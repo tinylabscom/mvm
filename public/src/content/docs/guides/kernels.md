@@ -37,7 +37,7 @@ Use `--which workload-sizeopt` to build the measured comparison variant with
 kernel cache entry.
 
 The compiled or downloaded kernel is cached at
-`~/.cache/mvm/builder-vm/<arch>/kernels/<variant>/vmlinux` and reused by every
+`~/.mvm/cache/builder-vm/<arch>/kernels/<variant>/vmlinux` and reused by every
 later `dev up`.
 
 When the kernel was compiled locally, the cache directory also carries a

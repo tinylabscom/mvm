@@ -38,7 +38,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use mvm_deps_audit::{
+use mvm_sdk::compile::deps_audit::{
     FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, VolumeManifest, reseal_volume,
     verify_sealed_volume,
 };
@@ -677,7 +677,7 @@ mod tests {
         cve: &str,
         annotations: BTreeMap<String, String>,
     ) -> (PathBuf, String) {
-        use mvm_deps_audit::{
+        use mvm_sdk::compile::deps_audit::{
             FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, seal_volume,
         };
         let work = cache_root.join("scratch");

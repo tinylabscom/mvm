@@ -19,7 +19,7 @@
 //! This is the no-auth length-prefixed transport: correct for the
 //! same-uid UDS channels (the supervisor proxies + their broker /
 //! host-signer / audit-signer servers). It is **not** the host↔guest
-//! trust-boundary frame — that stays in `mvm_guest::vsock`'s
+//! trust-boundary frame — that stays in `mvm_agentd::vsock`'s
 //! Ed25519-signed `AuthenticatedFrame` (session-id + sequence replay
 //! protection, separately fuzzed) until a pluggable `AuthStage` +
 //! optional encryption stage retrofit lands behind a real cargo-fuzz +

@@ -126,15 +126,7 @@ struct SessionRecord {
 }
 
 fn session_record_path() -> PathBuf {
-    mvm_core::config::mvm_data_dir_strict()
-        .unwrap_or_else(|_| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".mvm")
-        })
-        .join("run")
-        .join("persistent-builder.json")
+    PathBuf::from(mvm_core::config::mvm_runtime_dir()).join("persistent-builder.json")
 }
 
 fn write_session_record(record: &SessionRecord) -> Result<()> {

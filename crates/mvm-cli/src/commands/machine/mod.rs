@@ -26,7 +26,6 @@ use clap::{Args as ClapArgs, Subcommand};
 use ed25519_dalek::Signer;
 #[cfg(test)]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use mvm_backend::backend::AnyBackend;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -34,10 +33,9 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::{VmId, VmStatus};
 use mvm_core::{config, naming};
 
-use mvm::machine::persist::{
+use mvm_runtime::machine::persist::{
     MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, ReconfigurePatch, SpecReconcile, apply_patch,
     list_machine_specs, load_machine_spec, machine_config_diff, overwrite_machine_spec,
     reconcile_machine_spec, save_machine_spec, validate_machine_memory,
@@ -51,17 +49,14 @@ use super::vm::group::VmCmd;
 use super::vm::host_signer::PUBLIC_FILENAME;
 use super::vm::host_signer::{host_signer_id, load_or_init};
 use super::vm::{console, down};
-use crate::commands::ssh_agent_proxy::{
-    SSH_AGENT_GUEST_SOCKET, SshAgentProxyListen, reap_proxy, spawn_proxy, ssh_auth_sock_from_env,
-};
 use crate::ui;
 use lifecycle::{exec_machine, run_restart, run_start, shell_machine, stop_machine};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
 use receipt::{
     MachineStartJsonSummary, MachineStartReceiptInput, MachineStartReceiptOutcome,
-    machine_start_plan_auth_policy, machine_start_preflight_summary, machine_start_receipt_input,
-    machine_start_volume_summary, print_machine_start_preflight_human, write_machine_start_receipt,
+    machine_start_preflight_summary, machine_start_receipt_input, machine_start_volume_summary,
+    print_machine_start_preflight_human, write_machine_start_receipt,
 };
 pub(in crate::commands) use runtime::boot_persistent_by_name;
 use runtime::run_dispatch;
@@ -496,7 +491,7 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
 }
 
 /// A writable (`:rw`) host share needs a dev-capable profile, matching the
-/// transient-run gate and the `dev.init` / `ssh_agent` rule.
+/// transient-run gate and the `dev.init` rule.
 fn profile_allows_writable_volume(profile: &str) -> bool {
     matches!(profile, "dev" | "permissive")
 }
@@ -547,7 +542,7 @@ fn require_tty(stdin_is_tty: bool) -> Result<()> {
 /// Build a persistent `MachineSpec` from the `run` flags. Mirrors the
 /// validation `machine create` applies (network policy, memory, profile) so the
 /// two entry points produce identical specs. The `run` surface intentionally
-/// omits disk volumes / init / ssh-agent — those stay manifest-driven.
+/// omits disk volumes / init — those stay manifest-driven.
 ///
 /// For flake sources, `resolved_manifest_slot` must already contain the
 /// built slot hash (the caller builds the flake before calling this function).
@@ -597,7 +592,6 @@ fn machine_run_spec(
         profile,
         volumes: machine_run_volume_specs(args)?,
         init: Vec::new(),
-        ssh_agent: false,
         agent_verb: args.agent_verb.clone(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
@@ -947,8 +941,6 @@ impl MachineCreateArgs {
             .map(|workflow| workflow.init.clone())
             .unwrap_or_default();
         enforce_dev_init_profile(&profile_name, &init)?;
-        let ssh_agent = workflow.is_some_and(|workflow| workflow.ssh_agent);
-        enforce_ssh_agent_profile(&profile_name, ssh_agent)?;
         let volumes = workflow
             .map(|workflow| workflow.volumes.clone())
             .unwrap_or_default();
@@ -976,7 +968,6 @@ impl MachineCreateArgs {
             profile: profile_name,
             volumes,
             init,
-            ssh_agent,
             agent_verb: Vec::new(),
             created_at: Some(mvm_core::time::utc_now()),
             last_started_at: None,
@@ -1077,23 +1068,10 @@ fn profile_allows_dev_init(profile: &str) -> bool {
     matches!(profile, "dev" | "permissive")
 }
 
-fn profile_allows_ssh_agent(profile: &str) -> bool {
-    matches!(profile, "dev" | "permissive")
-}
-
 fn enforce_dev_init_profile(profile: &str, init: &[String]) -> Result<()> {
     if !init.is_empty() && !profile_allows_dev_init(profile) {
         bail!(
             "machine dev.init requires a dev-capable profile; use --profile dev or --profile permissive"
-        );
-    }
-    Ok(())
-}
-
-fn enforce_ssh_agent_profile(profile: &str, enabled: bool) -> Result<()> {
-    if enabled && !profile_allows_ssh_agent(profile) {
-        bail!(
-            "machine ssh_agent requires a dev-capable profile; use --profile dev or --profile permissive"
         );
     }
     Ok(())
@@ -1268,97 +1246,12 @@ fn already_running_notice(name: &str, json: bool) -> String {
 
 fn machine_start_audit_detail(input: &MachineStartReceiptInput) -> String {
     format!(
-        "source=machine.start network={} enforced={} auth={} shares={} init_commands={}",
+        "source=machine.start network={} enforced={} shares={} init_commands={}",
         input.network_posture,
         input.egress_enforcement,
-        input.auth.mode,
         machine_start_volume_summary(&input.volumes),
         input.init.command_count
     )
-}
-
-fn ssh_agent_proxy_listen_for_backend(vm_name: &str, backend: &str) -> SshAgentProxyListen {
-    match backend {
-        "firecracker" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
-            vm_name,
-            mvm_guest::vsock::SSH_AGENT_PORT,
-        )),
-        "vz" => SshAgentProxyListen::Uds(mvm_core::config::vm_vz_vsock_port_socket(
-            vm_name,
-            mvm_guest::vsock::SSH_AGENT_PORT,
-        )),
-        "libkrun" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
-            vm_name,
-            mvm_guest::vsock::SSH_AGENT_PORT,
-        )),
-        _ => SshAgentProxyListen::Vsock(mvm_guest::vsock::SSH_AGENT_PORT),
-    }
-}
-
-fn configure_machine_ssh_agent_forwarding(
-    vm_name: &str,
-    backend: &str,
-    host_sock: &Path,
-) -> Result<()> {
-    spawn_proxy(
-        vm_name,
-        host_sock,
-        ssh_agent_proxy_listen_for_backend(vm_name, backend),
-    )?;
-    if !super::shared::wait_for_guest_agent(vm_name, 30) {
-        reap_proxy(vm_name);
-        bail!("guest agent for {vm_name:?} not reachable while configuring ssh-agent forwarding");
-    }
-    let transport = mvm::vsock_transport::for_vm(vm_name)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    start_guest_ssh_agent_socket_forwarding(vm_name, &mut stream)?;
-    Ok(())
-}
-
-fn start_guest_ssh_agent_socket_forwarding(
-    vm_name: &str,
-    stream: &mut std::os::unix::net::UnixStream,
-) -> Result<()> {
-    mvm_guest::vsock::require_capabilities(
-        stream,
-        &[mvm_guest::vsock::GuestCapability::UnixSocketForward],
-    )
-    .context("guest agent does not support ssh-agent socket forwarding")?;
-    let req = mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
-        guest_path: SSH_AGENT_GUEST_SOCKET.to_string(),
-        host_vsock_port: mvm_guest::vsock::SSH_AGENT_PORT,
-        socket_mode: 0o600,
-    };
-    super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    match mvm_guest::vsock::call_unary(&mut *stream, &req)? {
-        mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted { .. } => {
-            mvm_core::audit_emit!(
-                NetworkPolicyAllow,
-                vm: vm_name,
-                "scope=auth,direction=in,kind=ssh-agent-socket,guest_socket={SSH_AGENT_GUEST_SOCKET}"
-            );
-            Ok(())
-        }
-        mvm_guest::vsock::GuestResponse::Error { message } => {
-            reap_proxy(vm_name);
-            bail!("guest refused ssh-agent forwarding: {message}")
-        }
-        other => {
-            reap_proxy(vm_name);
-            bail!("unexpected response to ssh-agent forwarding request: {other:?}")
-        }
-    }
-}
-
-fn machine_console_env(ssh_agent: bool) -> Vec<(String, String)> {
-    if ssh_agent {
-        vec![(
-            "SSH_AUTH_SOCK".to_string(),
-            SSH_AGENT_GUEST_SOCKET.to_string(),
-        )]
-    } else {
-        Vec::new()
-    }
 }
 
 fn machine_exec_command(argv: &[String]) -> String {
@@ -1371,7 +1264,7 @@ fn machine_exec_command(argv: &[String]) -> String {
 
 fn build_machine_volume_cfg(
     volume_specs: &[String],
-) -> Result<Vec<mvm_backend::image::RuntimeVolume>> {
+) -> Result<Vec<mvm_runtime::image::RuntimeVolume>> {
     let mut volume_cfg = Vec::with_capacity(volume_specs.len());
     for volume in volume_specs {
         let spec = super::shared::parse_volume_spec(volume)?;
@@ -1379,12 +1272,12 @@ fn build_machine_volume_cfg(
             .with_context(|| format!("volume {volume:?}"))?;
         super::shared::materialize_disk_volume(&vmv)
             .with_context(|| format!("volume {volume:?}"))?;
-        volume_cfg.push(mvm_backend::image::RuntimeVolume::from(&vmv));
+        volume_cfg.push(mvm_runtime::image::RuntimeVolume::from(&vmv));
     }
     Ok(volume_cfg)
 }
 
-fn run_machine_init_commands(name: &str, commands: &[String], ssh_agent: bool) -> Result<()> {
+fn run_machine_init_commands(name: &str, commands: &[String]) -> Result<()> {
     if commands.is_empty() {
         return Ok(());
     }
@@ -1392,9 +1285,6 @@ fn run_machine_init_commands(name: &str, commands: &[String], ssh_agent: bool) -
         vm_name: name.to_string(),
     };
     let mut script = "set -e\n".to_string();
-    if ssh_agent {
-        script.push_str(&format!("export SSH_AUTH_SOCK={SSH_AGENT_GUEST_SOCKET}\n"));
-    }
     script.push_str(&commands.join("\n"));
     let output = crate::exec::dispatch_in_session(&session, script, None)
         .with_context(|| format!("running dev.init in machine {name:?}"))?;
@@ -1411,9 +1301,7 @@ fn run_machine_init_commands(name: &str, commands: &[String], ssh_agent: bool) -
 }
 
 fn stop_failed_machine_start(name: &str, backend_name: &str) {
-    reap_proxy(name);
-    let backend = AnyBackend::from_hypervisor(backend_name);
-    if let Err(err) = backend.stop(&VmId(name.to_string())) {
+    if let Err(err) = mvm_client::backend_stop_by_name(backend_name, name) {
         tracing::warn!(error = %err, machine = name, "stopping machine after failed init failed");
     }
 }

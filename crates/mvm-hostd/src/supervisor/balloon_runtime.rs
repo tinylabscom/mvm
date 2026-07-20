@@ -202,8 +202,8 @@ mod tests {
 
     use anyhow::bail;
     use mvm_core::vm_backend::{
-        BackendSecurityProfile, BalloonState, ClaimStatus, LayerCoverage, VmCapabilities,
-        VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+        BackendKind, BackendSecurityProfile, BalloonState, ClaimStatus, LayerCoverage,
+        VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
     };
 
     use crate::supervisor::balloon::{BalloonAction, BalloonPolicy, HostPressure};
@@ -282,6 +282,9 @@ mod tests {
     impl VmBackend for TestBackend {
         fn name(&self) -> &str {
             "test"
+        }
+        fn kind(&self) -> BackendKind {
+            BackendKind::Mock
         }
         fn capabilities(&self) -> VmCapabilities {
             VmCapabilities {

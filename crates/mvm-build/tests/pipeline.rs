@@ -332,7 +332,7 @@ fn test_build_revision_recorded() {
     let pool_artifacts = "/var/lib/mvm/tenants/acme/pools/workers/artifacts";
     let tpl_src = format!(
         "{}/templates/base-tpl/artifacts/rev123",
-        mvm_core::config::mvm_data_dir()
+        mvm_core::config::mvm_home()
     );
 
     // Revisions directory was created

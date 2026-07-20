@@ -1,0 +1,22 @@
+[package]
+name = "mvm-net"
+version.workspace = true
+edition.workspace = true
+description = "NetworkProvider trait + provisioning/policy/registry seam for mvm. The TAP/bridge/native-gateway/passt impl lives in mvm-runtime; the WireGuard/Tailscale mesh impl is mvmd's."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+mvm-core.workspace = true
+# IR `NetworkMode` the registry resolves. Direct dep on the no_std
+# foundation crate now that the IR lives there — mvm-net no longer
+# needs mvm-sdk's build-time tooling for this.
+mvm-protocol.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

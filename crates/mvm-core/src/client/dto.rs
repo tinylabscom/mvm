@@ -14,6 +14,11 @@ pub enum MachineStatus {
     Starting,
     Running,
     Stopped,
+    /// vCPUs paused with the VMM still alive. Kept distinct from `Stopped` so a
+    /// paused machine stays visible in a default listing instead of folding
+    /// away. Any detail behind a non-happy status (e.g. a `Failed` reason)
+    /// travels in [`MachineState::status_detail`], which keeps this enum `Copy`.
+    Paused,
     Failed,
 }
 
@@ -114,12 +119,100 @@ impl MachineSpecBuilder {
     }
 }
 
+/// A host:guest port forwarding on a machine — plain listing data that mirrors a
+/// backend's port mapping so a machine record can carry its forwards without
+/// exposing a runtime type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortMapping {
+    pub host: u16,
+    pub guest: u16,
+}
+
+/// A machine's observed runtime state — the shared listing/inspect record. Every
+/// field is REST-satisfiable plain data (no host handles, no paths, no keys), so
+/// the same struct crosses the gateway wire. New fields carry `#[serde(default)]`
+/// so an older serialized record still deserializes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineState {
     pub id: MachineId,
     pub name: String,
     pub status: MachineStatus,
+    /// Free-text detail for a non-happy `status` — e.g. the reason behind
+    /// [`MachineStatus::Failed`]. `None` when the status needs no elaboration.
+    /// Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.
+    #[serde(default)]
+    pub status_detail: Option<String>,
+    /// Backend that owns this machine (e.g. `"firecracker"`, `"hvf"`,
+    /// `"libkrun"`). Empty when unknown.
+    #[serde(default)]
+    pub backend: String,
+    /// Guest IP, when networking is configured.
+    #[serde(default)]
+    pub guest_ip: Option<String>,
+    /// vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).
+    #[serde(default)]
+    pub cpus: u32,
+    /// Guest memory in MiB. `0` when unknown.
+    #[serde(default)]
+    pub memory_mib: u32,
+    /// Flake profile name, when built from a profile.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Nix store revision hash, when known.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Original flake reference, when known.
+    #[serde(default)]
+    pub flake_ref: Option<String>,
+    /// Active host:guest port forwardings.
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
+    /// Caller-supplied metadata tags.
+    #[serde(default)]
+    pub tags: std::collections::BTreeMap<String, String>,
+    /// RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller
+    /// (presentation) decision, not modeled here.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// Whether connecting auto-resumes a sleeping machine.
+    #[serde(default = "default_auto_resume")]
+    pub auto_resume: bool,
+    /// Finer-grained host-observed readiness, when tracked.
+    #[serde(default)]
+    pub readiness: Option<crate::domain::instance::InstanceReadiness>,
+    /// RFC 3339 timestamp of the last `readiness` change.
+    #[serde(default)]
+    pub last_readiness_change_at: Option<String>,
+}
+
+fn default_auto_resume() -> bool {
+    true
+}
+
+impl Default for MachineState {
+    fn default() -> Self {
+        Self {
+            id: MachineId(String::new()),
+            name: String::new(),
+            status: MachineStatus::Stopped,
+            status_detail: None,
+            backend: String::new(),
+            guest_ip: None,
+            cpus: 0,
+            memory_mib: 0,
+            profile: None,
+            revision: None,
+            flake_ref: None,
+            ports: Vec::new(),
+            tags: std::collections::BTreeMap::new(),
+            expires_at: None,
+            auto_resume: true,
+            readiness: None,
+            last_readiness_change_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +250,84 @@ pub struct ExecResult {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+/// Options for `pause_machine` — intent only, so a remote gateway can carry them
+/// over REST. The snapshot transport (a live Firecracker socket vs the mock's
+/// canned bytes) is host-local and chosen by the backend, never named here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseOpts {
+    /// Wait for the workload to signal "primed" (a fully-warmed base) before
+    /// sealing, failing closed on timeout so no half-warmed snapshot is sealed.
+    /// A backend with no guest agent to answer (the mock) ignores it.
+    #[serde(default)]
+    pub primed_barrier: bool,
+    /// Seconds to wait for the primed signal when `primed_barrier` is set.
+    #[serde(default = "default_primed_timeout_secs")]
+    pub primed_timeout_secs: u64,
+}
+
+fn default_primed_timeout_secs() -> u64 {
+    120
+}
+
+impl Default for PauseOpts {
+    fn default() -> Self {
+        Self {
+            primed_barrier: false,
+            primed_timeout_secs: default_primed_timeout_secs(),
+        }
+    }
+}
+
+/// The outcome of a successful `pause_machine`: the sealed snapshot's replay
+/// epoch and the byte lengths of the sealed vmstate + memory artifacts. Plain
+/// data the caller renders in its success line and audit entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseOutcome {
+    /// Monotonic replay-defence counter stamped into the sealed envelope; a
+    /// resume refuses any snapshot whose epoch is below the high-water mark.
+    pub epoch: u64,
+    /// Length in bytes of the sealed `vmstate.bin`.
+    pub vmstate_len: u64,
+    /// Length in bytes of the sealed `mem.bin`.
+    pub mem_len: u64,
+}
+
+/// Options for `resume_machine` — intent only, REST-satisfiable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeOpts {
+    /// Drive the resume through the backend's live-memory warm-start path
+    /// instead of the plain verify-and-resume. Fails closed with a typed
+    /// recovery hint on a disk-only backend that cannot warm-start at the
+    /// live-memory tier.
+    #[serde(default)]
+    pub warm: bool,
+}
+
+/// What a `resume_machine` did — the detail the caller renders in its success
+/// line and, crucially, the chain-signed `WorkloadWake` audit entry, at parity
+/// with [`PauseOutcome`]. Plain data, REST-satisfiable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeOutcome {
+    /// The verified snapshot's epoch (plain resume). `0` for a warm resume,
+    /// which restores live memory rather than a sealed snapshot.
+    #[serde(default)]
+    pub epoch: u64,
+    /// Length in bytes of the restored `vmstate.bin` (plain resume); `0` for warm.
+    #[serde(default)]
+    pub vmstate_len: u64,
+    /// Length in bytes of the restored `mem.bin` (plain resume); `0` for warm.
+    #[serde(default)]
+    pub mem_len: u64,
+    /// The warm-start reseed summary (whether the guest rotated its VMGenID and
+    /// reseeded). `Some` for a warm resume, `None` for a plain verify-and-resume.
+    #[serde(default)]
+    pub reseed: Option<String>,
 }
 
 /// A patch over a machine's reconfigurable fields — intent only. Every
@@ -256,6 +427,71 @@ mod tests {
             serde_json::to_string(&MachineStatus::Running).unwrap(),
             "\"running\""
         );
+        assert_eq!(
+            serde_json::to_string(&MachineStatus::Paused).unwrap(),
+            "\"paused\""
+        );
+    }
+
+    #[test]
+    fn machine_state_serde_round_trips_with_all_fields() {
+        let state = MachineState {
+            id: MachineId("m1".into()),
+            name: "web".into(),
+            status: MachineStatus::Failed,
+            status_detail: Some("boom".into()),
+            backend: "firecracker".into(),
+            guest_ip: Some("172.16.0.2".into()),
+            cpus: 2,
+            memory_mib: 512,
+            profile: Some("worker".into()),
+            revision: Some("abc123".into()),
+            flake_ref: Some(".#worker".into()),
+            ports: vec![PortMapping {
+                host: 8080,
+                guest: 80,
+            }],
+            tags: std::collections::BTreeMap::from([("env".into(), "prod".into())]),
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+            auto_resume: false,
+            readiness: Some(crate::domain::instance::InstanceReadiness::AgentReady),
+            last_readiness_change_at: Some("2026-01-01T00:00:00Z".into()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: MachineState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, back);
+    }
+
+    #[test]
+    fn machine_state_deserializes_legacy_three_field_record() {
+        // A record serialized before the listing fields existed still loads:
+        // the added fields fall back to their serde defaults.
+        let legacy = r#"{"id":"m1","name":"web","status":"running"}"#;
+        let state: MachineState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(state.status, MachineStatus::Running);
+        assert!(state.status_detail.is_none());
+        assert!(state.backend.is_empty());
+        assert_eq!(state.cpus, 0);
+        assert!(state.ports.is_empty());
+        assert!(state.tags.is_empty());
+        // auto_resume defaults true (matches the registry default), not false.
+        assert!(state.auto_resume);
+    }
+
+    #[test]
+    fn machine_state_default_is_stopped_and_empty() {
+        let d = MachineState::default();
+        assert_eq!(d.status, MachineStatus::Stopped);
+        assert!(d.auto_resume);
+        assert!(d.backend.is_empty() && d.ports.is_empty() && d.tags.is_empty());
+    }
+
+    #[test]
+    fn machine_state_rejects_unknown_field_fail_closed() {
+        let err = serde_json::from_str::<MachineState>(
+            r#"{"id":"m1","name":"w","status":"running","rogue":true}"#,
+        );
+        assert!(err.is_err(), "unknown field must be rejected");
     }
 
     #[test]
@@ -287,5 +523,67 @@ mod tests {
     fn reconfigure_request_rejects_unknown_field_fail_closed() {
         let err = serde_json::from_str::<ReconfigureRequest>(r#"{"rogue":true}"#);
         assert!(err.is_err(), "unknown field must be rejected");
+    }
+
+    #[test]
+    fn pause_opts_default_is_off_with_120s_timeout() {
+        let d = PauseOpts::default();
+        assert!(!d.primed_barrier);
+        assert_eq!(d.primed_timeout_secs, 120);
+    }
+
+    #[test]
+    fn pause_opts_serde_round_trips_and_defaults_timeout() {
+        let opts = PauseOpts {
+            primed_barrier: true,
+            primed_timeout_secs: 30,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert_eq!(serde_json::from_str::<PauseOpts>(&json).unwrap(), opts);
+        // An omitted timeout falls back to the 120s default, not 0.
+        let partial: PauseOpts = serde_json::from_str(r#"{"primed_barrier":true}"#).unwrap();
+        assert_eq!(partial.primed_timeout_secs, 120);
+    }
+
+    #[test]
+    fn pause_opts_rejects_unknown_field_fail_closed() {
+        assert!(serde_json::from_str::<PauseOpts>(r#"{"rogue":true}"#).is_err());
+    }
+
+    #[test]
+    fn pause_outcome_serde_round_trips() {
+        let outcome = PauseOutcome {
+            epoch: 7,
+            vmstate_len: 4096,
+            mem_len: 1 << 20,
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PauseOutcome>(&json).unwrap(),
+            outcome
+        );
+        assert_eq!(
+            PauseOutcome::default(),
+            PauseOutcome {
+                epoch: 0,
+                vmstate_len: 0,
+                mem_len: 0
+            }
+        );
+    }
+
+    #[test]
+    fn resume_opts_serde_round_trips_and_defaults_warm_off() {
+        let opts = ResumeOpts { warm: true };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert_eq!(serde_json::from_str::<ResumeOpts>(&json).unwrap(), opts);
+        assert!(!ResumeOpts::default().warm);
+        // Omitted `warm` defaults false.
+        assert!(!serde_json::from_str::<ResumeOpts>("{}").unwrap().warm);
+    }
+
+    #[test]
+    fn resume_opts_rejects_unknown_field_fail_closed() {
+        assert!(serde_json::from_str::<ResumeOpts>(r#"{"rogue":true}"#).is_err());
     }
 }

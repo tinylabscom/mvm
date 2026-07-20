@@ -64,7 +64,7 @@ Request types: `ping`, `status`, `sleep-prep`, `wake`, and more.
 
 ## Control plane and data plane
 
-Plan 74 / ADR-053 §4 splits the agent's wire surface into a
+Plan 74 / ADR-019 §4 splits the agent's wire surface into a
 **control plane** (small, single-frame, bounded requests/responses)
 and a **data plane** (streaming or chunked operations where the
 payload size is dominated by user content, not metadata). The
@@ -87,7 +87,7 @@ No streaming. No payload bytes from user processes.
 
 | Verb | Response shape | Notes |
 |---|---|---|
-| `ProtocolHello` | `ProtocolHelloAck` / `ProtocolMismatch` | Required first request in every session (ADR-053 §1, hard cutover). |
+| `ProtocolHello` | `ProtocolHelloAck` / `ProtocolMismatch` | Required first request in every session (ADR-019 §1, hard cutover). |
 | `Ping` | `Pong` | Reachability probe. Requires `Ping` capability. |
 | `WorkerStatus` | `WorkerStatus { status, last_busy_at }` | Idle/busy sampled from `/proc/loadavg`. |
 | `ReadinessStatus` | `ReadinessStatusReport` | Component-level readiness (see "Readiness model" below). |
@@ -123,7 +123,7 @@ and backpressure behavior below.
 ### Redaction invariant
 
 The following audit / readiness / progress / receipt surfaces are
-guaranteed by ADR-053 §4 / §5 to **never** contain data-plane
+guaranteed by ADR-019 §4 / §5 to **never** contain data-plane
 payload bytes. The list is the authoritative one:
 
 - `~/.mvm/audit/<tenant>.jsonl` chain-signed entries.
@@ -169,7 +169,7 @@ sent to a sealed-prod agent are rejected before any handler runs:
 
 | Profile | Effective verb set | Used by |
 |---------|-------------------|---------|
-| `sealed-prod` (default) | Lifecycle, status, entrypoint, sleep/wake, volume mount/unmount, idle-timeout updates. The full ADR-002 production-safe surface. | Production images. The policy file lives on a dm-verity rootfs (ADR-002 §W3) so the profile cannot be widened at runtime. |
+| `sealed-prod` (default) | Lifecycle, status, entrypoint, sleep/wake, volume mount/unmount, idle-timeout updates. The full ADR-001 production-safe surface. | Production images. The policy file lives on a dm-verity rootfs (ADR-001 §W3) so the profile cannot be widened at runtime. |
 | `dev` | `sealed-prod` plus shell `Exec`, process RPC, filesystem RPC, console PTY, port forwarding, and `RunCode`. | `mvmctl dev` images and any image built with `dev-shell` feature. |
 | `builder` | Reserved for builder-only verbs. The current builder agent speaks a separate `BuilderRequest` protocol, so this profile is wire-stable but unused for the tenant agent. | Future builder VM agent if/when its verbs land on the tenant wire. |
 
@@ -185,7 +185,7 @@ this is the protocol-layer analog of
 
 The profile gate is **complementary** to the existing compile-time
 gate (`#[cfg(feature = "dev-shell")]` for `do_exec` / `do_run_code` /
-process RPC handlers per ADR-002 §W4.3, claim 4). The compile-time
+process RPC handlers per ADR-001 §W4.3, claim 4). The compile-time
 gate keeps the handler symbols *absent* from production binaries; the
 profile gate keeps the dispatcher *reachable but refusing* for dev
 verbs in sealed-prod. Both checks run on every request.

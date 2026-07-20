@@ -19,7 +19,9 @@ use super::machine;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
-use super::vm::{checkpoint, console, cp, exec, forward, group, pause, sandbox, session, volume};
+use super::vm::{
+    checkpoint, console, cp, exec, forward, group, sandbox, session, snapshot, volume,
+};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -72,7 +74,6 @@ fn internal_subprocess_commands_are_hidden_from_help() {
         "persistent-builder",
         "__builder-vm-bootstrap",
         "__qemu-vsock-bridge",
-        "__ssh-agent-proxy",
     ] {
         assert!(
             !visible.iter().any(|n| n == hidden),
@@ -2001,8 +2002,8 @@ fn test_snapshot_ls_json_parses() {
     assert!(matches!(
         cli.command,
         Commands::Machine(machine::Args {
-            action: machine::MachineAction::Vm(group::VmCmd::Snapshot(pause::SnapshotArgs {
-                command: pause::SnapshotCmd::Ls { json: true }
+            action: machine::MachineAction::Vm(group::VmCmd::Snapshot(snapshot::SnapshotArgs {
+                command: snapshot::SnapshotCmd::Ls { json: true }
             }))
         })
     ));
@@ -2015,8 +2016,8 @@ fn test_snapshot_rm_json_parses() {
     assert!(matches!(
         cli.command,
         Commands::Machine(machine::Args {
-            action: machine::MachineAction::Vm(group::VmCmd::Snapshot(pause::SnapshotArgs {
-                command: pause::SnapshotCmd::Rm { json: true, .. }
+            action: machine::MachineAction::Vm(group::VmCmd::Snapshot(snapshot::SnapshotArgs {
+                command: snapshot::SnapshotCmd::Rm { json: true, .. }
             }))
         })
     ));
@@ -3942,14 +3943,6 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
         "--watch-pid-file",
         "/tmp/qemu.pid",
     ]));
-    assert!(exits_early(&[
-        "mvmctl",
-        "__ssh-agent-proxy",
-        "--host-sock",
-        "/tmp/ssh-agent.sock",
-        "--listen-vsock-port",
-        "5000",
-    ]));
     assert!(!exits_early(&["mvmctl", "doctor"]));
     assert!(!exits_early(&[
         "mvmctl",
@@ -4182,15 +4175,15 @@ fn console_removed() {
 
 #[test]
 fn machine_console_refused_on_sealed_image() {
-    use mvm::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
+    use mvm_runtime::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
 
-    let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+    let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut env = mvm_core::util::test_env::TestEnv::new();
     let tmp = tempfile::tempdir().expect("tempdir");
     env.set("HOME", tmp.path());
-    env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+    env.set("MVM_HOME", tmp.path());
 
     let name = "sealed-machine-console";
     write_meta(

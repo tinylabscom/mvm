@@ -118,8 +118,6 @@ pub(crate) fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()>
         env.log_info("Builder artifacts found.");
         let mut refresh_ctx = BTreeMap::new();
         refresh_ctx.insert("builder_dir", BUILDER_DIR.to_string());
-        refresh_ctx.insert("inject_ssh", "no".to_string());
-        refresh_ctx.insert("auth_keys", String::new());
         refresh_ctx.insert("agent_src", agent_bin.clone());
         refresh_ctx.insert("agent_dst", BUILDER_AGENT_GUEST_BIN.to_string());
         refresh_ctx.insert("agent_service", BUILDER_AGENT_SERVICE.to_string());
@@ -146,9 +144,6 @@ pub(crate) fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()>
     download_ctx.insert("fc_short", fc_short);
     download_ctx.insert("fc_full", fc_full);
     download_ctx.insert("arch", ARCH.to_string());
-    download_ctx.insert("builder_pub", String::new());
-    download_ctx.insert("inject_ssh", "no".to_string());
-    download_ctx.insert("auth_keys", String::new());
     download_ctx.insert("agent_src", agent_bin);
     download_ctx.insert("agent_dst", BUILDER_AGENT_GUEST_BIN.to_string());
     download_ctx.insert("agent_service", BUILDER_AGENT_SERVICE.to_string());

@@ -15,7 +15,7 @@ use std::process::Command;
 use async_trait::async_trait;
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    ReconfigureRequest,
+    PauseOpts, PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use mvm_core::client::{MvmClient, MvmError, Result};
 
@@ -33,7 +33,7 @@ fn machine_err(e: MachineError) -> MvmError {
 
 // The `machine` subcommand argv is built in exactly one place — the pure
 // `machine.rs` builders, which the cross-language conformance harness pins to
-// `sdks/machine-fixtures/*.argv`. The facade delegates to them rather than
+// `tests/machine-fixtures/*.argv`. The facade delegates to them rather than
 // hand-rolling a second copy, so it can never drift from the CLI contract.
 
 fn list_args() -> Result<Vec<String>> {
@@ -261,6 +261,7 @@ fn parse_machine_list(bytes: &[u8]) -> Result<Vec<MachineState>> {
             id: MachineId(it.name.clone()),
             status: status_from_label(it.status.as_deref()),
             name: it.name,
+            ..Default::default()
         })
         .collect())
 }
@@ -291,6 +292,7 @@ impl MvmClient for SubprocessBackend {
             id: MachineId(name.clone()),
             name,
             status: MachineStatus::Stopped,
+            ..Default::default()
         })
     }
 
@@ -304,6 +306,7 @@ impl MvmClient for SubprocessBackend {
             name: id.0.clone(),
             id,
             status: MachineStatus::Running,
+            ..Default::default()
         })
     }
 
@@ -313,6 +316,7 @@ impl MvmClient for SubprocessBackend {
             id: id.clone(),
             name: id.0.clone(),
             status: MachineStatus::Running,
+            ..Default::default()
         })
     }
 
@@ -326,6 +330,26 @@ impl MvmClient for SubprocessBackend {
 
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
         self.run_cli(&logs_args(id, &opts)?)
+    }
+
+    async fn pause_machine(&self, _id: &MachineId, _opts: PauseOpts) -> Result<PauseOutcome> {
+        // Instance-snapshot pause is not one of the conformed `machine` verbs
+        // this courier drives (it seals a host-local snapshot). Drive it through
+        // the CLI (`mvmctl machine pause`) or `LocalBackend` directly.
+        Err(MvmError::Backend {
+            reason: "pause is not supported via the subprocess facade; \
+                     use `mvmctl machine pause` or LocalBackend"
+                .into(),
+        })
+    }
+
+    async fn resume_machine(&self, _id: &MachineId, _opts: ResumeOpts) -> Result<ResumeOutcome> {
+        // Symmetric with `pause_machine`.
+        Err(MvmError::Backend {
+            reason: "resume is not supported via the subprocess facade; \
+                     use `mvmctl machine resume` or LocalBackend"
+                .into(),
+        })
     }
 
     async fn exec_machine(&self, id: &MachineId, command: Vec<String>) -> Result<ExecResult> {
@@ -351,6 +375,15 @@ impl MvmClient for SubprocessBackend {
         Err(MvmError::Backend {
             reason: "reconfigure is not supported via the subprocess facade; \
                      use `mvmctl machine reconfigure` or LocalBackend"
+                .into(),
+        })
+    }
+
+    async fn set_ttl(&self, _id: &MachineId, _expires_at: Option<String>) -> Result<()> {
+        // TTL lives in the host name registry, which this courier doesn't own.
+        Err(MvmError::Backend {
+            reason: "set-ttl is not supported via the subprocess facade; \
+                     use `mvmctl set-ttl` or LocalBackend"
                 .into(),
         })
     }
@@ -393,6 +426,22 @@ mod tests {
         assert_eq!(status_from_label(Some("stopped")), MachineStatus::Stopped);
         assert_eq!(status_from_label(Some("weird")), MachineStatus::Stopped);
         assert_eq!(status_from_label(None), MachineStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_are_fail_closed_via_subprocess() {
+        // The subprocess courier does not drive snapshot pause/resume; both must
+        // refuse with a typed error (no `mvmctl` is spawned).
+        let be = SubprocessBackend::new("/nonexistent/mvmctl");
+        let id = MachineId("web".into());
+        assert!(matches!(
+            be.pause_machine(&id, PauseOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
+        assert!(matches!(
+            be.resume_machine(&id, ResumeOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
     }
 
     #[test]
@@ -547,7 +596,7 @@ mod tests {
     fn fixture(name: &str) -> Vec<String> {
         std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../sdks/machine-fixtures")
+                .join("../../tests/machine-fixtures")
                 .join(format!("{name}.argv")),
         )
         .expect("read shared machine fixture")

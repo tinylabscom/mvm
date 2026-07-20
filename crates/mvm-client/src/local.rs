@@ -19,19 +19,27 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
-use mvm_backend::AnyBackend;
-use mvm_core::protocol::vm_backend::{VmId, VmInfo, VmStatus};
-use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
-use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
-use mvm_oci::{
+use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
+use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
     OciManifestFetcher, UnpackOptions, unpack_layer,
 };
+use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
+use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
+use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
+    PauseOpts, PauseOutcome, PortMapping, ResumeOpts, ResumeOutcome,
 };
 use mvm_core::client::{MvmClient, MvmError, Result};
+use mvm_core::config::vm_state_dir;
+use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
+use mvm_runtime::vm::instance_snapshot::{
+    CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, VsockPrimedSignalSource,
+    await_primed_barrier, pause_and_seal, signal_post_restore, verify_and_resume,
+};
+use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 
 /// Drives the host's VM backend directly. Construct with [`LocalBackend::new`]
 /// (auto-selected backend) or [`LocalBackend::with_hypervisor`].
@@ -51,6 +59,198 @@ impl LocalBackend {
             backend: AnyBackend::from_hypervisor(name),
         }
     }
+
+    /// The backend-observed VMs on this host — every VMM's live listing plus this
+    /// client's own backend, deduped by name — as the target set for a bulk stop.
+    ///
+    /// This is deliberately NOT [`list_machines`](MvmClient::list_machines): it
+    /// omits the registry-only rows that call folds in (a stopped registration
+    /// with no backend process), which must never be swept by `down`, and it
+    /// KEEPS a crashed VM that still holds a pid marker — reported `Stopped` by
+    /// its backend — so [`stop_machine`](MvmClient::stop_machine) can reap that
+    /// VM's orphaned per-VM subprocesses (secret substitution, broker, …).
+    ///
+    /// Infallible: a per-backend listing error degrades to fewer rows rather than
+    /// aborting a host-wide stop before it can reap anything.
+    pub fn list_stop_targets(&self) -> Vec<MachineState> {
+        let mut infos: Vec<VmInfo> = AnyBackend::list_all();
+        for vm in self.backend.list().unwrap_or_default() {
+            if !infos.iter().any(|existing| existing.name == vm.name) {
+                infos.push(vm);
+            }
+        }
+        infos.into_iter().map(|i| to_state(i, None)).collect()
+    }
+
+    /// Whether this client drives the hermetic in-memory mock backend. The mock
+    /// has no live Firecracker socket and no guest agent, so the snapshot path
+    /// swaps in canned bytes and skips the guest-facing signals.
+    fn is_mock(&self) -> bool {
+        self.backend.kind() == BackendKind::Mock
+    }
+
+    /// Pick the `SnapshotIO` matching this client's backend. The mock writes
+    /// deterministic `CannedIO` stub bytes so the seal/verify round-trip runs
+    /// without a real Firecracker socket; every other backend drives
+    /// `FirecrackerIO` against the running VM's UDS control socket.
+    fn snapshot_io_for(&self, vm_name: &str) -> Result<Box<dyn SnapshotIO>> {
+        if self.is_mock() {
+            let dir = mvm_runtime::MockBackend::vm_dir(vm_name);
+            if !dir.exists() {
+                return Err(backend_err(format!(
+                    "mock VM {vm_name:?} is not running (no directory at {})",
+                    dir.display()
+                )));
+            }
+            return Ok(Box::new(CannedIO {
+                vmstate_bytes: b"mock-vmstate".to_vec(),
+                mem_bytes: b"mock-mem".to_vec(),
+            }));
+        }
+        let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(vm_name)
+            .map_err(|e| backend_err(format!("VM {vm_name:?} is not running: {e:#}")))?;
+        Ok(Box::new(FirecrackerIO::new(firecracker_socket(&vm_dir))))
+    }
+
+    /// Warm-resume through the backend's live-memory `warm_start` path: mint a
+    /// fresh VMGenID, load + resume live memory, reseed. Fails closed with the
+    /// typed `WarmStartError::Unsupported` recovery hint on a disk-only backend
+    /// rather than silently cold-booting.
+    fn warm_resume(&self, name: &str) -> Result<ResumeOutcome> {
+        let config = VmStartConfig {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        match self
+            .backend
+            .warm_start(&config, SnapshotCapability::LiveMemory)
+        {
+            Ok(outcome) => {
+                // FC keeps its pid across pause/resume, so the marker must be
+                // cleared explicitly on a successful warm resume.
+                let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
+                set_registry_resumed(name);
+                // A warm resume restores live memory, not a sealed snapshot, so it
+                // carries no epoch/lengths — only the reseed summary.
+                Ok(ResumeOutcome {
+                    reseed: Some(outcome.reseed.resume_summary().to_string()),
+                    ..Default::default()
+                })
+            }
+            // Name the tier mismatch + recovery hint verbatim (its `Display` is
+            // the actionable message); other failures keep a locating context.
+            Err(e @ WarmStartError::Unsupported { .. }) => Err(backend_err(format!("{e}"))),
+            Err(e) => Err(backend_err(format!("warm-starting VM {name:?}: {e}"))),
+        }
+    }
+
+    /// Plain resume: verify the sealed snapshot envelope — **refusing a replayed
+    /// older-epoch snapshot** — load it back and resume vCPUs, then finish
+    /// bringing the guest back with a fresh-VMGenID PostRestore (skipped for the
+    /// mock, which has no guest agent).
+    fn plain_resume(&self, name: &str) -> Result<ResumeOutcome> {
+        let io = self.snapshot_io_for(name)?;
+        // The replay-refusal gate: `verify_and_resume` rejects a snapshot whose
+        // epoch is below the persisted high-water mark before restoring anything.
+        // Called unchanged — this is the security property of resume.
+        let sidecar = verify_and_resume(name, &*io)
+            .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
+
+        // FC keeps the same pid across pause/resume, so a stale fc.paused would
+        // keep matching the live pid — clear it now vCPUs are running again.
+        let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
+
+        // Mark resumed before signaling the guest so a post-restore failure below
+        // leaves the registry consistent (the VM *is* up) and the operator can
+        // simply re-run resume.
+        set_registry_resumed(name);
+
+        if !self.is_mock() {
+            signal_guest_post_restore(name)?;
+        }
+        // Report the verified snapshot's epoch + artifact lengths so the caller's
+        // WorkloadWake audit entry carries the same detail the pause did.
+        Ok(ResumeOutcome {
+            epoch: sidecar.epoch,
+            vmstate_len: sidecar.vmstate_len,
+            mem_len: sidecar.mem_len,
+            reseed: None,
+        })
+    }
+}
+
+/// Deliver the host-side PostRestore signal to a resumed guest. Mints a fresh
+/// generation token so the guest rotates its VMGenID and reseeds its CSPRNG (two
+/// clones of one snapshot must not draw identical randomness), audits the vsock
+/// RPC, then sends it — failing closed if the guest does not acknowledge (its
+/// config/secret drives may still be unmounted).
+fn signal_guest_post_restore(name: &str) -> Result<()> {
+    let token = mvm_core::crypto::vmgenid::fresh_generation_token(name).token;
+    // The verb-emits-at-least-one-audit invariant extends to the vsock messages a
+    // verb dispatches; this records the PostRestore RPC alongside where it fires.
+    mvm_core::audit_emit!(
+        NetworkPolicyAllow,
+        vm: name,
+        "scope=rpc,direction=in,kind=vsock,verb={verb}",
+        verb = "post-restore",
+    );
+    signal_post_restore(name, &VsockPostRestoreSignal { token })
+        .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))?;
+    Ok(())
+}
+
+/// The primed-barrier timeout to enforce before sealing, or `None` when the
+/// barrier is not requested (or the backend is the hermetic mock, which has no
+/// live guest agent to answer). Pure so the opt-in gating is unit-tested.
+fn primed_barrier_timeout(opts: &PauseOpts, is_mock: bool) -> Option<std::time::Duration> {
+    if opts.primed_barrier && !is_mock {
+        Some(std::time::Duration::from_secs(opts.primed_timeout_secs))
+    } else {
+        None
+    }
+}
+
+/// The Firecracker control socket path inside a running VM's state dir — the
+/// `fc.socket` the start path actually creates.
+fn firecracker_socket(vm_dir: &str) -> PathBuf {
+    PathBuf::from(format!("{vm_dir}/fc.socket"))
+}
+
+/// Stamp the live Firecracker pid into an `fc.paused` marker so the quiesce gate
+/// can distinguish paused from running (FC keeps its pid across a pause, so
+/// pid-liveness alone cannot tell them apart). Guarded on `fc.pid` existing, so
+/// only Firecracker VMs get the marker; a write failure is logged, not fatal —
+/// the pause itself already succeeded.
+fn write_fc_paused_marker(name: &str) {
+    if let Some(fc_pid_path) = mvm_runtime::microvm::fc_pid_path(name)
+        && let Ok(pid) = std::fs::read_to_string(&fc_pid_path)
+        && let Err(e) = std::fs::write(vm_state_dir(name).join("fc.paused"), pid.trim())
+    {
+        tracing::warn!(error = %e, vm = %name, "could not write fc.paused marker (pause succeeded)");
+    }
+}
+
+/// Flip the persistent name-registry `paused` flag for `name`. Best-effort: a
+/// missing or unreadable registry is ignored (a direct-boot VM carries no entry,
+/// and the pause/resume this follows already succeeded regardless).
+fn set_registry_paused(name: &str, paused: bool) {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = VmNameRegistry::load(&registry_path) {
+        let _ = registry.set_paused(name, paused);
+        let _ = registry.save(&registry_path);
+    }
+}
+
+/// Mark `name` resumed in the name registry and refresh its idle tracking so the
+/// freshly-woken VM isn't immediately re-slept by the idle reaper. Best-effort,
+/// same rationale as [`set_registry_paused`].
+fn set_registry_resumed(name: &str) {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = VmNameRegistry::load(&registry_path) {
+        let _ = registry.set_paused(name, false);
+        let _ = registry.touch_last_active(name, mvm_core::time::utc_now());
+        let _ = registry.save(&registry_path);
+    }
 }
 
 impl Default for LocalBackend {
@@ -63,18 +263,86 @@ fn map_status(s: &VmStatus) -> MachineStatus {
     match s {
         VmStatus::Running => MachineStatus::Running,
         VmStatus::Starting => MachineStatus::Starting,
-        // A paused VM isn't accepting work; surface it as stopped rather than
-        // inventing a facade state that callers don't model.
-        VmStatus::Stopped | VmStatus::Paused => MachineStatus::Stopped,
+        VmStatus::Stopped => MachineStatus::Stopped,
+        // A paused VM stays distinct from stopped so it remains visible in a
+        // default listing rather than folding away.
+        VmStatus::Paused => MachineStatus::Paused,
         VmStatus::Failed { .. } => MachineStatus::Failed,
     }
 }
 
-fn to_state(v: VmInfo) -> MachineState {
+/// The detail behind a non-happy status — currently the failure reason, which
+/// rides on [`MachineState::status_detail`] because [`MachineStatus::Failed`] is
+/// a unit variant.
+fn status_detail(s: &VmStatus) -> Option<String> {
+    match s {
+        VmStatus::Failed { reason } => Some(reason.clone()),
+        VmStatus::Running | VmStatus::Starting | VmStatus::Stopped | VmStatus::Paused => None,
+    }
+}
+
+/// Resolve the backend that owns a started VM by its state-dir marker, falling
+/// back to the platform default so the column is accurate for a marker-less VM.
+fn resolve_backend_name(vm_name: &str) -> String {
+    AnyBackend::for_started_vm(vm_name)
+        .map(|b| b.name().to_string())
+        .unwrap_or_else(|| {
+            if mvm_core::platform::current().is_hvf_default_tier() {
+                "hvf".to_string()
+            } else {
+                "firecracker".to_string()
+            }
+        })
+}
+
+/// Load the persistent VM name registry, degrading to empty when absent or
+/// unreadable so a listing falls back to backend-only rows rather than failing.
+fn load_name_registry() -> VmNameRegistry {
+    let path = mvm_runtime::vm::name_registry::registry_path();
+    VmNameRegistry::load(&path).unwrap_or_default()
+}
+
+/// Best-effort removal of a machine name from the persistent VM name registry
+/// after a successful stop, so it stops showing as registered. A load or save
+/// failure is ignored — a direct-boot VM carries no registry entry, and the
+/// stop this follows already succeeded regardless.
+fn deregister_from_name_registry(name: &str) {
+    let path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = VmNameRegistry::load(&path) {
+        registry.deregister(name);
+        let _ = registry.save(&path);
+    }
+}
+
+/// Build a [`MachineState`] from a backend `VmInfo` joined with its optional
+/// registry entry (tags / TTL / readiness) and its resolved owning backend.
+fn to_state(info: VmInfo, reg: Option<&VmRegistration>) -> MachineState {
+    let backend = resolve_backend_name(&info.name);
     MachineState {
-        id: MachineId(v.id.0),
-        name: v.name,
-        status: map_status(&v.status),
+        id: MachineId(info.id.0),
+        status: map_status(&info.status),
+        status_detail: status_detail(&info.status),
+        backend,
+        guest_ip: info.guest_ip,
+        cpus: info.cpus,
+        memory_mib: info.memory_mib,
+        profile: info.profile,
+        revision: info.revision,
+        flake_ref: info.flake_ref,
+        ports: info
+            .ports
+            .into_iter()
+            .map(|p| PortMapping {
+                host: p.host,
+                guest: p.guest,
+            })
+            .collect(),
+        tags: reg.map(|r| r.tags.clone()).unwrap_or_default(),
+        expires_at: reg.and_then(|r| r.expires_at.clone()),
+        auto_resume: reg.map(|r| r.auto_resume).unwrap_or(true),
+        readiness: reg.and_then(|r| r.readiness.clone()),
+        last_readiness_change_at: reg.and_then(|r| r.last_readiness_change_at.clone()),
+        name: info.name,
     }
 }
 
@@ -210,29 +478,72 @@ fn unpack_one_layer(layer: &LayerDescriptor, bytes: &[u8], dest: &Path) -> Resul
 /// (`rootfs.verity` + `rootfs.roothash`) from the host filesystem. Returns
 /// `(verity_path, roothash)` when both are present and the hash is well-formed
 /// (64-hex); `(None, None)` for an unverified image. A `&Path` adapter over
-/// `mvm_backend::microvm::probe_verity_sidecar`, which does the host-side read.
+/// `mvm_runtime::microvm::probe_verity_sidecar`, which does the host-side read.
 fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<String>) {
-    mvm_backend::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
+    mvm_runtime::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
 }
 
 #[async_trait]
 impl MvmClient for LocalBackend {
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
-        let infos = self.backend.list().map_err(backend_err)?;
+        let registry = load_name_registry();
+
+        // Aggregate every backend's live VMs (the host-wide view `mvmctl ls`
+        // shows), then fold in this backend's own listing — the in-process mock
+        // is excluded from `list_all`, so a single-backend caller (tests, a
+        // mock-driven consumer) would otherwise see nothing. Dedup by name.
+        let mut infos: Vec<VmInfo> = AnyBackend::list_all();
+        for vm in self.backend.list().map_err(backend_err)? {
+            if !infos.iter().any(|existing| existing.name == vm.name) {
+                infos.push(vm);
+            }
+        }
+
+        // Fold in registered-but-not-running machines as stopped rows so the
+        // registry's TTL/tag metadata is listable; the CLI hides these unless
+        // `--all` is asked.
+        let listed: std::collections::BTreeSet<&str> =
+            infos.iter().map(|i| i.name.as_str()).collect();
+        let registry_only: Vec<VmInfo> = registry
+            .vms
+            .iter()
+            .filter(|(name, _)| !listed.contains(name.as_str()))
+            .map(|(name, reg)| VmInfo {
+                id: VmId(name.clone()),
+                name: name.clone(),
+                status: VmStatus::Stopped,
+                guest_ip: reg.guest_ip.clone(),
+                cpus: 0,
+                memory_mib: 0,
+                profile: None,
+                revision: None,
+                flake_ref: None,
+                ports: Vec::new(),
+            })
+            .collect();
+        infos.extend(registry_only);
+
         Ok(infos
             .into_iter()
-            .map(to_state)
+            .map(|info| {
+                let reg = registry.lookup(&info.name);
+                to_state(info, reg)
+            })
             .filter(|m| filter.matches(m))
             .collect())
     }
 
     async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState> {
+        let registry = load_name_registry();
         self.backend
             .list()
             .map_err(backend_err)?
             .into_iter()
-            .map(to_state)
-            .find(|m| m.id == *id)
+            .find(|v| v.id.0 == id.0)
+            .map(|info| {
+                let reg = registry.lookup(&info.name);
+                to_state(info, reg)
+            })
             .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
     }
 
@@ -250,11 +561,11 @@ impl MvmClient for LocalBackend {
         let rootfs = resolve_local_rootfs(&spec.image, &spec.name).await?;
         let (verity_path, roothash) = host_verity_sidecars(&rootfs);
 
-        // libkrun/Vz/mock carry their own kernel; HVF boots an explicit
+        // libkrun/mock carry their own kernel; HVF boots an explicit
         // arm64 kernel Image. Resolve it from the per-arch workload-kernel
         // cache the CLI's run path populates — the facade stays
         // cache-hit-or-error; the heavier build/fetch flows are CLI concerns.
-        let kernel_path = if self.backend.name() == "hvf" {
+        let kernel_path = if self.backend.kind() == BackendKind::Hvf {
             let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
             let arch = mvm_core::arch::GuestArch::host().to_string();
             let path = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
@@ -304,6 +615,10 @@ impl MvmClient for LocalBackend {
             id: MachineId(started.vm_id.0),
             name: spec.name,
             status: MachineStatus::Running,
+            backend: self.backend.name().to_string(),
+            cpus: spec.cpus,
+            memory_mib: spec.memory_mib,
+            ..Default::default()
         })
     }
 
@@ -318,7 +633,86 @@ impl MvmClient for LocalBackend {
     }
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
-        self.backend.stop(&VmId(id.0.clone())).map_err(backend_err)
+        let vid = VmId(id.0.clone());
+        // Stop via the VMM that actually started this VM (resolved from its
+        // per-VM state-dir pid marker) so a QEMU/libkrun VM is torn down by its
+        // own hypervisor, not this client's default. A marker-less VM (mock or
+        // direct-boot) has no owning marker, so fall back to this client's
+        // configured backend — which keeps a `with_hypervisor("mock")` client
+        // hermetic rather than reaching a platform default.
+        let result = match AnyBackend::for_started_vm(&id.0) {
+            Some(owner) => owner.stop(&vid),
+            None => self.backend.stop(&vid),
+        };
+        // Deregister from the name registry only on a successful stop; on
+        // failure the entry (and any readiness the caller recorded) stays so
+        // the user can see what happened.
+        if result.is_ok() {
+            deregister_from_name_registry(&id.0);
+        }
+        result.map_err(backend_err)
+    }
+
+    async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
+        let name = &id.0;
+
+        // Opt-in warm-base barrier: wait for the workload to signal "primed"
+        // before sealing. Fails closed — a timeout propagates so no half-warmed
+        // snapshot is sealed. Skipped for the mock (no guest agent to answer).
+        if let Some(timeout) = primed_barrier_timeout(&opts, self.is_mock()) {
+            let source = VsockPrimedSignalSource {
+                vm_name: name.clone(),
+                poll_interval: std::time::Duration::from_millis(500),
+            };
+            await_primed_barrier(&source, timeout)
+                .map_err(|e| backend_err(format!("primed barrier for VM {name:?}: {e:#}")))?;
+        }
+
+        let io = self.snapshot_io_for(name)?;
+        let sidecar = pause_and_seal(name, &*io)
+            .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
+
+        write_fc_paused_marker(name);
+        set_registry_paused(name, true);
+
+        Ok(PauseOutcome {
+            epoch: sidecar.epoch,
+            vmstate_len: sidecar.vmstate_len,
+            mem_len: sidecar.mem_len,
+        })
+    }
+
+    async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
+        // `warm` routes through the backend's live-memory warm-start path (fails
+        // closed on a disk-only backend); the default plain path verifies +
+        // restores the sealed snapshot and signals the guest.
+        if opts.warm {
+            self.warm_resume(&id.0)
+        } else {
+            self.plain_resume(&id.0)
+        }
+    }
+
+    async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
+        let path = mvm_runtime::vm::name_registry::registry_path();
+        let mut registry = VmNameRegistry::load(&path).map_err(|e| {
+            backend_err(format!(
+                "loading VM name registry at {}: {e}",
+                path.display()
+            ))
+        })?;
+        let updated = registry
+            .set_expires_at(&id.0, expires_at)
+            .map_err(|e| backend_err(format!("updating registry record: {e}")))?;
+        if !updated {
+            return Err(MvmError::NotFound { id: id.0.clone() });
+        }
+        registry.save(&path).map_err(|e| {
+            backend_err(format!(
+                "saving VM name registry at {}: {e}",
+                path.display()
+            ))
+        })
     }
 
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
@@ -367,7 +761,7 @@ impl MvmClient for LocalBackend {
         id: &MachineId,
         cfg: mvm_core::client::dto::ReconfigureRequest,
     ) -> Result<MachineState> {
-        use mvm::machine::persist as mp;
+        use mvm_runtime::machine::persist as mp;
 
         // Claim-10: this backend's in-process boot does not enforce network
         // policy, so a net/allow_host change would persist-but-not-enforce.
@@ -416,6 +810,7 @@ impl MvmClient for LocalBackend {
                 id: id.clone(),
                 name: existing.name,
                 status,
+                ..Default::default()
             });
         }
 
@@ -447,6 +842,7 @@ impl MvmClient for LocalBackend {
             id: id.clone(),
             name: desired.name,
             status: MachineStatus::Stopped,
+            ..Default::default()
         })
     }
 }
@@ -471,7 +867,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = tempfile::tempdir().unwrap();
             let mut env = TestEnv::new();
-            env.set("MVM_DATA_DIR", dir.path());
+            env.set("MVM_HOME", dir.path());
             Self {
                 _lock: lock,
                 _env: env,
@@ -489,7 +885,8 @@ mod tests {
         assert_eq!(map_status(&VmStatus::Running), MachineStatus::Running);
         assert_eq!(map_status(&VmStatus::Starting), MachineStatus::Starting);
         assert_eq!(map_status(&VmStatus::Stopped), MachineStatus::Stopped);
-        assert_eq!(map_status(&VmStatus::Paused), MachineStatus::Stopped);
+        // Paused stays distinct from Stopped (it must remain visible by default).
+        assert_eq!(map_status(&VmStatus::Paused), MachineStatus::Paused);
         assert_eq!(
             map_status(&VmStatus::Failed {
                 reason: "boom".into()
@@ -498,8 +895,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn status_detail_carries_only_failure_reason() {
+        assert_eq!(
+            status_detail(&VmStatus::Failed {
+                reason: "boom".into()
+            }),
+            Some("boom".to_string())
+        );
+        assert_eq!(status_detail(&VmStatus::Running), None);
+        assert_eq!(status_detail(&VmStatus::Paused), None);
+    }
+
+    #[test]
+    fn to_state_joins_backend_info_with_registry_metadata() {
+        let info = VmInfo {
+            id: VmId("vm-1".into()),
+            name: "web".into(),
+            status: VmStatus::Running,
+            guest_ip: Some("172.16.0.2".into()),
+            cpus: 2,
+            memory_mib: 512,
+            profile: Some("worker".into()),
+            revision: None,
+            flake_ref: Some(".#worker".into()),
+            ports: vec![mvm_core::protocol::vm_backend::VmPortMapping {
+                host: 8080,
+                guest: 80,
+            }],
+        };
+        let mut registry = VmNameRegistry::default();
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert("env".to_string(), "prod".to_string());
+        registry
+            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams {
+                name: "web",
+                vm_dir: "/tmp/web",
+                network: "default",
+                guest_ip: Some("172.16.0.2"),
+                slot_index: 0,
+                tags,
+                expires_at: Some("2099-01-01T00:00:00Z".into()),
+                auto_resume: false,
+            })
+            .unwrap();
+
+        let state = to_state(info, registry.lookup("web"));
+        assert_eq!(state.name, "web");
+        assert_eq!(state.status, MachineStatus::Running);
+        assert_eq!(state.cpus, 2);
+        assert_eq!(state.memory_mib, 512);
+        assert_eq!(state.flake_ref.as_deref(), Some(".#worker"));
+        assert_eq!(
+            state.ports,
+            vec![PortMapping {
+                host: 8080,
+                guest: 80
+            }]
+        );
+        assert_eq!(state.tags.get("env").map(String::as_str), Some("prod"));
+        assert_eq!(state.expires_at.as_deref(), Some("2099-01-01T00:00:00Z"));
+        assert!(!state.auto_resume);
+        // No registry entry → metadata defaults (auto_resume true).
+        let bare = to_state(
+            VmInfo {
+                id: VmId("vm-2".into()),
+                name: "solo".into(),
+                status: VmStatus::Stopped,
+                guest_ip: None,
+                cpus: 0,
+                memory_mib: 0,
+                profile: None,
+                revision: None,
+                flake_ref: None,
+                ports: Vec::new(),
+            },
+            None,
+        );
+        assert!(bare.tags.is_empty() && bare.auto_resume && bare.expires_at.is_none());
+    }
+
     #[tokio::test]
     async fn list_over_mock_backend_succeeds() {
+        // `list_machines` unions the host-wide backend scan + name registry, so
+        // isolate the data dir or leftover real `~/.mvm/vms` state leaks in.
+        let _data = IsolatedDataDir::new();
         let be = LocalBackend::with_hypervisor("mock");
         let machines = be.list_machines(MachineFilter::all()).await.unwrap();
         let none = be
@@ -617,6 +1097,53 @@ mod tests {
             .expect("removing an absent machine is Ok");
     }
 
+    #[tokio::test]
+    async fn stop_machine_falls_back_to_configured_backend_and_is_idempotent() {
+        // A mock-driven VM writes no pid marker, so `for_started_vm` finds no
+        // owning VMM and the stop must fall back to this client's configured
+        // backend (mock). That fallback is what keeps `with_hypervisor("mock")`
+        // hermetic — no platform default, no real VMM reached.
+        let data = IsolatedDataDir::new();
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
+
+        let be = LocalBackend::with_hypervisor("mock");
+        let spec = MachineSpec {
+            name: "local-stop-target".into(),
+            image: rootfs.to_string_lossy().into_owned(),
+            cpus: 1,
+            memory_mib: 128,
+            env: vec![],
+        };
+        let state = be.run_machine(spec).await.expect("boot");
+        assert!(
+            be.list_machines(MachineFilter::all())
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == state.id),
+            "the booted machine should list before the stop"
+        );
+
+        // Stop drops it from the backend's live view.
+        be.stop_machine(&state.id).await.expect("stop");
+        assert!(
+            !be.list_machines(MachineFilter::all())
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == state.id),
+            "stopped machine must not list as running"
+        );
+
+        // Idempotent: stopping the now-stopped machine, and a never-existed id,
+        // both succeed rather than erroring.
+        be.stop_machine(&state.id).await.expect("re-stop is Ok");
+        be.stop_machine(&MachineId("never-existed-xyz".into()))
+            .await
+            .expect("stopping an absent machine is Ok");
+    }
+
     #[test]
     fn host_verity_sidecars_reads_well_formed_pair() {
         let dir = tempfile::tempdir().unwrap();
@@ -638,13 +1165,83 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // pause / resume tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn primed_barrier_timeout_is_opt_in_and_skips_mock() {
+        // Default off → no barrier.
+        assert!(primed_barrier_timeout(&PauseOpts::default(), false).is_none());
+        // Opt-in on a real backend → barrier with the requested timeout.
+        let on = PauseOpts {
+            primed_barrier: true,
+            primed_timeout_secs: 30,
+        };
+        assert_eq!(
+            primed_barrier_timeout(&on, false),
+            Some(std::time::Duration::from_secs(30))
+        );
+        // The hermetic mock has no live guest agent — never gate it.
+        assert!(primed_barrier_timeout(&on, true).is_none());
+    }
+
+    #[test]
+    fn firecracker_socket_is_fc_socket_in_vm_dir() {
+        assert_eq!(
+            firecracker_socket("/tmp/vms/web"),
+            std::path::PathBuf::from("/tmp/vms/web/fc.socket")
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_seals_and_resume_verifies_over_mock_canned_io() {
+        // The mock snapshot transport keys off the mock VM's per-VM dir existing.
+        let _data = IsolatedDataDir::new();
+        let vm_dir = mvm_runtime::MockBackend::vm_dir("snap-roundtrip");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("snap-roundtrip".into());
+
+        let outcome = be
+            .pause_machine(&id, PauseOpts::default())
+            .await
+            .expect("pause seals the canned snapshot");
+        // CannedIO writes 12-byte vmstate + 8-byte mem stubs and seals epoch 1.
+        assert_eq!(outcome.vmstate_len, b"mock-vmstate".len() as u64);
+        assert_eq!(outcome.mem_len, b"mock-mem".len() as u64);
+        assert!(outcome.epoch >= 1);
+
+        // Plain resume drives the replay-refusal gate (`verify_and_resume`) and,
+        // for the mock, skips the guest PostRestore signal.
+        be.resume_machine(&id, ResumeOpts::default())
+            .await
+            .expect("resume verifies the sealed envelope and restores");
+    }
+
+    #[tokio::test]
+    async fn pause_on_absent_mock_vm_is_error() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let err = be
+            .pause_machine(&MachineId("never-brought-up".into()), PauseOpts::default())
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("is not running"),
+            "absent mock VM must fail with 'is not running'; got: {msg}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
     // reconfigure_machine tests
     // ---------------------------------------------------------------------------
 
     /// Persist a minimal image-backed spec named `name` into the current
-    /// `MVM_DATA_DIR`-derived machine state dir.
+    /// `MVM_HOME`-derived machine state dir.
     fn persist_test_spec(name: &str) {
-        use mvm::machine::persist::{
+        use mvm_runtime::machine::persist::{
             MACHINE_SPEC_SCHEMA_VERSION, MachineSpec as PersistSpec, save_machine_spec,
         };
         let spec = PersistSpec {
@@ -662,7 +1259,6 @@ mod tests {
             profile: "standard".to_string(),
             volumes: vec![],
             init: vec![],
-            ssh_agent: false,
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
@@ -756,7 +1352,8 @@ mod tests {
         assert_eq!(state.status, MachineStatus::Stopped);
 
         // The spec was actually persisted: load it back and confirm cpus updated.
-        let loaded = mvm::machine::persist::load_machine_spec("myapp").expect("load patched spec");
+        let loaded =
+            mvm_runtime::machine::persist::load_machine_spec("myapp").expect("load patched spec");
         assert_eq!(loaded.cpus, 4, "persisted cpus should be 4");
         assert_eq!(loaded.memory, "512M", "memory should be unchanged");
     }
@@ -783,8 +1380,8 @@ mod tests {
         );
 
         // The spec must not have been overwritten.
-        let loaded =
-            mvm::machine::persist::load_machine_spec("zero-cpu-machine").expect("load spec");
+        let loaded = mvm_runtime::machine::persist::load_machine_spec("zero-cpu-machine")
+            .expect("load spec");
         assert_eq!(loaded.cpus, 2, "cpus must remain unchanged after refusal");
     }
 

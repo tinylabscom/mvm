@@ -1,6 +1,6 @@
 //! Bounded HTTP/1.1 request reader for the transparent egress terminator.
 //!
-//! Ported from `crates/mvm-guest/src/forward_proxy.rs`. The terminator reads
+//! Ported from `crates/mvm-agentd/src/forward_proxy.rs`. The terminator reads
 //! raw redirected TCP bytes off a blocking socket and needs the same
 //! headers→body logic.
 

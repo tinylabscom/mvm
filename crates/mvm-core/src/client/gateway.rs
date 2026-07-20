@@ -10,7 +10,8 @@ use reqwest::{StatusCode, Url};
 
 use crate::client::MvmClient;
 use crate::client::dto::{
-    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, ReconfigureRequest,
+    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, PauseOpts,
+    PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
 
@@ -181,6 +182,7 @@ impl From<SandboxDto> for MachineState {
             id: MachineId(s.sandbox_id),
             name: s.name,
             status: map_status(&s.status),
+            ..Default::default()
         }
     }
 }
@@ -312,6 +314,23 @@ impl MvmClient for GatewayBackend {
         }
     }
 
+    async fn pause_machine(&self, _id: &MachineId, _opts: PauseOpts) -> Result<PauseOutcome> {
+        // Instance-snapshot pause/resume is a host-local operation (sealing the
+        // vmstate + memory under a host key); the gateway exposes no snapshot
+        // endpoint. Refuse rather than fake an outcome — remote pause/resume is
+        // wired only when a fleet consumer needs it.
+        Err(MvmError::Backend {
+            reason: "gateway pause is not wired (remote instance snapshot unsupported)".into(),
+        })
+    }
+
+    async fn resume_machine(&self, _id: &MachineId, _opts: ResumeOpts) -> Result<ResumeOutcome> {
+        // Symmetric with `pause_machine`: no remote snapshot restore endpoint yet.
+        Err(MvmError::Backend {
+            reason: "gateway resume is not wired (remote instance snapshot unsupported)".into(),
+        })
+    }
+
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
         let mut url = self.endpoint(&format!("/api/v1/sandboxes/{}/logs", id.0))?;
         if let Some(n) = opts.tail_lines {
@@ -372,6 +391,14 @@ impl MvmClient for GatewayBackend {
             reason: format!("parsing reconfigure response: {e}"),
         })?;
         Ok(env.data.into())
+    }
+
+    async fn set_ttl(&self, _id: &MachineId, _expires_at: Option<String>) -> Result<()> {
+        // The fleet's TTL lives in its own control plane; this client has no
+        // remote TTL endpoint yet. Refuse rather than fake success.
+        Err(MvmError::Backend {
+            reason: "gateway set-ttl is not wired (no remote TTL endpoint)".into(),
+        })
     }
 }
 
@@ -482,11 +509,13 @@ mod tests {
                 id: MachineId("1".into()),
                 name: "a".into(),
                 status: MachineStatus::Running,
+                ..Default::default()
             },
             MachineState {
                 id: MachineId("2".into()),
                 name: "b".into(),
                 status: MachineStatus::Stopped,
+                ..Default::default()
             },
         ];
         let f = MachineFilter {
@@ -553,6 +582,22 @@ mod tests {
             url.as_str(),
             "https://fleet.example.com/api/v1/sandboxes/abc/reconfigure"
         );
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_fail_closed_until_wired() {
+        install_rustls_provider();
+        let be = GatewayBackend::new(cfg("https://fleet.example.com")).unwrap();
+        let id = MachineId("sbx-1".into());
+        // No request is sent — the stub refuses before touching the network.
+        assert!(matches!(
+            be.pause_machine(&id, PauseOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
+        assert!(matches!(
+            be.resume_machine(&id, ResumeOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
     }
 
     #[test]

@@ -5,7 +5,7 @@ description: How to build mvm microVM images from your own project — the mvm r
 
 mvm is a **library**, not a project to fork. You keep your code, your `flake.nix`, and your `mvm.toml` in your own repository, and `mvmctl` builds your microVM image by running `nix build` against your flake. **You should never need to edit anything inside the mvm repository.**
 
-Under the hood, mvm wraps [microvm.nix](https://github.com/microvm-nix/microvm.nix) (MIT) — that's the NixOS module that abstracts Firecracker, Cloud Hypervisor, QEMU, crosvm, kvmtool, and stratovirt. The choice is recorded in [ADR-013](/contributing/adr/013-libkrun-pivot/).
+Under the hood, mvm wraps [microvm.nix](https://github.com/microvm-nix/microvm.nix) (MIT) — that's the NixOS module that abstracts Firecracker, Cloud Hypervisor, QEMU, crosvm, kvmtool, and stratovirt. The choice is recorded in [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md).
 
 ## The two files in your project
 
@@ -177,7 +177,7 @@ The `mkGuest` library produces a **busybox-as-PID-1** rootfs (no NixOS, no syste
 
 The numbers are surfaced on every `mkGuest` derivation as `passthru.mvm.expectedBootMs` so you can `nix eval .#default.passthru.mvm.expectedBootMs` to confirm. Phase 9 enforces with `xtask perf --backend <name> --p50-ms 300 --runs 100`. See [ADR-013 §"Boot-time budget"](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/013-libkrun-libkrun-microvm-nix-pivot.md) for rationale.
 
-The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-013](/contributing/adr/013-libkrun-pivot/) for why this matters and the implementation breadcrumb.
+The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md) for why this matters and the implementation breadcrumb.
 
 ## What's inside the mvm repository (and why you don't touch it)
 
@@ -203,7 +203,7 @@ mvm runs Nix builds inside the project builder VM and copies the finished kernel
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
 - **macOS**: the host `mvmctl build` command orchestrates a Linux builder VM. The resulting runtime image boots on the HVF backend by default on macOS 26+ (Hypervisor.framework, vsock-only), or libkrun on macOS 13–25.
-- **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-031](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/031-cross-platform-strategy.md).
+- **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-009](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/009-cross-platform-strategy.md).
 
 ## Rootless workloads
 
@@ -220,7 +220,7 @@ PID 1 must be uid 0 (kernel mandate). Everything else can — and by default in 
 The dev/prod default split is intentional:
 
 - **Dev** keeps entrypoint as root because debug shells expect root: `apt install`, `mount`, `tcpdump`. Forcing rootless dev would break those flows on first try.
-- **Prod** drops to uid 1000 by default per ADR-002 W2.1 — "no guest binary can elevate to uid 0." A workload that *isn't* root can't be re-elevated.
+- **Prod** drops to uid 1000 by default per ADR-001 W2.1 — "no guest binary can elevate to uid 0." A workload that *isn't* root can't be re-elevated.
 
 `/init` uses `setpriv --reuid=N --regid=N --clear-groups --no-new-privs --` to drop. `--no-new-privs` blocks `setuid` re-elevation, so even if the workload finds a SUID binary, it can't reach uid 0.
 

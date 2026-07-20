@@ -13,9 +13,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use std::io::{Read, Write};
 
+use mvm_agentd::vsock::{FsResult, GuestRequest};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_guest::vsock::{FsResult, GuestRequest};
 
 use super::Cli;
 use super::shared::{clap_vm_name, human_bytes};
@@ -171,13 +171,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// the in-memory mock backend.
 pub(super) fn fs_request(name: &str, req: GuestRequest) -> Result<FsResult> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let mock_dir = mvm_backend::MockBackend::vm_dir(name);
+    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
     if mock_dir.join("runtime").join("v.sock").exists() {
-        return mvm_guest::vsock::send_fs_request(&mock_dir.to_string_lossy(), req);
+        return mvm_agentd::vsock::send_fs_request(&mock_dir.to_string_lossy(), req);
     }
     let mut stream =
-        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    mvm_guest::vsock::send_fs_request_on(&mut stream, req)
+        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::send_fs_request_on(&mut stream, req)
 }
 
 fn unwrap_fs(result: FsResult) -> Result<FsResult> {
@@ -264,10 +264,10 @@ fn cmd_ls(name: &str, path: &str, json: bool) -> Result<()> {
             }
             for e in &entries {
                 let kind = match e.kind {
-                    mvm_guest::vsock::FsEntryKind::File => "f",
-                    mvm_guest::vsock::FsEntryKind::Dir => "d",
-                    mvm_guest::vsock::FsEntryKind::Symlink => "l",
-                    mvm_guest::vsock::FsEntryKind::Other => "?",
+                    mvm_agentd::vsock::FsEntryKind::File => "f",
+                    mvm_agentd::vsock::FsEntryKind::Dir => "d",
+                    mvm_agentd::vsock::FsEntryKind::Symlink => "l",
+                    mvm_agentd::vsock::FsEntryKind::Other => "?",
                 };
                 if e.size > 0 {
                     println!("  {} {} ({})", kind, e.name, human_bytes(e.size));

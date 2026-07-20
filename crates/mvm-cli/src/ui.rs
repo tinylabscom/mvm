@@ -1,41 +1,41 @@
 //! CLI-side surface for `[mvm]` chrome. Every helper is a thin
-//! delegation to [`mvm::ui`] so the verbosity gate (info/success/step/
+//! delegation to [`mvm_runtime::ui`] so the verbosity gate (info/success/step/
 //! progress are opt-in; errors/warnings/banners/status/prompts always
 //! print) lives in exactly one place. Only [`format_timed`] /
 //! [`timed_step`] are CLI-local, and `timed_step` routes through the
 //! gated [`info`] so it follows the same toggle.
 
-pub type Spinner = mvm::ui::Spinner;
+pub type Spinner = mvm_runtime::ui::Spinner;
 
 // ---------------------------------------------------------------------------
-// Message helpers (delegate to mvm::ui)
+// Message helpers (delegate to mvm_runtime::ui)
 // ---------------------------------------------------------------------------
 
 /// Print a progress / chatter message that's only useful when
 /// troubleshooting. Opt-in: shown when `--verbose`/`--debug` is passed
 /// or `RUST_LOG` is set.
 pub fn progress(msg: &str) {
-    mvm::ui::progress(msg);
+    mvm_runtime::ui::progress(msg);
 }
 
 /// Print an informational message: `[mvm]` message. Opt-in chatter.
 pub fn info(msg: &str) {
-    mvm::ui::info(msg);
+    mvm_runtime::ui::info(msg);
 }
 
 /// Print a success message: `[mvm]` message (in green). Opt-in chatter.
 pub fn success(msg: &str) {
-    mvm::ui::success(msg);
+    mvm_runtime::ui::success(msg);
 }
 
 /// Print an error message: `[mvm]` message (in red). Always printed.
 pub fn error(msg: &str) {
-    mvm::ui::error(msg);
+    mvm_runtime::ui::error(msg);
 }
 
 /// Print a warning message: `[mvm]` message (in yellow). Always printed.
 pub fn warn(msg: &str) {
-    mvm::ui::warn(msg);
+    mvm_runtime::ui::warn(msg);
 }
 
 /// Print an always-on liveness/notice line: `[mvm]` message. Unlike [`info`],
@@ -43,12 +43,12 @@ pub fn warn(msg: &str) {
 /// line is the only signal a long, silent blocking step is alive (the Stage 0
 /// builder-image build), so it must show even in the default quiet mode.
 pub fn notice(msg: &str) {
-    mvm::ui::notice(msg);
+    mvm_runtime::ui::notice(msg);
 }
 
 /// Print a numbered step: `[mvm]` Step n/total: message. Opt-in chatter.
 pub fn step(n: u32, total: u32, msg: &str) {
-    mvm::ui::step(n, total, msg);
+    mvm_runtime::ui::step(n, total, msg);
 }
 
 /// Format a completed timed step's message: `<label> … <secs>s`.
@@ -92,39 +92,39 @@ pub fn format_build_progress(activity: &str, elapsed: std::time::Duration) -> St
 /// Print a green bold banner box. Always printed (carries actionable
 /// command results like the guest IP and next-step verbs).
 pub fn banner(lines: &[&str]) {
-    mvm::ui::banner(lines);
+    mvm_runtime::ui::banner(lines);
 }
 
 /// Print the status header.
 pub fn status_header() {
-    mvm::ui::status_header();
+    mvm_runtime::ui::status_header();
 }
 
 /// Print a status line with a bold label and a colored value.
 pub fn status_line(label: &str, value: &str) {
-    mvm::ui::status_line(label, value);
+    mvm_runtime::ui::status_line(label, value);
 }
 
 /// Show an interactive confirmation prompt. Returns true if confirmed.
 pub fn confirm(msg: &str) -> bool {
-    mvm::ui::confirm(msg)
+    mvm_runtime::ui::confirm(msg)
 }
 
 /// Show an interactive free-form prompt and return the entered line.
 pub fn prompt_text(msg: &str) -> std::io::Result<String> {
-    mvm::ui::prompt_text(msg)
+    mvm_runtime::ui::prompt_text(msg)
 }
 
 /// Show an interactive secret prompt with terminal echo disabled while the
 /// user types.
 pub fn prompt_secret(msg: &str) -> std::io::Result<String> {
-    mvm::ui::prompt_secret(msg)
+    mvm_runtime::ui::prompt_secret(msg)
 }
 
 /// Create and start a spinner with the given message.
 /// Call `.finish_with_message()` or `.finish_and_clear()` when done.
-pub fn spinner(msg: &str) -> mvm::ui::Spinner {
-    mvm::ui::spinner(msg)
+pub fn spinner(msg: &str) -> mvm_runtime::ui::Spinner {
+    mvm_runtime::ui::spinner(msg)
 }
 
 #[cfg(test)]

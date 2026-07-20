@@ -55,7 +55,7 @@ pub const KEY_BYTES: usize = 32;
 
 /// Resolve `~/.mvm/keys/` from the calling user's `$HOME`.
 pub fn default_keys_dir() -> Result<PathBuf> {
-    Ok(mvm_core::config::mvm_data_dir_strict()?.join("keys"))
+    Ok(mvm_core::config::mvm_home_strict()?.join("keys"))
 }
 
 /// Compose the host-signer identifier used as `signer_id` in the
@@ -73,7 +73,7 @@ pub fn host_signer_id() -> String {
 /// Idempotent: a subsequent call reloads from disk. Refuses if the
 /// secret-half file has perms looser than `SECRET_MODE`. Caller is
 /// responsible for ensuring `~/.mvm/` itself is mode `0700` (the
-/// `mvm_core::config::ensure_data_dir` helper handles that already
+/// `mvm_core::config::ensure_home_dir` helper handles that already
 /// for the parent).
 pub fn load_or_init() -> Result<HostSigner> {
     load_or_init_at(&default_keys_dir()?)

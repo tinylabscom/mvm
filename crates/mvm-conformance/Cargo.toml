@@ -1,0 +1,39 @@
+[package]
+name = "mvm-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Dev-only cucumber-rs BDD conformance harness. Runs the Gherkin scenarios under features/suites/ against the real mvmctl binary (and, as later suites land, the mvm-client facade). Not a dependency of any shipped crate."
+
+[[test]]
+name = "conformance"
+harness = false
+# Opt-in: cucumber drives its own scenario loop and does not speak the
+# libtest CLI (`--list`), so building this target in a plain workspace test
+# run breaks `cargo nextest run --workspace` at list time and would make
+# `cargo test --workspace` launch the whole BDD suite implicitly. `just bdd`
+# enables the feature explicitly.
+required-features = ["bdd"]
+
+[features]
+# Gates the cucumber conformance runner (see the [[test]] target above).
+bdd = []
+
+[dependencies]
+
+[dev-dependencies]
+# Only pulled in at test time (`just bdd` / `cargo test -p mvm-conformance
+# --test conformance`) — not a normal dependency of this crate, and never a
+# dependency of any shipped crate. `cargo tree -p mvm-conformance -e no-dev`
+# must not list cucumber.
+cucumber = "0.23"
+tokio.workspace = true
+# Cross-workspace `mvmctl` binary resolution — the same mechanism
+# crates/mvm-cli/tests/cli.rs already uses, so a scenario keeps working
+# through a crate rename as long as the produced binary is still named
+# `mvmctl`.
+assert_cmd.workspace = true
+
+[lints]
+workspace = true

@@ -68,9 +68,9 @@ mod linux {
     /// failed `File::open` (cheap, non-fatal).
     const STAGE0_DISK_CANDIDATES: &[&str] = &["/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd"];
 
-    const VSOCK_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
+    const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
-    const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = "127.0.0.1:1080";
+    const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
     const VSOCK_EGRESS_PROXY_READY_TIMEOUT: Duration = Duration::from_secs(5);
     const VSOCK_EGRESS_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
     const VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
@@ -196,7 +196,7 @@ mod linux {
     }
 
     fn best_effort_raise_loopback() {
-        match mvm_guest::guest_net::bring_iface_up("lo") {
+        match mvm_agentd::guest_net::bring_iface_up("lo") {
             Ok(()) => eprintln!("stage0-init: brought loopback interface up"),
             Err(e) => eprintln!("stage0-init: bring_iface_up lo failed: {e}"),
         }
@@ -884,7 +884,7 @@ mod linux {
             run_streaming(cmd, &mut std::io::stderr()).map_err(|e| format!("nix build: {e}"))?;
 
         // Persist the full log to /out (a virtio-fs share) for host-side
-        // post-mortem at ~/.cache/mvm/builder-vm/.../nix-stderr.log.
+        // post-mortem at ~/.mvm/cache/builder-vm/.../nix-stderr.log.
         let _ = std::fs::write("/out/nix-stderr.log", &stderr_log);
         if !status.success() {
             return Err(format!("nix build exit {}", status.code().unwrap_or(-1)));
@@ -1358,13 +1358,14 @@ mod linux {
             // byte layout assumption) so a future change to the on-disk
             // superblock format fails this test instead of silently
             // desynchronizing the host writer and the guest reader.
-            let nodes = vec![mvm_ext4::Node::Dir {
+            let nodes = vec![mvm_fs::ext4::Node::Dir {
                 path: "/a".to_string(),
                 mode: 0o755,
                 xattrs: vec![],
             }];
-            let options = mvm_ext4::BuildOptions::default().with_volume_name(b"mvm-work");
-            let image = mvm_ext4::build_image_with_options(&nodes, &options).expect("build image");
+            let options = mvm_fs::ext4::BuildOptions::default().with_volume_name(b"mvm-work");
+            let image =
+                mvm_fs::ext4::build_image_with_options(&nodes, &options).expect("build image");
             assert_eq!(
                 ext4_volume_label_from_superblock(&image),
                 Some("mvm-work".to_string())

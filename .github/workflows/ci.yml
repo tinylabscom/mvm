@@ -69,11 +69,11 @@ jobs:
         run: |
           sudo apt-get install -y shellcheck
           shellcheck -S warning install.sh
-          shellcheck packaging/release/verify-release-assets.sh \
-                     packaging/release/verify-release-assets.test.sh
+          shellcheck nix/packaging/release/verify-release-assets.sh \
+                     nix/packaging/release/verify-release-assets.test.sh
 
       - name: Release-asset verifier gate tests
-        run: bash packaging/release/verify-release-assets.test.sh
+        run: bash nix/packaging/release/verify-release-assets.test.sh
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -94,9 +94,6 @@ jobs:
       - name: No forbidden dependency families
         run: cargo run -p xtask -- check-forbidden-deps
 
-      - name: SDK crate split guard
-        run: cargo run -p xtask -- check-sdk-split
-
       - name: Gated doc claims
         run: cargo run -p xtask -- check-doc-claims
 
@@ -106,14 +103,23 @@ jobs:
       - name: No overclaiming
         run: cargo run -p xtask -- check-no-overclaim
 
-      - name: Unique spec numbers
-        run: cargo run -p xtask -- check-spec-numbers
-
       - name: Two product surfaces only (host + user)
         run: cargo run -p xtask -- check-two-surfaces
 
       - name: No spec refs in source comments
         run: cargo run -p xtask -- check-no-spec-refs-in-comments
+
+      - name: No stringly backend-name dispatch
+        run: cargo run -p xtask -- check-no-string-backend-dispatch
+
+      - name: Single MVM_HOME root (no resolver bypass)
+        run: cargo run -p xtask -- check-single-home
+
+      - name: No baked network literals (IPs/ports/tmp-sockets)
+        run: cargo run -p xtask -- check-no-network-literals
+
+      - name: mvm-cli drives machines through the mvm-client facade
+        run: cargo run -p xtask -- check-cli-runtime-surface
 
       - name: Conformance claim catalog
         run: cargo run -p xtask -- check-claim-catalog
@@ -240,11 +246,19 @@ jobs:
       - name: Run dev-shell agent handler tests
         # The default workspace run builds the guest agent without `dev-shell`,
         # so the dev-tier handlers (exec, run-code, run-detached) and their
-        # tests are compiled out. Run mvm-guest with the feature on so the
+        # tests are compiled out. Run mvm-agentd with the feature on so the
         # detached-workload handler is actually exercised on every PR — a fresh
         # agent that links the handler but can't run the workload would slip an
         # all-default run.
-        run: cargo nextest run -p mvm-guest --features dev-shell
+        run: cargo nextest run -p mvm-agentd --features dev-shell
+
+      - name: Run addon/egress helper tests
+        # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
+        # mvm-egress-client) and their shared vsock session helper live behind
+        # the off-by-default `addons` feature, so the default workspace run
+        # skips their tests. Run mvm-agentd with the feature on so they stay
+        # exercised on every PR.
+        run: cargo nextest run -p mvm-agentd --features addons
 
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
@@ -306,6 +320,48 @@ jobs:
             nix flake check --no-build "./$d"
           done
 
+  # `mvm-protocol` is `no_std` + `alloc` (the IR, wire protocol, policy/audit
+  # DTOs, and the audit-log verifier) so the same logic can run in a browser.
+  # A `std`/OS-only API creeping into its default build is the one thing that
+  # would break that — and the wasm32-unknown-unknown *build itself* is the
+  # proof: it only succeeds if the crate stays no_std-clean, so no separate
+  # lint is needed. The crate also goes `std` under `cfg(test)` (libtest
+  # needs `std` to link), so its tests run for real under wasm on
+  # wasm32-wasip1 via wasmtime, confirming the no_std surface behaves
+  # correctly and not just that it compiles.
+  wasm-no-std-boundary:
+    name: mvm-protocol wasm32 no_std boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32-wasip1
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-
+
+      - name: Install wasmtime (wasm32-wasip1 test runner)
+        run: |
+          set -euo pipefail
+          curl https://wasmtime.dev/install.sh -sSf | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: mvm-protocol builds no_std + alloc on wasm32-unknown-unknown
+        run: cargo build -p mvm-protocol --target wasm32-unknown-unknown
+
+      - name: mvm-protocol tests run under wasm (wasm32-wasip1, via wasmtime)
+        run: cargo test -p mvm-protocol --target wasm32-wasip1
+
   # The pure-Rust `mvm-ext4` writer (Plan 221) must produce an image the real
   # Linux kernel mounts — the strongest correctness oracle, beyond the in-process
   # `am-fs-ext4` read oracle. Write a fixed sample image and loop-mount it.
@@ -317,7 +373,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Write a sample image with the pure-Rust ext4 writer
-        run: cargo run -p mvm-ext4 --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
+        run: cargo run -p mvm-fs --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
       - name: Loop-mount read-only and verify the tree on the real kernel
         run: |
           set -euo pipefail
@@ -372,7 +428,7 @@ jobs:
       - name: Write + loop-mount a MULTI-block-group image (> 128 MiB)
         run: |
           set -euo pipefail
-          cargo run -p mvm-ext4 --example write_multigroup -- /tmp/multigroup.ext4
+          cargo run -p mvm-fs --example write_multigroup -- /tmp/multigroup.ext4
           # Sanity: bigger than one group's 128 MiB.
           [ "$(stat -c '%s' /tmp/multigroup.ext4)" -gt 134217728 ]
           mnt=$(mktemp -d)
@@ -391,7 +447,7 @@ jobs:
       - name: Write + loop-mount a DEPTH-1 extent-tree image (>512 MiB single file)
         run: |
           set -euo pipefail
-          cargo run -p mvm-ext4 --example write_extent_tree -- /tmp/extent_tree.ext4
+          cargo run -p mvm-fs --example write_extent_tree -- /tmp/extent_tree.ext4
           # >4 groups → the single file needs a depth-1 extent tree.
           [ "$(stat -c '%s' /tmp/extent_tree.ext4)" -gt 536870912 ]
           mnt=$(mktemp -d)

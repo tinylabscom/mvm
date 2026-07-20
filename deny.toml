@@ -1,4 +1,4 @@
-# cargo-deny configuration — ADR-002 §W5.2.
+# cargo-deny configuration — ADR-001 §W5.2.
 #
 # Three policies enforced against the workspace's transitive Cargo
 # graph on every PR:

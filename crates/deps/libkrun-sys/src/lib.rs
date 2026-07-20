@@ -1338,7 +1338,7 @@ fn install_shutdown_handler(_krun: &sys::Context) -> Result<(), Error> {
 /// "unknown variant" error.
 ///
 /// Scope: this reservation is `mvm-libkrun::SupervisorConfig`-only.
-/// The shared `mvm-bridge` sidecar binary (Firecracker + vz)
+/// The shared `mvm-bridge` sidecar binary (Firecracker)
 /// doesn't need an equivalent field because its crash policy is
 /// enforced by the parent `mvm-backend` process via the watchdog
 /// thread — the bridge dies, the parent observes the exit, the
@@ -1402,9 +1402,10 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub gateway_audit_socket: Option<std::path::PathBuf>,
     /// `~/.mvm/audit/gateway-events-<vm>.sock` — per-VM ingest
-    /// socket the Vz Swift bridge connects to (one writer only).
-    /// Required for Vz backend; ignored on libkrun (which spawns
-    /// its bridge in-process).
+    /// socket an out-of-process gateway bridge connects to (one writer
+    /// only). Ignored on libkrun (which spawns its bridge in-process); the
+    /// out-of-process backend that needed it (the removed Vz backend's
+    /// Swift bridge) is gone, so no current backend sets this.
     #[serde(default)]
     pub gateway_events_socket: Option<std::path::PathBuf>,
     /// `~/.mvm/keys/host-signer.ed25519` — host signing key for
@@ -1494,8 +1495,8 @@ impl SupervisorConfig {
     ///   `~/.mvm/keys/` (path-traversal defense — the signing key
     ///   is host-trust-boundary state per claim 8).
     ///
-    /// `gateway_events_socket` is validated only when the backend
-    /// requires it (Vz only); libkrun's in-process bridge ignores it.
+    /// `gateway_events_socket` is not validated here — no current backend
+    /// requires it; libkrun's in-process bridge ignores it.
     pub fn validate_audit_substrate(&self) -> Result<(), AuditSubstrateError> {
         let tenant = self
             .tenant_id
@@ -1588,7 +1589,7 @@ pub struct SupervisorBaseConfig {
 /// Workload-**specific** supervisor config — the bytes that arrive over the
 /// control UDS at attach. The only attacker-reachable-post-spawn surface
 /// (fuzzed by `fuzz_attach_message`). The plan re-verify in
-/// `mvm_vm_host::prelaunch` is what makes accepting these bytes safe.
+/// `mvm_hostd::prelaunch` is what makes accepting these bytes safe.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorAttachConfig {
@@ -1602,7 +1603,8 @@ pub struct SupervisorAttachConfig {
     pub audit_dir: std::path::PathBuf,
     /// `~/.mvm/audit/gateway-<vm>.sock` — per-VM subscriber socket.
     pub gateway_audit_socket: std::path::PathBuf,
-    /// Vz-only ingest socket; ignored on libkrun (in-process bridge).
+    /// Out-of-process gateway-bridge ingest socket; ignored on libkrun
+    /// (in-process bridge). No current backend sets this.
     #[serde(default)]
     pub gateway_events_socket: Option<std::path::PathBuf>,
     /// JSON-encoded `SignedExecutionPlan` envelope — same carrier shape as
@@ -1626,7 +1628,7 @@ pub struct SupervisorAttachConfig {
 }
 
 /// Failure modes of [`SupervisorConfig::from_base_and_attach`]. The plan
-/// re-verify failures live in `mvm_vm_host::prelaunch::AttachVerifyError` —
+/// re-verify failures live in `mvm_hostd::prelaunch::AttachVerifyError` —
 /// this leaf crate can't depend on `mvm-core::plan`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttachMergeError {
@@ -1655,7 +1657,7 @@ impl SupervisorConfig {
     /// [`SupervisorAttachConfig`] received over the control UDS, validating the
     /// echoed binding nonce, into a whole `SupervisorConfig` the existing
     /// `run_with_bridge` path consumes verbatim. Does **not** verify the plan
-    /// signature — that is `mvm_vm_host::prelaunch::verify_and_merge_attach`'s
+    /// signature — that is `mvm_hostd::prelaunch::verify_and_merge_attach`'s
     /// job (this crate is a leaf with no `mvm-core` dep).
     pub fn from_base_and_attach(
         base: SupervisorBaseConfig,
@@ -2084,12 +2086,12 @@ mod tests {
 
     #[test]
     fn vsock_socket_path_uses_configured_dir_when_set() {
-        let ctx =
-            KrunContext::new("vm-1", "/k", "/r").with_vsock_socket_dir("/home/user/.mvm/vms/vm-1");
+        let ctx = KrunContext::new("vm-1", "/k", "/r")
+            .with_vsock_socket_dir("/home/user/mvm-home/vms/vm-1");
         let path = ctx.vsock_socket_path(5252);
         assert_eq!(
             path,
-            std::path::PathBuf::from("/home/user/.mvm/vms/vm-1/vsock-5252.sock")
+            std::path::PathBuf::from("/home/user/mvm-home/vms/vm-1/vsock-5252.sock")
         );
     }
 

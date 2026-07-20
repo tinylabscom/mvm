@@ -741,7 +741,7 @@ mod tests {
         ReproducibilityStatus, RevocationStatus, SbomReference, Sha256Hex, SignatureFormat,
         SignatureValidity,
     };
-    use crate::plan::bundle::KeyId;
+    use crate::plan::bundle::{KeyId, key_id_from_identity, key_id_from_pubkey};
     use crate::util::test_env::TestEnv;
 
     struct MapTrustStore {
@@ -885,7 +885,7 @@ mod tests {
         let (dir, mut manifest) = staged_builder_pack();
         manifest.provenance.signature_bundle.format = SignatureFormat::Sigstore;
         manifest.provenance.signature_bundle.signatures.clear();
-        manifest.trust.signing_key_id = KeyId::from_identity("test-identity");
+        manifest.trust.signing_key_id = key_id_from_identity("test-identity");
         manifest.outputs.pack_hash = manifest.computed_pack_hash().expect("pack hash");
         (dir, manifest)
     }
@@ -912,7 +912,7 @@ mod tests {
         let key = signing_key();
         MapTrustStore {
             keys: HashMap::from([(
-                KeyId::from_pubkey(&key.verifying_key()),
+                key_id_from_pubkey(&key.verifying_key()),
                 key.verifying_key(),
             )]),
         }
@@ -924,13 +924,13 @@ mod tests {
         }
     }
 
-    /// Point `MVM_CACHE_DIR` at a fresh tempdir so the cache is isolated per
+    /// Point `MVM_HOME` at a fresh tempdir so the cache is isolated per
     /// test, and hold the env guard for the whole test. Returns both so they
     /// outlive the promotion calls.
     fn isolated_cache() -> (TempDir, TestEnv) {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
         (cache, env)
     }
 
@@ -1081,7 +1081,7 @@ mod tests {
 
         assert!(
             promoted.root.starts_with(cache.path()),
-            "promoted dir {:?} not under MVM_CACHE_DIR {:?}",
+            "promoted dir {:?} not under MVM_HOME {:?}",
             promoted.root,
             cache.path()
         );
@@ -1115,7 +1115,11 @@ mod tests {
         let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         promote(staged.path(), &manifest, &ctx).expect("promote");
 
-        let incoming = cache.path().join("packs").join(super::QUARANTINE_DIR_NAME);
+        let incoming = cache
+            .path()
+            .join("cache")
+            .join("packs")
+            .join(super::QUARANTINE_DIR_NAME);
         // The `.incoming` dir may exist but must hold no staging leftovers.
         if let Ok(entries) = fs::read_dir(&incoming) {
             assert_eq!(entries.count(), 0, "quarantine staging not cleaned up");
@@ -1190,6 +1194,7 @@ mod tests {
         assert!(
             !cache
                 .path()
+                .join("cache")
                 .join("packs")
                 .join(manifest.outputs.pack_hash.as_str())
                 .exists()
@@ -1207,7 +1212,11 @@ mod tests {
         let promoted = promote(staged.path(), &manifest, &ctx).expect("promote");
 
         // Rename the content-addressed dir so its name no longer equals the hash.
-        let renamed = cache.path().join("packs").join("not-a-pack-hash");
+        let renamed = cache
+            .path()
+            .join("cache")
+            .join("packs")
+            .join("not-a-pack-hash");
         fs::rename(&promoted.root, &renamed).expect("rename promoted dir");
 
         let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
@@ -1448,11 +1457,14 @@ mod tests {
         let promoted_a = promote(staged_a.path(), &manifest_a, &ctx).expect("promote a");
         let promoted_b = promote(staged_b.path(), &manifest_b, &ctx).expect("promote b");
 
-        let mut ix = load_index(cache.path());
+        // The index lives at `mvm_cache_dir()` (`$MVM_HOME/cache`), the same
+        // root `resolve_pack` reads — not the `MVM_HOME` root itself.
+        let cache_root = cache.path().join("cache");
+        let mut ix = load_index(&cache_root);
         ix.record(entry_for(&promoted_a, "stable", 10));
         ix.record(entry_for(&promoted_b, "stable", 20));
         assert!(ix.set_active(&builder_key(), &promoted_b.verified.pack_hash));
-        save_index(cache.path(), &ix).expect("save index");
+        save_index(&cache_root, &ix).expect("save index");
 
         // Scan order is by directory name (pack hash), which need not put `b`
         // first — the active pointer must win regardless.
@@ -1493,7 +1505,8 @@ mod tests {
 
         // A truncated / garbage `index.json` must not break resolution:
         // `load_index` fails open and resolve re-verifies via the scan.
-        std::fs::write(index_path(cache.path()), b"{ not json").expect("write corrupt index");
+        std::fs::write(index_path(&cache.path().join("cache")), b"{ not json")
+            .expect("write corrupt index");
 
         let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
             .expect("resolve ok")
@@ -1514,11 +1527,14 @@ mod tests {
         let promoted_a = promote(staged_a.path(), &manifest_a, &ctx).expect("promote a");
         let promoted_b = promote(staged_b.path(), &manifest_b, &ctx).expect("promote b");
 
-        let mut ix = load_index(cache.path());
+        // The index lives at `mvm_cache_dir()` (`$MVM_HOME/cache`), the same
+        // root `resolve_pack` reads — not the `MVM_HOME` root itself.
+        let cache_root = cache.path().join("cache");
+        let mut ix = load_index(&cache_root);
         ix.record(entry_for(&promoted_a, "stable", 10));
         ix.record(entry_for(&promoted_b, "stable", 20));
         assert!(ix.set_active(&builder_key(), &promoted_b.verified.pack_hash));
-        save_index(cache.path(), &ix).expect("save index");
+        save_index(&cache_root, &ix).expect("save index");
 
         // Poison the active pack's promoted copy after the fact.
         fs::write(

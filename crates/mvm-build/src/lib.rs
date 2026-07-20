@@ -15,7 +15,7 @@ pub mod builder_protocol;
 pub mod builder_route;
 pub mod builder_vm;
 /// Hypervisor-agnostic builder-VM orchestration helper that wraps a
-/// `VmBackendForBuilder` implementation (libkrun and Vz).
+/// `VmBackendForBuilder` implementation (libkrun and HVF).
 pub mod builder_vm_runtime;
 /// Request-handling core of the resident `mvm-builderd` builder-VM
 /// daemon: stateless request dispatch + the framed connection serve
@@ -39,7 +39,7 @@ pub mod egress_proxy;
 pub mod fc_kernel;
 pub mod firecracker;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
-/// macOS backend, raw HVF backend). Shared by `mvm_backend::hvf` (writer) + the bin.
+/// macOS backend, raw HVF backend). Shared by `mvm_runtime::hvf` (writer) + the bin.
 pub mod hvf_supervisor;
 /// Hash-verify a fetched kernel image against its [`mvm_core::kernel_artifact::KernelArtifactId`].
 pub mod kernel_fetch;
@@ -110,16 +110,10 @@ pub mod nix;
 /// mount point) into an OCI-unpacked rootfs so `run --image` has a vsock
 /// control plane. Host-side filesystem I/O against the staging tree.
 pub mod oci_runtime_inject;
-/// OCI layer unpack to a staging rootfs directory. Handles whiteouts,
-/// symlinks, hardlinks, ownership, permissions, path traversal, the
-/// `/mvm` reserved-path collision check, and per-entry + per-layer
-/// size caps (decompression-bomb mitigation). ext4 generation
-/// (`mke2fs -d` against the staging dir) runs inside the builder VM.
-pub mod oci_to_rootfs;
 pub mod pipeline;
 /// Host-side resolver for the mvm runtime overlay disk. Picks the right
 /// ext4 + verity sidecar + roothash for the running mvmctl version and
-/// host arch from `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
+/// host arch from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.

@@ -1,0 +1,219 @@
+[package]
+name = "mvm-agentd"
+version.workspace = true
+edition.workspace = true
+description = "in-guest agent: vsock protocol, entrypoint runtime, and the addon/egress helper bins for mvm microVMs"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mvm-builder-agent"
+path = "src/bin/mvm-builder-agent.rs"
+
+[[bin]]
+name = "mvm-guest-agent"
+path = "src/bin/mvm-guest-agent.rs"
+
+# Exec-shim that compiles a syscall allowlist into a BPF program via
+# seccompiler, applies it via prctl, and execve's into the wrapped
+# command. mkServiceBlock wraps every guest service launch with this
+# shim so per-service seccomp filters are the default.
+[[bin]]
+name = "mvm-seccomp-apply"
+path = "src/bin/mvm-seccomp-apply.rs"
+
+# In-guest entrypoint runtime for function-call workloads (folded in
+# from the former mvm-runner crate). The library half lives in
+# `src/runner/`; this is the thin binary the nix factories
+# bake at `/usr/lib/mvm/wrappers/runner`.
+[[bin]]
+name = "mvm-runner"
+path = "src/bin/mvm-runner.rs"
+
+# Early-userspace init (PID 1) that runs from the verity initramfs
+# baked by `mkGuest` when `verifiedBoot = true`. Reads the roothash
+# from /proc/cmdline, constructs the dm-verity device-mapper target
+# via raw ioctls, mounts it, and switch_roots to the real /init.
+# Bypasses Firecracker's auto-appended `root=/dev/vda` by owning the
+# boot pivot in userspace.
+[[bin]]
+name = "mvm-verity-init"
+path = "src/bin/mvm-verity-init.rs"
+
+# Guest-side network defense. Installs kernel blackhole
+# routes for `MANDATORY_DENY_RANGES` (cloud metadata, link-local,
+# CGNAT, host loopback) inside every microVM. Run as root from
+# `/init` BEFORE the agent is forked under setpriv, so the routes
+# exist before any workload code can attempt egress. Cross-platform
+# (Linux kernel routing is uniform across Firecracker, libkrun,
+# Apple Container).
+[[bin]]
+name = "mvm-guest-netinit"
+path = "src/bin/mvm-guest-netinit.rs"
+
+# Long-lived guest-side packet-tunnel worker. When the shared
+# `mvm.network_tunnel=` cmdline token is present, `mvm-guest-netinit`
+# spawns this helper after boot-time route hardening so it can own the
+# TUN device + vsock session for the VM lifetime.
+[[bin]]
+name = "mvm-guest-netd"
+path = "src/bin/mvm-guest-netd.rs"
+
+# Static PID 1 injected into arbitrary OCI rootfs trees by `run --image`.
+# It performs the mvm boot/runtime setup with syscalls and direct process
+# spawns, so scratch/distroless images do not need `/bin/sh`, busybox, coreutils,
+# or an image-native init system.
+[[bin]]
+name = "mvm-oci-init"
+path = "src/bin/mvm-oci-init.rs"
+
+[[bin]]
+name = "mvm-oci-entrypoint"
+path = "src/bin/mvm-oci-entrypoint.rs"
+
+# In-guest loopback DNS resolver for local addons. Gated behind the
+# `addons` feature so the sealed agent's default closure stays
+# tokio-free (see the feature's doc comment below).
+[[bin]]
+name = "mvm-addon-dns"
+path = "src/bin/mvm-addon-dns.rs"
+required-features = ["addons"]
+
+# In-guest loopback TCP ↔ host-vsock bridge for local addons.
+[[bin]]
+name = "mvm-addon-vsock-bridge"
+path = "src/bin/mvm-addon-vsock-bridge.rs"
+required-features = ["addons"]
+
+# In-guest loopback SOCKS5/HTTP-proxy → host-vsock egress client.
+[[bin]]
+name = "mvm-egress-client"
+path = "src/bin/mvm-egress-client.rs"
+required-features = ["addons"]
+
+# In-guest one-shot workload-exit-code reporter over AF_VSOCK.
+[[bin]]
+name = "mvm-exit-report"
+path = "src/bin/mvm-exit-report.rs"
+
+# Test-only probe used by `tests/seccomp_apply.rs` to verify that
+# tier allowlists actually deny what they claim. Not
+# selected by `nix/packages/mvm-guest-agent.nix`, so it never ships
+# in the guest closure.
+[[bin]]
+name = "syscall-probe"
+path = "src/bin/syscall-probe.rs"
+
+# In-guest host.audit.v1 driver for the live-VM round-trip proof. Baked only
+# by the opt-in `withAuditProbe` mkGuest flag (a test fixture image), never by
+# the production guest closure.
+[[bin]]
+name = "audit-probe"
+path = "src/bin/audit-probe.rs"
+
+# Test fixture for the warm-process worker pool. Speaks the
+# `worker_protocol` framed multi-call loop on stdin/stdout. Behavior
+# selectable via `MVM_FAKE_RUNNER_BEHAVIOR` env var so tests can
+# exercise crash, recycle, slow, and malformed-frame paths against a
+# real child process. Not selected by the production guest closure.
+[[bin]]
+name = "fake-runner"
+path = "tests/bin/fake_runner.rs"
+test = false
+doctest = false
+
+# Test fixture for `entrypoint::execute`. A real
+# ELF binary used in place of `#!/bin/sh` wrappers in the runner
+# integration tests so the production `/proc/self/fd/<n>` argv[0]
+# contract is exercised end-to-end on Linux. Behaviour is encoded in a
+# stdin header so `execute()`'s `env_clear()` + no-argv shape stays
+# identical to production. Not selected by the production guest closure.
+[[bin]]
+name = "mvm-entrypoint-test-wrapper"
+path = "tests/bin/entrypoint_test_wrapper.rs"
+test = false
+doctest = false
+
+# Emits the host↔guest RPC protocol JSON Schema. Gated by
+# `required-features = ["schema"]` so it (and `schemars`) is excluded from
+# the default/prod build, exactly like mvm-libkrun-supervisor's
+# `libkrun-sys` gate. Run via `cargo run -p mvm-agentd --features schema
+# --bin emit_protocol_schema`.
+[[bin]]
+name = "emit_protocol_schema"
+path = "src/bin/emit_protocol_schema.rs"
+required-features = ["schema"]
+test = false
+doctest = false
+
+[features]
+dev-shell = []
+# Derive `schemars::JsonSchema` on the host↔guest wire types
+# (`GuestRequest`/`GuestResponse` + their tree) so the `emit_protocol_schema`
+# bin can emit the protocol schema (the SDK-codegen SSOT). Off by default:
+# the schema is a build-time codegen input, never linked into the runtime
+# agent, so the lean-agent closure stays schemars-free. Pulls
+# `mvm-core/schema` for the shared `AgentProfile`/`BackpressureReason` types.
+schema = ["dep:schemars", "mvm-core/schema"]
+# The async loopback addon/egress helper bins (`mvm-addon-dns`,
+# `mvm-addon-vsock-bridge`, `mvm-egress-client`) and their shared vsock
+# session helper. Off by default so the sealed agent's request-serving
+# path — vsock, worker_pool, runner — stays synchronous and pulls no
+# async runtime. The helper bins are separate processes launched by
+# `/init`, never linked into `mvm-guest-agent`, so gating them here costs
+# the sealed agent nothing.
+addons = ["dep:tokio", "dep:hickory-proto"]
+
+[dependencies]
+mvm-core.workspace = true
+# `mvm_protocol::entrypoint::detect_shell_shebang` — the shell-launcher
+# detector the no-shell-entrypoint validator uses. `no_std` + alloc, so
+# it adds nothing to the lean-agent closure beyond what it already pulls.
+mvm-protocol.workspace = true
+# Only under `schema` (protocol-schema codegen) — see the feature above.
+schemars = { version = "0.8", optional = true }
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+libc.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The readiness/shutdown hook runner uses thiserror for
+# typed error variants (ReadinessError, ShutdownError).
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# mvm-addon-dns's in-guest resolver parses/answers DNS over loopback.
+# Optional: only the `addons` feature's helper bins use it.
+hickory-proto = { workspace = true, optional = true }
+# The addon/egress helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
+# mvm-egress-client) run an async loopback listener per bin. Optional so
+# the sealed agent's default closure stays tokio-free — see the `addons`
+# feature.
+tokio = { workspace = true, optional = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# The `netinit` module's `RouteInstaller` trait + types +
+# install loop + tests are cross-platform; only `RawNetlinkInstaller`
+# itself is Linux-only (a synchronous AF_NETLINK socket via libc — no
+# async rtnetlink stack). ipnet stays in the main
+# deps so the cross-platform tests run on macOS dev hosts too.
+ipnet.workspace = true
+
+# seccompiler builds Linux-only — guests are always Linux microVMs,
+# but the workspace also compiles on macOS for CLI development. Gate
+# the dep so `cargo check` on a Mac doesn't try to build it.
+#
+# `mvm-guest-netinit`'s `RawNetlinkInstaller` talks to AF_NETLINK
+# directly through `libc` (already a main dep) — no netlink crate, no
+# async runtime. Nothing extra is needed here.
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

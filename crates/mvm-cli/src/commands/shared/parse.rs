@@ -235,8 +235,8 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
 /// intact so its data survives. No-op for a directory share.
 ///
 /// The sidecar-lock guard from `ensure_persistent_volume_image` is
-/// released immediately: Apple Vz takes its own exclusive lock on a RW
-/// disk at start, and a daemon-launched workload can't hold a host-side
+/// released immediately: the hypervisor (HVF) takes its own exclusive lock
+/// on a RW disk at start, and a daemon-launched workload can't hold a host-side
 /// guard for the VM's lifetime anyway. The guard's value is serializing
 /// concurrent *creation*, which this still does.
 pub fn materialize_disk_volume(v: &VmVolume) -> Result<()> {
@@ -314,10 +314,13 @@ fn expand_tilde(p: &str) -> std::path::PathBuf {
 /// host signer key, the audit chain, and common credential stores.
 /// Sharing any of these would hand a guest the host's trust roots.
 fn denied_host_roots() -> Vec<std::path::PathBuf> {
-    let mut roots = Vec::new();
+    let mut roots = vec![
+        mvm_core::config::mvm_keys_dir(),
+        mvm_core::config::mvm_audit_dir(),
+    ];
     if let Some(home) = std::env::var_os("HOME") {
         let h = std::path::PathBuf::from(home);
-        for sub in [".mvm/keys", ".mvm/audit", ".ssh", ".gnupg", ".aws"] {
+        for sub in [".ssh", ".gnupg", ".aws"] {
             roots.push(h.join(sub));
         }
     }

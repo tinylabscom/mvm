@@ -1,6 +1,6 @@
 //! End-to-end coverage for the [`mvm_build::app_deps`] host
 //! orchestrator. Uses on-disk sealed-volume fixtures hand-authored via
-//! [`mvm_deps_audit::seal_volume`] so the cache-hit
+//! [`mvm_sdk::compile::deps_audit::seal_volume`] so the cache-hit
 //! path exercises the same wire format the builder VM will emit when
 //! the live dispatch path lands.
 //!
@@ -28,7 +28,7 @@ use mvm_build::app_deps::{
     install_app_deps, resolve_cache_root,
 };
 use mvm_build::builder_vm::{BuilderArtifacts, BuilderVmError};
-use mvm_deps_audit::{
+use mvm_sdk::compile::deps_audit::{
     FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, VolumeSealResult,
     seal_volume, verify_sealed_volume,
 };

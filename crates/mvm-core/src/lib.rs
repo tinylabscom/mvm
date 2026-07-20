@@ -21,7 +21,6 @@ pub mod egress_handler;
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
 pub mod egress_substitution;
-pub mod entrypoint_policy;
 pub mod exit_capture;
 /// Guest `mvm-netd` helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
@@ -41,8 +40,11 @@ pub mod kernel_artifact;
 pub mod kernel_format;
 /// Flat launch-metadata parsers for `mvm-init` (no JSON in PID 1).
 pub mod launch_metadata;
-/// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
-pub mod lifecycle;
+// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host
+// contract) are a pure-DTO leaf that now lives in `mvm-protocol`;
+// re-exported here as a module alias so every existing
+// `crate::lifecycle::X` path keeps resolving unchanged.
+pub use mvm_protocol::lifecycle;
 /// Resident-memory accounting for warm pools (learned charge + admission).
 pub mod memory_budget;
 pub mod metering;
@@ -57,6 +59,9 @@ pub mod packs;
 /// templates a stock binary trusts for its own release packs, with
 /// version interpolation.
 pub mod release_trust;
+/// Semantic content identity for the Workload IR (`sha256(JCS(ir))`,
+/// distinct from every exact-byte/trust/replay identity type).
+pub mod semantic_address;
 pub mod user_config;
 
 /// Cryptographic primitives — attestation, key rotation, keystore,

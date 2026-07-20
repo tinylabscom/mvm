@@ -12,9 +12,9 @@ use clap::{Args as ClapArgs, Subcommand};
 use std::collections::BTreeMap;
 use std::io::Write;
 
+use mvm_agentd::vsock::{GuestRequest, ProcResult, ProcWaitEvent};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_guest::vsock::{GuestRequest, ProcResult, ProcWaitEvent};
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -132,13 +132,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// mock backend.
 fn proc_request(name: &str, req: GuestRequest) -> Result<ProcResult> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let mock_dir = mvm_backend::MockBackend::vm_dir(name);
+    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
     if mock_dir.join("runtime").join("v.sock").exists() {
-        return mvm_guest::vsock::send_proc_request(&mock_dir.to_string_lossy(), req);
+        return mvm_agentd::vsock::send_proc_request(&mock_dir.to_string_lossy(), req);
     }
     let mut stream =
-        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    mvm_guest::vsock::send_proc_request_on(&mut stream, req)
+        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::send_proc_request_on(&mut stream, req)
 }
 
 /// Stream a `ProcWait` for `name`'s guest agent over the backend-aware
@@ -150,9 +150,9 @@ fn proc_wait<F: FnMut(&ProcWaitEvent)>(
     on_event: F,
 ) -> Result<ProcWaitEvent> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let mock_dir = mvm_backend::MockBackend::vm_dir(name);
+    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
     if mock_dir.join("runtime").join("v.sock").exists() {
-        return mvm_guest::vsock::send_proc_wait(
+        return mvm_agentd::vsock::send_proc_wait(
             &mock_dir.to_string_lossy(),
             token,
             timeout,
@@ -160,8 +160,8 @@ fn proc_wait<F: FnMut(&ProcWaitEvent)>(
         );
     }
     let mut stream =
-        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    mvm_guest::vsock::send_proc_wait_on(&mut stream, token, timeout, on_event)
+        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::send_proc_wait_on(&mut stream, token, timeout, on_event)
 }
 
 fn unwrap_proc(result: ProcResult) -> Result<ProcResult> {
@@ -227,10 +227,10 @@ fn cmd_ls(name: &str, json: bool) -> Result<()> {
             println!("{:<28} {:<22} {:<10} ARGV0", "TOKEN", "STARTED", "STATE");
             for p in &processes {
                 let state = match &p.state {
-                    mvm_guest::vsock::ProcState::Running => "running".to_string(),
-                    mvm_guest::vsock::ProcState::Exited(c) => format!("exited({c})"),
-                    mvm_guest::vsock::ProcState::Killed(s) => format!("killed({s})"),
-                    mvm_guest::vsock::ProcState::TimedOut => "timed_out".to_string(),
+                    mvm_agentd::vsock::ProcState::Running => "running".to_string(),
+                    mvm_agentd::vsock::ProcState::Exited(c) => format!("exited({c})"),
+                    mvm_agentd::vsock::ProcState::Killed(s) => format!("killed({s})"),
+                    mvm_agentd::vsock::ProcState::TimedOut => "timed_out".to_string(),
                 };
                 println!(
                     "{:<28} {:<22} {:<10} {}",

@@ -4,7 +4,7 @@
 
 All Nix builds/evals, Firecracker operations, `mvmctl` runtime commands (anything that boots, talks to, or manages microVMs), and Linux-specific syscalls MUST run inside the project builder VM, not a Lima VM. Do not use `limactl` for this repo. The builder VM is the current Linux execution boundary for Nix and microVM work.
 
-> **Exception (2026-05-31, owner-approved): Lima is permitted _strictly_ as a test-environment KVM provider** — e.g. a virtual `/dev/kvm` for Firecracker / Linux-KVM E2E tests that cannot run on the builder VM or on GitHub-hosted runners (which have no KVM). It is modeled as a **test/dev-tier `VmBackend`** (admission-visible, **refused by prod admission** — like the Docker fallback tier), so it can never silently run a production workload, and it is never used for builds/evals. Broader Lima use is a separate future decision (ADR-066 / Plan 117 §A28).
+> **Exception (2026-05-31, owner-approved): Lima is permitted _strictly_ as a test-environment KVM provider** — e.g. a virtual `/dev/kvm` for Firecracker / Linux-KVM E2E tests that cannot run on the builder VM or on GitHub-hosted runners (which have no KVM). It is modeled as a **test/dev-tier `VmBackend`** (admission-visible, **refused by prod admission** — like the Docker fallback tier), so it can never silently run a production workload, and it is never used for builds/evals. Broader Lima use is a separate future decision (ADR-022 / Plan 117 §A28).
 
 **Run cargo on the macOS host wherever it compiles cleanly.** `cargo test`, `cargo check`, and `cargo build` should default to the host so worktrees don't deadlock on shared builder state (cargo target-dir contention, registry locks, and `.git/index` cross-mount races are real and have caused us to lose work). Tests that genuinely need Linux — vsock, jailer/seccomp, dm-verity, network namespaces, anything that pokes at `/dev/kvm` or `/proc/net` — should be gated with `#[cfg(target_os = "linux")]` and only those sub-targets are run inside the builder VM. Workspace-wide `cargo clippy --workspace --all-targets -- -D warnings` is still expected to pass in the Linux builder environment before merge, since clippy needs to see the Linux-gated code paths.
 
@@ -73,16 +73,16 @@ Agents working inside a worktree directory should not invoke `git` directly. If 
 
 ### Isolating mutable state
 
-Worktrees share `~/.mvm`, `~/.cache/mvm`, `~/.cargo`, `~/.rustup`, the builder VM, the Nix store, and any pushed registries with the main checkout. Per-worktree isolation is achieved by overriding three env vars for the duration of a command:
+Worktrees share `~/.mvm`, `~/.cargo`, `~/.rustup`, the builder VM, the Nix store, and any pushed registries with the main checkout. Per-worktree isolation is achieved by overriding three env vars for the duration of a command:
 
 ```bash
-MVM_DATA_DIR="$PWD/.mvm-test"      \
+MVM_HOME="$PWD/.mvm-test"          \
 CARGO_TARGET_DIR="$PWD/.mvm-test/target" \
 CARGO_HOME="$PWD/.mvm-test/cargo"  \
   cargo test --workspace
 ```
 
-- `MVM_DATA_DIR` redirects mvmctl's templates, sockets, microVM registry, snapshots, and signing keys away from `~/.mvm`.
+- `MVM_HOME` redirects mvmctl's entire state tree — templates, sockets, caches, the microVM registry, snapshots, and signing keys — away from `~/.mvm`.
 - `CARGO_TARGET_DIR` gives the worktree its own `target/` so two worktrees compiling at once don't fight over output paths or rustc invocation locks.
 - `CARGO_HOME` gives the worktree its own cargo registry/cache and (most importantly) its own `.package-cache` lock — without this, two concurrent `cargo test` invocations across worktrees serialize on `~/.cargo/registry/.package-cache` and one will block until the other finishes downloading or resolving.
 
@@ -107,7 +107,7 @@ Even with per-worktree isolation, a few resources are shared and can cause concu
 
 The builder VM is shared across worktrees by design — **never fork it per worktree**. It is expensive to boot, and the Nix store inside it is the warm cache that makes builds fast; a per-worktree VM would duplicate tens of GB of store, re-download the kernel/rootfs, and multiply boot time with no isolation benefit.
 
-The `MVM_DATA_DIR` override is what isolates per-feature state — templates, sockets, the microVM registry, snapshots, signing keys. Anything that would otherwise land in `~/.mvm` ends up under the worktree.
+The `MVM_HOME` override is what isolates per-feature state — templates, sockets, the microVM registry, snapshots, signing keys. Anything that would otherwise land in `~/.mvm` ends up under the worktree.
 
 State that *does* live inside the shared builder VM (`/var/lib/mvm/`, the `br-mvm` bridge, TAP devices, in-flight microVMs) is the only collision surface between worktrees. If two worktrees need to run microVMs concurrently, give them distinct microVM and TAP names — do not spin up a second builder VM.
 
@@ -185,7 +185,7 @@ Rules:
 
 ## No Spec References in Code Comments
 
-**NEVER** cite a plan, ADR, PR, sprint, or workstream in a code comment. Process artifacts (`Plan 200`, `ADR-093`, `PR #1234`, `Sprint 52`, `W2.4`) belong in specs, commit messages, and PR descriptions — not in the source. The `check-no-spec-refs-in-comments` lint (`xtask/src/check_no_spec_refs_in_comments.rs`, a CI Lint-job gate) extracts comment text and fails the build on any such reference, so a citation that builds locally will still break the GitHub action.
+**NEVER** cite a plan, ADR, PR, sprint, or workstream in a code comment. Process artifacts (`Plan 200`, `ADR-007`, `PR #1234`, `Sprint 52`, `W2.4`) belong in specs, commit messages, and PR descriptions — not in the source. The `check-no-spec-refs-in-comments` lint (`xtask/src/check_no_spec_refs_in_comments.rs`, a CI Lint-job gate) extracts comment text and fails the build on any such reference, so a citation that builds locally will still break the GitHub action.
 
 Keep the *reasoning* in the comment, drop the *citation*. Write the invariant or the "why" the comment is explaining, not the spec number that motivated it:
 
@@ -203,10 +203,10 @@ work belongs in. Duplicated logic drifts out of sync, doubles the test surface,
 and is the single most common source of bugs in this repo. If an existing helper
 is *almost* right, extend or generalize it — don't fork a second copy.
 
-- **Use the helpers.** All `~/.mvm` **and** `~/.cache/mvm` paths go through
-  `mvm-core::config` helpers (`vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) —
+- **Use the helpers.** All `~/.mvm` paths go through `mvm-core::config`
+  helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) —
   **never** build them inline with `std::env::var("HOME")` + `.join(...)`, which
-  silently ignores `MVM_DATA_DIR` / `MVM_CACHE_DIR` / XDG and breaks parallel-worktree
+  silently ignores `MVM_HOME` and breaks parallel-worktree
   isolation. Shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
   Find the established helper and call it; if one is missing, add it where it belongs
   and call it from every site.

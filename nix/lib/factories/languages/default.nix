@@ -28,7 +28,7 @@ let
     let
       # Cold tier (concurrency == null): single-call `oneshot`. Warm-process
       # tier: long-running wrapper speaking the framed multi-call protocol
-      # (`mvm_guest::worker_protocol`). Same install path either way — the
+      # (`mvm_agentd::worker_protocol`). Same install path either way — the
       # wrapper itself decides whether to loop.
       variant = if concurrency == null then "oneshot" else "longrunning";
       runnerSource = ../../../wrappers + "/${spec.wrapperDir}/${variant}.${spec.ext}";

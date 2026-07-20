@@ -40,8 +40,7 @@ pub fn resolve_tenant(flag_value: Option<&str>) -> String {
 }
 
 fn read_config_tenant() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::PathBuf::from(home).join(".mvm/config.toml");
+    let path = std::path::PathBuf::from(mvm_core::config::mvm_home()).join("config.toml");
     let body = std::fs::read_to_string(&path).ok()?;
     let parsed: ConfigFile = toml::from_str(&body).ok()?;
     parsed.tenant.and_then(|t| {

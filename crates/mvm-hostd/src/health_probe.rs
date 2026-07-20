@@ -23,12 +23,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use mvm::machine::persist::load_machine_spec;
-use mvm::vm::name_registry::record_readiness;
+use mvm_agentd::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::health::{HealthAction, HealthPolicy, HealthState, HealthTracker, ProbeResult, fold};
-use mvm_guest::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
-use mvm_ir::HealthCheck;
+use mvm_protocol::ir::HealthCheck;
+use mvm_runtime::machine::persist::load_machine_spec;
+use mvm_runtime::vm::name_registry::record_readiness;
 
 /// Base of the exponential restart-backoff schedule, in seconds.
 const BACKOFF_BASE_SECS: u64 = 1;
@@ -62,7 +62,7 @@ pub struct AgentExec;
 
 impl GuestExec for AgentExec {
     fn exec(&self, vm_name: &str, cmd: &str, timeout_secs: u64) -> ExecOutcome {
-        let transport = match mvm::vsock_transport::for_vm(vm_name) {
+        let transport = match mvm_runtime::vsock_transport::for_vm(vm_name) {
             Ok(t) => t,
             Err(_) => return ExecOutcome::Unreachable,
         };
@@ -486,21 +486,22 @@ mod tests {
         assert_eq!(command_string(&h), "'curl' '-f' 'http://x/health'");
     }
 
-    // ---- HealthProber::tick (disk-backed via MVM_DATA_DIR/MVM_SHARE_DIR) ----
+    // ---- HealthProber::tick (disk-backed via MVM_HOME) ----
 
-    use mvm::machine::persist::{MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, save_machine_spec};
-    use mvm::vm::name_registry::{VmNameRegistry, registry_path};
     use mvm_core::domain::instance::InstanceReadiness;
     use mvm_core::health::HealthState;
     use mvm_core::util::test_env::TestEnv;
+    use mvm_runtime::machine::persist::{
+        MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, save_machine_spec,
+    };
+    use mvm_runtime::vm::name_registry::{VmNameRegistry, registry_path};
 
-    // Point both the machine-spec dir and the name-registry dir at `dir`, holding
-    // the process-wide env lock so these disk-backed tests don't race other tests
-    // that mutate the same vars under a threaded runner.
+    // Point the whole mvm root (machine specs + name registry) at `dir`,
+    // holding the process-wide env lock so these disk-backed tests don't race
+    // other tests that mutate the same var under a threaded runner.
     fn data_env(dir: &std::path::Path) -> TestEnv {
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir);
-        env.set("MVM_SHARE_DIR", dir);
+        env.set("MVM_HOME", dir);
         env
     }
 
@@ -520,7 +521,6 @@ mod tests {
             profile: "standard".to_string(),
             volumes: vec![],
             init: vec![],
-            ssh_agent: false,
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,

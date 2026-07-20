@@ -109,11 +109,13 @@ impl SignerHelper {
             );
         }
         validate_vm_id(&req.vm_id)?;
-        ensure_parent(&req.workload_chain_path)?;
-        ensure_parent(&req.chain_head_secondary_path)?;
+        let workload_chain_path = Path::new(&req.workload_chain_path);
+        let chain_head_secondary_path = Path::new(&req.chain_head_secondary_path);
+        ensure_parent(workload_chain_path)?;
+        ensure_parent(chain_head_secondary_path)?;
         Chain::open(
-            &req.workload_chain_path,
-            &req.chain_head_secondary_path,
+            workload_chain_path,
+            chain_head_secondary_path,
             self.software_chain_key_path.as_deref(),
         )
     }
@@ -335,8 +337,14 @@ mod tests {
             vm_id: vm_id.into(),
             tenant_id: tenant_id.into(),
             workload_id: format!("wl-{vm_id}"),
-            workload_chain_path: dir.join(format!("{tenant_id}.{vm_id}.workload.jsonl")),
-            chain_head_secondary_path: dir.join(format!("{tenant_id}.{vm_id}.head")),
+            workload_chain_path: dir
+                .join(format!("{tenant_id}.{vm_id}.workload.jsonl"))
+                .to_string_lossy()
+                .into_owned(),
+            chain_head_secondary_path: dir
+                .join(format!("{tenant_id}.{vm_id}.head"))
+                .to_string_lossy()
+                .into_owned(),
         })
     }
 

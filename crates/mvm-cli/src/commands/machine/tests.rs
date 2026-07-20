@@ -1,4 +1,4 @@
-use super::receipt::{MachineStartAuthPolicy, MachineStartInitPolicy};
+use super::receipt::MachineStartInitPolicy;
 use super::runtime::resolve_persistent_spec;
 use super::*;
 use crate::commands::{Cli, Commands};
@@ -21,7 +21,7 @@ impl IsolatedMachineState {
     fn new() -> Self {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         Self {
             _env: env,
             _tmp: tmp,
@@ -62,7 +62,7 @@ const SDK_RUN_EGRESS_ENFORCEMENT: &str = "libkrun:l4-host-port";
 fn sdk_machine_fixture(name: &str) -> Vec<String> {
     std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../sdks/machine-fixtures")
+            .join("../../tests/machine-fixtures")
             .join(format!("{name}.argv")),
     )
     .expect("read shared SDK machine argv fixture")
@@ -96,13 +96,13 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
 }
 
 /// Source-of-truth anchor for the cross-language conformance harness: every
-/// `sdks/machine-fixtures/*.argv` the SDKs assert against must be argv the
+/// `tests/machine-fixtures/*.argv` the SDKs assert against must be argv the
 /// CLI parser actually accepts, and must map to the verb its first line
 /// names. This is what catches an SDK emitting a flag the CLI rejects (e.g.
 /// `stop --name X` when `stop` takes a positional name).
 #[test]
 fn every_shared_machine_fixture_parses_to_its_verb() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/machine-fixtures");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/machine-fixtures");
     let mut seen = 0;
     for entry in std::fs::read_dir(&dir).expect("read machine-fixtures dir") {
         let path = entry.expect("dir entry").path();
@@ -552,7 +552,6 @@ fn spec_fixture(name: &str) -> MachineSpec {
         profile: "standard".to_string(),
         volumes: vec![],
         init: vec![],
-        ssh_agent: false,
         agent_verb: vec![],
         created_at: None,
         last_started_at: None,
@@ -587,10 +586,9 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
     assert_eq!(spec.profile, "dev");
     assert!(spec.net);
     assert_eq!(spec.allow_host, vec!["api.example.com:443"]);
-    // Disk volumes / init / ssh-agent are not part of the `run` surface.
+    // Disk volumes / init are not part of the `run` surface.
     assert!(spec.volumes.is_empty());
     assert!(spec.init.is_empty());
-    assert!(!spec.ssh_agent);
     // No --agent-verb: spec stores an empty list (computed default applies at start).
     assert!(spec.agent_verb.is_empty());
 }
@@ -739,18 +737,18 @@ fn interactive_requires_a_host_tty() {
 
 #[test]
 fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
-    let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+    let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut env = TestEnv::new();
     let tmp = tempfile::tempdir().expect("tempdir");
     env.set("HOME", tmp.path());
-    env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+    env.set("MVM_HOME", tmp.path());
     let name = "sealed-machine";
-    mvm::vm::runtime_meta::write(
+    mvm_runtime::vm::runtime_meta::write(
         name,
-        &mvm::vm::runtime_meta::VmRuntimeMeta {
-            mode: mvm::vm::runtime_meta::StartModeKind::Detached,
+        &mvm_runtime::vm::runtime_meta::VmRuntimeMeta {
+            mode: mvm_runtime::vm::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: None,
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
@@ -1329,13 +1327,6 @@ fn machine_exec_command_quotes_argv_for_guest_exec() {
         machine_exec_command(&argv),
         "exec 'printf' 'hello %s\n' 'it'\\''s ok'"
     );
-    assert_eq!(
-        machine_console_env(true),
-        vec![(
-            "SSH_AUTH_SOCK".to_string(),
-            "/run/mvm/ssh-agent.sock".to_string()
-        )]
-    );
 }
 
 #[test]
@@ -1355,7 +1346,6 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         profile: "standard".to_string(),
         volumes: Vec::new(),
         init: Vec::new(),
-        ssh_agent: false,
         agent_verb: Vec::new(),
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
@@ -1437,9 +1427,6 @@ allow_hosts = ["api.example.com"]
 [dev]
 init = ["pip install -r requirements.txt"]
 volumes = ["./src:/work:rw"]
-
-[auth]
-ssh_agent = true
 "#,
     )
     .expect("manifest");
@@ -1467,7 +1454,6 @@ ssh_agent = true
     assert_eq!(spec.memory, "2G");
     assert_eq!(spec.mem_initial.as_deref(), Some("512M"));
     assert_eq!(spec.profile, "dev");
-    assert!(spec.ssh_agent);
     assert_eq!(spec.init, vec!["pip install -r requirements.txt"]);
     assert_eq!(
         spec.volumes,
@@ -1530,35 +1516,6 @@ fn create_requires_dev_profile_when_manifest_declares_dev_init() {
 }
 
 #[test]
-fn create_requires_dev_profile_when_manifest_declares_ssh_agent() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        dir.path().join("mvm.toml"),
-        "image = \"alpine:latest\"\n[auth]\nssh_agent = true\n",
-    )
-    .expect("manifest");
-    let err = MachineCreateArgs {
-        name: Some("web".to_string()),
-        manifest: Some(dir.path().join("mvm.toml").display().to_string()),
-        image: None,
-        net: false,
-        allow_host: Vec::new(),
-        cpus: None,
-        memory: None,
-        mem_initial: None,
-        profile: None,
-        force: false,
-        json: false,
-    }
-    .into_spec()
-    .expect_err("standard profile should refuse ssh-agent");
-    assert!(
-        err.to_string()
-            .contains("ssh_agent requires a dev-capable profile")
-    );
-}
-
-#[test]
 fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
     let spec = MachineSpec {
         schema_version: MACHINE_SPEC_SCHEMA_VERSION,
@@ -1575,7 +1532,6 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         profile: "dev".to_string(),
         volumes: vec!["/Users/example/src:/work:rw".to_string()],
         init: vec!["pip install -r requirements.txt".to_string()],
-        ssh_agent: false,
         agent_verb: Vec::new(),
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
@@ -1592,7 +1548,6 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         summary.invocation.network_posture,
         "allow-list:api.example.com:443"
     );
-    assert_eq!(summary.invocation.auth.mode, "none");
     assert_eq!(summary.invocation.volumes.len(), 1);
     assert_eq!(summary.invocation.volumes[0].kind, "dir_share");
     assert!(!summary.invocation.volumes[0].host_path_sha256.is_empty());
@@ -1602,36 +1557,6 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
     let json = serde_json::to_string(&summary).expect("summary json");
     assert!(!json.contains("/Users/example/src"));
     assert!(json.contains("allow-list:api.example.com:443"));
-}
-
-#[test]
-fn machine_start_preflight_surfaces_ssh_agent_auth_mode() {
-    let spec = MachineSpec {
-        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
-        name: "web".to_string(),
-        image: Some("ghcr.io/acme/web:latest".to_string()),
-        manifest: None,
-        resolved_digest: Some("sha256:abc".to_string()),
-        runtime_pack: false,
-        net: false,
-        allow_host: Vec::new(),
-        cpus: 2,
-        memory: "512M".to_string(),
-        mem_initial: None,
-        profile: "dev".to_string(),
-        volumes: Vec::new(),
-        init: Vec::new(),
-        ssh_agent: true,
-        agent_verb: Vec::new(),
-        created_at: Some("2026-06-18T00:00:00Z".to_string()),
-        last_started_at: None,
-        health_check: None,
-    };
-
-    let summary = machine_start_preflight_summary(&spec, None, None).expect("preflight summary");
-    assert_eq!(summary.invocation.auth.mode, "ssh-agent-socket");
-    let json = serde_json::to_string(&summary).expect("summary json");
-    assert!(json.contains("ssh-agent-socket"));
 }
 
 #[test]
@@ -1650,9 +1575,6 @@ fn machine_start_receipt_is_signed_and_verifiable() {
         profile: "standard".to_string(),
         network_posture: "deny-all".to_string(),
         egress_enforcement: "flow-drop".to_string(),
-        auth: MachineStartAuthPolicy {
-            mode: "none".to_string(),
-        },
         volumes: Vec::new(),
         init: MachineStartInitPolicy {
             command_count: 0,
@@ -1679,38 +1601,6 @@ fn machine_start_receipt_is_signed_and_verifiable() {
 }
 
 #[test]
-fn machine_start_receipt_input_records_ssh_agent_socket_for_dev_profiles() {
-    let spec = MachineSpec {
-        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
-        name: "web".to_string(),
-        image: Some("ghcr.io/acme/web:latest".to_string()),
-        manifest: None,
-        resolved_digest: None,
-        runtime_pack: false,
-        net: false,
-        allow_host: Vec::new(),
-        cpus: 2,
-        memory: "512M".to_string(),
-        mem_initial: None,
-        profile: "dev".to_string(),
-        volumes: Vec::new(),
-        init: Vec::new(),
-        ssh_agent: true,
-        agent_verb: Vec::new(),
-        created_at: Some("2026-06-18T00:00:00Z".to_string()),
-        last_started_at: None,
-        health_check: None,
-    };
-    let input = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
-    assert_eq!(input.auth.mode, "ssh-agent-socket");
-    assert_eq!(
-        machine_start_plan_auth_policy(&spec),
-        mvm_core::plan::AuthPolicy::ssh_agent_socket()
-    );
-    assert!(machine_start_audit_detail(&input).contains("auth=ssh-agent-socket"));
-}
-
-#[test]
 fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
     let spec = MachineSpec {
         schema_version: MACHINE_SPEC_SCHEMA_VERSION,
@@ -1727,7 +1617,6 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         profile: "dev".to_string(),
         volumes: Vec::new(),
         init: Vec::new(),
-        ssh_agent: false,
         agent_verb: Vec::new(),
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
@@ -1744,171 +1633,6 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         summary.invocation.egress_enforcement,
         "libkrun:l4-host-port"
     );
-}
-
-#[test]
-fn ssh_agent_socket_forwarding_negotiates_capability_before_request() {
-    let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
-
-    let guest_thread = std::thread::spawn(move || {
-        let hello: mvm_guest::vsock::GuestRequest =
-            mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
-        match hello {
-            mvm_guest::vsock::GuestRequest::ProtocolHello {
-                requested_capabilities,
-                ..
-            } => assert_eq!(
-                requested_capabilities,
-                vec![mvm_guest::vsock::GuestCapability::UnixSocketForward]
-            ),
-            other => panic!("expected ProtocolHello before forwarding request, got {other:?}"),
-        }
-        mvm_guest::vsock::write_frame(
-            &mut guest,
-            &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
-                agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
-                min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
-                agent_version: "test".to_string(),
-                capabilities: vec![mvm_guest::vsock::GuestCapability::UnixSocketForward],
-            },
-        )
-        .expect("write hello ack");
-
-        let req: mvm_guest::vsock::GuestRequest =
-            mvm_guest::vsock::read_frame(&mut guest).expect("read forward request");
-        match req {
-            mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
-                guest_path,
-                host_vsock_port,
-                socket_mode,
-            } => {
-                assert_eq!(guest_path, SSH_AGENT_GUEST_SOCKET);
-                assert_eq!(host_vsock_port, mvm_guest::vsock::SSH_AGENT_PORT);
-                assert_eq!(socket_mode, 0o600);
-                mvm_guest::vsock::write_frame(
-                    &mut guest,
-                    &mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted {
-                        guest_path,
-                        host_vsock_port,
-                    },
-                )
-                .expect("write forward response");
-            }
-            other => panic!("expected StartUnixSocketForward, got {other:?}"),
-        }
-    });
-
-    start_guest_ssh_agent_socket_forwarding("devbox", &mut host)
-        .expect("ssh-agent forwarding request succeeds");
-    guest_thread.join().expect("guest thread");
-}
-
-#[test]
-fn ssh_agent_socket_forwarding_refuses_guest_without_capability() {
-    let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
-
-    let guest_thread = std::thread::spawn(move || {
-        let hello: mvm_guest::vsock::GuestRequest =
-            mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
-        assert!(
-            matches!(hello, mvm_guest::vsock::GuestRequest::ProtocolHello { .. }),
-            "expected ProtocolHello, got {hello:?}"
-        );
-        mvm_guest::vsock::write_frame(
-            &mut guest,
-            &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
-                agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
-                min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
-                agent_version: "test".to_string(),
-                capabilities: Vec::new(),
-            },
-        )
-        .expect("write hello ack");
-    });
-
-    let err = start_guest_ssh_agent_socket_forwarding("devbox", &mut host)
-        .expect_err("missing capability is refused");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("ssh-agent socket forwarding"),
-        "unexpected error: {msg}"
-    );
-    guest_thread.join().expect("guest thread");
-}
-
-#[test]
-fn ssh_agent_proxy_uses_backend_socket_transport_for_firecracker_and_in_process_vmms() {
-    let cases = [
-        (
-            "firecracker",
-            mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
-        ),
-        (
-            "libkrun",
-            mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
-        ),
-        (
-            "vz",
-            mvm_core::config::vm_vz_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
-        ),
-    ];
-
-    for (backend, expected) in cases {
-        match ssh_agent_proxy_listen_for_backend("devbox", backend) {
-            SshAgentProxyListen::Uds(path) => assert_eq!(path, expected),
-            SshAgentProxyListen::Vsock(port) => {
-                panic!("{backend} unexpectedly selected AF_VSOCK port {port}")
-            }
-        }
-    }
-}
-
-#[test]
-fn ssh_agent_proxy_keeps_qemu_on_raw_vsock_transport() {
-    match ssh_agent_proxy_listen_for_backend("devbox", "qemu") {
-        SshAgentProxyListen::Vsock(port) => {
-            assert_eq!(port, mvm_guest::vsock::SSH_AGENT_PORT);
-        }
-        SshAgentProxyListen::Uds(path) => {
-            panic!("qemu unexpectedly selected UDS {}", path.display())
-        }
-    }
-}
-
-#[test]
-fn machine_start_receipt_input_refuses_ssh_agent_on_standard_profile() {
-    let spec = MachineSpec {
-        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
-        name: "web".to_string(),
-        image: Some("ghcr.io/acme/web:latest".to_string()),
-        manifest: None,
-        resolved_digest: None,
-        runtime_pack: false,
-        net: false,
-        allow_host: Vec::new(),
-        cpus: 2,
-        memory: "512M".to_string(),
-        mem_initial: None,
-        profile: "standard".to_string(),
-        volumes: Vec::new(),
-        init: Vec::new(),
-        ssh_agent: true,
-        agent_verb: Vec::new(),
-        created_at: Some("2026-06-18T00:00:00Z".to_string()),
-        last_started_at: None,
-        health_check: None,
-    };
-    let err = machine_start_receipt_input(&spec, "firecracker")
-        .expect_err("standard profile must refuse ssh-agent");
-    assert!(err.to_string().contains("dev-capable profile"));
-}
-
-#[test]
-fn ssh_agent_auth_is_dev_tier_only() {
-    assert!(!profile_allows_ssh_agent("restrictive"));
-    assert!(!profile_allows_ssh_agent("standard"));
-    assert!(profile_allows_ssh_agent("dev"));
-    assert!(profile_allows_ssh_agent("permissive"));
 }
 
 #[test]
@@ -1948,7 +1672,6 @@ fn create_refuses_overwrite_without_force() {
         profile: "standard".to_string(),
         volumes: Vec::new(),
         init: Vec::new(),
-        ssh_agent: false,
         agent_verb: Vec::new(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
@@ -1993,7 +1716,6 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         profile: "standard".to_string(),
         volumes: Vec::new(),
         init: Vec::new(),
-        ssh_agent: false,
         agent_verb: Vec::new(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
@@ -2025,7 +1747,6 @@ fn seed_machine_spec(name: &str) {
         profile: "standard".to_string(),
         volumes: Vec::new(),
         init: Vec::new(),
-        ssh_agent: false,
         agent_verb: Vec::new(),
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
@@ -2431,7 +2152,6 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         profile: "standard".into(),
         volumes: vec!["/data:/data:ro".into()],
         init: vec![],
-        ssh_agent: false,
         agent_verb: vec![],
         created_at: None,
         last_started_at: None,

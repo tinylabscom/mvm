@@ -46,7 +46,7 @@ pub(super) fn run_steps(production: bool) -> Result<()> {
         bootstrap::check_package_manager()?;
     }
 
-    // Dev mode is libkrun/Apple-Container on Apple Silicon macOS or
+    // Dev mode is libkrun/HVF on Apple Silicon macOS or
     // native Firecracker on Linux KVM. There is no Lima VM to provision
     // here; setup_steps below handles the remaining assets.
     bootstrap::hint_libkrun_if_useful();

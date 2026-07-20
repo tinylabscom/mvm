@@ -20,18 +20,18 @@ fn main() -> anyhow::Result<()> {
     // string into valid JSON for ordinary names.
     let payload = format!("[[{name:?}], {{}}]").into_bytes();
 
-    let transport = mvm::vsock_transport::for_vm(&vm)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    let transport = mvm_runtime::vsock_transport::for_vm(&vm)?;
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
 
     let stdout = RefCell::new(Vec::<u8>::new());
     let stderr = RefCell::new(Vec::<u8>::new());
     let terminal =
-        mvm_guest::vsock::send_run_entrypoint(&mut stream, payload, 30, Vec::new(), |event| {
+        mvm_agentd::vsock::send_run_entrypoint(&mut stream, payload, 30, Vec::new(), |event| {
             match event {
-                mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
+                mvm_agentd::vsock::EntrypointEvent::Stdout { chunk } => {
                     stdout.borrow_mut().extend_from_slice(chunk)
                 }
-                mvm_guest::vsock::EntrypointEvent::Stderr { chunk } => {
+                mvm_agentd::vsock::EntrypointEvent::Stderr { chunk } => {
                     stderr.borrow_mut().extend_from_slice(chunk)
                 }
                 _ => {}

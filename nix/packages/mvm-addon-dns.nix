@@ -1,6 +1,6 @@
 # `mvm-addon-dns` — production in-guest addon DNS resolver binary.
 #
-# Built from `crates/mvm-addon-dns` in the workspace. Baked into the
+# Built from `crates/mvm-agentd` in the workspace. Baked into the
 # rootfs alongside `mvm-guest-agent` so every guest carries the binary;
 # `/init` only activates it when a zone file is present (see
 # `nix/lib/mk-guest.nix::initScript`).
@@ -8,6 +8,11 @@
 # Always built without any dev-shell-style feature flag — the DNS
 # binary has no `do_exec`-equivalent surface and the same artifact is
 # safe for dev and prod images.
+#
+# Requires the `addons` feature: this bin (along with mvm-egress-client
+# and mvm-addon-vsock-bridge) is the only mvm-agentd consumer of tokio,
+# so the crate keeps it behind that feature to hold the sealed agent's
+# default build tokio-free.
 
 { pkgs
 , lib
@@ -26,12 +31,13 @@ pkgs.rustPlatform.buildRustPackage {
   # heavier members (mvm-libkrun, mvm-providers, etc.) are not in the
   # closure of this crate, so the produced artifact stays small.
   cargoBuildFlags = [
-    "--package" "mvm-guest-helpers"
+    "--package" "mvm-agentd"
     "--bin" "mvm-addon-dns"
+    "--features" "mvm-agentd/addons"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-guest-helpers"
+    "--package" "mvm-agentd"
   ];
 
   # Tests run in the workspace's host-side `cargo test` lane; the Nix

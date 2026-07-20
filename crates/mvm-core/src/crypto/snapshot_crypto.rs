@@ -3,8 +3,8 @@
 //! Tenant-scoped encryption-at-rest builds on these primitives. The
 //! wire format is `[12-byte nonce][ciphertext + 16-byte tag]`; the API
 //! only takes and returns byte slices — file-bound wrappers are
-//! deferred so they can sit on `mvm-storage::VolumeBackend` rather than
-//! re-deriving an earlier shape.
+//! deferred so they can sit on `mvm_runtime::storage::volume::VolumeBackend`
+//! rather than re-deriving an earlier shape.
 
 use crate::crypto::aead;
 use anyhow::Result;

@@ -5,9 +5,9 @@ use clap::Args as ClapArgs;
 
 use crate::ui;
 
+use mvm_agentd::vsock::FsChange;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_guest::vsock::FsChange;
 
 use super::Cli;
 use super::shared::{clap_vm_name, human_bytes};
@@ -35,9 +35,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ui::info(&format!("{} change(s):", changes.len()));
         for change in &changes {
             let prefix = match change.kind {
-                mvm_guest::vsock::FsChangeKind::Created => "+",
-                mvm_guest::vsock::FsChangeKind::Modified => "~",
-                mvm_guest::vsock::FsChangeKind::Deleted => "-",
+                mvm_agentd::vsock::FsChangeKind::Created => "+",
+                mvm_agentd::vsock::FsChangeKind::Modified => "~",
+                mvm_agentd::vsock::FsChangeKind::Deleted => "-",
             };
             if change.size > 0 {
                 println!(
@@ -61,11 +61,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// VMM (Firecracker's `v.sock`, or the per-port UNIX socket libkrun/QEMU
 /// expose) but is unaware of the in-memory mock backend.
 fn fs_diff(name: &str) -> Result<Vec<FsChange>> {
-    let mock_dir = mvm_backend::MockBackend::vm_dir(name);
+    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
     if mock_dir.join("runtime").join("v.sock").exists() {
-        return mvm_guest::vsock::query_fs_diff(&mock_dir.to_string_lossy());
+        return mvm_agentd::vsock::query_fs_diff(&mock_dir.to_string_lossy());
     }
     let mut stream =
-        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    mvm_guest::vsock::query_fs_diff_on(&mut stream)
+        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::query_fs_diff_on(&mut stream)
 }

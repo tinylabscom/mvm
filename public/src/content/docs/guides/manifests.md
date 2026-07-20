@@ -43,9 +43,6 @@ net = false                   # default-deny unless true or allow_hosts narrows 
 [network]
 allow_hosts = ["api.example.com:443"]
 
-[auth]
-ssh_agent = false             # parsed and persisted; machine start fails closed today
-
 [dev]
 init = []                     # dev-only; machine start fails closed today
 volumes = ["./src:/work/src:ro"]
@@ -69,7 +66,6 @@ Each field's owner:
 | `mem_initial` | mvmctl — optional balloon initial commitment | Optional |
 | `data_disk` | mvmctl — host-side block device sizing | **Yes** |
 | `net`, `[network].allow_hosts` | mvmctl — effective egress policy | Optional |
-| `[auth].ssh_agent` | mvmctl — future agent socket forwarding | Parsed, start fails closed today |
 | `[dev].init` | mvmctl — future dev-only init hook | Parsed, start fails closed today |
 | `[dev].volumes` | mvmctl — host shares / persistent disks | Optional |
 | `name` | mvmctl — display in `ls`, optional S3 channel key | Optional |
@@ -107,10 +103,10 @@ mvmctl machine create --name alpine-dev --manifest ./mvm.toml
 mvmctl machine start alpine-dev
 ```
 
-`machine create` stores a strict JSON spec under `MVM_DATA_DIR`, and
+`machine create` stores a strict JSON spec under `MVM_HOME`, and
 `machine start` boots it through the admitted OCI-backed launch path.
-`[auth].ssh_agent` and `[dev].init` are intentionally fail-closed at start
-until their runtime transports are implemented.
+`[dev].init` is intentionally fail-closed at start until its runtime
+transport is implemented.
 
 ### Manifest discovery
 

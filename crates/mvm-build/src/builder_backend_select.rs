@@ -121,11 +121,11 @@ pub fn auto_detect_default_for(
 }
 
 /// Auto-detect using the live runtime platform + compile-time arch.
-/// `is_vz_default_tier()` already enforces `Platform::MacOS` +
+/// `is_hvf_default_tier()` already enforces `Platform::MacOS` +
 /// `is_macos_26_or_later()`; the arch check completes the "Apple
 /// Silicon" half of the predicate.
 pub fn auto_detect_default() -> BuilderBackendChoice {
-    let is_target = current().is_vz_default_tier() && cfg!(target_arch = "aarch64");
+    let is_target = current().is_hvf_default_tier() && cfg!(target_arch = "aarch64");
     auto_detect_default_for(current(), is_target)
 }
 
@@ -710,7 +710,7 @@ mod tests {
     fn closure_nar_for_host_arch_is_none_when_the_arch_cache_dir_has_no_closure() {
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        env.set("MVM_HOME", scratch.path().join(".cache"));
         assert_eq!(closure_nar_for_host_arch(), None);
     }
 
@@ -718,7 +718,7 @@ mod tests {
     fn closure_nar_for_host_arch_resolves_when_the_arch_cache_dir_has_one() {
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        env.set("MVM_HOME", scratch.path().join(".cache"));
         let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
         std::fs::write(arch_dir.join("nix-closure.nar"), b"nar-bytes").unwrap();
@@ -854,7 +854,7 @@ mod tests {
         // writes (a libkrun VMM failure records it) so it can't leak across tests.
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        env.set("MVM_HOME", scratch.path().join(".cache"));
         let calls = RefCell::new(Vec::new());
         let result: Result<(), _> =
             run_with_builder_fallback(BuilderBackendChoice::Libkrun, false, |c| {
@@ -876,7 +876,7 @@ mod tests {
         use std::cell::RefCell;
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        env.set("MVM_HOME", scratch.path().join(".cache"));
         let calls = RefCell::new(0u32);
         // A genuine build error must NOT trigger a fallback, even on Linux.
         let result: Result<(), _> =
@@ -915,7 +915,7 @@ mod tests {
         // Isolate the per-host builder-health marker (see the typed sibling test).
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        env.set("MVM_HOME", scratch.path().join(".cache"));
         let calls = RefCell::new(Vec::new());
         let result: anyhow::Result<()> =
             run_with_builder_fallback_anyhow(BuilderBackendChoice::Libkrun, false, |c| {
@@ -935,7 +935,7 @@ mod tests {
         use std::cell::RefCell;
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        env.set("MVM_HOME", scratch.path().join(".cache"));
         let calls = RefCell::new(0u32);
         let result: anyhow::Result<()> =
             run_with_builder_fallback_anyhow(BuilderBackendChoice::Libkrun, false, |_c| {
@@ -1107,7 +1107,7 @@ mod tests {
         use std::cell::RefCell;
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        env.set("MVM_HOME", scratch.path().join(".cache"));
         let calls = RefCell::new(Vec::new());
         // Drive the order directly (host-agnostic): hvf fails VMM-level, libkrun ok.
         let order = builder_attempt_order(BuilderBackendChoice::Hvf, false, false, false);

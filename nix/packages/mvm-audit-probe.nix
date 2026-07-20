@@ -1,7 +1,7 @@
 # `mvm-audit-probe` — in-guest host.audit.v1 driver, test fixture only.
 #
-# The real Rust binary at `crates/mvm-guest/src/bin/audit-probe.rs`. It calls
-# `mvm_guest::host_audit::emit` from inside a booted guest so an audit entry
+# The real Rust binary at `crates/mvm-agentd/src/bin/audit-probe.rs`. It calls
+# `mvm_agentd::host_audit::emit` from inside a booted guest so an audit entry
 # travels the full spine (guest → backend vsock splice → per-VM mvm-broker →
 # mvm-audit-signer → the per-VM workload chain). It is the in-guest half of the
 # live-VM round-trip proof.
@@ -28,12 +28,12 @@ pkgs.rustPlatform.buildRustPackage {
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
 
   cargoBuildFlags = [
-    "--package" "mvm-guest"
+    "--package" "mvm-agentd"
     "--bin" "audit-probe"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-guest"
+    "--package" "mvm-agentd"
   ];
 
   # Tests run in the workspace's host-side `cargo test` lane (the probe's

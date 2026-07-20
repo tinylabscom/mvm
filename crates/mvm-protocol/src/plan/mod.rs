@@ -1,0 +1,26 @@
+//! Plan types — the signed `ExecutionPlan` contract itself and the pure
+//! serde DTOs it's built from. Logic (sign/verify/hash/resolve/synth/fs/net/io)
+//! stays in `mvm-core::plan`, which re-exports these types at their
+//! existing paths.
+
+pub mod bundle;
+pub mod execution_plan;
+pub mod types;
+pub mod validity;
+pub mod verb;
+pub mod verb_grant;
+pub mod verb_trust;
+
+pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
+pub use types::{
+    AdmissionProfile, ArtifactDigests, ArtifactPolicy, AttestationMode, AttestationRequirement,
+    AuditLabels, AuditTaxonomy, BuildProvenance, DepsVolumeBinding, DepsVolumeBindingError,
+    FsPolicyRef, HostShareGrant, InputKind, KeyRotationSpec, NetworkMode, Nonce, NonceParseError,
+    PlanId, PlanSeccompTier, PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin,
+    Resources, RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind,
+    SignedImageRef, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+};
+pub use validity::FreshnessClaims;
+pub use verb::{VerbId, VerbIdError};
+pub use verb_grant::{VERB_GRANT_BASELINE, VerbGrant, VerbGrantError};
+pub use verb_trust::{GrantKeySource, VERB_TRUST_POLICY_VERSION, VerbTrustPolicy};

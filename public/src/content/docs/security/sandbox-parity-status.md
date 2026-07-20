@@ -80,7 +80,7 @@ Tracking work:
 ### `network-policy` — Planned
 
 Today's egress enforcement is L3 allow-listing
-([ADR-004](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/004-egress-policy.md)).
+([ADR-003](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/003-egress-policy.md)).
 There is no DNS pinning resolver, no HTTPS SNI/Host policy, and the
 metadata endpoint (`169.254.169.254`) is not blocked by default.
 

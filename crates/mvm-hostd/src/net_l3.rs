@@ -446,8 +446,8 @@ mod tests {
             format!("{manifest}/src/net_l3.rs"),
             format!("{manifest}/src/network_tunnel.rs"),
             format!("{manifest}/src/bin/mvm-network-tunnel-worker.rs"),
-            format!("{manifest}/../mvm-core/src/protocol/network_tunnel.rs"),
-            format!("{manifest}/../mvm-backend/src/network_tunnel_spawn.rs"),
+            format!("{manifest}/../mvm-protocol/src/protocol/network_tunnel.rs"),
+            format!("{manifest}/../mvm-runtime/src/network_tunnel_spawn.rs"),
         ];
         // MITM / semantic-protocol identifiers the raw-L3 plane must never carry.
         let banned = [

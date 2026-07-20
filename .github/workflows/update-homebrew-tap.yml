@@ -44,8 +44,8 @@ jobs:
         env:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          chmod +x packaging/homebrew/render-formula.sh
-          packaging/homebrew/render-formula.sh "$VERSION" checksums-sha256.txt mvmctl.rb
+          chmod +x nix/packaging/homebrew/render-formula.sh
+          nix/packaging/homebrew/render-formula.sh "$VERSION" checksums-sha256.txt mvmctl.rb
           echo "=== rendered formula ===" && cat mvmctl.rb
 
       - name: Audit formula

@@ -75,36 +75,32 @@ impl Platform {
         matches!(self, Platform::LinuxNative)
     }
 
-    /// Whether this host is the macOS tier where Vz is the auto-detect
+    /// Whether this host is the macOS tier where HVF is the auto-detect
     /// default backend (macOS 26+ — the Apple Silicon arch half is
     /// asserted by callers via `cfg!(target_arch = "aarch64")`).
     ///
-    /// Distinct from [`Self::has_vz`], which reports mere Vz *availability*
-    /// from macOS 13 up. Vz is opt-in on macOS 13-25 and only the
-    /// default from 26 on, so the selection paths gate on this.
-    pub fn is_vz_default_tier(self) -> bool {
+    /// Distinct from [`Self::has_macos13_or_later`], which reports the
+    /// older macOS-13 floor libkrun targets. HVF is only the default from
+    /// 26 on, so the selection paths gate on this.
+    pub fn is_hvf_default_tier(self) -> bool {
         if !matches!(self, Platform::MacOS) {
             return false;
         }
         is_macos_26_or_later()
     }
 
-    /// Whether Apple Virtualization.framework (Vz) is available on
-    /// this host.
+    /// Whether this host meets the macOS-13 (Ventura) floor libkrun's
+    /// virtio surface needs.
     ///
-    /// Vz is built into macOS — no separate library to probe, no
-    /// Homebrew install — so detection collapses to a combined
-    /// OS-and-version check. macOS 13 (Ventura) is the floor
-    /// because the full virtio surface we use
-    /// (`VZMultipleDirectoryShare`, `VZDiskBlockDeviceStorageDeviceAttachment`)
-    /// lands there. macOS 11–12 hosts fall back to libkrun (no
-    /// regression). Both architectures are supported (Apple Silicon
-    /// arm64 + Intel x86_64); Vz works on both since macOS 11.
+    /// macOS 13 is the floor because the full virtio surface libkrun
+    /// depends on lands there; macOS 11–12 hosts have no supported local
+    /// microVM path. Both architectures are supported (Apple Silicon
+    /// arm64 + Intel x86_64).
     ///
     /// This probe reports only the OS-version tier; it does not assert any
     /// per-VM supervisor binary is installed (`mvmctl doctor` surfaces binary
     /// presence separately).
-    pub fn has_vz(self) -> bool {
+    pub fn has_macos13_or_later(self) -> bool {
         if !matches!(self, Platform::MacOS) {
             return false;
         }
@@ -206,7 +202,8 @@ fn has_nested_kvm_at(intel_path: &str, amd_path: &str) -> bool {
 }
 
 /// Check whether the current macOS version is 13.0 (Ventura) or later.
-/// Vz's full virtio surface lands here; macOS 11–12 fall back to libkrun.
+/// libkrun's full virtio surface lands here; macOS 11–12 fall back to
+/// whichever backend is installed.
 fn is_macos_13_or_later() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -420,33 +417,32 @@ mod tests {
     }
 
     #[test]
-    fn test_has_vz_false_on_non_macos() {
-        assert!(!Platform::LinuxNative.has_vz());
-        assert!(!Platform::LinuxNoKvm.has_vz());
-        assert!(!Platform::Wsl2.has_vz());
-        assert!(!Platform::Windows.has_vz());
+    fn test_has_macos13_or_later_false_on_non_macos() {
+        assert!(!Platform::LinuxNative.has_macos13_or_later());
+        assert!(!Platform::LinuxNoKvm.has_macos13_or_later());
+        assert!(!Platform::Wsl2.has_macos13_or_later());
+        assert!(!Platform::Windows.has_macos13_or_later());
     }
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn test_has_vz_true_on_macos_13_or_later() {
-        // Whether Vz reports available on this *contributor host*
-        // depends on the actual macOS version. macOS 13+ → true;
-        // 11–12 → false. The probe is the source of truth — we
-        // assert it agrees with the underlying version check rather
-        // than hard-coding a result that would diverge across CI
-        // matrix rows.
+    fn test_has_macos13_or_later_true_on_macos_13_or_later() {
+        // Whether this reports true on this *contributor host* depends on
+        // the actual macOS version. macOS 13+ → true; 11–12 → false. The
+        // probe is the source of truth — we assert it agrees with the
+        // underlying version check rather than hard-coding a result that
+        // would diverge across CI matrix rows.
         let plat = Platform::MacOS;
         let expected = macos_major_version() >= 13;
-        assert_eq!(plat.has_vz(), expected);
+        assert_eq!(plat.has_macos13_or_later(), expected);
     }
 
     #[test]
-    fn test_is_vz_default_tier_non_macos() {
-        assert!(!Platform::LinuxNative.is_vz_default_tier());
-        assert!(!Platform::LinuxNoKvm.is_vz_default_tier());
-        assert!(!Platform::Wsl2.is_vz_default_tier());
-        assert!(!Platform::Windows.is_vz_default_tier());
+    fn test_is_hvf_default_tier_non_macos() {
+        assert!(!Platform::LinuxNative.is_hvf_default_tier());
+        assert!(!Platform::LinuxNoKvm.is_hvf_default_tier());
+        assert!(!Platform::Wsl2.is_hvf_default_tier());
+        assert!(!Platform::Windows.is_hvf_default_tier());
     }
 
     #[test]
@@ -476,7 +472,7 @@ mod tests {
         let p = current();
         let _ = p.has_kvm();
         let _ = p.supports_native_runner();
-        let _ = p.is_vz_default_tier();
+        let _ = p.is_hvf_default_tier();
     }
 
     #[test]

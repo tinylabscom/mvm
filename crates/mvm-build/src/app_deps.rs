@@ -10,7 +10,7 @@
 //!    lockfile, derive a stable `lockfile_hash`, look it up in the
 //!    deps-volume index, and — on a cache hit — re-verify the on-disk
 //!    sealed volume via
-//!    [`mvm_deps_audit::verify_sealed_volume`]. A hit
+//!    [`mvm_sdk::compile::deps_audit::verify_sealed_volume`]. A hit
 //!    returns `InstallResult { cache_hit: true, .. }` carrying the
 //!    canonical `volume_hash` + `manifest.sha256` the supervisor's
 //!    admission gate pins.
@@ -19,7 +19,7 @@
 //!    [`crate::builder_vm::BuilderVm`]) with the canonical mount
 //!    layout (source_root → `/work`, an in-cache scratch dir →
 //!    `/out`), then seals the resulting volume via
-//!    [`mvm_deps_audit::seal_volume`] and renames it
+//!    [`mvm_sdk::compile::deps_audit::seal_volume`] and renames it
 //!    into the cache. Callers that want to skip dispatch (testing
 //!    a cache-hit-only path) pass `driver = None` and get
 //!    [`InstallError::DriverNotProvided`] on miss.
@@ -69,7 +69,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use mvm_deps_audit::{
+use mvm_sdk::compile::deps_audit::{
     FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, VolumeError, seal_volume,
     verify_sealed_volume,
 };
@@ -147,7 +147,7 @@ pub struct InstallSpec {
     /// Optional override for the deps-volumes cache root. When
     /// `None`, resolves to
     /// [`mvm_core::config::mvm_deps_volumes_dir`] (which itself
-    /// honors `MVM_DEPS_VOLUMES_DIR` — the same env knob the
+    /// honors `MVM_HOME` — the same env knob the
     /// admission verifier uses).
     pub cache_root_override: Option<PathBuf>,
 }
@@ -416,7 +416,7 @@ fn finalize_cache_hit(
 ///    move the sealed volume into the cache.
 /// 3. Drive the VM via [`InstallDriver::run_install`].
 /// 4. Seal the artifacts via
-///    `mvm_deps_audit::seal_volume`. Annotates the
+///    `mvm_sdk::compile::deps_audit::seal_volume`. Annotates the
 ///    sealed manifest with the lockfile hash + language/gate
 ///    tokens so `mvmctl deps inspect` can surface them.
 /// 5. Write the manifest, rename the scratch dir to
@@ -628,7 +628,7 @@ pub fn derive_lockfile_hash(lockfile_sha256: &str, language: Language, gate: Gat
 /// Resolve the deps-volumes cache root, honoring the per-call
 /// override and falling back to
 /// [`mvm_core::config::mvm_deps_volumes_dir`] (which itself honors
-/// `MVM_DEPS_VOLUMES_DIR`). Shared lookup with the admission
+/// `MVM_HOME`). Shared lookup with the admission
 /// verifier — no duplication.
 pub fn resolve_cache_root(override_path: Option<&Path>) -> PathBuf {
     override_path

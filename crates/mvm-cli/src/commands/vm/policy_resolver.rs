@@ -635,7 +635,6 @@ mod tests {
             network_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
             fs_policy: FsPolicyRef(LOCAL_DEFAULT.to_string()),
             secrets: Vec::new(),
-            auth: Default::default(),
             egress_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),

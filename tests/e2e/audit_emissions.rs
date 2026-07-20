@@ -1,13 +1,8 @@
-//! E2E coverage for the Plan 37 §6 invariant: every state-changing CLI
+//! E2E coverage for the invariant that every state-changing CLI
 //! verb writes one local audit entry. Each test isolates the mvmctl
-//! data/state/cache directories under a fresh tempdir, runs the verb,
-//! and reads back `<state>/log/audit.jsonl` to confirm a JSONL line
-//! with the expected `kind` shows up.
-//!
-//! `MVM_DATA_DIR` must be overridden alongside `MVM_STATE_DIR` because
-//! `default_audit_log()` honours a legacy `~/.mvm/log/audit.jsonl`
-//! when present — without the override, audit lines from a developer's
-//! real mvmctl history would shadow the temp dir.
+//! root under a fresh tempdir via `MVM_HOME`, runs the verb, and reads
+//! back `<root>/state/log/audit.jsonl` to confirm a JSONL line with
+//! the expected `kind` shows up.
 
 use super::harness::mvmctl;
 use assert_cmd::Command;
@@ -16,35 +11,30 @@ use std::path::{Path, PathBuf};
 
 struct IsolatedEnv {
     _tmp: tempfile::TempDir,
-    state: PathBuf,
-    data: PathBuf,
+    root: PathBuf,
     cache: PathBuf,
 }
 
 impl IsolatedEnv {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let state = tmp.path().join("state");
-        let data = tmp.path().join("data");
-        let cache = tmp.path().join("cache");
+        let root = tmp.path().join("mvm-root");
+        let cache = root.join("cache");
         Self {
             _tmp: tmp,
-            state,
-            data,
+            root,
             cache,
         }
     }
 
     fn cmd(&self) -> Command {
         let mut cmd = mvmctl();
-        cmd.env("MVM_STATE_DIR", &self.state)
-            .env("MVM_DATA_DIR", &self.data)
-            .env("MVM_CACHE_DIR", &self.cache);
+        cmd.env("MVM_HOME", &self.root);
         cmd
     }
 
     fn audit_log(&self) -> PathBuf {
-        self.state.join("log").join("audit.jsonl")
+        self.root.join("state").join("log").join("audit.jsonl")
     }
 }
 

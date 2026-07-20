@@ -3,7 +3,7 @@
 //
 // Counterpart to ./oneshot.mjs: same dispatch + envelope semantics, but
 // stays alive across many calls and speaks the framed multi-call protocol
-// on its own stdin/stdout (matching mvm_guest::worker_protocol::
+// on its own stdin/stdout (matching mvm_agentd::worker_protocol::
 // {WorkerCallRequest, WorkerCallResponse}).
 //
 // Wire format (per call, both directions):
@@ -52,7 +52,7 @@ const WRAPPER_CONFIG_PATH =
   process.env.MVM_WRAPPER_CONFIG_PATH || "/etc/mvm/wrapper.json";
 const MAX_NESTING_DEPTH = 64;
 const DEFAULT_MAX_INPUT_BYTES = 16 * 1024 * 1024; // 16 MiB
-const MAX_FRAME_BYTES = 256 * 1024; // mvm_guest::worker_protocol cap
+const MAX_FRAME_BYTES = 256 * 1024; // mvm_agentd::worker_protocol cap
 const ENVELOPE_MARKER = "MVM_ENVELOPE: ";
 
 function loadConfig() {

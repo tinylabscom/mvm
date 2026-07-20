@@ -115,7 +115,7 @@ jobs:
         run: cargo build --release --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
-      # guest). They are SEPARATE bin targets in `mvm-vm-host` — the root
+      # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
       # `cargo build` above only produces `mvmctl`, so without this step a
       # downloaded (non-source) install has no `mvm-bridge` and the backend's
       # adjacent-to-exe resolver (which also checks `MVM_BRIDGE_PATH` and the
@@ -146,12 +146,12 @@ jobs:
         shell: bash
         run: |
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            cargo build --release --target "${TARGET}" -p mvm-vm-host \
+            cargo build --release --target "${TARGET}" -p mvm-hostd \
               --bin mvm-bridge \
               --bin mvm-hvf-supervisor \
               --bin mvm-libkrun-supervisor --features libkrun-sys
           else
-            cargo build --release --target "${TARGET}" -p mvm-vm-host \
+            cargo build --release --target "${TARGET}" -p mvm-hostd \
               --bin mvm-bridge
           fi
           # The per-VM substitution endpoint (mvm-hostd) is the egress gate every
@@ -218,7 +218,7 @@ jobs:
             src="target/${TARGET}/release/${hostbin}"
             [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
           done
-          cp -r resources "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
+          cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           # Include generated man pages
           if [ -d man ] && ls man/*.1 2>/dev/null; then
@@ -404,7 +404,7 @@ jobs:
             staging/builder-vm-${{ matrix.arch }}.sbom.txt
             staging/builder-vm-${{ matrix.arch }}-checksums-sha256.txt
 
-  # Plan 74 W1.4b / ADR-051: the verity-sealed mvm runtime overlay
+  # Plan 74 W1.4b / ADR-018: the verity-sealed mvm runtime overlay
   # disk. Attached as `/dev/vdc` at every microVM boot;
   # `mvm-verity-init` mounts it at `/mvm/runtime` so the guest agent,
   # seccomp shim, and per-language SDK runtime libraries live in a
@@ -417,7 +417,7 @@ jobs:
   # installs the extracted canonical names (`overlay.ext4`,
   # `overlay.verity`, `overlay.roothash`, `VERSION`,
   # `checksums-sha256.txt`) into
-  # `~/.cache/mvm/runtime-overlay/<mvmctl-version>/<arch>/`.
+  # `~/.mvm/cache/runtime-overlay/<mvmctl-version>/<arch>/`.
   runtime-overlay-image:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
@@ -748,7 +748,7 @@ jobs:
             sbom.cdx.json
             sbom.cdx.json.bundle
           )
-          RELEASE_NOTES_PREFIX="$(cat packaging/release/runtime-overlay-operational-note.md)"
+          RELEASE_NOTES_PREFIX="$(cat nix/packaging/release/runtime-overlay-operational-note.md)"
           gh release create "${TAG_NAME}" \
             --title "${TAG_NAME}" \
             --generate-notes \
@@ -799,7 +799,7 @@ jobs:
           COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          bash packaging/release/verify-release-assets.sh \
+          bash nix/packaging/release/verify-release-assets.sh \
             --assets-dir release-assets \
             --cosign \
             --expect-version "${TAG_NAME#v}"

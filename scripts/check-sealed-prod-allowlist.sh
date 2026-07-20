@@ -10,7 +10,6 @@
 # does not run AND pass, which catches deletions and renames in
 # addition to the classifier widening the SealedProd allowlist.
 #
-# Plan reference: specs/plans/76-secure-fast-boot-and-dx.md
 # ADR reference: specs/adrs/002-microvm-security-posture.md
 #                §W4.1 (deny-unknown-fields), §W4.3 (compile-time
 #                symbol absence for do_exec / do_run_code).
@@ -71,8 +70,8 @@ run_locked_tests() {
   fi
 }
 
-run_locked_tests mvm-guest "${EXPECTED_GUEST_COUNT}" "${GUEST_TESTS[@]}"
-run_locked_tests mvm-core  "${EXPECTED_CORE_COUNT}"  "${CORE_TESTS[@]}"
+run_locked_tests mvm-agentd "${EXPECTED_GUEST_COUNT}" "${GUEST_TESTS[@]}"
+run_locked_tests mvm-core   "${EXPECTED_CORE_COUNT}"  "${CORE_TESTS[@]}"
 
 echo
-echo "✅ Sealed-prod vsock allowlist locked: ${EXPECTED_GUEST_COUNT} mvm-guest + ${EXPECTED_CORE_COUNT} mvm-core tests pass."
+echo "✅ Sealed-prod vsock allowlist locked: ${EXPECTED_GUEST_COUNT} mvm-agentd + ${EXPECTED_CORE_COUNT} mvm-core tests pass."

@@ -362,6 +362,39 @@ mod reap_orphans_tests {
     }
 
     #[test]
+    fn reap_spares_live_hvf_workload_under_launchd() {
+        // Regression: WORKLOAD_SIDECARS previously carried only `vz.pid` /
+        // `libkrun.pid`, so a live HVF supervisor's `hvf.pid` was never read
+        // in the supervisor phase — an argv-scanned helper match on the same
+        // dir could then be misclassified as an unprotected orphan and
+        // SIGTERM'd. `hvf.pid` must now be recognised the same as the other
+        // backends' sidecars.
+        let (mut child, pid, snapshot) = alive_child_under_launchd();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vms_root = dir.path().join("vms");
+        let vm = vms_root.join("mvm-workload-livetest-hvf-running");
+        std::fs::create_dir_all(&vm).expect("mkdir");
+        std::fs::write(vm.join("hvf.pid"), format!("{pid}\n")).expect("write pid");
+
+        let out = reap_orphaned_vm_helpers_at_with_snapshot(
+            &vms_root,
+            WORKLOAD_SIDECARS,
+            false,
+            true,
+            false,
+            &snapshot,
+        )
+        .expect("reap");
+
+        assert_eq!(out.killed, 0, "live hvf workload must not be signalled");
+        assert!(pid_is_alive(pid), "live hvf workload was wrongly killed");
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
     fn reap_still_kills_orphaned_ephemeral_builder_under_launchd() {
         let (mut child, pid, snapshot) = alive_child_under_launchd();
 

@@ -32,7 +32,7 @@ fn bind_listener(path: &std::path::Path) -> Option<UnixListener> {
 fn socket_path_in(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join(format!(
         "vsock-{}.sock",
-        mvm_guest::builder_agent::BUILDER_DISPATCH_PORT
+        mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT
     ))
 }
 
@@ -78,7 +78,7 @@ fn spawn_vsock_response_listener_decodes_guest_response() {
     let expected = response.clone();
     let guest_thread = std::thread::spawn(move || {
         let (mut conn, _) = listener.accept().expect("accept");
-        mvm_guest::vsock::write_frame(&mut conn, &response).expect("write_frame");
+        mvm_agentd::vsock::write_frame(&mut conn, &response).expect("write_frame");
         // Drop closes the socket, signaling EOF.
     });
 

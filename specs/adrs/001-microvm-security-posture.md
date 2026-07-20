@@ -1,0 +1,686 @@
+# ADR-001: microVM security posture — guarantees and threat model
+
+## Status
+
+Accepted.
+
+## Context
+
+mvm runs untrusted-shaped Linux workloads inside real microVMs. The
+product promise — a developer can run third-party or AI-generated code in
+a microVM and trust the isolation — only holds if every layer between the
+workload and the host is hardened, verifiable, and stated explicitly. A
+single strong claim ("vsock-only, no SSH") is not a security posture if
+everything underneath it — the guest's privilege model, the rootfs's
+integrity, the host-side proxy socket, the supply chain, the deserializer
+parsing every host-to-guest message — is soft.
+
+### Adversaries, in priority order
+
+1. **A malicious guest workload.** Code running inside a microVM must not
+   read the host filesystem beyond explicit shares, reach the host
+   network without an admitted policy, escape the hypervisor, read
+   another guest service's secrets, or tamper with the rootfs's baked
+   closure.
+2. **A same-host hostile process.** Another local user, or another
+   process running as the host user, must not be able to talk to a
+   guest's agent, read its console log, write to its rootfs cache, or
+   tamper with its lifecycle state.
+3. **A compromised supply chain.** A malicious nixpkgs commit, a
+   compromised artifact-hosting account, or a typo-squatted Cargo
+   dependency must not silently land code in a microVM without producing
+   a verifiable signature failure.
+
+A **malicious host** — the machine running `mvmctl` itself — is out of
+scope. mvmctl trusts the host with the hypervisor, the GC roots, the
+user's secrets, and the private signing keys. **Multi-tenant guests** are
+out of scope: one guest is one workload. **Hardware-backed key
+attestation** is out of scope: every trust anchor mvm verifies today is
+launcher-provisioned, not measured by hardware the host cannot forge (see
+"Explicit out of scope" below).
+
+### Hardware boundary, not a userspace syscall sandbox
+
+mvm isolates a workload behind a hardware boundary — a VMM over KVM or
+Hypervisor.framework — rather than a userspace application-kernel sandbox
+that intercepts guest syscalls in a host-side process and re-implements a
+kernel ABI on seccomp plus namespaces. The isolation is enforced by the
+CPU (rings, EPT, IOMMU), not by the correctness of a syscall-emulation
+layer; there is no host-side syscall-compatibility surface to keep in
+lockstep with the guest kernel; and a bug in the boundary is a rare,
+hardware-assisted VM escape rather than an in-process logic error in an
+emulated `openat`/`mount`/`ptrace`. The *in-guest* hardening layers (L4/L5
+below) borrow syscall-discipline ideas from that class of sandbox — an
+`openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`-confined OCI-layer
+unpacker, an ioctl-syscall denylist on the guest agent — without adopting
+it as the primary isolation boundary.
+
+## Decision
+
+### Trust layers
+
+Defense-in-depth is five nested trust layers. Each layer trusts only the
+layer directly below it; an attacker must break every boundary above to
+reach the host, and a failure in one layer is bounded by the layer
+beneath it.
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│ L5 — Workload (untrusted code, AI-generated, user scripts)    │
+│      enforced by: per-service uid, bounding-set drop,         │
+│                    seccomp tier `standard` default             │
+├───────────────────────────────────────────────────────────────┤
+│ L4 — Guest agent (parses host messages, launches services)    │
+│      enforced by: uid 901 setpriv, no_new_privs,               │
+│                    `do_exec` absent in production,             │
+│                    fuzzed deserialization + deny_unknown_fields│
+├───────────────────────────────────────────────────────────────┤
+│ L3 — Guest kernel (Linux from Nix, ephemeral, isolated)        │
+│      enforced by: dm-verity rootfs + roothash on the kernel    │
+│                    cmdline + a verity-aware init initramfs     │
+├───────────────────────────────────────────────────────────────┤
+│ L2 — VMM (userspace, Rust, seccomp-jailed, unprivileged)       │
+│      enforced by: minimal device set, seccomp default-on,      │
+│                    host-side proxy socket mode 0700,           │
+│                    vsock port allowlist                        │
+├───────────────────────────────────────────────────────────────┤
+│ L1 — Host + hypervisor (KVM on Linux; Hypervisor.framework on  │
+│                          macOS, via the in-house HVF VMM or    │
+│                          libkrun)                               │
+│      enforced by: hardware (CPU rings, EPT, IOMMU); host       │
+│                    hardening is the operator's responsibility  │
+└───────────────────────────────────────────────────────────────┘
+```
+
+L1 carries no numbered claim of its own — the host is trusted by
+definition — but it *enables* claim 3: verified boot needs a hypervisor
+that respects the kernel cmdline it is given. If the host is compromised,
+every layer above it falls; that is the accepted, named out-of-scope
+case.
+
+The guest agent runs as uid 901 under `setpriv`; the host-side vsock
+proxy socket is mode 0700; the proxy's port allowlist admits only the
+agent port and the declared forward range; console and daemon logs are
+mode 0600; and `~/.mvm` and `~/.cache/mvm` are mode 0700.
+
+### The claims ledger
+
+Every guarantee below is backed by a named test or CI lane, recorded in
+the machine-checked ledger later in this document (between the
+`claims-catalog` markers). `xtask check-claim-catalog` parses that table
+on every PR and fails when a claim's witness no longer exists in the
+tree — the claim list cannot silently drift from what the code actually
+does. The narrative in this section states what each claim *means*; the
+ledger is the checked source of truth for *what proves it*.
+
+### The claims
+
+Sixteen claims: fifteen numbered guarantees plus one preview claim not
+yet promoted to the numbered set. L1 (the host) has no claim of its own
+per the threat model above.
+
+| # | Claim | Layer | Enforcement |
+|---|---|---|---|
+| 1 | No host-fs access from a guest beyond explicit shares | L2/L5 | Per-service uid; seccomp tier `standard` default; `setpriv --bounding-set=-all --no-new-privs`; user-volume allow-list with a read-only default; admission-enforced share matching |
+| 2 | No guest binary can elevate to uid 0 | L2/L4 | `setpriv --no-new-privs`; `/etc/{passwd,group,nsswitch.conf}` are read-only bind mounts, so a compromised service cannot mint a uid-0 entry |
+| 3 | A tampered rootfs ext4 fails to boot, on the block+ext4 backends | L3 | dm-verity sidecar + 64-hex roothash on the kernel cmdline + a verity-aware initramfs that owns the boot pivot in userspace; a flipped data block panics the kernel before userspace runs |
+| 4 | The guest agent contains no `do_exec` symbol in production builds | L4 | The exec handler is compiled in only under the `dev-shell` feature; a symbol-grep CI job asserts its absence from the production agent binary |
+| 5 | Vsock framing and supervisor-config JSON are fuzzed | L2/L4 | `cargo-fuzz` targets cover `GuestRequest`, `AuthenticatedFrame`, and the host-side `SupervisorConfig` parser; every host↔guest type is `#[serde(deny_unknown_fields)]` |
+| 6 | The pre-built dev image is hash-verified | supply chain | The per-arch checksums manifest is fetched and the artifact is streamed through SHA-256; a mismatch rejects and deletes the download |
+| 7 | Cargo dependencies are audited on every PR | supply chain | `cargo-deny` and `cargo-audit` CI jobs; a reproducibility double-build catches non-determinism that could mask injection |
+| 8 | Every workload runs from a signed, audited `ExecutionPlan` | cross-cutting | An Ed25519 host-signer keypair signs a typed plan; a validity window and a nonce replay-store gate admission; every admission emits chain-signed `plan.admitted` / `plan.launched` / `plan.failed` audit entries |
+| 9 | Every published bundle is content-addressed, key_id-pinned, and re-verified at fetch and at admit time | supply chain | A rejection ladder covers unknown key, tampered manifest, key_id mismatch, tampered or missing artifact, unsafe path, schema bump, and pin-archive/pin-signature drift |
+| 10 | No untrusted workload reaches the network unless explicitly admitted by policy | data containment | `NetworkPolicy` defaults to deny-all; Firecracker enforces it with an nftables default-deny ruleset on the TAP; libkrun enforces it with a gateway-bridge `PlanFlowPolicy` plus always-on deny-egress and per-tenant scans; an `unrestricted` policy emits an opt-in warning with a documented escape hatch |
+| 11 | Every application-dependency volume is hash-locked, attestation-checked, CVE-scanned, SBOM-enumerated, and bound to the workload's audit chain | supply chain (app layer) | A sealed volume carries `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a hash-chained `meta.json`; the admission verifier refuses a tampered volume; a production launch fails closed on a high or critical CVE finding |
+| 12 | Every host-side broker service is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited | cross-cutting | Binding-gated dispatch with a rejection ladder for unbound and out-of-profile calls; the handler registry is linted for policy-schema and composition coverage |
+| 13 | No raw secret value crosses the broker channel | data containment | `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space; secret-bearing buffers are zeroized on drop |
+| 14 | Every OCI image admission records provenance in the chain-signed audit log | supply chain | A `plan.oci_provenance` entry carries the registry host, repo, supplied reference, resolved manifest digest, layer digest list, trust policy, and cosign verdict; a production pull or run refuses a mutable reference before any network fetch |
+| 15 | No interactive access to a sealed production microVM | L4 | Only the dev `/init` variant serves a console; the sealed rootfs is dm-verity protected; the backend captures the guest console write-only, with no host input; the host accessible-gate refuses `console` on a sealed image; the agent's console and `do_exec` are both `dev-shell`-gated |
+
+**Preview 16 — egress substitution keeps a raw secret off the guest.** A
+tokenized-replacement mechanism on the host-owned substitution proxy
+boundary reinforces claims 12 and 13 on the egress delivery path: a
+handed placeholder never contains the secret value, the substitution
+endpoint refuses an unbound destination, and the audit chain carries no
+secret value. This claim is registered in the ledger for
+witness-checking but stays a preview — promotion to the numbered set
+above is a separate decision.
+
+### Explicit out of scope
+
+- **A malicious host.** mvmctl trusts the host with the hypervisor, the
+  GC roots, and the private signing keys. Nothing in this ADR defends
+  against a compromised host.
+- **Multi-tenant guests.** One guest is one workload. Fleet-level
+  multi-tenancy is a distinct, separately-scoped trust boundary owned by
+  the sibling fleet-orchestration product, not by this ADR.
+- **Hardware-backed key attestation.** Every trust anchor a guest
+  verifies today — the kernel cmdline, the per-launch config drive, even
+  the dm-verity roothash — is provisioned by the same trusted launcher
+  that provisions the material it protects; the launcher-provided
+  verifying key rides in the same envelope as the grant it authenticates,
+  which is integrity over a trusted channel, not independent key
+  separation. Real separation against a malicious host requires a trust
+  root the host cannot forge — confidential-computing hardware
+  (SEV-SNP/TDX) with CPU-signed attestation — and the primary Linux
+  workload VMM has no vTPM or measured-boot surface today. This ADR does
+  not pursue that path; a future claim binding a grant's verifying key to
+  an attested launch measurement is possible only after a dedicated
+  confidential-computing workload backend exists and after this ADR's
+  threat model is revised to bring a malicious host partly in scope.
+
+### Design principles
+
+- **Defaults are safe.** Every option whose value affects security
+  defaults to the safer choice; a user opts *out*, never in, and the
+  opt-out is documented.
+- **Defense in depth, not a single chokepoint.** The vsock-only claim is
+  one enforced layer among many; a failure in any single layer is not
+  catastrophic.
+- **Verified boot is mandatory for production microVMs**, on the
+  block+ext4 backends. A dev VM's writable overlay upper layer cannot
+  compose with dm-verity, so the dev tier is named as an explicit
+  exemption rather than left ambiguous.
+- **The guest agent does not run as root in production**, without
+  exception.
+- **CI gates every claim.** A claim that stops being backed by a passing
+  test or CI lane is a broken build, not a stale sentence in a document.
+- **The threat model is lived with, not aspired to.** A malicious host,
+  multi-tenant guests, and hardware attestation are named out of scope so
+  the project never accidentally commits to defending against them by
+  omission.
+
+### Per-backend tier matrix
+
+mvm ships four workload-capable VM backends plus a test-only mock and an
+explicitly claims-free browser preview backend. A given run carries the
+tier of its *active* backend, not the strongest tier the project
+supports; `mvmctl doctor` renders this matrix per host with the active
+backend highlighted, and the CLI surfaces a loud banner when the active
+backend falls below Tier 1.
+
+| Backend | L1 | L2 | L3 | L4 | L5 | Notes |
+|---|---|---|---|---|---|---|
+| Firecracker (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — the production workload runtime, selected automatically whenever native KVM is available. Every numbered claim holds. |
+| HVF / Hypervisor.framework (macOS 26+ Apple Silicon) | ✅ | ✅ | ⚠️ block+ext4 verified boot only | ✅ | ✅ | Tier 2 — the in-house Hypervisor.framework VMM. Egress, admission, and substitution are enforced through a single per-VM vsock gating endpoint: there is no guest network interface and no separate userspace gateway sidecar. The macOS 26+ Apple Silicon default. |
+| libkrun (Linux KVM, macOS Hypervisor.framework) | ✅ | ✅ | ⚠️ block+ext4 verified boot only | ✅ | ✅ | Tier 2 — comparable VMM TCB to Firecracker. The macOS 13–25 default and the Linux `--builder libkrun` / opt-in workload path. |
+| QEMU (Linux KVM/TCG) | ✅ KVM where available | ⚠️ larger device-model TCB | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — a `mvm`-only Linux dev/test substrate, opt-in only, never reachable from the fleet orchestrator. It carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately not wired into its start path. This carve-out is type-enforced: a `WorkloadBackend` marker trait gates the admitted workload-launch path, and QEMU does not implement it, so it cannot reach that path regardless of prose. The test-only mock backend does implement the marker — it is a hermetic lifecycle test double that carries no real workload, so permitting it costs nothing. |
+| `wasm-sandbox` (browser / WASI preview) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale.** No KVM, no real kernel, no TAP/virtio/vsock. Asserts none of the numbered claims and declares its own non-virtualization honestly; fails closed on any kernel/TAP/vsock request. Opt-in only; auto-detection never selects it. It is safe *because* it is single-principal — a developer's own code in their own browser sandbox, where the "malicious guest" adversary class does not apply — not because it holds any isolation claim. Promotion to a real, claim-bearing microVM re-materializes the workload from recorded intent through the audited build and admission pipeline; nothing produced in this claims-free tier carries authority into a claim-bearing one. |
+
+**Tier discipline.** Tier 1 is the production default and the only tier
+that carries every numbered claim. Tier 2 backends hold every claim
+except claim 3, which is scoped to the block+ext4 backends. There is no
+Tier 3: a shared-kernel container runtime holds none of the L1–L3
+isolation claims, so mvm ships no container-based backend at any tier.
+
+**Claim-10 coverage.** Claim 10's default-deny egress is enforced at the
+host-side network chokepoint of the two backends that run untrusted
+workloads: Firecracker via nftables default-deny on the TAP, and libkrun
+via the gateway-bridge `PlanFlowPolicy` composed with an always-on
+mandatory deny-egress scan and per-tenant policy/DNS-sinkhole scans. Both
+derive the same posture from the same `NetworkPolicy`. QEMU is
+intentionally excluded, for the reason given in the tier matrix above.
+
+**Deny-all control-plane posture (DHCP/ARP).** A networked guest brings
+up its network interface at boot — link-up, then DHCP, then a static
+fallback — before the agent drops privileges. Under a deny-all policy the
+host-side flow gate drops every egress flow, including DHCP, with no
+control-plane carve-out: deny-all means deny-all. This does not hang the
+guest — the DHCP client exits immediately on no lease and the guest
+self-assigns its static fallback address, so the interface is
+administratively up with no admitted egress. ARP and IPv6 neighbor
+discovery are non-IP link-layer frames the bridge forwards unchanged;
+they reach only the local gateway and admit no IP egress, so they need no
+special handling under deny-all. When the policy admits egress, the flow
+gate opens and DHCP flows normally.
+
+**Verified-boot scoping (claim 3).** dm-verity is block-device-specific:
+it covers the block+ext4 backends — Firecracker and the in-process
+materialize path. A virtiofs root serves a host directory, not a block
+device, so it cannot be dm-verity-sealed; it is a dev/local-tier boot
+mechanism with an explicitly weaker contract (unpack-time per-layer
+SHA-256 verification, then read-only serving from the trusted host, with
+no guest-enforced re-verification) and does not witness claim 3.
+Production, sealed, and every Firecracker tier stay on the block+ext4
+path, where claim 3 holds unchanged.
+
+### Framework references
+
+Each claim named in adversary-technique and defensive-technique
+vocabulary, for cross-reference only — the CI gate above, not the
+framework mapping, is the source of truth.
+
+| # | Adversary technique denied | Defensive technique instantiated |
+|---|---|---|
+| 1 | T1611 (Escape to Host) | Process segmentation, mandatory access control; privilege restriction, segmentation |
+| 2 | T1548 (Abuse Elevation Control), T1068 (Exploitation for Privilege Escalation) | Local file permissions, system call permissions; privilege restriction |
+| 3 | T1542.003 (Bootkit), T1601 (Modify System Image) | System boot verification; substantiated integrity |
+| 4 | T1059 (Command and Scripting Interpreter — surface eliminated, not detected) | Scope reduction by build-time exclusion |
+| 5 | T1190-class (exploit of the host↔guest interface) | Substantiated integrity via fuzzing and `deny_unknown_fields` |
+| 6 | T1195.002 (Compromise Software Supply Chain) | Executable integrity via hash and signature verification |
+| 7 | T1195.001 (Compromise Software Dependencies and Development Tools) | Software composition analysis; substantiated integrity |
+| 8 | T1565 (Data Manipulation), T1574 (Hijack Execution Flow — policy substitution variant) | Authentication, authorization; every launch traces back to a signed, validity-windowed plan |
+| 9 | T1195.002 (image variant), T1565.001 (Stored Data Manipulation) | Authentication, executable integrity; manifest-signed and key_id-pinned trust establishment |
+| 10 | T1071 (Application Layer Protocol — exfiltration channel), T1041 (Exfiltration Over C2 Channel) | Network traffic filtering; deny-all default, egress as explicit opt-in |
+| 11 | T1195.001 (app-layer variant), T1565.001 (deps-volume variant) | Software composition analysis, executable integrity; hash-locked, SBOM- and CVE-scanned, attested sealed volume |
+| 12 | T1574 (capability-granting variant), T1078 (Valid Accounts — unauthorized service invocation) | Authorization; signed binding gate, enforced dispatch, chain-signed audit |
+| 13 | T1078 (unauthorized audit attribution), T1565 (audit-chain variant) | Authentication, authorization; workload-emitted entries chain-signed under a distinct audit category |
+| 15 | T1021 (Remote Services — interactive session into a sealed workload), T1059 (interactive console surface eliminated, not detected) | Scope reduction by build-time exclusion, same family as claim 4 |
+
+### Cold-state guarantee
+
+A workload's runtime state does not survive its own teardown, and the
+next boot on the same host is fresh. This is a structural property of
+the runtime today rather than a single CI-gated claim; promotion to a
+witnessed, numbered claim is pending a machine-checked test. Scope is
+strictly per-workload — one guest is one workload — and this is not a
+claim about hypervisor or DRAM scrubbing, which stays out of scope under
+the trusted-host model.
+
+### Boundary language: Rust by default at the guest control surface
+
+Every binary in the guest's blast radius — init, netinit, the agent, and
+in-boot addons — and every host-side binary that participates in the
+audit chain or signs material is Rust by default, and that default is
+not negotiable case by case.
+
+Before any non-Rust language is considered for boundary code, the lean-Rust
+discipline must be evaluated first: replacing `tokio` with a small
+hand-rolled executor where async ergonomics are not load-bearing,
+replacing `serde_json` with hand-rolled per-variant parsers on a small
+stable wire surface, and replacing broad netlink crates with narrow
+manual netlink for one-shot usage.
+
+A non-Rust language may be proposed for boundary code only when all of
+the following hold: the binary has a narrow, stable ABI surface (a
+netlink-route installer or a vsock diagnostics probe qualify; broad
+protocol stacks like OCI, PGP, or an async runtime do not); the binary
+does not drive the audit chain, which stays single-language by
+construction; and the native language measurably reduces supply-chain
+surface or boundary footprint, evidenced rather than asserted. Any
+adopted non-Rust boundary binary ships side by side with the Rust
+implementation, opt-in by default, until proven across a full release
+cycle before its default flips — and the Rust implementation is removed
+only in a later, separate change after that. There is no non-Rust code at
+the guest control boundary today.
+
+### Browser-reachable surface: verification, not virtualization
+
+mvm virtualizes on real hardware — Firecracker and libkrun over KVM, HVF
+over Hypervisor.framework. It does not run a CPU emulator, so it does not
+pursue "run microVMs in the browser": that capability is incompatible
+with hardware virtualization, and a wasm/emulator backend is the wrong
+shape for the workload-backend trait (kernel path, ext4 rootfs, TAP,
+pause/resume, vsock are nearly all not applicable).
+
+What mvm does grow is a serverless, in-browser *verification* surface for
+its signed artifacts: a dependency-light, wasm-clean leaf crate
+re-implements the audit-chain verifier against an in-memory string and an
+Ed25519 public key, with byte-exact parity to the native verifier pinned
+by a cross-crate test. An operator can verify a downloaded audit log and
+a host signer's public key in a browser tab with nothing leaving the
+page — no host, no backend. Verification cores must be wasm-clean leaf
+crates: no async runtime, no libc, no heavy dependency graph in the
+compiled artifact. A browser-reachable interactive *console* against a
+live microVM remains out of scope for this repository; it is
+fleet-orchestration territory that must keep the console byte-stream and
+its protocol cleanly bridgeable, nothing more.
+
+### Dev-VM mutation boundary
+
+A dev microVM is a mutable work surface only. Its rootfs mutations, ad
+hoc package installs, and dev-lifecycle side effects never implicitly
+flow into a production or sealed build or runtime. A production build may
+depend only on declared inputs: host workspace files and committed
+source, declared config and lockfiles, explicitly mounted host
+directories that are part of the build-input model, and explicitly
+exported or promoted artifacts that re-enter the system through a
+declared input path. "It existed in the dev VM" is never itself a
+promotion mechanism; a dev-produced change that should matter to
+production must cross the boundary as a host workspace edit, an explicit
+export, or a signed artifact re-admitted through a declared input path.
+
+"No SSH in microVMs, ever" is absolute, with no dev-tier carve-out:
+private key files, `~/.ssh/`, known-hosts material, SSH clients, SSH
+servers, SSH config, and any form of host ssh-agent forwarding are never
+copied, mounted, installed, or bridged into any guest template, on any
+tier or run posture. A host ssh-agent socket in particular is never
+forwarded — doing so would hand a guest every key the agent holds,
+bypassing the bound-destination, claim-13/16 secret-substitution model
+this ADR otherwise requires. The sole interactive path into a microVM is
+the console PTY-over-vsock transport on a dev-tier machine (claim 15
+gates it out of sealed production); nothing SSH-shaped exists anywhere in
+this repository. `scripts/check-no-ssh.sh` (CI: `no-ssh-forwarding`) greps
+source for ssh-agent-forwarding identifiers as a regression backstop.
+Every dev-tier hook — writable volumes, dev-lifecycle
+side effects — stays visible in dry-run, admission and audit output, and
+receipts; it is never hidden behind a convenience default.
+
+### Cloud control-plane trust boundary
+
+**Status: proposed, not yet accepted.** A future hosted, multi-tenant
+control plane inverts two of this ADR's own scoping decisions: it owns
+the host (so a malicious host partly re-enters scope from the tenant's
+perspective) and it hosts many tenants on shared infrastructure (so
+multi-tenant guests re-enter scope). The intended shape, recorded here
+for continuity rather than as an accepted decision, is that the cloud
+tier is a strict superset of this ADR's fifteen claims plus a named set
+of multi-tenant claims — cross-tenant isolation with a database-level
+fail-closed backstop, admission under fleet authority, control-plane
+replay resistance, and per-tenant resource bounds — each with its own
+CI-witnessed gate, owned by the sibling fleet-orchestration product's own
+claim catalog. A control that exists but is not on the enforced request
+path with a passing witness counts as absent, not as done. Any client
+surface that can reach both a local, host-authoritative path and a
+remote, fleet-authoritative path must keep the acting authority
+observable and must never let a locally-signed artifact be honored by
+the remote authority, or vice versa.
+
+### Reversible replacement on owned cleartext paths
+
+**Status: proposed, not yet accepted.** Where the runtime owns both sides
+of a cleartext request/response flow, a request-scoped mechanism may
+detect secret- and PII-shaped spans on the outbound leg, replace them
+with opaque tokens, and restore only exact token echoes on the inbound
+leg — never a semantic or paraphrase-aware recovery. This composes with,
+and runs before, the existing one-way redaction and host-side declared-secret
+substitution; its policy travels inside the signed `ExecutionPlan`, and
+every replace/reinject event is recorded as plaintext-free proof metadata
+(flow id, sensitive class, surface, offsets, token id, and keyed digests
+of the original and rewritten bytes) rather than the value itself. This
+reinforces claims 12 and 13 on the egress-delivery path; it does not
+replace either.
+
+## Consequences
+
+### Positive
+
+- The project's security story is fifteen enumerated, CI-enforced claims
+  plus one preview claim, each with a named witness, rather than a single
+  vsock-only assertion resting on unstated layers beneath it.
+- A new contributor gets one document that states what mvm protects
+  against, what it explicitly does not, and how each protection is
+  enforced in the tree today.
+- The per-backend tier matrix makes "which guarantees does *my* run
+  carry" a lookup, not a guess.
+
+### Negative / accepted costs
+
+- The production guest closure carries `setpriv`/`runuser` support for
+  the per-service privilege drop.
+- dm-verity adds a second block device per VM and a small first-boot
+  cost.
+- `cargo-deny` and `cargo-audit` occasionally block a merge on an
+  upstream advisory; that friction is the point, and is accepted.
+- Reversing the per-service uid model would require every guest flake to
+  be re-audited for cross-service file-sharing assumptions built on the
+  old shared group.
+- Reversing verified boot means dropping a numbered claim outright, which
+  itself warrants a superseding decision record rather than a quiet
+  rollback.
+
+### Non-goals
+
+- **Malicious host defense.**
+- **Multi-tenant guests**, at the `mvm` layer.
+- **Hardware-backed key attestation / TPM / measured boot.**
+- **Network policy enforcement inside the dev/test-only QEMU backend.**
+  The `NetworkPolicy` type and the seccomp tier filter network syscalls,
+  but QEMU's start path carries no untrusted workload and is
+  type-excluded from the admitted launch path, so egress enforcement is
+  deliberately not wired there.
+
+## Claims ledger (claim → witness)
+
+<!-- claims-catalog:begin -->
+---
+claim: catalog
+status: Shipped
+gated_phrases: []
+exempt_paths: []
+---
+
+# Conformance claim catalog
+
+The machine-checked map from each numbered security claim (the narrative
+lives in `CLAUDE.md` §"Security model" and `specs/adrs/001-microvm-security-posture.md`)
+to the witnesses that ratify it. `xtask check-claim-catalog` parses the
+table below on every PR and fails when a named witness no longer exists,
+so the claim list cannot silently drift from the tree.
+
+Witness tokens are typed:
+
+- `fn:NAME` — a `fn NAME(` must exist under `crates/` (a test, or the impl
+  symbol the claim exercises).
+- `ci:NAME` — `NAME` must appear in some `.github/workflows/*` file (a job
+  key or lane name).
+
+The witnesses here are a representative anchor per claim, not the full
+test list — enough that a rename or deletion trips the gate. Grounding
+each witness in an *external* authority (vs. a self-referential check) is
+tracked separately as a follow-up audit (see "deferred follow-ups").
+
+| #  | Claim | Witnesses | Authority | Status |
+|----|-------|-----------|-----------|--------|
+| 1  | No host-fs access from a guest beyond explicit shares | fn:seccomp_allows_listed_denies_unlisted, ci:seccomp-functional, fn:validated_conversion_enforces_mount_allow_list, fn:dir_share_two_part_defaults_ro, fn:libkrun_refuses_read_only_virtiofs_share, fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched | seccomp + setpriv (ADR-001 §W2) + user-volume allow-list / ro-default / admission-enforced shares (mvm-cli + mvm-backend) | Shipped |
+| 2  | No guest binary can elevate to uid 0 | fn:set_no_new_privs, fn:virtiofs_mount_flags_keep_workspace_read_only | setpriv --no-new-privs + RO config binds (ADR-001 §W2.2) | Shipped |
+| 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts | dm-verity + roothash on **block+ext4** backends — Firecracker + Option B (ADR-001 §W3, ADR-106); virtiofs-root is a dev-tier path with a weaker contract that does **not** witness this claim (ADR-107) | Shipped |
+| 4  | The guest agent has no do_exec in production builds | ci:prod-agent-runentry-contract | ELF symbol contract (ADR-001 §W4.3) | Shipped |
+| 5  | Vsock framing + supervisor-config JSON are fuzzed | ci:fuzz | cargo-fuzz (ADR-001 §W4.1/W4.2) | Shipped |
+| 6  | The pre-built dev image is hash-verified | ci:hash-verify-tests, fn:download_runtime_overlay_rejects_checksum_mismatch | SHA-256 manifest (ADR-001 §W5.1) | Shipped |
+| 7  | Cargo deps are audited on every PR | ci:cargo-deny, ci:cargo-audit, ci:reproducibility | RUSTSEC + deny.toml (ADR-001 §W5.2/W5.3) | Shipped |
+| 8  | Every workload runs from a signed, audited ExecutionPlan | fn:synthesize_plan, fn:admit_for_run, fn:verify_audit_chain | Ed25519 + chain-signed audit log (ADR-014) | Shipped |
+| 9  | Every published bundle is content-addressed and re-verified | fn:read_and_verify_bundle, fn:verify_plan_bundle | SHA-256 content-addressing (Sprint 52 W2) | Shipped |
+| 10 | No untrusted workload reaches the network unless policy-admitted | fn:policy_default_is_deny_all, fn:run_net_default_is_deny_all | default-deny network policy (Sprint 52 W3) | Shipped |
+| 11 | Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated | ci:app-deps-audit, fn:verify_sealed_volume, fn:apply_install_gate | CycloneDX + pip-audit (ADR-047) | Shipped |
+| 12 | Every host-side service binding is plan-gated and audited | fn:unbound_service_returns_not_bound, fn:service_call_rejects_unknown_envelope_fields | ExecutionPlan.services binding (ADR-020) | Shipped |
+| 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-023) | Shipped |
+| 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md) | Shipped |
+| 15 | No interactive access to a sealed production microVM | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + dev-shell-gated agent (Plan 165 WS-C, ADR-001 §W4.3 extension) | Shipped |
+| 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
+
+Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
+it is registered here for witness machine-checking and tracked by its own doc
+(`claim-egress-no-secret-to-guest.md`) at status `Preview`; promotion to a
+numbered claim in ADR-001's source-of-truth table is a separate maintainer
+decision. It does not restate or replace the broker rows 12/13 — those are the
+shipped broker delivery; row 16 backs the same two invariants on the egress
+substitution path.
+
+**Claim 3 backend scoping (ADR-107).** Claim 3's witness, dm-verity, is
+block-device-specific: it ratifies the claim on the **block+ext4** backends
+— Firecracker and the in-process Option B materialize path (ADR-106). A
+**virtiofs root** (Plan 221 Option A) serves a host directory, not a block
+device, so it cannot be dm-verity-sealed. Per ADR-107, virtiofs-root is a
+dev/local-tier boot mechanism carrying an explicitly weaker contract
+(unpack-time per-layer sha256 + read-only serving from the trusted host, no
+guest-enforced plan-bound re-verification); it does **not** witness claim 3.
+Prod / sealed / `--prod` workloads — and Firecracker on every tier — stay on
+Option B, where claim 3 holds unchanged. No numbered claim is weakened; this
+note only scopes which backends the existing witness covers.
+
+## Maintaining this catalog
+
+- Adding a claim: append a row with the next number (the gate enforces a
+  contiguous `1..=N`) and at least one resolvable witness.
+- Renaming a witnessed test/fn or CI lane: update the row in the same PR,
+  or the gate goes red.
+- The `Status` column accepts `Shipped` / `Preview` / `Planned` /
+  `Not-claimed`, matching `check-no-overclaim`'s status vocabulary.
+
+## Deferred follow-ups
+
+- [ ] Audit each witness for *external-authority* grounding (assert against
+  a reference implementation / oracle rather than the code's own output);
+  record gaps in the Authority column. Becomes its own
+  `specs/plans/<N>-claim-witness-authority-audit.md`.
+- [ ] For any witness found to be self-referential, file a follow-up to add
+  a reference oracle.
+<!-- claims-catalog:end -->
+
+## Appendix: Compliance mapping
+
+The default postures below are decided; the requirement-by-requirement
+control mapping for each framework is a living work item tracked outside
+this ADR, not restated here as an exhaustive checklist.
+
+**GDPR.** Default posture is data-minimization-by-default. The concrete
+technical primitives this ADR and its sibling architecture provide toward
+GDPR obligations are: a PII redactor that reduces what reaches any log or
+audit entry; signed, exportable audit and snapshot bundles that support
+data-portability requests; default-deny network egress and
+encryption-everywhere as the "protection by design and by default"
+posture; and an overlay-erasure primitive signed by the host identity key
+that the fleet-orchestration layer's tenant-deprovisioning flow invokes
+for right-to-erasure. Cross-border transfer and breach-notification
+timelines are operational properties of a deployment, owned by whoever
+operates the fleet, not by this library.
+
+**HIPAA.** Default posture requires a signed agreement with any customer
+storing protected health information before that data enters the system;
+HIPAA compliance is a property of a deployment, not of this library by
+itself. The technical safeguards this ADR maps to are: per-VM identity
+keys and per-tenant signing keys for unique identification; the
+chain-signed audit log for the audit-controls requirement; dm-verity
+rootfs integrity and audit-chain HMAC for the integrity requirement; and
+encrypted transport with forward-secret session keys for the transmission
+security requirement. Administrative and physical safeguards are
+operational, owned by the deployer.
+
+**PCI DSS.** Default posture is scope reduction: mvm and its
+fleet-orchestration sibling do not handle cardholder data, and any
+customer who routes cardholder data through a workload takes on their own
+PCI compliance burden without assistance or certification from this
+project. An opt-in, stricter-defaults profile is available for the rare
+customer who insists on processing cardholder data inside a workload
+(mandatory volume encryption, no shared infrastructure across tenants, a
+mandatory egress proxy with data-loss-prevention rules, extended audit
+retention), but the project does not certify that profile — the customer
+retains end-to-end PCI responsibility.
+
+**SOC 2.** Every SOC 2 Trust Services Criterion this ADR bears on maps to
+a concrete artifact already described above: encryption layers and
+default-deny egress for the Control Activities criterion; the chain-signed
+audit log and its total-coverage test for Monitoring; attestation and
+per-tenant signing keys for Logical Access; the ADR/claim-catalog
+discipline itself for Change Management; and the PII redactor for
+Privacy. Availability, processing-integrity, and confidentiality
+commitments beyond what is stated as a numbered claim above are
+operational SLOs, not architectural decisions, and are tracked
+separately.
+
+## Appendix: Cardoso minimum-viable-policy checklist
+
+Maps a widely-cited five-bullet minimum-viable sandbox policy to mvm's
+claims.
+
+| Minimum-viable-policy bullet | mvm status | Backing claim(s) |
+|---|---|---|
+| Default-deny outbound, then allowlist (or policy proxy) | pass | claim 10 |
+| No long-lived credentials; short-lived scoped tokens | pass | claim 8 + claim 13 |
+| Workspace-only filesystem; no host mounts beyond explicit shares | pass | claim 1 |
+| Resource limits: CPU / memory / disk / timeouts / PIDs | partial | CPU, memory, and disk are enforced; `ExecutionPlan.resources` is scaffolded for timeout and PID-limit fields, which are not yet populated |
+| Observability — log process tree, network egress, failures | pass | claim 8 + claim 10 + claim 12 |
+
+**Beyond this minimum.** Properties mvm enforces beyond the five-bullet
+floor: hermetic builds where the host environment never influences an
+artifact; signed, admission-checked execution plans (claim 8); signed,
+re-verified, content-addressed bundles (claim 9); hash-locked,
+SBOM-bound, CVE-scanned, attested dependency volumes (claim 11); a
+dm-verity rootfs that panics on tamper (claim 3); reproducible host-code
+builds (claim 7); a production guest agent that ships without `do_exec`
+(claim 4); binding-gated, audited host-service dispatch (claim 12); and
+no raw secret crossing the broker channel (claim 13).
+
+**Three questions.**
+
+| Question | mvm answer |
+|---|---|
+| What is shared between this code and the host? | KVM ioctls on Linux; Hypervisor.framework calls on macOS; vsock for the control plane and binding-gated brokered host services (claim 12); one explicit virtio-fs share per declared mount. The host filesystem is never ambient. |
+| What can the code touch? | Whatever the signed `ExecutionPlan` admits: declared shares, a declared egress allowlist (claim 10), declared volumes, declared brokered services (claim 12 binding). No raw devices, no host process namespace, no host network namespace. |
+| What survives between runs? | Only volumes the plan declares persistent; sealed dependency volumes are read-only and hash-locked (claim 11). Everything else is ephemeral by default. |
+
+## Appendix: Threat model — host services broker over vsock
+
+The host services broker exposes a small set of host-side services to a
+guest workload over vsock, gated by the signed plan's service bindings
+(claim 12) and never returning a raw secret (claim 13). This appendix is
+the structured threat enumeration for that surface.
+
+**In scope.** The broker subprocesses and their per-VM lifecycle; the
+vsock channel between the guest microVM and the host subprocesses; the
+per-VM local IPC channels between the supervisor and each subprocess; the
+cross-VM path from the supervisor to a fleet-orchestration agent; the
+`ExecutionPlan.services` admission ceremony and the audit entries it
+generates.
+
+**Out of scope**, per this ADR's own scoping: physical attacks on the
+host; multi-tenant guests; hardware-backed key attestation of the
+workload itself; vulnerabilities in a third-party hypervisor's vsock
+implementation, which are dependency-CVE-managed rather than reviewed
+here (the in-house HVF backend's vsock implementation is not a
+third-party dependency, so it is in-scope for review here).
+
+**Adversary classes.**
+
+| Class | Description | Capabilities |
+|---|---|---|
+| G — hostile guest | A workload running inside a microVM; the primary adversary. Full control over guest userspace; cannot escape the VM. | Sends arbitrary bytes to the broker's vsock ports; receives responses; observes timing. |
+| N — hostile network peer | A network attacker between the supervisor and a remote fleet-orchestration agent. | Observes and tampers with network traffic, mitigated by identity pinning and TLS. |
+| I — software insider | An unauthorized human with shell access to the host as some Unix user. In scope for logical (not physical) attacks. | Executes arbitrary code on the host; cannot escalate to root if not already root; cannot perform physical attacks. |
+
+**Cross-cutting threats and mitigations.**
+
+| ID | STRIDE | Adv. | Threat | Mitigation |
+|---|---|---|---|---|
+| X-S1 | Spoofing | G | Guest spoofs another workload's session by forging a session id | `AuthenticatedFrame` signature verification under a per-workload session key minted at admission and discarded at workload stop |
+| X-S2 | Spoofing | I | Insider runs a fake broker subprocess binary | Cosign-verify at spawn; TOCTOU-resistant verify-then-exec; subprocess config signed under the release key |
+| X-T1 | Tampering | I | Insider tampers with the audit chain on disk | Append-only file descriptor held by the audit-signing subprocess; a persisted chain head is independently verified; per-tenant encryption at rest |
+| X-T2 | Tampering | I | Insider tampers with the host signer key on disk | On enclave-equipped hosts the key never leaves the enclave; on non-enclave hosts the key file is mode 0600, immutable once written, and rollback-detected by a monotonic counter |
+| X-R1 | Repudiation | G | Guest denies having made a call | Every dispatch, allowed or denied, emits a chain-signed audit entry with the service, verb, outcome, and correlation id |
+| X-I1 | Information disclosure | G | Guest reads another workload's local IPC socket | Per-VM socket paths under a supervisor-owned directory, mode 0600 |
+| X-I2 | Information disclosure | G | Guest infers state from response timing | A latency floor pads responses for the sensitive service class; a per-workload call-rate budget escalates to an audited abuse signal |
+| X-I3 | Information disclosure | I | Insider reads audit log contents | Per-tenant authenticated encryption at rest |
+| X-I4 | Information disclosure | I | Insider reads in-memory secrets from a running subprocess | Per-workload cgroup and namespace isolation; secret-bearing pages are memory-locked; anti-debug and dumpable-flag hardening; a seccomp filter denies cross-process memory reads |
+| X-D1 | Denial of service | G | Guest floods the broker to exhaust CPU or memory | Per-service token bucket, in-flight cap, lifetime quota, per-workload CPU and memory budgets, bounded receive queue |
+| X-D2 | Denial of service | G | Guest forces a subprocess restart loop | A restart cap per workload lifetime; beyond it, an audited crash signal and workload pause |
+| X-E1 | Elevation of privilege | G | Guest exploits a parser bug in the schema gate | Frame size cap enforced before parse, bounded recursion, a parse timeout, and a fuzzed parser; the subprocess's address space is fully isolated from the supervisor's |
+| X-E2 | Elevation of privilege | G | Guest exploits a logic bug to call an unbound service | The binding gate refuses; covered by a dedicated regression test |
+| X-E4 | Elevation of privilege | G | Guest triggers a memory-safety bug in the general broker to pivot into the secrets-handling subprocess | Architecturally impossible: the broker subprocesses share zero address space |
+
+**Per-service notes.** The workload-emitted audit service refuses an
+entry whose asserted workload id does not match the caller's
+supervisor-assigned id, and tags workload-emitted entries under a
+distinct audit category so they are never mistaken for a supervisor-asserted
+entry; per-record and per-batch size and rate caps bound the amount of
+audit noise a guest can inject. The introspection service returns only a
+workload's own bound service set, so an unbound service is invisible to
+probing.
+
+**Residual risk, named and accepted.** A non-enclave host retains a
+trust-on-first-use posture for the host signer key until hardware-enclave
+support lands; `mvmctl doctor` surfaces this as a downgrade. All
+workloads on a host share one audit-signing subprocess per VM, so a
+defect there affects that workload's whole audit stream — mitigated by
+keeping that subprocess minimal and security-reviewed. The host signer is
+a single point of admission availability; loss of the key means no plan
+can be admitted, with no recovery path today.
+
+## References
+
+- `specs/adrs/007-vmbackend-single-trait.md` — the `VmBackend` trait
+  boundary this ADR's tier matrix depends on; the `WorkloadBackend`
+  marker trait that type-enforces the QEMU carve-out above is defined in
+  `crates/mvm-backend/src/workload_backend.rs`.
+- `specs/adrs/014-signed-audited-execution-plans.md` — claim 8's signing
+  and admission mechanics.
+- `specs/adrs/020-host-services-broker.md` — claims 12 and 13's broker
+  architecture, and the resident-daemon trust-gradient ledger.
+- `specs/adrs/021-pid0-portability-boundary.md` — the guest control
+  surface the boundary-language decision above governs.
+- `specs/adrs/023-secrets-subsystem-egress-substitution.md` — the
+  substitution mechanism behind claim 13 and preview claim 16.
+- `specs/adrs/024-wasm-sandbox-backend.md` — the `wasm-sandbox` backend's
+  own decision record.
+- `CLAUDE.md` §"Security model" — the narrative summary kept in lockstep
+  with the claims ledger above.

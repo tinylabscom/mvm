@@ -105,7 +105,7 @@ pub(crate) fn boot_builder_vsock(
         },
         "vsock": {
             "vsock_id": "vsock0",
-            "guest_cid": mvm_guest::vsock::GUEST_CID,
+            "guest_cid": mvm_agentd::vsock::GUEST_CID,
             "uds_path": vsock_uds,
         }
     });

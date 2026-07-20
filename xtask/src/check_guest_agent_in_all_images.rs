@@ -54,7 +54,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     if !missing.is_empty() {
         bail!(
             "check-guest-agent-in-all-images: a bootable image's launch path no longer forks \
-             mvm-guest-agent (ADR-066 §6 universal-agent invariant):\n  - {}\n\
+             mvm-guest-agent (ADR-022 §6 universal-agent invariant):\n  - {}\n\
              Every VM type (workload, dev, builder) must run the agent — restore the fork or \
              update this gate's marker if the launch mechanism was deliberately rewritten.",
             missing.join("\n  - ")

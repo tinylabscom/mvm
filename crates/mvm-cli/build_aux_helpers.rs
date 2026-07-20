@@ -34,14 +34,14 @@ pub(crate) fn aux_helper_specs(
     ];
     if target_os == "macos" && target_arch == "aarch64" {
         specs.push(AuxHelperSpec {
-            package: "mvm-vm-host",
+            package: "mvm-hostd",
             bin: "mvm-hvf-supervisor",
             features: &[],
         });
     }
     if libkrun_present {
         specs.push(AuxHelperSpec {
-            package: "mvm-vm-host",
+            package: "mvm-hostd",
             bin: "mvm-libkrun-supervisor",
             features: &["libkrun-sys"],
         });

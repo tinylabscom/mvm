@@ -10,6 +10,15 @@
 /// daemon and to localhost are not themselves routed through the broker.
 pub const NO_PROXY_LOOPBACK: &str = "localhost,127.0.0.1,::1";
 
+/// Loopback listen address of the in-guest egress proxy. The cooperative
+/// workload's proxy environment (built by [`proxy_env_vars`]) points here, and
+/// the in-guest proxy daemon binds it. Callers that must name a scheme dial
+/// [`DEFAULT_EGRESS_PROXY_URL`] instead.
+pub const DEFAULT_EGRESS_PROXY_LISTEN: &str = "127.0.0.1:1080";
+/// SOCKS5h URL form of [`DEFAULT_EGRESS_PROXY_LISTEN`], used where a workload's
+/// `ALL_PROXY` / `HTTP_PROXY` must carry a scheme.
+pub const DEFAULT_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
+
 /// Build the standard proxy environment for a cooperative app, pointing it at
 /// the in-guest `mvm-netd` proxy at `proxy_addr` (e.g. `127.0.0.1:3128`). Both
 /// upper- and lower-case variants are emitted because tooling is inconsistent
@@ -54,6 +63,14 @@ mod tests {
         let no_proxy = env.get("NO_PROXY").map(String::as_str).unwrap_or_default();
         assert!(no_proxy.contains("127.0.0.1"));
         assert!(no_proxy.contains("localhost"));
+    }
+
+    #[test]
+    fn socks5h_url_wraps_the_listen_addr() {
+        assert_eq!(
+            DEFAULT_EGRESS_PROXY_URL,
+            format!("socks5h://{DEFAULT_EGRESS_PROXY_LISTEN}")
+        );
     }
 
     #[test]

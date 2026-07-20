@@ -3,20 +3,36 @@
 //! Asserts the trust-gradient ledger stays true: tier ranks strictly decrease
 //! down the layers, the workload row forbids the host-only authorities, and
 //! every named witness still exists in the tree.
+//!
+//! The ledger lives embedded in
+//! `specs/adrs/020-host-services-broker.md` (folded in from the former
+//! standalone resident-daemon-trust-gradient doc during an ADR
+//! consolidation pass), between the `<!-- trust-gradient:begin -->` /
+//! `<!-- trust-gradient:end -->` markers — scoping to that region keeps
+//! the rest of the ADR's prose and tables from ever being mistaken for
+//! ledger rows.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 const REQUIRED_WORKLOAD_FORBIDDEN: [&str; 3] = ["signing-key", "plan-admission", "audit-writer"];
+const BEGIN_MARKER: &str = "<!-- trust-gradient:begin -->";
+const END_MARKER: &str = "<!-- trust-gradient:end -->";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let path = workspace
         .join("specs")
-        .join("claims")
-        .join("trust-gradient.md");
+        .join("adrs")
+        .join("020-host-services-broker.md");
     let source =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let rows = parse_rows(&source).with_context(|| format!("parsing {}", path.display()))?;
+    let ledger = extract_ledger_section(&source).with_context(|| {
+        format!(
+            "locating the trust-gradient ledger between `{BEGIN_MARKER}` and `{END_MARKER}` in {}",
+            path.display()
+        )
+    })?;
+    let rows = parse_rows(ledger).with_context(|| format!("parsing {}", path.display()))?;
 
     let mut errors: Vec<String> = Vec::new();
     structural_checks(&rows, &mut errors);
@@ -37,12 +53,25 @@ pub fn run(workspace: &Path) -> Result<()> {
             eprintln!("[error] {e}");
         }
         bail!(
-            "check-trust-gradient: {} problem(s) in specs/claims/trust-gradient.md",
+            "check-trust-gradient: {} problem(s) in the trust-gradient ledger \
+             (specs/adrs/020-host-services-broker.md)",
             errors.len()
         );
     }
     eprintln!("check-trust-gradient: clean ({} rows)", rows.len());
     Ok(())
+}
+
+/// Slice out the text strictly between `BEGIN_MARKER` and `END_MARKER`.
+fn extract_ledger_section(source: &str) -> Result<&str> {
+    let start = source
+        .find(BEGIN_MARKER)
+        .ok_or_else(|| anyhow::anyhow!("begin marker not found"))?
+        + BEGIN_MARKER.len();
+    let end = source[start..]
+        .find(END_MARKER)
+        .ok_or_else(|| anyhow::anyhow!("end marker not found"))?;
+    Ok(&source[start..start + end])
 }
 
 pub(crate) struct Row {
@@ -195,6 +224,17 @@ mod tests {
         let mut errs = Vec::new();
         structural_checks(&rows(md), &mut errs);
         assert!(errs.iter().any(|e| e.contains("monotonic")), "{errs:?}");
+    }
+
+    #[test]
+    fn extract_ledger_section_slices_between_markers() {
+        let source = "prose\n\n<!-- trust-gradient:begin -->\nTABLE HERE\n<!-- trust-gradient:end -->\n\nmore\n";
+        assert_eq!(extract_ledger_section(source).unwrap(), "\nTABLE HERE\n");
+    }
+
+    #[test]
+    fn extract_ledger_section_errors_without_markers() {
+        assert!(extract_ledger_section("no markers here").is_err());
     }
 
     #[test]

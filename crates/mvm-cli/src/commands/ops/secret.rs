@@ -43,7 +43,7 @@ use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_core::plan::TenantId;
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
-use mvm_ir::{AuthType, Sigv4Params};
+use mvm_protocol::ir::{AuthType, Sigv4Params};
 use secrecy::SecretBox;
 
 use mvm_core::user_config::MvmConfig;
@@ -146,7 +146,7 @@ pub(in crate::commands) enum SecretAction {
     },
 }
 
-/// Clap mirror of [`mvm_ir::AuthType`] — kept local so the CLI owns
+/// Clap mirror of [`mvm_protocol::ir::AuthType`] — kept local so the CLI owns
 /// the clap dependency and `mvm-sdk` (a build-time crate) does not.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::commands) enum AuthTypeArg {
@@ -496,9 +496,9 @@ pub(crate) struct AuditLog {
 
 impl AuditLog {
     pub(crate) fn default() -> Result<Self> {
-        // No `$HOME` → no-op log (CI sandboxes, daemons without a home
-        // dir). MVM_DATA_DIR is honored by mvm_audit_dir when set.
-        if std::env::var_os("HOME").is_none() && std::env::var_os("MVM_DATA_DIR").is_none() {
+        // No resolvable home root → no-op log (CI sandboxes, daemons
+        // without a home dir).
+        if mvm_core::config::mvm_home_strict().is_err() {
             return Ok(Self {
                 path: None,
                 recorder: None,

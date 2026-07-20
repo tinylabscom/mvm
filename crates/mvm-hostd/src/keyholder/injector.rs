@@ -10,7 +10,7 @@
 //! claim 12: the destination allow-list is checked **before** the value is
 //! resolved, so an out-of-policy request never triggers a decrypt.
 
-use mvm_ir::{AuthType, SecretRef, host_matches};
+use mvm_protocol::ir::{AuthType, SecretRef, host_matches};
 use secrecy::ExposeSecret;
 use zeroize::Zeroizing;
 
@@ -80,7 +80,7 @@ mod tests {
     use super::*;
     use crate::keyholder::LocalResolver;
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_ir::SecretMount;
+    use mvm_protocol::ir::SecretMount;
     use secrecy::SecretBox;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};

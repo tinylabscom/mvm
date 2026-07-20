@@ -11,7 +11,7 @@ fn main() {
         // script should handle signing.
         //
         // To auto-sign during development:
-        //   cargo build && codesign --force --sign - --entitlements resources/mvmctl.entitlements target/debug/mvmctl
-        println!("cargo:rustc-env=MVM_ENTITLEMENTS=resources/mvmctl.entitlements");
+        //   cargo build && codesign --force --sign - --entitlements assets/mvmctl.entitlements target/debug/mvmctl
+        println!("cargo:rustc-env=MVM_ENTITLEMENTS=assets/mvmctl.entitlements");
     }
 }

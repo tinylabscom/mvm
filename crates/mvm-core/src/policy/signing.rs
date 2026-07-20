@@ -93,9 +93,9 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             bundle_id: PolicyId("01HXBUNDLE0000000000000000".to_string()),
             bundle_version: 1,
-            network: NetworkPolicy {
+            network: BundleNetworkPolicy {
                 preset: Some("agent".to_string()),
-                ..NetworkPolicy::default()
+                ..BundleNetworkPolicy::default()
             },
             egress: EgressPolicy {
                 mode: Some("l3_plus_l7".to_string()),

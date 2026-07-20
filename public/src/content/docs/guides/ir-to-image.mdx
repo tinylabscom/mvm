@@ -86,7 +86,7 @@ The IR is canonicalized to **RFC 8785** (keys sorted, no whitespace, determinist
 - `crates/mvm-ir/src/canonicalize.rs` — produces the canonical byte sequence
 - `crates/mvm-ir/src/hash.rs` — `ir_hash()` returns the lowercase-hex SHA-256
 
-Two semantically equivalent IRs (different field order, different whitespace) **must** produce the same hash. The hash is what binds an IR to a launch plan and to an audit-chain entry (ADR-002 claim 8). If you change a workload's IR, its hash changes; if you change anything else, it does not.
+Two semantically equivalent IRs (different field order, different whitespace) **must** produce the same hash. The hash is what binds an IR to a launch plan and to an audit-chain entry (ADR-001 claim 8). If you change a workload's IR, its hash changes; if you change anything else, it does not.
 
 ### Validation
 
@@ -259,7 +259,7 @@ What it provides:
 
 - **Firecracker kernel** (`vmlinux`)
 - **Busybox-as-PID-1 init** — under-5-second cold boot, no systemd
-- **Guest agent** — Rust binary built from `mvm-src`, communicates over vsock (ADR-002 W4.1, W6.1.2). In production builds, the `do_exec` symbol is gated out of the agent (CI claim 4); the `dev-shell` feature flag enables it for dev images only.
+- **Guest agent** — Rust binary built from `mvm-src`, communicates over vsock (ADR-001 W4.1, W6.1.2). In production builds, the `do_exec` symbol is gated out of the agent (CI claim 4); the `dev-shell` feature flag enables it for dev images only.
 - **Networking** — `eth0` configured via kernel boot args, NAT to host
 - **Privilege model** — PID 1 runs as uid 0 (kernel requirement); the entrypoint and agent run rootless (uid 1000 in prod, uid 0 in dev for the dev shell)
 - **Hardening** — `setpriv --no-new-privs` (W2.3), seccomp `standard` (W2.4), per-service uids (W2.1), read-only `/etc` overlay (W2.2), dm-verity verified boot (W3)

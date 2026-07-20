@@ -297,12 +297,12 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use mvm_core::plan::{
-        AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuthPolicy,
-        FsPolicyRef, KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle,
-        Resources, RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,
+        AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
+        KeyRotationSpec, Nonce, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
+        RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,
     };
     use mvm_core::policy::{
-        AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
+        AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy, ToolPolicy,
     };
     use std::collections::BTreeMap;
 
@@ -339,7 +339,6 @@ mod tests {
             network_policy: PolicyRef("n".to_string()),
             fs_policy: FsPolicyRef("f".to_string()),
             secrets: vec![],
-            auth: AuthPolicy::none(),
             egress_policy: PolicyRef("e".to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
@@ -375,7 +374,7 @@ mod tests {
             schema_version: 1,
             bundle_id: PolicyId("bundle-y".to_string()),
             bundle_version: 3,
-            network: NetworkPolicy::default(),
+            network: BundleNetworkPolicy::default(),
             egress: EgressPolicy::default(),
             pii: PiiPolicy::default(),
             tool: ToolPolicy::default(),

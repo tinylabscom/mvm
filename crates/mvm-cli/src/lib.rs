@@ -10,6 +10,8 @@ pub mod host_binaries;
 pub mod http;
 pub mod json_out;
 pub mod logging;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod metrics_server;
 pub mod shell_init;
 pub mod signal;

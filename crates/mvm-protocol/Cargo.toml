@@ -1,0 +1,65 @@
+[package]
+name = "mvm-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "no_std + alloc core for mvm: audit-log verifier (and, incrementally, the Workload IR + wire protocol + policy DTOs). The wasm/browser-capable foundation."
+
+[dependencies]
+# All no_std + alloc — pinned directly (not `workspace = true`) because
+# the workspace-level entries for these carry default features (or
+# a hardcoded `std` feature) that a member can't override away. Versions
+# match the workspace's resolved versions so Cargo still unifies on one
+# copy of each.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# `DateTime<Utc>`'s serde impl emits/parses RFC-3339 identically under
+# `std` and `no_std` — the `clock` feature only gates `Utc::now()`
+# (wall-clock reads), never serialization — so plan DTOs keep their
+# `DateTime<Utc>` fields byte-identical across the move.
+chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
+ed25519-dalek = { version = "3", default-features = false }
+# Only under the `schema` feature (IR JSON-Schema codegen for
+# `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins). schemars 0.8's
+# derive macro emits `std::`-rooted paths unconditionally, so it can't
+# build under `no_std` at all — optional + off by default keeps the
+# wasm32 build (which uses only this crate's own default features)
+# schemars-free. Mirrors `mvm-core`/`mvm-agentd`'s `schema` feature.
+# `chrono` gives schemars its `impl JsonSchema for DateTime<Utc>` bridge —
+# `VerbGrant::not_after` needs it under this feature the same way
+# `mvm-core`'s schemars dep already carries it.
+schemars = { version = "0.8", default-features = false, features = ["derive", "chrono"], optional = true }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.11", default-features = false }
+# `core::error::Error` (stable since 1.81) behind the default `std`
+# feature — the moved plan DTO error enums derive `thiserror::Error`
+# under `no_std` this way.
+thiserror = { version = "2", default-features = false }
+
+# Test-only; std-based, so it can't join [dependencies] on a no_std lib —
+# but dev-dependencies never link into the wasm32 lib-only build, so the
+# gate stays clean. Exercises the TOML round-trip the bundle-authoring
+# path (mvm-core's toml_loader) relies on.
+[dev-dependencies]
+toml.workspace = true
+# Re-declaring chrono here (feature-unified with the no_std `[dependencies]`
+# entry above, for this crate's own test builds only) turns on `clock` so
+# `mod tests` can call `Utc::now()`. Dev-dependencies never join the
+# wasm32-unknown-unknown lib build, so the wasm-clean gate stays chrono
+# clock-free.
+chrono = { version = "0.4", features = ["clock"] }
+
+[features]
+default = []
+# Derive `schemars::JsonSchema` on the Workload IR types so
+# `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins can emit the IR's
+# JSON Schema. Off by default: the schema is a build-time codegen
+# input, never linked into the wasm-clean verifier build.
+schema = ["dep:schemars"]
+
+[lints]
+workspace = true

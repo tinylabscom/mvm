@@ -9,7 +9,7 @@ use super::{BackendBuildResult, BackendParams, BuilderBackend};
 use crate::nix_manifest::NixManifest;
 use crate::scripts::render_script;
 
-/// Host backend: runs `nix build` directly on the host (Lima VM or bare metal).
+/// Host backend: runs `nix build` directly on the host machine.
 ///
 /// No Firecracker builder VM is needed. This is faster and avoids the networking
 /// complexity of FC-based builds while still producing the same artifacts

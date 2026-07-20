@@ -1,45 +1,29 @@
 [workspace]
 members = [
     "crates/mvm-core",
-    "crates/mvm-deps-audit",
-    "crates/mvm-ir",
-    "crates/mvm-storage",
     # plan 123 Phase A — NetworkProvider trait + provisioning/policy seam.
-    # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-backend
+    # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-runtime
     # (where the in-VM shell lives) and the WireGuard/Tailscale mesh impl is
     # mvmd's; both register against this trait.
-    "crates/mvm-network",
+    "crates/mvm-net",
     "crates/deps/libkrun-sys",
-    # Plan 102 W6.A.5 — leaf bin crate that links mvm-libkrun + mvm-
-    # supervisor without closing the
-    # `mvm-supervisor → mvm-backend → mvm-libkrun` cycle. Produces the
-    # `mvm-libkrun-supervisor` binary that mvm-backend's spawner
-    # resolves at runtime.
-    # Plan 97 Phase B — type-safe `SupervisorConfig` + path resolution
-    # for the Rust-native `mvm-vz-supervisor` bin. Pure data; no FFI.
-    # Parallel role to `mvm-libkrun` for the Vz backend.
-    "crates/mvm-backend",
-    "crates/mvm",
+    "crates/mvm-runtime",
     "crates/mvm-build",
-    "crates/mvm-guest",
+    "crates/mvm-agentd",
     "crates/mvm-cli",
     "crates/mvm-hostd",
-    "crates/mvm-vm-host",
-    "crates/mvm-guest-helpers",
     # C-ABI veneer over the in-guest host-services broker clients. One
     # JSON-in/JSON-out cdylib every language SDK loads through a thin FFI
     # shim, so adding a language carries no new Rust binding code.
     "crates/mvm-host-services-ffi",
     "crates/mvm-client",
-    "crates/mvm-mcp",
     # plan 74 W1 — OCI image distribution client (registry resolution,
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
     # verity generation land in subsequent W1 PRs). Anonymous-only at
     # W1.1; private auth lands later behind the credential redaction
-    # contract from ADR-049. mvmd consumes this crate as a library per
-    # ADR-048 §"Runtime Ownership" — keep its dep closure small.
-    "crates/mvm-oci",
-    "crates/mvm-ext4",
+    # contract from ADR-023. mvmd consumes this crate as a library per
+    # ADR-014 §"Runtime Ownership" — keep its dep closure small.
+    "crates/mvm-fs",
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at
     # runtime; the crate compiles on macOS / Windows as an inert
     # binary so workspace builds stay green for non-Linux contributors.
@@ -51,33 +35,35 @@ members = [
     # and loopback TCP to host-vsock bridge. Distributed service mesh,
     # tenant policy, and cryptographic routing belong in mvmd.
     # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
-    # mvm-sdk is the builder surface and re-exports the canonical
-    # Workload IR from `mvm-ir` as `mvm_sdk::ir`. The mvm-sdk-macros proc-macro crate
-    # was removed (Plan 199 C) as an orphaned empty placeholder — re-add
-    # it when the `#[mvm::function]`/`#[mvm::image]`/… bodies actually land.
+    # mvm-sdk is the builder surface; the canonical Workload IR now
+    # lives in the no_std foundation crate `mvm-protocol` and is
+    # re-exported here unchanged as `mvm_sdk::ir`. The mvm-sdk-macros
+    # proc-macro crate was removed (Plan 199 C) as an orphaned empty
+    # placeholder — re-add it when the
+    # `#[mvm::function]`/`#[mvm::image]`/… bodies actually land.
     "crates/mvm-sdk",
     # Plan 104 W1a — host services broker subprocess (one of three
     # per-VM subprocesses: mvm-broker, mvm-host-signer,
-    # mvm-audit-signer; ADR-062 dropped mvm-secrets-dispatcher). W1a
+    # mvm-audit-signer; ADR-020 dropped mvm-secrets-dispatcher). W1a
     # ships the dispatch-loop skeleton + UDS listener + config
-    # envelope for the general broker subprocess only. ADR-061 /
-    # ADR-062 / Plan 104 §"Host-side: three-subprocess architecture".
+    # envelope for the general broker subprocess only. ADR-020 /
+    # Plan 104 §"Host-side: three-subprocess architecture".
     # Plan 104 W1b.1 — the remaining two key subprocesses, each as
     # its own crate. The supervisor lifecycle + cosign-verify +
     # cgroup + seccomp + binary hardening land in W1b.2.
-    # Plan 113 / ADR-064 §Decision 5 — A2 confinement helper wrapping
+    # Plan 113 / ADR-003 §Decision 5 — A2 confinement helper wrapping
     # seccompiler 0.5 + landlock 0.4. Called by the per-VM
     # `mvm-bridge` sidecar just after startup so
     # the kernel-LSM ruleset + seccomp filter are installed before the
     # packet loop touches untrusted bytes. Linux-only at runtime; the
     # crate compiles as inert stubs on macOS / Windows so workspace
     # builds stay green for non-Linux contributors.
-    # Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary (legacy
+    # Plan 113 §Task 10 / ADR-003 — per-VM Vz drainer binary (legacy
     # NDJSON ingest path; superseded by the Rust supervisor's in-process
     # Vz gateway-compat splice, retained pending a dead-code sweep). Threads the
     # `FlowEventWire` stream through the chain-signing audit pipeline.
     # Parallel role to `mvm-libkrun-supervisor` for the Vz backend.
-    # Plan 113 §Task 12 / ADR-064 — per-VM Firecracker bridge sidecar.
+    # Plan 113 §Task 12 / ADR-003 — per-VM Firecracker bridge sidecar.
     # Linux-only at runtime; the file-level `cfg(target_os = "linux")`
     # gate in `src/main.rs` reduces non-Linux compilation to a stub
     # `main()` that prints a guard message and exits nonzero. Verifies
@@ -85,51 +71,58 @@ members = [
     # `mvm-jailer-lite` (seccomp + Landlock) ruleset, then hands the
     # parent-inherited socketpair fds to the
     # `mvm-supervisor::gateway_bridge::BridgeEndpoints::Passt` path.
-    # ADR-070 — wasm-clean, dependency-light verifier for the
-    # chain-signed audit log. Builds on host (linted + tested here) and
-    # on wasm32 (the browser transparency tool in `web/audit-verify/`,
+    # no_std + alloc foundation crate: the chain-signed audit-log
+    # verifier today, the Workload IR + wire protocol + policy DTOs
+    # incrementally. Builds on host (linted + tested here) and on
+    # wasm32 (the browser transparency tool in `web/audit-verify/`,
     # which is excluded from this workspace to keep wasm-bindgen out of
     # the main build).
-    "crates/mvm-verify",
+    "crates/mvm-protocol",
+    # The dev-only cucumber-rs BDD conformance harness: runs the Gherkin
+    # scenarios under features/suites/ against the built mvmctl binary and
+    # (as later suites land) the mvm-client facade. Never a dependency of
+    # any shipped crate — it stands alone like xtask, so it sits outside
+    # the host/user product-surface feature aggregation.
+    "crates/mvm-conformance",
     "xtask",
 ]
 # cargo-fuzz crates have to be excluded from the main workspace because
 # they depend on libfuzzer-sys, which only builds under cargo-fuzz's
 # wrapper (it injects the right linker flags + sanitizer toolchain).
 # Plain `cargo build --workspace` would otherwise fail with linker
-# errors. ADR-002 §W4.2.
+# errors. ADR-001 §W4.2.
 exclude = [
-    "crates/mvm-guest/fuzz",
+    "crates/mvm-agentd/fuzz",
     # Plan 214 Phase 8 — hardened snapshot-frame parser fuzz harness
     # (`parse_header` / `parse_sections`, the cap-before-alloc /
     # bounds-checked path). Same libfuzzer-sys linker-flag constraints as
     # the other fuzz crates.
     "crates/mvm-core/fuzz",
     # Plan 85 §R1 / Phase A.2 — layer-unpack fuzz harness. Same
-    # libfuzzer-sys linker-flag constraints as the mvm-guest fuzz
+    # libfuzzer-sys linker-flag constraints as the mvm-agentd fuzz
     # crate; CI gate at `.github/workflows/security.yml::fuzz` (the
     # `Fuzz OCI unpack_layer` step). Release-tag + nightly + manual
     # dispatch only; not run on per-PR pushes.
-    "crates/mvm-oci/fuzz",
+    "crates/mvm-fs/fuzz-oci",
     # virtio-fs FUSE-server request-parser fuzz harness. Same libfuzzer-sys
     # linker constraints; CI gate at `.github/workflows/security.yml::fuzz`.
-    "crates/mvm-backend/fuzz",
-    # Plan 88 W6 / ADR-055 §"New untrusted-input surfaces" —
+    "crates/mvm-runtime/fuzz-backend",
+    # Plan 88 W6 / ADR-003 §"New untrusted-input surfaces" —
     # supervisor-config JSON fuzz harness. CI gate at
     # `.github/workflows/security.yml::fuzz`.
     "crates/deps/libkrun-sys/fuzz",
-    # Plan 97 / ADR-002 claim 5 — Vz supervisor JSON fuzz harness.
+    # Plan 97 / ADR-001 claim 5 — Vz supervisor JSON fuzz harness.
     # Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
     # constraints apply.
     "crates/mvm-build/fuzz",
-    # Plan 113 §Task 15 / ADR-064 — `BridgeConfigJson` JSON +
+    # Plan 113 §Task 15 / ADR-003 — `BridgeConfigJson` JSON +
     # `PasstHashesFile` TOML fuzz harnesses. Same libfuzzer-sys
     # linker-flag constraints as the mvm-libkrun/fuzz crate; the
     # CI gate at `.github/workflows/security.yml::fuzz` runs both
     # targets on release-tag pushes + nightly cron + manual
     # dispatch only (not on every PR — the lane is heavy).
-    "crates/mvm-vm-host/fuzz",
-    # Plan 141 / ADR-064 — gateway packet parse + payload-rebuild fuzz
+    "crates/mvm-hostd/fuzz-vmhost",
+    # Plan 141 / ADR-003 — gateway packet parse + payload-rebuild fuzz
     # harness (`fuzz_packet_parse`). Same libfuzzer-sys linker constraints;
     # CI gate at `.github/workflows/security.yml::fuzz`.
     "crates/mvm-hostd/fuzz",
@@ -141,10 +134,10 @@ exclude = [
     # structural invariants on the emitted image). Same libfuzzer-sys
     # linker-flag constraints; CI gate at
     # `.github/workflows/security.yml::fuzz`.
-    "crates/mvm-ext4/fuzz",
-    # ADR-070 — browser audit-log verifier. Excluded so wasm-bindgen +
+    "crates/mvm-fs/fuzz-ext4",
+    # Browser audit-log verifier. Excluded so wasm-bindgen +
     # the wasm32 target stay out of `cargo build --workspace` and CI;
-    # it depends on the in-workspace `mvm-verify` crate by path and is
+    # it depends on the in-workspace `mvm-protocol` crate by path and is
     # built separately with `wasm-pack` (see web/audit-verify/README.md).
     "web/audit-verify",
 ]
@@ -182,7 +175,7 @@ too_many_arguments = "deny"
 # across the workspace. Dropping `io-std` (no `tokio::io::std*`
 # consumers) and `parking_lot` (no consumers; `tokio::sync::Mutex`
 # uses its own primitives). `fs`, `process`, and `signal` are no
-# longer workspace-wide either: `mvm-storage`, `mvm-hostd`, and the
+# longer workspace-wide either: `mvm-runtime`, `mvm-hostd`, and the
 # small set of signal-aware bins request them directly. `test-util`
 # is dev-dep-only — the crates that need it (`mvm-oci`,
 # `mvm-supervisor`, root) add it on their own `[dev-dependencies]
@@ -209,7 +202,7 @@ base64 = "0.22"
 ed25519-dalek = "3"
 hmac = "0.13"
 rand = "0.8"
-# Plan 129 Stage 2 (ADR-006): mint the per-VM name-constrained egress CA /
+# Plan 129 Stage 2 (ADR-003): mint the per-VM name-constrained egress CA /
 # intermediate / leaf certs for transparent https substitution. 0.13+ for the
 # `nameConstraints` API. `ring` crypto backend (no cmake/C-toolchain like the
 # aws-lc-rs default). Sync (no tokio) so it lives behind mvm-core's `egress-ca`
@@ -231,7 +224,6 @@ toml = "0.8"
 # CLI
 clap = { version = "4", default-features = false, features = ["derive", "help", "std", "usage"] }
 clap_mangen = "0.2"
-colored = "3"
 
 # HTTP client (for CLI upgrade)
 reqwest = { version = "0.13", features = ["blocking", "json", "rustls-no-provider"], default-features = false }
@@ -242,9 +234,6 @@ reqwest = { version = "0.13", features = ["blocking", "json", "rustls-no-provide
 # Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
-# Name generation
-names = { version = "0.14", default-features = false }
-
 # Signal handling
 libc = "0.2"
 # Readiness-driven event loop for the in-house VMM's host↔guest vsock I/O thread
@@ -253,12 +242,12 @@ mio = { version = "1", features = ["os-poll", "os-ext"] }
 
 # Seccomp BPF compilation (W2.4 — per-service syscall filtering inside
 # guests, applied via the `mvm-seccomp-apply` shim before execve into
-# the service binary). Plan 113 / ADR-064 also uses this for the
+# the service binary). Plan 113 / ADR-003 also uses this for the
 # `mvm-jailer-lite` A2 confinement helper that wraps the Firecracker
 # bridge sidecar.
 seccompiler = "0.5"
 
-# Landlock (Linux kernel LSM) ruleset binding. Plan 113 / ADR-064 —
+# Landlock (Linux kernel LSM) ruleset binding. Plan 113 / ADR-003 —
 # `mvm-jailer-lite` uses this to constrain the per-VM Firecracker
 # bridge to a small read/write-path set before entering the packet
 # loop. Linux-only at runtime; the `mvm-jailer-lite` Cargo.toml gates
@@ -275,7 +264,7 @@ notify-debouncer-mini = "0.7"
 # the canonical CIDR string ("10.0.0.0/24"), which is the wire
 # format the policy bundle TOML uses.
 ipnet = { version = "2", features = ["serde"] }
-# Plan 141 / ADR-064 — EthernetII/IPv4/IPv6/TCP/UDP parse + payload rebuild
+# Plan 141 / ADR-003 — EthernetII/IPv4/IPv6/TCP/UDP parse + payload rebuild
 # for the gateway packet-observer pipeline. Pure-Rust, zero transitive
 # deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
 # so a mature parser beats a hand-rolled one.
@@ -297,8 +286,7 @@ async-trait = "0.1"
 
 # Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.
 hickory-resolver = "0.26"
-# DNS server/protocol stack for the in-guest addon DNS resolver.
-hickory-server = "0.26"
+# DNS protocol stack for the in-guest addon DNS resolver.
 hickory-proto = "0.26"
 
 # Utilities
@@ -349,17 +337,15 @@ tree-sitter-typescript = "0.23.2"
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
-mvm-deps-audit = { path = "crates/mvm-deps-audit", version = "0.18.0" }
-mvm-ir = { path = "crates/mvm-ir", version = "0.18.0" }
+# no_std + alloc foundation crate (audit-log verifier today; Workload IR
+# + wire protocol + policy DTOs incrementally). No default features.
+mvm-protocol = { path = "crates/mvm-protocol", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
-mvm-guest = { path = "crates/mvm-guest", version = "0.18.0" }
-mvm-guest-helpers = { path = "crates/mvm-guest-helpers", version = "0.18.0" }
+mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
-mvm = { path = "crates/mvm", version = "0.18.0", default-features = false }
-mvm-oci = { path = "crates/mvm-oci", version = "0.18.0" }
-mvm-ext4 = { path = "crates/mvm-ext4", version = "0.18.0" }
-mvm-storage = { path = "crates/mvm-storage", version = "0.18.0" }
-mvm-network = { path = "crates/mvm-network", version = "0.18.0" }
+mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
+mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
+mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
 # default-features = false drops `packet-forwarder` (the smoltcp egress stack) for
 # library consumers — only the mvm-network-tunnel-worker bin (mvm-hostd's own
@@ -368,30 +354,20 @@ mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.0", default-features = 
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
 mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.0" }
-mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0" }
 # Plan 57 W1 — libkrun FFI bindings split out of mvm-providers so the
 # bindgen + libclang build cost is isolated from the Apple-VZ objc2
 # stack. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
 libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.18.0" }
-# Plan 97 Phase B — type-safe interface to `mvm-vz-supervisor`. No FFI,
-# Linux-safe (compiles everywhere; `Platform::has_vz()` short-circuits
-# on non-macOS).
-mvm-backend = { path = "crates/mvm-backend", version = "0.18.0", default-features = false }
 
-# Plan 73 Followup B.2.x — builder-VM egress allowlist proxy.
-# mvm-host-vm-init spawns this as a subprocess before the
-# installer + tears it down after.
-mvm-egress-proxy = { path = "crates/mvm-egress-proxy", version = "0.18.0" }
-
-# Plan 113 / ADR-064 §Decision 5 — A2 confinement helper (seccompiler +
+# Plan 113 / ADR-003 §Decision 5 — A2 confinement helper (seccompiler +
 # landlock). Consumed by the per-VM `mvm-bridge` sidecar.
 
-# Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary crate. Leaf
+# Plan 113 §Task 10 / ADR-003 — per-VM Vz drainer binary crate. Leaf
 # entry consumed by `mvm-backend::vz::start()` (Task 11) via fork+exec;
 # no other workspace member links it as a library.
 
-# Plan 113 §Task 12 / ADR-064 — per-VM Firecracker bridge sidecar binary
+# Plan 113 §Task 12 / ADR-003 — per-VM Firecracker bridge sidecar binary
 # crate. Leaf entry resolved by Task 13's `FirecrackerBackend` at runtime
 # (fork+exec, never linked as a library). Linux-only at runtime; the
 # crate's `src/main.rs` cfg-gates the body so `cargo check --workspace`
@@ -423,10 +399,9 @@ path = "src/main.rs"
 
 [dependencies]
 mvm-core.workspace = true
-mvm = { workspace = true, default-features = false }
-mvm-backend = { workspace = true, default-features = false }
+mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
-mvm-guest.workspace = true
+mvm-agentd.workspace = true
 mvm-cli = { workspace = true, default-features = false }
 anyhow.workspace = true
 
@@ -457,7 +432,7 @@ flate2.workspace = true
 sha2.workspace = true
 tar.workspace = true
 libkrun-sys.workspace = true
-mvm-oci.workspace = true
+mvm-fs.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
 # `clap::Command` tree returned by `mvm_cli::commands::cli_command()`
 # to enforce that every subcommand has a declared audit posture.
@@ -516,12 +491,15 @@ host = [
 ]
 
 # `user` — everything a user runs to create/drive sandboxes: cosign manifest
-# verification for `--prod`, and `build --watch`.
+# verification for `--prod`, `build --watch`, and the MCP server that drives
+# sandboxes over the Model Context Protocol (a zero-extra-dep capability that was
+# implemented but composed by no surface, so it shipped in no build).
 user = [
-    "mvm/manifest-verify",
+    "mvm-runtime/manifest-verify",
     "mvm-cli/manifest-verify",
     "mvm-core/manifest-verify",
     "mvm-cli/dev-watch",
+    "mvm-cli/mcp",
 ]
 
 # `dev` — the local-development union. A contributor laptop is BOTH host and
@@ -533,8 +511,7 @@ user = [
 dev = [
     "host",
     "user",
-    "mvm/contributor-bootstrap",
-    "mvm-backend/contributor-bootstrap",
+    "mvm-runtime/contributor-bootstrap",
     "mvm-build/contributor-bootstrap",
     "mvm-cli/contributor-bootstrap",
 ]
@@ -558,7 +535,7 @@ release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
 # Optional S3 storage backend for the template registry — a heavy cloud dep kept
 # opt-in (not part of the local host runtime; fleet/deployment use only).
 template-registry-s3 = [
-    "mvm/template-registry-s3",
+    "mvm-runtime/template-registry-s3",
     "mvm-cli/template-registry-s3",
 ]
 
@@ -581,6 +558,18 @@ opt-level = 0
 debug = "line-tables-only"
 incremental = true
 codegen-units = 256
+
+# The `dev` profile is what cargo compiles every LIBRARY crate under, even during
+# `cargo test`/`nextest` (only the test *binaries* use `[profile.test]`). Without
+# this override it defaults to `debug = 2` — full DWARF — which is the single
+# biggest memory + disk cost of a workspace build: a large crate like `mvm-cli`
+# burns gigabytes of rustc + linker memory emitting debug info nothing on the
+# inner loop reads, and 16 of those in parallel is what makes the build a memory
+# hog on a shared dev machine. Drop it to line tables (matching `[profile.test]`):
+# panic backtraces keep their file:line, but the DWARF bloat — and its memory +
+# disk footprint — is gone. This also lightens `cargo build`/`check`/`clippy`.
+[profile.dev]
+debug = "line-tables-only"
 
 # Per-package optimisation overrides applied to the `dev` and `test`
 # profiles. Build scripts + proc-macros run during compilation, so a
@@ -621,7 +610,7 @@ opt-level = 3
 [workspace.metadata.mvm.toolchain]
 # Pinned cross-compile toolchain for the embedded host-vm binaries
 # baked into mvmctl. Bump in lockstep across this file and CI to keep
-# the embedded payload reproducible (Plan 115 / ADR-065 claim 11).
+# the embedded payload reproducible (Plan 115 / ADR-004 claim 11).
 #
 # musl, not gnu: these binaries run as PID 1 / early services inside the
 # builder VM, whose minimal NixOS-derived rootfs ships no FHS dynamic

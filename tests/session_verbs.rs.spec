@@ -2,7 +2,7 @@
 //!
 //! Phase 3 / `specs/upstream-mvm-prompt.md` deliverable D. The verbs
 //! all operate on the on-disk session table at
-//! `$XDG_RUNTIME_DIR/mvm/sessions/<id>.json`; these tests pre-populate
+//! `<mvm_home>/run/sessions/<id>.json`; these tests pre-populate
 //! the table via `mvm_core::session::write_session` and then drive the
 //! CLI to assert the verbs read/write the right entries. No real VM
 //! ever boots — `ls` / `info` / `set-timeout` don't touch the
@@ -15,7 +15,7 @@ use mvm_core::session::{SessionMode, SessionRecord, SessionState, write_session}
 use predicates::prelude::*;
 
 /// `cargo test` runs tests in parallel within a binary. Several tests
-/// here mutate `MVM_RUNTIME_DIR` in the parent process to populate the
+/// here mutate `MVM_HOME` in the parent process to populate the
 /// on-disk table via `mvm_core::session::write_session` before
 /// spawning the mvmctl child. Without serialization the env races
 /// across threads. Hold this mutex for the duration of any test that
@@ -25,52 +25,52 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn mvm_with_runtime_dir(runtime_dir: &std::path::Path) -> Command {
     #[allow(deprecated)]
     let mut cmd = Command::cargo_bin("mvmctl").unwrap();
-    cmd.env("MVM_RUNTIME_DIR", runtime_dir);
+    cmd.env("MVM_HOME", runtime_dir);
     cmd
 }
 
 /// Spawn `mvmctl` with runtime + state + data dirs all pinned to
 /// temps. Use when the test needs to inspect the audit log: the
 /// audit framework's `default_audit_log()` first checks a legacy
-/// path under `MVM_DATA_DIR` for backward compat, so we have to
+/// path under `MVM_HOME` for backward compat, so we have to
 /// pin **both** state and data dirs to ensure the log lands under
 /// `<state_dir>/log/audit.jsonl` and not in the user's real home.
 fn mvm_with_isolated_dirs(runtime_dir: &std::path::Path, state_dir: &std::path::Path) -> Command {
     #[allow(deprecated)]
     let mut cmd = Command::cargo_bin("mvmctl").unwrap();
-    cmd.env("MVM_RUNTIME_DIR", runtime_dir);
-    cmd.env("MVM_STATE_DIR", state_dir);
-    // Point MVM_DATA_DIR somewhere that doesn't have a legacy
+    cmd.env("MVM_HOME", runtime_dir);
+    cmd.env("MVM_HOME", state_dir);
+    // Point MVM_HOME somewhere that doesn't have a legacy
     // audit.jsonl — using the runtime_dir is convenient since it's
     // already a fresh temp.
-    cmd.env("MVM_DATA_DIR", runtime_dir);
+    cmd.env("MVM_HOME", runtime_dir);
     cmd
 }
 
 /// Helper: pre-populate the on-disk session table at `runtime_dir`
 /// while holding the env-lock so concurrent tests don't observe a
-/// transient `MVM_RUNTIME_DIR` value. Returns the id of the written
+/// transient `MVM_HOME` value. Returns the id of the written
 /// record.
 fn populate_record(
     runtime_dir: &std::path::Path,
     record: &SessionRecord,
 ) -> std::sync::MutexGuard<'static, ()> {
     let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let prev = std::env::var("MVM_RUNTIME_DIR").ok();
+    let prev = std::env::var("MVM_HOME").ok();
     // SAFETY: lock above serializes env mutation across this test
     // binary; restoring the prior value on drop is the caller's
     // responsibility (we hold the guard for them via the return
     // value, but the tests below explicitly restore).
     unsafe {
-        std::env::set_var("MVM_RUNTIME_DIR", runtime_dir);
+        std::env::set_var("MVM_HOME", runtime_dir);
     }
     write_session(record).expect("write");
     // Restore prior env so other helpers/tests don't observe the
     // override; the caller-held guard keeps the mutex.
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("MVM_RUNTIME_DIR", v),
-            None => std::env::remove_var("MVM_RUNTIME_DIR"),
+            Some(v) => std::env::set_var("MVM_HOME", v),
+            None => std::env::remove_var("MVM_HOME"),
         }
     }
     lock
@@ -186,14 +186,14 @@ fn session_set_timeout_updates_record() {
     let rec = SessionRecord::new_running("vm-1", "openclaw", SessionMode::Prod);
     let id = rec.id.to_string();
     // Hold the env-lock through the read-back at the end so a
-    // concurrent test can't change `MVM_RUNTIME_DIR` between mvmctl's
+    // concurrent test can't change `MVM_HOME` between mvmctl's
     // write and our re-read.
     let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let prev = std::env::var("MVM_RUNTIME_DIR").ok();
+    let prev = std::env::var("MVM_HOME").ok();
     // SAFETY: ENV_LOCK is held; serializes env mutation across this
     // binary's tests.
     unsafe {
-        std::env::set_var("MVM_RUNTIME_DIR", temp.path());
+        std::env::set_var("MVM_HOME", temp.path());
     }
     write_session(&rec).unwrap();
 
@@ -208,8 +208,8 @@ fn session_set_timeout_updates_record() {
 
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("MVM_RUNTIME_DIR", v),
-            None => std::env::remove_var("MVM_RUNTIME_DIR"),
+            Some(v) => std::env::set_var("MVM_HOME", v),
+            None => std::env::remove_var("MVM_HOME"),
         }
     }
 }

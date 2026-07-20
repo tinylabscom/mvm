@@ -5,12 +5,12 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 use crate::ui;
-use mvm::config::VM_NAME;
-use mvm::shell;
-use mvm_backend::backend::AnyBackend;
 use mvm_core::config::fc_version;
 use mvm_core::platform::{self, Platform};
 use mvm_core::vm_backend::ClaimStatus;
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::config::VM_NAME;
+use mvm_runtime::shell;
 
 /// Audience-scoped filter for `mvmctl doctor`.
 ///
@@ -98,10 +98,9 @@ struct Check {
 /// (`VM_NAME`) is the routing key for `shell::run_on_vm`, not a filesystem
 /// path.
 fn dev_vm_socket_path() -> String {
-    format!(
-        "{}/vms/mvm-dev/vsock.sock",
-        mvm_core::config::mvm_share_dir()
-    )
+    mvm_core::config::vm_vsock_proxy_socket("mvm-dev")
+        .display()
+        .to_string()
 }
 
 fn dev_vm_running() -> bool {
@@ -159,7 +158,7 @@ struct DoctorReport {
     /// output is deterministic.
     balloon_support: BTreeMap<String, bool>,
     /// Per-backend warm-start tier + the Linux fast-resume substrate probe.
-    /// Surfaces the honest capability matrix — Firecracker live-memory, Vz
+    /// Surfaces the honest capability matrix — Firecracker live-memory, HVF
     /// save/restore, libkrun disk-only — so a user can predict which backend
     /// resumes from RAM vs. reboots from disk.
     warm_start: WarmStartReport,
@@ -375,7 +374,7 @@ fn builder_egress_check() -> Check {
 
 /// One-line summary of a dry-run convergence report for `doctor`.
 /// Pure so it's testable without touching the registry.
-fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String {
+fn registry_drift_summary(report: &mvm_runtime::vm::reconcile::ConvergeReport) -> String {
     let n = report.reconciled_count();
     if n == 0 {
         "clean".to_string()
@@ -389,7 +388,9 @@ fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String
 /// count. Informational — drift self-heals at the next state-touching
 /// command, so `ok` is always true.
 fn registry_drift_check() -> Check {
-    let report = mvm::vm::reconcile::converge(&mvm::vm::reconcile::ConvergeOpts { dry_run: true });
+    let report = mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts {
+        dry_run: true,
+    });
     Check {
         name: "registry drift",
         category: "platform",
@@ -478,7 +479,7 @@ fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
         if !dir.is_dir() {
             continue;
         }
-        // A builder VM may be libkrun (`<dir>/vsock-<port>.sock`) or Vz
+        // A builder VM may be libkrun (`<dir>/vsock-<port>.sock`) or HVF
         // (`<dir>/vsock/vsock-<port>.sock`); probe whichever socket the
         // backend actually created.
         let Some(sock) = mvm_build::builderd::builderd_control_socket_candidates(&dir)
@@ -576,8 +577,8 @@ fn network_tunnel_worker_summary(vms_root: &std::path::Path) -> String {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let pid_file = dir.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE);
-        let audit_file = dir.join(mvm_backend::NETWORK_TUNNEL_AUDIT_JSONL);
+        let pid_file = dir.join(mvm_runtime::NETWORK_TUNNEL_WORKER_PID_FILE);
+        let audit_file = dir.join(mvm_runtime::NETWORK_TUNNEL_AUDIT_JSONL);
         let pid_file_exists = pid_file.exists();
         let pid = std::fs::read_to_string(&pid_file)
             .ok()
@@ -610,9 +611,7 @@ fn network_tunnel_worker_check() -> Check {
         name: "network tunnel worker",
         category: "platform",
         ok: true,
-        info: network_tunnel_worker_summary(
-            &std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms"),
-        ),
+        info: network_tunnel_worker_summary(&mvm_core::config::vms_dir()),
     }
 }
 
@@ -835,7 +834,7 @@ fn issue_summary_lines(missing: &[&Check]) -> Vec<String> {
 /// gets a stable BTreeMap ordering. Names match `VmBackend::name`.
 fn collect_balloon_support() -> BTreeMap<String, bool> {
     let mut out = BTreeMap::new();
-    for descriptor in mvm_backend::catalog::balloon_support_descriptors() {
+    for descriptor in mvm_runtime::catalog::balloon_support_descriptors() {
         let backend = descriptor.instantiate_dyn();
         out.insert(backend.name().to_string(), backend.capabilities().balloon);
     }
@@ -890,7 +889,7 @@ struct BackendCapabilityRow {
 /// a hand-maintained copy. Sorted by name for deterministic output.
 fn collect_capability_table() -> Vec<BackendCapabilityRow> {
     let mut rows: Vec<BackendCapabilityRow> =
-        mvm_backend::catalog::warm_start_support_descriptors()
+        mvm_runtime::catalog::warm_start_support_descriptors()
             .map(|descriptor| {
                 let b = descriptor.instantiate_dyn();
                 let caps = b.capabilities();
@@ -934,18 +933,18 @@ fn render_capability_table(rows: &[BackendCapabilityRow]) {
 
 /// Enumerate every backend's `snapshot_capability()` tier and, on Linux,
 /// probe the fast-resume substrate. Surfaced so a user knows which backend
-/// resumes from RAM (Firecracker live-memory, Vz save/restore) vs. reboots
+/// resumes from RAM (Firecracker live-memory, HVF save/restore) vs. reboots
 /// from a disk snapshot (libkrun) before relying on a warm start.
 fn collect_warm_start_support() -> WarmStartReport {
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
-    for descriptor in mvm_backend::catalog::warm_start_support_descriptors() {
+    for descriptor in mvm_runtime::catalog::warm_start_support_descriptors() {
         let b = descriptor.instantiate_dyn();
         backends.insert(b.name().to_string(), b.snapshot_capability().label());
         standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
     }
     // Best-effort live idle count. A missing pool dir reads as 0.
-    let standby_pool_idle = mvm_backend::standby_pool::SupervisorStandbyPool::open()
+    let standby_pool_idle = mvm_runtime::standby_pool::SupervisorStandbyPool::open()
         .and_then(|p| p.list())
         .ok()
         .map(|v| {
@@ -1228,7 +1227,7 @@ fn nested_kvm_check(plat: Platform) -> Check {
             name: "nested-kvm",
             category: "platform",
             ok: true,
-            info: "n/a (Linux-only — macOS hosts use libkrun/Vz; Plan 100 W6 affects Linux only)"
+            info: "n/a (Linux-only — macOS hosts use libkrun/HVF; Plan 100 W6 affects Linux only)"
                 .to_string(),
         };
     }
@@ -1282,7 +1281,8 @@ fn linux_builder_vm_requested_for_doctor() -> bool {
 }
 
 fn kvm_check(plat: Platform, in_vm: bool) -> Check {
-    // Inside Lima VM or native Linux: check /dev/kvm locally
+    // Inside the Linux execution environment (builder VM) or native Linux:
+    // check /dev/kvm locally
     if in_vm
         || plat == Platform::LinuxNative
         || plat == Platform::LinuxNoKvm
@@ -1293,7 +1293,7 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
         return match shell::run_host("bash", &["-c", "test -c /dev/kvm && echo ok"]) {
             Ok(out) if out.status.success() => {
                 let context = if in_vm {
-                    "available (inside Lima VM)"
+                    "available (inside the Linux execution environment)"
                 } else {
                     "available"
                 };
@@ -1309,7 +1309,7 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
                 category: "platform",
                 ok: false,
                 info: if in_vm {
-                    "/dev/kvm not accessible inside Lima VM".to_string()
+                    "/dev/kvm not accessible inside the Linux execution environment".to_string()
                 } else {
                     "not available. Enable virtualization in BIOS or check permissions on /dev/kvm."
                         .to_string()
@@ -1319,14 +1319,14 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
     }
 
     // macOS host: /dev/kvm doesn't exist anywhere in the stack — the
-    // backend is Apple Container / libkrun driven by
-    // Hypervisor.framework. Lima is gone; reporting KVM as missing on
-    // macOS would be a stale artifact from that era.
+    // backend is libkrun or HVF driven by Hypervisor.framework. Lima is
+    // gone; reporting KVM as missing on macOS would be a stale artifact
+    // from that era.
     Check {
         name: "kvm",
         category: "platform",
         ok: true,
-        info: "n/a on macOS (Hypervisor.framework via libkrun / Apple Container)".to_string(),
+        info: "n/a on macOS (Hypervisor.framework via libkrun / HVF)".to_string(),
     }
 }
 
@@ -2153,11 +2153,11 @@ fn parse_macos_diskutil_encryption_status(
     ))
 }
 
-/// `~/.mvm` should be mode 0700. The XDG share directory
-/// (`mvm_share_dir`) lands at the OS default mode (0755 on macOS Tahoe);
-/// the data dir (`mvm_data_dir`) is the one the security model owns.
+/// The mvm root (`mvm_home`) should be mode 0700 — it is the single
+/// tree the security model owns; every subdirectory inherits its
+/// privacy from this boundary.
 fn security_data_dir_mode_check() -> Check {
-    let dir = mvm_core::config::mvm_data_dir();
+    let dir = mvm_core::config::mvm_home();
     let Ok(meta) = std::fs::symlink_metadata(&dir) else {
         return Check {
             name: "data dir mode",
@@ -2196,10 +2196,7 @@ fn security_data_dir_mode_check() -> Check {
 
 /// Dev VM vsock proxy socket should be mode 0700.
 fn security_proxy_socket_mode_check() -> Check {
-    let path = format!(
-        "{}/vms/mvm-dev/vsock.sock",
-        mvm_core::config::mvm_share_dir()
-    );
+    let path = dev_vm_socket_path();
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return Check {
             name: "vsock socket mode",
@@ -2336,7 +2333,7 @@ fn security_network_policy_default_check() -> Check {
 /// any local user could read the key and forge sidecars.
 fn security_snapshot_key_check() -> Check {
     let path = mvm_core::crypto::snapshot_hmac::default_key_path(std::path::Path::new(
-        &mvm_core::config::mvm_data_dir(),
+        &mvm_core::config::mvm_home(),
     ));
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return Check {
@@ -2470,7 +2467,7 @@ fn security_snapshot_dirs_check() -> Check {
 /// `collect_sign_targets` so an unsigned supervisor is not left unreported.
 /// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 fn security_signing_check() -> Check {
-    use mvm_backend::codesign::{collect_sign_targets, entitlements_present};
+    use mvm_runtime::codesign::{collect_sign_targets, entitlements_present};
     let targets = collect_sign_targets();
     // `entitlements_present` returns `None` off macOS for every path, so if
     // the first target gives `None` the whole check is n/a.
@@ -2646,12 +2643,12 @@ mod tests {
     #[test]
     fn builder_egress_check_reports_no_vm_when_console_log_absent() {
         use mvm_core::util::test_env::TestEnv;
-        // With MVM_CACHE_DIR pointed at an empty dir there is no
+        // With MVM_HOME pointed at an empty dir there is no
         // persistent builder console.log, so the check reports the
         // no-VM-yet info and exits ok.
         let scratch = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path());
+        env.set("MVM_HOME", scratch.path());
         let c = builder_egress_check();
         assert!(c.ok);
         assert!(c.info.contains("no builder VM yet"));
@@ -2663,7 +2660,7 @@ mod tests {
         use mvm_core::util::test_env::TestEnv;
         let scratch = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", scratch.path());
+        env.set("MVM_HOME", scratch.path());
         // Materialize a fixture console.log at the exact path the helper
         // resolves, then assert the lease is read end-to-end.
         let log = mvm_core::config::vm_state_dir("mvm-dev").join("console.log");
@@ -3068,7 +3065,7 @@ mod tests {
 
     #[test]
     fn registry_drift_summary_reports_clean_and_counts() {
-        use mvm::vm::reconcile::ConvergeReport;
+        use mvm_runtime::vm::reconcile::ConvergeReport;
         let clean = ConvergeReport::default();
         assert_eq!(registry_drift_summary(&clean), "clean");
 
@@ -3140,7 +3137,7 @@ mod tests {
 
     // ── Dev-VM gating + data-dir-mode routing tests ─────────────────
     //
-    // These tests mutate `MVM_DATA_DIR` / `MVM_SHARE_DIR` (and the ts-runner
+    // These tests mutate `MVM_HOME` (and the ts-runner
     // tests below, PATH / MVM_TSX) to redirect doctor's probes at a tempdir.
     // Env-var mutation is process-wide, so they all go through the shared
     // `TestEnv` guard, which serializes them behind one lock and restores the
@@ -3150,38 +3147,33 @@ mod tests {
 
     struct EnvGuard {
         _env: mvm_core::util::test_env::TestEnv,
-        _tmp_data: Option<tempfile::TempDir>,
-        _tmp_share: Option<tempfile::TempDir>,
+        _tmp_root: Option<tempfile::TempDir>,
     }
 
     impl EnvGuard {
-        fn new(data: Option<tempfile::TempDir>, share: Option<tempfile::TempDir>) -> Self {
+        fn new(root: Option<tempfile::TempDir>) -> Self {
             let mut env = mvm_core::util::test_env::TestEnv::new();
-            if let Some(d) = data.as_ref() {
-                env.set("MVM_DATA_DIR", d.path());
-            }
-            if let Some(s) = share.as_ref() {
-                env.set("MVM_SHARE_DIR", s.path());
+            if let Some(r) = root.as_ref() {
+                env.set("MVM_HOME", r.path());
             }
             EnvGuard {
                 _env: env,
-                _tmp_data: data,
-                _tmp_share: share,
+                _tmp_root: root,
             }
         }
     }
 
     #[test]
-    fn dev_vm_socket_path_uses_share_dir() {
+    fn dev_vm_socket_path_lives_in_the_dev_vm_state_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let expected = format!("{}/vms/mvm-dev/vsock.sock", tmp.path().display());
-        let _g = EnvGuard::new(None, Some(tmp));
+        let _g = EnvGuard::new(Some(tmp));
         assert_eq!(dev_vm_socket_path(), expected);
     }
 
     #[test]
     fn dev_vm_running_is_false_when_no_socket() {
-        let _g = EnvGuard::new(None, Some(tempfile::tempdir().unwrap()));
+        let _g = EnvGuard::new(Some(tempfile::tempdir().unwrap()));
         assert!(
             !dev_vm_running(),
             "fresh tempdir has no vsock socket; dev_vm_running must be false"
@@ -3214,14 +3206,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn security_data_dir_mode_check_reads_data_dir_not_share_dir() {
+    fn security_data_dir_mode_check_reads_the_root_mode() {
         use std::os::unix::fs::PermissionsExt;
         let data = tempfile::tempdir().unwrap();
-        let share = tempfile::tempdir().unwrap();
-        // data dir 0700 (the one we want checked), share dir 0755 (decoy).
         std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(share.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _g = EnvGuard::new(Some(data), Some(share));
+        let _g = EnvGuard::new(Some(data));
         let c = security_data_dir_mode_check();
         assert!(
             c.ok,
@@ -3601,7 +3590,7 @@ mod tests {
     // The selection layer's `auto_detect_default()` queries the real
     // host platform (not the `Platform` enum passed to the check). On
     // Linux CI runners it always returns Qemu. macOS contributor
-    // hosts get covered by the existing `vz_check_macos_reports_*`
+    // hosts get covered by the existing `runtime_backend_check_macos_reports_*`
     // tests above; this Linux-only test pins the format of the new
     // `builder backend` line so the doctor report stays readable for
     // operators on the supported Linux path.
@@ -3921,17 +3910,17 @@ mod tests {
     }
 
     #[test]
-    fn builderd_daemon_summary_finds_a_vz_shaped_socket() {
+    fn builderd_daemon_summary_finds_an_hvf_shaped_socket() {
         use std::os::unix::net::UnixListener;
-        // Regression for the live Vz boot: the Vz supervisor nests the
+        // Regression for the live HVF boot: the HVF supervisor nests the
         // control socket under `<vm_state_dir>/vsock/`. The scan must find
         // it there, not only at the libkrun `<vm_state_dir>/vsock-*.sock`.
         let root = tempfile::Builder::new()
             .prefix("mvmbd")
             .tempdir_in("/tmp")
             .unwrap();
-        let vm_dir = root.path().join("bvz");
-        let sock = mvm_build::builderd::builderd_vz_control_socket_path(&vm_dir);
+        let vm_dir = root.path().join("bhvf");
+        let sock = mvm_build::builderd::builderd_hvf_control_socket_path(&vm_dir);
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
         let listener = match UnixListener::bind(&sock) {
             Ok(listener) => listener,
@@ -3947,7 +3936,7 @@ mod tests {
         });
 
         let s = builderd_daemon_summary(root.path());
-        assert!(s.contains("bvz: ready"), "got {s:?}");
+        assert!(s.contains("bhvf: ready"), "got {s:?}");
         handle.join().expect("server thread");
     }
 
@@ -4026,7 +4015,7 @@ mod tests {
             let dir = root.path().join(name);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
-                dir.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
+                dir.join(mvm_runtime::NETWORK_TUNNEL_WORKER_PID_FILE),
                 format!("{}\n", std::process::id()),
             )
             .unwrap();
@@ -4044,11 +4033,11 @@ mod tests {
         let stale = root.path().join("vm-stale");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(
-            stale.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
+            stale.join(mvm_runtime::NETWORK_TUNNEL_WORKER_PID_FILE),
             "2147483646\n",
         )
         .unwrap();
-        std::fs::write(stale.join(mvm_backend::NETWORK_TUNNEL_AUDIT_JSONL), "").unwrap();
+        std::fs::write(stale.join(mvm_runtime::NETWORK_TUNNEL_AUDIT_JSONL), "").unwrap();
 
         let s = network_tunnel_worker_summary(root.path());
         assert!(s.contains("stale: vm-stale"), "got {s:?}");

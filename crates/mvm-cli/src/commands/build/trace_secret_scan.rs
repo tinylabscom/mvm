@@ -11,7 +11,7 @@
 
 use base64::Engine;
 use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
-use mvm_ir::EnvValue;
+use mvm_protocol::ir::EnvValue;
 use mvm_sdk::runtime::{RecordedOp, RuntimeRecording};
 use std::collections::BTreeMap;
 
@@ -99,7 +99,7 @@ fn push_if_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_ir::{AuthType, SecretMount, SecretRef};
+    use mvm_protocol::ir::{AuthType, SecretMount, SecretRef};
     use mvm_sdk::runtime::SandboxCreate;
 
     fn scanner() -> SecretsScanner {

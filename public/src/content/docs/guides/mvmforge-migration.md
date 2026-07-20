@@ -5,8 +5,8 @@ description: mvmforge has been merged into mvm. Workloads previously authored ag
 
 mvmforge — the sibling repo that previously held the workload SDKs —
 has been merged into this repo and deprecated. Every author-side
-capability now lives under `crates/mvm-sdk/`, `sdks/python/mvm/`, and
-`sdks/typescript/`. There is no longer a cross-repo boundary; one
+capability now lives under `crates/mvm-sdk/`, `crates/mvm-sdk/sdks/python/mvm/`, and
+`crates/mvm-sdk/sdks/typescript/`. There is no longer a cross-repo boundary; one
 mvm release ships the substrate and the SDK in lockstep.
 
 ## What moved
@@ -18,8 +18,8 @@ mvm release ships the substrate and the SDK in lockstep.
 | `mvmforge-addon` crate             | `crates/mvm-sdk/src/addon/`                                 |
 | `mvmforge` host CLI compile path   | `crates/mvm-sdk/src/compile/` + `mvmctl build compile`            |
 | `mvmforge-runtime` (in-guest)      | `crates/mvm-runner` + `nix/lib/factories/mkFunctionService` |
-| Python SDK (`@mv.func`)            | `sdks/python/mvm/` (`@mvm.app`)                             |
-| TypeScript SDK                     | `sdks/typescript/`                                          |
+| Python SDK (`@mv.func`)            | `crates/mvm-sdk/sdks/python/mvm/` (`@mvm.app`)                             |
+| TypeScript SDK                     | `crates/mvm-sdk/sdks/typescript/`                                          |
 
 ## Author-side renames
 

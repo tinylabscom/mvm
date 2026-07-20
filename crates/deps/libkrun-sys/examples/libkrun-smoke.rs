@@ -73,7 +73,7 @@ fn main() -> ExitCode {
     // ad-hoc codesigns the current binary on first run and re-spawns
     // with `MVM_SIGNED=1`; subsequent runs are silent. Without this
     // call, `krun_start_enter` fails at VM creation with rc -22.
-    mvm_backend::codesign::ensure_signed();
+    mvm_runtime::codesign::ensure_signed();
 
     // Sanity-check every path that has to exist before we hand it to
     // libkrun. The C wrapper would fail later anyway, but failing here
@@ -132,7 +132,7 @@ fn main() -> ExitCode {
         .with_resources(args.vcpus, args.mem_mib)
         .with_cmdline(&args.cmdline)
         .with_vsock_socket_dir(&socket_dir)
-        .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+        .add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
     if let Some(dd) = args.data_disk {
         ctx = ctx.add_disk("data", dd, false);
     }

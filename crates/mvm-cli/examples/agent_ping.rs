@@ -8,11 +8,11 @@ fn main() -> anyhow::Result<()> {
     let vm = std::env::args()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("usage: agent_ping <vm-name>"))?;
-    let transport = mvm::vsock_transport::for_vm(&vm)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    let ack = mvm_guest::vsock::negotiate_protocol(
+    let transport = mvm_runtime::vsock_transport::for_vm(&vm)?;
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    let ack = mvm_agentd::vsock::negotiate_protocol(
         &mut stream,
-        vec![mvm_guest::vsock::GuestCapability::Ping],
+        vec![mvm_agentd::vsock::GuestCapability::Ping],
     )?;
     println!("AGENT PING OK for '{vm}': negotiated {ack:?}");
     Ok(())

@@ -138,7 +138,7 @@ mod tests {
     use super::*;
     use crate::keyholder::{LocalResolver, SecretResolver, Signer, SubstitutionRegistry};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_ir::{AuthType, SecretMount, SecretRef};
+    use mvm_protocol::ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::sync::Arc;
     use tempfile::tempdir;

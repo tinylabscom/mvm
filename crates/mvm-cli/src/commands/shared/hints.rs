@@ -15,8 +15,8 @@ pub fn with_hints(result: Result<()>) -> Result<()> {
                 "Hint: Enable KVM/virtualization in your BIOS or VM settings.\n      \
                  On macOS, mvm uses Hypervisor.framework via libkrun — install it with 'brew install libkrun'.",
             );
-        } else if msg.contains("Permission denied") && msg.contains(".mvm") {
-            ui::warn("Hint: Check directory permissions on ~/.mvm (set MVM_DATA_DIR to override).");
+        } else if msg.contains("Permission denied") && msg.contains(&mvm_core::config::mvm_home()) {
+            ui::warn("Hint: Check directory permissions on ~/.mvm (set MVM_HOME to override).");
         } else if msg.contains("nix: command not found") || msg.contains("nix: not found") {
             ui::warn("Hint: Nix runs inside the builder VM; builds invoke it automatically.");
         } else if msg.contains("dev VM is not running") || msg.contains("VM is not started") {

@@ -12,7 +12,6 @@ use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 
 use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
-use mvm_ir::HealthCheck;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -32,7 +31,7 @@ pub(in crate::commands) struct Args {
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
     /// legacy slot name). If omitted, the bundled
     /// `nix/images/default-tenant/` image is used (built via Nix on first use,
-    /// cached at `~/.cache/mvm/default-microvm/`). Each invocation boots a
+    /// cached at `~/.mvm/cache/default-microvm/`). Each invocation boots a
     /// fresh transient microVM — never the long-running builder VM.
     #[arg(short = 'm', long)]
     pub manifest: Option<String>,
@@ -87,7 +86,7 @@ pub(in crate::commands) struct Args {
     /// Internal (not a CLI flag): the resolved healthcheck declaration,
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
-    pub healthcheck: Option<HealthCheck>,
+    pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -231,7 +230,7 @@ pub(in crate::commands) struct RunArgs {
     /// Internal (not a CLI flag): the resolved healthcheck declaration,
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
-    pub healthcheck: Option<HealthCheck>,
+    pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -340,7 +339,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
 
     // Every transient run is admitted as a locally-signed workload (uniform
     // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
-    // libkrun/Vz supervisor spawn the enforcing gateway bridge (so the egress
+    // libkrun/HVF supervisor spawn the enforcing gateway bridge (so the egress
     // policy is enforced and the run is chain-audited) instead of the legacy
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
@@ -381,7 +380,6 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             // No secrets on the plain transient path; deny secret release.
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
-            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,
@@ -854,7 +852,6 @@ fn emit_oci_run_admission(
         tool_policy_ref: None,
         secret_release: mvm_core::plan::SecretReleasePolicy::None,
         secrets: Vec::new(),
-        auth: mvm_core::plan::AuthPolicy::none(),
         audit_event_prefix: None,
         cpus,
         mem_mib,
@@ -908,7 +905,7 @@ struct ReceiptInput {
     /// How faithfully the resolved backend actually enforces that posture
     /// (`flow-drop`, `open`, `<backend>:l4-host-port`). Recorded so the signed
     /// receipt cannot overstate enforcement fidelity — a host:port allow-list is
-    /// now port-gated on every backend (Firecracker nftables; libkrun/Vz via the
+    /// now port-gated on every backend (Firecracker nftables; libkrun/HVF via the
     /// admission-time DNS pin → L4 scan). See `shared::egress_enforcement_label`.
     egress_enforcement: String,
     command: ReceiptCommand,
@@ -1188,7 +1185,7 @@ impl ReceiptInput {
             }
         };
 
-        let selected_backend = mvm_backend::backend::AnyBackend::from_hypervisor(backend);
+        let selected_backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend);
         crate::exec::validate_image_egress_backend(
             &selected_backend,
             args.image.is_some(),
@@ -1293,11 +1290,11 @@ fn oci_vsock_proxy_env_for_capabilities(
     if !(caps.vsock && caps.no_routable_guest_nic && caps.host_vsock_proxy) {
         return Vec::new();
     }
-    mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
+    mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
 }
 
 fn oci_vsock_proxy_env_for_backend(
-    backend: &mvm_backend::backend::AnyBackend,
+    backend: &mvm_runtime::backend::AnyBackend,
     image_requested: bool,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> Vec<(String, String)> {
@@ -1555,7 +1552,7 @@ mod tests {
 
         // deny-all is uniform across backends.
         let deny = run_args(RunProfile::Standard);
-        let r = ReceiptInput::from_run_args(&deny, "vz").expect("receipt input");
+        let r = ReceiptInput::from_run_args(&deny, "hvf").expect("receipt input");
         assert_eq!(r.network_posture, "deny-all");
         assert_eq!(r.egress_enforcement, "flow-drop");
     }

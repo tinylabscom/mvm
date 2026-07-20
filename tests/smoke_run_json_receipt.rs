@@ -54,22 +54,18 @@ impl SmokeSandbox {
         #[allow(deprecated)]
         let mut cmd = Command::cargo_bin("mvmctl").expect("cargo_bin mvmctl");
         cmd.env("HOME", self.path())
-            .env("MVM_DATA_DIR", self.path().join(".mvm"))
-            .env("MVM_STATE_DIR", self.path().join(".local/state/mvm"))
-            .env("MVM_CACHE_DIR", self.path().join(".cache/mvm"))
-            .env("MVM_CONFIG_DIR", self.path().join(".config/mvm"))
-            .env("MVM_SHARE_DIR", self.path().join(".local/share/mvm"))
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("XDG_DATA_HOME")
-            .env_remove("XDG_CACHE_HOME")
-            .env_remove("XDG_CONFIG_HOME");
+            .env("MVM_HOME", self.path().join("mvm-home"));
         cmd
+    }
+
+    fn scratch_cache(&self) -> PathBuf {
+        self.path().join("mvm-home/cache")
     }
 
     fn seed_cached_runtime_caches(&self) {
         for cache_subdir in ["host-bins", "default-microvm"] {
             let source_root = PathBuf::from(mvm_core::config::mvm_cache_dir()).join(cache_subdir);
-            let dest_root = self.path().join(".cache/mvm").join(cache_subdir);
+            let dest_root = self.scratch_cache().join(cache_subdir);
             sync_tree_if_missing(&source_root, &dest_root)
                 .unwrap_or_else(|e| panic!("seed cached {cache_subdir} into scratch cache: {e}"));
         }
@@ -77,7 +73,7 @@ impl SmokeSandbox {
 
     fn persist_cached_runtime_caches(&self) {
         for cache_subdir in ["host-bins", "default-microvm"] {
-            let source_root = self.path().join(".cache/mvm").join(cache_subdir);
+            let source_root = self.scratch_cache().join(cache_subdir);
             let dest_root = PathBuf::from(mvm_core::config::mvm_cache_dir()).join(cache_subdir);
             sync_tree_if_missing(&source_root, &dest_root).unwrap_or_else(|e| {
                 panic!("persist scratch {cache_subdir} back into operator cache: {e}")

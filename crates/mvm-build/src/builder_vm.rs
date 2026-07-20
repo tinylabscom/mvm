@@ -170,7 +170,7 @@ pub enum BuilderArtifacts {
         /// Directory the builder VM sealed the application-deps
         /// volume into (content + SBOM + fetch log + CVE scan +
         /// attestations + meta). Caller hashes this with
-        /// `mvm_deps_audit::verify_sealed_volume` to
+        /// `mvm_sdk::compile::deps_audit::verify_sealed_volume` to
         /// derive the canonical `volume_hash`.
         volume_dir: PathBuf,
         /// JSON sidecar emitted by `mvm-host-vm-init` next to the
@@ -281,7 +281,7 @@ impl GuestSidecar {
     /// genuinely overlay-aware: the `/mvm/runtime` mount point exists
     /// and the injected `/init` prefers an overlay-resident agent when
     /// one is attached (Firecracker) and falls back to the baked agent
-    /// otherwise (libkrun/Vz). `overlay_aware: true` is therefore an
+    /// otherwise (libkrun/HVF). `overlay_aware: true` is therefore an
     /// honest claim, not a gate bypass — only emit this sidecar once
     /// the injection has actually run.
     ///
@@ -411,8 +411,7 @@ pub enum BuilderVmError {
     #[error(
         "libkrun-as-Linux-builder bootstrap is in flight; \
          the libkrun builder path does not use host Nix; \
-         see ADR-013 §\"Linux builder via libkrun (no Lima)\" \
-         for the design and Sprint 50 for the schedule. \
+         builds run inside a builder VM the CLI launches directly. \
          Rebuild or restart the project builder VM before retrying."
     )]
     NotYetImplemented,
@@ -423,7 +422,7 @@ pub enum BuilderVmError {
 
     /// A host VMM the operator explicitly asked for isn't available on
     /// this platform. Carries the requested label (e.g.
-    /// `"linux-builder-vm"`, `"vz"`) and an
+    /// `"linux-builder-vm"`, `"hvf"`) and an
     /// actionable hint pointing at the kernel-module parameter,
     /// platform-version gap, or install step the operator needs.
     #[error("{requested} is not available on this host: {reason}")]
@@ -538,7 +537,7 @@ pub enum BuilderVmError {
     },
 }
 
-/// `~/.cache/mvm/builder-vm/` (honors `MVM_CACHE_DIR`) — the directory to clear
+/// `~/.mvm/cache/builder-vm/` (honors `MVM_HOME`) — the directory to clear
 /// to recover a degraded builder store. Lives here (ungated) so the build
 /// error path can name the recovery dir; the `builder-vm`-gated builder modules
 /// delegate to this for a single source of truth.
@@ -576,7 +575,7 @@ pub struct BuilderStoreRepair {
 
 /// Recover a degraded builder Nix store by removing the builder-VM cache
 /// dir so the next `mvmctl bootstrap` / `build` cold-rebuilds it clean — the documented
-/// `rm -rf ~/.cache/mvm/builder-vm` recovery as a first-class operation. The
+/// `rm -rf ~/.mvm/cache/builder-vm` recovery as a first-class operation. The
 /// whole dir goes (store image + per-VM dirs + job dirs): the store image is the
 /// degraded piece, and the kernel/rootfs/jobs are all rebuildable. `dry_run`
 /// reports what would be freed without deleting.
@@ -685,7 +684,7 @@ pub struct BuilderVmRunConfig {
     pub kernel_cmdline: String,
     /// Optional initrd path.
     pub initrd_path: Option<PathBuf>,
-    /// vCPU count. The libkrun + Vz backends both refuse values
+    /// vCPU count. The libkrun + HVF backends both refuse values
     /// above their host-determined caps.
     pub vcpus: u8,
     /// Guest memory in MiB.
@@ -700,8 +699,8 @@ pub struct BuilderVmRunConfig {
 }
 
 /// virtio-fs share to attach for the builder run. Maps onto
-/// `libkrun_add_virtiofs` (libkrun) or
-/// `VZVirtioFileSystemDeviceConfiguration` (Vz).
+/// `libkrun_add_virtiofs` (libkrun) or the equivalent share-attach call
+/// on the hypervisor in use (HVF, QEMU).
 ///
 /// Builder mode is the *only* path that attaches virtio-fs shares
 /// today; workload microVMs default to zero shares and refuse
@@ -973,7 +972,7 @@ fn shell_quote(input: &str) -> String {
 /// Best-effort sidecar emission: query `passthru.mvm` against the
 /// already-built flake/attr and write it to
 /// `<build_dir>/mvm-meta.json` so the consumer in
-/// `mvm::vm::runtime_meta::from_sidecar` can populate
+/// `mvm_runtime::vm::runtime_meta::from_sidecar` can populate
 /// `accessible` for the console gate.
 ///
 /// Failure modes (all log+continue, never fail the build):
@@ -1141,13 +1140,13 @@ mod tests {
     #[test]
     fn degraded_store_error_names_the_recovery_dir_and_command() {
         let e = BuilderVmError::DegradedBuilderStore {
-            cache_dir: "/home/u/.cache/mvm/builder-vm".into(),
+            cache_dir: "/home/u/mvm-home/cache/builder-vm".into(),
             log_path: "/tmp/job/nix-stderr.log".into(),
             detail: "error: path '/nix/store/x-source/flake.nix' does not exist".into(),
         };
         let msg = e.to_string();
         assert!(msg.contains("mvmctl cache repair")); // the first-class recovery
-        assert!(msg.contains("rm -rf /home/u/.cache/mvm/builder-vm")); // manual fallback
+        assert!(msg.contains("rm -rf /home/u/mvm-home/cache/builder-vm")); // manual fallback
         assert!(msg.contains("mvmctl bootstrap"));
         assert!(msg.contains("dangling")); // distinct from a generic build failure
     }

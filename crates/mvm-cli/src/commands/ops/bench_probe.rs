@@ -70,7 +70,6 @@ pub fn admit_probe_plan(
         tool_policy_ref: None,
         secret_release: SecretReleasePolicy::default(),
         secrets: Vec::new(),
-        auth: mvm_core::plan::AuthPolicy::none(),
         audit_event_prefix: None,
         cpus: 2,
         mem_mib: u64::from(PROBE_MEM_MIB),
@@ -125,7 +124,7 @@ impl Drop for HeldProbeVm {
     fn drop(&mut self) {
         use mvm_core::vm_backend::{VmBackend, VmId};
 
-        let backend = mvm_backend::LibkrunBackend;
+        let backend = mvm_runtime::LibkrunBackend;
         let _ = backend.stop(&VmId(self.vm_name.clone()));
     }
 }
@@ -133,7 +132,7 @@ impl Drop for HeldProbeVm {
 /// Per-VM state dir the libkrun backend writes the supervisor PID file and host-side
 /// vsock socket into (`~/.mvm/vms/<name>`). Delegate to the
 /// canonical `mvm_core::config::vm_state_dir` the backend itself uses, instead of building
-/// the path from `mvm_state_dir()` — that's the **XDG** state dir (`~/.local/state/mvm`),
+/// the path from `mvm_state_dir()` — that's the state dir (`~/.mvm/state`),
 /// which the supervisor never writes to, so the `start_to_pid` mark never resolved and the
 /// probe timed out on every dev-host run.
 #[cfg(feature = "libkrun-live")]
@@ -180,7 +179,7 @@ pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
     };
     populate_audit_substrate(&mut cfg, &admitted, None)?;
 
-    let backend = mvm_backend::LibkrunBackend;
+    let backend = mvm_runtime::LibkrunBackend;
     let start = Instant::now();
     backend.start(&cfg).context("probe backend.start")?;
 
@@ -206,7 +205,7 @@ pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
 /// 30 s — the PID file is written almost immediately after spawn.
 #[cfg(feature = "libkrun-live")]
 fn wait_for_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
-    use mvm_guest::vsock::adaptive_backoff;
+    use mvm_agentd::vsock::adaptive_backoff;
 
     let pid_path = probe_state_dir(vm_name).join("libkrun.pid");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -239,7 +238,7 @@ fn wait_for_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
 /// 90 s.
 #[cfg(feature = "libkrun-live")]
 fn wait_for_ready(vm_name: &str) -> Result<(std::time::Instant, std::time::Instant)> {
-    use mvm_guest::vsock::{adaptive_backoff, ping};
+    use mvm_agentd::vsock::{adaptive_backoff, ping};
 
     let dir = probe_state_dir(vm_name);
     let dir_str = dir.to_string_lossy().into_owned();
@@ -273,21 +272,21 @@ mod tests {
     use super::*;
 
     // The probe pid path must resolve under the backend's data dir
-    // (`~/.mvm`, honouring MVM_DATA_DIR), NOT the XDG state dir the supervisor never
+    // (`~/.mvm`, honouring MVM_HOME), NOT the state dir the supervisor never
     // writes to. Regression guard for the `start_to_pid` timeout this fix closed.
     #[cfg(feature = "libkrun-live")]
     #[test]
-    fn probe_state_dir_resolves_under_mvm_data_dir_not_xdg_state() {
+    fn probe_state_dir_resolves_under_mvm_home_not_xdg_state() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", "/tmp/mvm-bench-probe-test/.mvm");
+        env.set("MVM_HOME", "/tmp/mvm-bench-probe-test/mvm-home");
         let dir = probe_state_dir("vm-x");
         assert_eq!(dir, mvm_core::config::vm_state_dir("vm-x"));
-        assert!(dir.starts_with("/tmp/mvm-bench-probe-test/.mvm"));
+        assert!(dir.starts_with("/tmp/mvm-bench-probe-test/mvm-home"));
         assert!(!dir.to_string_lossy().contains(".local/state"));
     }
 
     #[test]
-    #[ignore = "touches ~/.cache/mvm; run on a host with the image cached"]
+    #[ignore = "touches ~/.mvm/cache; run on a host with the image cached"]
     fn resolve_probe_image_returns_existing_paths() {
         let img = resolve_probe_image().unwrap();
         assert!(std::path::Path::new(&img.kernel).exists());

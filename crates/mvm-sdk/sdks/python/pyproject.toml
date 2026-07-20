@@ -1,0 +1,62 @@
+[project]
+name = "mvm"
+version = "0.15.1"
+description = "Declarative microVM workloads for Python — author once, emit a Nix flake, boot under mvm."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Tinylabs" }]
+keywords = ["microvm", "nix", "firecracker", "iac", "infrastructure", "mvm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/tinylabscom/mvm"
+Repository = "https://github.com/tinylabscom/mvm"
+Issues = "https://github.com/tinylabscom/mvm/issues"
+
+[project.optional-dependencies]
+# `mvm[schema]` enables pydantic-based schema auto-derivation
+# from function type hints (plan-0009 v2). Without this extra,
+# `mv.derive_schema(fn)` raises a clear ImportError pointing at this
+# install path; explicit `mv.json_schema(...)` paths still work.
+schema = ["pydantic>=2.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mvm"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "mvm/**",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+# Dev-tool versions are pinned for reproducible SDK builds.
+# `datamodel-code-generator` lives in the workspace xtask, not here.
+[dependency-groups]
+dev = [
+    "pytest==8.3.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -47,17 +47,11 @@ impl TopLevelCommand for Commands {
             Commands::QemuVsockBridge(_) => {
                 unreachable!("qemu vsock bridge short-circuits in run()")
             }
-            Commands::SshAgentProxy(_) => {
-                unreachable!("ssh-agent proxy short-circuits in run()")
-            }
         }
     }
 
     fn is_early_command(&self) -> bool {
-        matches!(
-            self,
-            Commands::QemuVsockBridge(_) | Commands::SshAgentProxy(_)
-        )
+        matches!(self, Commands::QemuVsockBridge(_))
     }
 
     fn try_run_early(&self) -> Option<Result<()>> {
@@ -66,7 +60,6 @@ impl TopLevelCommand for Commands {
         }
         match self {
             Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
-            Commands::SshAgentProxy(a) => Some(ssh_agent_proxy::run(a)),
             _ => None,
         }
     }

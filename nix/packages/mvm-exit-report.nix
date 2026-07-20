@@ -1,6 +1,6 @@
 # `mvm-exit-report` — production in-guest exit-report binary.
 #
-# Built from `crates/mvm-guest-helpers` in the workspace. Baked
+# Built from `crates/mvm-agentd` in the workspace. Baked
 # unconditionally into every guest rootfs (prod and dev) so the guest
 # can record its exit status before poweroff regardless of whether
 # dev-shell features are compiled in.
@@ -26,12 +26,12 @@ pkgs.rustPlatform.buildRustPackage {
   # heavier members (mvm-libkrun, mvm-providers, etc.) are not in the
   # closure of this crate, so the produced artifact stays small.
   cargoBuildFlags = [
-    "--package" "mvm-guest-helpers"
+    "--package" "mvm-agentd"
     "--bin" "mvm-exit-report"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-guest-helpers"
+    "--package" "mvm-agentd"
   ];
 
   # Tests run in the workspace's host-side `cargo test` lane; the Nix

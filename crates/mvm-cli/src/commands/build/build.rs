@@ -6,14 +6,14 @@ use serde::Serialize;
 
 use crate::ui;
 
-use mvm::vm::template::lifecycle as tmpl;
-use mvm_backend::image;
 use mvm_core::manifest::{
     self, MANIFEST_SCHEMA_VERSION, Manifest, PersistedManifest, Provenance,
     key_for_manifest_identity, resolve_manifest_config_path,
 };
 use mvm_core::naming::validate_flake_ref;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::image;
+use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::Cli;
 use super::shared::{PhaseEvent, clap_flake_ref, resolve_flake_ref};
@@ -227,7 +227,7 @@ fn build_manifest(
     // template_persist_slot call refreshes updated_at/provenance and
     // preserves created_at via touch(); the synthesized created_at here
     // is only used for first-build slots.
-    let backend = mvm_backend::backend::AnyBackend::auto_select()
+    let backend = mvm_runtime::backend::AnyBackend::auto_select()
         .name()
         .to_string();
     // Override flake_ref to the resolved (absolute) path so the slot's
@@ -313,7 +313,7 @@ fn build_flake(
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
 
-    let build_env = mvm::build_env::default_build_env();
+    let build_env = mvm_runtime::build_env::default_build_env();
     let env = build_env.as_ref();
 
     // A steady-state `mvmctl build` runs the user's nix build
@@ -634,7 +634,7 @@ fn lockfile_sha256s_under(project_root: &std::path::Path) -> Vec<String> {
 /// reference it by hash without re-running the build.
 ///
 /// The slot hash is the `sha256(flake_synthetic_path)` key under
-/// `~/.cache/mvm/templates/`. Repeated calls with the same resolved flake ref
+/// `~/.mvm/cache/templates/`. Repeated calls with the same resolved flake ref
 /// return the same hash and skip the build on a cache hit.
 pub(in crate::commands) fn build_flake_to_slot(
     flake_ref: &str,
@@ -653,7 +653,7 @@ pub(in crate::commands) fn build_flake_to_slot(
     }
 
     let resolved = resolve_flake_ref(flake_ref)?;
-    let backend = mvm_backend::backend::AnyBackend::auto_select()
+    let backend = mvm_runtime::backend::AnyBackend::auto_select()
         .name()
         .to_string();
     let mode = mvm_build::pipeline::BuildMode::Dev;

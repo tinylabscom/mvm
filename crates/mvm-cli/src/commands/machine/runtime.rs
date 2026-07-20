@@ -1,6 +1,7 @@
 use super::*;
 use crate::commands::shared;
 use crate::commands::vm::invoke;
+use mvm_client::MvmClient;
 
 pub(super) fn resolve_persistent_spec(
     args: &MachineRunArgs,
@@ -85,7 +86,7 @@ fn run_persistent(
         apply_machine_ttl(&name, dur_str)?;
     }
 
-    run_persistent_post_start(cli, cfg, &args, &name, &spec)
+    run_persistent_post_start(cli, cfg, &args, &name)
 }
 
 fn persist_and_boot_machine(
@@ -118,7 +119,6 @@ fn run_persistent_post_start(
     cfg: &MvmConfig,
     args: &MachineRunArgs,
     name: &str,
-    spec: &MachineSpec,
 ) -> Result<()> {
     if !args.argv.is_empty() {
         if !shared::wait_for_guest_agent(name, 30) {
@@ -130,7 +130,7 @@ fn run_persistent_post_start(
                 name: name.to_string(),
                 command: Some(machine_exec_command(&args.argv)),
                 force: false,
-                env: machine_console_env(spec.ssh_agent),
+                env: Vec::new(),
                 pty_argv: Vec::new(),
             },
             cfg,
@@ -157,26 +157,27 @@ fn run_persistent_post_start(
 }
 
 fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
+    // Duration parsing stays a CLI concern; the facade's `set_ttl` applies the
+    // resolved `expires_at` to the host registry (same op the `set-ttl` verb
+    // routes through), so the machine path stays off the registry internals.
     let dur = mvm_core::crypto::policy::parse_ttl(dur_str)
         .with_context(|| format!("Invalid --ttl value {dur_str:?}"))?;
     let expires_at = mvm_core::util::time::utc_plus_duration(dur);
-    let registry_path = mvm::vm::name_registry::registry_path();
-    let mut registry =
-        mvm::vm::name_registry::VmNameRegistry::load(&registry_path).with_context(|| {
-            format!(
-                "Failed to load VM name registry at {}",
-                registry_path.display()
-            )
-        })?;
-    registry
-        .set_expires_at(name, Some(expires_at))
-        .with_context(|| format!("Failed to set TTL for machine {name:?}"))?;
-    registry.save(&registry_path).with_context(|| {
-        format!(
-            "Failed to save VM name registry at {}",
-            registry_path.display()
-        )
-    })
+    let client = mvm_client::LocalBackend::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build runtime for machine TTL")?;
+    match runtime
+        .block_on(client.set_ttl(&mvm_client::MachineId(name.to_string()), Some(expires_at)))
+    {
+        Ok(()) => Ok(()),
+        Err(mvm_client::MvmError::NotFound { .. }) => {
+            anyhow::bail!("machine {name:?} is not registered")
+        }
+        Err(e) => Err(anyhow::anyhow!("{e}"))
+            .with_context(|| format!("Failed to set TTL for machine {name:?}")),
+    }
 }
 
 fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'static str {
@@ -187,7 +188,7 @@ fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'stati
             .next_back()
             .unwrap_or(manifest);
         if let Ok(Some(revision)) =
-            mvm::vm::template::lifecycle::template_load_current_revision(slot_name)
+            mvm_runtime::vm::template::lifecycle::template_load_current_revision(slot_name)
         {
             return match revision.build_mode.as_deref() {
                 Some("dev") => "dev",
@@ -195,7 +196,7 @@ fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'stati
             };
         }
     }
-    match mvm::vm::runtime_meta::read(name) {
+    match mvm_runtime::vm::runtime_meta::read(name) {
         Ok(Some(meta)) if meta.accessible => "dev",
         _ => "prod",
     }

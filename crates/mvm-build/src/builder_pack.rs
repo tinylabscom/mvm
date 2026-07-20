@@ -625,7 +625,7 @@ mod tests {
         assert_eq!(verified.file_count, 2);
         assert_eq!(
             verified.signer_key_id,
-            mvm_core::plan::bundle::KeyId::from_pubkey(&key.verifying_key())
+            mvm_core::plan::bundle::key_id_from_pubkey(&key.verifying_key())
         );
         // Artifacts landed under their in-pack names.
         assert!(out.path().join(KERNEL_FILE).exists());
@@ -745,7 +745,7 @@ mod tests {
         // one and the test is hermetic.
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
 
         let src = TempDir::new().expect("src tempdir");
         let out = TempDir::new().expect("out tempdir");
@@ -828,7 +828,7 @@ mod tests {
         );
         assert_eq!(
             produced.manifest.trust.signing_key_id,
-            mvm_core::plan::bundle::KeyId::from_identity(KEYLESS_IDENTITY)
+            mvm_core::plan::bundle::key_id_from_identity(KEYLESS_IDENTITY)
         );
         assert!(out.path().join(KERNEL_FILE).exists());
         assert!(out.path().join(ROOTFS_FILE).exists());

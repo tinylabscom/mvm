@@ -23,7 +23,7 @@ mvm's job is to let you run **untrusted code** — third-party software, AI-gene
 
 Each layer trusts only the layer **below** it. An attacker has to break through every boundary above to reach the host. A failure in any one layer is bounded — the layer below still enforces its own contract.
 
-This pattern (sometimes called the *matryoshka* model after the nested Russian dolls) is the same defense-in-depth used across the production microVM / hardened-isolation ecosystem. mvm's adaptation is that **L5 is enforced inside the guest** — even a guest-kernel compromise doesn't give arbitrary access to other in-guest services. See [ADR-002](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/002-microvm-security-posture.md) for the full decision record.
+This pattern (sometimes called the *matryoshka* model after the nested Russian dolls) is the same defense-in-depth used across the production microVM / hardened-isolation ecosystem. mvm's adaptation is that **L5 is enforced inside the guest** — even a guest-kernel compromise doesn't give arbitrary access to other in-guest services. See [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md) for the full decision record.
 
 ## The seven claims
 
@@ -61,7 +61,7 @@ mvm runs on multiple backends. Not all backends carry all seven claims. The tier
 
 | Backend | L1 | L2 | L3 | L4 | L5 | Tier |
 |---|---|---|---|---|---|---|
-| **Firecracker** (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-002. All seven claims hold. |
+| **Firecracker** (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-001. All seven claims hold. |
 | **HVF** (macOS 26+ Apple Silicon — auto-default) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 (verified boot) partial; `Hypervisor.framework`, vsock-only egress (no guest NIC). The macOS-26 auto-default. |
 | **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same as HVF. |
 | **QEMU** (Linux KVM/TCG) | ✅ | ⚠️ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (`--hypervisor qemu`; the no-`/dev/kvm` path via TCG software emulation). Never selected by `mvmd`. |
@@ -83,17 +83,17 @@ mvm has **no Tier 3** and no container/Docker fallback. A shared-kernel containe
 
 ## What's not promised
 
-ADR-002 names three explicit non-goals so we don't accidentally commit to defending against them:
+ADR-001 names three explicit non-goals so we don't accidentally commit to defending against them:
 
 - **A malicious host.** mvm trusts the host with the hypervisor and the build keys. If your laptop or your server is compromised, every layer falls.
 - **Multi-tenant guests.** One guest = one workload. Sharing a single guest VM between mutually-distrusting tenants is out of scope.
 - **Hardware-backed key attestation** (TPM/SEV/etc.) is out of scope for v1.
 
-If your threat model needs any of those, mvm is not the right tool today. ADR-002 documents these limits explicitly.
+If your threat model needs any of those, mvm is not the right tool today. ADR-001 documents these limits explicitly.
 
 ## See also
 
-- [ADR-002 (full decision record)](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/002-microvm-security-posture.md)
+- [ADR-001 (full decision record)](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md)
 - [Plan 25 (microVM hardening — the implementation sequence for the seven claims)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/25-microvm-hardening.md)
 - [Plan 53 (cross-platform roadmap — backend tier discipline)](https://github.com/tinylabscom/mvm/blob/main/specs/plans/53-cross-platform-roadmap.md)
 - ["Your container is not a sandbox" (emirb, 2026)](https://emirb.github.io/blog/microvm-2026/) — the post that crystallized the matryoshka framing in the broader microVM ecosystem.

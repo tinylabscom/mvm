@@ -80,7 +80,7 @@ let
   # nothing here is decided at call time.
   #
   # The `concurrency` block opts the agent into the
-  # warm-process worker pool. Schema mirrors `mvm_guest::
+  # warm-process worker pool. Schema mirrors `mvm_agentd::
   # runtime_config::RuntimeConfig` exactly so mvm's
   # `serde(deny_unknown_fields)` parse succeeds.
   runtimeJson = builtins.toJSON (

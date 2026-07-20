@@ -8,7 +8,7 @@
 // Single-shot invariant
 // ---------------------
 // Assumes exactly one invocation per process — the substrate agent
-// spawns a fresh wrapper for every call (mvm ADR-007 §6 hygiene). The
+// spawns a fresh wrapper for every call (mvm ADR-005 §6 hygiene). The
 // wrapper takes shortcuts that depend on this:
 //   - `chdir(working_dir)` — never undone.
 //   - dynamic `import(moduleUrl)` populates the loader cache for the
@@ -239,7 +239,7 @@ async function main() {
   if (mainInvoked && process.env.MVM_WRAPPER_ALLOW_REENTRY !== "1") {
     throw new Error(
       "wrapper main() called twice without MVM_WRAPPER_ALLOW_REENTRY=1; " +
-        "this wrapper assumes per-call respawn (mvm ADR-007 §6)",
+        "this wrapper assumes per-call respawn (mvm ADR-005 §6)",
     );
   }
   mainInvoked = true;

@@ -72,10 +72,8 @@ fn run_build(args: BuildArgs) -> Result<()> {
     };
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let mode = requested_acquire_mode(args.source);
-    let resolver = mvm_build::runtime_overlay::RuntimeOverlayResolver::new(
-        cache_root.clone(),
-        version.clone(),
-    );
+    let resolver =
+        mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.clone());
     if !args.force {
         match mode {
             RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
@@ -88,7 +86,9 @@ fn run_build(args: BuildArgs) -> Result<()> {
                 return Ok(());
             }
             RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-                if let Ok(artifact) = resolver.resolve(arch) {
+                if let Ok(artifact) =
+                    mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(&resolver, arch)
+                {
                     announce_cached_overlay(&artifact);
                     return Ok(());
                 }
@@ -134,7 +134,7 @@ fn requested_acquire_mode(source: Source) -> RuntimeOverlayAcquireMode {
     }
 }
 
-fn announce_cached_overlay(artifact: &mvm_build::runtime_overlay::RuntimeOverlayArtifact) {
+fn announce_cached_overlay(artifact: &mvm_fs::overlay::RuntimeOverlayArtifact) {
     ui::success(&format!(
         "Runtime overlay {} for {} already cached at {}",
         artifact.version,
@@ -143,10 +143,7 @@ fn announce_cached_overlay(artifact: &mvm_build::runtime_overlay::RuntimeOverlay
     ));
 }
 
-fn announce_built_overlay(
-    artifact: &mvm_build::runtime_overlay::RuntimeOverlayArtifact,
-    forced: bool,
-) {
+fn announce_built_overlay(artifact: &mvm_fs::overlay::RuntimeOverlayArtifact, forced: bool) {
     let action = if forced { "refreshed" } else { "cached" };
     ui::success(&format!(
         "Runtime overlay {} for {} {action}: ext4={}, verity={}",

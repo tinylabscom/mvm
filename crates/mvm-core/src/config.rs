@@ -57,34 +57,44 @@ pub fn fc_version_short() -> String {
     }
 }
 
-/// Root data directory for mvm dev-tool state.
+/// The single root directory for ALL host-side mvm state.
 ///
 /// Resolution order:
-///   1. `MVM_DATA_DIR` env var (explicit override)
+///   1. `MVM_HOME` env var (explicit override, non-empty)
 ///   2. `$HOME/.mvm`
+///   3. `/tmp/.mvm` (lenient last resort when `$HOME` is unset; use
+///      [`mvm_home_strict`] for anything security-sensitive)
+///
+/// Everything mvm writes on the host lives under this one root: data
+/// children (`keys/`, `audit/`, `volumes/`, …) sit directly at the root,
+/// and the former standalone roots are subdirectories — `cache/`,
+/// `config/`, `run/`, `state/`, `share/`, `vms/`. This deliberately
+/// deviates from the XDG base-directory spec: one hermetic, discoverable
+/// root means `MVM_HOME` relocates the whole world for parallel sessions,
+/// and `rm -rf ~/.mvm` removes every trace. No `XDG_*` variable is
+/// consulted anywhere.
 ///
 /// This is a user-owned directory — no sudo required.
 /// Fleet orchestration state (tenants, pools, instances) uses `/var/lib/mvm/`
 /// and is managed by mvmd with appropriate permissions.
-pub fn mvm_data_dir() -> String {
-    if let Ok(d) = std::env::var("MVM_DATA_DIR")
+pub fn mvm_home() -> String {
+    if let Ok(d) = std::env::var("MVM_HOME")
         && !d.is_empty()
     {
         return d;
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    format!("{}/.mvm", home)
+    format!("{}/.mvm", home_dir())
 }
 
-/// Like [`mvm_data_dir`] but fails instead of silently falling back to
-/// `/tmp` when neither `MVM_DATA_DIR` nor `$HOME` is set. Use this for
+/// Like [`mvm_home`] but fails instead of silently falling back to
+/// `/tmp` when neither `MVM_HOME` nor `$HOME` is set. Use this for
 /// security-sensitive state — secrets, signed bundles, the trusted-
 /// publisher store, per-tenant policy — that must never land in a
 /// world-traversable `/tmp` just because `$HOME` happened to be unset.
-/// Honors the `MVM_DATA_DIR` override so parallel sessions stay isolated
+/// Honors the `MVM_HOME` override so parallel sessions stay isolated
 /// (the inline `$HOME/.mvm` derivations this replaces silently ignored it).
-pub fn mvm_data_dir_strict() -> std::io::Result<std::path::PathBuf> {
-    if let Ok(d) = std::env::var("MVM_DATA_DIR")
+pub fn mvm_home_strict() -> std::io::Result<std::path::PathBuf> {
+    if let Ok(d) = std::env::var("MVM_HOME")
         && !d.is_empty()
     {
         return Ok(std::path::PathBuf::from(d));
@@ -92,13 +102,13 @@ pub fn mvm_data_dir_strict() -> std::io::Result<std::path::PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "$HOME unset and MVM_DATA_DIR not set; cannot locate ~/.mvm",
+            "$HOME unset and MVM_HOME not set; cannot locate ~/.mvm",
         )
     })?;
     Ok(std::path::PathBuf::from(home).join(".mvm"))
 }
 
-/// Create `~/.mvm` (or whatever `mvm_data_dir()` resolves to) with
+/// Create `~/.mvm` (or whatever `mvm_home()` resolves to) with
 /// mode `0700` and return its path. Idempotent: if the dir already
 /// exists with looser perms, chmod it to `0700` so a host that was
 /// created before this lockdown still gets locked down on the next
@@ -112,14 +122,14 @@ pub fn mvm_data_dir_strict() -> std::io::Result<std::path::PathBuf> {
 /// same-host other user can read all of it; this is the project's
 /// privacy boundary.
 #[cfg(unix)]
-pub fn ensure_data_dir() -> std::io::Result<String> {
-    let dir = mvm_data_dir();
+pub fn ensure_home_dir() -> std::io::Result<String> {
+    let dir = mvm_home();
     ensure_private_dir(&dir)?;
     Ok(dir)
 }
 
-/// Create `~/.cache/mvm` (or wherever `mvm_cache_dir()` resolves to)
-/// with mode `0700`. Same rationale as `ensure_data_dir`. The cache
+/// Create `~/.mvm/cache` (or wherever `mvm_cache_dir()` resolves to)
+/// with mode `0700`. Same rationale as `ensure_home_dir`. The cache
 /// holds the dev image kernel/rootfs, daemon stdout/stderr logs,
 /// and the GC sentinel — none of it is secret on its own, but the
 /// daemon logs *do* capture guest stdout, which can leak whatever
@@ -146,88 +156,48 @@ fn ensure_private_dir(dir: &str) -> std::io::Result<()> {
 }
 
 // ============================================================================
-// XDG-compliant directory functions
+// Subtree accessors under the single root
 // ============================================================================
+//
+// Each former standalone root is now a fixed child of `mvm_home()`. The
+// accessors stay so call sites read as intent (`mvm_cache_dir()`), but they
+// take no overrides of their own — `MVM_HOME` moves the whole tree.
 
 fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
 }
 
-/// Default cache directory for build artifacts, images, and VM runtime state,
-/// ignoring `MVM_CACHE_DIR` overrides.
-///
-/// Resolution order:
-///   1. `$XDG_CACHE_HOME/mvm`
-///   2. `$HOME/.cache/mvm`
-pub fn default_mvm_cache_dir() -> String {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        return format!("{xdg}/mvm");
-    }
-    format!("{}/.cache/mvm", home_dir())
-}
-
-/// Cache directory for build artifacts, images, VM runtime state.
-///
-/// Resolution order:
-///   1. `MVM_CACHE_DIR` env var
-///   2. `$XDG_CACHE_HOME/mvm`
-///   3. `$HOME/.cache/mvm`
+/// Cache directory for build artifacts, images, VM runtime state:
+/// `<mvm_home>/cache`.
 pub fn mvm_cache_dir() -> String {
-    if let Ok(d) = std::env::var("MVM_CACHE_DIR")
-        && !d.is_empty()
-    {
-        return d;
-    }
-    default_mvm_cache_dir()
+    format!("{}/cache", mvm_home())
 }
 
-/// Config directory for user configuration files.
-///
-/// Resolution order:
-///   1. `MVM_CONFIG_DIR` env var
-///   2. `$XDG_CONFIG_HOME/mvm`
-///   3. `$HOME/.config/mvm`
+/// The cache directory of the *default* root (`$HOME/.mvm/cache`),
+/// deliberately ignoring the `MVM_HOME` override. Isolated sessions
+/// (worktrees pointing `MVM_HOME` at a tempdir) use this to
+/// opportunistically seed expensive artifacts — the builder VM image,
+/// the runtime overlay — from the host's shared cache instead of
+/// re-bootstrapping from scratch.
+pub fn default_mvm_cache_dir() -> String {
+    format!("{}/.mvm/cache", home_dir())
+}
+
+/// Config directory for user configuration files: `<mvm_home>/config`.
 pub fn mvm_config_dir() -> String {
-    if let Ok(d) = std::env::var("MVM_CONFIG_DIR")
-        && !d.is_empty()
-    {
-        return d;
-    }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
-        && !xdg.is_empty()
-    {
-        return format!("{xdg}/mvm");
-    }
-    format!("{}/.config/mvm", home_dir())
+    format!("{}/config", mvm_home())
 }
 
-/// Runtime directory for ephemeral per-session / per-call state.
-///
-/// Resolution order:
-///   1. `MVM_RUNTIME_DIR` env var
-///   2. `$XDG_RUNTIME_DIR/mvm`
-///   3. `$HOME/.cache/mvm/runtime` (fallback when no XDG runtime dir;
-///      not as good — survives reboots, slightly looser perms — but
-///      works on macOS where systemd-style `XDG_RUNTIME_DIR` is rare)
+/// Runtime directory for ephemeral per-session / per-call state:
+/// `<mvm_home>/run`.
 ///
 /// Holds short-lived state like the session table at
 /// `<runtime>/sessions/<id>.json`. By contract the dir is mode 0700;
 /// entries within it are 0600 unless the writer explicitly relaxes
-/// them.
+/// them. Unlike a systemd-style runtime dir it survives reboots, so
+/// readers must treat stale entries as garbage, not truth.
 pub fn mvm_runtime_dir() -> String {
-    if let Ok(d) = std::env::var("MVM_RUNTIME_DIR")
-        && !d.is_empty()
-    {
-        return d;
-    }
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR")
-        && !xdg.is_empty()
-    {
-        return format!("{xdg}/mvm");
-    }
-    format!("{}/.cache/mvm/runtime", home_dir())
+    format!("{}/run", mvm_home())
 }
 
 /// Create the runtime dir 0700 and return its path. Idempotent.
@@ -238,65 +208,28 @@ pub fn ensure_runtime_dir() -> std::io::Result<String> {
     Ok(dir)
 }
 
-/// State directory for logs and audit trails.
-///
-/// Resolution order:
-///   1. `MVM_STATE_DIR` env var
-///   2. `$XDG_STATE_HOME/mvm`
-///   3. `$HOME/.local/state/mvm`
+/// State directory for logs and long-lived operational state:
+/// `<mvm_home>/state`.
 pub fn mvm_state_dir() -> String {
-    if let Ok(d) = std::env::var("MVM_STATE_DIR")
-        && !d.is_empty()
-    {
-        return d;
-    }
-    if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
-        && !xdg.is_empty()
-    {
-        return format!("{xdg}/mvm");
-    }
-    format!("{}/.local/state/mvm", home_dir())
+    format!("{}/state", mvm_home())
 }
 
-/// Share directory for templates, network definitions, and registries.
-///
-/// Resolution order:
-///   1. `MVM_SHARE_DIR` env var
-///   2. `$XDG_DATA_HOME/mvm`
-///   3. `$HOME/.local/share/mvm`
+/// Share directory for templates, network definitions, and registries:
+/// `<mvm_home>/share`.
 pub fn mvm_share_dir() -> String {
-    if let Ok(d) = std::env::var("MVM_SHARE_DIR")
-        && !d.is_empty()
-    {
-        return d;
-    }
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
-        return format!("{xdg}/mvm");
-    }
-    format!("{}/.local/share/mvm", home_dir())
+    format!("{}/share", mvm_home())
 }
 
 /// Root directory for application-dependency volumes sealed by
-/// `mvm_sdk::compile::deps_audit::seal_volume`. Each immediate child
-/// is a `<volume_hash>/` directory containing `content/`,
-/// `sbom.cdx.json`, `fetch.log`, `cve.json`, `meta.json`.
-///
-/// Resolution order:
-///   1. `MVM_DEPS_VOLUMES_DIR` env var (test override)
-///   2. `<mvm_data_dir()>/volumes/deps`
+/// `mvm_sdk::compile::deps_audit::seal_volume`: `<mvm_home>/volumes/deps`.
+/// Each immediate child is a `<volume_hash>/` directory containing
+/// `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, `meta.json`.
 ///
 /// The supervisor's admission gate (security claim 9 — every
 /// application-dep volume is hash-locked and audited) reads this
 /// dir; `mvmctl build` writes to it.
 pub fn mvm_deps_volumes_dir() -> String {
-    if let Ok(d) = std::env::var("MVM_DEPS_VOLUMES_DIR")
-        && !d.is_empty()
-    {
-        return d;
-    }
-    format!("{}/volumes/deps", mvm_data_dir())
+    format!("{}/volumes/deps", mvm_home())
 }
 
 /// Custom volume specs from the `MVM_VOLUMES` env var: a comma-separated
@@ -350,33 +283,39 @@ pub fn pack_dir(pack_hash: &str) -> std::path::PathBuf {
 // ============================================================================
 //
 // Every per-VM artifact mvm writes on the host lives under
-// `<mvm_data_dir>/vms/<name>/`. Build these paths ONLY through the helpers
-// below: a single source of truth for the layout, and `MVM_DATA_DIR` is
+// `<mvm_home>/vms/<name>/`. Build these paths ONLY through the helpers
+// below: a single source of truth for the layout, and `MVM_HOME` is
 // honored everywhere. The inline `$HOME/.mvm/vms/...` derivations these
 // replace duplicated the convention — which let the libkrun vsock socket
-// name drift between two resolvers — and silently ignored `MVM_DATA_DIR`,
+// name drift between two resolvers — and silently ignored the override,
 // so parallel sessions collided despite setting it.
 
-/// Per-VM state directory: `<mvm_data_dir>/vms/<name>/`. Holds the
+/// Root of all per-VM directories: `<mvm_home>/vms/`. One tree for every
+/// backend — the Firecracker workspace (fc.pid, fc.socket, run-info.json,
+/// disk images) and the host-side VMM state (pid files, console log,
+/// vsock sockets) share the same per-VM directory with disjoint file names.
+pub fn vms_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("vms")
+}
+
+/// Per-VM state directory: `<mvm_home>/vms/<name>/`. Holds the
 /// libkrun pid file, console log, vsock listener socket(s), runtime
 /// `mode.json`, `rootfs.ref` / `kernel.ref`, and the `ports` file.
 pub fn vm_state_dir(name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir())
-        .join("vms")
-        .join(name)
+    vms_dir().join(name)
 }
 
-/// Per-instance state root: `<mvm_data_dir>/instances/<name>/`. Distinct from
+/// Per-instance state root: `<mvm_home>/instances/<name>/`. Distinct from
 /// `vms/` (the VMM runtime dir) — this holds instance-snapshot artifacts that
 /// must outlive a VMM restart. Shared by the mvm-layer pause/resume
 /// orchestration and the backend warm-start path so both agree on one path.
 pub fn instance_dir(name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir())
+    std::path::PathBuf::from(mvm_home())
         .join("instances")
         .join(name)
 }
 
-/// Sealed instance-snapshot directory: `<mvm_data_dir>/instances/<name>/snapshot/`.
+/// Sealed instance-snapshot directory: `<mvm_home>/instances/<name>/snapshot/`.
 /// Holds `vmstate.bin` + `mem.bin` + the integrity sidecar a warm-start loads.
 pub fn instance_snapshot_dir(name: &str) -> std::path::PathBuf {
     instance_dir(name).join("snapshot")
@@ -387,32 +326,32 @@ pub fn instance_snapshot_dir(name: &str) -> std::path::PathBuf {
 // ============================================================================
 //
 // Named machines are product-level state, not a VMM runtime directory. Keep
-// their declarative spec under `<mvm_data_dir>/machines/<name>/` so runtime
+// their declarative spec under `<mvm_home>/machines/<name>/` so runtime
 // sockets/pids under `vms/` can be replaced without migrating the UX contract.
 
-/// Root of persistent named machine specs: `<mvm_data_dir>/machines/`.
+/// Root of persistent named machine specs: `<mvm_home>/machines/`.
 pub fn machine_state_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir()).join("machines")
+    std::path::PathBuf::from(mvm_home()).join("machines")
 }
 
-/// Persistent named machine directory: `<mvm_data_dir>/machines/<name>/`.
+/// Persistent named machine directory: `<mvm_home>/machines/<name>/`.
 pub fn machine_state_dir(name: &str) -> std::path::PathBuf {
     machine_state_root().join(name)
 }
 
-/// Persistent named machine spec: `<mvm_data_dir>/machines/<name>/machine.json`.
+/// Persistent named machine spec: `<mvm_home>/machines/<name>/machine.json`.
 pub fn machine_spec_path(name: &str) -> std::path::PathBuf {
     machine_state_dir(name).join("machine.json")
 }
 
-/// Root of the per-tenant host-agent daemon dirs: `<mvm_data_dir>/host-agent`.
+/// Root of the per-tenant host-agent daemon dirs: `<mvm_home>/host-agent`.
 /// Each `<tenant>/` subdir holds one resident daemon's control UDS, pid file,
 /// and spawn lock. Enumerated by `mvmctl doctor` to report daemon state.
 pub fn host_agent_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir()).join("host-agent")
+    std::path::PathBuf::from(mvm_home()).join("host-agent")
 }
 
-/// Per-tenant host-agent daemon directory: `<mvm_data_dir>/host-agent/<tenant>/`.
+/// Per-tenant host-agent daemon directory: `<mvm_home>/host-agent/<tenant>/`.
 /// Holds the resident daemon's control UDS, pid file, worker pid file, and
 /// spawn lock — one set per tenant, so the daemon is `O(active tenants)` not
 /// `O(VMs)`.
@@ -438,16 +377,16 @@ pub fn host_agent_signer_helper_socket(tenant: &str) -> std::path::PathBuf {
     host_agent_dir(tenant).join("signer-helper.sock")
 }
 
-/// `<mvm_data_dir>/pool/` — the supervisor standby pool root.
+/// `<mvm_home>/pool/` — the supervisor standby pool root.
 /// Each idle standby gets a `pool/<id>/` subdir holding its control UDS +
-/// `standby.json`. Uses the strict resolver so a missing `$HOME`/`MVM_DATA_DIR`
+/// `standby.json`. Uses the strict resolver so a missing `$HOME`/`MVM_HOME`
 /// surfaces as an error rather than silently writing entitled processes' state to
 /// `/tmp`.
 pub fn mvm_pool_dir() -> std::io::Result<std::path::PathBuf> {
-    Ok(mvm_data_dir_strict()?.join("pool"))
+    Ok(mvm_home_strict()?.join("pool"))
 }
 
-/// `<mvm_data_dir>/pool/<id>/` for a single standby.
+/// `<mvm_home>/pool/<id>/` for a single standby.
 pub fn pool_standby_dir(id: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(mvm_pool_dir()?.join(id))
 }
@@ -463,7 +402,7 @@ pub fn vsock_socket_filename(port: u32) -> String {
 /// Conservative per-path byte budget for Unix-domain sockets. macOS caps
 /// `sockaddr_un.sun_path` at roughly 104 bytes including the trailing NUL, so
 /// keep generated paths at or below 103 bytes and fall back to a short `/tmp`
-/// namespace when a worktree-local `MVM_DATA_DIR` would overflow it.
+/// namespace when a worktree-local `MVM_HOME` would overflow it.
 const UNIX_SOCKET_PATH_MAX_BYTES: usize = 103;
 const SHORT_VM_SOCKET_ROOT: &str = "/tmp/mvm-sock";
 
@@ -578,35 +517,35 @@ pub fn vm_inhouse_agent_socket(name: &str) -> std::path::PathBuf {
     vm_inhouse_agent_socket_at(&vm_state_dir(name))
 }
 
-/// The directory the Vz supervisor nests its per-port vsock listener
+/// The directory the HVF supervisor nests its per-port vsock listener
 /// sockets under: `<socket-dir>/vsock`. Unlike libkrun (which binds
-/// `<vm_state_dir>/vsock-<port>.sock` directly), the Vz `VsockProxy`
+/// `<vm_state_dir>/vsock-<port>.sock` directly), the HVF `VsockProxy`
 /// listens inside this subdir. `socket-dir` is normally the per-VM state dir,
 /// but falls back to a short hashed `/tmp` namespace when a deep worktree path
 /// would overflow macOS's Unix-socket limit. Single source of truth so
-/// `mvm-backend`'s supervisor config and the host-side `VzTransport` can't
-/// drift.
-pub fn vm_vz_vsock_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+/// `mvm-backend`'s supervisor config and the host-side `HvfVsockTransport`
+/// can't drift.
+pub fn vm_hvf_vsock_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     vm_socket_dir_at(state_dir).join("vsock")
 }
 
-/// The directory the Vz supervisor nests its per-port vsock listener
+/// The directory the HVF supervisor nests its per-port vsock listener
 /// sockets under for a named VM.
-pub fn vm_vz_vsock_dir(name: &str) -> std::path::PathBuf {
-    vm_vz_vsock_dir_at(&vm_state_dir(name))
+pub fn vm_hvf_vsock_dir(name: &str) -> std::path::PathBuf {
+    vm_hvf_vsock_dir_at(&vm_state_dir(name))
 }
 
-/// Vz's per-port vsock listener socket: `<vm_state_dir>/vsock/vsock-<port>.sock`.
-/// The Vz supervisor listens here and forwards to the guest's vsock port, so a
+/// HVF's per-port vsock listener socket: `<vm_state_dir>/vsock/vsock-<port>.sock`.
+/// The HVF supervisor listens here and forwards to the guest's vsock port, so a
 /// host client connects directly with no port handshake (same shape as libkrun,
-/// one subdir deeper). Pairs with [`vm_vz_vsock_dir`] + [`vsock_socket_filename`].
-pub fn vm_vz_vsock_port_socket_at(state_dir: &std::path::Path, port: u32) -> std::path::PathBuf {
-    vm_vz_vsock_dir_at(state_dir).join(vsock_socket_filename(port))
+/// one subdir deeper). Pairs with [`vm_hvf_vsock_dir`] + [`vsock_socket_filename`].
+pub fn vm_hvf_vsock_port_socket_at(state_dir: &std::path::Path, port: u32) -> std::path::PathBuf {
+    vm_hvf_vsock_dir_at(state_dir).join(vsock_socket_filename(port))
 }
 
-/// Vz's per-port vsock listener socket for a named VM.
-pub fn vm_vz_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
-    vm_vz_vsock_port_socket_at(&vm_state_dir(name), port)
+/// HVF's per-port vsock listener socket for a named VM.
+pub fn vm_hvf_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
+    vm_hvf_vsock_port_socket_at(&vm_state_dir(name), port)
 }
 
 /// libkrun supervisor pid file: `<vm_state_dir>/libkrun.pid`.
@@ -636,9 +575,9 @@ pub fn vm_vsock_egress_marker_path(name: &str) -> std::path::PathBuf {
 
 /// Per-VM Unix socket the `mvm-substitution-endpoint` binds and the hvf VMM's
 /// substitution bridge connects to: `<socket-dir>/substitution-endpoint.sock`.
-/// Unlike the Vz path (where the Swift supervisor proxies the guest
-/// vsock dial to a `vsock/`-nested socket), the hvf VMM's device bridges
-/// `EGRESS_PORT` straight to this socket, so it lives at the socket-dir root.
+/// Unlike the per-port `vsock/`-nested convention (see
+/// [`vm_hvf_vsock_dir_at`]), the hvf VMM's device bridges `EGRESS_PORT`
+/// straight to this socket, so it lives at the socket-dir root.
 /// `socket-dir` is normally the per-VM state dir, but falls back to a short
 /// hashed `/tmp` namespace when a deep worktree path would overflow macOS's
 /// Unix-socket limit. Single source of truth: the backend spawn (which binds
@@ -661,8 +600,9 @@ pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
 /// The hvf VMM's per-VM `BROKER_PORT` listener socket the host-agent daemon
 /// (or, on the fork path, the per-VM broker) binds on behalf of this VM:
 /// `<socket-dir>/hvf-broker.sock`. Sits at the socket-dir root like the
-/// substitution-endpoint socket (the hvf device model has no `vsock/` subdir
-/// the way vz does). `socket-dir` is normally the per-VM state dir, but falls
+/// substitution-endpoint socket (the `BROKER_PORT` channel has no `vsock/`
+/// subdir the way the per-port console channels do — see
+/// [`vm_hvf_vsock_dir_at`]). `socket-dir` is normally the per-VM state dir, but falls
 /// back to a short hashed `/tmp` namespace when a deep worktree path would
 /// overflow macOS's Unix-socket limit. Single source of truth so the backend
 /// (which passes it to registration) and whatever eventually bridges the
@@ -675,27 +615,27 @@ pub fn vm_hvf_broker_socket(name: &str) -> std::path::PathBuf {
 // Sensitive ~/.mvm subdirectories
 // ============================================================================
 //
-// Build these ONLY through the helpers below so they honor MVM_DATA_DIR and
+// Build these ONLY through the helpers below so they honor MVM_HOME and
 // stay consistent across the diagnostics, signer, and audit paths. The
-// inline `$HOME/.mvm/<sub>` derivations these replace ignored MVM_DATA_DIR.
+// inline `$HOME/.mvm/<sub>` derivations these replace ignored MVM_HOME.
 
-/// Host signing keys (e.g. `host-signer.ed25519`): `<mvm_data_dir>/keys/`.
+/// Host signing keys (e.g. `host-signer.ed25519`): `<mvm_home>/keys/`.
 pub fn mvm_keys_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir()).join("keys")
+    std::path::PathBuf::from(mvm_home()).join("keys")
 }
 
-/// Immutable checkpoint store: `<mvm_data_dir>/checkpoints/`. Each checkpoint is
+/// Immutable checkpoint store: `<mvm_home>/checkpoints/`. Each checkpoint is
 /// a subdirectory `<id>/` holding `meta.json` + cloned `content/`.
 pub fn checkpoints_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir()).join("checkpoints")
+    std::path::PathBuf::from(mvm_home()).join("checkpoints")
 }
 
-/// Chain-signed audit logs: `<mvm_data_dir>/audit/`.
+/// Chain-signed audit logs: `<mvm_home>/audit/`.
 pub fn mvm_audit_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir()).join("audit")
+    std::path::PathBuf::from(mvm_home()).join("audit")
 }
 
-/// Forensic transcript captures: `<mvm_data_dir>/audit/transcripts/`. Each
+/// Forensic transcript captures: `<mvm_home>/audit/transcripts/`. Each
 /// capture is `<tenant>/<vm>/<capture-id>/` holding `manifest.json` + encrypted
 /// chunk files. Kept under `audit/` since it is opt-in forensic evidence.
 pub fn mvm_transcripts_dir() -> std::path::PathBuf {
@@ -706,7 +646,7 @@ pub fn mvm_transcripts_dir() -> std::path::PathBuf {
 pub const WORKLOAD_AUDIT_SUFFIX: &str = ".workload.jsonl";
 
 /// Per-VM workload audit-chain file:
-/// `<mvm_data_dir>/audit/<tenant>.<vm>.workload.jsonl`.
+/// `<mvm_home>/audit/<tenant>.<vm>.workload.jsonl`.
 ///
 /// Distinct from the per-tenant *lifecycle* chain (`<tenant>.jsonl`, written
 /// in-process by `FileAuditSigner`). The workload chain carries the
@@ -732,22 +672,22 @@ pub fn workload_audit_vm_name<'a>(file_name: &'a str, tenant: &str) -> Option<&'
         .filter(|vm| !vm.is_empty())
 }
 
-/// Overlay receipts / destruction certificates: `<mvm_data_dir>/overlays/`.
+/// Overlay receipts / destruction certificates: `<mvm_home>/overlays/`.
 pub fn mvm_overlays_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir()).join("overlays")
+    std::path::PathBuf::from(mvm_home()).join("overlays")
 }
 
-/// Secret-material staging: `<mvm_data_dir>/secrets/`.
+/// Secret-material staging: `<mvm_home>/secrets/`.
 pub fn mvm_secrets_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir()).join("secrets")
+    std::path::PathBuf::from(mvm_home()).join("secrets")
 }
 
 /// The long-lived host egress CA's home:
-/// `<mvm_data_dir>/egress-ca/` (holds `ca.crt` + `ca.key`, key mode 0400).
+/// `<mvm_home>/egress-ca/` (holds `ca.crt` + `ca.key`, key mode 0400).
 /// The per-VM name-constrained intermediates the transparent `https`
 /// terminator uses are minted under this CA; see `crypto::egress_ca`.
 pub fn egress_ca_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_data_dir()).join("egress-ca")
+    std::path::PathBuf::from(mvm_home()).join("egress-ca")
 }
 
 /// Check if running in production mode (MVM_PRODUCTION=1).
@@ -805,7 +745,7 @@ mod tests {
         assert_eq!(workload_audit_vm_name("local.vm.jsonl", "local"), None);
     }
 
-    // Tests here mutate process-global env vars (`MVM_*`, `XDG_*_HOME`, `HOME`).
+    // Tests here mutate process-global env vars (`MVM_*`, `HOME`).
     // Each grabs a `TestEnv` guard, which serializes env-mutating tests behind a
     // shared process-wide lock and restores the prior values on drop. Pure-logic
     // tests (`normalize_*`) take no guard and run in parallel.
@@ -905,14 +845,32 @@ mod tests {
         short
     }
 
-    // --- XDG directory tests ---
+    // --- Single-root layout tests ---
 
     #[test]
-    fn test_mvm_cache_dir_env_override() {
+    fn test_mvm_home_env_override() {
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", "/custom/cache");
-        assert_eq!(mvm_cache_dir(), "/custom/cache");
-        env.remove("MVM_CACHE_DIR");
+        env.set("MVM_HOME", "/custom/root");
+        assert_eq!(mvm_home(), "/custom/root");
+        env.remove("MVM_HOME");
+    }
+
+    #[test]
+    fn test_mvm_home_default_under_home() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_HOME");
+        env.set("HOME", "/home/user");
+        assert_eq!(mvm_home(), "/home/user/.mvm");
+    }
+
+    #[test]
+    fn test_mvm_home_lenient_tmp_fallback() {
+        // The infallible resolver falls back to /tmp/.mvm when $HOME is
+        // unset; security-sensitive callers use mvm_home_strict() instead.
+        let mut env = TestEnv::new();
+        env.remove("MVM_HOME");
+        env.remove("HOME");
+        assert_eq!(mvm_home(), "/tmp/.mvm");
     }
 
     #[test]
@@ -934,46 +892,47 @@ mod tests {
     }
 
     #[test]
-    fn test_mvm_cache_dir_xdg_override() {
+    fn subtree_accessors_are_children_of_the_single_root() {
+        // One override moves the whole world: every former standalone root
+        // is a fixed child of MVM_HOME.
         let mut env = TestEnv::new();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", "/xdg/cache");
-        assert_eq!(mvm_cache_dir(), "/xdg/cache/mvm");
-        env.remove("XDG_CACHE_HOME");
+        env.set("MVM_HOME", "/custom/root");
+
+        assert_eq!(mvm_cache_dir(), "/custom/root/cache");
+        assert_eq!(mvm_config_dir(), "/custom/root/config");
+        assert_eq!(mvm_runtime_dir(), "/custom/root/run");
+        assert_eq!(mvm_state_dir(), "/custom/root/state");
+        assert_eq!(mvm_share_dir(), "/custom/root/share");
+        assert_eq!(mvm_deps_volumes_dir(), "/custom/root/volumes/deps");
+        assert_eq!(vms_dir(), std::path::PathBuf::from("/custom/root/vms"));
     }
 
     #[test]
     fn test_default_mvm_cache_dir_ignores_override() {
+        // Seeding expensive artifacts from the host's shared cache needs
+        // the *default* root even when MVM_HOME points at a tempdir.
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", "/custom/cache");
-        env.set("XDG_CACHE_HOME", "/xdg/cache");
-        assert_eq!(default_mvm_cache_dir(), "/xdg/cache/mvm");
+        env.set("MVM_HOME", "/custom/root");
+        env.set("HOME", "/home/user");
+        assert_eq!(default_mvm_cache_dir(), "/home/user/.mvm/cache");
+        assert_ne!(default_mvm_cache_dir(), mvm_cache_dir());
     }
 
     #[test]
-    fn test_mvm_cache_dir_default() {
+    fn test_mvm_home_strict_honors_override() {
         let mut env = TestEnv::new();
-        env.remove("MVM_CACHE_DIR");
-        env.remove("XDG_CACHE_HOME");
-        let dir = mvm_cache_dir();
-        assert!(dir.ends_with("/.cache/mvm"));
-    }
-
-    #[test]
-    fn test_mvm_data_dir_strict_honors_override() {
-        let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", "/custom/data");
+        env.set("MVM_HOME", "/custom/data");
         assert_eq!(
-            mvm_data_dir_strict().unwrap(),
+            mvm_home_strict().unwrap(),
             std::path::PathBuf::from("/custom/data")
         );
-        env.remove("MVM_DATA_DIR");
+        env.remove("MVM_HOME");
     }
 
     #[test]
-    fn pool_dirs_live_under_mvm_data_dir() {
+    fn pool_dirs_live_under_mvm_home() {
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", "/custom/data");
+        env.set("MVM_HOME", "/custom/data");
         assert_eq!(
             mvm_pool_dir().unwrap(),
             std::path::PathBuf::from("/custom/data/pool")
@@ -982,83 +941,36 @@ mod tests {
             pool_standby_dir("standby-abc").unwrap(),
             std::path::PathBuf::from("/custom/data/pool/standby-abc")
         );
-        env.remove("MVM_DATA_DIR");
+        env.remove("MVM_HOME");
     }
 
     #[test]
-    fn test_mvm_data_dir_strict_errs_without_home_or_override() {
+    fn test_mvm_home_strict_errs_without_home_or_override() {
         // The security contract: secrets/bundles/trust-store callers must
-        // never get a silent /tmp fallback. With neither MVM_DATA_DIR nor
+        // never get a silent /tmp fallback. With neither MVM_HOME nor
         // $HOME set, the strict resolver errors (unlike infallible
-        // mvm_data_dir(), which returns /tmp/.mvm).
+        // mvm_home(), which returns /tmp/.mvm).
         let mut env = TestEnv::new();
-        env.remove("MVM_DATA_DIR");
+        env.remove("MVM_HOME");
         env.remove("HOME");
-        let res = mvm_data_dir_strict();
+        let res = mvm_home_strict();
         assert!(res.is_err());
     }
 
     #[test]
-    fn test_mvm_config_dir_env_override() {
+    fn subtree_accessors_default_under_home_dot_mvm() {
         let mut env = TestEnv::new();
-        env.set("MVM_CONFIG_DIR", "/custom/config");
-        assert_eq!(mvm_config_dir(), "/custom/config");
-        env.remove("MVM_CONFIG_DIR");
+        env.remove("MVM_HOME");
+        env.set("HOME", "/home/user");
+        assert_eq!(mvm_cache_dir(), "/home/user/.mvm/cache");
+        assert_eq!(mvm_config_dir(), "/home/user/.mvm/config");
+        assert_eq!(mvm_runtime_dir(), "/home/user/.mvm/run");
+        assert_eq!(mvm_state_dir(), "/home/user/.mvm/state");
+        assert_eq!(mvm_share_dir(), "/home/user/.mvm/share");
+        assert_eq!(vms_dir(), std::path::PathBuf::from("/home/user/.mvm/vms"));
     }
 
-    #[test]
-    fn test_mvm_config_dir_default() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_CONFIG_DIR");
-        env.remove("XDG_CONFIG_HOME");
-        let dir = mvm_config_dir();
-        assert!(dir.ends_with("/.config/mvm"));
-    }
-
-    #[test]
-    fn test_mvm_state_dir_env_override() {
-        let mut env = TestEnv::new();
-        env.set("MVM_STATE_DIR", "/custom/state");
-        assert_eq!(mvm_state_dir(), "/custom/state");
-        env.remove("MVM_STATE_DIR");
-    }
-
-    #[test]
-    fn test_mvm_state_dir_default() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_STATE_DIR");
-        env.remove("XDG_STATE_HOME");
-        let dir = mvm_state_dir();
-        assert!(dir.ends_with("/.local/state/mvm"));
-    }
-
-    #[test]
-    fn test_mvm_share_dir_env_override() {
-        let mut env = TestEnv::new();
-        env.set("MVM_SHARE_DIR", "/custom/share");
-        assert_eq!(mvm_share_dir(), "/custom/share");
-        env.remove("MVM_SHARE_DIR");
-    }
-
-    #[test]
-    fn test_mvm_share_dir_default() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_SHARE_DIR");
-        env.remove("XDG_DATA_HOME");
-        let dir = mvm_share_dir();
-        assert!(dir.ends_with("/.local/share/mvm"));
-    }
-
-    #[test]
-    fn test_mvm_share_dir_xdg_override() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_SHARE_DIR");
-        env.set("XDG_DATA_HOME", "/xdg/data");
-        assert_eq!(mvm_share_dir(), "/xdg/data/mvm");
-        env.remove("XDG_DATA_HOME");
-    }
-
-    /// `ensure_data_dir` / `ensure_cache_dir` create their
+    /// `ensure_home_dir` / `ensure_cache_dir` create their
     /// directories with mode 0700, AND chmod existing dirs
     /// with looser perms down to 0700 — that's the upgrade path
     /// for hosts created before this change landed.
@@ -1097,18 +1009,18 @@ mod tests {
     fn checkpoints_dir_is_under_data_dir() {
         let mut env = TestEnv::new();
         let temp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", temp.path());
+        env.set("MVM_HOME", temp.path());
         let dir = checkpoints_dir();
         assert_eq!(dir, temp.path().join("checkpoints"));
-        env.remove("MVM_DATA_DIR");
+        env.remove("MVM_HOME");
     }
 
     #[test]
     fn vm_state_paths_honor_data_dir_and_share_one_source() {
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", "/custom/data");
+        env.set("MVM_HOME", "/custom/data");
 
-        // Per-VM dir + sockets derive from MVM_DATA_DIR; the inline
+        // Per-VM dir + sockets derive from MVM_HOME; the inline
         // `$HOME/.mvm/vms/...` derivations this centralizes silently ignored
         // it, so parallel sessions collided despite setting it.
         assert_eq!(
@@ -1123,16 +1035,15 @@ mod tests {
             vm_vsock_proxy_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/vsock.sock")
         );
-        // Vz nests its per-port listener under a `vsock/` subdir (vz.rs
-        // builds `<state_dir>/vsock`); the console VzTransport must derive
-        // the same path so they can't drift.
+        // HVF nests its per-port listener under a `vsock/` subdir; the console
+        // HvfVsockTransport must derive the same path so they can't drift.
         assert_eq!(
-            vm_vz_vsock_port_socket("foo", 5252),
+            vm_hvf_vsock_port_socket("foo", 5252),
             std::path::PathBuf::from("/custom/data/vms/foo/vsock/vsock-5252.sock")
         );
         assert_eq!(
-            vm_vz_vsock_port_socket_at(&vm_state_dir("foo"), 5252),
-            vm_vz_vsock_port_socket("foo", 5252)
+            vm_hvf_vsock_port_socket_at(&vm_state_dir("foo"), 5252),
+            vm_hvf_vsock_port_socket("foo", 5252)
         );
         // The dev-VM connect resolver (mvm-backend) and the console transport
         // (mvm) both build the libkrun socket from the shared socket-dir +
@@ -1146,7 +1057,7 @@ mod tests {
             vm_vsock_port_socket("foo", 5252)
         );
         // The hvf VMM's substitution-endpoint socket sits at the state-dir
-        // root (the device bridges to it directly) and honors MVM_DATA_DIR.
+        // root (the device bridges to it directly) and honors MVM_HOME.
         assert_eq!(
             vm_substitution_endpoint_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/substitution-endpoint.sock")
@@ -1157,14 +1068,14 @@ mod tests {
             std::path::PathBuf::from("/custom/data/vms/foo/hvf-broker.sock")
         );
 
-        env.remove("MVM_DATA_DIR");
+        env.remove("MVM_HOME");
     }
 
     #[test]
     fn long_vm_socket_paths_fall_back_to_short_tmp_namespace() {
         let mut env = TestEnv::new();
         env.set(
-            "MVM_DATA_DIR",
+            "MVM_HOME",
             "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test",
         );
 
@@ -1182,7 +1093,7 @@ mod tests {
         let hvf_agent = vm_hvf_agent_socket("sunny-badger-e546");
         let broker = vm_hvf_broker_socket("sunny-badger-e546");
         let libkrun = vm_vsock_port_socket_at(&state_dir, 5252);
-        let console = vm_vz_vsock_port_socket_at(&state_dir, 20001);
+        let console = vm_hvf_vsock_port_socket_at(&state_dir, 20001);
 
         for path in [
             &substitution,
@@ -1200,13 +1111,13 @@ mod tests {
             );
         }
 
-        env.remove("MVM_DATA_DIR");
+        env.remove("MVM_HOME");
     }
 
     #[test]
     fn machine_state_paths_honor_data_dir() {
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", "/custom/data");
+        env.set("MVM_HOME", "/custom/data");
 
         assert_eq!(
             machine_state_root(),
@@ -1221,6 +1132,6 @@ mod tests {
             std::path::PathBuf::from("/custom/data/machines/web/machine.json")
         );
 
-        env.remove("MVM_DATA_DIR");
+        env.remove("MVM_HOME");
     }
 }

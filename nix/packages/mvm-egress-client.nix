@@ -1,6 +1,6 @@
 # `mvm-egress-client` — production in-guest egress shim.
 #
-# Built from `crates/mvm-guest-helpers` in the workspace. A loopback SOCKS5 proxy
+# Built from `crates/mvm-agentd` in the workspace. A loopback SOCKS5 proxy
 # that funnels the workload's egress to the host vsock egress gateway — the guest's
 # only path off-VM under the vsock-only model (no NIC, no IP routing, no gateway).
 # `/init` starts it and exports `ALL_PROXY=socks5h://127.0.0.1:<port>` when the boot
@@ -8,6 +8,11 @@
 #
 # Baked unconditionally (it is inert unless `/init` starts it), like mvm-exit-report.
 # Always built without any dev-shell feature — it has no interactive surface.
+#
+# Requires the `addons` feature: the async loopback helper bins (this one,
+# mvm-addon-dns, mvm-addon-vsock-bridge) are the only mvm-agentd consumers of
+# tokio, so the crate keeps them behind that feature to hold the sealed
+# agent's default build tokio-free.
 
 { pkgs
 , lib
@@ -25,12 +30,13 @@ pkgs.rustPlatform.buildRustPackage {
   # Restrict the build to the egress-client binary; the workspace's heavier members
   # are not in this crate's closure, so the artifact stays small.
   cargoBuildFlags = [
-    "--package" "mvm-guest-helpers"
+    "--package" "mvm-agentd"
     "--bin" "mvm-egress-client"
+    "--features" "mvm-agentd/addons"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-guest-helpers"
+    "--package" "mvm-agentd"
   ];
 
   # Host-side `cargo test` lane runs the tests; the Nix build stays focused on the

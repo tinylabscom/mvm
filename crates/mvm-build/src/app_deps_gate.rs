@@ -40,7 +40,7 @@
 use std::path::Path;
 use std::{fs, io};
 
-use mvm_deps_audit::{FILE_CVE, FILE_SBOM};
+use mvm_sdk::compile::deps_audit::{FILE_CVE, FILE_SBOM};
 use thiserror::Error;
 
 use crate::app_deps::{GateLevel, InstallResult};

@@ -55,9 +55,9 @@ use mvm_core::policy::PolicyBundle;
 use std::sync::Mutex;
 
 use crate::audit::host_keypair::host_signer_id;
-use mvm_backend::AnyBackend;
 use mvm_core::plan::{SynthesisInput, synthesize_plan};
 use mvm_core::vm_backend::{VmId, VmStartConfig};
+use mvm_runtime::AnyBackend;
 
 pub use mvm_core::time::{Clock, SystemClock};
 
@@ -213,7 +213,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Populate the three `VmStartConfig` audit-substrate fields
 /// (`tenant_id`, `plan_json`, `bundle_json`) from the admitted
 /// plan. Call after the `VmStartConfig` is built and before
-/// `backend.start()`; the libkrun/Vz backends read these to wire
+/// `backend.start()`; the libkrun/HVF backends read these to wire
 /// `SupervisorConfig.{tenant_id, audit_dir, gateway_audit_socket,
 /// gateway_events_socket, signing_key_path}` and activate the
 /// bridge-factory path.
@@ -235,7 +235,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// workload must carry it — `host.audit.v1` is implicitly available to any
 /// admitted workload. This is decoupled from
 /// [`populate_audit_substrate`]: the broker needs the tenant string, **not**
-/// the signed `plan_json`, whose presence flips libkrun/Vz workload boots onto
+/// the signed `plan_json`, whose presence flips libkrun/HVF workload boots onto
 /// the claim-10 gateway-bridge supervisor path. Call this unconditionally; call
 /// `populate_audit_substrate` when a backend has a signed-plan consumer.
 pub fn thread_tenant_id(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted: &AdmittedPlan) {
@@ -298,7 +298,7 @@ pub fn populate_audit_substrate(
 /// bridge reader never sees a partial file.
 ///
 /// Parent dir is assumed pre-created by the caller (the producer sites
-/// in `up.rs` ensure `mvm_data_dir/vms/<name>/` exists with the same
+/// in `up.rs` ensure `mvm_home/vms/<name>/` exists with the same
 /// `0700` umbrella as `~/.mvm`).
 #[cfg(unix)]
 pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<()> {
@@ -348,9 +348,7 @@ pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Resul
     let Some(plan_json) = cfg.plan_json.as_deref() else {
         return Ok(());
     };
-    let state_dir = std::path::PathBuf::from(mvm_core::config::mvm_data_dir())
-        .join("vms")
-        .join(&cfg.name);
+    let state_dir = mvm_core::config::vm_state_dir(&cfg.name);
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("create per-VM state dir {}", state_dir.display()))?;
     write_secret_file(&state_dir.join("plan.json"), plan_json.as_bytes())?;
@@ -540,7 +538,7 @@ pub fn admit_and_start(
 mod tests {
     use super::*;
     use chrono::{DateTime, TimeZone, Utc};
-    use mvm_core::plan::{AuthPolicy, PlanSeccompTier, SecretReleasePolicy};
+    use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -560,7 +558,6 @@ mod tests {
             tool_policy_ref: None,
             secret_release: SecretReleasePolicy::None,
             secrets: Vec::new(),
-            auth: AuthPolicy::none(),
             audit_event_prefix: None,
             cpus: 1,
             mem_mib: 256,
@@ -777,7 +774,7 @@ mod tests {
 
     use mvm_core::plan::bundle::{
         BundleResolveError, BundleResolver, KeyId as BundleKeyId, PlanArtifact, TrustStore,
-        bundle_sha256, write_bundle,
+        bundle_sha256, key_id_from_pubkey, write_bundle,
     };
     use std::collections::HashMap;
 
@@ -806,7 +803,7 @@ mod tests {
             ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             sha256_hex,
         };
-        let key_id = BundleKeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let make_art = |name: &str, role: ArtifactRole, bytes: &[u8]| BundleArtifact {
             name: name.to_string(),
             role,
@@ -875,7 +872,7 @@ mod tests {
         };
         let (archive, pin) = make_test_bundle(&sk, b"kernel-bytes", b"rootfs-bytes");
         let mut map = HashMap::new();
-        let key_id = BundleKeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         map.insert(key_id, sk.verifying_key());
         let trust = MapTrust(map);
         let resolver = FixedResolver(archive);
@@ -966,10 +963,7 @@ mod tests {
         let (_archive_a, pin_a) = make_test_bundle(&sk, b"kA", b"rA");
         let (archive_b, _pin_b) = make_test_bundle(&sk, b"kB", b"rB");
         let mut map = HashMap::new();
-        map.insert(
-            BundleKeyId::from_pubkey(&sk.verifying_key()),
-            sk.verifying_key(),
-        );
+        map.insert(key_id_from_pubkey(&sk.verifying_key()), sk.verifying_key());
         let trust = MapTrust(map);
         let resolver = FixedResolver(archive_b);
         let ctx = BundleAdmissionContext {
@@ -1012,7 +1006,7 @@ mod tests {
             Some(admitted.plan.tenant.0.as_str())
         );
         // It must NOT thread the signed plan / policy bundle — that flips
-        // libkrun/Vz onto the gateway-bridge supervisor (+ its ~/.mvm/keys
+        // libkrun/HVF onto the gateway-bridge supervisor (+ its ~/.mvm/keys
         // substrate validation), which is a separate opt-in concern.
         assert!(
             cfg.plan_json.is_none(),
@@ -1165,7 +1159,7 @@ mod tests {
         // because there's nothing to stash.
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let cfg = VmStartConfig {
             name: "skip-me".into(),
@@ -1185,7 +1179,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let cfg = VmStartConfig {
             name: "with-plan".into(),
@@ -1256,7 +1250,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let keys_dir = mvm_core::config::mvm_keys_dir();
 
         // Build an admitted plan that carries agent_verbs.
@@ -1314,7 +1308,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let keys_dir = mvm_core::config::mvm_keys_dir();
 
         // Plain plan with no agent_verbs — the fixture default.
@@ -1348,7 +1342,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let keys_dir = mvm_core::config::mvm_keys_dir();
 
         let vm_name = "vm-stale-grant";
@@ -1406,7 +1400,7 @@ mod tests {
     #[test]
     fn admit_and_start_admits_then_boots_on_mock() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = mvm_backend::AnyBackend::from_hypervisor("mock");
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-boot".into(),
@@ -1442,7 +1436,7 @@ mod tests {
     fn admit_and_start_refuses_unadmitted_volume_before_boot() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let dir = tempfile::tempdir().unwrap();
-        let backend = mvm_backend::AnyBackend::from_hypervisor("mock");
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
         // The synthesized plan admits no shares, but the launch config carries a
         // volume — claim 1 must refuse before the backend ever starts.

@@ -27,8 +27,8 @@ name: Windows (informational)
 # apply here.
 
 on:
-  # Per ADR-038: Windows lane is release-time only (mvm-studio Tauri
-  # build is the supported Windows surface — see ADR-031). The day-to-
+  # Per ADR-012: Windows lane is release-time only (mvm-studio Tauri
+  # build is the supported Windows surface — see ADR-009). The day-to-
   # day CI lane (ci.yml) runs Linux + macOS on every push; Windows-
   # specific regressions surface at release-tag time as a final
   # pre-publish backstop.

@@ -19,3 +19,9 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# Lets `cargo test --target wasm32-wasip1` (the mvm-protocol wasm-clean test
+# lane) execute the compiled `.wasm` test binary under wasmtime instead of
+# trying to exec it as a native binary.
+[target.wasm32-wasip1]
+runner = "wasmtime"

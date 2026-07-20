@@ -3,7 +3,7 @@
 //! Spawns a stand-alone Python script that mimics what the
 //! `mvm` SDK's atexit hook would do: writes a recording JSON to
 //! `$MVM_SDK_OUT_PATH`. This keeps the test self-contained (no
-//! `pip install -e sdks/python` required, no dependence on the
+//! `pip install -e crates/mvm-sdk/sdks/python` required, no dependence on the
 //! Python SDK being importable on the test runner). The wiring
 //! the test exercises is the *CLI* side of Phase 7e — `python3`
 //! discovery, env var plumbing, recording load, lowering — which
@@ -11,11 +11,10 @@
 //!
 //! When `python3` isn't on PATH the test prints a skip notice
 //! and returns Ok; the SDK's atexit hook is independently covered
-//! by `sdks/python/tests/test_sandbox.py`.
+//! by `crates/mvm-sdk/sdks/python/tests/test_sandbox.py`.
 
 use std::process::Command;
 
-use mvm_ir::Entrypoint;
 use tempfile::TempDir;
 
 /// Heredoc-style Python that emits a valid recording JSON to
@@ -84,7 +83,7 @@ fn auto_exec_python_script_emits_recording_and_compile_lowers_it() {
 
     assert_eq!(workload.id, "etl-test");
     match &workload.apps[0].entrypoints[0] {
-        Entrypoint::Command { command, .. } => {
+        mvm_protocol::ir::Entrypoint::Command { command, .. } => {
             assert_eq!(command, &vec!["python".to_string(), "run.py".into()]);
         }
         other => panic!("expected Command entrypoint, got {other:?}"),

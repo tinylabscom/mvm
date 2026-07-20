@@ -12,7 +12,7 @@ Please include:
 
 - Affected mvm version(s) and platform(s) (macOS / Linux, arch, kernel version).
 - Reproduction steps or proof-of-concept code.
-- Your assessment of impact (confidentiality / integrity / availability) and the affected security claim (per [ADR-002 §"Security claims"](specs/adrs/002-microvm-security-posture.md)).
+- Your assessment of impact (confidentiality / integrity / availability) and the affected security claim (per [ADR-001 §"Security claims"](specs/adrs/001-microvm-security-posture.md)).
 - Whether you've shared the finding with anyone else and on what timeline.
 
 We acknowledge within **2 business days**.
@@ -22,7 +22,7 @@ We acknowledge within **2 business days**.
 - **Acknowledgement:** within 2 business days.
 - **Triage + severity assessment:** within 5 business days (CVSS v3.1 + impact-on-claims rubric).
 - **Fix + advisory publication target** (under coordinated disclosure):
-  - **Critical** (claim-breaking — see ADR-002's live claim list): 14 days.
+  - **Critical** (claim-breaking — see ADR-001's live claim list): 14 days.
   - **High** (mitigated by other layer but defense-in-depth weakened): 30 days.
   - **Medium / Low:** 90 days.
 - **CVE assignment:** we request CVE IDs from the GitHub CNA or MITRE for any vulnerability rated Medium or higher.
@@ -42,17 +42,17 @@ Security-relevant code:
 
 - All four broker subprocesses (`mvm-broker`, `mvm-secrets-dispatcher`, `mvm-host-signer`, `mvm-audit-signer`) — see [Plan 104 §Hardening posture](specs/plans/104-host-services-broker.md#hardening-posture-layers-111).
 - The per-VM supervisor (`crates/mvm-supervisor/`).
-- The guest agent (`crates/mvm-guest/`).
+- The guest agent (`crates/mvm-agentd/`).
 - The CLI surface (`mvmctl`) including `mvmctl up`, `mvmctl run`, `mvmctl image pull`, `mvmctl deps`, `mvmctl audit`, `mvmctl host-key`, `mvmctl services`, `mvmctl doctor`.
 - Audit chain integrity / verifier (`mvmctl audit verify`).
-- The signed-`ExecutionPlan` admission ceremony (per [ADR-041](specs/adrs/041-signed-audited-execution-plans.md)).
+- The signed-`ExecutionPlan` admission ceremony (per [ADR-014](specs/adrs/014-signed-audited-execution-plans.md)).
 - The OCI image runner (per [claim 10](specs/claims/claim-10-oci-image-provenance.md)).
-- The app-deps audit pipeline (per [ADR-047](specs/adrs/047-app-deps-audit-pipeline.md)).
+- The app-deps audit pipeline (per [ADR-014](specs/adrs/014-signed-audited-execution-plans.md)).
 
 ## What's out of scope
 
-- Vulnerabilities in upstream dependencies — please report those to the upstream project. We track their CVE surface per [ADR-059 §"Dependency CVE surface"](specs/adrs/059-host-services-broker.md#dependency-cve-surface) and will refresh our affected-version list per release. If an upstream CVE materially affects us, we coordinate with upstream and ship a doctor-refusal version of `mvmctl` once a fixed upstream is available.
-- Physical attacks on the host (cold-boot DRAM, DMA via Thunderbolt/PCIe, chip-off, hardware tampering) — per ADR-002 these are out of scope; the trust model assumes the host owner controls physical access.
+- Vulnerabilities in upstream dependencies — please report those to the upstream project. We track their CVE surface per [ADR-020 §"Dependency CVE surface"](specs/adrs/020-host-services-broker.md#dependency-cve-surface) and will refresh our affected-version list per release. If an upstream CVE materially affects us, we coordinate with upstream and ship a doctor-refusal version of `mvmctl` once a fixed upstream is available.
+- Physical attacks on the host (cold-boot DRAM, DMA via Thunderbolt/PCIe, chip-off, hardware tampering) — per ADR-001 these are out of scope; the trust model assumes the host owner controls physical access.
 - Theoretical attacks without a reproducible exploit (we'll triage them but lower-priority).
 - Best-practice suggestions without a vulnerability ("you should use X instead of Y") — please open a GitHub Discussion instead.
 
@@ -93,7 +93,7 @@ cosign tree --tag <version>          # confirm Rekor entry exists
 
 ## Hardening status by claim
 
-Each of mvm's published security claims (currently 1–10; ADR-059 proposes two more on merge) is backed by a CI gate. The current claim → gate mapping is documented in [CLAUDE.md §"Security model"](CLAUDE.md#security-model) and per-claim files in [specs/claims/](specs/claims/).
+Each of mvm's published security claims (currently 1–10; ADR-020 proposes two more on merge) is backed by a CI gate. The current claim → gate mapping is documented in [CLAUDE.md §"Security model"](CLAUDE.md#security-model) and per-claim files in [specs/claims/](specs/claims/).
 
 A vulnerability that breaks a claim is **Critical** by definition.
 
@@ -105,7 +105,7 @@ _(none yet — placeholder for future credits)_
 
 ## See also
 
-- [ADR-002 — microvm security posture](specs/adrs/002-microvm-security-posture.md) — the master security claim list and threat model.
-- [ADR-059 — host services broker](specs/adrs/059-host-services-broker.md) — the architecture of the broker subprocess set and the narrowed insider-threat clause.
+- [ADR-001 — microvm security posture](specs/adrs/001-microvm-security-posture.md) — the master security claim list and threat model.
+- [ADR-020 — host services broker](specs/adrs/020-host-services-broker.md) — the architecture of the broker subprocess set and the narrowed insider-threat clause.
 - [Plan 104 — host services broker](specs/plans/104-host-services-broker.md) — the hardening implementation specifics (Layers 1–11).
 - [threat model 02 — host services broker](specs/threat-models/02-host-services-broker.md) — STRIDE walk for the broker.

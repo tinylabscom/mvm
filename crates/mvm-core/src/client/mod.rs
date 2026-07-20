@@ -21,7 +21,8 @@ pub mod mock;
 pub use error::{MvmError, Result};
 
 use dto::{
-    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, ReconfigureRequest,
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, PauseOpts,
+    PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 
 /// The single machine-driving contract. `async_trait` boxes the futures so
@@ -48,6 +49,19 @@ pub trait MvmClient: Send + Sync {
     /// Stop a machine by id. Idempotent: stopping a stopped machine is `Ok`.
     async fn stop_machine(&self, id: &MachineId) -> Result<()>;
 
+    /// Pause a running machine: quiesce it, seal an epoch-bound snapshot of its
+    /// vmstate + memory, mark it paused, and return the sealed [`PauseOutcome`].
+    /// The snapshot transport is host-local and chosen by the backend, so it
+    /// never appears in this signature — keeping the method REST-satisfiable.
+    async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome>;
+
+    /// Resume a paused machine from its sealed snapshot. Verifies the snapshot
+    /// envelope and **refuses a replayed (older-epoch) snapshot** before
+    /// restoring, then finishes bringing the guest back. `opts.warm` selects the
+    /// backend's live-memory warm-start path, which fails closed on a disk-only
+    /// backend.
+    async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome>;
+
     /// Remove a machine by id (stopping it first if needed). Idempotent:
     /// removing an absent machine is `Ok`.
     async fn remove_machine(&self, id: &MachineId) -> Result<()>;
@@ -66,6 +80,11 @@ pub trait MvmClient: Send + Sync {
         id: &MachineId,
         cfg: ReconfigureRequest,
     ) -> Result<MachineState>;
+
+    /// Set or clear a machine's TTL — the `expires_at` the idle reaper honors.
+    /// `Some(rfc3339)` arms it, `None` clears it. Errors if the machine is not
+    /// registered.
+    async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()>;
 }
 
 #[cfg(test)]

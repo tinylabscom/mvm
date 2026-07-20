@@ -69,6 +69,27 @@ fn wait_for_path(path: &std::path::Path, timeout: Duration) {
     }
 }
 
+/// Connect to a UDS, retrying until it accepts or `timeout` elapses. A bare
+/// "the socket file exists" check races the server: `bind(2)` creates the file
+/// but `connect(2)` is refused until `listen(2)` runs, and under heavy test
+/// contention the child can lag between the two. Retrying the connect closes
+/// that window and tolerates a starved child that binds slowly.
+fn connect_uds_retry(path: &std::path::Path, timeout: Duration) -> UnixStream {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match UnixStream::connect(path) {
+            Ok(stream) => return stream,
+            Err(e) if Instant::now() >= deadline => {
+                panic!(
+                    "could not connect to {} within {timeout:?}: {e}",
+                    path.display()
+                )
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
 /// Kills the child on drop so a panicking assertion never leaks a process.
 struct Kill(Child);
 impl Drop for Kill {
@@ -104,7 +125,9 @@ fn host_audit_v1_round_trip_signs_a_verifiable_workload_chain() {
         "software_chain_key_path": secret_key,
     });
     let _audit_guard = Kill(spawn_with_config(AUDIT_SIGNER_BIN, &audit_cfg));
-    wait_for_path(&audit_sock, Duration::from_secs(10));
+    // Generous: under a saturated box a freshly-spawned child can take many
+    // seconds just to get scheduled far enough to bind its socket.
+    wait_for_path(&audit_sock, Duration::from_secs(30));
 
     // ── broker: binds `broker_sock`, forwards host.audit.v1 to `audit_sock` ──
     let broker_cfg = serde_json::json!({
@@ -115,10 +138,11 @@ fn host_audit_v1_round_trip_signs_a_verifiable_workload_chain() {
         "audit_signer_uds_path": audit_sock,
     });
     let _broker_guard = Kill(spawn_with_config(BROKER_BIN, &broker_cfg));
-    wait_for_path(&broker_sock, Duration::from_secs(10));
 
     // ── the workload's emit, as it arrives at the broker UDS ──
-    let mut conn = UnixStream::connect(&broker_sock).expect("connect to broker UDS");
+    // Retry the connect rather than gating on the socket file existing: bind
+    // precedes listen, so "file present" does not mean "accepting" yet.
+    let mut conn = connect_uds_retry(&broker_sock, Duration::from_secs(30));
     let call = ServiceCall {
         service: ServiceId::parse("host.audit.v1").unwrap(),
         verb: "emit".into(),

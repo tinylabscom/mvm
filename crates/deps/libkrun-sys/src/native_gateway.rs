@@ -431,7 +431,7 @@ impl Drop for NativeGatewayHandle {
         // Best-effort socket cleanup — if libkrun was holding the fd
         // open, the inode goes away when the last fd closes, but the
         // path entry remains. Removing it explicitly keeps
-        // `~/.cache/mvm/builder-vm/vms/<vm>/` tidy.
+        // `~/.mvm/cache/builder-vm/vms/<vm>/` tidy.
         let _ = std::fs::remove_file(&self.socket_path);
         let _ = std::fs::remove_file(&self.pid_path);
     }

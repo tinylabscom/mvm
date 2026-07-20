@@ -19,8 +19,7 @@ boundary only when a workflow actually needs Linux build or evaluation work.
 | Run a command in an OCI image | `mvmctl machine run --image ghcr.io/org/app:tag -- <cmd>` | OCI provenance, cache reuse, admission, receipts, and audit. |
 | Use a local image archive | `mvmctl machine run --image-archive ./image.tar -- <cmd>` | Offline-friendly image input through the same hardened unpack/admission path. |
 | Keep a dev machine around | `mvmctl machine create --name dev --image alpine` | Durable spec plus `start`, `exec`, `shell`, `stop`, `inspect`, and `rm`. |
-| Forward your SSH agent | `mvmctl machine create --ssh-agent --name dev --image alpine` | Dev-tier agent socket forwarding; private key files stay on the host. |
-| Declare a repeatable machine | `mvmctl machine create --manifest ./mvm.toml --name dev` | TOML-backed image, sizing, network, volume, dev-init, and auth settings. |
+| Declare a repeatable machine | `mvmctl machine create --manifest ./mvm.toml --name dev` | TOML-backed image, sizing, network, volume, and dev-init settings. |
 | Verify a portable artifact | `mvmctl machine check-artifact ./app.mvm --key ./publisher.pub` | Signature, hash, format, and host-architecture verification before admission. |
 
 Portable artifact creation and `machine run <artifact>` are still preview
@@ -77,9 +76,6 @@ cpus = 2
 mem = "512M"
 net = true
 allow_hosts = ["registry.npmjs.org"]
-
-[auth]
-ssh_agent = true
 ```
 
 ```bash
@@ -88,29 +84,13 @@ mvmctl machine start js-dev
 ```
 
 Unknown manifest keys are rejected. That is intentional: typos should not
-silently widen network, auth, volume, or dev-init behavior.
-
-## SSH-Agent Forwarding
-
-SSH-agent support forwards an agent socket into a dev-tier machine. It does not
-copy `~/.ssh`, private keys, known-hosts files, or SSH server/client packages
-into the guest.
-
-Use it only when the host has `SSH_AUTH_SOCK` pointing to a Unix socket:
-
-```bash
-mvmctl machine create --name dev --image alpine:3.20 --ssh-agent
-mvmctl machine exec dev -- env | grep SSH_AUTH_SOCK
-```
-
-The guest sees `/run/mvm/ssh-agent.sock`; the private keys remain controlled by
-the host agent.
+silently widen network, volume, or dev-init behavior.
 
 ## Read This Before Depending On A Capability
 
 Machine UX intentionally keeps the first path small. Some capabilities are
 unsupported, backend-specific, or future work. Read
 [Machine limitations](/guides/machine-limitations/) before depending on network
-protocol behavior, volume shapes, SSH-agent prerequisites, macOS signing or
-entitlement behavior, GPU availability, or host/guest architecture support.
+protocol behavior, volume shapes, macOS signing or entitlement behavior, GPU availability,
+or host/guest architecture support.
 

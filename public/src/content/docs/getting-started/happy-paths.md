@@ -18,7 +18,7 @@ nothing more, nothing less.
 | [Prebuilt bundle operator](#bundle-run) | `--workflow bundle-run` | Launch a signed `.mvmpkg` artifact. |
 | [`mvmctl dev` user](#dev-shell) | `--workflow dev-shell` | Drop into a builder-VM shell for tinkering. |
 
-The preflight filter (plan 74 W5 / ADR-050 §1) only fails on missing
+The preflight filter (plan 74 W5 / ADR-017 §1) only fails on missing
 prerequisites your workflow actually needs. A bundle operator no
 longer sees a "missing `cargo`" failure they don't care about; a
 `mvmctl dev` user no longer needs host rustup.
@@ -41,7 +41,7 @@ path.
 
 For the higher-level `mvmctl machine` workflow map, see
 [Machine use cases](/guides/machine-use-cases/). For explicit network, volume,
-SSH-agent, macOS, GPU, and architecture limits, see
+macOS, GPU, and architecture limits, see
 [Machine limitations](/guides/machine-limitations/).
 
 **Failure recovery:**

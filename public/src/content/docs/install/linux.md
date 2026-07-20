@@ -3,7 +3,7 @@ title: "Install mvm on Linux"
 description: "mvm on Linux is the Tier 1 production target — Firecracker + KVM, no virtualization wrapper, sub-200ms cold boot."
 ---
 
-Linux is mvm's Tier 1 target. The full security posture (verified boot, jailer, seccomp tier "strict") and the project's tightest boot-time budget (≤ 200ms cold on Firecracker; ≤ 30ms snapshot-cloned) hold here. Other platforms get the same API surface via [ADR-013](/contributing/adr/013-libkrun-pivot/), but Linux is where mvm runs at full pace.
+Linux is mvm's Tier 1 target. The full security posture (verified boot, jailer, seccomp tier "strict") and the project's tightest boot-time budget (≤ 200ms cold on Firecracker; ≤ 30ms snapshot-cloned) hold here. Other platforms get the same API surface via [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md), but Linux is where mvm runs at full pace.
 
 For the full host/backend matrix, see [Platform support](/reference/platform-support/).
 

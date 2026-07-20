@@ -220,7 +220,7 @@ fn resolve_bare_dns_pins(
                 .map(|addrs| addrs.map(|sa| sa.ip()).collect())
                 .unwrap_or_default()
         };
-        reg.add(mvm_core::policy::dns_pin::DnsPin::new(
+        reg.add(mvm_core::policy::dns_pin::new_pin(
             hp.host,
             ips,
             chrono::Duration::hours(BARE_PIN_TTL_HOURS),
@@ -1658,7 +1658,7 @@ mod tests {
 
     fn eff_with_l4(specs: Vec<L4RuleSpec>) -> mvm_core::policy::EffectivePolicy {
         mvm_core::policy::EffectivePolicy {
-            network: mvm_core::policy::NetworkPolicy {
+            network: mvm_core::policy::BundleNetworkPolicy {
                 l4: specs,
                 ..Default::default()
             },
@@ -2288,7 +2288,7 @@ mod tests {
     /// by hand so the bare-L4 lowering is exercised without real DNS.
     fn bare_pins(host: &str, ips: &[&str]) -> mvm_core::policy::dns_pin::DnsPinRegistry {
         let mut reg = mvm_core::policy::dns_pin::DnsPinRegistry::new();
-        reg.add(mvm_core::policy::dns_pin::DnsPin::new(
+        reg.add(mvm_core::policy::dns_pin::new_pin(
             host,
             ips.iter().map(|s| s.parse().unwrap()).collect(),
             chrono::Duration::hours(1),
@@ -3788,7 +3788,6 @@ mod tests {
             network_policy: PolicyRef("local-default".into()),
             fs_policy: FsPolicyRef("local-default".into()),
             secrets: Vec::new(),
-            auth: Default::default(),
             egress_policy: PolicyRef("local-default".into()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),

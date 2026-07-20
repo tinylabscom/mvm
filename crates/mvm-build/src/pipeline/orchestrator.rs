@@ -33,7 +33,6 @@ fn builder_mode() -> BuilderMode {
         .as_str()
     {
         "vsock" => BuilderMode::Vsock,
-        "ssh" => BuilderMode::Vsock,
         "auto" => BuilderMode::Auto,
         _ => BuilderMode::Host,
     }

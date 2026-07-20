@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
+use mvm_agentd::vsock::GuestRequest;
 use mvm_core::plan::VerbId;
-use mvm_guest::vsock::GuestRequest;
 
 /// Whether the image at `rootfs_path` is a sealed prod image, read from the
 /// `mvm-meta.json` sidecar the build/materialize pipeline writes next to the

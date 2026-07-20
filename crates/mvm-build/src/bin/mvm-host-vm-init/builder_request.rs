@@ -454,7 +454,7 @@ mod tests {
 
     /// **The cross-validation test.** What the host's serde-derived
     /// writer (`mvm_build::builder_protocol::HostVmRequest` →
-    /// `mvm_guest::vsock::write_frame`) emits must parse cleanly
+    /// `mvm_agentd::vsock::write_frame`) emits must parse cleanly
     /// via this hand-rolled parser. Any schema drift on either side
     /// trips this test and that's the signal to resync.
     #[test]

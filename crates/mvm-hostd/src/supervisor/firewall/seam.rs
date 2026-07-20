@@ -1,5 +1,5 @@
 //! `SupervisorEgressEnforcer` — adapts the supervisor's [`FirewallEnforcer`]
-//! to the low [`mvm_network::EgressEnforcer`] seam.
+//! to the low [`mvm_net::EgressEnforcer`] seam.
 //!
 //! Pure plumbing: it maps the seam's `EgressWiring` onto a [`FirewallSpec`]
 //! and delegates `enforce`→`install_default_deny`, `withdraw`→`teardown`,
@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use mvm_core::network_policy::NetworkPolicy;
-use mvm_network::{EgressEnforcer, EgressWiring, EnforcementError};
+use mvm_net::{EgressEnforcer, EgressWiring, EnforcementError};
 
 use super::{FirewallEnforcer, FirewallError, FirewallSpec};
 

@@ -3,7 +3,7 @@
 # Built from `crates/mvm-host-services-ffi` (crate-type `cdylib`). Baked into
 # the runtime overlay at `/mvm/runtime/lib/` and loaded via `ctypes` / `koffi`
 # by the in-guest language SDKs (`mvm.audit.emit`, `mvm.host.time()`, ...).
-# It is the single JSON-in/JSON-out C ABI over `mvm_guest::host_{audit,time,
+# It is the single JSON-in/JSON-out C ABI over `mvm_agentd::host_{audit,time,
 # cost}`, so every language SDK is a thin shim over this one object.
 #
 # Built for the workload rootfs's libc (the nixpkgs Linux platform = glibc,

@@ -2,8 +2,8 @@
 //!
 //! Authoritative shape. The generated `schema/addon-manifest-v0.json`
 //! is emitted from these types via `schemars` and committed; CI rejects
-//! drift. SDK lower layers (`sdks/python/mvm/_addon/`,
-//! `sdks/typescript/src/addon/`) are generated from the JSON Schema
+//! drift. SDK lower layers (`python/mvm/_addon/`,
+//! `typescript/src/addon/`) are generated from the JSON Schema
 //! and committed as well.
 //!
 //! Round-trip discipline: a manifest parsed and re-serialized via

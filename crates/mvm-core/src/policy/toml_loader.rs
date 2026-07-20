@@ -91,7 +91,7 @@ pub enum LoadError {
 /// Per-tenant subdir `<base>/<tenant>/`, per-workload file
 /// `<base>/<tenant>/<workload>.toml`.
 pub fn default_policy_dir() -> Option<PathBuf> {
-    crate::config::mvm_data_dir_strict()
+    crate::config::mvm_home_strict()
         .ok()
         .map(|d| d.join("policies"))
 }
@@ -284,7 +284,7 @@ port_hi  = 0
 
     #[test]
     fn parse_bundle_treats_missing_l4_section_as_empty() {
-        // `#[serde(default)]` on `NetworkPolicy::l4` means bundles
+        // `#[serde(default)]` on `BundleNetworkPolicy::l4` means bundles
         // authored before the l4 section existed continue to parse —
         // they evaluate as default-deny at the gate.
         let bundle = parse_bundle(&minimal_bundle_toml()).unwrap();

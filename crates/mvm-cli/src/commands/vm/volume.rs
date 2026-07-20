@@ -31,16 +31,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 
-use mvm::vm::volume_registry::{
-    LocalVolumeCatalog, LocalVolumeEncryption, LocalVolumeEntry, LocalVolumeState,
-    MvmManagedVolumeEncryption, VolumeMountEntry, VolumeMountRegistry,
-};
 use mvm_core::crypto::key_rotation;
 use mvm_core::crypto::policy::validate_mount_path;
 use mvm_core::crypto::rotation_policy;
 use mvm_core::domain::volume::{MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::vm::volume_registry::{
+    LocalVolumeCatalog, LocalVolumeEncryption, LocalVolumeEntry, LocalVolumeState,
+    MvmManagedVolumeEncryption, VolumeMountEntry, VolumeMountRegistry,
+};
 use rand::RngCore;
 use secrecy::ExposeSecret;
 
@@ -177,19 +177,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 fn default_managed_volume_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_core::config::mvm_data_dir())
+    std::path::PathBuf::from(mvm_core::config::mvm_home())
         .join("volumes")
         .join("local")
 }
 
 fn default_mvm_volume_root() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_data_dir())
+    PathBuf::from(mvm_core::config::mvm_home())
         .join("volumes")
         .join("mvm-managed")
 }
 
 fn local_master_key_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_data_dir())
+    PathBuf::from(mvm_core::config::mvm_home())
         .join("volumes")
         .join("master-keys")
         .join("local")
@@ -837,7 +837,7 @@ mod tests {
         fn new() -> Self {
             let mut env = mvm_core::util::test_env::TestEnv::new();
             let tmp = tempfile::tempdir().expect("tempdir");
-            env.set("MVM_DATA_DIR", tmp.path());
+            env.set("MVM_HOME", tmp.path());
             Self { _env: env, tmp }
         }
 

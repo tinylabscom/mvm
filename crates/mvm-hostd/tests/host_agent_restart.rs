@@ -3,13 +3,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
-use mvm_backend::{deregister_vm, ensure_host_agent_daemon, load_host_signing_key, register_vm};
 use mvm_core::config;
 use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceId, ServiceResponse};
 use mvm_core::protocol::broker_control::RegisterVm;
 use mvm_core::util::test_env::TestEnv;
 use mvm_hostd::audit::host_keypair;
 use mvm_hostd::audit_signer::verify::verify_workload_chain;
+use mvm_runtime::{deregister_vm, ensure_host_agent_daemon, load_host_signing_key, register_vm};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -44,7 +44,7 @@ impl HostAgentFixture {
     async fn start_inner(idle_timeout_secs: Option<u64>) -> Self {
         let mut env = TestEnv::new();
         let data_dir = tempfile::tempdir().expect("temp data dir");
-        env.set("MVM_DATA_DIR", data_dir.path());
+        env.set("MVM_HOME", data_dir.path());
         env.set("MVM_HOST_AGENT_PATH", HOST_AGENT_BIN);
         env.set("MVM_SIGNER_HELPER_PATH", SIGNER_HELPER_BIN);
         if let Some(secs) = idle_timeout_secs {
@@ -66,9 +66,15 @@ impl HostAgentFixture {
             vm_id: vm_name.clone(),
             workload_id: Some("wl-vm-1".to_string()),
             tenant_id: tenant_id.clone(),
-            broker_listen_socket: broker_socket.clone(),
-            workload_chain_path: workload_chain.clone(),
-            workload_chain_head_path: Some(data_dir.path().join("audit-signer.head")),
+            broker_listen_socket: broker_socket.to_string_lossy().into_owned(),
+            workload_chain_path: workload_chain.to_string_lossy().into_owned(),
+            workload_chain_head_path: Some(
+                data_dir
+                    .path()
+                    .join("audit-signer.head")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             audit_signer_uds_path: None,
             services_bindings: vec![],
         };

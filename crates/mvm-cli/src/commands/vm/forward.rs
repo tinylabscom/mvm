@@ -5,9 +5,9 @@ use clap::Args as ClapArgs;
 
 use crate::ui;
 
-use mvm_backend::microvm;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::microvm;
 
 use super::Cli;
 use super::shared::{
@@ -35,8 +35,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 /// Forward a port from a running microVM to localhost.
 ///
-/// On macOS this tunnels through Lima's SSH connection; on native Linux
-/// it spawns a local socat proxy.
+/// The microVM is directly reachable on the host bridge, so this spawns a
+/// local socat proxy on every platform.
 ///
 /// Each `port_spec` is either `GUEST_PORT` (binds to same local port) or
 /// `LOCAL_PORT:GUEST_PORT`.  Multiple ports are forwarded concurrently —

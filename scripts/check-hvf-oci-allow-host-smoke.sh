@@ -26,7 +26,7 @@ Required host:
 
 Useful overrides:
   MVM_HVF_ALLOW_HOST_OUT_DIR=/tmp/path     evidence directory
-  MVM_HVF_ALLOW_HOST_DATA_DIR=/tmp/path    isolated MVM_DATA_DIR
+  MVM_HVF_ALLOW_HOST_DATA_DIR=/tmp/path    isolated MVM_HOME
   MVM_HVF_ALLOW_HOST_HOST=google.com       allow-host target for the exact CLI proof
   MVM_HVF_ALLOW_HOST_IMAGE=alpine          OCI image for the exact CLI proof
   MVM_HVF_ALLOW_HOST_SKIP_BUILD=1          skip helper binary builds
@@ -85,7 +85,7 @@ fi
 
 run_env=(
   env
-  "MVM_DATA_DIR=${DATA_DIR}"
+  "MVM_HOME=${DATA_DIR}"
   "MVM_HVF_SUPERVISOR_PATH=${SUPERVISOR_BIN}"
   "MVM_SUBSTITUTION_ENDPOINT_PATH=${ENDPOINT_BIN}"
 )
@@ -106,7 +106,7 @@ grep -q "/usr/local/bin/mvm-guest-agent" "${CLI_STDOUT}" || {
 
 if [[ "${SKIP_RELAY_PROOF}" != "1" ]]; then
   echo "==> relay admit/deny proof guest"
-  OUT="${GUEST_OUT}" bash crates/mvm-backend/examples/hvf-egress-guest/build.sh
+  OUT="${GUEST_OUT}" bash crates/mvm-runtime/examples/hvf-egress-guest/build.sh
 
   KERNEL="${MVM_HVF_KERNEL:-${HOME}/.cache/mvm/builder-vm/aarch64/vmlinux}"
   INITRD="${MVM_HVF_INITRD:-${GUEST_OUT}/initramfs.cpio}"
@@ -122,7 +122,7 @@ if [[ "${SKIP_RELAY_PROOF}" != "1" ]]; then
   "${run_env[@]}" \
     "MVM_HVF_KERNEL=${KERNEL}" \
     "MVM_HVF_INITRD=${INITRD}" \
-    cargo run -p mvm-backend --example hvf-relay-egress \
+    cargo run -p mvm-runtime --example hvf-relay-egress \
     >"${RELAY_STDOUT}" 2>"${RELAY_STDERR}"
 
   grep -q "admitted destination reachable: true" "${RELAY_STDOUT}" || {

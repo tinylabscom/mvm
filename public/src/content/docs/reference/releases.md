@@ -26,7 +26,7 @@ GitHub Release:
 | `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
 | `mvmctl update` | the tarball for the latest release, in-place swap |
 | `mvmctl kernel build --source download` | `vmlinux-<arch>-<variant>` + `kernel-<arch>-checksums-sha256.txt`, pinned to the binary's own release tag |
-| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` + `runtime-overlay-<arch>.tar.gz.sha256`; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.cache/mvm/runtime-overlay/<version>/<arch>/` |
+| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` + `runtime-overlay-<arch>.tar.gz.sha256`; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/runtime-overlay/<version>/<arch>/` |
 
 ## Runtime overlay release assets
 
@@ -44,7 +44,7 @@ backends that admit `RequiredOverlay`.
 The tarball itself is hash-verified before extraction. Inside it, the canonical
 payload is still per-file checked: `overlay.ext4`, `overlay.verity`,
 `overlay.roothash`, `VERSION`, and an inner `checksums-sha256.txt`. When
-`mvmctl` installs that payload into `~/.cache/mvm/runtime-overlay/<version>/<arch>/`,
+`mvmctl` installs that payload into `~/.mvm/cache/runtime-overlay/<version>/<arch>/`,
 every required-overlay boot re-hashes those cached files before attach and
 refuses to mount the overlay if the cache entry has drifted.
 

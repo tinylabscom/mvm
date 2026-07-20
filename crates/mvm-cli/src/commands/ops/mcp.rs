@@ -23,11 +23,12 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 use mvm_hostd::supervisor::ToolRegistry;
 use mvm_hostd::supervisor::tools::{download, staging, upload, web_fetch, web_search};
-use mvm_mcp::{
+use secrecy::SecretBox;
+
+use crate::mcp::{
     ContentBlock, Dispatcher, ReapReason, Reaper, RunParams, SessionConfig, SessionLookup,
     SessionMap, SessionState, ToolResult,
 };
-use secrecy::SecretBox;
 
 use super::Cli;
 
@@ -54,7 +55,7 @@ pub(in crate::commands) enum McpTransport {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.transport {
         McpTransport::Stdio => {
-            mvm_mcp::init_stderr_tracing();
+            crate::mcp::init_stderr_tracing();
             let dispatcher = ExecDispatcher::default();
             // Spawn the session reaper. Drops out when the process exits;
             // sessions still in the map at shutdown get drained by the
@@ -63,7 +64,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             dispatcher.spawn_reaper();
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
-            mvm_mcp::run_with_dispatcher(stdin.lock(), &mut stdout.lock(), &dispatcher)
+            crate::mcp::run_with_dispatcher(stdin.lock(), &mut stdout.lock(), &dispatcher)
         }
     }
 }
@@ -387,13 +388,13 @@ fn build_tool_registry() -> ToolRegistry {
 
 /// The admission hook every MCP code-run boots under — cold and warm alike.
 /// MCP runs untrusted AI code, so each VM is admitted as a deny-all transient
-/// workload: the signed plan's `tenant_id` makes the libkrun/Vz supervisor
+/// workload: the signed plan's `tenant_id` makes the libkrun/HVF supervisor
 /// spawn the enforcing gateway bridge (Firecracker enforces the same policy
 /// field via nftables). Without admission no bridge spawns and the deny-all is
 /// inert on the bridge backends.
 fn mcp_untrusted_admit()
 -> impl Fn(&std::path::Path, &str) -> Result<Option<crate::exec::SessionAuditSubstrate>> {
-    let backend = mvm_backend::backend::AnyBackend::auto_select()
+    let backend = mvm_runtime::backend::AnyBackend::auto_select()
         .name()
         .to_string();
     crate::commands::vm::untrusted_transient_admit(
@@ -433,7 +434,7 @@ impl ExecDispatcher {
             healthcheck: None,
         };
         // Admit the run (see `mcp_untrusted_admit`): without it no bridge spawns
-        // and the deny-all above is inert on the libkrun/Vz backends.
+        // and the deny-all above is inert on the libkrun/HVF backends.
         let admit = mcp_untrusted_admit();
         crate::exec::run_captured(req, Some(&admit))
     }
@@ -567,7 +568,7 @@ impl Drop for ExecDispatcher {
 }
 
 /// Reaper impl that audit-logs the close *and* tears down the warm
-/// VM (A.2 v2). The trait-based design (per `mvm_mcp::session`) means
+/// VM. The trait-based design (per `crate::mcp::session`) means
 /// mvmd's hosted variant can plug in its own reaper that uses its
 /// per-tenant orchestrator without changing the map contract.
 struct DispatcherReaper {
@@ -669,7 +670,7 @@ impl Dispatcher for ExecDispatcher {
         // Memory ceiling check: reject envs whose recorded mem_mib
         // exceeds MVM_MCP_MEM_CEILING_MIB. Missing spec is a soft
         // pass since we don't know the size.
-        if let Ok(spec) = mvm::vm::template::lifecycle::template_load(&params.env)
+        if let Ok(spec) = mvm_runtime::vm::template::lifecycle::template_load(&params.env)
             && spec.mem_mib > self.mem_ceiling_mib
         {
             return error_result(format!(
@@ -837,7 +838,7 @@ fn parse_env_u32(name: &str, default: u32) -> u32 {
 }
 
 fn validate_env(env: &str) -> anyhow::Result<()> {
-    let envs = mvm::vm::template::lifecycle::template_list()?;
+    let envs = mvm_runtime::vm::template::lifecycle::template_list()?;
     if envs.iter().any(|e| e == env) {
         return Ok(());
     }

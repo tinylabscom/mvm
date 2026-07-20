@@ -45,7 +45,7 @@ mvmctl machine run --flake examples/python/hello-app-with-deps/ --profile prod -
 # expect: "hello ari"
 ```
 
-The `--prod` flag exercises the strict ADR-047 gate semantics: missing
+The `--prod` flag exercises the strict ADR-014 gate semantics: missing
 attestations or any high/critical CVE finding fails admission closed
 (see `crates/mvm-build/src/app_deps_gate.rs::apply_install_gate`).
 `--dev` warn-and-continues for fast iteration.
@@ -70,7 +70,7 @@ mvmctl deps audit --all
 
 ## Why the lockfile is the cache key
 
-ADR-047 pins the *volume* hash at admission time, but the volume hash
+ADR-014 pins the *volume* hash at admission time, but the volume hash
 bakes in `cve.json` + `meta.json` — values only the builder VM knows
 after the install runs. The orchestrator keys its cache on
 `sha256(lockfile_bytes)` mixed with `(language, gate_level)` so the

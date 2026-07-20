@@ -115,7 +115,7 @@ sha256sum --check checksums-sha256.txt
 ```
 
 When `mvmctl build runtime-overlay build --source download` installs this
-payload into `~/.cache/mvm/runtime-overlay/<version>/<arch>/`, it first
+payload into `~/.mvm/cache/runtime-overlay/<version>/<arch>/`, it first
 verifies the tarball, then verifies the extracted inner files against the
 embedded `checksums-sha256.txt`, and later required-overlay boots recheck those
 cached file hashes before attach. A drifted cache entry is refused.
@@ -156,7 +156,7 @@ If you must roll back a release:
 2. Ensure the matching older runtime-overlay assets are available again, either
    by re-running `mvmctl build runtime-overlay build --source download` for the
    older tag or by restoring the older cached artifact under
-   `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
+   `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 3. Restart affected VMs so they boot with the downgraded, version-matched
    overlay.
 
@@ -230,7 +230,7 @@ The revocations tag is signed by a *separate* OIDC identity (`revocations.yml`) 
 Published builder packs use the same `revocations` channel for additive
 recalls. When the installed attested builder-pack path is active, `mvmctl`
 refreshes `pack-revocations.json` and `pack-revocations.json.bundle` into
-`~/.cache/mvm/pack-revocations/` every 24 hours, tolerates up to 7 days of
+`~/.mvm/cache/pack-revocations/` every 24 hours, tolerates up to 7 days of
 offline staleness, treats `404` as bootstrap state, and unions any fetched
 entries with the operator's local `pack-trust.json` revocations. A fetched list
 that fails cosign verification is ignored rather than applied.

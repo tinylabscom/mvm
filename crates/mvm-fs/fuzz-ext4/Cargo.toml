@@ -1,0 +1,30 @@
+[package]
+name = "mvm-fs-ext4-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detached from the parent workspace: libfuzzer-sys only links under
+# cargo-fuzz's wrapper (sanitizer + linker flags), so a plain
+# `cargo build --workspace` would fail. The root Cargo.toml lists this
+# path in `workspace.exclude`; the empty `[workspace]` table below is the
+# other half cargo requires to treat it as standalone.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1"
+
+[dependencies.mvm-fs]
+path = ".."
+
+# libfuzzer harnesses, never bench/test/doc targets.
+[[bin]]
+name = "fuzz_build_image"
+path = "fuzz_targets/fuzz_build_image.rs"
+test = false
+doc = false
+bench = false

@@ -57,11 +57,11 @@ pub const PUBLIC_MODE: u32 = 0o644;
 /// Length of an Ed25519 key, in bytes (both halves).
 pub const KEY_BYTES: usize = 32;
 
-/// Resolve `~/.mvm/attestation/` from the calling user's `$HOME`.
+/// Resolve the attestation key directory: `<mvm_home>/attestation/`.
 pub fn default_identity_dir() -> Result<PathBuf> {
-    let home =
-        std::env::var_os("HOME").context("$HOME unset; cannot locate ~/.mvm/attestation/")?;
-    Ok(PathBuf::from(home).join(".mvm").join("attestation"))
+    let home = crate::config::mvm_home_strict()
+        .context("no home root (MVM_HOME/$HOME unset); cannot locate the attestation dir")?;
+    Ok(home.join("attestation"))
 }
 
 /// Compose the identity identifier used as `signer_id` in attestation

@@ -44,8 +44,8 @@ pub const FIRECRACKER_BIN: &str = "/usr/bin/firecracker";
 const FC_BASE_CMDLINE: &str = "console=ttyS0 reboot=k panic=1 pci=off";
 
 /// Guest CID the workload microVM's vsock is addressed at — mirrors
-/// `mvm_guest::vsock::GUEST_CID` (hardcoded here because the guest
-/// init deliberately doesn't depend on `mvm-guest`; see Cargo.toml).
+/// `mvm_agentd::vsock::GUEST_CID` (hardcoded here because the guest
+/// init deliberately doesn't depend on `mvm-agentd`; see Cargo.toml).
 const GUEST_CID: u32 = 3;
 
 /// Generic (VMM-agnostic) spawn config — the post-parse form of

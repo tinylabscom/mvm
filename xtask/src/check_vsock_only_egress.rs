@@ -21,13 +21,13 @@ use std::path::{Path, PathBuf};
 /// host-authority tunnel path. These must stay free of guest-NIC and legacy
 /// helper tokens.
 const GUARDED_PATHS: &[&str] = &[
-    "crates/mvm-backend/src/vmm",
-    "crates/mvm-backend/src/hvf",
-    "crates/mvm-backend/src/libkrun.rs",
-    "crates/mvm-backend/src/vsock_egress_bridge",
-    "crates/mvm-backend/src/network_tunnel_spawn.rs",
-    "crates/mvm-guest/src/network_tunnel.rs",
-    "crates/mvm-guest/src/guest_tun.rs",
+    "crates/mvm-runtime/src/vmm",
+    "crates/mvm-runtime/src/hvf",
+    "crates/mvm-runtime/src/libkrun.rs",
+    "crates/mvm-runtime/src/vsock_egress_bridge",
+    "crates/mvm-runtime/src/network_tunnel_spawn.rs",
+    "crates/mvm-agentd/src/network_tunnel.rs",
+    "crates/mvm-agentd/src/guest_tun.rs",
     "crates/mvm-hostd/src/network_tunnel.rs",
 ];
 

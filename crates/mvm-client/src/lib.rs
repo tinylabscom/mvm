@@ -7,18 +7,27 @@
 //! crate and `mvm-sdk` share one trait without a dependency cycle — but callers
 //! depend only on `mvm-client` and never name `mvm-core` directly.
 
+pub mod boot;
 pub mod connect;
 pub mod local;
+pub mod readiness;
+pub mod registration;
 
 pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineSpecBuilder, MachineState,
-    MachineStatus, ReconfigureRequest,
+    MachineStatus, PauseOpts, PauseOutcome, PortMapping, ReconfigureRequest, ResumeOpts,
+    ResumeOutcome,
 };
 #[cfg(feature = "remote")]
 pub use mvm_core::client::gateway;
 pub use mvm_core::client::mock::{self, MockBackend};
 pub use mvm_core::client::{MvmClient, MvmError, Result};
 
+pub use boot::{backend_is_running, backend_stop_by_name, start_prepared};
 pub use connect::{Target, connect};
 pub use local::LocalBackend;
+pub use readiness::{readiness_of, record_readiness, touch_activity};
+pub use registration::{
+    MachineRegistration, StaleRegistration, gc_stale_registrations, register_machine,
+};

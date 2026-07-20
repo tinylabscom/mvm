@@ -21,14 +21,14 @@ use mvm_core::plan::{
     DepsVolumeBinding, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, check_window,
 };
 use mvm_core::time::{Clock, SystemClock};
-use mvm_deps_audit::{VolumeError, verify_sealed_volume};
+use mvm_sdk::compile::deps_audit::{VolumeError, verify_sealed_volume};
 use thiserror::Error;
 use tracing::warn;
 
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::plan::Variant;
 use mvm_core::policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
-use mvm_network::{EgressEnforcer, EgressWiring, EnforcementError};
+use mvm_net::{EgressEnforcer, EgressWiring, EnforcementError};
 
 use crate::supervisor::artifact::{ArtifactCollector, NoopArtifactCollector};
 use crate::supervisor::audit::{AuditSigner, NoopAuditSigner};
@@ -488,7 +488,7 @@ impl Supervisor {
     }
 
     /// Re-derive the on-disk volume hash via
-    /// `mvm_deps_audit::verify_sealed_volume` and
+    /// `mvm_sdk::compile::deps_audit::verify_sealed_volume` and
     /// compare against the plan's pinned `DepsVolumeBinding`.
     ///
     /// Two checks:
@@ -504,7 +504,7 @@ impl Supervisor {
     /// admission path turns into a `plan.rejected.deps_volume`
     /// audit entry.
     fn verify_deps_volume(&self, binding: &DepsVolumeBinding) -> Result<(), SupervisorError> {
-        use mvm_deps_audit::FILE_MANIFEST;
+        use mvm_sdk::compile::deps_audit::FILE_MANIFEST;
         use sha2::{Digest, Sha256};
 
         let volume_dir = self.resolve_deps_volume_dir(&binding.volume_hash);
@@ -1032,7 +1032,7 @@ mod tests {
         prepare_calls: Mutex<Vec<PlanId>>,
         launch_calls: Mutex<Vec<PlanId>>,
         stop_calls: Mutex<Vec<PlanId>>,
-        slot: mvm_backend::base::config::VmSlot,
+        slot: mvm_runtime::base::config::VmSlot,
         prepare_should_fail: bool,
         launch_should_fail: bool,
         stop_should_fail: bool,
@@ -1044,7 +1044,7 @@ mod tests {
                 prepare_calls: Mutex::new(Vec::new()),
                 launch_calls: Mutex::new(Vec::new()),
                 stop_calls: Mutex::new(Vec::new()),
-                slot: mvm_backend::base::config::VmSlot::new("vm1", 0),
+                slot: mvm_runtime::base::config::VmSlot::new("vm1", 0),
                 prepare_should_fail: false,
                 launch_should_fail: false,
                 stop_should_fail: false,
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     fn sample_firewall_spec() -> FirewallSpec {
-        FirewallSpec::from_vm_slot(&mvm_backend::base::config::VmSlot::new("vm1", 0), "mvmtun0")
+        FirewallSpec::from_vm_slot(&mvm_runtime::base::config::VmSlot::new("vm1", 0), "mvmtun0")
             .expect("valid sample firewall spec")
     }
 
@@ -1179,7 +1179,6 @@ mod tests {
             network_policy: PolicyRef("default-deny".to_string()),
             fs_policy: FsPolicyRef("default".to_string()),
             secrets: vec![],
-            auth: AuthPolicy::none(),
             egress_policy: PolicyRef("agent-l7".to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
@@ -1499,7 +1498,7 @@ mod tests {
         let plan = sample_plan();
         let (signed, _sk, vk) = sign_sample(&plan);
         let mut backend = MockBackend::new();
-        backend.slot = mvm_backend::base::config::VmSlot::new("vm/1", 0);
+        backend.slot = mvm_runtime::base::config::VmSlot::new("vm/1", 0);
         let backend = Arc::new(backend);
         let firewall = Arc::new(MockFirewall::new());
         let mut s = make_supervisor_with_firewall(backend.clone(), firewall.clone());
@@ -2379,7 +2378,7 @@ mod tests {
     // audit-chain assertion that `plan.admitted` / `plan.running`
     // entries pin both hashes when a deps-volume is bound.
 
-    use mvm_deps_audit::{FILE_CVE, FILE_MANIFEST, seal_volume};
+    use mvm_sdk::compile::deps_audit::{FILE_CVE, FILE_MANIFEST, seal_volume};
     use sha2::Digest as _;
     use std::collections::BTreeMap as DepsBTreeMap;
     use std::fs;
@@ -2387,13 +2386,17 @@ mod tests {
 
     /// Build a complete sealed volume at `<root>/<volume_hash>/` and
     /// return the seal result + on-disk manifest sha256. Mirrors the
-    /// `Fixture::build_sealed` helper in `mvm_deps_audit::tests`
+    /// `Fixture::build_sealed` helper in `mvm_sdk::deps_audit::tests`
     /// but exposes the manifest sha so a supervisor test can pin both
     /// values into a `DepsVolumeBinding`.
     fn build_sealed_volume(
         root: &DepsPath,
         name: &str,
-    ) -> (PathBuf, mvm_deps_audit::VolumeSealResult, String) {
+    ) -> (
+        PathBuf,
+        mvm_sdk::compile::deps_audit::VolumeSealResult,
+        String,
+    ) {
         let v = root.join(name);
         let content = v.join("content");
         fs::create_dir_all(&content).unwrap();

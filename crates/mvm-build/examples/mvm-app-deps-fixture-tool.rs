@@ -5,7 +5,7 @@
 //! a scratch deps-volumes cache, (b) drive the prod/dev gate against
 //! those fixtures, and (c) round-trip the inspect path against a
 //! freshly sealed volume. None of (a)/(b)/(c) requires a builder VM —
-//! the wire shape is what `mvm_deps_audit::seal_volume`
+//! the wire shape is what `mvm_sdk::compile::deps_audit::seal_volume`
 //! produces, so re-using the same sealer here keeps the smoke aligned
 //! with the supervisor's verifier and the builder VM's emitter.
 //!
@@ -41,7 +41,7 @@ use std::process::ExitCode;
 
 use mvm_build::app_deps::{GateLevel, InstallResult};
 use mvm_build::app_deps_gate::apply_install_gate;
-use mvm_deps_audit::{
+use mvm_sdk::compile::deps_audit::{
     FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, seal_volume,
 };
 
@@ -119,7 +119,7 @@ fn seal_with_high_cve(rest: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Re-use `mvm_deps_audit::seal_volume` to produce a
+/// Re-use `mvm_sdk::compile::deps_audit::seal_volume` to produce a
 /// volume the way the builder VM's `mvm-host-vm-init::install::seal`
 /// would. Realistic-ish payloads so the inspector pretty-print works
 /// against fields it would see in production (component_count > 0,

@@ -42,7 +42,7 @@ cargo run -- dev        # auto-bootstrap + drop into the builder-VM shell
 Or run the bootstrap script on a fresh machine:
 
 ```bash
-./ops/bootstrap/dev-setup.sh
+./nix/ops/bootstrap/dev-setup.sh
 ```
 
 ## Building and Running
@@ -67,7 +67,7 @@ just release-build
 
 The runtime-overlay command only builds the **guest-executed** runtime payload
 and stores the sealed shared artifact under
-`~/.cache/mvm/runtime-overlay/<version>/<arch>/`. Host-side binaries used for
+`~/.mvm/cache/runtime-overlay/<version>/<arch>/`. Host-side binaries used for
 bootstrap or supervision stay outside that overlay.
 
 ### Kernel builds
@@ -193,7 +193,7 @@ MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
 
 The lane mirrored at `.github/workflows/ci.yml::core-demo-e2e` runs the same command on a self-hosted runner labelled `[self-hosted, macOS, ARM64, libkrun]`, gated on the `MACOS_LIBKRUN_AVAILABLE` repo variable. GitHub-hosted macOS runners cannot serve this lane (no nested HVF, no libkrun) — it stays opt-in until a self-hosted runner is wired.
 
-The same gated convention covers `sdks/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest sdks/python/tests/test_sandbox_exec.py`.
+The same gated convention covers `crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`.
 
 ## Linting and Formatting
 
@@ -214,7 +214,7 @@ just lint         # Both format check + clippy
 
 ### Multi-Backend
 
-mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; Vz and libkrun-backed components cover Apple Silicon macOS. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
+mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; HVF and libkrun-backed components cover Apple Silicon macOS. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
 
 ### Host vs. VM
 
@@ -279,20 +279,22 @@ microVMs have no SSH. Interactive access is via `mvmctl machine console` which u
 - Authenticated via the existing Ed25519 vsock protocol
 - Dev-mode only (`access.console` must be `true` in the guest security policy)
 - Single session per VM, 15-minute idle timeout
-- Supports both Firecracker and Vz backends
+- Supports Firecracker, libkrun, and HVF backends
 
-### XDG Directory Layout
+### Directory Layout
 
-Dev tool state uses XDG-compliant paths (override with `MVM_CACHE_DIR`, `MVM_CONFIG_DIR`, etc.):
+All dev tool state lives under one root, `~/.mvm` (relocate the whole tree
+with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 
 | Path | Purpose |
 |------|---------|
-| `~/.cache/mvm/` | Build artifacts, images, VM runtime state |
-| `~/.config/mvm/` | User config (`config.toml`) |
-| `~/.local/state/mvm/` | Logs, audit trail |
-| `~/.local/share/mvm/` | Templates, network definitions, VM name registry |
-
-Legacy `~/.mvm/` paths are auto-detected as fallback.
+| `~/.mvm/` | Data: keys, audit chains, volumes, bundles, machine specs |
+| `~/.mvm/vms/` | Per-VM state: sockets, pid files, console logs, FC workspace |
+| `~/.mvm/cache/` | Build artifacts, images, VM runtime state |
+| `~/.mvm/config/` | User config (`config.toml`) |
+| `~/.mvm/run/` | Ephemeral per-session state |
+| `~/.mvm/state/` | Logs, audit trail |
+| `~/.mvm/share/` | Templates, network definitions, VM name registry |
 
 ## CI/CD
 

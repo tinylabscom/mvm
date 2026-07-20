@@ -1,7 +1,7 @@
 //! Volume wire types — shared between mvm and mvmd.
 //!
 //! All types here are pure data; behaviour (the `VolumeBackend` trait and
-//! its impls) lives in the `mvm-storage` crate.
+//! its impls) lives in `mvm_runtime::storage::volume`.
 //!
 //! ## Identity
 //!
@@ -12,7 +12,7 @@
 //! ## Backends
 //!
 //! [`VolumeBackendConfig`] is the declarative shape of a backend. The
-//! mvm-storage crate ships `LocalBackend` only; mvmd ships
+//! runtime's volume-backend module ships `LocalBackend` only; mvmd ships
 //! `ObjectStoreBackend` (wrapping `opendal`) and `EncryptedBackend<B>`.
 
 use std::path::PathBuf;
@@ -264,22 +264,22 @@ impl std::fmt::Display for SecretRef {
 // Backend configuration
 // ============================================================================
 
-/// Declarative backend shape. Behaviour lives in `mvm-storage`
+/// Declarative backend shape. Behaviour lives in `mvm_runtime::storage::volume`
 /// (LocalBackend) and mvmd-side crates (ObjectStoreBackend +
 /// EncryptedBackend).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VolumeBackendConfig {
     /// Host directory served by virtiofsd. The only mountable backend
-    /// in v1. mvm-storage ships this impl.
+    /// in v1. `mvm_runtime::storage::volume` ships this impl.
     Local {
         /// Absolute host path that the backing data lives under.
         root: PathBuf,
     },
 
     /// Object storage via opendal (S3, R2, GCS, Azure, Hetzner, …).
-    /// Implemented in mvmd, not mvm-storage. Data-plane only — not
-    /// virtio-fs-mountable in v1.
+    /// Implemented in mvmd, not the runtime's volume-backend module.
+    /// Data-plane only — not virtio-fs-mountable in v1.
     #[serde(rename = "object-store")]
     ObjectStore(ObjectStoreSpec),
 }
@@ -537,8 +537,8 @@ pub struct MasterKeyRef {
 // ============================================================================
 
 /// Errors returned by the `VolumeBackend` trait (defined in
-/// `mvm-storage`). Lives in `mvm-core` so trait callers and impls can
-/// share a single error type without a circular dep.
+/// `mvm_runtime::storage::volume`). Lives in `mvm-core` so trait callers
+/// and impls can share a single error type without a circular dep.
 #[derive(Debug, Error)]
 pub enum VolumeError {
     #[error("volume entry not found: {0}")]

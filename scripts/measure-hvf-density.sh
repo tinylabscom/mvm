@@ -70,7 +70,7 @@ case "${OUT_DIR}" in
 esac
 
 DATA_DIR="${MVM_HVF_DENSITY_DATA_DIR:-${OUT_DIR}/mvm-data}"
-CACHE_DIR="${MVM_HVF_DENSITY_CACHE_DIR:-${OUT_DIR}/mvm-cache}"
+CACHE_DIR="${DATA_DIR}/cache"
 TARGET_DIR="${MVM_HVF_DENSITY_TARGET_DIR:-${OUT_DIR}/target}"
 RUN_ID="plan237-${STAMP}"
 SUMMARY="${OUT_DIR}/summary.tsv"
@@ -153,8 +153,7 @@ fi
 
 run_env=(
   env
-  "MVM_DATA_DIR=${DATA_DIR}"
-  "MVM_CACHE_DIR=${CACHE_DIR}"
+  "MVM_HOME=${DATA_DIR}"
   "CARGO_TARGET_DIR=${TARGET_DIR}"
 )
 

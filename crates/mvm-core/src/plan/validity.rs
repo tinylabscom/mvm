@@ -19,6 +19,8 @@ use thiserror::Error;
 use crate::plan::execution_plan::ExecutionPlan;
 use crate::plan::types::Nonce;
 
+pub use mvm_protocol::plan::validity::FreshnessClaims;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PlanValidityError {
     #[error("plan not yet valid (valid_from={valid_from}, now={now})")]
@@ -64,43 +66,18 @@ impl Freshness for ExecutionPlan {
     }
 }
 
-/// Freshness block embedded inside a signed payload (e.g. a signed
-/// reconcile request). It lives inside the signed bytes, so tampering
-/// with the window or nonce breaks signature verification upstream.
-///
-/// Fields are optional on the wire so a payload that predates the
-/// block still deserializes; [`checked`](FreshnessClaims::checked)
-/// then fails closed when any is absent.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FreshnessClaims {
-    #[serde(default)]
-    pub valid_from: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub valid_until: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub nonce: Option<Nonce>,
-}
-
-impl FreshnessClaims {
-    pub fn new(valid_from: DateTime<Utc>, valid_until: DateTime<Utc>, nonce: Nonce) -> Self {
-        Self {
-            valid_from: Some(valid_from),
-            valid_until: Some(valid_until),
-            nonce: Some(nonce),
-        }
-    }
-
-    /// Fail-closed conversion to a verifiable value: absent freshness
-    /// is never valid.
-    pub fn checked(&self) -> Result<CheckedFreshness, PlanValidityError> {
-        match (self.valid_from, self.valid_until, self.nonce.clone()) {
-            (Some(valid_from), Some(valid_until), Some(nonce)) => Ok(CheckedFreshness {
-                valid_from,
-                valid_until,
-                nonce,
-            }),
-            _ => Err(PlanValidityError::MissingFreshness),
-        }
+/// Fail-closed conversion of a wire [`FreshnessClaims`] to a verifiable
+/// value: absent freshness is never valid. A free function, not an
+/// inherent method — `FreshnessClaims` lives in `mvm-protocol`, and
+/// `mvm-core` may not add inherent methods to a foreign type.
+pub fn checked(claims: &FreshnessClaims) -> Result<CheckedFreshness, PlanValidityError> {
+    match (claims.valid_from, claims.valid_until, claims.nonce.clone()) {
+        (Some(valid_from), Some(valid_until), Some(nonce)) => Ok(CheckedFreshness {
+            valid_from,
+            valid_until,
+            nonce,
+        }),
+        _ => Err(PlanValidityError::MissingFreshness),
     }
 }
 
@@ -221,7 +198,7 @@ mod tests {
             now + Duration::minutes(5),
             nonce(1),
         );
-        let fresh = claims.checked().expect("full claims are valid");
+        let fresh = checked(&claims).expect("full claims are valid");
 
         check_window(&fresh, now).expect("now is inside the window");
 
@@ -244,7 +221,7 @@ mod tests {
         // deserializes (serde default), but verification rejects it.
         let claims: FreshnessClaims =
             serde_json::from_str("{}").expect("empty object deserializes");
-        assert_eq!(claims.checked(), Err(PlanValidityError::MissingFreshness));
+        assert_eq!(checked(&claims), Err(PlanValidityError::MissingFreshness));
 
         // A partially-populated block is equally invalid.
         let now = Utc::now();
@@ -253,45 +230,34 @@ mod tests {
             valid_until: Some(now + Duration::minutes(1)),
             nonce: None,
         };
-        assert_eq!(partial.checked(), Err(PlanValidityError::MissingFreshness));
+        assert_eq!(checked(&partial), Err(PlanValidityError::MissingFreshness));
     }
 
     #[test]
     fn checked_freshness_rejects_stale_and_future_windows() {
         let now = Utc::now();
 
-        let expired = FreshnessClaims::new(
+        let expired = checked(&FreshnessClaims::new(
             now - Duration::minutes(10),
             now - Duration::minutes(5),
             nonce(2),
-        )
-        .checked()
+        ))
         .unwrap();
         assert!(matches!(
             check_window(&expired, now),
             Err(PlanValidityError::Expired { .. })
         ));
 
-        let not_yet = FreshnessClaims::new(
+        let not_yet = checked(&FreshnessClaims::new(
             now + Duration::minutes(5),
             now + Duration::minutes(10),
             nonce(3),
-        )
-        .checked()
+        ))
         .unwrap();
         assert!(matches!(
             check_window(&not_yet, now),
             Err(PlanValidityError::NotYetValid { .. })
         ));
-    }
-
-    #[test]
-    fn freshness_claims_serde_roundtrips() {
-        let now = Utc::now();
-        let claims = FreshnessClaims::new(now, now + Duration::minutes(1), nonce(4));
-        let json = serde_json::to_string(&claims).unwrap();
-        let back: FreshnessClaims = serde_json::from_str(&json).unwrap();
-        assert_eq!(claims, back);
     }
 
     // ExecutionPlan must keep working through the generalized helpers —

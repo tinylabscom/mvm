@@ -217,7 +217,7 @@ pub enum PersistentBuilderError {
 ///
 /// `socket_path` is `<vm_state_dir>/vsock-<BUILDER_DISPATCH_PORT>.sock`
 /// — the libkrun-managed Unix socket that proxies to AF_VSOCK port
-/// [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`] inside the
+/// [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`] inside the
 /// guest. The owner of the persistent VM (`LibkrunPersistentHostVm`)
 /// constructs this supervisor once the VM is up, then hands the
 /// result to whatever submits jobs (`mvmctl build` from inside a dev
@@ -460,7 +460,7 @@ impl PersistentBuilderSupervisor {
         let mut stream = self.connect()?;
         let _ = stream.set_read_timeout(Some(self.frame_read_timeout));
         let _ = stream.set_write_timeout(Some(self.frame_read_timeout));
-        mvm_guest::vsock::write_frame(&mut stream, request)
+        mvm_agentd::vsock::write_frame(&mut stream, request)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         match read_next_response(&mut stream, self.frame_read_timeout)? {
             Some(resp) => Ok(resp),
@@ -480,7 +480,7 @@ impl PersistentBuilderSupervisor {
 
         let request = HostVmRequest::Shutdown {};
         let mut stream = self.connect()?;
-        mvm_guest::vsock::write_frame(&mut stream, &request)
+        mvm_agentd::vsock::write_frame(&mut stream, &request)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         // Expect Bye. Any other frame is a protocol violation but
         // we already asked for shutdown — log via the error chain
@@ -508,7 +508,7 @@ impl PersistentBuilderSupervisor {
         let _ = stream.set_read_timeout(Some(self.frame_read_timeout));
         let _ = stream.set_write_timeout(Some(self.frame_read_timeout));
 
-        mvm_guest::vsock::write_frame(&mut stream, request)
+        mvm_agentd::vsock::write_frame(&mut stream, request)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let mut stderr_chunks = Vec::new();
@@ -605,7 +605,7 @@ fn read_next_response(
     stream: &mut UnixStream,
     _read_timeout: Duration,
 ) -> Result<Option<HostVmResponse>, PersistentBuilderError> {
-    match mvm_guest::vsock::read_frame::<HostVmResponse>(stream) {
+    match mvm_agentd::vsock::read_frame::<HostVmResponse>(stream) {
         Ok(resp) => Ok(Some(resp)),
         Err(e) => {
             let src = e.source();
@@ -627,7 +627,7 @@ fn read_next_response(
 /// `add_vsock_port(BUILDER_DISPATCH_PORT)` is configured.
 pub fn dispatch_socket_path(vm_state_dir: &Path) -> PathBuf {
     vm_state_dir.join(mvm_core::config::vsock_socket_filename(
-        mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+        mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
     ))
 }
 
@@ -690,7 +690,7 @@ pub enum BuilderSessionPolicyDecision {
 
 /// Decide what the keeper should do with a live persistent-builder session.
 ///
-/// The Vz dev-builder has a real snapshot path; this hidden
+/// A real snapshot path for the HVF dev-builder is not wired yet; this hidden
 /// `persistent-builder` session is currently libkrun-backed, so a policy-level
 /// `Park` decision degrades to teardown rather than pretending a snapshot was
 /// captured.
@@ -738,7 +738,7 @@ fn session_idle_duration(record: &SessionRecord, now_unix_secs: u64) -> Duration
 /// On-disk location of the session record. Returns `None` only if
 /// `$HOME` isn't set, which would be a misconfigured environment.
 pub fn session_record_path() -> Option<PathBuf> {
-    mvm_core::config::mvm_data_dir_strict()
+    mvm_core::config::mvm_home_strict()
         .ok()
         .map(|d| d.join("run").join("persistent-builder.json"))
 }
@@ -1184,7 +1184,7 @@ mod tests {
         assert!(
             p.to_string_lossy().ends_with(&format!(
                 "vsock-{}.sock",
-                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT
+                mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT
             )),
             "got: {}",
             p.display()
@@ -1238,8 +1238,8 @@ mod tests {
         // `mvm_cli::commands::build::persistent_builder` emits.
         let json = r#"{
             "session_id": "abc123",
-            "dispatch_socket_path": "/home/u/.mvm/vms/foo/vsock-21471.sock",
-            "job_dir": "/home/u/.mvm/jobs/foo",
+            "dispatch_socket_path": "/home/u/mvm-home/vms/foo/vsock-21471.sock",
+            "job_dir": "/home/u/mvm-home/jobs/foo",
             "workspace_root": "/work",
             "supervisor_pid": 7777,
             "last_activity_unix_secs": 1234567890
@@ -1254,8 +1254,8 @@ mod tests {
     fn session_record_defaults_missing_last_activity_to_none() {
         let json = r#"{
             "session_id": "abc123",
-            "dispatch_socket_path": "/home/u/.mvm/vms/foo/vsock-21471.sock",
-            "job_dir": "/home/u/.mvm/jobs/foo",
+            "dispatch_socket_path": "/home/u/mvm-home/vms/foo/vsock-21471.sock",
+            "job_dir": "/home/u/mvm-home/jobs/foo",
             "workspace_root": "/work",
             "supervisor_pid": 7777
         }"#;
@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn touch_active_session_updates_live_record_timestamp() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let data_dir = scratch.path().join(".mvm");
+        let data_dir = scratch.path().join("mvm-home");
         let run_dir = data_dir.join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let record = SessionRecord {
@@ -1354,7 +1354,7 @@ mod tests {
         )
         .unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", &data_dir);
+        env.set("MVM_HOME", &data_dir);
         let touched = touch_active_session(55).expect("touch active session");
         assert!(touched);
         let body = std::fs::read(run_dir.join("persistent-builder.json")).unwrap();
@@ -1364,12 +1364,12 @@ mod tests {
 
     #[test]
     fn read_active_session_returns_none_when_record_missing() {
-        // Point MVM_DATA_DIR at a tempdir with no run/persistent-
+        // Point MVM_HOME at a tempdir with no run/persistent-
         // builder.json; the read should silently return None rather
         // than error.
         let scratch = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
+        env.set("MVM_HOME", scratch.path().join("mvm-home"));
         let result = read_active_session();
         assert!(result.is_none());
     }
@@ -1383,7 +1383,7 @@ mod tests {
         // sentinel; this one is safely unallocated.
         const DEFINITELY_DEAD_PID: u32 = 2_000_000_000;
         let scratch = tempfile::tempdir().expect("tempdir");
-        let run_dir = scratch.path().join(".mvm").join("run");
+        let run_dir = scratch.path().join("mvm-home").join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let record = SessionRecord {
             session_id: "x".to_string(),
@@ -1399,7 +1399,7 @@ mod tests {
         )
         .unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
+        env.set("MVM_HOME", scratch.path().join("mvm-home"));
         let result = read_active_session();
         assert!(
             result.is_none(),

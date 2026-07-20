@@ -280,14 +280,14 @@ mod tests {
     #[test]
     fn flags_plan_ref_in_line_comment() {
         assert_eq!(rust_hits("// Plan 99 wires the thing\nlet x = 1;\n"), 1);
-        assert_eq!(rust_hits("/// ADR-002 §3 — the invariant\nfn f() {}\n"), 1);
+        assert_eq!(rust_hits("/// ADR-001 §3 — the invariant\nfn f() {}\n"), 1);
         assert_eq!(rust_hits("// W4.3 regression guard\n"), 1);
     }
 
     #[test]
     fn ignores_token_inside_string_literal() {
         assert_eq!(rust_hits(r#"let s = "Plan 99 is data";"#), 0);
-        assert_eq!(rust_hits(r#"bail!("predates ADR-002 W1.4b");"#), 0);
+        assert_eq!(rust_hits(r#"bail!("predates ADR-001 W1.4b");"#), 0);
     }
 
     #[test]
@@ -313,7 +313,7 @@ mod tests {
         };
         assert_eq!(count("foo = \"#640 in a string\";\n"), 0);
         assert_eq!(count("# Plan 71 — one-line helper\n"), 1);
-        assert_eq!(count("buildInputs = []; # ADR-051 overlay\n"), 1);
+        assert_eq!(count("buildInputs = []; # ADR-018 overlay\n"), 1);
     }
 
     #[test]

@@ -1,17 +1,12 @@
 //! Vsock helpers for talking to the in-guest agent.
 //!
-//! Routes through the canonical `mvm::vsock_transport::for_vm`
+//! Routes through the canonical `mvm_runtime::vsock_transport::for_vm`
 //! dispatcher — the same selector `invoke`/`exec`/`readiness` use. It
-//! probes the live backend (libkrun → vz → firecracker) per VM, so a
-//! VM started under any backend reaches its agent on the right transport.
+//! probes the live backend (hvf agent bridge → libkrun → hvf per-port vsock →
+//! firecracker) per VM, so a VM started under any backend reaches its agent
+//! on the right transport.
 
-use anyhow::{Context, Result};
-
-use mvm::vsock_transport;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use mvm_runtime::vsock_transport;
 
 /// Wait for the guest agent to complete the protocol hello over
 /// vsock. Returns true once the agent has
@@ -38,102 +33,19 @@ pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
     let mut attempt: u32 = 0;
     while std::time::Instant::now() < deadline {
         if let Ok(transport) = vsock_transport::for_vm(vm_id)
-            && let Ok(mut s) = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            && mvm_guest::vsock::negotiate_protocol(
+            && let Ok(mut s) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+            && mvm_agentd::vsock::negotiate_protocol(
                 &mut s,
-                vec![mvm_guest::vsock::GuestCapability::Ping],
+                vec![mvm_agentd::vsock::GuestCapability::Ping],
             )
             .is_ok()
         {
             return true;
         }
-        std::thread::sleep(mvm_guest::vsock::adaptive_backoff(attempt));
+        std::thread::sleep(mvm_agentd::vsock::adaptive_backoff(attempt));
         attempt = attempt.saturating_add(1);
     }
     false
-}
-
-/// Host-side SSH-agent socket proxy for dev-tier machines.
-///
-/// This lives with the existing per-VM port/vsock substrate because it binds a
-/// local listener and splices it to a guest-visible vsock path. The only
-/// upstream it may dial is the already validated host `SSH_AUTH_SOCK` Unix
-/// socket; callers are responsible for policy admission before spawning it.
-pub(crate) fn run_ssh_agent_proxy_uds(listen_uds: &Path, host_sock: &Path) -> Result<()> {
-    if let Some(parent) = listen_uds.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let _ = std::fs::remove_file(listen_uds);
-    let listener = UnixListener::bind(listen_uds)
-        .with_context(|| format!("binding ssh-agent proxy {}", listen_uds.display()))?;
-    std::fs::set_permissions(listen_uds, std::fs::Permissions::from_mode(0o600))?;
-    println!("READY");
-    std::io::stdout().flush().ok();
-    serve_ssh_agent_unix_listener(listener, host_sock)
-}
-
-fn serve_ssh_agent_unix_listener(listener: UnixListener, host_sock: &Path) -> Result<()> {
-    for inbound in listener.incoming() {
-        let inbound = inbound?;
-        let host_sock = host_sock.to_path_buf();
-        std::thread::spawn(move || {
-            if let Ok(agent) = UnixStream::connect(&host_sock) {
-                splice_unix_streams(inbound, agent);
-            }
-        });
-    }
-    Ok(())
-}
-
-pub(crate) fn run_ssh_agent_proxy_vsock(port: u32, host_sock: &Path) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        use mvm_hostd::supervisor::substitution_proxy::vsock::{VsockListener, accept};
-        use std::os::fd::FromRawFd;
-        let listener = VsockListener::bind(port)
-            .with_context(|| format!("binding AF_VSOCK ssh-agent proxy port {port}"))?;
-        println!("READY");
-        std::io::stdout().flush().ok();
-        loop {
-            let fd = accept(listener.raw_fd())?;
-            let inbound = unsafe {
-                // SAFETY: `accept` returned a fresh connected socket fd owned by
-                // this process; UnixStream is an fd wrapper suitable for splice.
-                UnixStream::from_raw_fd(fd)
-            };
-            let host_sock = host_sock.to_path_buf();
-            std::thread::spawn(move || {
-                if let Ok(agent) = UnixStream::connect(&host_sock) {
-                    splice_unix_streams(inbound, agent);
-                }
-            });
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (port, host_sock);
-        anyhow::bail!("AF_VSOCK ssh-agent proxy listener is linux-only")
-    }
-}
-
-fn splice_unix_streams(left: UnixStream, right: UnixStream) {
-    let Ok(mut left_read) = left.try_clone() else {
-        return;
-    };
-    let Ok(mut right_write) = right.try_clone() else {
-        return;
-    };
-    let mut left_write = left;
-    let mut right_read = right;
-    let h1 = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut left_read, &mut right_write);
-    });
-    let h2 = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut right_read, &mut left_write);
-    });
-    let _ = h1.join();
-    let _ = h2.join();
 }
 
 /// Emit a `LocalAuditKind::NetworkPolicyAllow` audit record for one
@@ -162,7 +74,7 @@ fn splice_unix_streams(left: UnixStream, right: UnixStream) {
 /// audit-spam (mostly while waiting for the agent to bind), so
 /// readiness probes get a separate `AgentReady` LocalAudit event
 /// in the `mvmctl up` flow already.
-pub fn emit_vsock_rpc_audit(vm_id: &str, request: &mvm_guest::vsock::GuestRequest) {
+pub fn emit_vsock_rpc_audit(vm_id: &str, request: &mvm_agentd::vsock::GuestRequest) {
     let verb = request.kind_name();
     mvm_core::audit_emit!(
         NetworkPolicyAllow,
@@ -185,11 +97,11 @@ mod tests {
     #[test]
     fn emit_vsock_rpc_audit_does_not_panic_on_common_verbs() {
         let cases = [
-            mvm_guest::vsock::GuestRequest::Ping,
-            mvm_guest::vsock::GuestRequest::ReadinessStatus,
-            mvm_guest::vsock::GuestRequest::EntrypointStatus,
-            mvm_guest::vsock::GuestRequest::FsDiff,
-            mvm_guest::vsock::GuestRequest::Exec {
+            mvm_agentd::vsock::GuestRequest::Ping,
+            mvm_agentd::vsock::GuestRequest::ReadinessStatus,
+            mvm_agentd::vsock::GuestRequest::EntrypointStatus,
+            mvm_agentd::vsock::GuestRequest::FsDiff,
+            mvm_agentd::vsock::GuestRequest::Exec {
                 command: "echo hello".to_string(),
                 stdin: None,
                 timeout_secs: Some(30),

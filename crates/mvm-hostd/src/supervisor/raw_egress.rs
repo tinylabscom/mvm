@@ -30,7 +30,7 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::supervisor::http_forward;
-use mvm_backend::vmm::egress_gate::{EgressGate, EgressVerdict};
+use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 
 /// Cap on the first `host:port` line. A guest that never sends a `\n` inside this
 /// many bytes is refused (fail closed) rather than read unbounded.

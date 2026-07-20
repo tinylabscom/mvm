@@ -24,10 +24,10 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use mvm::vsock_transport::VsockTransport as _;
-use mvm_backend::backend::AnyBackend;
+use mvm_agentd::vsock::{GuestRequest, GuestResponse};
 use mvm_core::vm_backend::VmStartConfig;
-use mvm_guest::vsock::{GuestRequest, GuestResponse};
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
 
 const ENABLE_VAR: &str = "MVM_RUNTIME_BOOT_BENCH";
@@ -269,8 +269,8 @@ fn wait_until_ready(spec: &BenchSpec, name: &str) -> Result<()> {
 }
 
 fn wait_for_guest_agent(backend: &str, name: &str) -> Result<()> {
-    if backend == "vz" {
-        return wait_for_vz_guest_agent(name);
+    if backend == "hvf" {
+        return wait_for_hvf_guest_agent(name);
     }
     let uds_path = guest_agent_socket_path(backend, name)?;
     let deadline = Instant::now() + READY_TIMEOUT;
@@ -293,27 +293,27 @@ fn wait_for_guest_agent(backend: &str, name: &str) -> Result<()> {
     }))
 }
 
-fn wait_for_vz_guest_agent(name: &str) -> Result<()> {
-    let transport = mvm::vsock_transport::VzTransport::for_vm(name);
+fn wait_for_hvf_guest_agent(name: &str) -> Result<()> {
+    let transport = mvm_runtime::vsock_transport::HvfVsockTransport::for_vm(name);
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_err = None;
 
     while Instant::now() < deadline {
-        match transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT) {
+        match transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT) {
             Ok(mut stream) => {
-                // ADR-053 / plan 74 W1: hard cutover requires hello
+                // ADR-019 / plan 74 W1: hard cutover requires hello
                 // before any operational request, so a raw `Ping`
                 // probe no longer works. Treat a successful hello
                 // negotiation (with the `Ping` capability acknowledged)
                 // as the readiness signal.
-                match mvm_guest::vsock::negotiate_protocol(
+                match mvm_agentd::vsock::negotiate_protocol(
                     &mut stream,
-                    vec![mvm_guest::vsock::GuestCapability::Ping],
+                    vec![mvm_agentd::vsock::GuestCapability::Ping],
                 ) {
                     Ok(negotiated)
                         if negotiated
                             .capabilities
-                            .contains(&mvm_guest::vsock::GuestCapability::Ping) =>
+                            .contains(&mvm_agentd::vsock::GuestCapability::Ping) =>
                     {
                         return Ok(());
                     }
@@ -337,19 +337,13 @@ fn wait_for_vz_guest_agent(name: &str) -> Result<()> {
 
 fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
     match backend {
-        "firecracker" => {
-            let home = std::env::var("HOME").context("resolving HOME for Firecracker VM state")?;
-            Ok(Path::new(&home)
-                .join("microvm")
-                .join("vms")
-                .join(name)
-                .join("runtime")
-                .join("v.sock"))
-        }
-        "libkrun" | "krun" => Ok(Path::new(&mvm_core::config::mvm_data_dir())
-            .join("vms")
-            .join(name)
-            .join(format!("vsock-{}.sock", mvm_guest::vsock::GUEST_AGENT_PORT))),
+        "firecracker" => Ok(mvm_core::config::vm_state_dir(name)
+            .join("runtime")
+            .join("v.sock")),
+        "libkrun" | "krun" => Ok(mvm_core::config::vm_state_dir(name).join(format!(
+            "vsock-{}.sock",
+            mvm_agentd::vsock::GUEST_AGENT_PORT
+        ))),
         other => bail!(
             "{READY_VAR}=guest-agent is not wired for backend {other:?}; use {READY_VAR}=start-return"
         ),
@@ -357,18 +351,18 @@ fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
 }
 
 fn ping_guest_agent(uds_path: &Path) -> Result<()> {
-    let mut stream = mvm_guest::vsock::connect_to(&uds_path.to_string_lossy(), 1)?;
-    let negotiated = mvm_guest::vsock::negotiate_protocol(
+    let mut stream = mvm_agentd::vsock::connect_to(&uds_path.to_string_lossy(), 1)?;
+    let negotiated = mvm_agentd::vsock::negotiate_protocol(
         &mut stream,
-        vec![mvm_guest::vsock::GuestCapability::Ping],
+        vec![mvm_agentd::vsock::GuestCapability::Ping],
     )?;
     if !negotiated
         .capabilities
-        .contains(&mvm_guest::vsock::GuestCapability::Ping)
+        .contains(&mvm_agentd::vsock::GuestCapability::Ping)
     {
         bail!("guest agent did not advertise the Ping capability");
     }
-    let response = mvm_guest::vsock::send_request(&mut stream, &GuestRequest::Ping)?;
+    let response = mvm_agentd::vsock::send_request(&mut stream, &GuestRequest::Ping)?;
     match response {
         GuestResponse::Pong => Ok(()),
         other => bail!("unexpected ping response: {other:?}"),
@@ -419,7 +413,7 @@ fn env_string_opt(var: &str, configured: Option<String>) -> Option<String> {
 
 fn default_ready_for_backend(backend: &Option<String>) -> String {
     match backend.as_deref() {
-        Some("vz") => ReadySignal::StartReturn.as_str().to_string(),
+        Some("hvf") => ReadySignal::StartReturn.as_str().to_string(),
         _ => DEFAULT_READY.as_str().to_string(),
     }
 }
@@ -494,10 +488,10 @@ fn summary_reports_percentiles_and_max() {
 }
 
 #[test]
-fn config_file_shape_accepts_vz_defaults() {
+fn config_file_shape_accepts_hvf_defaults() {
     let config: RawBenchConfig = toml::from_str(
         r#"
-backend = "vz"
+backend = "hvf"
 kernel = "/tmp/vmlinux"
 rootfs = "/tmp/rootfs.ext4"
 runs = 2
@@ -509,7 +503,7 @@ memory-mib = 256
     )
     .expect("parse runtime boot bench config");
 
-    assert_eq!(config.backend.as_deref(), Some("vz"));
+    assert_eq!(config.backend.as_deref(), Some("hvf"));
     assert_eq!(config.runs, Some(2));
     assert_eq!(config.concurrent, Some(3));
     assert_eq!(

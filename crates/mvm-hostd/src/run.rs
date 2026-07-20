@@ -18,9 +18,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_backend::AnyBackend;
-use mvm_core::plan::{AuthPolicy, PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
+use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 use mvm_core::vm_backend::VmStartConfig;
+use mvm_runtime::AnyBackend;
 
 use crate::plan_admission::{
     AdmitAndStartParams, Clock, InMemoryNonceLedger, StartedMachine, admit_and_start,
@@ -94,7 +94,6 @@ pub fn admit_and_boot_local(
         tool_policy_ref: None,
         secret_release: SecretReleasePolicy::None,
         secrets: Vec::new(),
-        auth: AuthPolicy::none(),
         audit_event_prefix: None,
         cpus: req.cpus,
         mem_mib: u64::from(req.mem_mib),
@@ -161,7 +160,7 @@ mod tests {
     fn admit_and_boot_local_over_mock_boots_admitted_plan() {
         let data = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", data.path());
         let keys = tempfile::tempdir().unwrap();
 
         let rootfs = data.path().join("rootfs.ext4");

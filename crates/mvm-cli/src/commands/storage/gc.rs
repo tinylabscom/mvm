@@ -5,10 +5,10 @@ use clap::Args as ClapArgs;
 use std::sync::Arc;
 
 use super::Cli;
-use mvm::storage::{
+use mvm_core::user_config::MvmConfig;
+use mvm_runtime::storage::{
     DeviceMapperBackend, DmsetupBackend, MockBackend, PoolConfig, ThinPool, ThinPoolImpl,
 };
-use mvm_core::user_config::MvmConfig;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -88,7 +88,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     };
 
     // `--apply` reached. Route through the canonical `audit::emit`
-    // (XDG state path) so `mvmctl audit tail` and the live drive-and-
+    // (state path) so `mvmctl audit tail` and the live drive-and-
     // assert tests in `tests/audit_emissions_live.rs` see the same
     // stream as every other state-changing verb. Earlier versions
     // wrote to `<data_dir>/audit.log` (singular, no `/log/` subdir,

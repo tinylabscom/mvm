@@ -25,7 +25,7 @@ fn check_artifact_reports_verified_runnable_and_admission_preview() {
     #[allow(deprecated)]
     let pack = Command::cargo_bin("mvmctl")
         .unwrap()
-        .env("MVM_DATA_DIR", &data)
+        .env("MVM_HOME", &data)
         .args([
             "artifact",
             "pack",
@@ -55,7 +55,7 @@ fn check_artifact_reports_verified_runnable_and_admission_preview() {
     #[allow(deprecated)]
     let check = Command::cargo_bin("mvmctl")
         .unwrap()
-        .env("MVM_DATA_DIR", &data)
+        .env("MVM_HOME", &data)
         .args([
             "machine",
             "check-artifact",

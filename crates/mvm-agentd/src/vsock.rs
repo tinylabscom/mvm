@@ -1,0 +1,7992 @@
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use mvm_core::security::{
+    AgentProfile, AuthenticatedFrame, PROTOCOL_VERSION_AUTHENTICATED, SIG_ALG_ED25519,
+    SessionHello, SessionHelloAck,
+};
+use mvm_core::signing::SignedPayload;
+use serde::{Deserialize, Serialize};
+
+/// Default vsock guest CID (Firecracker convention).
+pub const GUEST_CID: u32 = 3;
+
+/// Port the guest vsock agent listens on.
+///
+/// **Why 5252 (and why not <1024).** Linux gates `bind(2)` on AF_VSOCK
+/// ports ≤ 1023 behind `CAP_NET_BIND_SERVICE` — the same way it gates
+/// AF_INET. The agent runs as uid 901 with `--bounding-set=-all`,
+/// so it has no caps to spend on a privileged port.
+/// Any port < 1024 would force us to either grant the agent
+/// `CAP_NET_BIND_SERVICE` (weakening the no-caps posture to work around
+/// port choice) or bind in init and pass the fd in (extra surface for no
+/// architectural benefit). Port 52 was picked when the agent ran as
+/// root and the codebase incorrectly assumed vsock binds were
+/// unprivileged on Linux — see the corrected comment in
+/// `nix/lib/minimal-init/default.nix::guestAgentBlock`.
+///
+/// 5252 sits clearly above 1023 and below the port-forward range
+/// (`PORT_FORWARD_BASE` = 10_000) and the console-data range
+/// (`CONSOLE_PORT_BASE` = 20_000), so the host-side proxy allowlist
+/// keeps its disjoint-union shape. The "52" tail is a
+/// callback to the historical port for grep-ability.
+///
+/// **Single source of truth.** `mvm_runtime::vm::vminitd_client` re-declares
+/// this value because it cannot depend on `mvm-agentd`. If you change
+/// this, update that duplicate in the same commit; the workspace tests
+/// catch drift.
+pub const GUEST_AGENT_PORT: u32 = 5252;
+
+/// Control vsock port the guest's `/init` connects to (host side) to
+/// report a one-shot workload's exit code before `poweroff -f`. The host
+/// supervisor binds the listener (`add_vsock_port2(listen=false)`). Wire
+/// format: a single 4-byte little-endian `i32`.
+pub const WORKLOAD_EXIT_PORT: u32 = 5251;
+
+/// vsock port of the **host egress gateway**  — the single host-mediated
+/// egress chokepoint. The in-guest egress client connects here; the host's per-VM
+/// gateway makes the claim-10 allow/deny decision and proxies the flow, and for a
+/// bound-secret destination performs the claims-12/13 credential substitution (a
+/// *behavior* of this one gateway, not a separate channel — this port was always
+/// host-mediated egress, formerly named `EGRESS_PORT`). Each microVM has its
+/// own vsock; this is a fixed well-known service number reused per VM, not a secret.
+/// NOTE: exposing it end-to-end needs the host-side proxy port-allowlist to admit it.
+pub const EGRESS_PORT: u32 = 5253;
+
+/// vsock port the host-services broker is exposed on. The in-guest broker
+/// client ([`crate::broker_client`]) dials this to reach the supervisor's
+/// guest-facing broker listener, which derives the workload identity from the
+/// connection, enforces the `ExecutionPlan.services` binding, and proxies the
+/// `ServiceCall` to the `mvm-broker` subprocess. The host admits it via its
+/// `host_listen_ports` allowlist — a one-port, audited widening, the same
+/// mechanism [`EGRESS_PORT`] uses.
+///
+/// 5300 sits above the privileged range and above 5251/5252/5253, and below
+/// the port-forward range ([`PORT_FORWARD_BASE`] = 10_000) and the
+/// console-data range ([`CONSOLE_PORT_BASE`] = 20_000), so the host-side proxy
+/// allowlist keeps its disjoint-union shape. It reuses the number the
+/// pre-broker secrets channel once held (that channel was removed), so there
+/// is no live collision.
+pub const BROKER_PORT: u32 = 5300;
+
+/// Vsock port for the backend-agnostic guest-TUN ↔ host-worker packet tunnel.
+/// The shared contract lives in `mvm_core::protocol::network_tunnel`; this
+/// guest crate re-exports the port so the standing vsock maps and any future
+/// guest network agent consume one source of truth.
+pub const NETWORK_TUNNEL_PORT: u32 = mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT;
+
+/// Base vsock port for TCP port forwarding.
+/// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
+pub const PORT_FORWARD_BASE: u32 = 10000;
+
+/// Base vsock port for interactive console PTY sessions.
+pub const CONSOLE_PORT_BASE: u32 = 20000;
+
+/// How many interactive-console data ports a dev-accessible VM pre-opens.
+/// The guest agent allocates `CONSOLE_PORT_BASE + session_id` per
+/// `ConsoleOpen`, with `session_id` incrementing monotonically over the VM's
+/// life (one active session at a time), so this bounds the number of console
+/// attaches before the pre-opened range is exhausted.
+pub const DEV_CONSOLE_DATA_PORT_COUNT: u32 = 128;
+
+/// The host-side console data-port range a dev-accessible VM pre-opens so an
+/// interactive PTY (`machine run -t`, `machine shell`, `up --console`) can
+/// reach the agent-allocated `CONSOLE_PORT_BASE + session_id` data channel.
+///
+/// The per-port-UDS backends (libkrun, HVF) bind a *static* vsock port list at
+/// start, so a dynamic data port is unreachable unless it was pre-declared;
+/// Firecracker multiplexes every port over one UDS and ignores this range.
+pub fn dev_console_data_ports() -> impl Iterator<Item = u32> {
+    (1..=DEV_CONSOLE_DATA_PORT_COUNT).map(|offset| CONSOLE_PORT_BASE + offset)
+}
+
+/// Default connect/read timeout in seconds.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
+
+/// Current guest-agent control protocol version.
+///
+/// This is distinct from `PROTOCOL_VERSION_AUTHENTICATED`, which
+/// versions the signed envelope used by authenticated frame wrappers.
+/// `PROTOCOL_VERSION` versions the `GuestRequest` / `GuestResponse`
+/// control surface served by `mvm-guest-agent`.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Oldest guest-agent control protocol this host can speak.
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+
+/// Maximum response frame size (256 KiB).
+const MAX_FRAME_SIZE: usize = 256 * 1024;
+
+/// Number of transport reconnect attempts before giving up.
+const CONNECT_RETRIES: u32 = 4;
+
+/// Base delay for exponential reconnect backoff.
+const CONNECT_RETRY_BASE_DELAY_MS: u64 = 100;
+
+/// Cap for exponential reconnect backoff.
+const CONNECT_RETRY_CAP_DELAY_MS: u64 = 500;
+
+/// Base delay for the adaptive readiness-poll backoff. The first poll
+/// after a failed attempt waits this long.
+const ADAPTIVE_BACKOFF_BASE_MS: u64 = 20;
+
+/// Cap for the adaptive readiness-poll backoff — the historical fixed
+/// poll interval. Backoff grows from [`ADAPTIVE_BACKOFF_BASE_MS`] up to
+/// this ceiling so a slow guest still polls at the old steady cadence.
+const ADAPTIVE_BACKOFF_CAP_MS: u64 = 500;
+
+/// Adaptive backoff delay for the `mvmctl up` readiness poll.
+/// `attempt` is 0-based: attempt 0 waits the
+/// base, each subsequent attempt doubles, capped at
+/// `ADAPTIVE_BACKOFF_CAP_MS`. This replaces a fixed 500 ms sleep that
+/// cost up to ~480 ms of dead time after a fast-binding guest was
+/// already reachable; the cap preserves the old steady-state cadence
+/// for a slow guest. Pure — the schedule is unit-tested. This changes
+/// *timing only*; it never reorders or skips the protocol/auth steps a
+/// caller performs between polls.
+pub fn adaptive_backoff(attempt: u32) -> Duration {
+    // Saturating shift so a large `attempt` can't overflow; it clamps
+    // to the cap well before the shift would wrap.
+    let scaled = ADAPTIVE_BACKOFF_BASE_MS.saturating_mul(1u64 << attempt.min(16));
+    Duration::from_millis(scaled.min(ADAPTIVE_BACKOFF_CAP_MS))
+}
+
+// ============================================================================
+// Guest agent protocol (JSON over vsock)
+// ============================================================================
+
+/// Request sent from host to guest vsock agent.
+///
+/// `#[serde(deny_unknown_fields)]` is load-bearing: the guest agent
+/// must refuse frames whose JSON contains
+/// fields the deserializer doesn't recognise, on the principle that
+/// silent acceptance of unknown fields is a deserialization-bug
+/// gadget waiting to happen. Today every variant is a struct or
+/// unit, so the attribute applies cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum GuestRequest {
+    /// Negotiate guest-agent protocol compatibility and capabilities
+    /// before dispatching capability-dependent requests.
+    ProtocolHello {
+        host_protocol_version: u32,
+        min_supported_version: u32,
+        host_version: String,
+        requested_capabilities: Vec<GuestCapability>,
+    },
+    /// Query current worker status.
+    WorkerStatus,
+    /// Request sleep preparation. Guest should:
+    /// 1. Finish/checkpoint in-flight OpenClaw work
+    /// 2. Flush data to disk
+    /// 3. Drop page cache
+    /// 4. ACK with SleepPrepAck
+    SleepPrep { drain_timeout_secs: u64 },
+    /// Signal wake — guest should reinitialize connections and refresh secrets.
+    Wake,
+    /// Health probe.
+    Ping,
+    /// Query status of all managed integrations.
+    IntegrationStatus,
+    /// Checkpoint named integrations before sleep.
+    /// Sent before SleepPrep so integrations can persist session state.
+    CheckpointIntegrations { integrations: Vec<String> },
+    /// Query status of all loaded probes.
+    ProbeStatus,
+    /// Query whether the workload has signalled "primed" (caches/JITs/model
+    /// load done). The workload asserts it by creating the primed marker
+    /// (`PRIMED_MARKER_PATH`); the agent reports its presence. Used by the
+    /// host's warm-snapshot barrier to seal a deterministic, fully-warmed base.
+    PrimedStatus,
+    /// Run a command inside the guest (dev-only, requires dev-shell feature + SecurityPolicy).
+    Exec {
+        command: String,
+        stdin: Option<String>,
+        timeout_secs: Option<u64>,
+    },
+    /// Tier-2 batched exec (dev-shell only): stage files, then run a sequence of
+    /// argv commands in-guest in a single round-trip, returning one buffered
+    /// outcome per command. The chain stops at the first non-zero exit. This is
+    /// the one-round-trip counterpart to the host driving `FsWrite` + `Exec`
+    /// frames itself; `peak_rss_kib` is agent-measured here. Answered by a
+    /// single `ExecBatchResult` frame.
+    ExecBatch {
+        stages: Vec<StageFile>,
+        commands: Vec<Vec<String>>,
+        timeout_secs: Option<u64>,
+    },
+    /// Run the image's baked entrypoint program with the given stdin
+    /// piped in and stdout/stderr captured.
+    ///
+    /// This is the production-safe call surface. The agent reads the
+    /// entrypoint path from `/etc/mvm/entrypoint` at boot, validates
+    /// it (verity-partition, mode, ownership), and that resolved
+    /// path is the only program `RunEntrypoint` will spawn. There is
+    /// no argv override, no shell, no env injection beyond what the
+    /// wrapper template defines at image build time.
+    ///
+    /// The response is a stream of `EntrypointEvent` frames
+    /// terminated by `EntrypointEvent::Exit` or
+    /// `EntrypointEvent::Error`. v1 emits one `Stdout` chunk + one
+    /// `Stderr` chunk + a terminal event (buffered up to caps); v2
+    /// may chunk progressively without changing the wire shape.
+    ///
+    /// Caps and timeouts are enforced agent-side. The wire
+    /// frame size is bounded by `MAX_FRAME_SIZE`.
+    RunEntrypoint {
+        /// Bytes piped to the wrapper's stdin.
+        stdin: Vec<u8>,
+        /// Wall-clock timeout for the call, in seconds. The agent
+        /// kills the wrapper on overrun and emits
+        /// `EntrypointEvent::Error { kind: Timeout }`.
+        timeout_secs: u64,
+        /// Env vars injected into the workload after `env_clear()`
+        /// (`HTTP_PROXY` + secret placeholder vars). Empty for
+        /// a plain call; omitted on the wire defaults to empty.
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
+    /// Run an arbitrary argv as a detached workload (dev-only).
+    ///
+    /// Mirrors how the image's `/init` runs its baked entrypoint, but
+    /// driven from the agent and non-blocking: the agent spawns the
+    /// program in its own session (`setsid`), with stdin from
+    /// `/dev/null` and stdout/stderr on the guest console (which the
+    /// host backend captures to `console.log`), returns an immediate
+    /// `DetachedStarted { pid }` ack, and a reaper reports the
+    /// workload's exit code to the host's workload-exit port when it
+    /// finishes — so the VM powers off once the workload exits
+    /// (docker `-d` semantics). Unlike `Exec`, the workload's lifetime
+    /// is not bound to this request's connection.
+    RunDetached {
+        /// The program and its arguments. `argv[0]` is the program;
+        /// resolved via PATH when not absolute.
+        argv: Vec<String>,
+        /// Env vars injected after `env_clear()` (plus a minimal safe
+        /// base). Empty when omitted on the wire.
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
+    /// Signal post-restore: rotate the VMGenID, then remount drives and
+    /// restart services. `token` is the host-minted generation token for this
+    /// resume; the guest feeds it to its `GenIdReseeder` so two clones of one
+    /// snapshot reseed their CSPRNG to distinct state. An all-zero token (the
+    /// `serde` default, used by no-rotation callers like template restore)
+    /// means "no rotation" — the remount/restart still runs.
+    PostRestore {
+        #[serde(default)]
+        token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+        /// Host-minted verb-grant envelope to re-pin after restore. When
+        /// the plan changes across a snapshot boundary the host delivers a
+        /// fresh envelope here so the guest updates its pinned grant without
+        /// a reboot. Absent on callers that do not rotate grants.
+        #[serde(default)]
+        grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    },
+    /// Request filesystem diff (changes since boot, from overlay or snapshot).
+    FsDiff,
+    /// Start a vsock→TCP port forwarder for the given guest port.
+    /// The agent binds vsock port `PORT_FORWARD_BASE + guest_port` and
+    /// forwards each connection to `localhost:guest_port`.
+    StartPortForward { guest_port: u16 },
+    /// Bind a guest Unix socket and forward each accepted connection to a host
+    /// vsock port. The guest path must live under `/run/mvm/` (see
+    /// `validate_unix_forward_guest_path`).
+    StartUnixSocketForward {
+        guest_path: String,
+        host_vsock_port: u32,
+        socket_mode: u32,
+    },
+    /// Open an interactive PTY console session (dev-mode only).
+    /// The guest allocates a PTY, spawns a shell, and listens on a
+    /// dedicated vsock data port for raw byte streaming.
+    ConsoleOpen {
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        argv: Vec<String>,
+    },
+    /// Close an active console session.
+    ConsoleClose { session_id: u32 },
+    /// Resize the PTY window for an active console session.
+    ConsoleResize {
+        session_id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    /// Query whether the agent's boot-time entrypoint validation
+    /// succeeded. Used by `mvmctl doctor` to confirm a running guest
+    /// can actually serve `RunEntrypoint`.
+    /// Prod-safe — reveals no secrets, takes no inputs.
+    EntrypointStatus,
+
+    /// Query structured readiness across every guest subsystem
+    /// (control plane, entrypoint, warm pool, integrations, probes,
+    /// volumes) plus per-phase boot timings.
+    ///
+    /// Prod-safe — the response carries no secrets and reveals only
+    /// state the host already chose to provision (via image config /
+    /// drop-in files). Designed to be the verb that responds first
+    /// after vsock bind, so a host can begin streaming progress UX
+    /// before entrypoint validation or warm-pool warmup finish.
+    ///
+    /// Distinct from `EntrypointStatus` (which is entrypoint-only and
+    /// returns a flat `EntrypointStatusReport`): `ReadinessStatus`
+    /// reports the *full* boot phase set with `ComponentState` per
+    /// component, and is intended to be polled (`mvmctl wait`).
+    ReadinessStatus,
+
+    // ========================================================================
+    // Filesystem RPC.
+    //
+    // Production-safe (unlike `Exec`): every verb is constrained by
+    // the agent's uid 901 + read-only bind mounts + the
+    // `mvm-core::crypto::policy::path` deny-list. Extending the
+    // `prod-agent-runentry-contract` CI lane to assert handler
+    // symbols PRESENT in prod builds is part of the per-verb landing.
+    // ========================================================================
+    /// Read up to `length` bytes from `path`, optionally starting at
+    /// `offset`. The agent enforces `length` ≤ a hard cap (default
+    /// 16 MiB); callers wanting larger reads must use the streaming
+    /// surface (lands in W2).
+    FsRead {
+        path: String,
+        offset: Option<u64>,
+        length: u64,
+        /// `true` to follow symlinks during canonicalization. Default
+        /// `true` for read; the host CLI may toggle to `false` for
+        /// TOCTOU-resistant audits.
+        #[serde(default = "default_true")]
+        follow_symlinks: bool,
+    },
+    /// Write `content` to `path`. Small-content path; large writes
+    /// must use the streaming surface (W2).
+    FsWrite {
+        path: String,
+        content: Vec<u8>,
+        /// File mode for newly-created files (e.g. `0o644`). Ignored
+        /// when overwriting an existing file (existing perms kept).
+        mode: u32,
+        /// Create parent directories if missing.
+        #[serde(default)]
+        create_parents: bool,
+        /// Defaults to `false` for write — TOCTOU-safe default since
+        /// a malicious symlink could redirect the write.
+        #[serde(default)]
+        follow_symlinks: bool,
+    },
+    /// List entries in `path`. Cap: 4096 entries; truncated flag set
+    /// in the response when exceeded.
+    FsList {
+        path: String,
+        #[serde(default = "default_true")]
+        follow_symlinks: bool,
+    },
+    /// Stat `path`. `follow_symlinks=false` returns metadata about
+    /// the symlink itself (`lstat`).
+    FsStat {
+        path: String,
+        #[serde(default = "default_true")]
+        follow_symlinks: bool,
+    },
+    /// Create directory at `path`. With `parents=true` the call
+    /// behaves like `mkdir -p`.
+    FsMkdir {
+        path: String,
+        mode: u32,
+        #[serde(default)]
+        parents: bool,
+    },
+    /// Remove `path`. With `recursive=true` the call walks subtrees;
+    /// the agent caps the walked-entry count to bound work.
+    FsRemove {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+        /// Defaults to `false` for remove; symlink-following on
+        /// remove is a known footgun.
+        #[serde(default)]
+        follow_symlinks: bool,
+    },
+    /// Rename `from` to `to`. Refuses to cross filesystem boundaries
+    /// (returns `Errno::XDEV` rather than copy-then-delete).
+    FsMove {
+        from: String,
+        to: String,
+        #[serde(default)]
+        follow_symlinks: bool,
+    },
+
+    // ========================================================================
+    // Process control RPC.
+    //
+    // **Dev-only.** These verbs are the closest analog to the
+    // established sandbox-runtime
+    // `commands.start/list/signal/sendInput/wait/kill` API; they
+    // exist for development and agent-driven workflows where the
+    // user wants to launch arbitrary processes interactively.
+    //
+    // The wire types are compiled into every `mvm-agentd` build so a
+    // host caller against a prod agent gets a typed
+    // `ProcErrorKind::UnsupportedInProduction` rather than a
+    // transport error. The agent-side **handler** lives in
+    // `crate::process_rpc`, gated behind the `dev-shell` feature —
+    // which means the function symbols are absent from prod builds.
+    // The combined `prod-agent-runentry-contract` CI gate asserts
+    // this symbol contract.
+    //
+    // Distinct from `Exec` (single-shot, blocking) and from
+    // `RunEntrypoint` (production-safe baked program). Process
+    // verbs offer sandbox-runtime-shaped fan-out: spawn many, list them, send
+    // signals, stream output, send more stdin.
+    // ========================================================================
+    /// Spawn a new process. Returns a `pid_token` string the host
+    /// uses to refer to the process for the rest of its lifetime —
+    /// the token is opaque to the host so a buggy or malicious
+    /// caller can never address a process it didn't start.
+    ///
+    /// Children spawned this way inherit the agent's bounding-set
+    /// (`--bounding-set=-all --no-new-privs`);
+    /// the handler additionally `process_group(0)`s and sets
+    /// `RLIMIT_CORE=0` to avoid coredump exfil. argv is validated
+    /// against an allowlist before exec.
+    ProcStart {
+        /// Argument vector. `argv[0]` is the executable to spawn.
+        argv: Vec<String>,
+        /// Environment variables. Replaces (does not extend) the
+        /// agent's environment.
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
+        /// Working directory inside the guest. `None` = process
+        /// inherits the agent's cwd.
+        #[serde(default)]
+        cwd: Option<String>,
+        /// Initial stdin bytes. Further input goes via
+        /// `ProcSendInput`.
+        #[serde(default)]
+        stdin: Vec<u8>,
+        /// Optional wall-clock kill on overrun. `None` = no agent-
+        /// imposed timeout; the caller can still send SIGTERM via
+        /// `ProcSignal` or `ProcKill`.
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+    /// List processes currently tracked by the agent's PID-token
+    /// map. Includes still-running and recently-exited entries
+    /// until the agent reaps them (default: keep for 60 s after
+    /// exit).
+    ProcList,
+    /// Send `signum` to the process named by `pid_token`. Common
+    /// signals are 15 (SIGTERM) and 2 (SIGINT); for SIGKILL use
+    /// the dedicated `ProcKill` verb so the audit chain captures
+    /// the explicit-force semantics.
+    ProcSignal { pid_token: String, signum: i32 },
+    /// Append `bytes` to the process's stdin. Capped per call by
+    /// the agent (default 1 MiB) and per process (default 16 MiB
+    /// ring buffer); `ProcResult::InputAccepted` reports actual
+    /// bytes written.
+    ProcSendInput { pid_token: String, bytes: Vec<u8> },
+    /// Wait for the process named by `pid_token` to exit, with an
+    /// optional timeout. Response is a stream of `ProcWaitEvent`
+    /// frames (stdout/stderr chunks) terminated by an `Exit`,
+    /// `Killed`, `TimedOut`, or `Error` event.
+    ProcWait {
+        pid_token: String,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+    /// Send SIGKILL to the process named by `pid_token`. Distinct
+    /// from `ProcSignal { signum: 9 }` so the audit emit can be
+    /// typed `ProcKilled` instead of a generic signal event.
+    ProcKill { pid_token: String },
+
+    // ========================================================================
+    // virtio-fs share mount control.
+    //
+    // The host launches a `virtiofsd` process exposing a host
+    // directory under a virtio-fs `tag`; the agent then runs the
+    // in-guest `mount -t virtiofs <tag> <guest_path>`. Mount paths
+    // are validated against `mvm_core::crypto::policy::MountPathPolicy`
+    // (default allow-roots `/mnt`, `/data`, `/work`; deny anything
+    // under `/etc`, `/usr`, `/proc`, etc.) so a host can't shadow
+    // verity-protected files post-boot. Production-safe.
+    // ========================================================================
+    /// Mount a virtio-fs volume inside the guest. The host has
+    /// already attached the device and the agent only needs to
+    /// run the in-guest mount(2) call. `volume_name` is the
+    /// virtio-fs tag string the device was created with — named to
+    /// align with the `Volume` wire type.
+    /// (Replaces the former `MountShare`.)
+    MountVolume {
+        volume_name: String,
+        guest_path: String,
+        read_only: bool,
+    },
+    /// Unmount a previously-mounted volume. `force = false`
+    /// returns `EBUSY` when the kernel reports active fds; the
+    /// caller passes `force = true` to demand a lazy detach.
+    /// (Replaces the former `UnmountShare`.)
+    UnmountVolume { guest_path: String, force: bool },
+
+    /// Update the warm-process pool's idle-recycle timeout. Workers
+    /// that have been idle (no in-flight call) longer than
+    /// `secs` are recycled at the next sweep. `secs == 0` disables
+    /// idle-based recycling — only `max_calls_per_worker` and
+    /// `max_rss_mb` triggers remain.
+    ///
+    /// This is the substrate-side mirror of `mvmctl session
+    /// set-timeout <id> <secs>`: the host writes the new value into
+    /// the session record, then dispatches this verb so the agent's
+    /// pool sees the same value. A best-effort dispatch — if the
+    /// agent is unreachable the host record still wins on the next
+    /// `mvmctl session reap`.
+    UpdateIdleTimeout { secs: u64 },
+    /// Run user-supplied source code in the wrapper's native
+    /// interpreter. Dev-only — gated behind the agent's `dev-shell`
+    /// feature flag, same fence as `Exec`. The host
+    /// (`mvmctl session run-code`) provides additional gating: the
+    /// session must be `mode=Dev`.
+    ///
+    /// The interpreter is selected by reading `/etc/mvm/wrapper.json`
+    /// at dispatch time:
+    ///   - `language = "python"` → `python3 -c <code>`
+    ///   - `language = "node"`   → `node -e <code>`
+    ///
+    /// Other values, or a missing/unparseable wrapper.json, refuse
+    /// with a wire-stable error message.
+    ///
+    /// **v1 is stateless** — each call spawns a fresh interpreter
+    /// process, so `from foo import bar` in call 1 isn't visible in
+    /// call 2. A future v2 routes
+    /// through the warm-process pool's wrapper for stateful eval
+    /// across calls; the wire shape stays identical, the dispatch
+    /// flips inside the agent.
+    RunCode {
+        code: String,
+        timeout_secs: Option<u64>,
+    },
+}
+
+impl GuestRequest {
+    /// Stable kebab-case verb name for this request — the value
+    /// host-side audit emitters write into the
+    /// `LocalAuditKind::NetworkPolicyAllow` detail format under
+    /// `verb=<name>`. Invariant: every vsock RPC from host to guest
+    /// emits one audit record so a forensic pass can reconstruct
+    /// what the host asked the guest to do.
+    ///
+    /// The strings are wire-stable — a rename here is also a
+    /// detail-format wire-format change. Pinned by
+    /// `tests::kind_name_covers_every_variant`.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::ProtocolHello { .. } => "protocol-hello",
+            Self::WorkerStatus => "worker-status",
+            Self::SleepPrep { .. } => "sleep-prep",
+            Self::Wake => "wake",
+            Self::Ping => "ping",
+            Self::IntegrationStatus => "integration-status",
+            Self::CheckpointIntegrations { .. } => "checkpoint-integrations",
+            Self::ProbeStatus => "probe-status",
+            Self::PrimedStatus => "primed-status",
+            Self::Exec { .. } => "exec",
+            Self::ExecBatch { .. } => "exec-batch",
+            Self::RunEntrypoint { .. } => "run-entrypoint",
+            Self::RunDetached { .. } => "run-detached",
+            Self::PostRestore { .. } => "post-restore",
+            Self::FsDiff => "fs-diff",
+            Self::StartPortForward { .. } => "start-port-forward",
+            Self::StartUnixSocketForward { .. } => "start-unix-socket-forward",
+            Self::ConsoleOpen { .. } => "console-open",
+            Self::ConsoleClose { .. } => "console-close",
+            Self::ConsoleResize { .. } => "console-resize",
+            Self::EntrypointStatus => "entrypoint-status",
+            Self::ReadinessStatus => "readiness-status",
+            Self::FsRead { .. } => "fs-read",
+            Self::FsWrite { .. } => "fs-write",
+            Self::FsList { .. } => "fs-list",
+            Self::FsStat { .. } => "fs-stat",
+            Self::FsMkdir { .. } => "fs-mkdir",
+            Self::FsRemove { .. } => "fs-remove",
+            Self::FsMove { .. } => "fs-move",
+            Self::ProcStart { .. } => "proc-start",
+            Self::ProcList => "proc-list",
+            Self::ProcSignal { .. } => "proc-signal",
+            Self::ProcSendInput { .. } => "proc-send-input",
+            Self::ProcWait { .. } => "proc-wait",
+            Self::ProcKill { .. } => "proc-kill",
+            Self::MountVolume { .. } => "mount-volume",
+            Self::UnmountVolume { .. } => "unmount-volume",
+            Self::UpdateIdleTimeout { .. } => "update-idle-timeout",
+            Self::RunCode { .. } => "run-code",
+        }
+    }
+}
+
+/// Helper for `#[serde(default = "...")]` on `bool` fields where
+/// `true` is the desired default (serde's `Default` trait yields
+/// `false`).
+fn default_true() -> bool {
+    true
+}
+
+// ============================================================================
+// Readiness model
+// ============================================================================
+
+/// State of a single guest subsystem during boot.
+///
+/// `Disabled` is distinct from `Ready` — a missing optional subsystem
+/// (no integrations declared, no warm pool configured, no probes
+/// registered) reports `Disabled`, while a present-and-warmed
+/// subsystem reports `Ready`. This lets the host UX distinguish
+/// "the workload doesn't use X" from "X is still warming".
+///
+/// `Default` is `Disabled` — the most-conservative semantically
+/// correct value (= "this subsystem isn't configured"). Lets
+/// constructors of `ReadinessReport` use `..Default::default()` to
+/// elide subsystems they don't care about in tests / fixtures.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ComponentState {
+    /// Subsystem is not configured for this image (no policy → no
+    /// state machine to advance). Wire-stable distinct from `Ready`.
+    #[default]
+    Disabled,
+    /// Subsystem is initializing in the background.
+    Starting,
+    /// Subsystem is up and accepting work.
+    Ready,
+    /// Subsystem failed to initialize. `message` is a short human-
+    /// readable reason; no secrets / paths beyond what the host
+    /// already knows.
+    Failed {
+        /// Short human-readable failure reason. Stable enough for an
+        /// operator to recognise, not a structured cause — pair with
+        /// stderr logs for diagnosis.
+        message: String,
+    },
+}
+
+/// Per-phase monotonic boot timings in milliseconds since the agent
+/// process started.
+///
+/// `agent_started_ms`, `vsock_bound_ms`, `first_accept_ms`, and
+/// `entrypoint_ready_ms` are wired so callers can already display the
+/// cold-path timing breakdown. The remaining fields
+/// (`warm_pool_ready_ms`, `integrations_ready_ms`, `probes_ready_ms`)
+/// are reserved and stay `None` for now.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BootTimingReport {
+    /// Milliseconds from agent process start to vsock bind/listen.
+    /// Always present once the agent has bound — this number is the
+    /// dominant signal for early-readiness regressions.
+    pub agent_started_ms: Option<u64>,
+    /// Milliseconds from agent start to a successful `bind+listen`
+    /// pair on the control port. Same anchor as `agent_started_ms`
+    /// today; reserved for diverging if a future refactor
+    /// splits "process started" from "socket created".
+    pub vsock_bound_ms: Option<u64>,
+    /// Milliseconds from agent start to the first accepted host
+    /// connection. `None` until the first `accept()` returns.
+    pub first_accept_ms: Option<u64>,
+    /// Milliseconds from agent start to `entrypoint = Ready` (or
+    /// `Failed`). `None` while still `Starting`.
+    pub entrypoint_ready_ms: Option<u64>,
+    /// Reserved; not yet populated, so `None` for now.
+    pub warm_pool_ready_ms: Option<u64>,
+    /// Reserved; not yet populated, so `None` for now.
+    pub integrations_ready_ms: Option<u64>,
+    /// Reserved; not yet populated, so `None` for now.
+    pub probes_ready_ms: Option<u64>,
+}
+
+/// Snapshot of agent readiness at the moment of a `ReadinessStatus`
+/// call.
+///
+/// Used by host
+/// callers (`mvmctl wait`, `mvmctl up --timings`, `mvmctl doctor`)
+/// to distinguish:
+///
+/// - "control plane is up, workload not yet warm" → invoke would
+///   block; the host can stream progress to the user
+/// - "entrypoint validation failed" → invoke would fail fast with
+///   a typed error; the host can surface the validation message
+/// - "optional subsystem failed" → invoke is still safe; the host
+///   surfaces a warning
+///
+/// `Default` composes the `Default` impls of each field — every
+/// component is `Disabled`, the profile is `SealedProd`, all
+/// timings are `None`. Tests and fixtures can construct partial
+/// reports with `..Default::default()`.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ReadinessReport {
+    /// Vsock listener bound and accepting. Always `Ready` if the
+    /// agent could respond at all.
+    pub control_plane: ComponentState,
+    /// `/etc/mvm/entrypoint` validation result. Gates `RunEntrypoint`
+    /// — a request submitted while `Starting` returns
+    /// `RunEntrypointError::NotReady`.
+    pub entrypoint: ComponentState,
+    /// Warm-process pool readiness. `Disabled` for cold-tier images;
+    /// `Ready` once the `after_start.sh` probe passes.
+    pub warm_pool: ComponentState,
+    /// Drop-in integration scan + health loop. `Disabled` if no
+    /// `/etc/mvm/integrations.d/*.json` files present.
+    pub integrations: ComponentState,
+    /// Drop-in probe scan + probe loop. `Disabled` if no
+    /// `/etc/mvm/probes.d/*.json` files present.
+    pub probes: ComponentState,
+    /// Volume-mount state — wire-stable placeholder. `Disabled` in
+    /// v1 (mount/unmount are on-demand verbs, not boot state).
+    pub volumes: ComponentState,
+    /// Active agent profile. Same value the dispatcher uses for the
+    /// `allowed_in` gate.
+    pub profile: AgentProfile,
+    /// Per-phase monotonic timings.
+    pub boot_millis: BootTimingReport,
+}
+
+// ============================================================================
+// Profile classifier
+// ============================================================================
+
+/// Coarse profile-eligibility class for each `GuestRequest` variant.
+///
+/// Wire types are compiled into every agent build; this classifier
+/// is the dispatcher-side gate that rejects out-of-profile verbs
+/// *before* the per-variant handler runs. Complemented by the
+/// compile-time symbol-absence story (`do_exec`, `do_run_code`,
+/// process RPC handlers gated by `dev-shell`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RequestClass {
+    /// Allowed under `SealedProd` and `Dev` profiles. Includes the
+    /// lifecycle, entrypoint-status, sleep/wake, mount-volume, and
+    /// idle-timeout verbs. Sub-policies (mount path, idle timeout
+    /// scope) are enforced inside the handler.
+    ProdSafe,
+    /// Allowed only under `Dev`. Process RPC, filesystem RPC, console,
+    /// port forwarding, shell exec, code eval.
+    DevOnly,
+    /// Allowed only under `Builder`. No current `GuestRequest`
+    /// variant is `BuilderOnly`; the variant is reserved for forward
+    /// compatibility when builder-specific verbs land on the tenant
+    /// wire.
+    BuilderOnly,
+}
+
+impl GuestRequest {
+    /// Stable string name for the verb, used in audit logs and the
+    /// `UnsupportedInProfile` rejection response. Wire-stable —
+    /// renaming a verb is a breaking change.
+    pub fn verb_name(&self) -> &'static str {
+        self.verb().name()
+    }
+
+    /// Typed projection of this request's verb. Exhaustive — adding a
+    /// `GuestRequest` variant fails to compile until mapped here, keeping
+    /// `Verb` in lockstep with the wire enum.
+    pub fn verb(&self) -> Verb {
+        match self {
+            GuestRequest::ProtocolHello { .. } => Verb::ProtocolHello,
+            GuestRequest::WorkerStatus => Verb::WorkerStatus,
+            GuestRequest::SleepPrep { .. } => Verb::SleepPrep,
+            GuestRequest::Wake => Verb::Wake,
+            GuestRequest::Ping => Verb::Ping,
+            GuestRequest::IntegrationStatus => Verb::IntegrationStatus,
+            GuestRequest::CheckpointIntegrations { .. } => Verb::CheckpointIntegrations,
+            GuestRequest::ProbeStatus => Verb::ProbeStatus,
+            GuestRequest::PrimedStatus => Verb::PrimedStatus,
+            GuestRequest::Exec { .. } => Verb::Exec,
+            GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
+            GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
+            GuestRequest::RunDetached { .. } => Verb::RunDetached,
+            GuestRequest::PostRestore { .. } => Verb::PostRestore,
+            GuestRequest::FsDiff => Verb::FsDiff,
+            GuestRequest::StartPortForward { .. } => Verb::StartPortForward,
+            GuestRequest::StartUnixSocketForward { .. } => Verb::StartUnixSocketForward,
+            GuestRequest::ConsoleOpen { .. } => Verb::ConsoleOpen,
+            GuestRequest::ConsoleClose { .. } => Verb::ConsoleClose,
+            GuestRequest::ConsoleResize { .. } => Verb::ConsoleResize,
+            GuestRequest::EntrypointStatus => Verb::EntrypointStatus,
+            GuestRequest::ReadinessStatus => Verb::ReadinessStatus,
+            GuestRequest::FsRead { .. } => Verb::FsRead,
+            GuestRequest::FsWrite { .. } => Verb::FsWrite,
+            GuestRequest::FsList { .. } => Verb::FsList,
+            GuestRequest::FsStat { .. } => Verb::FsStat,
+            GuestRequest::FsMkdir { .. } => Verb::FsMkdir,
+            GuestRequest::FsRemove { .. } => Verb::FsRemove,
+            GuestRequest::FsMove { .. } => Verb::FsMove,
+            GuestRequest::ProcStart { .. } => Verb::ProcStart,
+            GuestRequest::ProcList => Verb::ProcList,
+            GuestRequest::ProcSignal { .. } => Verb::ProcSignal,
+            GuestRequest::ProcSendInput { .. } => Verb::ProcSendInput,
+            GuestRequest::ProcWait { .. } => Verb::ProcWait,
+            GuestRequest::ProcKill { .. } => Verb::ProcKill,
+            GuestRequest::MountVolume { .. } => Verb::MountVolume,
+            GuestRequest::UnmountVolume { .. } => Verb::UnmountVolume,
+            GuestRequest::UpdateIdleTimeout { .. } => Verb::UpdateIdleTimeout,
+            GuestRequest::RunCode { .. } => Verb::RunCode,
+        }
+    }
+
+    /// The declared response contract for this request — which
+    /// `GuestResponse` variant(s) answer it, unary vs streamed. See
+    /// [`Verb::response_contract`].
+    pub fn response_contract(&self) -> ResponseContract {
+        self.verb().response_contract()
+    }
+
+    /// Profile class of this request. Exhaustive match — adding a new
+    /// `GuestRequest` variant fails to compile until it is classified.
+    pub fn class(&self) -> RequestClass {
+        match self {
+            // ProdSafe: handshake + lifecycle + status + entrypoint
+            // + sleep/wake + mount-volume + idle-timeout. Volume
+            // mounts are additionally constrained by
+            // `MountPathPolicy` inside the handler — the gate just
+            // lets the verb reach it. `ProtocolHello` MUST be
+            // prod-safe; it's the negotiation that runs before
+            // every other request and a sealed-prod agent that
+            // refuses it would never see another verb.
+            GuestRequest::ProtocolHello { .. }
+            | GuestRequest::WorkerStatus
+            | GuestRequest::SleepPrep { .. }
+            | GuestRequest::Wake
+            | GuestRequest::Ping
+            | GuestRequest::IntegrationStatus
+            | GuestRequest::CheckpointIntegrations { .. }
+            | GuestRequest::ProbeStatus
+            | GuestRequest::PrimedStatus
+            | GuestRequest::RunEntrypoint { .. }
+            | GuestRequest::PostRestore { .. }
+            | GuestRequest::EntrypointStatus
+            | GuestRequest::ReadinessStatus
+            | GuestRequest::MountVolume { .. }
+            | GuestRequest::UnmountVolume { .. }
+            | GuestRequest::UpdateIdleTimeout { .. } => RequestClass::ProdSafe,
+
+            // DevOnly: shell exec, process RPC, filesystem RPC,
+            // console, port forwarding, code eval, filesystem diff.
+            // Filesystem reads look benign but can leak secrets and
+            // mounted-volume contents, so the entire filesystem
+            // RPC surface is DevOnly in v1.
+            GuestRequest::Exec { .. }
+            | GuestRequest::ExecBatch { .. }
+            | GuestRequest::RunDetached { .. }
+            | GuestRequest::FsDiff
+            | GuestRequest::StartPortForward { .. }
+            | GuestRequest::StartUnixSocketForward { .. }
+            | GuestRequest::ConsoleOpen { .. }
+            | GuestRequest::ConsoleClose { .. }
+            | GuestRequest::ConsoleResize { .. }
+            | GuestRequest::FsRead { .. }
+            | GuestRequest::FsWrite { .. }
+            | GuestRequest::FsList { .. }
+            | GuestRequest::FsStat { .. }
+            | GuestRequest::FsMkdir { .. }
+            | GuestRequest::FsRemove { .. }
+            | GuestRequest::FsMove { .. }
+            | GuestRequest::ProcStart { .. }
+            | GuestRequest::ProcList
+            | GuestRequest::ProcSignal { .. }
+            | GuestRequest::ProcSendInput { .. }
+            | GuestRequest::ProcWait { .. }
+            | GuestRequest::ProcKill { .. }
+            | GuestRequest::RunCode { .. } => RequestClass::DevOnly,
+        }
+    }
+
+    /// Whether this request is allowed under `profile`.
+    ///
+    /// Profile rules:
+    /// - `SealedProd` allows only `ProdSafe`.
+    /// - `Dev` allows `ProdSafe` and `DevOnly` (a superset).
+    /// - `Builder` allows only `BuilderOnly` — today the builder
+    ///   agent speaks `HostVmRequest`, so `GuestRequest` reaching
+    ///   a `Builder`-profile agent is a configuration error.
+    pub fn allowed_in(&self, profile: AgentProfile) -> bool {
+        matches!(
+            (self.class(), profile),
+            (
+                RequestClass::ProdSafe,
+                AgentProfile::SealedProd | AgentProfile::Dev
+            ) | (RequestClass::DevOnly, AgentProfile::Dev)
+                | (RequestClass::BuilderOnly, AgentProfile::Builder)
+        )
+    }
+
+    /// The kebab `kind_name()`s of every `ProdSafe` control verb —
+    /// the candidate members of an `agent_verbs` grant. Single source
+    /// of truth; the classification guard test keeps this in lockstep
+    /// with `class()`.
+    pub fn prod_safe_verb_names() -> &'static [&'static str] {
+        &[
+            "protocol-hello",
+            "ping",
+            "readiness-status",
+            "worker-status",
+            "sleep-prep",
+            "wake",
+            "integration-status",
+            "checkpoint-integrations",
+            "probe-status",
+            "primed-status",
+            "post-restore",
+            "entrypoint-status",
+            "run-entrypoint",
+            "mount-volume",
+            "unmount-volume",
+            "update-idle-timeout",
+        ]
+    }
+}
+
+/// Response from guest vsock agent to host.
+///
+/// Same `deny_unknown_fields` discipline as `GuestRequest` — a
+/// compromised guest must not be able to slip extra fields past the
+/// host's deserializer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum GuestResponse {
+    /// Guest-agent protocol negotiation succeeded.
+    ProtocolHelloAck {
+        agent_protocol_version: u32,
+        min_supported_version: u32,
+        agent_version: String,
+        capabilities: Vec<GuestCapability>,
+    },
+    /// Guest-agent protocol negotiation failed before dispatch.
+    ProtocolMismatch {
+        host_protocol_version: u32,
+        agent_protocol_version: u32,
+        required_action: ProtocolUpgradeAction,
+        message: String,
+    },
+    /// Worker status with optional last-busy timestamp.
+    WorkerStatus {
+        status: String,
+        last_busy_at: Option<String>,
+    },
+    /// Sleep preparation acknowledgement.
+    SleepPrepAck {
+        success: bool,
+        detail: Option<String>,
+    },
+    /// Wake acknowledgement.
+    WakeAck { success: bool },
+    /// Pong.
+    Pong,
+    /// Error from guest agent.
+    Error { message: String },
+    /// The dispatcher refused this verb because the active
+    /// `AgentProfile` does not allow it. Distinct
+    /// from `Error { message }` so SDK callers can branch on
+    /// capability without parsing message text — analogous to
+    /// `ProcErrorKind::UnsupportedInProduction` for process RPC,
+    /// but at the protocol layer rather than per-handler.
+    UnsupportedInProfile {
+        /// Active profile on the agent that rejected the call.
+        profile: AgentProfile,
+        /// `verb_name()` of the rejected request. Wire-stable.
+        verb: String,
+    },
+    /// The pinned verb grant does not authorize this verb for the
+    /// workload. Wire-stable. Universal — may answer any request.
+    VerbNotAuthorized { verb: String },
+    /// Per-integration status report.
+    IntegrationStatusReport {
+        integrations: Vec<crate::integrations::IntegrationStateReport>,
+    },
+    /// Result of checkpointing integrations before sleep.
+    CheckpointResult {
+        success: bool,
+        /// Names of integrations that failed to checkpoint.
+        failed: Vec<String>,
+        detail: Option<String>,
+    },
+    /// Per-probe status report.
+    ProbeStatusReport {
+        probes: Vec<crate::probes::ProbeResult>,
+    },
+    /// Whether the workload has signalled "primed" (the primed marker is
+    /// present). Answers `PrimedStatus`.
+    PrimedStatusReport { primed: bool },
+    /// One event in the response stream of a `RunEntrypoint` call.
+    ///
+    /// The agent emits a sequence of these in response to a single
+    /// `RunEntrypoint` request, terminated by an `EntrypointEvent`
+    /// whose `is_terminal` returns true (`Exit` or `Error`). The
+    /// host reads frames in a loop until terminal.
+    EntrypointEvent(EntrypointEvent),
+    /// One event in the streaming response of an `Exec` call (dev-shell
+    /// only). Terminated by `ExecEvent::Exit`.
+    ExecEvent(ExecEvent),
+    /// Buffered outcomes of an `ExecBatch` call (dev-shell only), one per
+    /// command in request order (truncated at the first non-zero exit).
+    ExecBatchResult { outcomes: Vec<ExecOutcomeWire> },
+    /// Ack for a `RunDetached` call: the detached workload was spawned
+    /// with the given guest PID. The workload runs independently of this
+    /// request's connection; its exit is later reported to the host's
+    /// workload-exit port by the agent's reaper.
+    DetachedStarted { pid: i32 },
+    /// Post-restore acknowledgement.
+    PostRestoreAck {
+        success: bool,
+        detail: Option<String>,
+        /// `true` iff the delivered generation token changed and the guest
+        /// reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero
+        /// token (a plain wake or no-rotation restore). Defaults to `false`
+        /// on the wire for forward-compat with a pre-rotation ack.
+        #[serde(default)]
+        reseeded: bool,
+    },
+    /// Filesystem diff result.
+    FsDiffResult { changes: Vec<FsChange> },
+    /// Port forward started successfully.
+    PortForwardStarted { guest_port: u16, vsock_port: u32 },
+    /// Guest Unix socket forward started successfully.
+    UnixSocketForwardStarted {
+        guest_path: String,
+        host_vsock_port: u32,
+    },
+    /// Console PTY session opened. Connect to `data_port` for raw I/O.
+    ConsoleOpened { session_id: u32, data_port: u32 },
+    /// Console PTY session ended (shell exited).
+    ConsoleExited { session_id: u32, exit_code: i32 },
+    /// Console resize acknowledged.
+    ConsoleResized { session_id: u32 },
+    /// Result of an `EntrypointStatus` query.
+    ///
+    /// `ok = true` means the agent successfully validated
+    /// `/etc/mvm/entrypoint` at boot and will serve `RunEntrypoint`.
+    /// `ok = false` means validation failed — `path` carries the
+    /// resolved path attempt (or the marker contents if resolution
+    /// itself failed) and `detail` carries a human-readable reason.
+    EntrypointStatusReport {
+        ok: bool,
+        path: Option<String>,
+        detail: Option<String>,
+    },
+
+    /// Result of a `ReadinessStatus` query.
+    /// Snapshot of every component plus per-phase timings.
+    ReadinessStatusReport(ReadinessReport),
+
+    /// Result of a filesystem RPC call. The single top-level variant
+    /// keeps `GuestResponse` from sprawling — the `FsResult` sub-enum
+    /// carries the per-verb shapes.
+    FsResult(FsResult),
+
+    /// Result of a non-streaming process-control verb (`ProcStart`,
+    /// `ProcList`, `ProcSignal`, `ProcSendInput`, `ProcKill`).
+    ProcResult(ProcResult),
+
+    /// One event in the streaming response of a `ProcWait` call.
+    /// Mirrors the `EntrypointEvent` shape — the agent emits
+    /// `Stdout`/`Stderr` chunks (capped per chunk by the wire frame
+    /// limit) terminated by exactly one of `Exit` / `Killed` /
+    /// `TimedOut` / `Error`.
+    ProcWaitEvent(ProcWaitEvent),
+
+    /// Result of a `MountVolume` / `UnmountVolume` call. Single-frame
+    /// surface; closed sub-enum carries the per-verb shape.
+    /// (Renamed from `ShareResult`.)
+    VolumeMountResult(VolumeMountResult),
+
+    /// Acknowledgement for `UpdateIdleTimeout`. `applied_secs` is the
+    /// value the agent is now enforcing — `0` means the warm-process
+    /// pool isn't active on this guest (cold-path-only build), so
+    /// the host reaper is the only enforcement.
+    UpdateIdleTimeoutAck {
+        previous_secs: u64,
+        applied_secs: u64,
+    },
+}
+
+// ============================================================================
+// Machine-readable RPC contract.
+//
+// The pairing "which `GuestResponse` answers which `GuestRequest`" used to live
+// only in the agent's dispatch `match`, scattered across ~35 arms. Declaring it
+// here makes it the single source of truth a typed RPC-client generator (host
+// or SDK) can consume, and lets a unit test assert no response variant is
+// orphaned. `Verb` / `ResponseVariant` are typed name-only projections of the
+// two wire enums so the contract references them by a compiler-checked
+// identifier, never a stringly name.
+// ============================================================================
+
+/// Declares a unit enum that is the name-only projection of a wire enum,
+/// with a `ALL` slice (every variant, declaration order) and a `name()`
+/// returning the variant's identifier. `ALL` is generated from the same
+/// variant list as the enum, so the two can't drift.
+macro_rules! name_enum {
+    ($(#[$m:meta])* $vis:vis enum $name:ident { $($v:ident),+ $(,)? }) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        $vis enum $name { $($v),+ }
+
+        impl $name {
+            /// Every variant, in declaration order.
+            pub const ALL: &'static [$name] = &[$($name::$v),+];
+
+            /// The variant's wire-stable identifier (its Rust ident).
+            pub fn name(self) -> &'static str {
+                match self { $($name::$v => stringify!($v)),+ }
+            }
+        }
+    };
+}
+
+name_enum! {
+    /// Typed projection of every `GuestRequest` verb. Enumerable (`ALL`) so
+    /// the contract can be iterated; `GuestRequest::verb()` keeps it in
+    /// lockstep with the wire enum (exhaustive match).
+    pub enum Verb {
+        ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
+        RunDetached,
+        PostRestore,
+        FsDiff, StartPortForward, StartUnixSocketForward, ConsoleOpen,
+        ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
+        FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
+        ProcList, ProcSignal, ProcSendInput, ProcWait, ProcKill, MountVolume,
+        UnmountVolume, UpdateIdleTimeout, RunCode,
+    }
+}
+
+name_enum! {
+    /// Typed projection of every `GuestResponse` variant.
+    /// `GuestResponse::variant()` keeps it in lockstep with the wire enum
+    /// (exhaustive match).
+    pub enum ResponseVariant {
+        ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
+        Pong, Error, UnsupportedInProfile, VerbNotAuthorized, IntegrationStatusReport,
+        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
+        ExecBatchResult, DetachedStarted,
+        PostRestoreAck, FsDiffResult, PortForwardStarted,
+        UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
+        EntrypointStatusReport,
+        ReadinessStatusReport, FsResult, ProcResult, ProcWaitEvent,
+        VolumeMountResult, UpdateIdleTimeoutAck,
+    }
+}
+
+impl ResponseVariant {
+    /// Universal responses any request may receive instead of its
+    /// request-specific answer: a protocol-layer profile rejection
+    /// (`UnsupportedInProfile`) or a generic agent `Error`. Excluded from
+    /// per-request contracts — a typed client handles them globally.
+    pub fn is_universal(self) -> bool {
+        matches!(
+            self,
+            ResponseVariant::Error
+                | ResponseVariant::UnsupportedInProfile
+                | ResponseVariant::VerbNotAuthorized
+        )
+    }
+}
+
+/// Whether a request is answered by a single response frame, or by a stream
+/// of frames terminated by a terminal event (`is_terminal()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseKind {
+    /// Exactly one `GuestResponse` frame.
+    Unary,
+    /// A sequence of `GuestResponse` frames, read until terminal.
+    Stream,
+}
+
+/// The declared response contract for a request verb: which `GuestResponse`
+/// variant(s) answer it, and whether the answer is a single frame or a
+/// terminal-terminated stream. The universal responses (`Error`,
+/// `UnsupportedInProfile`) are not listed — they may answer any request.
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseContract {
+    /// The request-specific response variant(s) this verb may produce.
+    pub responses: &'static [ResponseVariant],
+    /// Single-frame vs streamed.
+    pub kind: ResponseKind,
+}
+
+impl Verb {
+    /// The declared host↔guest response contract for this verb — the
+    /// machine-readable pairing previously implicit in the agent dispatch.
+    pub fn response_contract(self) -> ResponseContract {
+        use ResponseKind::{Stream, Unary};
+        use ResponseVariant as R;
+        let unary = |responses: &'static [R]| ResponseContract {
+            responses,
+            kind: Unary,
+        };
+        let stream = |responses: &'static [R]| ResponseContract {
+            responses,
+            kind: Stream,
+        };
+        match self {
+            Verb::ProtocolHello => unary(&[R::ProtocolHelloAck, R::ProtocolMismatch]),
+            Verb::WorkerStatus => unary(&[R::WorkerStatus]),
+            Verb::SleepPrep => unary(&[R::SleepPrepAck]),
+            Verb::Wake => unary(&[R::WakeAck]),
+            Verb::Ping => unary(&[R::Pong]),
+            Verb::IntegrationStatus => unary(&[R::IntegrationStatusReport]),
+            Verb::CheckpointIntegrations => unary(&[R::CheckpointResult]),
+            Verb::ProbeStatus => unary(&[R::ProbeStatusReport]),
+            Verb::PrimedStatus => unary(&[R::PrimedStatusReport]),
+            Verb::Exec => stream(&[R::ExecEvent]),
+            Verb::ExecBatch => unary(&[R::ExecBatchResult]),
+            Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
+            Verb::RunDetached => unary(&[R::DetachedStarted]),
+            Verb::PostRestore => unary(&[R::PostRestoreAck]),
+            Verb::FsDiff => unary(&[R::FsDiffResult]),
+            Verb::StartPortForward => unary(&[R::PortForwardStarted]),
+            Verb::StartUnixSocketForward => unary(&[R::UnixSocketForwardStarted]),
+            Verb::ConsoleOpen => unary(&[R::ConsoleOpened]),
+            Verb::ConsoleClose => unary(&[R::ConsoleExited]),
+            Verb::ConsoleResize => unary(&[R::ConsoleResized]),
+            Verb::EntrypointStatus => unary(&[R::EntrypointStatusReport]),
+            Verb::ReadinessStatus => unary(&[R::ReadinessStatusReport]),
+            Verb::FsRead
+            | Verb::FsWrite
+            | Verb::FsList
+            | Verb::FsStat
+            | Verb::FsMkdir
+            | Verb::FsRemove
+            | Verb::FsMove => unary(&[R::FsResult]),
+            Verb::ProcStart
+            | Verb::ProcList
+            | Verb::ProcSignal
+            | Verb::ProcSendInput
+            | Verb::ProcKill => unary(&[R::ProcResult]),
+            Verb::ProcWait => stream(&[R::ProcWaitEvent]),
+            Verb::MountVolume | Verb::UnmountVolume => unary(&[R::VolumeMountResult]),
+            Verb::UpdateIdleTimeout => unary(&[R::UpdateIdleTimeoutAck]),
+            Verb::RunCode => stream(&[R::ExecEvent]),
+        }
+    }
+}
+
+impl GuestResponse {
+    /// Name-only projection. Exhaustive — adding a `GuestResponse` variant
+    /// fails to compile until mapped here, keeping `ResponseVariant` in
+    /// lockstep with the wire enum.
+    pub fn variant(&self) -> ResponseVariant {
+        match self {
+            GuestResponse::ProtocolHelloAck { .. } => ResponseVariant::ProtocolHelloAck,
+            GuestResponse::ProtocolMismatch { .. } => ResponseVariant::ProtocolMismatch,
+            GuestResponse::WorkerStatus { .. } => ResponseVariant::WorkerStatus,
+            GuestResponse::SleepPrepAck { .. } => ResponseVariant::SleepPrepAck,
+            GuestResponse::WakeAck { .. } => ResponseVariant::WakeAck,
+            GuestResponse::Pong => ResponseVariant::Pong,
+            GuestResponse::Error { .. } => ResponseVariant::Error,
+            GuestResponse::UnsupportedInProfile { .. } => ResponseVariant::UnsupportedInProfile,
+            GuestResponse::VerbNotAuthorized { .. } => ResponseVariant::VerbNotAuthorized,
+            GuestResponse::IntegrationStatusReport { .. } => {
+                ResponseVariant::IntegrationStatusReport
+            }
+            GuestResponse::CheckpointResult { .. } => ResponseVariant::CheckpointResult,
+            GuestResponse::ProbeStatusReport { .. } => ResponseVariant::ProbeStatusReport,
+            GuestResponse::PrimedStatusReport { .. } => ResponseVariant::PrimedStatusReport,
+            GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
+            GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
+            GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
+            GuestResponse::DetachedStarted { .. } => ResponseVariant::DetachedStarted,
+            GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
+            GuestResponse::FsDiffResult { .. } => ResponseVariant::FsDiffResult,
+            GuestResponse::PortForwardStarted { .. } => ResponseVariant::PortForwardStarted,
+            GuestResponse::UnixSocketForwardStarted { .. } => {
+                ResponseVariant::UnixSocketForwardStarted
+            }
+            GuestResponse::ConsoleOpened { .. } => ResponseVariant::ConsoleOpened,
+            GuestResponse::ConsoleExited { .. } => ResponseVariant::ConsoleExited,
+            GuestResponse::ConsoleResized { .. } => ResponseVariant::ConsoleResized,
+            GuestResponse::EntrypointStatusReport { .. } => ResponseVariant::EntrypointStatusReport,
+            GuestResponse::ReadinessStatusReport(_) => ResponseVariant::ReadinessStatusReport,
+            GuestResponse::FsResult(_) => ResponseVariant::FsResult,
+            GuestResponse::ProcResult(_) => ResponseVariant::ProcResult,
+            GuestResponse::ProcWaitEvent(_) => ResponseVariant::ProcWaitEvent,
+            GuestResponse::VolumeMountResult(_) => ResponseVariant::VolumeMountResult,
+            GuestResponse::UpdateIdleTimeoutAck { .. } => ResponseVariant::UpdateIdleTimeoutAck,
+        }
+    }
+}
+
+// ============================================================================
+// Contract-checked RPC client (host side).
+//
+// Thin layer over `send_request` / `read_frame` that enforces the declared
+// `response_contract()`: it maps the universal `Error` / `UnsupportedInProfile`
+// responses to typed errors and rejects any frame whose variant isn't in the
+// verb's contract — so an agent that dishonors the protocol is caught at the
+// boundary instead of mis-deserialized at a call site.
+// ============================================================================
+
+/// Failure of a contract-checked guest RPC call.
+#[derive(Debug, thiserror::Error)]
+pub enum RpcError {
+    /// Transport / framing / serialization failure.
+    #[error("guest agent transport error: {0}")]
+    Transport(#[from] anyhow::Error),
+    /// The agent answered with the universal `Error { message }`.
+    #[error("guest agent returned error: {0}")]
+    Agent(String),
+    /// The agent refused the verb for its active profile (e.g. a dev-only
+    /// verb on a sealed-prod agent).
+    #[error("verb {verb} unsupported in agent profile {profile:?}")]
+    UnsupportedInProfile {
+        /// Profile the agent is running under.
+        profile: AgentProfile,
+        /// `verb_name()` of the rejected request.
+        verb: String,
+    },
+    /// The pinned verb grant does not authorize this verb.
+    #[error("verb {verb} not authorized by the session's verb grant")]
+    VerbNotAuthorized {
+        /// `kind_name()` (kebab-case) of the rejected request.
+        verb: String,
+    },
+    /// The agent returned a response variant not in the verb's
+    /// `response_contract()` — a protocol violation.
+    #[error("guest agent returned {got:?} for {verb}, not in its contract {expected:?}")]
+    OffContract {
+        /// The request verb whose contract was violated.
+        verb: &'static str,
+        /// The variant the agent actually sent.
+        got: ResponseVariant,
+        /// The variant(s) the contract permits.
+        expected: &'static [ResponseVariant],
+    },
+}
+
+impl GuestResponse {
+    /// Whether this frame ends a streaming response. Only the streaming
+    /// variants can be non-terminal (their inner event decides); any other
+    /// frame is a complete answer and ends the read.
+    pub fn is_stream_terminal(&self) -> bool {
+        match self {
+            GuestResponse::EntrypointEvent(e) => e.is_terminal(),
+            GuestResponse::ExecEvent(e) => e.is_terminal(),
+            GuestResponse::ProcWaitEvent(e) => e.is_terminal(),
+            _ => true,
+        }
+    }
+}
+
+/// Enforce `req`'s response contract on a received frame. Returns the frame
+/// unchanged when it satisfies the contract; maps the universal `Error` /
+/// `UnsupportedInProfile` responses and any off-contract variant to
+/// [`RpcError`].
+pub fn check_response(req: &GuestRequest, resp: GuestResponse) -> Result<GuestResponse, RpcError> {
+    match resp {
+        GuestResponse::Error { message } => Err(RpcError::Agent(message)),
+        GuestResponse::UnsupportedInProfile { profile, verb } => {
+            Err(RpcError::UnsupportedInProfile { profile, verb })
+        }
+        GuestResponse::VerbNotAuthorized { verb } => Err(RpcError::VerbNotAuthorized { verb }),
+        other => {
+            let got = other.variant();
+            let contract = req.response_contract();
+            if contract.responses.contains(&got) {
+                Ok(other)
+            } else {
+                Err(RpcError::OffContract {
+                    verb: req.verb().name(),
+                    got,
+                    expected: contract.responses,
+                })
+            }
+        }
+    }
+}
+
+/// Send a unary request and return its contract-checked response. Use for
+/// verbs whose [`ResponseKind`] is `Unary`; streaming verbs use
+/// [`call_streaming`].
+pub fn call_unary(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResponse, RpcError> {
+    let resp = send_request(stream, req)?;
+    check_response(req, resp)
+}
+
+/// Drive a streaming request: send `req`, then invoke `on_event` for each
+/// contract-checked response frame until a terminal one
+/// ([`GuestResponse::is_stream_terminal`]) arrives. A universal `Error` /
+/// `UnsupportedInProfile` frame ends the stream as an `Err`.
+pub fn call_streaming(
+    stream: &mut UnixStream,
+    req: &GuestRequest,
+    mut on_event: impl FnMut(&GuestResponse),
+) -> Result<(), RpcError> {
+    // `send_request` writes the request and reads the first frame; subsequent
+    // frames come from `read_frame`.
+    let mut frame = check_response(req, send_request(stream, req)?)?;
+    loop {
+        on_event(&frame);
+        if frame.is_stream_terminal() {
+            return Ok(());
+        }
+        frame = check_response(req, read_frame::<GuestResponse>(stream)?)?;
+    }
+}
+
+/// Grant intersection, applied AFTER `allowed_in`. `None` grant => no
+/// restriction (class gate only). Baseline/listed verbs pass.
+pub fn enforce_verb_grant(
+    req: &GuestRequest,
+    grant: Option<&mvm_core::plan::VerbGrant>,
+) -> Option<GuestResponse> {
+    match grant {
+        None => None,
+        Some(g) if g.permits(req.kind_name()) => None,
+        Some(_) => Some(GuestResponse::VerbNotAuthorized {
+            verb: req.kind_name().to_string(),
+        }),
+    }
+}
+
+/// Well-known guest path where `/init` copies the host-signer's Ed25519
+/// public key from the read-only config drive.
+/// Absent on grant-less boots.
+pub const HOST_SIGNER_PUBKEY_PATH: &str = "/run/mvm/host-signer.pub";
+
+/// Decode a 64-char lowercase-hex string to an Ed25519 `VerifyingKey`.
+///
+/// Returns `Err` on wrong length, invalid hex chars, or a byte sequence that
+/// is not a valid compressed Ed25519 point.
+pub fn verifying_key_from_hex(hex: &str) -> anyhow::Result<ed25519_dalek::VerifyingKey> {
+    let hex = hex.trim_ascii();
+    if hex.len() != 64 {
+        anyhow::bail!(
+            "host-signer pubkey must be exactly 64 hex chars, got {}",
+            hex.len()
+        );
+    }
+    let mut bytes = [0u8; 32];
+    for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = hex_nibble(pair[0]).ok_or_else(|| {
+            anyhow::anyhow!(
+                "host-signer pubkey has invalid hex char {:?}",
+                pair[0] as char
+            )
+        })?;
+        let lo = hex_nibble(pair[1]).ok_or_else(|| {
+            anyhow::anyhow!(
+                "host-signer pubkey has invalid hex char {:?}",
+                pair[1] as char
+            )
+        })?;
+        bytes[i] = (hi << 4) | lo;
+    }
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("host-signer pubkey is not a valid Ed25519 key: {e}"))
+}
+
+/// Load the host-signer verifying key from `path`.
+///
+/// - File absent  -> `Ok(None)`   (grant-less boot; no key to verify against)
+/// - File present, valid raw 32-byte Ed25519 key -> `Ok(Some(key))`
+/// - File present, valid 64-char hex of a 32-byte Ed25519 key -> `Ok(Some(key))`
+/// - File present but malformed -> `Err`  (fail closed; do not silently ignore)
+pub fn load_host_signer_verifying_key(
+    path: &std::path::Path,
+) -> anyhow::Result<Option<ed25519_dalek::VerifyingKey>> {
+    let raw = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("failed to read host-signer pubkey: {e}")),
+    };
+    if raw.len() == 32 {
+        let key_bytes: [u8; 32] = raw
+            .as_slice()
+            .try_into()
+            .expect("length checked before converting host-signer pubkey");
+        return ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("host-signer pubkey is not a valid Ed25519 key: {e}"));
+    }
+    let raw = std::str::from_utf8(&raw).map_err(|e| {
+        anyhow::anyhow!("host-signer pubkey is neither raw bytes nor UTF-8 hex: {e}")
+    })?;
+    verifying_key_from_hex(raw.trim_ascii()).map(Some)
+}
+
+/// Decode a single ASCII hex nibble ('0'-'9', 'a'-'f') to its value.
+/// Returns `None` for any other character (including uppercase).
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
+}
+
+/// Verify an incoming grant against the provisioned host-signer key and the
+/// live session binding, returning the grant to pin.
+///
+/// - `grant` `None`                        -> `Ok(None)` (workload shipped no grant; class gate only)
+/// - `grant` `Some` but `host_signer_key` `None` -> `Err` (fail closed — a grant arrived but
+///   we have no key to trust it against; letting it silently pass would disable enforcement)
+/// - `grant` `Some` + `key` `Some`         -> `verify(session_id, plan_nonce, now)`; `Ok(Some(clone))` or `Err`
+pub fn pin_verb_grant(
+    grant: Option<&mvm_core::plan::VerbGrant>,
+    host_signer_key: Option<&ed25519_dalek::VerifyingKey>,
+    session_id: &str,
+    plan_nonce: &mvm_core::plan::Nonce,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<Option<mvm_core::plan::VerbGrant>> {
+    match (grant, host_signer_key) {
+        (None, _) => Ok(None),
+        (Some(_), None) => anyhow::bail!(
+            "verb grant present but no host-signer key provisioned — cannot verify; \
+             rejecting to prevent unverifiable grant from bypassing enforcement"
+        ),
+        (Some(g), Some(key)) => {
+            g.verify(key, session_id, plan_nonce, now)
+                .map_err(|e| anyhow::anyhow!("verb grant verification failed: {e}"))?;
+            Ok(Some(g.clone()))
+        }
+    }
+}
+
+/// Verify a `VerbGrantEnvelope` against a caller-supplied host-signer trust
+/// anchor and return the pinned grant, or `None` on any failure.
+///
+/// Shared verification core used by both boot-time `load_pinned_verb_grant`
+/// (resolves the anchor from disk) and restore-time `re_pin_verb_grant`
+/// (receives the anchor already resolved). Neither caller reads the verifying
+/// key from the envelope: the key that rides inside the envelope
+/// (`envelope.pubkey_hex`) is self-attested and is never trusted for
+/// verification. Logs a warning and returns `None` on any error so callers
+/// never crash on a bad envelope.
+fn verify_envelope_with_anchor(
+    envelope: &mvm_core::protocol::vm_backend::VerbGrantEnvelope,
+    host_signer_key: &ed25519_dalek::VerifyingKey,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<mvm_core::plan::VerbGrant> {
+    let plan_nonce = match mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("mvm-guest-agent: verb-grant plan_nonce_hex invalid, skipping grant: {e}");
+            return None;
+        }
+    };
+    match pin_verb_grant(
+        Some(&envelope.grant),
+        Some(host_signer_key),
+        &envelope.grant.session_id,
+        &plan_nonce,
+        now,
+    ) {
+        Ok(pinned) => pinned,
+        Err(e) => {
+            eprintln!("mvm-guest-agent: verb-grant verification failed, skipping grant: {e}");
+            None
+        }
+    }
+}
+
+/// Re-pin a verb grant delivered over vsock at restore time (plain resume sends
+/// no envelope; a fork sends a fresh host-signed one).
+///
+/// Trust derives from the boot-pinned host-signer anchor the guest holds at
+/// `HOST_SIGNER_PUBKEY_PATH`, passed in as `host_signer_key` — NOT from the key
+/// embedded in the envelope. A prior version verified against
+/// `envelope.pubkey_hex`, which is self-attested: any party able to deliver a
+/// `PostRestore` envelope could forge its own keypair and mint an arbitrary
+/// grant. Binding to the boot anchor closes that bypass.
+///
+/// A fork legitimately mints a fresh host-signed envelope carrying the child's
+/// new `session_id`/`plan_nonce` and MAY widen the verb set (it runs a newly
+/// admitted plan), so re-pin does NOT require the boot session/nonce to match;
+/// the sole invariant is that the grant is signed by the host-signer anchor.
+pub fn re_pin_verb_grant(
+    envelope: &mvm_core::protocol::vm_backend::VerbGrantEnvelope,
+    current_grant: Option<&mvm_core::plan::VerbGrant>,
+    host_signer_key: &ed25519_dalek::VerifyingKey,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<mvm_core::plan::VerbGrant> {
+    if let Some(current) = current_grant {
+        let predecessor_session = envelope.predecessor_session_id.as_deref()?;
+        let predecessor_nonce_hex = envelope.predecessor_plan_nonce_hex.as_deref()?;
+        if predecessor_session != current.session_id
+            || predecessor_nonce_hex != current.plan_nonce.as_hex()
+        {
+            eprintln!("mvm-guest-agent: PostRestore grant lineage mismatch, refusing re-pin");
+            return None;
+        }
+    }
+    verify_envelope_with_anchor(envelope, host_signer_key, now)
+}
+
+/// Read the pinned verb grant written by `/init` and verify it before use.
+///
+/// The grant's trust derives from the host-signer pubkey provisioned through
+/// the read-only config drive. The envelope's embedded pubkey is retained for
+/// wire compatibility and diagnostics, but is not trusted for verification.
+///
+/// Returns:
+/// - `Some(grant)` when the file is present and the grant verifies.
+/// - `None` when `grant_path` is absent (no-grant boot; class gate only).
+/// - `None` when the envelope is malformed or the grant fails verification
+///   (logs a warning; does not crash the agent).
+pub fn load_pinned_verb_grant(
+    grant_path: &std::path::Path,
+    host_signer_pubkey_path: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<mvm_core::plan::VerbGrant> {
+    // Grant file absent → no grant on this boot.
+    let raw = match std::fs::read(grant_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("mvm-guest-agent: could not read verb-grant file: {e}");
+            return None;
+        }
+    };
+    let envelope: mvm_core::protocol::vm_backend::VerbGrantEnvelope =
+        match serde_json::from_slice(&raw) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("mvm-guest-agent: verb-grant.json malformed, booting without grant: {e}");
+                return None;
+            }
+        };
+    let host_key = match load_host_signer_verifying_key(host_signer_pubkey_path) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            eprintln!(
+                "mvm-guest-agent: verb-grant present but host-signer pubkey is absent, booting without grant"
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!("mvm-guest-agent: host-signer pubkey invalid, booting without grant: {e}");
+            return None;
+        }
+    };
+    verify_envelope_with_anchor(&envelope, &host_key, now)
+}
+
+/// Well-known guest path for the dm-verity-measured verb-trust policy baked
+/// into a sealed image's rootfs. Absent on dev/OCI boots.
+pub const VERB_TRUST_POLICY_PATH: &str = "/etc/mvm/verb-trust.json";
+
+/// The guest's grant-trust decision, derived from the measured policy and
+/// whether a valid grant is pinned. `ObserveGap` serves but flags the gap
+/// (observe mode); `FailClosed` refuses control RPCs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustDecision {
+    Serve,
+    ObserveGap,
+    FailClosed,
+}
+
+/// Read the dm-verity-measured verb-trust policy from `path`. Absent,
+/// unreadable, or malformed returns `None` (no requirement — the dev/OCI
+/// permissive default). A real sealed image carries this file under
+/// dm-verity, so a malformed policy there cannot occur without breaking
+/// the verity seal (claim 3).
+pub fn load_verb_trust_policy(path: &std::path::Path) -> Option<mvm_core::plan::VerbTrustPolicy> {
+    let raw = std::fs::read(path).ok()?;
+    match serde_json::from_slice(&raw) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("mvm-guest-agent: verb-trust.json malformed, treating as no policy: {e}");
+            None
+        }
+    }
+}
+
+/// Returns `true` if `verb` is in the baseline set (`mvm_core::plan::VERB_GRANT_BASELINE`)
+/// that is always allowed regardless of grant or trust-policy state.
+pub fn is_verb_trust_baseline(verb: &str) -> bool {
+    mvm_core::plan::VERB_GRANT_BASELINE.contains(&verb)
+}
+
+/// Pure trust decision. `Attested` key source is treated as fail-closed
+/// whenever the grant is not present, never a silent downgrade.
+/// `launch_requires_grant` is derived from the `mvm.require_grant=1`
+/// kernel-cmdline token set by the host when it delivered a verb grant.
+pub fn trust_decision(
+    policy: Option<&mvm_core::plan::VerbTrustPolicy>,
+    grant_present: bool,
+    launch_requires_grant: bool,
+) -> TrustDecision {
+    use mvm_core::plan::GrantKeySource;
+    if grant_present {
+        return TrustDecision::Serve;
+    }
+    let policy_requires = policy.map(|p| p.require_grant).unwrap_or(false);
+    let attested = policy
+        .map(|p| matches!(p.grant_key_source, GrantKeySource::Attested))
+        .unwrap_or(false);
+    if launch_requires_grant || policy_requires || attested {
+        return TrustDecision::FailClosed;
+    }
+    if policy.is_some() {
+        TrustDecision::ObserveGap
+    } else {
+        TrustDecision::Serve
+    }
+}
+
+/// Whether the kernel cmdline carries the launcher's `mvm.require_grant=1`
+/// enforcement assertion. Pure over the cmdline string for testability.
+pub fn parse_require_grant_cmdline(cmdline: &str) -> bool {
+    cmdline
+        .split_whitespace()
+        .any(|tok| tok == "mvm.require_grant=1")
+}
+
+/// Read `/proc/cmdline` and return whether enforcement is launch-asserted.
+/// Absent/unreadable cmdline implies no assertion, so no launch-gated fail-close.
+pub fn launch_requires_grant() -> bool {
+    std::fs::read_to_string("/proc/cmdline")
+        .map(|s| parse_require_grant_cmdline(&s))
+        .unwrap_or(false)
+}
+
+/// Guest-agent control protocol capability. Closed enum so host and
+/// guest fail loudly on drift instead of accepting arbitrary strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum GuestCapability {
+    Ping,
+    IntegrationStatus,
+    EntrypointStatus,
+    RunEntrypoint,
+    FilesystemRpc,
+    ProcessRpc,
+    Console,
+    /// Unix-domain socket forwarding (`StartUnixSocketForward`). Not an SSH
+    /// session capability — no SSH client/server or key material crosses the
+    /// guest boundary.
+    UnixSocketForward,
+    VolumeMount,
+    UpdateIdleTimeout,
+    /// `ReadinessStatus` returns
+    /// `GuestResponse::ReadinessStatusReport(ReadinessReport)`.
+    /// `mvmctl wait` / `mvmctl boot-report` require this capability.
+    Readiness,
+}
+
+/// Required remediation for a host/guest protocol mismatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ProtocolUpgradeAction {
+    UpgradeHost,
+    RebuildGuest,
+    DowngradeHost,
+}
+
+/// Protocol negotiation result returned by [`negotiate_protocol`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolNegotiation {
+    pub agent_protocol_version: u32,
+    pub min_supported_version: u32,
+    pub agent_version: String,
+    pub capabilities: Vec<GuestCapability>,
+}
+
+/// Capabilities served by this agent build.
+pub fn supported_capabilities() -> Vec<GuestCapability> {
+    vec![
+        GuestCapability::Ping,
+        GuestCapability::IntegrationStatus,
+        GuestCapability::EntrypointStatus,
+        GuestCapability::RunEntrypoint,
+        GuestCapability::FilesystemRpc,
+        GuestCapability::ProcessRpc,
+        GuestCapability::Console,
+        GuestCapability::UnixSocketForward,
+        GuestCapability::VolumeMount,
+        GuestCapability::UpdateIdleTimeout,
+        GuestCapability::Readiness,
+    ]
+}
+
+/// Return `true` when `[a_min, a_max]` overlaps `[b_min, b_max]`.
+fn protocol_ranges_overlap(a_min: u32, a_max: u32, b_min: u32, b_max: u32) -> bool {
+    a_min <= b_max && b_min <= a_max
+}
+
+/// Build the guest side response for a protocol hello request.
+pub fn protocol_hello_response(
+    host_protocol_version: u32,
+    host_min_supported_version: u32,
+    _host_version: &str,
+    requested_capabilities: &[GuestCapability],
+) -> GuestResponse {
+    if !protocol_ranges_overlap(
+        host_min_supported_version,
+        host_protocol_version,
+        MIN_SUPPORTED_PROTOCOL_VERSION,
+        PROTOCOL_VERSION,
+    ) {
+        let required_action = if host_protocol_version < MIN_SUPPORTED_PROTOCOL_VERSION {
+            ProtocolUpgradeAction::UpgradeHost
+        } else {
+            ProtocolUpgradeAction::RebuildGuest
+        };
+
+        return GuestResponse::ProtocolMismatch {
+            host_protocol_version,
+            agent_protocol_version: PROTOCOL_VERSION,
+            required_action,
+            message: format!(
+                "guest-agent protocol mismatch: host supports {}..={}, agent supports {}..={}",
+                host_min_supported_version,
+                host_protocol_version,
+                MIN_SUPPORTED_PROTOCOL_VERSION,
+                PROTOCOL_VERSION
+            ),
+        };
+    }
+
+    let supported = supported_capabilities();
+    let capabilities = requested_capabilities
+        .iter()
+        .copied()
+        .filter(|cap| supported.contains(cap))
+        .collect();
+
+    GuestResponse::ProtocolHelloAck {
+        agent_protocol_version: PROTOCOL_VERSION,
+        min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        capabilities,
+    }
+}
+
+/// Result of a virtio-fs volume mount operation.
+/// (Renamed from `ShareResult`.)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum VolumeMountResult {
+    /// `MountVolume` succeeded. `canonical_path` is the
+    /// post-validation path the agent actually mounted at — same
+    /// shape as input but with trailing slashes normalised.
+    Mounted { canonical_path: String },
+    /// `UnmountVolume` succeeded.
+    Unmounted,
+    /// Verb-specific error.
+    Error {
+        kind: VolumeMountErrorKind,
+        message: String,
+    },
+}
+
+/// Class of error returned in `VolumeMountResult::Error`. Closed enum
+/// so the host can branch on `kind` without parsing message text.
+/// (Renamed from `ShareErrorKind`.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum VolumeMountErrorKind {
+    /// `guest_path` is empty / not absolute / contains `..` /
+    /// embedded NUL.
+    BadPath,
+    /// `guest_path` resolved to a deny-prefix or fell outside the
+    /// allow-roots configured for this image.
+    PolicyDenied,
+    /// `volume_name` is empty, too long, or contains characters
+    /// virtio-fs won't accept as a tag.
+    BadVolumeName,
+    /// `mount(2)` returned a non-EBUSY error (no virtiofsd, kernel
+    /// missing virtio_fs module, etc.).
+    MountFailed,
+    /// `umount(2)` returned EBUSY and `force = false` — caller
+    /// must retry with `force = true` to lazy-detach.
+    Busy,
+    /// Underlying I/O error not mapped above.
+    IoError,
+    /// Any other unclassified failure.
+    Other,
+}
+
+/// Result of a non-streaming process-control verb. Closed enum with
+/// `deny_unknown_fields` so a compromised agent can't smuggle extra
+/// fields past the host's deserializer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ProcResult {
+    /// `ProcStart` succeeded — `pid_token` is the opaque handle the
+    /// host uses for the rest of the process's lifetime.
+    Started { pid_token: String },
+    /// `ProcList` snapshot. Order is agent-defined (typically by
+    /// `started_at`).
+    List { processes: Vec<ProcInfo> },
+    /// `ProcSignal` delivered.
+    Signaled,
+    /// `ProcSendInput` accepted some/all of the bytes.
+    /// `bytes_accepted` may be less than the request's `bytes.len()`
+    /// if the per-process input ring buffer would overflow.
+    InputAccepted { bytes_accepted: u64 },
+    /// `ProcKill` issued SIGKILL.
+    Killed,
+    /// Verb-specific error. Distinct from `GuestResponse::Error`,
+    /// which is reserved for transport-layer failures.
+    Error {
+        kind: ProcErrorKind,
+        message: String,
+    },
+}
+
+/// Per-process metadata returned by `ProcList`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ProcInfo {
+    pub pid_token: String,
+    /// RFC 3339 timestamp.
+    pub started_at: String,
+    /// argv\[0\] for display only — the agent does not expose the
+    /// full argv over the wire (it could echo secrets the caller
+    /// passed in via env / stdin).
+    pub argv0: String,
+    pub state: ProcState,
+}
+
+/// Lifecycle state of a tracked process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ProcState {
+    Running,
+    Exited(i32),
+    /// Process was killed by signal `i32`.
+    Killed(i32),
+    /// Process exceeded its `timeout_secs`; agent killed the pgroup.
+    TimedOut,
+}
+
+/// Class of error returned in `ProcResult::Error` and
+/// `ProcWaitEvent::Error`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ProcErrorKind {
+    /// `pid_token` doesn't match any known process. Either the
+    /// host fabricated it or the agent reaped the process record.
+    UnknownToken,
+    /// The agent failed to spawn the child (executable missing,
+    /// EACCES, ENOMEM, etc.).
+    SpawnFailed,
+    /// Per-child seccomp / setpriv envelope failed to apply.
+    /// Agent refuses to spawn an un-confined child.
+    SecurityEnvelopeFailed,
+    /// argv was empty, argv\[0\] was empty / not absolute / on a
+    /// disallowed path.
+    InvalidArgv,
+    /// One or more env keys / values failed validation (charset,
+    /// length).
+    InvalidEnv,
+    /// `cwd` failed canonicalization or hit the deny-list.
+    BadCwd,
+    /// Per-VM concurrent-process cap or per-call byte cap
+    /// exceeded.
+    CapExceeded,
+    /// Returned by prod builds whose handler module was stripped.
+    /// Lets SDK callers branch on capability.
+    UnsupportedInProduction,
+    /// Other / unclassified.
+    Other,
+}
+
+/// One event in the streaming response of a `ProcWait` call.
+/// Terminal events end the stream — the host loops on
+/// `is_terminal()` just like for `EntrypointEvent`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ProcWaitEvent {
+    /// Bytes from the process's stdout.
+    Stdout { chunk: Vec<u8> },
+    /// Bytes from the process's stderr.
+    Stderr { chunk: Vec<u8> },
+    /// Process exited with the given code. Terminal.
+    Exit { code: i32 },
+    /// Process was killed by signal. Terminal.
+    Killed { signal: i32 },
+    /// `timeout_secs` elapsed; agent killed the process group.
+    /// Terminal.
+    TimedOut,
+    /// Agent-side condition prevented the wait (unknown token,
+    /// internal failure, prod-stripped). Terminal.
+    Error {
+        kind: ProcErrorKind,
+        message: String,
+    },
+    /// A streaming resource is throttled.
+    /// **Non-terminal.** The agent emits this on the rising edge of
+    /// a backpressure condition — typically the host-side stdout/
+    /// stderr buffer crossing its high-water mark. The wait loop
+    /// continues; subsequent `Stdout` / `Stderr` / terminal events
+    /// signal that flow has resumed.
+    ///
+    /// `detail` is a bounded, redacted human-readable hint
+    /// (operator-facing). It **never** carries argv, env, stdin,
+    /// stdout, stderr, or filesystem paths — that's the payload
+    /// invariant.
+    Backpressure {
+        reason: mvm_core::domain::instance::BackpressureReason,
+        detail: String,
+    },
+}
+
+impl ProcWaitEvent {
+    /// Returns true if this event terminates the response stream
+    /// for one `ProcWait` call. `Backpressure` is non-terminal —
+    /// the wait loop continues after the agent emits it.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            ProcWaitEvent::Exit { .. }
+                | ProcWaitEvent::Killed { .. }
+                | ProcWaitEvent::TimedOut
+                | ProcWaitEvent::Error { .. }
+        )
+    }
+}
+
+/// Result of a filesystem RPC call. Closed enum with
+/// `deny_unknown_fields` so a compromised agent can't smuggle extra
+/// data past the host's deserializer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum FsResult {
+    /// Bytes read. `total_size` is the on-disk size at read time so
+    /// callers can detect short reads even when `content.len() <
+    /// requested length`.
+    Read { content: Vec<u8>, total_size: u64 },
+    /// Bytes successfully written.
+    Write { bytes_written: u64 },
+    /// Directory listing. `truncated` is `true` when the entry count
+    /// exceeded the agent's per-call cap.
+    List {
+        entries: Vec<FsEntry>,
+        truncated: bool,
+    },
+    /// File / directory metadata.
+    Stat(FsStat),
+    /// Directory created (no payload).
+    Mkdir,
+    /// Removed `entries_removed` filesystem entries (1 for a single
+    /// file/dir, more under `recursive=true`).
+    Remove { entries_removed: u64 },
+    /// Move / rename completed.
+    Move,
+    /// Verb-specific error. Distinct from `GuestResponse::Error`,
+    /// which is reserved for transport-layer failures the agent
+    /// can't attribute to a specific verb.
+    Error { kind: FsErrorKind, message: String },
+}
+
+/// One entry in an `FsList` response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FsEntry {
+    /// Bare entry name (no leading directory component).
+    pub name: String,
+    /// File type. `Other` covers sockets, FIFOs, devices.
+    pub kind: FsEntryKind,
+    /// Size in bytes, or `0` for non-files.
+    pub size: u64,
+}
+
+/// Type of a filesystem entry returned by `FsList` / `FsStat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum FsEntryKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+/// Stat metadata for a single filesystem entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FsStat {
+    /// Canonical (post-`realpath`) path the agent operated on. Lets
+    /// the host detect when a symlink resolution surprised it.
+    pub canonical_path: String,
+    pub kind: FsEntryKind,
+    pub size: u64,
+    /// Unix mode bits (e.g. `0o100644`). Always present; on backends
+    /// without a unix mode the agent reports a best-effort
+    /// equivalent.
+    pub mode: u32,
+    /// Modification timestamp as RFC 3339, or `None` if the
+    /// underlying fs doesn't expose mtime.
+    pub mtime: Option<String>,
+}
+
+/// Class of error returned in `FsResult::Error`. Closed enum so the
+/// host can branch on `kind` without parsing message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum FsErrorKind {
+    /// Path was rejected by the agent's policy (deny-list,
+    /// canonicalization failed, symlink crossed the deny-list).
+    PolicyDenied,
+    /// Path doesn't exist.
+    NotFound,
+    /// Caller does not have permission for this op (uid 901 EPERM).
+    PermissionDenied,
+    /// Target already exists where the verb required absence.
+    AlreadyExists,
+    /// Size / count cap exceeded (e.g. `length > 16 MiB`,
+    /// `recursive` walk would exceed cap).
+    CapExceeded,
+    /// Tried to rename across filesystems (`EXDEV`).
+    CrossDevice,
+    /// `recursive=false` on a non-empty directory.
+    DirectoryNotEmpty,
+    /// Underlying I/O error (look at `message` for detail).
+    IoError,
+    /// Path canonicalization succeeded but produced a path the agent
+    /// refuses to operate on (e.g. `/proc/self`).
+    BadPath,
+    /// Other / unclassified.
+    Other,
+}
+
+/// A single filesystem change detected since boot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FsChange {
+    /// Path relative to the filesystem root.
+    pub path: String,
+    /// Type of change.
+    pub kind: FsChangeKind,
+    /// File size in bytes (0 for deleted files).
+    pub size: u64,
+}
+
+/// Kind of filesystem change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum FsChangeKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+/// One event in the streaming response of a `RunEntrypoint` call.
+///
+/// `Stdout` / `Stderr` carry bytes from the wrapper's respective
+/// streams. `Exit` and `Error` are terminal — they end the response
+/// stream for one call. The agent emits exactly one terminal event
+/// per call.
+///
+/// v1 buffers each stream fully before sending one `Stdout` and one
+/// `Stderr` event (sizes bounded by agent caps). v2 may chunk
+/// progressively without changing the type or the protocol shape:
+/// the host already reads frames in a loop until terminal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum EntrypointEvent {
+    /// Bytes from the wrapper's stdout.
+    Stdout { chunk: Vec<u8> },
+    /// Bytes from the wrapper's stderr.
+    Stderr { chunk: Vec<u8> },
+    /// One control-channel record from the wrapper's fd-3.
+    ///
+    /// fd-3 is a separate stream the wrapper writes structured
+    /// records to — error envelopes, captured logs when capture is
+    /// on, etc. — that user code cannot spoof by writing to stderr.
+    /// stdout / stderr keep streaming user-visible bytes verbatim.
+    ///
+    /// The on-the-fd-3-wire frame format is:
+    ///
+    /// ```text
+    ///   header_len:  u32 LE   (4 bytes; max 64 KiB)
+    ///   header_json: bytes    (header_len bytes; UTF-8 JSON object)
+    ///   payload_len: u32 LE   (4 bytes; max bounded by call caps)
+    ///   payload:     bytes    (payload_len bytes; opaque)
+    /// ```
+    ///
+    /// `header_json` is a JSON object with at minimum `{"kind": "<str>"}`.
+    /// The agent re-emits the header as `header_json: String` and the
+    /// payload bytes as `payload: Vec<u8>` — no agent-side parsing
+    /// beyond the framing. The host (`mvmctl invoke` and downstream
+    /// SDKs) decides what to do with each record kind.
+    ///
+    /// **Wiring status:** the variant ships ahead of any
+    /// emitter. Agents at this version do not yet open fd-3 in the
+    /// child or emit `Control` events; later work lands fd-3 wiring in
+    /// the cold path (`execute()`), then the warm-process
+    /// pool, and the wrapper templates flip from stderr-envelope to
+    /// fd-3-envelope at the same time. Hosts that see a `Control`
+    /// event must already know how to consume it, so this variant is
+    /// added eagerly to keep host/guest deserializers in lockstep.
+    Control {
+        /// JSON-encoded record header (deserialized by the host into a
+        /// kind-specific struct). Agent does not parse beyond UTF-8
+        /// validation.
+        header_json: String,
+        /// Opaque per-record payload. Empty for envelope-style records;
+        /// used for raw bytes on log-style records.
+        payload: Vec<u8>,
+    },
+    /// Wrapper exited with the given code. Terminal.
+    Exit { code: i32 },
+    /// Agent-side condition that prevented or interrupted the
+    /// call (cap breach, timeout, busy session, missing entrypoint,
+    /// crashed wrapper, internal failure). Terminal.
+    Error {
+        kind: RunEntrypointError,
+        message: String,
+    },
+}
+
+impl EntrypointEvent {
+    /// Returns true if this event terminates the response stream
+    /// for one `RunEntrypoint` call.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            EntrypointEvent::Exit { .. } | EntrypointEvent::Error { .. }
+        )
+    }
+}
+
+/// A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StageFile {
+    pub path: String,
+    pub content: Vec<u8>,
+    pub mode: u32,
+}
+
+/// One command's buffered outcome from an [`GuestRequest::ExecBatch`]. Agent-
+/// measured: `duration_ms` is the in-guest wall-clock and `peak_rss_kib` the
+/// `getrusage` high-water mark when the guest can report it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ExecOutcomeWire {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub duration_ms: u64,
+    pub peak_rss_kib: Option<u64>,
+}
+
+/// One event in the response stream of an `Exec` call (dev-shell only).
+/// The agent emits a sequence of these for a single `Exec` request,
+/// terminated by `Exit`. The host reads frames in a loop until terminal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ExecEvent {
+    /// Bytes from the command's stdout, as they arrive.
+    Stdout { chunk: Vec<u8> },
+    /// Bytes from the command's stderr, as they arrive.
+    Stderr { chunk: Vec<u8> },
+    /// Command exited with this code. Terminal.
+    Exit { code: i32 },
+    /// `timeout_secs` elapsed; the agent killed the command's process
+    /// group. Terminal. Mirrors `ProcWaitEvent::TimedOut`. The host maps
+    /// this to exit code 124 (GNU `timeout(1)` convention) for user
+    /// commands.
+    TimedOut,
+}
+
+impl ExecEvent {
+    /// True if this event terminates the `Exec` response stream.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, ExecEvent::Exit { .. } | ExecEvent::TimedOut)
+    }
+}
+
+/// Kind of agent-side error reported via `EntrypointEvent::Error`.
+///
+/// The variants are deliberately coarse — the host correlates by
+/// `kind` and surfaces the human-readable `message` to the operator.
+/// Adding a variant is a wire change; renaming or removing is a
+/// breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum RunEntrypointError {
+    /// Inbound stdin or buffered stdout/stderr exceeded the cap
+    /// configured for the call.
+    PayloadCap,
+    /// The wrapper exceeded `timeout_secs`. Agent killed the
+    /// process group.
+    Timeout,
+    /// Another `RunEntrypoint` is in flight on this VM. M12: agents
+    /// serialize per-VM; concurrency comes from pool growth.
+    Busy,
+    /// The wrapper process died unexpectedly (signal, OOM, etc.).
+    WrapperCrashed,
+    /// Entrypoint validation has not yet completed:
+    /// the agent binds vsock early and validates entrypoint in the
+    /// background, so a host that races `RunEntrypoint` ahead of
+    /// `ReadinessStatus { entrypoint: Ready }` gets this back rather
+    /// than `EntrypointInvalid` (which would imply a permanent
+    /// failure). Hosts should poll readiness, not retry blindly.
+    NotReady,
+    /// `/etc/mvm/entrypoint` is missing, fails validation
+    /// (symlink crossing FS, wrong perms, off the verity
+    /// partition), or otherwise can't be loaded. Reported per-call
+    /// even though the validation runs at agent boot.
+    EntrypointInvalid,
+    /// The session backing this call was killed externally (host
+    /// invoked `mvmctl session kill <id>`) while the call was in
+    /// flight. Synthesized host-side by `mvmctl invoke` /
+    /// `session attach` after detecting a transport-level connection
+    /// drop coincident with a session record marked `Killed`. The
+    /// agent itself does not emit this — it would be torn down with
+    /// the VM before it could.
+    SessionKilled,
+    /// Other agent-internal failure — file I/O, vsock framing,
+    /// inter-process plumbing. Look at `message` for detail.
+    InternalError,
+}
+
+/// Read a single length-prefixed JSON frame from a stream.
+/// Returns the deserialized value.
+pub fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .with_context(|| "Failed to read frame length")?;
+    let frame_len = u32::from_be_bytes(len_buf) as usize;
+
+    if frame_len > MAX_FRAME_SIZE {
+        bail!(
+            "Frame too large: {} bytes (max {})",
+            frame_len,
+            MAX_FRAME_SIZE
+        );
+    }
+
+    let mut buf = vec![0u8; frame_len];
+    stream
+        .read_exact(&mut buf)
+        .with_context(|| "Failed to read frame body")?;
+
+    serde_json::from_slice(&buf).with_context(|| "Failed to deserialize frame")
+}
+
+/// Write a single length-prefixed JSON frame to a stream.
+pub fn write_frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
+    let data = serde_json::to_vec(value).with_context(|| "Failed to serialize frame")?;
+    let len = (data.len() as u32).to_be_bytes();
+    stream
+        .write_all(&len)
+        .with_context(|| "Failed to write frame length")?;
+    stream
+        .write_all(&data)
+        .with_context(|| "Failed to write frame body")?;
+    stream.flush()?;
+    Ok(())
+}
+
+// ============================================================================
+// Authenticated frame wrappers
+// ============================================================================
+
+/// Write an authenticated, Ed25519-signed frame to a stream.
+///
+/// Serializes `value` as JSON, signs it with the given key, wraps it in an
+/// `AuthenticatedFrame` envelope, then writes it as a length-prefixed JSON frame.
+pub fn write_authenticated_frame<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    signing_key: &SigningKey,
+    signer_id: &str,
+    session_id: &str,
+    sequence: u64,
+) -> Result<()> {
+    let payload = serde_json::to_vec(value).with_context(|| "Failed to serialize inner payload")?;
+
+    let signature = signing_key.sign(&payload);
+    let signed = SignedPayload {
+        payload,
+        signature: signature.to_bytes().to_vec(),
+        signer_id: signer_id.to_string(),
+    };
+
+    let frame = AuthenticatedFrame {
+        version: PROTOCOL_VERSION_AUTHENTICATED,
+        sig_alg: SIG_ALG_ED25519,
+        session_id: session_id.to_string(),
+        sequence,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        signed,
+    };
+
+    write_frame(stream, &frame)
+}
+
+/// Read an authenticated frame from a stream and verify its Ed25519 signature.
+///
+/// Reads a length-prefixed `AuthenticatedFrame`, verifies the signature against
+/// the provided verifying key, checks session ID and sequence number, then
+/// deserializes the inner payload as `T`.
+pub fn read_authenticated_frame<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+    verifying_key: &VerifyingKey,
+    expected_session_id: &str,
+    expected_min_sequence: u64,
+) -> Result<(T, u64)> {
+    let frame: AuthenticatedFrame = read_frame(stream)?;
+    verify_authenticated_frame(
+        &frame,
+        verifying_key,
+        expected_session_id,
+        expected_min_sequence,
+    )
+}
+
+/// Verify an already-deserialized `AuthenticatedFrame` and extract its
+/// inner payload.
+///
+/// Same checks as [`read_authenticated_frame`] minus the wire read:
+/// version → session ID → sequence (replay) → 64-byte signature length
+/// → Ed25519 signature over `signed.payload` → deserialize as `T`.
+/// Each step short-circuits with `Err`; the inner deserializer is
+/// reached only after the signature check passes, which is the
+/// load-bearing property the fuzz harness exercises.
+///
+/// Public so `crates/mvm-agentd/fuzz/fuzz_targets/fuzz_authed_path.rs`
+/// can drive the verification path without a real `UnixStream`.
+pub fn verify_authenticated_frame<T: serde::de::DeserializeOwned>(
+    frame: &AuthenticatedFrame,
+    verifying_key: &VerifyingKey,
+    expected_session_id: &str,
+    expected_min_sequence: u64,
+) -> Result<(T, u64)> {
+    if frame.version != PROTOCOL_VERSION_AUTHENTICATED {
+        bail!(
+            "Unexpected protocol version: {} (expected {})",
+            frame.version,
+            PROTOCOL_VERSION_AUTHENTICATED
+        );
+    }
+
+    if frame.session_id != expected_session_id {
+        bail!(
+            "Session ID mismatch: got '{}', expected '{}'",
+            frame.session_id,
+            expected_session_id
+        );
+    }
+
+    if frame.sequence < expected_min_sequence {
+        bail!(
+            "Replay detected: sequence {} < expected minimum {}",
+            frame.sequence,
+            expected_min_sequence
+        );
+    }
+
+    let signed = &frame.signed;
+    if signed.signature.len() != 64 {
+        bail!(
+            "Invalid signature length: {} (expected 64)",
+            signed.signature.len()
+        );
+    }
+
+    let sig_bytes: [u8; 64] = signed
+        .signature
+        .as_slice()
+        .try_into()
+        .with_context(|| "Signature must be exactly 64 bytes")?;
+
+    let signature = Signature::from_bytes(&sig_bytes);
+    verifying_key
+        .verify(&signed.payload, &signature)
+        .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
+
+    let value: T = serde_json::from_slice(&signed.payload)
+        .with_context(|| "Failed to deserialize verified payload")?;
+
+    Ok((value, frame.sequence))
+}
+
+/// Perform the host side of the session handshake.
+///
+/// After CONNECT/OK, the host sends `SessionHello` with a random challenge
+/// and its public key. The guest responds with `SessionHelloAck` containing
+/// the signed challenge and its public key.
+///
+/// Returns the guest's verifying key on success.
+pub fn handshake_as_host(
+    stream: &mut UnixStream,
+    session_id: &str,
+    host_signing_key: &SigningKey,
+) -> Result<VerifyingKey> {
+    let _span = tracing::info_span!("vsock_handshake").entered();
+    let t = std::time::Instant::now();
+    let challenge: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let host_pubkey = host_signing_key.verifying_key().to_bytes().to_vec();
+
+    let hello = SessionHello {
+        version: PROTOCOL_VERSION_AUTHENTICATED,
+        session_id: session_id.to_string(),
+        challenge: challenge.clone(),
+        host_pubkey,
+    };
+
+    write_frame(stream, &hello)?;
+
+    let ack: SessionHelloAck = read_frame(stream)?;
+
+    // Verify session ID echoed back
+    if ack.session_id != session_id {
+        bail!(
+            "Session ID mismatch in HelloAck: got '{}', expected '{}'",
+            ack.session_id,
+            session_id
+        );
+    }
+
+    // Extract guest public key
+    if ack.guest_pubkey.len() != 32 {
+        bail!(
+            "Invalid guest public key length: {} (expected 32)",
+            ack.guest_pubkey.len()
+        );
+    }
+    let guest_key_bytes: [u8; 32] = ack
+        .guest_pubkey
+        .as_slice()
+        .try_into()
+        .with_context(|| "Guest public key must be 32 bytes")?;
+
+    let guest_verifying_key = VerifyingKey::from_bytes(&guest_key_bytes)
+        .with_context(|| "Invalid guest Ed25519 public key")?;
+
+    // Verify guest signed the challenge
+    if ack.challenge_response.len() != 64 {
+        bail!(
+            "Invalid challenge response length: {} (expected 64)",
+            ack.challenge_response.len()
+        );
+    }
+    let sig_bytes: [u8; 64] = ack
+        .challenge_response
+        .as_slice()
+        .try_into()
+        .with_context(|| "Challenge response must be 64 bytes")?;
+
+    let sig = Signature::from_bytes(&sig_bytes);
+    guest_verifying_key
+        .verify(&challenge, &sig)
+        .map_err(|e| anyhow::anyhow!("Challenge verification failed: {}", e))?;
+
+    mvm_core::observability::metrics::global()
+        .vsock_handshake_rtt_ms
+        .store(
+            t.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+    Ok(guest_verifying_key)
+}
+
+/// Perform the guest side of the session handshake.
+///
+/// Reads `SessionHello` from the host, signs the challenge with the guest's
+/// key, and sends back `SessionHelloAck`.
+///
+/// Returns the host's verifying key and session ID on success.
+pub fn handshake_as_guest(
+    stream: &mut UnixStream,
+    guest_signing_key: &SigningKey,
+) -> Result<(VerifyingKey, String)> {
+    let hello: SessionHello = read_frame(stream)?;
+
+    // Extract host public key
+    if hello.host_pubkey.len() != 32 {
+        bail!(
+            "Invalid host public key length: {} (expected 32)",
+            hello.host_pubkey.len()
+        );
+    }
+    let host_key_bytes: [u8; 32] = hello
+        .host_pubkey
+        .as_slice()
+        .try_into()
+        .with_context(|| "Host public key must be 32 bytes")?;
+
+    let host_verifying_key = VerifyingKey::from_bytes(&host_key_bytes)
+        .with_context(|| "Invalid host Ed25519 public key")?;
+
+    // Sign the challenge to prove we hold the session key
+    let challenge_sig = guest_signing_key.sign(&hello.challenge);
+    let guest_pubkey = guest_signing_key.verifying_key().to_bytes().to_vec();
+
+    let ack = SessionHelloAck {
+        version: hello.version,
+        session_id: hello.session_id.clone(),
+        challenge_response: challenge_sig.to_bytes().to_vec(),
+        guest_pubkey,
+    };
+
+    write_frame(stream, &ack)?;
+
+    Ok((host_verifying_key, hello.session_id))
+}
+
+// ============================================================================
+// Vsock UDS connection
+// ============================================================================
+
+/// Path to the Firecracker vsock UDS for an instance.
+pub fn vsock_uds_path(instance_dir: &str) -> String {
+    format!("{}/runtime/v.sock", instance_dir)
+}
+
+/// Check if an IO error is a timeout (EAGAIN/EWOULDBLOCK or TimedOut).
+fn is_timeout_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+fn connect_retry_delay(attempt: u32) -> Duration {
+    let scaled = CONNECT_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(16));
+    Duration::from_millis(scaled.min(CONNECT_RETRY_CAP_DELAY_MS))
+}
+
+fn is_transient_connect_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::AddrNotAvailable
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn should_retry_connect_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(is_transient_connect_error)
+}
+
+/// Single attempt to connect and perform the Firecracker CONNECT handshake.
+fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
+    let timeout = Duration::from_secs(timeout_secs);
+
+    // Pre-flight: verify the socket file exists and is actually a socket.
+    // Follow symlinks (`metadata`, not `symlink_metadata`): both the
+    // Firecracker default-image and template launch paths expose the vsock
+    // UDS at `<dir>/runtime/v.sock` as a symlink to the socket Firecracker
+    // actually binds, so the pre-flight must resolve through it — otherwise
+    // it sees the symlink's own file type and wrongly rejects a connectable
+    // socket.
+    match std::fs::metadata(uds_path) {
+        Err(e) => bail!("Vsock socket not found at {}: {}", uds_path, e),
+        Ok(m) if !m.file_type().is_socket() => {
+            bail!(
+                "Path {} exists but is not a socket (type: {:?})",
+                uds_path,
+                m.file_type()
+            )
+        }
+        Ok(_) => {}
+    }
+
+    let stream = UnixStream::connect(uds_path)
+        .with_context(|| format!("Failed to connect to vsock UDS at {}", uds_path))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+
+    let mut stream = stream;
+    writeln!(stream, "CONNECT {}", port).with_context(|| "Failed to send CONNECT")?;
+    stream.flush()?;
+
+    // Read response line: "OK <port>\n"
+    let mut reader = BufReader::new(&stream);
+    let mut response_line = String::new();
+    let bytes = reader.read_line(&mut response_line).map_err(|e| {
+        if is_timeout_error(&e) {
+            anyhow::anyhow!(
+                "Guest agent did not respond within {}s \
+                 (the agent may not be running or the microVM may be unhealthy)",
+                timeout_secs
+            )
+        } else {
+            anyhow::anyhow!("Failed to read CONNECT response: {}", e)
+        }
+    })?;
+    if bytes == 0 {
+        return Err(anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "guest agent closed the CONNECT handshake before replying",
+        ))
+        .context("Failed to read CONNECT response"));
+    }
+
+    if !response_line.starts_with("OK ") {
+        bail!(
+            "Vsock CONNECT failed: expected 'OK {}', got '{}'",
+            GUEST_AGENT_PORT,
+            response_line.trim()
+        );
+    }
+
+    Ok(stream)
+}
+
+/// Connect to a specific vsock port via the Firecracker UDS multiplexer.
+///
+/// The Firecracker vsock device exposes a single host-side UDS for
+/// host→guest connections; the destination port is selected by the
+/// `CONNECT <port>\n` handshake line, not by the UDS path. This entry
+/// point lets the caller pick that port — needed for things like the
+/// console data port, which is allocated by the agent at runtime.
+///
+/// Connect protocol:
+/// 1. Open Unix stream to the given UDS path.
+/// 2. Write `CONNECT <port>\n`.
+/// 3. Read `OK <port>\n`.
+/// 4. Then exchange length-prefixed JSON frames.
+///
+/// Retries up to `CONNECT_RETRIES` times on timeout errors, skipping retries
+/// for definitive failures (connection refused, socket not found).
+pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
+    let mut last_err = None;
+
+    for attempt in 0..CONNECT_RETRIES {
+        match try_connect_once(uds_path, port, timeout_secs) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                if !should_retry_connect_error(e.root_cause()) {
+                    return Err(e);
+                }
+
+                last_err = Some(e);
+
+                if attempt + 1 < CONNECT_RETRIES {
+                    std::thread::sleep(connect_retry_delay(attempt));
+                }
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!(
+            "Failed to connect to guest agent on port {} after {} attempts",
+            port,
+            CONNECT_RETRIES
+        )
+    }))
+}
+
+/// Connect to the guest agent control port ([`GUEST_AGENT_PORT`]) via
+/// a direct UDS path. Backward-compatible thin wrapper over
+/// [`connect_to_port`] that all existing callers (control-plane RPCs,
+/// health probes, integration queries) target.
+pub fn connect_to(uds_path: &str, timeout_secs: u64) -> Result<UnixStream> {
+    connect_to_port(uds_path, GUEST_AGENT_PORT, timeout_secs)
+}
+
+/// The vsock CID of the host, from the guest's perspective (`VMADDR_CID_HOST`).
+pub const HOST_CID: u32 = 2;
+
+/// Open a **guest→host** vsock stream to the host on `port` (AF_VSOCK to
+/// [`HOST_CID`]). This is the direction the substitution forward proxy needs —
+/// the opposite of [`connect_to_port`], which is the host→guest Firecracker
+/// UDS-multiplexer path. Backend-agnostic on the guest side: both QEMU
+/// (`vhost-vsock`) and Firecracker forward a guest AF_VSOCK connect to CID 2 to
+/// the host's listener (real AF_VSOCK for QEMU, a per-port UDS for Firecracker).
+///
+/// The returned fd is a `SOCK_STREAM` socket wrapped as a [`UnixStream`] — a
+/// thin SOCK_STREAM wrapper whose read/write are the same syscalls — so the
+/// length-prefixed frame helpers ([`read_frame`]/[`write_frame`]) work over it
+/// unchanged.
+pub fn connect_host_vsock(port: u32, timeout_secs: u64) -> Result<UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    const AF_VSOCK: libc::c_int = 40;
+    // Kernel uapi `struct sockaddr_vm`: family u16 + reserved u16 + port u32 +
+    // cid u32 + 4-byte pad = 16 (== sizeof(struct sockaddr)).
+    #[repr(C)]
+    struct SockaddrVm {
+        svm_family: libc::sa_family_t,
+        svm_reserved1: u16,
+        svm_port: u32,
+        svm_cid: u32,
+        svm_zero: [u8; 4],
+    }
+    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
+
+    let mut last_err = None;
+    let mut stream = None;
+    for attempt in 0..CONNECT_RETRIES {
+        // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; `addr` is fully
+        // initialized and sized exactly. The fd is adopted by `UnixStream` on
+        // success (closed on its drop) or closed explicitly on the error path.
+        let connect_result = unsafe {
+            let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
+            if fd < 0 {
+                Err(anyhow::Error::from(std::io::Error::last_os_error())
+                    .context("AF_VSOCK socket()"))
+            } else {
+                let addr = SockaddrVm {
+                    svm_family: AF_VSOCK as libc::sa_family_t,
+                    svm_reserved1: 0,
+                    svm_port: port,
+                    svm_cid: HOST_CID,
+                    svm_zero: [0; 4],
+                };
+                let rc = libc::connect(
+                    fd,
+                    std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+                    std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+                );
+                if rc < 0 {
+                    let err = std::io::Error::last_os_error();
+                    libc::close(fd);
+                    Err(anyhow::Error::from(err).context(format!(
+                        "AF_VSOCK connect to host CID {HOST_CID} port {port}"
+                    )))
+                } else {
+                    Ok(UnixStream::from_raw_fd(fd))
+                }
+            }
+        };
+
+        match connect_result {
+            Ok(open_stream) => {
+                stream = Some(open_stream);
+                break;
+            }
+            Err(e) => {
+                if !should_retry_connect_error(e.root_cause()) {
+                    return Err(e);
+                }
+                last_err = Some(e);
+                if attempt + 1 < CONNECT_RETRIES {
+                    std::thread::sleep(connect_retry_delay(attempt));
+                }
+            }
+        }
+    }
+    let stream = match stream {
+        Some(stream) => stream,
+        None => {
+            return Err(last_err.unwrap_or_else(|| {
+                anyhow::anyhow!(
+                    "Failed to connect to host CID {HOST_CID} port {port} after {CONNECT_RETRIES} attempts"
+                )
+            }));
+        }
+    };
+    let timeout = Duration::from_secs(timeout_secs);
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    Ok(stream)
+}
+
+/// Connect to the guest vsock agent via the fleet-mode instance directory convention.
+///
+/// Resolves the UDS path as `<instance_dir>/runtime/v.sock`.
+fn connect(instance_dir: &str, timeout_secs: u64) -> Result<UnixStream> {
+    connect_to(&vsock_uds_path(instance_dir), timeout_secs)
+}
+
+/// Send a request and receive a response over a vsock connection.
+///
+/// Uses 4-byte big-endian length prefix + JSON body (same pattern as hostd).
+pub fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResponse> {
+    let data = serde_json::to_vec(req).with_context(|| "Failed to serialize request")?;
+
+    // Write length-prefixed frame
+    let len = (data.len() as u32).to_be_bytes();
+    stream
+        .write_all(&len)
+        .with_context(|| "Failed to write frame length")?;
+    stream
+        .write_all(&data)
+        .with_context(|| "Failed to write frame body")?;
+    stream.flush()?;
+
+    // Read response length
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).map_err(|e| {
+        if is_timeout_error(&e) {
+            anyhow::anyhow!("Guest agent timed out while waiting for response")
+        } else {
+            anyhow::anyhow!("Failed to read response length: {}", e)
+        }
+    })?;
+    let resp_len = u32::from_be_bytes(len_buf) as usize;
+
+    if resp_len > MAX_FRAME_SIZE {
+        bail!(
+            "Response frame too large: {} bytes (max {})",
+            resp_len,
+            MAX_FRAME_SIZE
+        );
+    }
+
+    // Read response body
+    let mut buf = vec![0u8; resp_len];
+    stream.read_exact(&mut buf).map_err(|e| {
+        if is_timeout_error(&e) {
+            anyhow::anyhow!("Guest agent timed out while reading response body")
+        } else {
+            anyhow::anyhow!("Failed to read response body: {}", e)
+        }
+    })?;
+
+    serde_json::from_slice(&buf).with_context(|| "Failed to deserialize response")
+}
+
+/// Negotiate guest-agent protocol version and capabilities on an
+/// already-connected control stream.
+///
+/// This helper is intentionally stream-level so it works with both the
+/// Firecracker UDS multiplexer path and Apple Container's direct vsock
+/// stream. Hard cutover: every fresh session
+/// must call this before issuing any operational request, including a
+/// bare `Ping` reachability probe. Pre-hello guest agents receive
+/// `ProtocolMismatch` and the connection is closed; this helper
+/// surfaces that as an error so callers can prompt the user to
+/// rebuild their dev VM.
+pub fn negotiate_protocol(
+    stream: &mut UnixStream,
+    requested_capabilities: Vec<GuestCapability>,
+) -> Result<ProtocolNegotiation> {
+    let resp = send_request(
+        stream,
+        &GuestRequest::ProtocolHello {
+            host_protocol_version: PROTOCOL_VERSION,
+            min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+            host_version: env!("CARGO_PKG_VERSION").to_string(),
+            requested_capabilities,
+        },
+    )?;
+
+    match resp {
+        GuestResponse::ProtocolHelloAck {
+            agent_protocol_version,
+            min_supported_version,
+            agent_version,
+            capabilities,
+        } => Ok(ProtocolNegotiation {
+            agent_protocol_version,
+            min_supported_version,
+            agent_version,
+            capabilities,
+        }),
+        GuestResponse::ProtocolMismatch {
+            required_action,
+            message,
+            ..
+        } => bail!("guest-agent protocol mismatch ({required_action:?}): {message}"),
+        GuestResponse::Error { message } => {
+            bail!("guest-agent protocol negotiation error: {message}")
+        }
+        other => bail!("unexpected response to ProtocolHello: {other:?}"),
+    }
+}
+
+/// Negotiate the guest-agent protocol and fail if any mandatory
+/// capability is missing.
+pub fn require_capabilities(
+    stream: &mut UnixStream,
+    required_capabilities: &[GuestCapability],
+) -> Result<ProtocolNegotiation> {
+    let negotiated = negotiate_protocol(stream, required_capabilities.to_vec())?;
+    let missing: Vec<_> = required_capabilities
+        .iter()
+        .copied()
+        .filter(|cap| !negotiated.capabilities.contains(cap))
+        .collect();
+
+    if !missing.is_empty() {
+        bail!("guest-agent missing required capabilities: {missing:?}");
+    }
+
+    Ok(negotiated)
+}
+
+/// Send a `RunEntrypoint` request and consume the streaming
+/// `EntrypointEvent` response.
+///
+/// `on_event` is invoked for each non-terminal event (`Stdout` /
+/// `Stderr` chunk) as it arrives — callers can stream output to their
+/// own stdout/stderr without buffering. Returns the terminal event
+/// (`Exit` or `Error`) for the caller to inspect.
+///
+/// The wire format is the same length-prefixed JSON envelope as every
+/// other vsock verb. v1 emits exactly three frames per call: one
+/// `Stdout`, one `Stderr`, and one terminal event. v2 may chunk
+/// progressively without changing this consumer — termination is
+/// detected via [`EntrypointEvent::is_terminal`], not frame count.
+pub fn send_run_entrypoint<F>(
+    stream: &mut UnixStream,
+    stdin: Vec<u8>,
+    timeout_secs: u64,
+    env: Vec<(String, String)>,
+    mut on_event: F,
+) -> Result<EntrypointEvent>
+where
+    F: FnMut(&EntrypointEvent),
+{
+    require_capabilities(stream, &[GuestCapability::RunEntrypoint])?;
+    let req = GuestRequest::RunEntrypoint {
+        stdin,
+        timeout_secs,
+        env,
+    };
+    write_frame(stream, &req)?;
+
+    loop {
+        let resp: GuestResponse = read_frame(stream)?;
+        let event = match resp {
+            GuestResponse::EntrypointEvent(e) => e,
+            GuestResponse::Error { message } => bail!("guest agent error: {message}"),
+            other => bail!("expected EntrypointEvent during RunEntrypoint stream, got {other:?}"),
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
+}
+
+/// Send an `Exec` request and stream its response. Invokes `on_event`
+/// for each `Stdout`/`Stderr` chunk as it arrives; returns the terminal
+/// `Exit` or `TimedOut`. Exec carries no `GuestCapability` — the agent
+/// gates it at compile time via the `dev-shell` feature — so this does
+/// a plain protocol hello (no capability requirement).
+pub fn send_exec_streaming<F>(
+    stream: &mut UnixStream,
+    command: &str,
+    stdin: Option<String>,
+    timeout_secs: Option<u64>,
+    on_event: F,
+) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let req = GuestRequest::Exec {
+        command: command.to_string(),
+        stdin,
+        timeout_secs,
+    };
+    write_frame(stream, &req)?;
+    read_exec_stream(stream, on_event)
+}
+
+/// Send a `RunDetached` request and read its single `DetachedStarted`
+/// ack, returning the detached workload's guest PID.
+///
+/// Non-streaming: the workload runs independently of this connection, so
+/// there is exactly one response frame. Its exit is reported to the
+/// host's workload-exit port by the agent's reaper, not over this
+/// stream. Like `Exec`, `RunDetached` carries no `GuestCapability` — the
+/// agent gates it at compile time via the `dev-shell` feature — so this
+/// does a plain protocol hello.
+pub fn send_run_detached(
+    stream: &mut UnixStream,
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+) -> Result<i32> {
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let req = GuestRequest::RunDetached { argv, env };
+    write_frame(stream, &req)?;
+    let resp: GuestResponse = read_frame(stream)?;
+    match resp {
+        GuestResponse::DetachedStarted { pid } => Ok(pid),
+        GuestResponse::Error { message } => bail!("guest agent error: {message}"),
+        GuestResponse::VerbNotAuthorized { verb } => {
+            Err(RpcError::VerbNotAuthorized { verb }.into())
+        }
+        other => bail!("expected DetachedStarted for RunDetached, got {other:?}"),
+    }
+}
+
+/// Read an `ExecEvent` response stream from `stream`: invoke `on_event`
+/// for each non-terminal chunk, return the terminal `Exit`. The caller
+/// must have already done the protocol hello and written the request
+/// frame (`Exec` or `RunCode` — both stream `ExecEvent`).
+pub fn read_exec_stream<F>(stream: &mut UnixStream, mut on_event: F) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
+    loop {
+        let resp: GuestResponse = read_frame(stream)?;
+        let event = match resp {
+            GuestResponse::ExecEvent(e) => e,
+            GuestResponse::Error { message } => bail!("guest exec error: {message}"),
+            // Surface a grant refusal as the typed RpcError (not a stringified
+            // "unexpected variant") so the host can audit it as `verb_denied`.
+            GuestResponse::VerbNotAuthorized { verb } => {
+                return Err(RpcError::VerbNotAuthorized { verb }.into());
+            }
+            other => bail!("expected ExecEvent during exec stream, got {other:?}"),
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
+}
+
+// ============================================================================
+// High-level API
+// ============================================================================
+
+/// Query worker status from the guest vsock agent.
+pub fn query_worker_status(instance_dir: &str) -> Result<GuestResponse> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    send_request(&mut stream, &GuestRequest::WorkerStatus)
+}
+
+/// Request sleep preparation via vsock.
+///
+/// Returns Ok(true) if guest ACKed (OpenClaw idle, data flushed),
+/// Ok(false) if guest NAKed or timed out.
+pub fn request_sleep_prep(instance_dir: &str, drain_timeout_secs: u64) -> Result<bool> {
+    let mut stream = connect(instance_dir, drain_timeout_secs)?;
+    let resp = send_request(&mut stream, &GuestRequest::SleepPrep { drain_timeout_secs })?;
+
+    match resp {
+        GuestResponse::SleepPrepAck { success, .. } => Ok(success),
+        GuestResponse::Error { message } => {
+            bail!("Guest sleep prep error: {}", message);
+        }
+        _ => bail!("Unexpected response to SleepPrep"),
+    }
+}
+
+/// Signal wake to the guest vsock agent.
+///
+/// Returns Ok(true) if guest ACKed (connections reinitialized, secrets refreshed),
+/// Ok(false) if guest NAKed.
+pub fn signal_wake(instance_dir: &str) -> Result<bool> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::Wake)?;
+
+    match resp {
+        GuestResponse::WakeAck { success } => Ok(success),
+        GuestResponse::Error { message } => {
+            bail!("Guest wake error: {}", message);
+        }
+        _ => bail!("Unexpected response to Wake"),
+    }
+}
+
+/// Ping the guest vsock agent (health check).
+pub fn ping(instance_dir: &str) -> Result<bool> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::Ping)?;
+    Ok(matches!(resp, GuestResponse::Pong))
+}
+
+/// Query integration status from the guest agent.
+pub fn query_integration_status(
+    instance_dir: &str,
+) -> Result<Vec<crate::integrations::IntegrationStateReport>> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::IntegrationStatus)?;
+
+    match resp {
+        GuestResponse::IntegrationStatusReport { integrations } => Ok(integrations),
+        GuestResponse::Error { message } => {
+            bail!("Guest integration status error: {}", message);
+        }
+        _ => bail!("Unexpected response to IntegrationStatus"),
+    }
+}
+
+/// Request the guest to checkpoint named integrations before sleep.
+///
+/// Returns Ok(true) if all integrations checkpointed successfully,
+/// Ok(false) if any failed.
+pub fn checkpoint_integrations(
+    instance_dir: &str,
+    integrations: Vec<String>,
+    timeout_secs: u64,
+) -> Result<bool> {
+    let mut stream = connect(instance_dir, timeout_secs)?;
+    let resp = send_request(
+        &mut stream,
+        &GuestRequest::CheckpointIntegrations { integrations },
+    )?;
+
+    match resp {
+        GuestResponse::CheckpointResult { success, .. } => Ok(success),
+        GuestResponse::Error { message } => {
+            bail!("Guest checkpoint error: {}", message);
+        }
+        _ => bail!("Unexpected response to CheckpointIntegrations"),
+    }
+}
+
+// ============================================================================
+// Direct-path API (for dev-mode VMs where v.sock is not under runtime/)
+// ============================================================================
+
+/// Ping the guest vsock agent at a specific UDS path.
+pub fn ping_at(vsock_uds_path: &str) -> Result<bool> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::Ping)?;
+    Ok(matches!(resp, GuestResponse::Pong))
+}
+
+/// Query worker status from the guest vsock agent at a specific UDS path.
+pub fn query_worker_status_at(vsock_uds_path: &str) -> Result<GuestResponse> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    send_request(&mut stream, &GuestRequest::WorkerStatus)
+}
+
+/// Query integration status from the guest agent at a specific UDS path.
+pub fn query_integration_status_at(
+    vsock_uds_path: &str,
+) -> Result<Vec<crate::integrations::IntegrationStateReport>> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::IntegrationStatus)?;
+
+    match resp {
+        GuestResponse::IntegrationStatusReport { integrations } => Ok(integrations),
+        GuestResponse::Error { message } => {
+            bail!("Guest integration status error: {}", message);
+        }
+        _ => bail!("Unexpected response to IntegrationStatus"),
+    }
+}
+
+/// Query probe status from the guest agent.
+pub fn query_probe_status(instance_dir: &str) -> Result<Vec<crate::probes::ProbeResult>> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::ProbeStatus)?;
+
+    match resp {
+        GuestResponse::ProbeStatusReport { probes } => Ok(probes),
+        GuestResponse::Error { message } => {
+            bail!("Guest probe status error: {}", message);
+        }
+        _ => bail!("Unexpected response to ProbeStatus"),
+    }
+}
+
+/// Query probe status from the guest agent at a specific UDS path.
+pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::ProbeResult>> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::ProbeStatus)?;
+
+    match resp {
+        GuestResponse::ProbeStatusReport { probes } => Ok(probes),
+        GuestResponse::Error { message } => {
+            bail!("Guest probe status error: {}", message);
+        }
+        _ => bail!("Unexpected response to ProbeStatus"),
+    }
+}
+
+/// Outcome of a `PostRestore` signal: whether the guest acknowledged the
+/// signal and whether it actually rotated its VMGenID from the host token.
+///
+/// `reseeded` is the load-bearing field for the warm-start verb's honesty —
+/// `acknowledged` only says the guest answered, `reseeded` says it rotated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostRestoreReply {
+    /// The guest acknowledged the post-restore signal with success.
+    pub acknowledged: bool,
+    /// The guest rotated its VMGenID from the delivered token.
+    pub reseeded: bool,
+}
+
+/// Interpret a guest's response to `PostRestore` into the host-facing reply.
+/// Pure so the success/reseeded mapping is unit-tested without a live agent.
+fn interpret_post_restore(resp: GuestResponse) -> Result<PostRestoreReply> {
+    match resp {
+        GuestResponse::PostRestoreAck {
+            success, reseeded, ..
+        } => Ok(PostRestoreReply {
+            acknowledged: success,
+            reseeded,
+        }),
+        GuestResponse::Error { message } => {
+            bail!("Guest post-restore error: {}", message);
+        }
+        _ => bail!("Unexpected response to PostRestore"),
+    }
+}
+
+/// Signal post-restore to the guest agent at a specific UDS path.
+///
+/// After snapshot restore, tells the guest to rotate its VMGenID with the
+/// host-minted `token` (so two clones of one snapshot diverge), then remount
+/// config/secrets drives and restart services. An all-zero `token` is a
+/// no-rotation restore. Returns the guest's [`PostRestoreReply`] so the caller
+/// can surface whether the guest actually reseeded.
+pub fn post_restore_at(
+    vsock_uds_path: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+) -> Result<PostRestoreReply> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(
+        &mut stream,
+        &GuestRequest::PostRestore {
+            token,
+            grant_envelope: None,
+        },
+    )?;
+    interpret_post_restore(resp)
+}
+
+/// Like [`post_restore_at`] but carries an optional verb-grant envelope so
+/// the guest re-pins its grant without a reboot. `None` degrades to the
+/// same behaviour as [`post_restore_at`].
+pub fn post_restore_with_grant_at(
+    vsock_uds_path: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+) -> Result<PostRestoreReply> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(
+        &mut stream,
+        &GuestRequest::PostRestore {
+            token,
+            grant_envelope,
+        },
+    )?;
+    interpret_post_restore(resp)
+}
+
+/// Filesystem marker a workload creates to signal it has finished warming
+/// (caches/JITs/model load done). The guest agent reports its presence on a
+/// `PrimedStatus` query; the host's warm-snapshot barrier waits for it before
+/// sealing. A tmpfs path the workload can write with no extra privilege.
+pub const PRIMED_MARKER_PATH: &str = "/run/mvm/primed";
+
+/// Whether the workload has signalled "primed": the marker exists. Pure so the
+/// agent-side check is unit-testable without a live guest.
+pub fn workload_is_primed_at(marker: &std::path::Path) -> bool {
+    marker.exists()
+}
+
+/// Interpret a guest's response to `PrimedStatus`. Pure so the mapping is
+/// unit-tested without a live agent.
+pub fn interpret_primed_status(resp: GuestResponse) -> Result<bool> {
+    match resp {
+        GuestResponse::PrimedStatusReport { primed } => Ok(primed),
+        GuestResponse::Error { message } => bail!("Guest primed-status error: {}", message),
+        _ => bail!("Unexpected response to PrimedStatus"),
+    }
+}
+
+/// Query whether the workload has signalled "primed" via the guest agent at a
+/// specific UDS path. One-shot; the host barrier polls this until primed or it
+/// times out.
+pub fn query_primed_at(vsock_uds_path: &str) -> Result<bool> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    let resp = send_request(&mut stream, &GuestRequest::PrimedStatus)?;
+    interpret_primed_status(resp)
+}
+
+/// Query filesystem diff from the guest agent at a specific UDS path.
+///
+/// Returns the list of filesystem changes since boot (created, modified,
+/// deleted files). The guest agent walks the overlay filesystem to compute
+/// the diff.
+pub fn query_fs_diff(instance_dir: &str) -> Result<Vec<FsChange>> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    query_fs_diff_on(&mut stream)
+}
+
+/// Query filesystem diff at a specific UDS path.
+pub fn query_fs_diff_at(vsock_uds_path: &str) -> Result<Vec<FsChange>> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    query_fs_diff_on(&mut stream)
+}
+
+/// Query filesystem diff on an already-connected stream. Backend-agnostic
+/// entry point for `mvmctl diff` — the stream comes from
+/// `mvm_runtime::vsock_transport::for_vm(name)` so the verb works against any VMM.
+/// `FsDiff` is part of the filesystem RPC surface, so this drives
+/// the hello prelude requiring `FilesystemRpc` exactly like
+/// [`send_fs_request_on`] — the dir-based wrappers used to skip the hello,
+/// which a hard-cutover agent would reject.
+pub fn query_fs_diff_on(stream: &mut UnixStream) -> Result<Vec<FsChange>> {
+    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
+    let resp = send_request(stream, &GuestRequest::FsDiff)?;
+    match resp {
+        GuestResponse::FsDiffResult { changes } => Ok(changes),
+        GuestResponse::Error { message } => {
+            bail!("Guest fs-diff error: {}", message);
+        }
+        _ => bail!("Unexpected response to FsDiff"),
+    }
+}
+
+/// Dispatch a non-streaming process-control request to a running
+/// VM and return the `ProcResult`. Single-frame surface — the
+/// streaming `ProcWait` verb has its own helper below. Dir-based
+/// wrapper over [`send_proc_request_on`] for callers that still pass
+/// an instance dir (mvmd, mock).
+pub fn send_proc_request(instance_dir: &str, req: GuestRequest) -> Result<ProcResult> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    send_proc_request_on(&mut stream, req)
+}
+
+/// Dispatch a non-streaming process-control verb on an already-connected
+/// stream and return the `ProcResult`. The backend-agnostic entry point:
+/// the host CLI obtains the stream from `mvm_runtime::vsock_transport::for_vm(name)`
+/// so `mvmctl proc` works regardless of which VMM launched the VM.
+/// `send_proc_request` is the dir-based wrapper over this.
+pub fn send_proc_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<ProcResult> {
+    debug_assert!(matches!(
+        req,
+        GuestRequest::ProcStart { .. }
+            | GuestRequest::ProcList
+            | GuestRequest::ProcSignal { .. }
+            | GuestRequest::ProcSendInput { .. }
+            | GuestRequest::ProcKill { .. }
+    ));
+    require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
+    let resp = send_request(stream, &req)?;
+    match resp {
+        GuestResponse::ProcResult(r) => Ok(r),
+        GuestResponse::Error { message } => {
+            bail!("Guest proc-control transport error: {}", message)
+        }
+        _ => bail!("Unexpected response to proc-control verb"),
+    }
+}
+
+/// Stream `ProcWait` events for `pid_token`. Calls `on_event` for
+/// every non-terminal frame and returns the terminal event. Mirrors
+/// the host shape of `send_run_entrypoint`. Dir-based wrapper over
+/// [`send_proc_wait_on`].
+pub fn send_proc_wait<F: FnMut(&ProcWaitEvent)>(
+    instance_dir: &str,
+    pid_token: &str,
+    timeout_secs: Option<u64>,
+    on_event: F,
+) -> Result<ProcWaitEvent> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    send_proc_wait_on(&mut stream, pid_token, timeout_secs, on_event)
+}
+
+/// Stream `ProcWait` events on an already-connected stream. Backend-agnostic
+/// entry point for `mvmctl proc wait` — the stream comes from
+/// `mvm_runtime::vsock_transport::for_vm(name)` so the verb works against any VMM.
+/// Mirrors the host shape of [`send_run_entrypoint`].
+pub fn send_proc_wait_on<F: FnMut(&ProcWaitEvent)>(
+    stream: &mut UnixStream,
+    pid_token: &str,
+    timeout_secs: Option<u64>,
+    mut on_event: F,
+) -> Result<ProcWaitEvent> {
+    require_capabilities(stream, &[GuestCapability::ProcessRpc])?;
+    let req = GuestRequest::ProcWait {
+        pid_token: pid_token.to_string(),
+        timeout_secs,
+    };
+    write_frame(stream, &req)?;
+    loop {
+        let resp: GuestResponse = read_frame(stream)?;
+        match resp {
+            GuestResponse::ProcWaitEvent(ev) => {
+                if ev.is_terminal() {
+                    return Ok(ev);
+                }
+                on_event(&ev);
+            }
+            GuestResponse::Error { message } => {
+                bail!("Guest proc-wait transport error: {}", message)
+            }
+            _ => bail!("Unexpected response in proc-wait stream"),
+        }
+    }
+}
+
+/// Dispatch a single FS RPC request to a running VM and return the
+/// `FsResult`. Wraps `connect` + `send_request` for `mvmctl fs *`
+/// callers — the host CLI doesn't need to thread a `UnixStream`
+/// around.
+pub fn send_fs_request(instance_dir: &str, req: GuestRequest) -> Result<FsResult> {
+    debug_assert!(matches!(
+        req,
+        GuestRequest::FsRead { .. }
+            | GuestRequest::FsWrite { .. }
+            | GuestRequest::FsList { .. }
+            | GuestRequest::FsStat { .. }
+            | GuestRequest::FsMkdir { .. }
+            | GuestRequest::FsRemove { .. }
+            | GuestRequest::FsMove { .. }
+    ));
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    send_fs_request_on(&mut stream, req)
+}
+
+/// Dispatch a single FS RPC on an already-connected stream and return the
+/// `FsResult`. The backend-agnostic entry point: the host CLI obtains the
+/// stream from `mvm_runtime::vsock_transport::for_vm(name)` (which resolves the
+/// right socket per backend — Firecracker's `v.sock`, or the per-port UNIX
+/// socket libkrun/QEMU expose), so `fs`/`cp` work regardless of which VMM
+/// launched the VM. `send_fs_request` is the dir-based wrapper
+/// over this for callers that still pass an instance dir (mvmd, mock).
+pub fn send_fs_request_on(stream: &mut UnixStream, req: GuestRequest) -> Result<FsResult> {
+    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
+    let resp = send_request(stream, &req)?;
+    match resp {
+        GuestResponse::FsResult(r) => Ok(r),
+        GuestResponse::Error { message } => bail!("Guest FS RPC transport error: {}", message),
+        _ => bail!("Unexpected response to FS RPC verb"),
+    }
+}
+
+/// Send a `StartPortForward` request on an already-connected stream.
+///
+/// Used by the Apple Container backend where the vsock connection is
+/// established via `VZVirtioSocketDevice` rather than a UDS path.
+///
+/// Performs the hello prelude internally so
+/// callers don't have to. `StartPortForward` is not a capability-gated
+/// operation, so an empty capability list is requested — the hello
+/// alone satisfies the agent's "no operational request before hello"
+/// rule.
+pub fn start_port_forward_on(stream: &mut UnixStream, guest_port: u16) -> Result<u32> {
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let resp = send_request(stream, &GuestRequest::StartPortForward { guest_port })?;
+    match resp {
+        GuestResponse::PortForwardStarted { vsock_port, .. } => Ok(vsock_port),
+        GuestResponse::Error { message } => {
+            bail!("Guest port-forward error: {}", message);
+        }
+        _ => bail!("Unexpected response to StartPortForward"),
+    }
+}
+
+/// Host-side helper: ask the guest agent to mount an already-attached
+/// virtio-fs volume at `guest_path`. `volume_name` is the virtio-fs tag
+/// the host registered (`uvol{idx}`). Returns the guest's canonical
+/// mount path on success. The guest validates `guest_path` against its
+/// `MountPathPolicy` (allow-roots `/mnt`, `/data`, `/work`); a denied
+/// path surfaces here as an error rather than a silent no-mount.
+pub fn mount_volume_on(
+    stream: &mut UnixStream,
+    volume_name: &str,
+    guest_path: &str,
+    read_only: bool,
+) -> Result<String> {
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let resp = send_request(
+        stream,
+        &GuestRequest::MountVolume {
+            volume_name: volume_name.to_string(),
+            guest_path: guest_path.to_string(),
+            read_only,
+        },
+    )?;
+    match resp {
+        GuestResponse::VolumeMountResult(VolumeMountResult::Mounted { canonical_path }) => {
+            Ok(canonical_path)
+        }
+        GuestResponse::VolumeMountResult(VolumeMountResult::Error { kind, message }) => {
+            bail!("guest refused volume '{volume_name}' -> {guest_path} ({kind:?}): {message}")
+        }
+        GuestResponse::VolumeMountResult(other) => {
+            bail!("unexpected volume-mount result for '{volume_name}': {other:?}")
+        }
+        GuestResponse::Error { message } => {
+            bail!("guest error mounting '{volume_name}': {message}")
+        }
+        _ => bail!("unexpected response to MountVolume for '{volume_name}'"),
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_console_data_ports_cover_the_expected_range() {
+        let ports: Vec<u32> = dev_console_data_ports().collect();
+        assert_eq!(ports.len(), DEV_CONSOLE_DATA_PORT_COUNT as usize);
+        assert_eq!(ports.first().copied(), Some(CONSOLE_PORT_BASE + 1));
+        assert_eq!(
+            ports.last().copied(),
+            Some(CONSOLE_PORT_BASE + DEV_CONSOLE_DATA_PORT_COUNT)
+        );
+        // Disjoint from the agent + control ports (no allowlist overlap).
+        assert!(!ports.contains(&GUEST_AGENT_PORT));
+        assert!(!ports.contains(&CONSOLE_PORT_BASE));
+    }
+
+    #[test]
+    fn adaptive_backoff_grows_then_caps_and_is_never_zero() {
+        // Doubles from the 20ms base.
+        assert_eq!(adaptive_backoff(0), Duration::from_millis(20));
+        assert_eq!(adaptive_backoff(1), Duration::from_millis(40));
+        assert_eq!(adaptive_backoff(2), Duration::from_millis(80));
+        assert_eq!(adaptive_backoff(3), Duration::from_millis(160));
+        assert_eq!(adaptive_backoff(4), Duration::from_millis(320));
+        // Caps at the historical fixed interval and stays there.
+        assert_eq!(adaptive_backoff(5), Duration::from_millis(500));
+        assert_eq!(adaptive_backoff(6), Duration::from_millis(500));
+        // Large attempt counts can't overflow or drop to zero.
+        assert_eq!(adaptive_backoff(64), Duration::from_millis(500));
+        assert_eq!(adaptive_backoff(u32::MAX), Duration::from_millis(500));
+        // Never busy-spins.
+        for a in 0..40 {
+            assert!(adaptive_backoff(a) >= Duration::from_millis(ADAPTIVE_BACKOFF_BASE_MS));
+        }
+    }
+
+    #[test]
+    fn test_guest_request_roundtrip() {
+        let variants: Vec<GuestRequest> = vec![
+            GuestRequest::ProtocolHello {
+                host_protocol_version: PROTOCOL_VERSION,
+                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                host_version: "0.1.0".to_string(),
+                requested_capabilities: vec![GuestCapability::Ping, GuestCapability::RunEntrypoint],
+            },
+            GuestRequest::WorkerStatus,
+            GuestRequest::SleepPrep {
+                drain_timeout_secs: 30,
+            },
+            GuestRequest::Wake,
+            GuestRequest::Ping,
+            GuestRequest::IntegrationStatus,
+            GuestRequest::CheckpointIntegrations {
+                integrations: vec!["whatsapp".to_string(), "telegram".to_string()],
+            },
+            GuestRequest::ProbeStatus,
+            GuestRequest::Exec {
+                command: "uname -a".to_string(),
+                stdin: Some("hello".to_string()),
+                timeout_secs: Some(10),
+            },
+            GuestRequest::PostRestore {
+                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                grant_envelope: None,
+            },
+            GuestRequest::FsDiff,
+            GuestRequest::StartPortForward { guest_port: 8080 },
+            GuestRequest::StartUnixSocketForward {
+                guest_path: "/run/mvm/forward.sock".to_string(),
+                host_vsock_port: BROKER_PORT,
+                socket_mode: 0o600,
+            },
+            GuestRequest::ConsoleOpen {
+                cols: 120,
+                rows: 40,
+                env: Vec::new(),
+                argv: Vec::new(),
+            },
+            GuestRequest::ConsoleClose { session_id: 1 },
+            GuestRequest::ConsoleResize {
+                session_id: 1,
+                cols: 80,
+                rows: 24,
+            },
+            GuestRequest::FsRead {
+                path: "/data/file.txt".to_string(),
+                offset: Some(1024),
+                length: 4096,
+                follow_symlinks: true,
+            },
+            GuestRequest::FsWrite {
+                path: "/tmp/out.bin".to_string(),
+                content: vec![0xde, 0xad, 0xbe, 0xef],
+                mode: 0o644,
+                create_parents: true,
+                follow_symlinks: false,
+            },
+            GuestRequest::FsList {
+                path: "/work".to_string(),
+                follow_symlinks: true,
+            },
+            GuestRequest::FsStat {
+                path: "/etc/hostname".to_string(),
+                follow_symlinks: false,
+            },
+            GuestRequest::FsMkdir {
+                path: "/work/new".to_string(),
+                mode: 0o755,
+                parents: true,
+            },
+            GuestRequest::FsRemove {
+                path: "/tmp/scratch".to_string(),
+                recursive: true,
+                follow_symlinks: false,
+            },
+            GuestRequest::FsMove {
+                from: "/tmp/a".to_string(),
+                to: "/tmp/b".to_string(),
+                follow_symlinks: false,
+            },
+            GuestRequest::ProcStart {
+                argv: vec!["/usr/bin/echo".to_string(), "hello".to_string()],
+                env: {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("LANG".to_string(), "C".to_string());
+                    m
+                },
+                cwd: Some("/tmp".to_string()),
+                stdin: vec![],
+                timeout_secs: Some(30),
+            },
+            GuestRequest::ProcList,
+            GuestRequest::ProcSignal {
+                pid_token: "tok-abc".to_string(),
+                signum: 15,
+            },
+            GuestRequest::ProcSendInput {
+                pid_token: "tok-abc".to_string(),
+                bytes: vec![1, 2, 3],
+            },
+            GuestRequest::ProcWait {
+                pid_token: "tok-abc".to_string(),
+                timeout_secs: Some(60),
+            },
+            GuestRequest::ProcKill {
+                pid_token: "tok-abc".to_string(),
+            },
+            GuestRequest::MountVolume {
+                volume_name: "data-volume".to_string(),
+                guest_path: "/data/foo".to_string(),
+                read_only: true,
+            },
+            GuestRequest::UnmountVolume {
+                guest_path: "/data/foo".to_string(),
+                force: false,
+            },
+            GuestRequest::UpdateIdleTimeout { secs: 600 },
+            GuestRequest::UpdateIdleTimeout { secs: 0 },
+            GuestRequest::RunCode {
+                code: "print('hello')".into(),
+                timeout_secs: Some(30),
+            },
+            GuestRequest::ReadinessStatus,
+        ];
+
+        for req in &variants {
+            let json = serde_json::to_string(req).unwrap();
+            let parsed: GuestRequest = serde_json::from_str(&json).unwrap();
+            // Verify round-trip produces valid JSON
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2);
+        }
+    }
+
+    #[test]
+    fn post_restore_token_roundtrips_and_defaults_to_zero() {
+        use mvm_core::crypto::vmgenid::GENID_BYTES;
+
+        // A non-zero generation token survives the JSON round-trip intact.
+        let req = GuestRequest::PostRestore {
+            token: [9u8; GENID_BYTES],
+            grant_envelope: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        match serde_json::from_str::<GuestRequest>(&json).unwrap() {
+            GuestRequest::PostRestore { token, .. } => assert_eq!(token, [9u8; GENID_BYTES]),
+            other => panic!("expected PostRestore, got {other:?}"),
+        }
+
+        // An omitted token (no-rotation caller / template restore) defaults to
+        // the all-zero "no rotation" token rather than failing to parse.
+        match serde_json::from_str::<GuestRequest>(r#"{"PostRestore":{}}"#).unwrap() {
+            GuestRequest::PostRestore { token, .. } => assert_eq!(token, [0u8; GENID_BYTES]),
+            other => panic!("expected PostRestore, got {other:?}"),
+        }
+
+        // `deny_unknown_fields` is load-bearing: an unexpected field fails closed.
+        assert!(
+            serde_json::from_str::<GuestRequest>(r#"{"PostRestore":{"bogus":1}}"#).is_err(),
+            "unknown field must be rejected"
+        );
+    }
+
+    #[test]
+    fn post_restore_ack_carries_reseeded_flag() {
+        let ack = GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: true,
+        };
+        let json = serde_json::to_string(&ack).unwrap();
+        match serde_json::from_str::<GuestResponse>(&json).unwrap() {
+            GuestResponse::PostRestoreAck { reseeded, .. } => assert!(reseeded),
+            other => panic!("expected PostRestoreAck, got {other:?}"),
+        }
+        // A pre-rotation ack without the field defaults `reseeded` to false.
+        match serde_json::from_str::<GuestResponse>(
+            r#"{"PostRestoreAck":{"success":true,"detail":null}}"#,
+        )
+        .unwrap()
+        {
+            GuestResponse::PostRestoreAck { reseeded, .. } => assert!(!reseeded),
+            other => panic!("expected PostRestoreAck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn primed_status_wire_roundtrips_and_rejects_unknown_fields() {
+        // Request roundtrip.
+        let json = serde_json::to_string(&GuestRequest::PrimedStatus).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<GuestRequest>(&json).unwrap(),
+            GuestRequest::PrimedStatus
+        ));
+        // Response roundtrip.
+        let report = GuestResponse::PrimedStatusReport { primed: true };
+        let json = serde_json::to_string(&report).unwrap();
+        match serde_json::from_str::<GuestResponse>(&json).unwrap() {
+            GuestResponse::PrimedStatusReport { primed } => assert!(primed),
+            other => panic!("expected PrimedStatusReport, got {other:?}"),
+        }
+        // The verb maps to the contracted unary response.
+        assert!(matches!(
+            GuestRequest::PrimedStatus.verb().response_contract().kind,
+            ResponseKind::Unary
+        ));
+    }
+
+    #[test]
+    fn workload_is_primed_reflects_marker_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("primed");
+        assert!(
+            !workload_is_primed_at(&marker),
+            "absent marker → not primed"
+        );
+        std::fs::write(&marker, b"").unwrap();
+        assert!(workload_is_primed_at(&marker), "present marker → primed");
+    }
+
+    #[test]
+    fn interpret_primed_status_maps_report_and_errors() {
+        assert!(
+            interpret_primed_status(GuestResponse::PrimedStatusReport { primed: true }).unwrap()
+        );
+        assert!(
+            !interpret_primed_status(GuestResponse::PrimedStatusReport { primed: false }).unwrap()
+        );
+        assert!(
+            interpret_primed_status(GuestResponse::Error {
+                message: "x".into()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn interpret_post_restore_maps_ack_reseeded_and_errors() {
+        // Positive ack with rotation.
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: true,
+        })
+        .unwrap();
+        assert!(r.acknowledged && r.reseeded);
+        // Acknowledged but the guest did not rotate (e.g. a zero/no-op token).
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: false,
+        })
+        .unwrap();
+        assert!(r.acknowledged && !r.reseeded);
+        // A guest-reported failure ack is surfaced as acknowledged=false.
+        let r = interpret_post_restore(GuestResponse::PostRestoreAck {
+            success: false,
+            detail: Some("kill failed".into()),
+            reseeded: false,
+        })
+        .unwrap();
+        assert!(!r.acknowledged && !r.reseeded);
+        // A transport-level error / off-contract response is an Err.
+        assert!(
+            interpret_post_restore(GuestResponse::Error {
+                message: "boom".into()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_guest_response_roundtrip() {
+        use crate::integrations::{IntegrationStateReport, IntegrationStatus};
+
+        let variants: Vec<GuestResponse> = vec![
+            GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: PROTOCOL_VERSION,
+                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                agent_version: "0.1.0".to_string(),
+                capabilities: vec![GuestCapability::Ping],
+            },
+            GuestResponse::ProtocolMismatch {
+                host_protocol_version: 0,
+                agent_protocol_version: PROTOCOL_VERSION,
+                required_action: ProtocolUpgradeAction::UpgradeHost,
+                message: "host too old".to_string(),
+            },
+            GuestResponse::WorkerStatus {
+                status: "idle".to_string(),
+                last_busy_at: Some("2025-01-01T00:00:00Z".to_string()),
+            },
+            GuestResponse::SleepPrepAck {
+                success: true,
+                detail: Some("flushed".to_string()),
+            },
+            GuestResponse::WakeAck { success: true },
+            GuestResponse::Pong,
+            GuestResponse::Error {
+                message: "oops".to_string(),
+            },
+            GuestResponse::UnsupportedInProfile {
+                profile: AgentProfile::SealedProd,
+                verb: "Exec".to_string(),
+            },
+            GuestResponse::ReadinessStatusReport(ReadinessReport {
+                control_plane: ComponentState::Ready,
+                entrypoint: ComponentState::Starting,
+                warm_pool: ComponentState::Disabled,
+                integrations: ComponentState::Disabled,
+                probes: ComponentState::Disabled,
+                volumes: ComponentState::Disabled,
+                profile: AgentProfile::SealedProd,
+                boot_millis: BootTimingReport {
+                    agent_started_ms: Some(5),
+                    vsock_bound_ms: Some(5),
+                    first_accept_ms: Some(8),
+                    entrypoint_ready_ms: None,
+                    warm_pool_ready_ms: None,
+                    integrations_ready_ms: None,
+                    probes_ready_ms: None,
+                },
+            }),
+            GuestResponse::IntegrationStatusReport {
+                integrations: vec![IntegrationStateReport {
+                    name: "whatsapp".to_string(),
+                    status: IntegrationStatus::Active,
+                    last_checkpoint_at: Some("2025-06-01T12:00:00Z".to_string()),
+                    state_size_bytes: 8192,
+                    health: None,
+                }],
+            },
+            GuestResponse::CheckpointResult {
+                success: true,
+                failed: vec![],
+                detail: Some("all checkpointed".to_string()),
+            },
+            GuestResponse::ProbeStatusReport {
+                probes: vec![crate::probes::ProbeResult {
+                    name: "disk-usage".to_string(),
+                    healthy: true,
+                    detail: "ok".to_string(),
+                    output: Some(serde_json::json!({"usage_pct": 42})),
+                    checked_at: "2026-02-26T12:00:00Z".to_string(),
+                }],
+            },
+            GuestResponse::PostRestoreAck {
+                success: true,
+                detail: Some("post-restore signal sent to init".to_string()),
+                reseeded: false,
+            },
+            GuestResponse::FsDiffResult {
+                changes: vec![
+                    FsChange {
+                        path: "/app/output.txt".to_string(),
+                        kind: FsChangeKind::Created,
+                        size: 1234,
+                    },
+                    FsChange {
+                        path: "/etc/hosts".to_string(),
+                        kind: FsChangeKind::Modified,
+                        size: 89,
+                    },
+                    FsChange {
+                        path: "/tmp/scratch".to_string(),
+                        kind: FsChangeKind::Deleted,
+                        size: 0,
+                    },
+                ],
+            },
+            GuestResponse::PortForwardStarted {
+                guest_port: 8080,
+                vsock_port: 18080,
+            },
+            GuestResponse::ConsoleOpened {
+                session_id: 1,
+                data_port: 20001,
+            },
+            GuestResponse::ConsoleExited {
+                session_id: 1,
+                exit_code: 0,
+            },
+            GuestResponse::ConsoleResized { session_id: 1 },
+            GuestResponse::FsResult(FsResult::Read {
+                content: vec![1, 2, 3],
+                total_size: 3,
+            }),
+            GuestResponse::FsResult(FsResult::Write { bytes_written: 4 }),
+            GuestResponse::FsResult(FsResult::List {
+                entries: vec![FsEntry {
+                    name: "data.csv".to_string(),
+                    kind: FsEntryKind::File,
+                    size: 1024,
+                }],
+                truncated: false,
+            }),
+            GuestResponse::FsResult(FsResult::Stat(FsStat {
+                canonical_path: "/data/data.csv".to_string(),
+                kind: FsEntryKind::File,
+                size: 1024,
+                mode: 0o100644,
+                mtime: Some("2026-05-05T10:00:00Z".to_string()),
+            })),
+            GuestResponse::FsResult(FsResult::Mkdir),
+            GuestResponse::FsResult(FsResult::Remove { entries_removed: 7 }),
+            GuestResponse::FsResult(FsResult::Move),
+            GuestResponse::FsResult(FsResult::Error {
+                kind: FsErrorKind::PolicyDenied,
+                message: "path under /etc/mvm/* is denied".to_string(),
+            }),
+            GuestResponse::ProcResult(ProcResult::Started {
+                pid_token: "tok-1".to_string(),
+            }),
+            GuestResponse::ProcResult(ProcResult::List {
+                processes: vec![ProcInfo {
+                    pid_token: "tok-1".to_string(),
+                    started_at: "2026-05-05T10:00:00Z".to_string(),
+                    argv0: "/usr/bin/sleep".to_string(),
+                    state: ProcState::Running,
+                }],
+            }),
+            GuestResponse::ProcResult(ProcResult::Signaled),
+            GuestResponse::ProcResult(ProcResult::InputAccepted { bytes_accepted: 3 }),
+            GuestResponse::ProcResult(ProcResult::Killed),
+            GuestResponse::ProcResult(ProcResult::Error {
+                kind: ProcErrorKind::UnknownToken,
+                message: "no such pid_token".to_string(),
+            }),
+            GuestResponse::ProcWaitEvent(ProcWaitEvent::Stdout { chunk: vec![1, 2] }),
+            GuestResponse::ProcWaitEvent(ProcWaitEvent::Stderr { chunk: vec![3, 4] }),
+            GuestResponse::ProcWaitEvent(ProcWaitEvent::Exit { code: 0 }),
+            GuestResponse::ProcWaitEvent(ProcWaitEvent::Killed { signal: 15 }),
+            GuestResponse::ProcWaitEvent(ProcWaitEvent::TimedOut),
+            GuestResponse::ProcWaitEvent(ProcWaitEvent::Error {
+                kind: ProcErrorKind::UnsupportedInProduction,
+                message: "stripped from prod".to_string(),
+            }),
+            GuestResponse::VolumeMountResult(VolumeMountResult::Mounted {
+                canonical_path: "/data/foo".to_string(),
+            }),
+            GuestResponse::VolumeMountResult(VolumeMountResult::Unmounted),
+            GuestResponse::VolumeMountResult(VolumeMountResult::Error {
+                kind: VolumeMountErrorKind::PolicyDenied,
+                message: "/etc/x is on the deny list".to_string(),
+            }),
+            GuestResponse::VolumeMountResult(VolumeMountResult::Error {
+                kind: VolumeMountErrorKind::Busy,
+                message: "target busy; pass force=true".to_string(),
+            }),
+            GuestResponse::UpdateIdleTimeoutAck {
+                previous_secs: 300,
+                applied_secs: 600,
+            },
+            GuestResponse::UpdateIdleTimeoutAck {
+                previous_secs: 0,
+                applied_secs: 0,
+            },
+        ];
+
+        for resp in &variants {
+            let json = serde_json::to_string(resp).unwrap();
+            let parsed: GuestResponse = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2);
+        }
+    }
+
+    #[test]
+    fn test_protocol_hello_response_ack_filters_capabilities() {
+        let resp = protocol_hello_response(
+            PROTOCOL_VERSION,
+            MIN_SUPPORTED_PROTOCOL_VERSION,
+            "host-test",
+            &[GuestCapability::Ping, GuestCapability::RunEntrypoint],
+        );
+
+        match resp {
+            GuestResponse::ProtocolHelloAck {
+                agent_protocol_version,
+                min_supported_version,
+                capabilities,
+                ..
+            } => {
+                assert_eq!(agent_protocol_version, PROTOCOL_VERSION);
+                assert_eq!(min_supported_version, MIN_SUPPORTED_PROTOCOL_VERSION);
+                assert_eq!(
+                    capabilities,
+                    vec![GuestCapability::Ping, GuestCapability::RunEntrypoint]
+                );
+            }
+            other => panic!("expected ProtocolHelloAck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_supported_capabilities_include_unix_socket_forward() {
+        assert!(supported_capabilities().contains(&GuestCapability::UnixSocketForward));
+    }
+
+    #[test]
+    fn test_protocol_hello_response_upgrade_host_when_host_too_old() {
+        let resp = protocol_hello_response(0, 0, "host-test", &[GuestCapability::Ping]);
+
+        match resp {
+            GuestResponse::ProtocolMismatch {
+                host_protocol_version,
+                agent_protocol_version,
+                required_action,
+                message,
+            } => {
+                assert_eq!(host_protocol_version, 0);
+                assert_eq!(agent_protocol_version, PROTOCOL_VERSION);
+                assert_eq!(required_action, ProtocolUpgradeAction::UpgradeHost);
+                assert!(message.contains("protocol mismatch"));
+            }
+            other => panic!("expected ProtocolMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_protocol_hello_response_rebuild_guest_when_agent_too_old() {
+        let resp = protocol_hello_response(
+            PROTOCOL_VERSION + 10,
+            PROTOCOL_VERSION + 10,
+            "host-test",
+            &[GuestCapability::Ping],
+        );
+
+        match resp {
+            GuestResponse::ProtocolMismatch {
+                host_protocol_version,
+                agent_protocol_version,
+                required_action,
+                ..
+            } => {
+                assert_eq!(host_protocol_version, PROTOCOL_VERSION + 10);
+                assert_eq!(agent_protocol_version, PROTOCOL_VERSION);
+                assert_eq!(required_action, ProtocolUpgradeAction::RebuildGuest);
+            }
+            other => panic!("expected ProtocolMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_protocol_unknown_field_rejected() {
+        let req_json = r#"{"ProtocolHello":{"host_protocol_version":1,"min_supported_version":1,"host_version":"0.1.0","requested_capabilities":["ping"],"extra":true}}"#;
+        let req: Result<GuestRequest, _> = serde_json::from_str(req_json);
+        assert!(req.is_err(), "ProtocolHello extra field must reject");
+
+        let resp_json = r#"{"ProtocolHelloAck":{"agent_protocol_version":1,"min_supported_version":1,"agent_version":"0.1.0","capabilities":["ping"],"extra":true}}"#;
+        let resp: Result<GuestResponse, _> = serde_json::from_str(resp_json);
+        assert!(resp.is_err(), "ProtocolHelloAck extra field must reject");
+    }
+
+    #[test]
+    fn test_negotiate_protocol_round_trip_on_stream() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            match req {
+                GuestRequest::ProtocolHello {
+                    host_protocol_version,
+                    min_supported_version,
+                    host_version,
+                    requested_capabilities,
+                } => {
+                    let resp = protocol_hello_response(
+                        host_protocol_version,
+                        min_supported_version,
+                        &host_version,
+                        &requested_capabilities,
+                    );
+                    write_frame(&mut guest, &resp).unwrap();
+                }
+                other => panic!("expected ProtocolHello, got {other:?}"),
+            }
+        });
+
+        let negotiated = negotiate_protocol(
+            &mut host,
+            vec![GuestCapability::Ping, GuestCapability::FilesystemRpc],
+        )
+        .unwrap();
+
+        guest_thread.join().unwrap();
+        assert_eq!(negotiated.agent_protocol_version, PROTOCOL_VERSION);
+        assert_eq!(
+            negotiated.capabilities,
+            vec![GuestCapability::Ping, GuestCapability::FilesystemRpc]
+        );
+    }
+
+    #[test]
+    fn test_negotiate_protocol_mismatch_is_error() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ProtocolMismatch {
+                    host_protocol_version: PROTOCOL_VERSION + 1,
+                    agent_protocol_version: PROTOCOL_VERSION,
+                    required_action: ProtocolUpgradeAction::RebuildGuest,
+                    message: "rebuild guest image".to_string(),
+                },
+            )
+            .unwrap();
+        });
+
+        let err = negotiate_protocol(&mut host, vec![GuestCapability::Ping]).unwrap_err();
+        guest_thread.join().unwrap();
+        assert!(err.to_string().contains("protocol mismatch"));
+        assert!(err.to_string().contains("rebuild guest image"));
+    }
+
+    #[test]
+    fn test_require_capabilities_accepts_present_capability() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            match req {
+                GuestRequest::ProtocolHello {
+                    host_protocol_version,
+                    min_supported_version,
+                    host_version,
+                    requested_capabilities,
+                } => {
+                    let resp = protocol_hello_response(
+                        host_protocol_version,
+                        min_supported_version,
+                        &host_version,
+                        &requested_capabilities,
+                    );
+                    write_frame(&mut guest, &resp).unwrap();
+                }
+                other => panic!("expected ProtocolHello, got {other:?}"),
+            }
+        });
+
+        let negotiated =
+            require_capabilities(&mut host, &[GuestCapability::FilesystemRpc]).unwrap();
+
+        guest_thread.join().unwrap();
+        assert_eq!(
+            negotiated.capabilities,
+            vec![GuestCapability::FilesystemRpc]
+        );
+    }
+
+    #[test]
+    fn test_require_capabilities_rejects_missing_capability() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: PROTOCOL_VERSION,
+                    min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "0.1.0".to_string(),
+                    capabilities: vec![GuestCapability::Ping],
+                },
+            )
+            .unwrap();
+        });
+
+        let err = require_capabilities(&mut host, &[GuestCapability::FilesystemRpc]).unwrap_err();
+
+        guest_thread.join().unwrap();
+        assert!(err.to_string().contains("missing required capabilities"));
+        assert!(err.to_string().contains("FilesystemRpc"));
+    }
+
+    #[test]
+    fn test_require_capabilities_surfaces_protocol_mismatch() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ProtocolMismatch {
+                    host_protocol_version: PROTOCOL_VERSION + 1,
+                    agent_protocol_version: PROTOCOL_VERSION,
+                    required_action: ProtocolUpgradeAction::RebuildGuest,
+                    message: "guest image is stale".to_string(),
+                },
+            )
+            .unwrap();
+        });
+
+        let err = require_capabilities(&mut host, &[GuestCapability::FilesystemRpc]).unwrap_err();
+
+        guest_thread.join().unwrap();
+        assert!(err.to_string().contains("protocol mismatch"));
+        assert!(err.to_string().contains("guest image is stale"));
+    }
+
+    /// Regression: every new FS variant rejects unknown
+    /// fields. Repeats the smuggling discipline from
+    /// `test_guest_request_rejects_unknown_field_inside_variant` for
+    /// each verb so a reviewer adding an FS field without the
+    /// `#[serde(...)]` attributes can't ship a regression.
+    #[test]
+    fn test_fs_request_variants_reject_unknown_fields() {
+        let cases = [
+            r#"{"FsRead":{"path":"/x","length":1,"follow_symlinks":true,"smuggled":1}}"#,
+            r#"{"FsWrite":{"path":"/x","content":[],"mode":420,"create_parents":false,"follow_symlinks":false,"smuggled":1}}"#,
+            r#"{"FsList":{"path":"/x","follow_symlinks":true,"smuggled":1}}"#,
+            r#"{"FsStat":{"path":"/x","follow_symlinks":true,"smuggled":1}}"#,
+            r#"{"FsMkdir":{"path":"/x","mode":493,"parents":true,"smuggled":1}}"#,
+            r#"{"FsRemove":{"path":"/x","recursive":false,"follow_symlinks":false,"smuggled":1}}"#,
+            r#"{"FsMove":{"from":"/x","to":"/y","follow_symlinks":false,"smuggled":1}}"#,
+        ];
+        for json in cases {
+            let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field"),
+                "expected unknown-field rejection for {json}, got: {err}"
+            );
+        }
+    }
+
+    /// FS sub-types that don't live inside `GuestRequest` directly
+    /// (`FsResult`, `FsEntry`, `FsStat`, `FsErrorKind`, `FsEntryKind`)
+    /// also need the deny-unknown-fields discipline because they
+    /// surface through `GuestResponse::FsResult(...)` on the host's
+    /// deserializer. Cover each in turn.
+    #[test]
+    fn test_fs_response_subtypes_reject_unknown_fields() {
+        let cases = [
+            // FsResult variant smuggling.
+            r#"{"FsResult":{"Read":{"content":[],"total_size":0,"smuggled":1}}}"#,
+            r#"{"FsResult":{"Write":{"bytes_written":0,"smuggled":1}}}"#,
+            r#"{"FsResult":{"List":{"entries":[],"truncated":false,"smuggled":1}}}"#,
+            r#"{"FsResult":{"Remove":{"entries_removed":0,"smuggled":1}}}"#,
+            r#"{"FsResult":{"Error":{"kind":"NotFound","message":"x","smuggled":1}}}"#,
+            // FsStat field smuggling (transports inside FsResult::Stat).
+            r#"{"FsResult":{"Stat":{"canonical_path":"/x","kind":"file","size":0,"mode":0,"mtime":null,"smuggled":1}}}"#,
+            // FsEntry field smuggling (transports inside FsResult::List).
+            r#"{"FsResult":{"List":{"entries":[{"name":"x","kind":"file","size":0,"smuggled":1}],"truncated":false}}}"#,
+        ];
+        for json in cases {
+            let err = serde_json::from_str::<GuestResponse>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field"),
+                "expected unknown-field rejection for {json}, got: {err}"
+            );
+        }
+    }
+
+    /// Regression: every new Proc variant rejects unknown
+    /// fields. Mirrors `test_fs_request_variants_reject_unknown_fields`
+    /// for the dev-only process surface.
+    #[test]
+    fn test_proc_request_variants_reject_unknown_fields() {
+        let cases = [
+            r#"{"ProcStart":{"argv":["/x"],"env":{},"cwd":null,"stdin":[],"timeout_secs":null,"smuggled":1}}"#,
+            r#"{"ProcSignal":{"pid_token":"t","signum":15,"smuggled":1}}"#,
+            r#"{"ProcSendInput":{"pid_token":"t","bytes":[],"smuggled":1}}"#,
+            r#"{"ProcWait":{"pid_token":"t","timeout_secs":null,"smuggled":1}}"#,
+            r#"{"ProcKill":{"pid_token":"t","smuggled":1}}"#,
+        ];
+        for json in cases {
+            let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field"),
+                "expected unknown-field rejection for {json}, got: {err}"
+            );
+        }
+    }
+
+    /// `ProcList` is a unit variant in the wire enum. JSON encoding
+    /// is just the variant name as a string. Verify roundtrip.
+    #[test]
+    fn test_proc_list_unit_variant_roundtrip() {
+        let req = GuestRequest::ProcList;
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#""ProcList""#);
+        let parsed: GuestRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, GuestRequest::ProcList));
+    }
+
+    /// FS-style: sub-types reachable through `ProcResult` and
+    /// `ProcWaitEvent` also need deny-unknown-fields, since they
+    /// land in `GuestResponse` on the *host's* deserializer.
+    #[test]
+    fn test_proc_response_subtypes_reject_unknown_fields() {
+        let cases = [
+            r#"{"ProcResult":{"Started":{"pid_token":"t","smuggled":1}}}"#,
+            r#"{"ProcResult":{"List":{"processes":[{"pid_token":"t","started_at":"now","argv0":"/x","state":"running","smuggled":1}]}}}"#,
+            r#"{"ProcResult":{"InputAccepted":{"bytes_accepted":0,"smuggled":1}}}"#,
+            r#"{"ProcResult":{"Error":{"kind":"UnknownToken","message":"x","smuggled":1}}}"#,
+            r#"{"ProcWaitEvent":{"Stdout":{"chunk":[],"smuggled":1}}}"#,
+            r#"{"ProcWaitEvent":{"Exit":{"code":0,"smuggled":1}}}"#,
+            r#"{"ProcWaitEvent":{"Killed":{"signal":15,"smuggled":1}}}"#,
+            r#"{"ProcWaitEvent":{"Error":{"kind":"Other","message":"x","smuggled":1}}}"#,
+        ];
+        for json in cases {
+            let err = serde_json::from_str::<GuestResponse>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field"),
+                "expected unknown-field rejection for {json}, got: {err}"
+            );
+        }
+    }
+
+    /// `ProcWaitEvent::is_terminal` is load-bearing for the host
+    /// streaming loop. Make sure every terminal variant says
+    /// terminal and no non-terminal one does.
+    #[test]
+    fn test_proc_wait_event_terminal_classification() {
+        assert!(!ProcWaitEvent::Stdout { chunk: vec![] }.is_terminal());
+        assert!(!ProcWaitEvent::Stderr { chunk: vec![] }.is_terminal());
+        assert!(ProcWaitEvent::Exit { code: 0 }.is_terminal());
+        assert!(ProcWaitEvent::Killed { signal: 9 }.is_terminal());
+        assert!(ProcWaitEvent::TimedOut.is_terminal());
+        assert!(
+            ProcWaitEvent::Error {
+                kind: ProcErrorKind::Other,
+                message: String::new(),
+            }
+            .is_terminal()
+        );
+        // `Backpressure` is non-terminal.
+        // The wait loop continues after the agent emits it.
+        assert!(
+            !ProcWaitEvent::Backpressure {
+                reason: mvm_core::domain::instance::BackpressureReason::OutputConsumerSlow,
+                detail: "captured output 12345 bytes ≥ 12288 byte high-water (cap 16384 bytes)"
+                    .to_string(),
+            }
+            .is_terminal()
+        );
+    }
+
+    /// The `Backpressure` variant
+    /// roundtrips through serde with its full nested shape and
+    /// `BackpressureReason` snake-case discriminant intact, and
+    /// rejects unknown fields like every other host↔guest type.
+    #[test]
+    fn test_proc_wait_event_backpressure_serde_roundtrip() {
+        let ev = ProcWaitEvent::Backpressure {
+            reason: mvm_core::domain::instance::BackpressureReason::OutputConsumerSlow,
+            detail: "captured output 12345 bytes ≥ 12288 byte high-water (cap 16384 bytes)"
+                .to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: ProcWaitEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ev);
+        // The reason discriminant ships snake_case on the wire so
+        // CLI / Studio / MCP renderers can pattern-match on string
+        // form without taking a typed dependency on mvm-core.
+        assert!(
+            json.contains("\"output_consumer_slow\""),
+            "wire payload missing snake_case reason: {json}"
+        );
+
+        let smuggled =
+            r#"{"Backpressure":{"reason":"output_consumer_slow","detail":"x","extra":1}}"#;
+        assert!(
+            serde_json::from_str::<ProcWaitEvent>(smuggled).is_err(),
+            "Backpressure must reject unknown fields"
+        );
+    }
+
+    /// Regression: every new Volume variant rejects unknown
+    /// fields. Mirrors the FS / Proc deny-unknown-fields tests for
+    /// the virtio-fs volume surface.
+    #[test]
+    fn test_volume_request_variants_reject_unknown_fields() {
+        let cases = [
+            r#"{"MountVolume":{"volume_name":"v","guest_path":"/data/x","read_only":true,"smuggled":1}}"#,
+            r#"{"UnmountVolume":{"guest_path":"/data/x","force":false,"smuggled":1}}"#,
+        ];
+        for json in cases {
+            let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field"),
+                "expected unknown-field rejection for {json}, got: {err}"
+            );
+        }
+    }
+
+    /// `VolumeMountResult` sub-variants reachable through
+    /// `GuestResponse` also need deny-unknown-fields, since they land
+    /// on the host's deserializer.
+    #[test]
+    fn test_volume_response_subtypes_reject_unknown_fields() {
+        let cases = [
+            r#"{"VolumeMountResult":{"Mounted":{"canonical_path":"/data/x","smuggled":1}}}"#,
+            r#"{"VolumeMountResult":{"Error":{"kind":"PolicyDenied","message":"x","smuggled":1}}}"#,
+        ];
+        for json in cases {
+            let err = serde_json::from_str::<GuestResponse>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown field"),
+                "expected unknown-field rejection for {json}, got: {err}"
+            );
+        }
+    }
+
+    /// `VolumeMountResult::Unmounted` is a unit variant; verify the
+    /// wire shape is just the variant name.
+    #[test]
+    fn test_volume_unmounted_unit_variant_roundtrip() {
+        let resp = GuestResponse::VolumeMountResult(VolumeMountResult::Unmounted);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""VolumeMountResult":"Unmounted""#));
+        let parsed: GuestResponse = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed,
+            GuestResponse::VolumeMountResult(VolumeMountResult::Unmounted)
+        ));
+    }
+
+    /// Every committed fuzz seed must deserialize cleanly under the
+    /// production `GuestRequest` schema. Without this guard, a typo
+    /// in a seed (or a future field rename) could silently exclude
+    /// the seed from the fuzz coverage and the corpus would shrink
+    /// without anyone noticing.
+    #[test]
+    fn test_fuzz_corpus_seeds_parse() {
+        let seeds = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fuzz/corpus/fuzz_guest_request");
+        if !seeds.is_dir() {
+            // The fuzz crate is excluded from some sparse checkouts;
+            // skip silently rather than failing in those.
+            return;
+        }
+        let mut count = 0usize;
+        for entry in std::fs::read_dir(&seeds).expect("read corpus dir") {
+            let entry = entry.expect("read corpus entry");
+            if !entry.file_type().expect("file type").is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if file_name.starts_with('.') {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("read seed");
+            // Tolerate an optional trailing newline editors add.
+            let trimmed = bytes.trim_ascii_end().to_vec();
+            serde_json::from_slice::<GuestRequest>(&trimmed)
+                .unwrap_or_else(|e| panic!("seed {} failed to parse: {e}", path.display()));
+            count += 1;
+        }
+        // 5 baseline (ping, port-fwd, run-entrypoint, sleep-prep,
+        // worker-status) + 7 fs-* (A1) + 6 proc-* (A2) + 2 share-*
+        // (D) = 20.
+        assert!(count >= 20, "expected ≥20 corpus seeds, got {count}");
+    }
+
+    /// `follow_symlinks` defaults to `true` for read-shaped verbs and
+    /// `false` for mutation verbs. The asymmetric default is
+    /// load-bearing for TOCTOU resistance — if a future reviewer
+    /// flips a default, this test catches it.
+    #[test]
+    fn test_fs_follow_symlinks_defaults() {
+        let read =
+            serde_json::from_str::<GuestRequest>(r#"{"FsRead":{"path":"/x","length":1}}"#).unwrap();
+        match read {
+            GuestRequest::FsRead {
+                follow_symlinks, ..
+            } => assert!(follow_symlinks, "FsRead should follow symlinks by default"),
+            _ => panic!("expected FsRead"),
+        }
+
+        let write = serde_json::from_str::<GuestRequest>(
+            r#"{"FsWrite":{"path":"/x","content":[],"mode":420}}"#,
+        )
+        .unwrap();
+        match write {
+            GuestRequest::FsWrite {
+                follow_symlinks,
+                create_parents,
+                ..
+            } => {
+                assert!(
+                    !follow_symlinks,
+                    "FsWrite must NOT follow symlinks by default"
+                );
+                assert!(!create_parents, "create_parents defaults to false");
+            }
+            _ => panic!("expected FsWrite"),
+        }
+
+        let remove = serde_json::from_str::<GuestRequest>(r#"{"FsRemove":{"path":"/x"}}"#).unwrap();
+        match remove {
+            GuestRequest::FsRemove {
+                follow_symlinks,
+                recursive,
+                ..
+            } => {
+                assert!(
+                    !follow_symlinks,
+                    "FsRemove must NOT follow symlinks by default"
+                );
+                assert!(!recursive, "recursive defaults to false");
+            }
+            _ => panic!("expected FsRemove"),
+        }
+    }
+
+    /// Regression: unknown fields in a `GuestRequest` JSON frame must be
+    /// rejected outright. Without `deny_unknown_fields`, an attacker could
+    /// smuggle extra keys past serde to (a) trip up downstream consumers that
+    /// re-parse the same blob, (b) probe for upcoming variants, or (c) create
+    /// drift between versions of the agent and host.
+    #[test]
+    fn test_guest_request_rejects_unknown_field_inside_variant() {
+        let json = r#"{"SleepPrep":{"drain_timeout_secs":30,"smuggled":1}}"#;
+        let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field") && err.to_string().contains("smuggled"),
+            "expected 'unknown field `smuggled`', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_guest_request_rejects_unknown_top_level_variant() {
+        let json = r#"{"NotARealVariant":{}}"#;
+        let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "expected 'unknown variant', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_guest_response_rejects_unknown_field_inside_variant() {
+        let json = r#"{"WorkerStatus":{"status":"idle","last_busy_at":null,"x":1}}"#;
+        let err = serde_json::from_str::<GuestResponse>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_fs_change_rejects_unknown_field() {
+        let json = r#"{"path":"/x","kind":"created","size":0,"hidden":42}"#;
+        let err = serde_json::from_str::<FsChange>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    // -------------------------------------------------------------------
+    // RunEntrypoint wire protocol
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_run_entrypoint_request_roundtrip() {
+        let req = GuestRequest::RunEntrypoint {
+            stdin: vec![1, 2, 3, 4, 5],
+            timeout_secs: 30,
+            env: vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())],
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            GuestRequest::RunEntrypoint {
+                stdin,
+                timeout_secs,
+                env,
+            } => {
+                assert_eq!(stdin, vec![1, 2, 3, 4, 5]);
+                assert_eq!(timeout_secs, 30);
+                assert_eq!(
+                    env,
+                    vec![("HTTP_PROXY".into(), "http://127.0.0.1:18080".into())]
+                );
+            }
+            other => panic!("expected RunEntrypoint, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // RunDetached wire protocol
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_run_detached_request_roundtrip() {
+        let req = GuestRequest::RunDetached {
+            argv: vec!["/bin/sh".into(), "-lc".into(), "true".into()],
+            env: vec![("FOO".into(), "bar".into())],
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            GuestRequest::RunDetached { argv, env } => {
+                assert_eq!(argv, vec!["/bin/sh", "-lc", "true"]);
+                assert_eq!(env, vec![("FOO".into(), "bar".into())]);
+            }
+            other => panic!("expected RunDetached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_detached_request_env_defaults_empty_when_omitted() {
+        // `env` is `#[serde(default)]`: a frame without it decodes to an
+        // empty env, matching the fuzz-seed shape.
+        let json = r#"{"RunDetached":{"argv":["/bin/sh","-lc","true"]}}"#;
+        let decoded: GuestRequest = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            GuestRequest::RunDetached { argv, env } => {
+                assert_eq!(argv, vec!["/bin/sh", "-lc", "true"]);
+                assert!(env.is_empty());
+            }
+            other => panic!("expected RunDetached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_detached_request_rejects_unknown_field() {
+        let json = r#"{"RunDetached":{"argv":["/bin/true"],"env":[],"oops":1}}"#;
+        let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_detached_started_response_roundtrip() {
+        let resp = GuestResponse::DetachedStarted { pid: 4242 };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let decoded: GuestResponse = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            GuestResponse::DetachedStarted { pid } => assert_eq!(pid, 4242),
+            other => panic!("expected DetachedStarted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_detached_classifies_dev_only() {
+        let req = GuestRequest::RunDetached {
+            argv: vec!["/bin/true".into()],
+            env: vec![],
+        };
+        assert!(matches!(req.class(), RequestClass::DevOnly));
+        assert_eq!(req.kind_name(), "run-detached");
+        assert!(!req.allowed_in(AgentProfile::SealedProd));
+        assert!(req.allowed_in(AgentProfile::Dev));
+    }
+
+    #[test]
+    fn test_send_run_detached_returns_pid() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            // Hello prelude.
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            match req {
+                GuestRequest::ProtocolHello {
+                    host_protocol_version,
+                    min_supported_version,
+                    host_version,
+                    requested_capabilities,
+                } => {
+                    let resp = protocol_hello_response(
+                        host_protocol_version,
+                        min_supported_version,
+                        &host_version,
+                        &requested_capabilities,
+                    );
+                    write_frame(&mut guest, &resp).unwrap();
+                }
+                other => panic!("expected ProtocolHello, got {other:?}"),
+            }
+            // The RunDetached frame, then ack with a pid.
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            match req {
+                GuestRequest::RunDetached { argv, env } => {
+                    assert_eq!(argv, vec!["/bin/echo", "hi"]);
+                    assert_eq!(env, vec![("K".to_string(), "V".to_string())]);
+                    write_frame(&mut guest, &GuestResponse::DetachedStarted { pid: 777 }).unwrap();
+                }
+                other => panic!("expected RunDetached, got {other:?}"),
+            }
+        });
+
+        let pid = send_run_detached(
+            &mut host,
+            vec!["/bin/echo".into(), "hi".into()],
+            vec![("K".into(), "V".into())],
+        )
+        .expect("send_run_detached should return the pid");
+        guest_thread.join().unwrap();
+        assert_eq!(pid, 777);
+    }
+
+    #[test]
+    fn test_send_run_detached_maps_agent_error() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let _hello: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: PROTOCOL_VERSION,
+                    min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "0.1.0".to_string(),
+                    capabilities: vec![],
+                },
+            )
+            .unwrap();
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::Error {
+                    message: "spawn failed".to_string(),
+                },
+            )
+            .unwrap();
+        });
+
+        let err = send_run_detached(&mut host, vec!["/bin/true".into()], vec![])
+            .expect_err("agent Error must surface as a helper error");
+        guest_thread.join().unwrap();
+        assert!(err.to_string().contains("spawn failed"), "err: {err}");
+    }
+
+    #[test]
+    fn test_run_entrypoint_request_env_defaults_empty_when_omitted() {
+        // `env` is `#[serde(default)]`: a wire frame without it decodes to an
+        // empty env (a plain call), so callers that never inject stay valid.
+        let json = r#"{"RunEntrypoint":{"stdin":[1,2,3],"timeout_secs":10}}"#;
+        let decoded: GuestRequest = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            GuestRequest::RunEntrypoint { env, .. } => assert!(env.is_empty()),
+            other => panic!("expected RunEntrypoint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_entrypoint_request_empty_stdin_roundtrip() {
+        let req = GuestRequest::RunEntrypoint {
+            stdin: vec![],
+            timeout_secs: 5,
+            env: vec![],
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(
+            decoded,
+            GuestRequest::RunEntrypoint {
+                stdin,
+                timeout_secs: 5,
+               ..
+            } if stdin.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_run_entrypoint_request_rejects_unknown_field() {
+        // Unknown fields inside the request must not slip past the
+        // deserializer.
+        let json = r#"{"RunEntrypoint":{"stdin":[1,2,3],"timeout_secs":10,"smuggled":"x"}}"#;
+        let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field") && err.to_string().contains("smuggled"),
+            "expected 'unknown field `smuggled`', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_entrypoint_event_stdout_roundtrip() {
+        let evt = EntrypointEvent::Stdout {
+            chunk: b"hello".to_vec(),
+        };
+        let json = serde_json::to_string(&evt).expect("serialize");
+        let decoded: EntrypointEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, evt);
+        assert!(!decoded.is_terminal());
+    }
+
+    #[test]
+    fn test_entrypoint_event_stderr_roundtrip() {
+        let evt = EntrypointEvent::Stderr {
+            chunk: b"warn".to_vec(),
+        };
+        let json = serde_json::to_string(&evt).expect("serialize");
+        let decoded: EntrypointEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, evt);
+        assert!(!decoded.is_terminal());
+    }
+
+    #[test]
+    fn test_entrypoint_event_control_roundtrip() {
+        // Control events are non-terminal — the host streams them
+        // through alongside Stdout/Stderr until a terminal Exit/Error
+        // arrives. Wire-shape lock-in.
+        let evt = EntrypointEvent::Control {
+            header_json: r#"{"kind":"envelope","envelope_kind":"ValueError","error_id":"abc","message":"negative input"}"#.into(),
+            payload: b"".to_vec(),
+        };
+        let json = serde_json::to_string(&evt).expect("serialize");
+        let decoded: EntrypointEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, evt);
+        assert!(!decoded.is_terminal());
+    }
+
+    #[test]
+    fn test_entrypoint_event_control_with_payload_roundtrip() {
+        // Log-style records carry raw bytes alongside a header.
+        let evt = EntrypointEvent::Control {
+            header_json: r#"{"kind":"log","stream":"stderr","ts_ms":12345}"#.into(),
+            payload: b"DEBUG: warmup complete\n".to_vec(),
+        };
+        let json = serde_json::to_string(&evt).expect("serialize");
+        let decoded: EntrypointEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, evt);
+        assert!(!decoded.is_terminal());
+    }
+
+    #[test]
+    fn test_entrypoint_event_exit_is_terminal() {
+        let evt = EntrypointEvent::Exit { code: 0 };
+        assert!(evt.is_terminal());
+        let json = serde_json::to_string(&evt).expect("serialize");
+        let decoded: EntrypointEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, evt);
+
+        let nonzero = EntrypointEvent::Exit { code: 42 };
+        assert!(nonzero.is_terminal());
+    }
+
+    #[test]
+    fn test_entrypoint_event_error_is_terminal() {
+        let evt = EntrypointEvent::Error {
+            kind: RunEntrypointError::Timeout,
+            message: "killed after 30s".into(),
+        };
+        assert!(evt.is_terminal());
+        let json = serde_json::to_string(&evt).expect("serialize");
+        let decoded: EntrypointEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, evt);
+    }
+
+    #[test]
+    fn test_entrypoint_event_rejects_unknown_field() {
+        let json = r#"{"Stdout":{"chunk":[1,2,3],"length":3}}"#;
+        let err = serde_json::from_str::<EntrypointEvent>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field") && err.to_string().contains("length"),
+            "expected 'unknown field `length`', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_entrypoint_event_rejects_unknown_variant() {
+        let json = r#"{"Aborted":{"reason":"x"}}"#;
+        let err = serde_json::from_str::<EntrypointEvent>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "expected 'unknown variant', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_run_entrypoint_error_all_variants_roundtrip() {
+        // Every error variant must serialize and deserialize back
+        // to itself. Adding a variant without updating this list is
+        // intentional friction.
+        let variants = [
+            RunEntrypointError::PayloadCap,
+            RunEntrypointError::Timeout,
+            RunEntrypointError::Busy,
+            RunEntrypointError::WrapperCrashed,
+            RunEntrypointError::EntrypointInvalid,
+            RunEntrypointError::SessionKilled,
+            RunEntrypointError::InternalError,
+        ];
+        for v in variants {
+            let json = serde_json::to_string(&v).expect("serialize");
+            let decoded: RunEntrypointError = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, v, "variant {v:?} did not roundtrip");
+        }
+    }
+
+    #[test]
+    fn test_run_entrypoint_error_rejects_unknown_variant() {
+        let json = r#""SomeNewError""#;
+        let err = serde_json::from_str::<RunEntrypointError>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "expected 'unknown variant', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_guest_response_entrypoint_event_roundtrip() {
+        // Wrap an EntrypointEvent in GuestResponse and roundtrip
+        // through the same JSON discipline as every other variant.
+        let resp = GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 });
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let decoded: GuestResponse = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code }) => {
+                assert_eq!(code, 0);
+            }
+            other => panic!("expected EntrypointEvent(Exit), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_entrypoint_response_stream_terminates_on_exit() {
+        // Simulate a v1 response stream and assert the host's read
+        // loop discipline: read events until is_terminal returns
+        // true. This is the contract W2's agent handler must
+        // satisfy and W3's CLI consumes.
+        let stream = vec![
+            EntrypointEvent::Stdout {
+                chunk: b"out".to_vec(),
+            },
+            EntrypointEvent::Stderr {
+                chunk: b"err".to_vec(),
+            },
+            EntrypointEvent::Exit { code: 0 },
+        ];
+
+        let mut seen = 0;
+        for evt in &stream {
+            seen += 1;
+            if evt.is_terminal() {
+                break;
+            }
+        }
+        assert_eq!(seen, 3);
+        assert!(stream[2].is_terminal());
+    }
+
+    #[test]
+    fn test_run_entrypoint_response_stream_terminates_on_error() {
+        // Same shape as the Exit case but with Error as the
+        // terminal event — the host loop must stop equally cleanly
+        // either way.
+        let stream = vec![
+            EntrypointEvent::Stdout {
+                chunk: b"partial".to_vec(),
+            },
+            EntrypointEvent::Error {
+                kind: RunEntrypointError::Timeout,
+                message: "killed after 30s".into(),
+            },
+        ];
+
+        let mut seen = 0;
+        for evt in &stream {
+            seen += 1;
+            if evt.is_terminal() {
+                break;
+            }
+        }
+        assert_eq!(seen, 2);
+        assert!(stream[1].is_terminal());
+    }
+
+    #[test]
+    fn test_run_entrypoint_request_well_formed_accepted() {
+        // Sanity: the W1 wire types must continue to parse cleanly
+        // with `deny_unknown_fields` applied.
+        let json = r#"{"RunEntrypoint":{"stdin":[],"timeout_secs":15}}"#;
+        let req: GuestRequest = serde_json::from_str(json).expect("deserialize");
+        assert!(matches!(
+            req,
+            GuestRequest::RunEntrypoint {
+                stdin,
+                timeout_secs: 15,
+               ..
+            } if stdin.is_empty()
+        ));
+    }
+
+    // -------------------------------------------------------------------
+    // EntrypointStatus query
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_entrypoint_status_request_roundtrip() {
+        let req = GuestRequest::EntrypointStatus;
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#""EntrypointStatus""#);
+        let decoded: GuestRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, GuestRequest::EntrypointStatus));
+    }
+
+    #[test]
+    fn test_entrypoint_status_report_ok_roundtrip() {
+        let resp = GuestResponse::EntrypointStatusReport {
+            ok: true,
+            path: Some("/usr/lib/mvm/wrappers/python-runner".into()),
+            detail: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: GuestResponse = serde_json::from_str(&json).unwrap();
+        match decoded {
+            GuestResponse::EntrypointStatusReport { ok, path, detail } => {
+                assert!(ok);
+                assert_eq!(path.as_deref(), Some("/usr/lib/mvm/wrappers/python-runner"));
+                assert!(detail.is_none());
+            }
+            other => panic!("expected EntrypointStatusReport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_entrypoint_status_report_failed_roundtrip() {
+        let resp = GuestResponse::EntrypointStatusReport {
+            ok: false,
+            path: None,
+            detail: Some("entrypoint validation never ran".into()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: GuestResponse = serde_json::from_str(&json).unwrap();
+        match decoded {
+            GuestResponse::EntrypointStatusReport { ok, path, detail } => {
+                assert!(!ok);
+                assert!(path.is_none());
+                assert!(detail.unwrap().contains("never ran"));
+            }
+            other => panic!("expected EntrypointStatusReport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_entrypoint_status_report_rejects_unknown_field() {
+        let json =
+            r#"{"EntrypointStatusReport":{"ok":true,"path":null,"detail":null,"smuggled":1}}"#;
+        let err = serde_json::from_str::<GuestResponse>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field") && err.to_string().contains("smuggled"),
+            "expected 'unknown field smuggled', got: {err}"
+        );
+    }
+
+    /// Sanity check: the well-formed frames the same tests cover above must
+    /// still parse cleanly with the attribute applied.
+    #[test]
+    fn test_guest_request_well_formed_still_accepted() {
+        let json = r#"{"SleepPrep":{"drain_timeout_secs":30}}"#;
+        let req: GuestRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            req,
+            GuestRequest::SleepPrep {
+                drain_timeout_secs: 30
+            }
+        ));
+    }
+
+    #[test]
+    fn test_vsock_uds_path() {
+        assert_eq!(
+            vsock_uds_path("/var/lib/mvm/tenants/acme/pools/workers/instances/i-abc"),
+            "/var/lib/mvm/tenants/acme/pools/workers/instances/i-abc/runtime/v.sock"
+        );
+    }
+
+    #[test]
+    fn test_guest_request_sleep_prep_fields() {
+        let req = GuestRequest::SleepPrep {
+            drain_timeout_secs: 45,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("45"));
+        assert!(json.contains("SleepPrep"));
+    }
+
+    #[test]
+    fn test_guest_response_worker_status_fields() {
+        let resp = GuestResponse::WorkerStatus {
+            status: "busy".to_string(),
+            last_busy_at: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"status\":\"busy\""));
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(GUEST_CID, 3);
+        // Must stay > 1023 — vsock binds <= 1023 require
+        // CAP_NET_BIND_SERVICE, which the agent (uid 901) doesn't have.
+        // See the doc comment on GUEST_AGENT_PORT.
+        const _: () = assert!(GUEST_AGENT_PORT > 1023);
+        assert_eq!(GUEST_AGENT_PORT, 5252);
+        assert_eq!(DEFAULT_TIMEOUT_SECS, 10);
+    }
+
+    #[test]
+    fn test_max_frame_size() {
+        assert_eq!(MAX_FRAME_SIZE, 256 * 1024);
+    }
+
+    #[test]
+    fn test_checkpoint_request_serde() {
+        let req = GuestRequest::CheckpointIntegrations {
+            integrations: vec!["whatsapp".to_string(), "signal".to_string()],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("CheckpointIntegrations"));
+        assert!(json.contains("whatsapp"));
+        assert!(json.contains("signal"));
+        let parsed: GuestRequest = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn test_ping_at_nonexistent_path() {
+        let result = ping_at("/nonexistent/v.sock");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_query_worker_status_at_nonexistent_path() {
+        let result = query_worker_status_at("/nonexistent/v.sock");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_query_integration_status_at_nonexistent_path() {
+        let result = query_integration_status_at("/nonexistent/v.sock");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_query_probe_status_at_nonexistent_path() {
+        let result = query_probe_status_at("/nonexistent/v.sock");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_is_timeout_error_would_block() {
+        let err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block");
+        assert!(is_timeout_error(&err));
+    }
+
+    #[test]
+    fn test_is_timeout_error_timed_out() {
+        let err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        assert!(is_timeout_error(&err));
+    }
+
+    #[test]
+    fn test_is_timeout_error_other() {
+        let err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        assert!(!is_timeout_error(&err));
+    }
+
+    #[test]
+    fn test_connect_retry_delay_grows_then_caps() {
+        assert_eq!(connect_retry_delay(0), Duration::from_millis(100));
+        assert_eq!(connect_retry_delay(1), Duration::from_millis(200));
+        assert_eq!(connect_retry_delay(2), Duration::from_millis(400));
+        assert_eq!(connect_retry_delay(3), Duration::from_millis(500));
+        assert_eq!(connect_retry_delay(32), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_transient_connect_errors_include_restart_races() {
+        assert!(is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "socket missing during restart"
+        )));
+        assert!(is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "listener not ready"
+        )));
+        assert!(is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "worker restarted"
+        )));
+        assert!(is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "listener died before CONNECT ack"
+        )));
+        assert!(!is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "caller bug"
+        )));
+    }
+
+    #[test]
+    fn test_try_connect_once_nonexistent_path() {
+        let result = try_connect_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Vsock socket not found at"),
+            "Error was: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_connect_to_nonexistent_retries_are_bounded() {
+        // A missing socket can be transient during restart. We retry briefly,
+        // but the bounded exponential backoff must still fail quickly.
+        let start = std::time::Instant::now();
+        let result = connect_to("/nonexistent/v.sock", 1);
+        let elapsed = start.elapsed();
+        assert!(result.is_err());
+        assert!(
+            elapsed.as_secs() < 3,
+            "connect_to took {:?}, suggesting an unbounded reconnect loop",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_connect_to_port_retries_across_listener_restart_before_connect_ack() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("v.sock");
+        let socket_path = socket.to_string_lossy().into_owned();
+        let port = 4242;
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+        let worker = std::thread::spawn({
+            let socket = socket.clone();
+            move || {
+                let listener = match UnixListener::bind(&socket) {
+                    Ok(listener) => listener,
+                    Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                        ready_tx.send(Err(err)).unwrap();
+                        return;
+                    }
+                    Err(err) => panic!("initial unix listener bind failed: {err}"),
+                };
+                ready_tx.send(Ok(())).unwrap();
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(line.trim(), format!("CONNECT {port}"));
+                drop(reader);
+                drop(listener);
+
+                std::fs::remove_file(&socket).unwrap();
+                let listener = match UnixListener::bind(&socket) {
+                    Ok(listener) => listener,
+                    Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                        panic!(
+                            "restart unix listener bind unexpectedly denied after initial success: {err}"
+                        );
+                    }
+                    Err(err) => panic!("restart unix listener bind failed: {err}"),
+                };
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(line.trim(), format!("CONNECT {port}"));
+                writeln!(stream, "OK {port}").unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        match ready_rx.recv().unwrap() {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping listener restart retry test: {err}");
+                worker.join().unwrap();
+                return;
+            }
+            Err(err) => panic!("worker setup failed before connect: {err}"),
+        }
+        let stream =
+            connect_to_port(&socket_path, port, 1).expect("connect succeeds after restart");
+        drop(stream);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn test_checkpoint_result_failure() {
+        let resp = GuestResponse::CheckpointResult {
+            success: false,
+            failed: vec!["whatsapp".to_string()],
+            detail: Some("session locked".to_string()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GuestResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            GuestResponse::CheckpointResult {
+                success, failed, ..
+            } => {
+                assert!(!success);
+                assert_eq!(failed, vec!["whatsapp"]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // ========================================================================
+    // Authenticated frame tests
+    // ========================================================================
+
+    fn test_keypair() -> SigningKey {
+        {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        }
+    }
+
+    #[test]
+    fn test_authenticated_frame_write_read_roundtrip() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let key = test_keypair();
+        let verifying = key.verifying_key();
+        let session_id = "test-session-001";
+
+        let request = GuestRequest::Ping;
+
+        write_authenticated_frame(&mut writer, &request, &key, "test-key", session_id, 1).unwrap();
+
+        let (parsed, seq): (GuestRequest, u64) =
+            read_authenticated_frame(&mut reader, &verifying, session_id, 0).unwrap();
+
+        assert_eq!(seq, 1);
+        assert!(matches!(parsed, GuestRequest::Ping));
+    }
+
+    #[test]
+    fn test_authenticated_frame_complex_payload() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let key = test_keypair();
+        let verifying = key.verifying_key();
+        let session_id = "complex-session";
+
+        let response = GuestResponse::WorkerStatus {
+            status: "busy".to_string(),
+            last_busy_at: Some("2026-02-25T10:00:00Z".to_string()),
+        };
+
+        write_authenticated_frame(&mut writer, &response, &key, "guest", session_id, 42).unwrap();
+
+        let (parsed, seq): (GuestResponse, u64) =
+            read_authenticated_frame(&mut reader, &verifying, session_id, 0).unwrap();
+
+        assert_eq!(seq, 42);
+        match parsed {
+            GuestResponse::WorkerStatus {
+                status,
+                last_busy_at,
+            } => {
+                assert_eq!(status, "busy");
+                assert_eq!(last_busy_at.unwrap(), "2026-02-25T10:00:00Z");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_authenticated_frame_tampered_payload_rejected() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let key = test_keypair();
+        let verifying = key.verifying_key();
+
+        // Write a valid authenticated frame
+        let request = GuestRequest::Ping;
+        write_authenticated_frame(&mut writer, &request, &key, "test", "sess", 1).unwrap();
+
+        // Read the raw bytes and tamper with the payload
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf).unwrap();
+        let frame_len = u32::from_be_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; frame_len];
+        reader.read_exact(&mut buf).unwrap();
+
+        // Tamper: change a byte in the payload
+        let mut frame: AuthenticatedFrame = serde_json::from_slice(&buf).unwrap();
+        if !frame.signed.payload.is_empty() {
+            frame.signed.payload[0] ^= 0xFF;
+        }
+
+        // Write tampered frame to a new stream
+        let (mut w2, mut r2) = UnixStream::pair().unwrap();
+        r2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write_frame(&mut w2, &frame).unwrap();
+
+        let result: Result<(GuestRequest, u64)> =
+            read_authenticated_frame(&mut r2, &verifying, "sess", 0);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Signature verification failed") || err_msg.contains("deserialize"),
+            "Unexpected error: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_authenticated_frame_wrong_key_rejected() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let key_a = test_keypair();
+        let key_b = test_keypair();
+
+        write_authenticated_frame(&mut writer, &GuestRequest::Ping, &key_a, "a", "sess", 1)
+            .unwrap();
+
+        // Try to verify with wrong key
+        let result: Result<(GuestRequest, u64)> =
+            read_authenticated_frame(&mut reader, &key_b.verifying_key(), "sess", 0);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Signature verification failed")
+        );
+    }
+
+    #[test]
+    fn test_authenticated_frame_replay_detection() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let key = test_keypair();
+        let verifying = key.verifying_key();
+
+        // Write frame with sequence 5
+        write_authenticated_frame(&mut writer, &GuestRequest::Ping, &key, "test", "sess", 5)
+            .unwrap();
+
+        // Try to read expecting minimum sequence 10 — should be rejected
+        let result: Result<(GuestRequest, u64)> =
+            read_authenticated_frame(&mut reader, &verifying, "sess", 10);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Replay detected"));
+    }
+
+    #[test]
+    fn test_authenticated_frame_session_id_mismatch() {
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let key = test_keypair();
+        let verifying = key.verifying_key();
+
+        write_authenticated_frame(
+            &mut writer,
+            &GuestRequest::Ping,
+            &key,
+            "test",
+            "session-A",
+            1,
+        )
+        .unwrap();
+
+        let result: Result<(GuestRequest, u64)> =
+            read_authenticated_frame(&mut reader, &verifying, "session-B", 0);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Session ID mismatch")
+        );
+    }
+
+    // ========================================================================
+    // Handshake tests
+    // ========================================================================
+
+    #[test]
+    fn test_handshake_roundtrip() {
+        let (mut host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+        host_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        guest_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let host_key = test_keypair();
+        let guest_key = test_keypair();
+        let host_vk_expected = host_key.verifying_key();
+        let guest_vk_expected = guest_key.verifying_key();
+        let session_id = "handshake-test-001";
+
+        // Run handshake in separate threads since both sides block on I/O
+        let host_handle =
+            std::thread::spawn(move || handshake_as_host(&mut host_stream, session_id, &host_key));
+
+        let guest_handle =
+            std::thread::spawn(move || handshake_as_guest(&mut guest_stream, &guest_key));
+
+        let guest_vk = host_handle.join().unwrap().unwrap();
+        let (host_vk, received_session_id) = guest_handle.join().unwrap().unwrap();
+
+        // Host got guest's public key
+        assert_eq!(guest_vk.as_bytes(), guest_vk_expected.as_bytes());
+        // Guest got host's public key
+        assert_eq!(host_vk.as_bytes(), host_vk_expected.as_bytes());
+        // Session ID was echoed correctly
+        assert_eq!(received_session_id, session_id);
+    }
+
+    #[test]
+    fn test_handshake_then_authenticated_exchange() {
+        let (mut host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+        host_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        guest_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let host_key = test_keypair();
+        let guest_key = test_keypair();
+        let session_id = "full-exchange-test";
+
+        // Handshake
+        let host_handle = {
+            let hk = SigningKey::from_bytes(&host_key.to_bytes());
+            std::thread::spawn(move || {
+                handshake_as_host(&mut host_stream, session_id, &hk).map(|gvk| (host_stream, gvk))
+            })
+        };
+
+        let guest_handle = {
+            let gk = SigningKey::from_bytes(&guest_key.to_bytes());
+            std::thread::spawn(move || {
+                handshake_as_guest(&mut guest_stream, &gk)
+                    .map(|(hvk, sid)| (guest_stream, hvk, sid))
+            })
+        };
+
+        let (mut host_stream, guest_vk) = host_handle.join().unwrap().unwrap();
+        let (mut guest_stream, host_vk, _sid) = guest_handle.join().unwrap().unwrap();
+
+        // Host sends authenticated request
+        write_authenticated_frame(
+            &mut host_stream,
+            &GuestRequest::Ping,
+            &host_key,
+            "host",
+            session_id,
+            1,
+        )
+        .unwrap();
+
+        // Guest reads and verifies
+        let (req, seq): (GuestRequest, u64) =
+            read_authenticated_frame(&mut guest_stream, &host_vk, session_id, 0).unwrap();
+        assert!(matches!(req, GuestRequest::Ping));
+        assert_eq!(seq, 1);
+
+        // Guest sends authenticated response
+        write_authenticated_frame(
+            &mut guest_stream,
+            &GuestResponse::Pong,
+            &guest_key,
+            "guest",
+            session_id,
+            1,
+        )
+        .unwrap();
+
+        // Host reads and verifies
+        let (resp, seq): (GuestResponse, u64) =
+            read_authenticated_frame(&mut host_stream, &guest_vk, session_id, 0).unwrap();
+        assert!(matches!(resp, GuestResponse::Pong));
+        assert_eq!(seq, 1);
+    }
+
+    // -------------------------------------------------------------------
+    // send_run_entrypoint streaming consumer
+    // -------------------------------------------------------------------
+
+    fn write_event_frame(stream: &mut UnixStream, event: &EntrypointEvent) {
+        write_frame(stream, &GuestResponse::EntrypointEvent(event.clone())).unwrap();
+    }
+
+    fn answer_run_entrypoint_protocol_hello(stream: &mut UnixStream) {
+        let req: GuestRequest = read_frame(stream).unwrap();
+        match req {
+            GuestRequest::ProtocolHello {
+                requested_capabilities,
+                ..
+            } => assert_eq!(requested_capabilities, vec![GuestCapability::RunEntrypoint]),
+            other => panic!("expected ProtocolHello, got {other:?}"),
+        }
+        write_frame(
+            stream,
+            &GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: PROTOCOL_VERSION,
+                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                agent_version: "test-agent".to_string(),
+                capabilities: vec![GuestCapability::RunEntrypoint],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_send_run_entrypoint_collects_events_until_terminal() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Guest side: read the request, emit Stdout, Stderr, Exit.
+        let guest_handle = std::thread::spawn(move || {
+            answer_run_entrypoint_protocol_hello(&mut guest);
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            assert!(matches!(
+                req,
+                GuestRequest::RunEntrypoint {
+                    timeout_secs: 30,
+                    ..
+                }
+            ));
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stdout {
+                    chunk: b"out".to_vec(),
+                },
+            );
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stderr {
+                    chunk: b"err".to_vec(),
+                },
+            );
+            write_event_frame(&mut guest, &EntrypointEvent::Exit { code: 0 });
+        });
+
+        let mut received: Vec<EntrypointEvent> = Vec::new();
+        let terminal = send_run_entrypoint(&mut host, b"in".to_vec(), 30, Vec::new(), |evt| {
+            received.push(evt.clone())
+        })
+        .expect("send_run_entrypoint");
+
+        guest_handle.join().unwrap();
+
+        assert_eq!(received.len(), 2);
+        assert!(matches!(
+            received[0],
+            EntrypointEvent::Stdout { ref chunk } if chunk == b"out"
+        ));
+        assert!(matches!(
+            received[1],
+            EntrypointEvent::Stderr { ref chunk } if chunk == b"err"
+        ));
+        assert!(matches!(terminal, EntrypointEvent::Exit { code: 0 }));
+    }
+
+    #[test]
+    fn test_send_run_entrypoint_terminates_on_error() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Guest side: emit one Stdout chunk, then a terminal Error.
+        // The handler must observe the Stdout but stop reading after
+        // Error.
+        let guest_handle = std::thread::spawn(move || {
+            answer_run_entrypoint_protocol_hello(&mut guest);
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stdout {
+                    chunk: b"partial".to_vec(),
+                },
+            );
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Error {
+                    kind: RunEntrypointError::Timeout,
+                    message: "killed at 30s".into(),
+                },
+            );
+            // Write a bogus extra frame after the terminal — the
+            // consumer must not read it.
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stdout {
+                    chunk: b"should-not-be-read".to_vec(),
+                },
+            );
+        });
+
+        let mut received: Vec<EntrypointEvent> = Vec::new();
+        let terminal = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |evt| {
+            received.push(evt.clone())
+        })
+        .expect("send_run_entrypoint");
+
+        guest_handle.join().unwrap();
+
+        assert_eq!(received.len(), 1);
+        assert!(matches!(
+            received[0],
+            EntrypointEvent::Stdout { ref chunk } if chunk == b"partial"
+        ));
+        assert!(matches!(
+            terminal,
+            EntrypointEvent::Error {
+                kind: RunEntrypointError::Timeout,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_send_run_entrypoint_rejects_unexpected_response() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Guest writes a Pong instead of an EntrypointEvent.
+        let guest_handle = std::thread::spawn(move || {
+            answer_run_entrypoint_protocol_hello(&mut guest);
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(&mut guest, &GuestResponse::Pong).unwrap();
+        });
+
+        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |_| {});
+        guest_handle.join().unwrap();
+
+        let err = result.expect_err("should reject Pong");
+        assert!(
+            err.to_string().contains("expected EntrypointEvent"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_send_run_entrypoint_surfaces_guest_error() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Guest writes a generic Error (not an EntrypointEvent::Error).
+        // This shouldn't normally happen for RunEntrypoint, but the
+        // host-side consumer should map it to a clear Result error.
+        let guest_handle = std::thread::spawn(move || {
+            answer_run_entrypoint_protocol_hello(&mut guest);
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::Error {
+                    message: "agent panicked before dispatch".into(),
+                },
+            )
+            .unwrap();
+        });
+
+        let result = send_run_entrypoint(&mut host, b"".to_vec(), 30, Vec::new(), |_| {});
+        guest_handle.join().unwrap();
+
+        let err = result.expect_err("should surface guest error");
+        assert!(
+            err.to_string().contains("agent panicked"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_handshake_with_wrong_challenge_response() {
+        let (mut host_stream, mut guest_stream) = UnixStream::pair().unwrap();
+        host_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        guest_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let host_key = test_keypair();
+        let wrong_key = test_keypair(); // Guest uses wrong key
+
+        let host_handle = std::thread::spawn(move || {
+            handshake_as_host(&mut host_stream, "bad-handshake", &host_key)
+        });
+
+        // Guest side: read hello, but sign with wrong key
+        let hello: SessionHello = read_frame(&mut guest_stream).unwrap();
+        let bad_sig = wrong_key.sign(&hello.challenge);
+        let ack = SessionHelloAck {
+            version: hello.version,
+            session_id: hello.session_id,
+            challenge_response: bad_sig.to_bytes().to_vec(),
+            // Send the correct guest pubkey for the wrong key
+            guest_pubkey: wrong_key.verifying_key().to_bytes().to_vec(),
+        };
+        write_frame(&mut guest_stream, &ack).unwrap();
+
+        // Host should succeed because the guest signed with wrong_key
+        // but sent wrong_key's pubkey — the challenge was signed by the
+        // key whose pubkey was provided, so verification passes.
+        // This is correct: we verify the guest controls the key it claims.
+        let result = host_handle.join().unwrap();
+        assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // profile classifier
+    // ========================================================================
+
+    /// One representative value per `GuestRequest` variant. Both the
+    /// classification test and the `prod_safe_verb_names` guard share
+    /// this list — a single source of truth that must grow with the enum.
+    fn every_guest_request_variant() -> Vec<GuestRequest> {
+        vec![
+            GuestRequest::ProtocolHello {
+                host_protocol_version: 1,
+                min_supported_version: 1,
+                host_version: "test".into(),
+                requested_capabilities: vec![],
+            },
+            GuestRequest::WorkerStatus,
+            GuestRequest::SleepPrep {
+                drain_timeout_secs: 0,
+            },
+            GuestRequest::Wake,
+            GuestRequest::Ping,
+            GuestRequest::IntegrationStatus,
+            GuestRequest::CheckpointIntegrations {
+                integrations: vec![],
+            },
+            GuestRequest::ProbeStatus,
+            GuestRequest::Exec {
+                command: "x".into(),
+                stdin: None,
+                timeout_secs: None,
+            },
+            GuestRequest::RunEntrypoint {
+                stdin: vec![],
+                timeout_secs: 1,
+                env: vec![],
+            },
+            GuestRequest::RunDetached {
+                argv: vec!["/bin/sh".into(), "-lc".into(), "true".into()],
+                env: vec![],
+            },
+            GuestRequest::PostRestore {
+                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                grant_envelope: None,
+            },
+            GuestRequest::FsDiff,
+            GuestRequest::StartPortForward { guest_port: 1 },
+            GuestRequest::StartUnixSocketForward {
+                guest_path: "/run/mvm/forward.sock".to_string(),
+                host_vsock_port: BROKER_PORT,
+                socket_mode: 0o600,
+            },
+            GuestRequest::ConsoleOpen {
+                cols: 1,
+                rows: 1,
+                env: Vec::new(),
+                argv: Vec::new(),
+            },
+            GuestRequest::ConsoleClose { session_id: 1 },
+            GuestRequest::ConsoleResize {
+                session_id: 1,
+                cols: 1,
+                rows: 1,
+            },
+            GuestRequest::EntrypointStatus,
+            GuestRequest::ReadinessStatus,
+            GuestRequest::FsRead {
+                path: "/x".into(),
+                offset: None,
+                length: 1,
+                follow_symlinks: true,
+            },
+            GuestRequest::FsWrite {
+                path: "/x".into(),
+                content: vec![],
+                mode: 0,
+                create_parents: false,
+                follow_symlinks: false,
+            },
+            GuestRequest::FsList {
+                path: "/x".into(),
+                follow_symlinks: true,
+            },
+            GuestRequest::FsStat {
+                path: "/x".into(),
+                follow_symlinks: true,
+            },
+            GuestRequest::FsMkdir {
+                path: "/x".into(),
+                mode: 0,
+                parents: false,
+            },
+            GuestRequest::FsRemove {
+                path: "/x".into(),
+                recursive: false,
+                follow_symlinks: false,
+            },
+            GuestRequest::FsMove {
+                from: "/x".into(),
+                to: "/y".into(),
+                follow_symlinks: false,
+            },
+            GuestRequest::ProcStart {
+                argv: vec!["/x".into()],
+                env: Default::default(),
+                cwd: None,
+                stdin: vec![],
+                timeout_secs: None,
+            },
+            GuestRequest::ProcList,
+            GuestRequest::ProcSignal {
+                pid_token: "t".into(),
+                signum: 15,
+            },
+            GuestRequest::ProcSendInput {
+                pid_token: "t".into(),
+                bytes: vec![],
+            },
+            GuestRequest::ProcWait {
+                pid_token: "t".into(),
+                timeout_secs: None,
+            },
+            GuestRequest::ProcKill {
+                pid_token: "t".into(),
+            },
+            GuestRequest::MountVolume {
+                volume_name: "v".into(),
+                guest_path: "/x".into(),
+                read_only: true,
+            },
+            GuestRequest::UnmountVolume {
+                guest_path: "/x".into(),
+                force: false,
+            },
+            GuestRequest::UpdateIdleTimeout { secs: 0 },
+            GuestRequest::RunCode {
+                code: "x".into(),
+                timeout_secs: Some(1),
+            },
+            GuestRequest::PrimedStatus,
+            GuestRequest::ExecBatch {
+                stages: vec![],
+                commands: vec![],
+                timeout_secs: None,
+            },
+        ]
+    }
+
+    /// Every `GuestRequest` variant must classify as either `ProdSafe`
+    /// or `DevOnly` today. Compile-fail when a new variant is added
+    /// without being classified — the exhaustive match inside
+    /// `class()` guarantees that, and this test fails closed if the
+    /// variant ever lands in an unexpected class.
+    #[test]
+    fn test_request_class_coverage_matches_sealed_prod_allowlist() {
+        let prod_safe_verbs: &[&str] = &[
+            "ProtocolHello",
+            "WorkerStatus",
+            "SleepPrep",
+            "Wake",
+            "Ping",
+            "IntegrationStatus",
+            "CheckpointIntegrations",
+            "ProbeStatus",
+            "PrimedStatus",
+            "RunEntrypoint",
+            "PostRestore",
+            "EntrypointStatus",
+            "ReadinessStatus",
+            "MountVolume",
+            "UnmountVolume",
+            "UpdateIdleTimeout",
+        ];
+
+        let all = every_guest_request_variant();
+
+        // Every variant has a stable verb_name; that name appears in
+        // exactly one of the two classification buckets.
+        for req in &all {
+            let name = req.verb_name();
+            let in_prod = prod_safe_verbs.contains(&name);
+            match req.class() {
+                RequestClass::ProdSafe => assert!(
+                    in_prod,
+                    "{name}: classified ProdSafe but missing from SealedProd allowlist"
+                ),
+                RequestClass::DevOnly => assert!(
+                    !in_prod,
+                    "{name}: classified DevOnly but present in SealedProd allowlist"
+                ),
+                RequestClass::BuilderOnly => {
+                    panic!("{name}: no GuestRequest variant should be BuilderOnly yet")
+                }
+            }
+        }
+
+        // The allowlist itself stays anchored: every prod-safe verb
+        // shows up in `all` above, so renaming a variant trips this
+        // assertion too.
+        let names: Vec<&'static str> = all.iter().map(|r| r.verb_name()).collect();
+        for v in prod_safe_verbs {
+            assert!(
+                names.contains(v),
+                "SealedProd verb {v} missing from coverage"
+            );
+        }
+    }
+
+    #[test]
+    fn prod_safe_verb_names_matches_classification() {
+        let listed: std::collections::BTreeSet<&str> = GuestRequest::prod_safe_verb_names()
+            .iter()
+            .copied()
+            .collect();
+        for req in every_guest_request_variant() {
+            let name = req.kind_name();
+            let is_prod = matches!(req.class(), RequestClass::ProdSafe);
+            assert_eq!(
+                listed.contains(name),
+                is_prod,
+                "{name}: listed={} but class ProdSafe={}",
+                listed.contains(name),
+                is_prod
+            );
+        }
+        // No duplicates, all non-empty.
+        assert_eq!(
+            listed.len(),
+            GuestRequest::prod_safe_verb_names().len(),
+            "duplicate in prod_safe_verb_names"
+        );
+        assert!(
+            GuestRequest::prod_safe_verb_names()
+                .iter()
+                .all(|n| !n.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_sealed_prod_rejects_dev_only_verbs() {
+        let dev_only_samples = [
+            GuestRequest::Exec {
+                command: "x".into(),
+                stdin: None,
+                timeout_secs: None,
+            },
+            GuestRequest::ConsoleOpen {
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+                argv: Vec::new(),
+            },
+            GuestRequest::ProcStart {
+                argv: vec!["/x".into()],
+                env: Default::default(),
+                cwd: None,
+                stdin: vec![],
+                timeout_secs: None,
+            },
+            GuestRequest::RunCode {
+                code: "print(1)".into(),
+                timeout_secs: Some(1),
+            },
+            GuestRequest::FsWrite {
+                path: "/x".into(),
+                content: vec![],
+                mode: 0,
+                create_parents: false,
+                follow_symlinks: false,
+            },
+            GuestRequest::FsRead {
+                path: "/x".into(),
+                offset: None,
+                length: 1,
+                follow_symlinks: true,
+            },
+            GuestRequest::StartPortForward { guest_port: 8080 },
+        ];
+
+        for req in &dev_only_samples {
+            assert!(
+                !req.allowed_in(AgentProfile::SealedProd),
+                "{} should be rejected in SealedProd",
+                req.verb_name()
+            );
+            assert!(
+                req.allowed_in(AgentProfile::Dev),
+                "{} should be allowed in Dev",
+                req.verb_name()
+            );
+            assert!(
+                !req.allowed_in(AgentProfile::Builder),
+                "{} should not be allowed in Builder",
+                req.verb_name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_sealed_prod_accepts_prod_safe_verbs() {
+        let prod_safe_samples = [
+            GuestRequest::Ping,
+            GuestRequest::WorkerStatus,
+            GuestRequest::EntrypointStatus,
+            GuestRequest::RunEntrypoint {
+                stdin: vec![],
+                timeout_secs: 60,
+                env: vec![],
+            },
+            GuestRequest::SleepPrep {
+                drain_timeout_secs: 5,
+            },
+            GuestRequest::Wake,
+            GuestRequest::PostRestore {
+                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                grant_envelope: None,
+            },
+            GuestRequest::UpdateIdleTimeout { secs: 600 },
+            GuestRequest::MountVolume {
+                volume_name: "v".into(),
+                guest_path: "/data".into(),
+                read_only: true,
+            },
+            GuestRequest::UnmountVolume {
+                guest_path: "/data".into(),
+                force: false,
+            },
+        ];
+
+        for req in &prod_safe_samples {
+            assert!(
+                req.allowed_in(AgentProfile::SealedProd),
+                "{} should be allowed in SealedProd",
+                req.verb_name()
+            );
+            assert!(
+                req.allowed_in(AgentProfile::Dev),
+                "{} should be allowed in Dev (Dev ⊃ SealedProd)",
+                req.verb_name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_unsupported_in_profile_response_roundtrip() {
+        let resp = GuestResponse::UnsupportedInProfile {
+            profile: AgentProfile::SealedProd,
+            verb: "Exec".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        // kebab-case profile wire format keeps user-facing JSON tidy.
+        assert!(json.contains("\"sealed-prod\""), "got {json}");
+        assert!(json.contains("\"Exec\""), "got {json}");
+
+        let parsed: GuestResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            GuestResponse::UnsupportedInProfile { profile, verb } => {
+                assert_eq!(profile, AgentProfile::SealedProd);
+                assert_eq!(verb, "Exec");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    // ========================================================================
+    // readiness model
+    // ========================================================================
+
+    #[test]
+    fn test_readiness_status_classifies_prod_safe() {
+        // `ReadinessStatus` must respond from sealed-prod images
+        // even before entrypoint validation completes — that's the
+        // whole point of the verb. If a future refactor downgrades
+        // it to DevOnly, this test fails loud.
+        let req = GuestRequest::ReadinessStatus;
+        assert_eq!(req.class(), RequestClass::ProdSafe);
+        assert!(req.allowed_in(AgentProfile::SealedProd));
+        assert!(req.allowed_in(AgentProfile::Dev));
+        assert!(!req.allowed_in(AgentProfile::Builder));
+        assert_eq!(req.verb_name(), "ReadinessStatus");
+    }
+
+    #[test]
+    fn test_component_state_wire_format_is_snake_case() {
+        // Wire format keeps JSON ergonomic for hand-written
+        // policies / mock fixtures.
+        assert_eq!(
+            serde_json::to_string(&ComponentState::Starting).unwrap(),
+            "\"starting\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ComponentState::Ready).unwrap(),
+            "\"ready\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ComponentState::Disabled).unwrap(),
+            "\"disabled\""
+        );
+        let failed_json = serde_json::to_string(&ComponentState::Failed {
+            message: "boom".into(),
+        })
+        .unwrap();
+        assert!(failed_json.contains("\"failed\""), "got {failed_json}");
+        assert!(failed_json.contains("\"boom\""), "got {failed_json}");
+
+        let parsed: ComponentState = serde_json::from_str(&failed_json).unwrap();
+        assert!(matches!(
+            parsed,
+            ComponentState::Failed { ref message } if message == "boom"
+        ));
+    }
+
+    #[test]
+    fn test_readiness_report_roundtrip_with_disabled_subsystems() {
+        // A cold-tier image's readiness snapshot mid-boot: control
+        // plane ready, entrypoint still validating, everything
+        // else `Disabled` (no warm pool, no integrations, no
+        // probes) by virtue of `Default`.
+        let report = ReadinessReport {
+            control_plane: ComponentState::Ready,
+            entrypoint: ComponentState::Starting,
+            boot_millis: BootTimingReport {
+                agent_started_ms: Some(3),
+                vsock_bound_ms: Some(3),
+                first_accept_ms: Some(7),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: ReadinessReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, report);
+    }
+
+    #[test]
+    fn test_readiness_report_rejects_unknown_fields() {
+        // Every host↔guest type must deny unknown
+        // fields. Verify the outer report shape; ComponentState +
+        // BootTimingReport carry their own `deny_unknown_fields`.
+        let json = r#"{
+            "control_plane": "ready",
+            "entrypoint": "starting",
+            "warm_pool": "disabled",
+            "integrations": "disabled",
+            "probes": "disabled",
+            "volumes": "disabled",
+            "profile": "sealed-prod",
+            "boot_millis": {
+                "agent_started_ms": null,
+                "vsock_bound_ms": null,
+                "first_accept_ms": null,
+                "entrypoint_ready_ms": null,
+                "warm_pool_ready_ms": null,
+                "integrations_ready_ms": null,
+                "probes_ready_ms": null
+            },
+            "smuggled": 1
+        }"#;
+        let err = serde_json::from_str::<ReadinessReport>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected unknown-field rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_run_entrypoint_error_not_ready_roundtrip() {
+        // The typed variant returned when a host
+        // races `RunEntrypoint` ahead of `entrypoint=Ready`.
+        let err = RunEntrypointError::NotReady;
+        let json = serde_json::to_string(&err).unwrap();
+        assert_eq!(json, "\"NotReady\"");
+        let parsed: RunEntrypointError = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, err);
+    }
+
+    #[test]
+    fn test_boot_timing_report_default_is_all_none() {
+        // The skeleton ships with all-`None` so later work can fill
+        // the remaining fields without breaking the wire shape.
+        let t = BootTimingReport::default();
+        assert!(t.agent_started_ms.is_none());
+        assert!(t.vsock_bound_ms.is_none());
+        assert!(t.first_accept_ms.is_none());
+        assert!(t.entrypoint_ready_ms.is_none());
+        assert!(t.warm_pool_ready_ms.is_none());
+        assert!(t.integrations_ready_ms.is_none());
+        assert!(t.probes_ready_ms.is_none());
+    }
+
+    #[test]
+    fn test_component_state_default_is_disabled() {
+        // "Not configured" is the semantically conservative default.
+        // A subsystem we haven't heard anything about must NOT
+        // accidentally read as `Ready` — that would short-circuit a
+        // host's readiness gate.
+        assert_eq!(ComponentState::default(), ComponentState::Disabled);
+    }
+
+    #[test]
+    fn test_readiness_report_default_is_all_disabled_sealed_prod() {
+        // A bare `ReadinessReport::default()` is what an unconfigured
+        // sealed-prod agent would report. Tests / fixtures that only
+        // care about one or two components can use this + struct-
+        // update syntax instead of listing every field.
+        let r = ReadinessReport::default();
+        assert_eq!(r.control_plane, ComponentState::Disabled);
+        assert_eq!(r.entrypoint, ComponentState::Disabled);
+        assert_eq!(r.warm_pool, ComponentState::Disabled);
+        assert_eq!(r.integrations, ComponentState::Disabled);
+        assert_eq!(r.probes, ComponentState::Disabled);
+        assert_eq!(r.volumes, ComponentState::Disabled);
+        assert_eq!(r.profile, AgentProfile::SealedProd);
+        assert_eq!(r.boot_millis, BootTimingReport::default());
+    }
+
+    #[test]
+    fn test_readiness_report_default_struct_update_ergonomics() {
+        // Demonstrates the intended call-site shape: change one or
+        // two components, default the rest. If the type ever grows a
+        // field this test still compiles — that's the whole point.
+        let r = ReadinessReport {
+            control_plane: ComponentState::Ready,
+            entrypoint: ComponentState::Starting,
+            boot_millis: BootTimingReport {
+                vsock_bound_ms: Some(7),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(r.control_plane, ComponentState::Ready);
+        assert_eq!(r.entrypoint, ComponentState::Starting);
+        assert_eq!(r.warm_pool, ComponentState::Disabled);
+        assert_eq!(r.boot_millis.vsock_bound_ms, Some(7));
+        assert!(r.boot_millis.first_accept_ms.is_none());
+    }
+
+    // ========================================================================
+    // `GuestRequest::kind_name` for vsock RPC audit
+    // ========================================================================
+
+    /// Every `GuestRequest` variant must produce a kebab-case
+    /// verb name. The check is exhaustive: a new variant added
+    /// without updating `kind_name` panics here because the
+    /// constructor list is hand-maintained, not derived.
+    ///
+    /// Pin the wire-stable strings: a rename is a detail-format
+    /// wire-format change, so the audit consumer reading old
+    /// logs sees the same `verb=<name>` tokens.
+    #[test]
+    fn kind_name_covers_every_variant() {
+        // Hand-roll one of each variant. A new variant requires
+        // a new row here — the match in `kind_name` is exhaustive
+        // so the compiler catches it on the implementation side,
+        // and this test catches it on the wire-format side.
+        let cases: &[(GuestRequest, &str)] = &[
+            (
+                GuestRequest::ProtocolHello {
+                    host_protocol_version: 0,
+                    min_supported_version: 0,
+                    host_version: String::new(),
+                    requested_capabilities: Vec::new(),
+                },
+                "protocol-hello",
+            ),
+            (GuestRequest::WorkerStatus, "worker-status"),
+            (
+                GuestRequest::SleepPrep {
+                    drain_timeout_secs: 0,
+                },
+                "sleep-prep",
+            ),
+            (GuestRequest::Wake, "wake"),
+            (GuestRequest::Ping, "ping"),
+            (GuestRequest::IntegrationStatus, "integration-status"),
+            (
+                GuestRequest::CheckpointIntegrations {
+                    integrations: Vec::new(),
+                },
+                "checkpoint-integrations",
+            ),
+            (GuestRequest::ProbeStatus, "probe-status"),
+            (
+                GuestRequest::Exec {
+                    command: String::new(),
+                    stdin: None,
+                    timeout_secs: None,
+                },
+                "exec",
+            ),
+            (
+                GuestRequest::RunEntrypoint {
+                    stdin: Vec::new(),
+                    timeout_secs: 0,
+                    env: Vec::new(),
+                },
+                "run-entrypoint",
+            ),
+            (
+                GuestRequest::PostRestore {
+                    token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                    grant_envelope: None,
+                },
+                "post-restore",
+            ),
+            (GuestRequest::FsDiff, "fs-diff"),
+            (
+                GuestRequest::StartPortForward { guest_port: 0 },
+                "start-port-forward",
+            ),
+            (
+                GuestRequest::StartUnixSocketForward {
+                    guest_path: "/run/mvm/forward.sock".to_string(),
+                    host_vsock_port: BROKER_PORT,
+                    socket_mode: 0o600,
+                },
+                "start-unix-socket-forward",
+            ),
+            (
+                GuestRequest::ConsoleOpen {
+                    cols: 0,
+                    rows: 0,
+                    env: Vec::new(),
+                    argv: Vec::new(),
+                },
+                "console-open",
+            ),
+            (
+                GuestRequest::ConsoleClose { session_id: 0 },
+                "console-close",
+            ),
+            (
+                GuestRequest::ConsoleResize {
+                    session_id: 0,
+                    cols: 0,
+                    rows: 0,
+                },
+                "console-resize",
+            ),
+            (GuestRequest::EntrypointStatus, "entrypoint-status"),
+            (GuestRequest::ReadinessStatus, "readiness-status"),
+            (
+                GuestRequest::FsRead {
+                    path: String::new(),
+                    offset: None,
+                    length: 0,
+                    follow_symlinks: true,
+                },
+                "fs-read",
+            ),
+            (
+                GuestRequest::FsWrite {
+                    path: String::new(),
+                    content: Vec::new(),
+                    mode: 0,
+                    create_parents: false,
+                    follow_symlinks: false,
+                },
+                "fs-write",
+            ),
+        ];
+        for (req, expected) in cases {
+            assert_eq!(req.kind_name(), *expected, "verb name for {req:?}");
+        }
+    }
+
+    #[test]
+    fn workload_exit_port_is_distinct_and_reserved() {
+        assert_eq!(WORKLOAD_EXIT_PORT, 5251);
+        assert_ne!(WORKLOAD_EXIT_PORT, GUEST_AGENT_PORT);
+        const { assert!(WORKLOAD_EXIT_PORT < PORT_FORWARD_BASE) }
+    }
+
+    /// Sanity: the verb names are all kebab-case (lowercase
+    /// ASCII letters + `-`). A future variant accidentally
+    /// emitting `snake_case` or `CamelCase` would break log
+    /// parsers that split on `-`.
+    #[test]
+    fn kind_name_strings_are_kebab_case() {
+        let samples = [
+            GuestRequest::Ping,
+            GuestRequest::EntrypointStatus,
+            GuestRequest::ReadinessStatus,
+            GuestRequest::FsDiff,
+            GuestRequest::StartPortForward { guest_port: 0 },
+            GuestRequest::CheckpointIntegrations {
+                integrations: vec![],
+            },
+        ];
+        for req in samples {
+            let s = req.kind_name();
+            for c in s.chars() {
+                assert!(
+                    c.is_ascii_lowercase() || c == '-',
+                    "verb '{s}' contains non-kebab-case char {c:?}"
+                );
+            }
+            assert!(!s.is_empty(), "verb name must not be empty");
+            assert!(!s.starts_with('-'), "verb must not start with hyphen: {s}");
+            assert!(!s.ends_with('-'), "verb must not end with hyphen: {s}");
+        }
+    }
+
+    #[test]
+    fn exec_event_exit_and_timedout_are_terminal() {
+        assert!(ExecEvent::Exit { code: 0 }.is_terminal());
+        assert!(ExecEvent::TimedOut.is_terminal());
+        assert!(
+            !ExecEvent::Stdout {
+                chunk: b"x".to_vec()
+            }
+            .is_terminal()
+        );
+        assert!(
+            !ExecEvent::Stderr {
+                chunk: b"y".to_vec()
+            }
+            .is_terminal()
+        );
+    }
+
+    #[test]
+    fn guest_response_exec_event_roundtrips() {
+        let r = GuestResponse::ExecEvent(ExecEvent::Stdout {
+            chunk: b"hi".to_vec(),
+        });
+        let j = serde_json::to_vec(&r).unwrap();
+        let back: GuestResponse = serde_json::from_slice(&j).unwrap();
+        assert!(
+            matches!(back, GuestResponse::ExecEvent(ExecEvent::Stdout { ref chunk }) if chunk == b"hi")
+        );
+    }
+
+    #[test]
+    fn exec_batch_request_roundtrips_and_classifies() {
+        let req = GuestRequest::ExecBatch {
+            stages: vec![StageFile {
+                path: "/tmp/m.rs".to_string(),
+                content: b"fn main(){}".to_vec(),
+                mode: 0o644,
+            }],
+            commands: vec![vec!["rustc".to_string(), "/tmp/m.rs".to_string()]],
+            timeout_secs: Some(30),
+        };
+        let back: GuestRequest =
+            serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            GuestRequest::ExecBatch { ref stages, ref commands, timeout_secs: Some(30) }
+                if stages.len() == 1 && commands == &[vec!["rustc".to_string(), "/tmp/m.rs".to_string()]]
+        ));
+        // Verb, name, dev-only class, and the unary ExecBatchResult contract.
+        assert_eq!(req.verb(), Verb::ExecBatch);
+        assert_eq!(req.kind_name(), "exec-batch");
+        assert_eq!(req.class(), RequestClass::DevOnly);
+        let contract = req.response_contract();
+        assert_eq!(contract.kind, ResponseKind::Unary);
+        assert_eq!(contract.responses, &[ResponseVariant::ExecBatchResult]);
+    }
+
+    #[test]
+    fn exec_batch_result_roundtrips_and_maps_to_variant() {
+        let r = GuestResponse::ExecBatchResult {
+            outcomes: vec![ExecOutcomeWire {
+                status: 0,
+                stdout: b"ok".to_vec(),
+                stderr: Vec::new(),
+                duration_ms: 12,
+                peak_rss_kib: Some(2048),
+            }],
+        };
+        let back: GuestResponse = serde_json::from_slice(&serde_json::to_vec(&r).unwrap()).unwrap();
+        assert!(matches!(
+            back,
+            GuestResponse::ExecBatchResult { ref outcomes }
+                if outcomes.len() == 1 && outcomes[0].duration_ms == 12
+                    && outcomes[0].peak_rss_kib == Some(2048)
+        ));
+        assert_eq!(r.variant(), ResponseVariant::ExecBatchResult);
+    }
+
+    #[test]
+    fn exec_batch_wire_types_deny_unknown_fields() {
+        // StageFile + ExecOutcomeWire fail closed on a smuggled extra field.
+        assert!(
+            serde_json::from_str::<StageFile>(r#"{"path":"/a","content":[],"mode":420,"x":1}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ExecOutcomeWire>(
+                r#"{"status":0,"stdout":[],"stderr":[],"duration_ms":0,"peak_rss_kib":null,"x":1}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn console_open_missing_argv_defaults_empty() {
+        let req: GuestRequest =
+            serde_json::from_str(r#"{"ConsoleOpen":{"cols":80,"rows":24,"env":[]}}"#)
+                .expect("legacy console-open request should deserialize");
+        match req {
+            GuestRequest::ConsoleOpen { argv, .. } => assert!(argv.is_empty()),
+            other => panic!("expected ConsoleOpen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn console_open_preserves_explicit_argv() {
+        let req = GuestRequest::ConsoleOpen {
+            cols: 80,
+            rows: 24,
+            env: Vec::new(),
+            argv: vec!["/bin/sh".to_string()],
+        };
+        let json = serde_json::to_string(&req).expect("serialize console-open");
+        assert!(
+            json.contains(r#""argv":["/bin/sh"]"#),
+            "serialized request should carry argv: {json}"
+        );
+        let parsed: GuestRequest = serde_json::from_str(&json).expect("deserialize console-open");
+        match parsed {
+            GuestRequest::ConsoleOpen { argv, .. } => {
+                assert_eq!(argv, vec!["/bin/sh".to_string()]);
+            }
+            other => panic!("expected ConsoleOpen, got {other:?}"),
+        }
+    }
+
+    // send_exec_streaming host reader
+    // -------------------------------------------------------------------
+
+    fn answer_exec_protocol_hello(stream: &mut UnixStream) {
+        let req: GuestRequest = read_frame(stream).unwrap();
+        match req {
+            GuestRequest::ProtocolHello {
+                requested_capabilities,
+                ..
+            } => assert_eq!(requested_capabilities, vec![]),
+            other => panic!("expected ProtocolHello, got {other:?}"),
+        }
+        write_frame(
+            stream,
+            &GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: PROTOCOL_VERSION,
+                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                agent_version: "test-agent".to_string(),
+                capabilities: vec![],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn send_exec_streaming_collects_chunks_until_exit() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let guest_handle = std::thread::spawn(move || {
+            answer_exec_protocol_hello(&mut guest);
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            assert!(matches!(req, GuestRequest::Exec { ref command,.. } if command == "echo hi"));
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Stdout {
+                    chunk: b"hi\n".to_vec(),
+                }),
+            )
+            .unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
+            )
+            .unwrap();
+        });
+
+        let mut got: Vec<ExecEvent> = Vec::new();
+        let terminal = send_exec_streaming(&mut host, "echo hi", None, Some(30), |e| {
+            got.push(e.clone())
+        })
+        .expect("send_exec_streaming");
+        guest_handle.join().unwrap();
+
+        assert_eq!(got.len(), 1);
+        assert!(matches!(got[0], ExecEvent::Stdout { ref chunk } if chunk == b"hi\n"));
+        assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
+    }
+
+    #[test]
+    fn read_exec_stream_collects_until_exit() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let guest_handle = std::thread::spawn(move || {
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Stderr {
+                    chunk: b"e".to_vec(),
+                }),
+            )
+            .unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 2 }),
+            )
+            .unwrap();
+        });
+        let mut got = Vec::new();
+        let term = read_exec_stream(&mut host, |e| got.push(e.clone())).unwrap();
+        guest_handle.join().unwrap();
+        assert_eq!(got.len(), 1);
+        assert!(matches!(got[0], ExecEvent::Stderr { ref chunk } if chunk == b"e"));
+        assert!(matches!(term, ExecEvent::Exit { code: 2 }));
+    }
+
+    #[test]
+    fn read_exec_stream_surfaces_verb_denied_as_typed_rpc_error() {
+        // A grant refusal arriving on the exec stream must surface as the typed
+        // RpcError::VerbNotAuthorized (downcastable) so the host can audit it as
+        // `verb_denied` — not a stringified "unexpected variant".
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let guest_handle = std::thread::spawn(move || {
+            write_frame(
+                &mut guest,
+                &GuestResponse::VerbNotAuthorized {
+                    verb: "run-code".to_string(),
+                },
+            )
+            .unwrap();
+        });
+        let err = read_exec_stream(&mut host, |_| {}).unwrap_err();
+        guest_handle.join().unwrap();
+        match err.downcast_ref::<RpcError>() {
+            Some(RpcError::VerbNotAuthorized { verb }) => assert_eq!(verb, "run-code"),
+            other => panic!("expected typed RpcError::VerbNotAuthorized, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod rpc_contract_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn ping_is_unary_pong() {
+        let c = Verb::Ping.response_contract();
+        assert_eq!(c.kind, ResponseKind::Unary);
+        assert_eq!(c.responses, &[ResponseVariant::Pong]);
+    }
+
+    #[test]
+    fn run_entrypoint_streams_entrypoint_event() {
+        let c = Verb::RunEntrypoint.response_contract();
+        assert_eq!(c.kind, ResponseKind::Stream);
+        assert_eq!(c.responses, &[ResponseVariant::EntrypointEvent]);
+    }
+
+    #[test]
+    fn protocol_hello_lists_both_outcomes() {
+        let c = Verb::ProtocolHello.response_contract();
+        assert_eq!(c.kind, ResponseKind::Unary);
+        let got: BTreeSet<_> = c.responses.iter().map(|r| r.name()).collect();
+        assert_eq!(
+            got,
+            BTreeSet::from(["ProtocolHelloAck", "ProtocolMismatch"])
+        );
+    }
+
+    #[test]
+    fn streaming_verbs_are_exactly_the_four() {
+        let streaming: BTreeSet<_> = Verb::ALL
+            .iter()
+            .filter(|v| v.response_contract().kind == ResponseKind::Stream)
+            .map(|v| v.name())
+            .collect();
+        assert_eq!(
+            streaming,
+            BTreeSet::from(["Exec", "ProcWait", "RunCode", "RunEntrypoint"])
+        );
+    }
+
+    // Drift guard: every GuestResponse variant must be answered by some
+    // request's contract, or be a universal (Error / UnsupportedInProfile).
+    // Adding a GuestResponse variant without wiring it fails this test.
+    #[test]
+    fn every_response_variant_is_contracted_or_universal() {
+        let mut covered: BTreeSet<&'static str> = BTreeSet::new();
+        for v in Verb::ALL {
+            for r in v.response_contract().responses {
+                covered.insert(r.name());
+            }
+        }
+        for r in ResponseVariant::ALL.iter().filter(|r| r.is_universal()) {
+            covered.insert(r.name());
+        }
+        let all: BTreeSet<_> = ResponseVariant::ALL.iter().map(|r| r.name()).collect();
+        assert_eq!(covered, all);
+    }
+
+    #[test]
+    fn contracts_never_list_universal_responses() {
+        for v in Verb::ALL {
+            for r in v.response_contract().responses {
+                assert!(
+                    !r.is_universal(),
+                    "{} lists universal response {}",
+                    v.name(),
+                    r.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verb_projection_matches_wire_verb_name() {
+        let req = GuestRequest::Ping;
+        assert_eq!(req.verb(), Verb::Ping);
+        assert_eq!(req.verb().name(), req.verb_name());
+    }
+
+    #[test]
+    fn response_variant_projection_round_trips() {
+        assert_eq!(GuestResponse::Pong.variant(), ResponseVariant::Pong);
+        assert_eq!(GuestResponse::Pong.variant().name(), "Pong");
+    }
+}
+
+#[cfg(test)]
+mod rpc_client_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    // ---- check_response: the pure contract enforcer ----
+
+    #[test]
+    fn check_accepts_contracted_unary_response() {
+        let ok = check_response(&GuestRequest::Ping, GuestResponse::Pong);
+        assert!(matches!(ok, Ok(GuestResponse::Pong)));
+    }
+
+    #[test]
+    fn check_accepts_either_protocol_hello_outcome() {
+        let req = GuestRequest::ProtocolHello {
+            host_protocol_version: 1,
+            min_supported_version: 1,
+            host_version: "t".into(),
+            requested_capabilities: vec![],
+        };
+        let mismatch = GuestResponse::ProtocolMismatch {
+            host_protocol_version: 1,
+            agent_protocol_version: 2,
+            required_action: ProtocolUpgradeAction::UpgradeHost,
+            message: "x".into(),
+        };
+        assert!(check_response(&req, mismatch).is_ok());
+    }
+
+    #[test]
+    fn check_maps_agent_error() {
+        let err = check_response(
+            &GuestRequest::Ping,
+            GuestResponse::Error {
+                message: "boom".into(),
+            },
+        );
+        assert!(matches!(err, Err(RpcError::Agent(m)) if m == "boom"));
+    }
+
+    #[test]
+    fn check_maps_unsupported_in_profile() {
+        let resp = GuestResponse::UnsupportedInProfile {
+            profile: AgentProfile::SealedProd,
+            verb: "Exec".into(),
+        };
+        let err = check_response(&GuestRequest::Ping, resp);
+        assert!(matches!(err, Err(RpcError::UnsupportedInProfile { verb,.. }) if verb == "Exec"));
+    }
+
+    #[test]
+    fn check_rejects_off_contract_response() {
+        // Ping's contract is [Pong]; a WorkerStatus answer is a protocol violation.
+        let resp = GuestResponse::WorkerStatus {
+            status: "idle".into(),
+            last_busy_at: None,
+        };
+        let err = check_response(&GuestRequest::Ping, resp);
+        assert!(matches!(
+            err,
+            Err(RpcError::OffContract {
+                verb: "Ping",
+                got: ResponseVariant::WorkerStatus,
+                ..
+            })
+        ));
+    }
+
+    // ---- is_stream_terminal ----
+
+    #[test]
+    fn entrypoint_exit_is_stream_terminal_but_stdout_is_not() {
+        let term = GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 });
+        let mid = GuestResponse::EntrypointEvent(EntrypointEvent::Stdout {
+            chunk: b"x".to_vec(),
+        });
+        assert!(term.is_stream_terminal());
+        assert!(!mid.is_stream_terminal());
+    }
+
+    // ---- call_unary / call_streaming round-trip over a socket pair ----
+
+    #[test]
+    fn call_unary_round_trips_and_validates() {
+        let (mut client, mut agent) = UnixStream::pair().unwrap();
+        // Pre-write the agent's response; call_unary writes the request
+        // (ignored on the agent side) then reads this frame back.
+        write_frame(&mut agent, &GuestResponse::Pong).unwrap();
+        let resp = call_unary(&mut client, &GuestRequest::Ping).unwrap();
+        assert!(matches!(resp, GuestResponse::Pong));
+    }
+
+    #[test]
+    fn call_unary_rejects_off_contract_agent() {
+        let (mut client, mut agent) = UnixStream::pair().unwrap();
+        write_frame(
+            &mut agent,
+            &GuestResponse::WorkerStatus {
+                status: "idle".into(),
+                last_busy_at: None,
+            },
+        )
+        .unwrap();
+        let err = call_unary(&mut client, &GuestRequest::Ping).unwrap_err();
+        assert!(matches!(err, RpcError::OffContract { verb: "Ping", .. }));
+    }
+
+    #[test]
+    fn call_streaming_yields_frames_until_terminal() {
+        let (mut client, mut agent) = UnixStream::pair().unwrap();
+        write_frame(
+            &mut agent,
+            &GuestResponse::EntrypointEvent(EntrypointEvent::Stdout {
+                chunk: b"hi".to_vec(),
+            }),
+        )
+        .unwrap();
+        write_frame(
+            &mut agent,
+            &GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 }),
+        )
+        .unwrap();
+        let req = GuestRequest::RunEntrypoint {
+            stdin: vec![],
+            timeout_secs: 5,
+            env: vec![],
+        };
+        let mut events = 0usize;
+        call_streaming(&mut client, &req, |_e| events += 1).unwrap();
+        assert_eq!(events, 2);
+    }
+
+    // ---- enforce_verb_grant ----
+
+    #[test]
+    fn grant_denies_unlisted_but_allows_listed_and_baseline() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        let now = chrono::Utc::now();
+        let grant = VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: Nonce::from_bytes([0u8; 16]),
+            not_after: now + chrono::Duration::minutes(1),
+            verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+            sig: vec![],
+        };
+        // listed => allowed
+        let run = GuestRequest::RunEntrypoint {
+            stdin: vec![],
+            timeout_secs: 1,
+            env: vec![],
+        };
+        assert!(enforce_verb_grant(&run, Some(&grant)).is_none());
+        // baseline => allowed even though not listed
+        assert!(enforce_verb_grant(&GuestRequest::Ping, Some(&grant)).is_none());
+        // ProdSafe but unlisted => denied
+        let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        let idle_name = idle.kind_name();
+        match enforce_verb_grant(&idle, Some(&grant)) {
+            Some(GuestResponse::VerbNotAuthorized { verb }) => assert_eq!(verb, idle_name),
+            other => panic!("expected VerbNotAuthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_grant_is_class_gate_only() {
+        let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        assert!(
+            enforce_verb_grant(&idle, None).is_none(),
+            "None grant must not deny anything"
+        );
+    }
+
+    // ---- load_host_signer_verifying_key ----
+
+    #[test]
+    fn load_host_signer_key_absent_missing_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        // absent -> Ok(None)
+        assert!(
+            load_host_signer_verifying_key(&dir.path().join("nope"))
+                .unwrap()
+                .is_none()
+        );
+        // valid -> Ok(Some)
+        let k = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let rawpath = dir.path().join("ok.raw.pub");
+        std::fs::write(&rawpath, k.verifying_key().to_bytes()).unwrap();
+        let loaded = load_host_signer_verifying_key(&rawpath).unwrap().unwrap();
+        assert_eq!(loaded.to_bytes(), k.verifying_key().to_bytes());
+
+        // valid hex -> Ok(Some)
+        let hexpath = dir.path().join("ok.pub");
+        let hex: String = k
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(&hexpath, format!("{hex}\n")).unwrap(); // trailing newline tolerated
+        let loaded = load_host_signer_verifying_key(&hexpath).unwrap().unwrap();
+        assert_eq!(loaded.to_bytes(), k.verifying_key().to_bytes());
+        // malformed -> Err
+        let bad = dir.path().join("bad.pub");
+        std::fs::write(&bad, "not-hex").unwrap();
+        assert!(load_host_signer_verifying_key(&bad).is_err());
+    }
+
+    // ---- pin_verb_grant ----
+
+    #[test]
+    fn pin_verb_grant_valid_forged_replay_expired_and_no_key() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        let session = "sess-H";
+        let nonce = Nonce::from_bytes([4u8; 16]);
+        let now = chrono::Utc::now();
+        let mut good = VerbGrant {
+            session_id: session.into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + chrono::Duration::minutes(1),
+            verbs: vec![VerbId::new("ping").unwrap()],
+            sig: vec![],
+        };
+        good.sig = {
+            use ed25519_dalek::Signer;
+            signer.sign(&good.signing_bytes()).to_bytes().to_vec()
+        };
+
+        // valid, key present -> Some
+        assert!(
+            pin_verb_grant(
+                Some(&good),
+                Some(&signer.verifying_key()),
+                session,
+                &nonce,
+                now
+            )
+            .unwrap()
+            .is_some()
+        );
+        // no grant -> None regardless of key
+        assert!(
+            pin_verb_grant(None, Some(&signer.verifying_key()), session, &nonce, now)
+                .unwrap()
+                .is_none()
+        );
+        // grant present but NO key provisioned -> Err (fail closed)
+        assert!(pin_verb_grant(Some(&good), None, session, &nonce, now).is_err());
+        // forged key -> Err
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]);
+        assert!(
+            pin_verb_grant(
+                Some(&good),
+                Some(&attacker.verifying_key()),
+                session,
+                &nonce,
+                now
+            )
+            .is_err()
+        );
+        // replay onto other session -> Err
+        assert!(
+            pin_verb_grant(
+                Some(&good),
+                Some(&signer.verifying_key()),
+                "other",
+                &nonce,
+                now
+            )
+            .is_err()
+        );
+        // expired -> Err
+        let later = good.not_after + chrono::Duration::seconds(1);
+        assert!(
+            pin_verb_grant(
+                Some(&good),
+                Some(&signer.verifying_key()),
+                session,
+                &nonce,
+                later
+            )
+            .is_err()
+        );
+    }
+
+    // ---- load_pinned_verb_grant ----
+
+    /// Build a signed VerbGrant + VerbGrantEnvelope in a tempdir and write the
+    /// signer pubkey as the config-drive key source.
+    #[cfg(test)]
+    fn write_grant_fixture(
+        dir: &std::path::Path,
+        signer: &ed25519_dalek::SigningKey,
+        session: &str,
+        nonce: &mvm_core::plan::Nonce,
+        verbs: &[&str],
+        valid_minutes: i64,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use mvm_core::plan::{VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        let now = chrono::Utc::now();
+        let mut grant = VerbGrant {
+            session_id: session.into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + chrono::Duration::minutes(valid_minutes),
+            verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
+            sig: vec![],
+        };
+        grant.sig = {
+            use ed25519_dalek::Signer;
+            signer.sign(&grant.signing_bytes()).to_bytes().to_vec()
+        };
+        let pubkey_hex: String = signer
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: pubkey_hex.clone(),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant,
+        };
+        let grant_path = dir.join("verb-grant.json");
+        std::fs::write(&grant_path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let pubkey_path = dir.join("host-signer.pub");
+        std::fs::write(&pubkey_path, format!("{pubkey_hex}\n")).unwrap();
+        (grant_path, pubkey_path)
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_valid_returns_some() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([8u8; 16]);
+        let (grant_path, pubkey_path) =
+            write_grant_fixture(dir.path(), &signer, "sess-valid", &nonce, &["ping"], 10);
+        let now = chrono::Utc::now();
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, now);
+        assert!(
+            result.is_some(),
+            "valid grant + matching key must return Some"
+        );
+        let g = result.unwrap();
+        assert_eq!(g.session_id, "sess-valid");
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_ignores_envelope_pubkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[10u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([11u8; 16]);
+        use mvm_core::plan::{VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        let now = chrono::Utc::now();
+        let mut grant = VerbGrant {
+            session_id: "sess-wrong-key".into(),
+            plan_nonce: nonce.clone(),
+            not_after: now + chrono::Duration::minutes(10),
+            verbs: vec![VerbId::new("ping").unwrap()],
+            sig: vec![],
+        };
+        grant.sig = {
+            use ed25519_dalek::Signer;
+            signer.sign(&grant.signing_bytes()).to_bytes().to_vec()
+        };
+        let attacker_pubkey_hex: String = attacker
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: attacker_pubkey_hex,
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant,
+        };
+        let grant_path = dir.path().join("verb-grant.json");
+        std::fs::write(&grant_path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let signer_pubkey_hex: String = signer
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let pubkey_path = dir.path().join("host-signer.pub");
+        std::fs::write(&pubkey_path, format!("{signer_pubkey_hex}\n")).unwrap();
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, now);
+        assert!(
+            result.is_some(),
+            "config-drive pubkey must be trusted instead of envelope.pubkey_hex"
+        );
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_wrong_config_key_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[12u8; 32]);
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[13u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([14u8; 16]);
+        let (grant_path, pubkey_path) =
+            write_grant_fixture(dir.path(), &signer, "sess-wrong-key", &nonce, &["ping"], 10);
+        let attacker_pubkey_hex: String = attacker
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(&pubkey_path, format!("{attacker_pubkey_hex}\n")).unwrap();
+        let now = chrono::Utc::now();
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, now);
+        assert!(
+            result.is_none(),
+            "grant signed by a different key than config-drive pubkey must return None"
+        );
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_malformed_config_pubkey_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[15u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([16u8; 16]);
+        let (grant_path, pubkey_path) = write_grant_fixture(
+            dir.path(),
+            &signer,
+            "sess-bad-pubkey",
+            &nonce,
+            &["ping"],
+            10,
+        );
+        std::fs::write(&pubkey_path, "not-valid-hex\n").unwrap();
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, chrono::Utc::now());
+        assert!(
+            result.is_none(),
+            "malformed config-drive pubkey must return None"
+        );
+    }
+
+    /// The vsock-only payoff: when the host-signer pubkey is present (as the
+    /// cmdline-delivered trust anchor now provides on the OCI/vsock path), a
+    /// valid pinned grant enforces its verb list SELECTIVELY — the listed verb
+    /// (and baseline verbs) are served while an unlisted verb is refused —
+    /// instead of collapsing to a deny-all posture. Drives the real per-verb
+    /// gate `enforce_verb_grant` against the pinned grant, not just a
+    /// grant-present shortcut.
+    #[test]
+    fn present_host_signer_pub_enforces_verb_list_selectively() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[21u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([22u8; 16]);
+        // List a single non-baseline verb so "listed" is distinguishable from
+        // the always-answerable baseline set.
+        let (grant_path, pubkey_path) = write_grant_fixture(
+            dir.path(),
+            &signer,
+            "sess-selective",
+            &nonce,
+            &["update-idle-timeout"],
+            10,
+        );
+        let now = chrono::Utc::now();
+
+        // Anchor present ⇒ grant pins, carrying the listed verb.
+        let pinned = load_pinned_verb_grant(&grant_path, &pubkey_path, now)
+            .expect("anchor present ⇒ valid grant must pin");
+        assert!(
+            pinned
+                .verbs
+                .iter()
+                .any(|v| v.as_str() == "update-idle-timeout"),
+            "listed verb must survive into the pinned grant"
+        );
+
+        // Listed, non-baseline verb ⇒ enforce_verb_grant permits (no refusal).
+        let listed = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        assert!(
+            enforce_verb_grant(&listed, Some(&pinned)).is_none(),
+            "listed verb must be served under the pinned grant"
+        );
+        // Baseline verb ⇒ permitted even though absent from the verb list.
+        assert!(
+            enforce_verb_grant(&GuestRequest::Ping, Some(&pinned)).is_none(),
+            "baseline verb must be served regardless of the verb list"
+        );
+        // Unlisted, non-baseline verb ⇒ refused. This is what proves selective
+        // enforcement rather than deny-all or serve-all.
+        let unlisted = GuestRequest::WorkerStatus;
+        let unlisted_name = unlisted.kind_name();
+        match enforce_verb_grant(&unlisted, Some(&pinned)) {
+            Some(GuestResponse::VerbNotAuthorized { verb }) => assert_eq!(verb, unlisted_name),
+            other => panic!("unlisted verb must be refused, got {other:?}"),
+        }
+
+        // Anchor absent ⇒ no grant pins ⇒ launch-asserted enforcement fails closed.
+        let missing_anchor = dir.path().join("no-host-signer.pub");
+        assert!(
+            load_pinned_verb_grant(&grant_path, &missing_anchor, now).is_none(),
+            "absent anchor is the current OCI/vsock regression: grant cannot pin"
+        );
+        assert_eq!(
+            trust_decision(None, false, true),
+            TrustDecision::FailClosed,
+            "no grant under launch-asserted enforcement is the deny-all path"
+        );
+    }
+
+    /// The shipped anchor form: `mvm-oci-init` writes `host-signer.pub` as the
+    /// RAW 32 pubkey bytes, not hex. Exercise that byte layout end-to-end
+    /// through the reader into `load_pinned_verb_grant`.
+    #[test]
+    fn load_pinned_verb_grant_accepts_raw_32_byte_pubkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([24u8; 16]);
+        let (grant_path, pubkey_path) =
+            write_grant_fixture(dir.path(), &signer, "sess-raw", &nonce, &["ping"], 10);
+        // Replace the hex fixture pubkey with the raw 32-byte form.
+        std::fs::write(&pubkey_path, signer.verifying_key().to_bytes()).unwrap();
+        assert_eq!(std::fs::read(&pubkey_path).unwrap().len(), 32);
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, chrono::Utc::now());
+        assert!(
+            result.is_some(),
+            "raw 32-byte host-signer pubkey must pin the grant (not the anchor-absent None path)"
+        );
+        assert_eq!(result.unwrap().session_id, "sess-raw");
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_malformed_envelope_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let grant_path = dir.path().join("verb-grant.json");
+        let pubkey_path = dir.path().join("host-signer.pub");
+        std::fs::write(&pubkey_path, "00".repeat(32)).unwrap();
+        std::fs::write(&grant_path, b"this is not json").unwrap();
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, chrono::Utc::now());
+        assert!(
+            result.is_none(),
+            "malformed envelope JSON must return None (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn load_pinned_verb_grant_absent_grant_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_grant = dir.path().join("no-grant.json");
+        let missing_pubkey = dir.path().join("no-host-signer.pub");
+        let result = load_pinned_verb_grant(&missing_grant, &missing_pubkey, chrono::Utc::now());
+        assert!(
+            result.is_none(),
+            "absent grant file must return None (no-op boot)"
+        );
+    }
+
+    // ---- re_pin_verb_grant ----
+
+    #[test]
+    fn re_pin_verb_grant_valid_returns_some() {
+        // Grant signed by the host anchor, envelope pubkey = anchor, called with
+        // the anchor: verifies and re-pins. A host-signed re-pin MAY widen the
+        // served verb set (a fork runs a newly admitted plan), so we assert the
+        // full listed set comes back.
+        let host = ed25519_dalek::SigningKey::from_bytes(&[20u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([21u8; 16]);
+        let now = chrono::Utc::now();
+        let envelope = self_signed_envelope(
+            &host,
+            "sess-repin",
+            &nonce,
+            &["run-entrypoint", "update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        );
+        let result = re_pin_verb_grant(&envelope, None, &host.verifying_key(), now);
+        let grant = result.expect("valid host-signed envelope must yield Some from re_pin");
+        assert_eq!(grant.session_id, "sess-repin");
+        assert!(grant.permits("run-entrypoint"));
+        assert!(grant.permits("update-idle-timeout"));
+    }
+
+    #[test]
+    fn re_pin_verb_grant_wrong_key_returns_none() {
+        // Envelope is self-consistent (grant signed by `signer`, pubkey_hex =
+        // signer), but the boot-pinned anchor is a DIFFERENT key. Because re-pin
+        // verifies against the anchor and ignores the embedded pubkey, an
+        // envelope not signed by the anchor is rejected — this is exactly the
+        // property the old embedded-pubkey path lacked.
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[22u8; 32]);
+        let anchor = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([24u8; 16]);
+        let now = chrono::Utc::now();
+        let envelope = self_signed_envelope(
+            &signer,
+            "sess-wrong",
+            &nonce,
+            &["ping"],
+            now + chrono::Duration::minutes(10),
+        );
+        let result = re_pin_verb_grant(&envelope, None, &anchor.verifying_key(), now);
+        assert!(
+            result.is_none(),
+            "grant not signed by the boot-pinned anchor must return None"
+        );
+    }
+
+    // ---- PostRestore back-compat + grant_envelope roundtrip ----
+
+    #[test]
+    fn post_restore_grant_envelope_defaults_absent_and_roundtrips() {
+        use mvm_core::crypto::vmgenid::GENID_BYTES;
+
+        // Back-compat: an old PostRestore frame without the grant_envelope field
+        // still deserializes successfully with grant_envelope defaulting to None.
+        let old = r#"{"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
+        let g: GuestRequest =
+            serde_json::from_str(&format!(r#"{{"PostRestore":{}}}"#, old)).unwrap();
+        match g {
+            GuestRequest::PostRestore { grant_envelope, .. } => assert!(
+                grant_envelope.is_none(),
+                "absent grant_envelope must default to None"
+            ),
+            _ => panic!("expected PostRestore"),
+        }
+
+        // A frame with an explicit null also deserializes correctly.
+        let with_null =
+            r#"{"PostRestore":{"token":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"grant_envelope":null}}"#;
+        match serde_json::from_str::<GuestRequest>(with_null).unwrap() {
+            GuestRequest::PostRestore { grant_envelope, .. } => assert!(grant_envelope.is_none()),
+            _ => panic!("expected PostRestore"),
+        }
+
+        // A frame without both token and grant_envelope defaults both.
+        match serde_json::from_str::<GuestRequest>(r#"{"PostRestore":{}}"#).unwrap() {
+            GuestRequest::PostRestore {
+                token,
+                grant_envelope,
+            } => {
+                assert_eq!(token, [0u8; GENID_BYTES]);
+                assert!(grant_envelope.is_none());
+            }
+            _ => panic!("expected PostRestore"),
+        }
+    }
+
+    // ---- trust_decision + load_verb_trust_policy ----
+
+    #[test]
+    fn trust_decision_covers_policy_matrix() {
+        use mvm_core::plan::{GrantKeySource, VerbTrustPolicy};
+        let require = |req| VerbTrustPolicy {
+            version: 1,
+            require_grant: req,
+            grant_key_source: GrantKeySource::LaunchProvisioned,
+        };
+        // No policy (dev/OCI): always serve regardless of launch flag.
+        assert_eq!(trust_decision(None, false, false), TrustDecision::Serve);
+        assert_eq!(trust_decision(None, false, true), TrustDecision::FailClosed);
+        assert_eq!(trust_decision(None, true, false), TrustDecision::Serve);
+        assert_eq!(trust_decision(None, true, true), TrustDecision::Serve);
+        // Policy + grant present: serve regardless of launch flag.
+        assert_eq!(
+            trust_decision(Some(&require(true)), true, false),
+            TrustDecision::Serve
+        );
+        assert_eq!(
+            trust_decision(Some(&require(true)), true, true),
+            TrustDecision::Serve
+        );
+        // Policy present, grant absent, require=false, launch=false: observe (mvmd-safe case).
+        assert_eq!(
+            trust_decision(Some(&require(false)), false, false),
+            TrustDecision::ObserveGap
+        );
+        // Policy present, grant absent, require=false, launch=true: fail closed (mvmctl grant-delivering launch).
+        assert_eq!(
+            trust_decision(Some(&require(false)), false, true),
+            TrustDecision::FailClosed
+        );
+        // Policy present, grant absent, require=true: fail closed regardless of launch.
+        assert_eq!(
+            trust_decision(Some(&require(true)), false, false),
+            TrustDecision::FailClosed
+        );
+        assert_eq!(
+            trust_decision(Some(&require(true)), false, true),
+            TrustDecision::FailClosed
+        );
+        // No policy, no grant, launch=true: fail closed.
+        assert_eq!(trust_decision(None, false, true), TrustDecision::FailClosed);
+        // No policy, no grant, launch=false: serve.
+        assert_eq!(trust_decision(None, false, false), TrustDecision::Serve);
+        // Attested + no grant is treated as fail-closed regardless of launch.
+        let attested = VerbTrustPolicy {
+            version: 1,
+            require_grant: false,
+            grant_key_source: GrantKeySource::Attested,
+        };
+        assert_eq!(
+            trust_decision(Some(&attested), false, false),
+            TrustDecision::FailClosed
+        );
+        assert_eq!(
+            trust_decision(Some(&attested), false, true),
+            TrustDecision::FailClosed
+        );
+    }
+
+    #[test]
+    fn parse_require_grant_cmdline_exact_match() {
+        // Token present: true.
+        assert!(parse_require_grant_cmdline(
+            "console=hvc0 mvm.require_grant=1 quiet"
+        ));
+        assert!(parse_require_grant_cmdline("mvm.require_grant=1"));
+        // Token absent: false.
+        assert!(!parse_require_grant_cmdline("console=hvc0 quiet"));
+        assert!(!parse_require_grant_cmdline(""));
+        // mvm.require_grant=0 is not the exact token: false.
+        assert!(!parse_require_grant_cmdline("mvm.require_grant=0"));
+        // Substring of another token does not match: false.
+        assert!(!parse_require_grant_cmdline("foo=mvm.require_grant=1bar"));
+        assert!(!parse_require_grant_cmdline("xmvm.require_grant=1"));
+    }
+
+    #[test]
+    fn load_verb_trust_policy_absent_is_none_malformed_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("verb-trust.json");
+        assert!(load_verb_trust_policy(&p).is_none()); // absent
+        std::fs::write(&p, b"{ not json").unwrap();
+        assert!(load_verb_trust_policy(&p).is_none()); // malformed => None (dev-default)
+    }
+
+    // ---- PostRestore re-pin adversarial (resume-path authority) ----
+
+    /// Build a `VerbGrantEnvelope` self-signed by `signer`, carrying `signer`'s
+    /// own pubkey. Mirrors what the launcher would ship, but usable with any key
+    /// so an adversarial (non-host) signer can be substituted.
+    fn self_signed_envelope(
+        signer: &ed25519_dalek::SigningKey,
+        session: &str,
+        nonce: &mvm_core::plan::Nonce,
+        verbs: &[&str],
+        not_after: chrono::DateTime<chrono::Utc>,
+    ) -> mvm_core::protocol::vm_backend::VerbGrantEnvelope {
+        use ed25519_dalek::Signer;
+        use mvm_core::plan::{VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        let mut grant = VerbGrant {
+            session_id: session.into(),
+            plan_nonce: nonce.clone(),
+            not_after,
+            verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
+            sig: vec![],
+        };
+        grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
+        let pubkey_hex: String = signer
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        VerbGrantEnvelope {
+            pubkey_hex,
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant,
+        }
+    }
+
+    /// A stale (expired) envelope delivered at restore must not re-pin: replaying
+    /// an old-but-once-valid grant cannot revive authority past its expiry.
+    #[test]
+    fn re_pin_verb_grant_expired_envelope_returns_none() {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[30u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([31u8; 16]);
+        let issued = chrono::Utc::now();
+        let envelope = self_signed_envelope(
+            &signer,
+            "sess-stale",
+            &nonce,
+            &["run-entrypoint"],
+            issued + chrono::Duration::minutes(5),
+        );
+        // Restore happens one minute after expiry. Anchor matches the signer, so
+        // the ONLY reason to reject is the elapsed validity window.
+        let later = issued + chrono::Duration::minutes(6);
+        assert!(
+            re_pin_verb_grant(&envelope, None, &signer.verifying_key(), later).is_none(),
+            "an expired envelope must not re-pin at restore"
+        );
+    }
+
+    /// Verbs appended to the grant AFTER signing (a widened set the signer never
+    /// authorized) break the Ed25519 signature and must not re-pin.
+    #[test]
+    fn re_pin_verb_grant_verbs_widened_after_signing_returns_none() {
+        use mvm_core::plan::VerbId;
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[32u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([33u8; 16]);
+        let now = chrono::Utc::now();
+        let mut envelope = self_signed_envelope(
+            &signer,
+            "sess-widen",
+            &nonce,
+            &["update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        );
+        // Tamper: append a broader verb after the signature was computed.
+        envelope
+            .grant
+            .verbs
+            .push(VerbId::new("run-entrypoint").unwrap());
+        // Anchor matches the signer, so rejection is purely the broken signature
+        // over the tampered (widened) verb set.
+        assert!(
+            re_pin_verb_grant(&envelope, None, &signer.verifying_key(), now).is_none(),
+            "verbs appended after signing must fail signature verification and not re-pin"
+        );
+    }
+
+    /// ADVERSARIAL (resume path). A `PostRestore` envelope self-signed by a key
+    /// that is NOT the boot-pinned host signer must not install a grant. Re-pin
+    /// verifies against the host-signer trust anchor pinned at boot — the same
+    /// anchor `load_pinned_verb_grant` uses and
+    /// `load_pinned_verb_grant_ignores_envelope_pubkey` proves the boot path
+    /// binds to (rather than trusting `envelope.pubkey_hex`). A self-attested
+    /// envelope key carries no authority.
+    #[test]
+    fn post_restore_self_signed_envelope_must_not_widen_authority() {
+        // Boot pins a host-signed grant limited to a single non-baseline verb.
+        let dir = tempfile::tempdir().unwrap();
+        let host = ed25519_dalek::SigningKey::from_bytes(&[40u8; 32]);
+        let boot_nonce = mvm_core::plan::Nonce::from_bytes([41u8; 16]);
+        let now = chrono::Utc::now();
+        let (grant_path, pubkey_path) = write_grant_fixture(
+            dir.path(),
+            &host,
+            "sess-boot",
+            &boot_nonce,
+            &["update-idle-timeout"],
+            10,
+        );
+        let pinned = load_pinned_verb_grant(&grant_path, &pubkey_path, now)
+            .expect("boot grant must pin under the host anchor");
+        assert!(
+            !pinned.permits("run-entrypoint"),
+            "run-entrypoint is forbidden at boot"
+        );
+
+        // Adversary crafts a restore envelope self-signed by a NON-host key,
+        // listing a broadened verb set, carrying its own pubkey.
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let evil_nonce = mvm_core::plan::Nonce::from_bytes([43u8; 16]);
+        let evil_env = self_signed_envelope(
+            &attacker,
+            "attacker",
+            &evil_nonce,
+            &["run-entrypoint", "update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        );
+
+        // Verified against the boot-pinned HOST anchor (not the envelope's
+        // self-attested pubkey), the non-host-signed envelope is rejected
+        // outright — no grant, and certainly no widening to the boot-forbidden
+        // verb.
+        let result = re_pin_verb_grant(&evil_env, Some(&pinned), &host.verifying_key(), now);
+        assert!(
+            result.is_none(),
+            "SECURITY: a PostRestore envelope self-signed by a non-host key must \
+             not re-pin any grant — it is not signed by the boot host-signer anchor"
+        );
+    }
+
+    /// A host-signed grant for a sibling VM must not re-pin over this VM's
+    /// current grant unless it proves lineage from the grant already pinned in
+    /// the snapshot.
+    #[test]
+    fn re_pin_verb_grant_cross_vm_host_signed_requires_matching_lineage() {
+        let host = ed25519_dalek::SigningKey::from_bytes(&[44u8; 32]);
+        let current_nonce = mvm_core::plan::Nonce::from_bytes([46u8; 16]);
+        let other_vm_nonce = mvm_core::plan::Nonce::from_bytes([45u8; 16]);
+        let now = chrono::Utc::now();
+        let current = self_signed_envelope(
+            &host,
+            "current-vm-session",
+            &current_nonce,
+            &["update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        )
+        .grant;
+        // Host-signed, but for some other VM's session/nonce.
+        let mut envelope = self_signed_envelope(
+            &host,
+            "some-other-vm-session",
+            &other_vm_nonce,
+            &["run-entrypoint"],
+            now + chrono::Duration::minutes(10),
+        );
+        envelope.predecessor_session_id = Some("sibling-vm-session".into());
+        envelope.predecessor_plan_nonce_hex = Some(other_vm_nonce.as_hex().to_string());
+        let result = re_pin_verb_grant(&envelope, Some(&current), &host.verifying_key(), now);
+        assert!(
+            result.is_none(),
+            "a host-signed grant for another VM must not re-pin when its \
+             predecessor lineage does not match the currently pinned grant"
+        );
+    }
+
+    #[test]
+    fn re_pin_verb_grant_matching_lineage_allows_host_signed_rotation() {
+        let host = ed25519_dalek::SigningKey::from_bytes(&[47u8; 32]);
+        let current_nonce = mvm_core::plan::Nonce::from_bytes([48u8; 16]);
+        let next_nonce = mvm_core::plan::Nonce::from_bytes([49u8; 16]);
+        let now = chrono::Utc::now();
+        let current = self_signed_envelope(
+            &host,
+            "parent-vm-session",
+            &current_nonce,
+            &["update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        )
+        .grant;
+        let mut envelope = self_signed_envelope(
+            &host,
+            "child-vm-session",
+            &next_nonce,
+            &["run-entrypoint", "update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        );
+        envelope.predecessor_session_id = Some(current.session_id.clone());
+        envelope.predecessor_plan_nonce_hex = Some(current.plan_nonce.as_hex().to_string());
+        let result = re_pin_verb_grant(&envelope, Some(&current), &host.verifying_key(), now);
+        let grant = result.expect("matching lineage must allow a host-signed grant rotation");
+        assert_eq!(grant.session_id, "child-vm-session");
+        assert!(grant.permits("run-entrypoint"));
+    }
+}

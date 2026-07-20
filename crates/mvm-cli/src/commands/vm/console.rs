@@ -6,12 +6,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm::vsock_transport::{
+use mvm_core::naming::validate_vm_name;
+use mvm_core::user_config::MvmConfig;
+use mvm_runtime::vsock_transport::{
     DevConsoleTransport, FirecrackerTransport, LibkrunTransport, VsockTransport,
     firecracker_transport_supported,
 };
-use mvm_core::naming::validate_vm_name;
-use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
@@ -32,7 +32,7 @@ use crate::ui;
 /// thread reuse the same dispatch.
 fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     let libkrun = LibkrunTransport::for_vm(name);
-    if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+    if libkrun.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Arc::new(libkrun));
     }
     // HVF runner (WorkloadRunner / HVF) exposes the agent at
@@ -44,7 +44,7 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     // agent carries no Console capability regardless.
     if hvf_console_arm_enabled(name) {
         let hvf = DevConsoleTransport::for_vm(name);
-        if hvf.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+        if hvf.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
             return Ok(Arc::new(hvf));
         }
     }
@@ -61,7 +61,7 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
 /// links no Console capability). Missing/legacy metadata reads as accessible —
 /// the same backward-compat default `enforce_accessible_gate` uses.
 fn hvf_console_arm_enabled(name: &str) -> bool {
-    !matches!(mvm::vm::runtime_meta::read(name), Ok(Some(meta)) if !meta.accessible)
+    !matches!(mvm_runtime::vm::runtime_meta::read(name), Ok(Some(meta)) if !meta.accessible)
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -92,7 +92,7 @@ pub(in crate::commands) struct Args {
 /// production microVM).
 pub(in crate::commands) fn enforce_accessible_gate(name: &str, force: bool) -> Result<()> {
     let _ = force;
-    match mvm::vm::runtime_meta::read(name) {
+    match mvm_runtime::vm::runtime_meta::read(name) {
         Ok(Some(meta)) if !meta.accessible => anyhow::bail!(
             "console refused: VM {name:?} was built from a sealed image (passthru.mvm.accessible = false). \
              Sealed images don't ship the dev agent surface. \
@@ -114,11 +114,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
     if let Some(cmd) = command {
         let transport = pick_console_transport(name)?;
-        let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+        let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
         // Inbound vsock RPC audit (verb=exec).
         super::shared::emit_vsock_rpc_audit(
             name,
-            &mvm_guest::vsock::GuestRequest::Exec {
+            &mvm_agentd::vsock::GuestRequest::Exec {
                 command: cmd.to_string(),
                 stdin: None,
                 timeout_secs: None,
@@ -128,14 +128,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         use std::io::Write as _;
         let command = command_with_env(cmd, &args.env);
         let terminal =
-            mvm_guest::vsock::send_exec_streaming(&mut stream, &command, None, None, |event| {
+            mvm_agentd::vsock::send_exec_streaming(&mut stream, &command, None, None, |event| {
                 match event {
-                    mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+                    mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
                         let mut so = std::io::stdout();
                         let _ = so.write_all(chunk);
                         let _ = so.flush();
                     }
-                    mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+                    mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
                         let mut se = std::io::stderr();
                         let _ = se.write_all(chunk);
                         let _ = se.flush();
@@ -144,13 +144,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             })?;
         match terminal {
-            mvm_guest::vsock::ExecEvent::Exit { code } => {
+            mvm_agentd::vsock::ExecEvent::Exit { code } => {
                 if code != 0 {
                     std::process::exit(code);
                 }
                 Ok(())
             }
-            mvm_guest::vsock::ExecEvent::TimedOut => {
+            mvm_agentd::vsock::ExecEvent::TimedOut => {
                 eprintln!("{}", crate::exec::timeout_exit_message(None));
                 std::process::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
             }
@@ -174,18 +174,11 @@ fn command_with_env(cmd: &str, env: &[(String, String)]) -> String {
     format!("{exports} {cmd}")
 }
 
-/// Record a coarse guest-activity touch on the named VM.
-/// Best-effort: only rewrites the registry when the name is registered;
-/// any load/save hiccup is swallowed so console attach never blocks.
+/// Record a coarse guest-activity touch on the named VM, through the client
+/// boundary (mvm-client owns the host-registry reach). Best-effort — a hiccup
+/// never blocks console attach.
 fn touch_activity(name: &str) {
-    let path = mvm::vm::name_registry::registry_path();
-    if let Ok(mut reg) = mvm::vm::name_registry::VmNameRegistry::load(&path)
-        && reg
-            .touch_last_active(name, mvm_core::time::utc_now())
-            .unwrap_or(false)
-    {
-        let _ = reg.save(&path);
-    }
+    mvm_client::touch_activity(name);
 }
 
 /// Open an interactive PTY console to a running VM.
@@ -258,12 +251,12 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
 
     let transport = pick_console_transport(name)?;
 
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    mvm_guest::vsock::require_capabilities(
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::require_capabilities(
         &mut stream,
-        &[mvm_guest::vsock::GuestCapability::Console],
+        &[mvm_agentd::vsock::GuestCapability::Console],
     )?;
-    let req = mvm_guest::vsock::GuestRequest::ConsoleOpen {
+    let req = mvm_agentd::vsock::GuestRequest::ConsoleOpen {
         cols,
         rows,
         env,
@@ -271,8 +264,8 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
     };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let (session_id, data_port) = match mvm_guest::vsock::call_unary(&mut stream, &req)? {
-        mvm_guest::vsock::GuestResponse::ConsoleOpened {
+    let (session_id, data_port) = match mvm_agentd::vsock::call_unary(&mut stream, &req)? {
+        mvm_agentd::vsock::GuestResponse::ConsoleOpened {
             session_id,
             data_port,
         } => (session_id, data_port),
@@ -318,15 +311,15 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
 }
 
 fn console_exit_code(transport: &Arc<dyn VsockTransport>, session_id: u32) -> Result<i32> {
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    mvm_guest::vsock::require_capabilities(
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::require_capabilities(
         &mut stream,
-        &[mvm_guest::vsock::GuestCapability::Console],
+        &[mvm_agentd::vsock::GuestCapability::Console],
     )?;
-    let req = mvm_guest::vsock::GuestRequest::ConsoleClose { session_id };
-    match mvm_guest::vsock::call_unary(&mut stream, &req)? {
-        mvm_guest::vsock::GuestResponse::ConsoleExited { exit_code, .. } => Ok(exit_code),
-        mvm_guest::vsock::GuestResponse::Error { message } => anyhow::bail!("{message}"),
+    let req = mvm_agentd::vsock::GuestRequest::ConsoleClose { session_id };
+    match mvm_agentd::vsock::call_unary(&mut stream, &req)? {
+        mvm_agentd::vsock::GuestResponse::ConsoleExited { exit_code, .. } => Ok(exit_code),
+        mvm_agentd::vsock::GuestResponse::Error { message } => anyhow::bail!("{message}"),
         other => anyhow::bail!("Unexpected response: {other:?}"),
     }
 }
@@ -375,17 +368,17 @@ fn setup_sigwinch_handler(
 
             // Send ConsoleResize via the control channel (best-effort).
             let _ = transport
-                .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
                 .ok()
                 .and_then(|mut stream| {
-                    mvm_guest::vsock::require_capabilities(
+                    mvm_agentd::vsock::require_capabilities(
                         &mut stream,
-                        &[mvm_guest::vsock::GuestCapability::Console],
+                        &[mvm_agentd::vsock::GuestCapability::Console],
                     )
                     .ok()?;
-                    mvm_guest::vsock::send_request(
+                    mvm_agentd::vsock::send_request(
                         &mut stream,
-                        &mvm_guest::vsock::GuestRequest::ConsoleResize {
+                        &mvm_agentd::vsock::GuestRequest::ConsoleResize {
                             session_id,
                             cols,
                             rows,
@@ -532,16 +525,16 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<()> 
 #[cfg(test)]
 mod accessible_gate_tests {
     use super::*;
-    use mvm::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
+    use mvm_runtime::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
 
     fn with_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
         env.set("HOME", tmp.path());
-        env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+        env.set("MVM_HOME", tmp.path());
         f(tmp.path());
     }
 
@@ -575,16 +568,16 @@ mod accessible_gate_tests {
     fn touch_activity_refreshes_last_active_for_registered_vm() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_SHARE_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
-        let path = mvm::vm::name_registry::registry_path();
-        let mut reg = mvm::vm::name_registry::VmNameRegistry::default();
+        let path = mvm_runtime::vm::name_registry::registry_path();
+        let mut reg = mvm_runtime::vm::name_registry::VmNameRegistry::default();
         reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
         reg.save(&path).unwrap();
         assert!(reg.lookup("vm1").unwrap().last_active.is_none());
 
         touch_activity("vm1");
-        let reloaded = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        let reloaded = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path).unwrap();
         assert!(
             reloaded.lookup("vm1").unwrap().last_active.is_some(),
             "console attach must refresh last_active"
@@ -592,7 +585,7 @@ mod accessible_gate_tests {
 
         // Unknown name is a clean no-op — no panic, registry untouched.
         touch_activity("ghost");
-        let reloaded = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        let reloaded = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path).unwrap();
         assert!(reloaded.lookup("ghost").is_none());
     }
 
@@ -672,7 +665,7 @@ mod picker_hvf_tests {
     use super::*;
 
     /// Bind `hvf-agent.sock` under a fresh temp state-dir and set
-    /// `MVM_DATA_DIR` so `vm_state_dir` resolves there. Returns the guard
+    /// `MVM_HOME` so `vm_state_dir` resolves there. Returns the guard
     /// objects that keep the socket and env alive for the test.
     fn setup_hvf_agent(
         name: &str,
@@ -683,7 +676,7 @@ mod picker_hvf_tests {
     ) {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
         let agent = mvm_core::config::vm_hvf_agent_socket(name);
@@ -708,18 +701,19 @@ mod picker_hvf_tests {
 
         let transport = pick_console_transport(name).expect("picker must resolve hvf transport");
         transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect("selected transport must connect to hvf-agent.sock");
     }
 
     // A sealed workload must not route to the hvf console even with
-    // `hvf-agent.sock` present. It falls through to Vz/Firecracker, so a sealed
-    // prod runner never receives an interactive attach.
+    // `hvf-agent.sock` present. It falls through to the HVF per-port vsock
+    // transport / Firecracker, so a sealed prod runner never receives an
+    // interactive attach.
     #[test]
     fn pick_console_transport_skips_hvf_for_sealed_workload() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let name = "hvf-sealed-workload";
         let state = mvm_core::config::vm_state_dir(name);
@@ -735,10 +729,10 @@ mod picker_hvf_tests {
         };
 
         // Mark the image sealed.
-        mvm::vm::runtime_meta::write(
+        mvm_runtime::vm::runtime_meta::write(
             name,
-            &mvm::vm::runtime_meta::VmRuntimeMeta {
-                mode: mvm::vm::runtime_meta::StartModeKind::Attached,
+            &mvm_runtime::vm::runtime_meta::VmRuntimeMeta {
+                mode: mvm_runtime::vm::runtime_meta::StartModeKind::Attached,
                 accessible: false,
                 rootfs_path: None,
                 runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
@@ -754,7 +748,7 @@ mod picker_hvf_tests {
             Ok(transport) => {
                 assert!(
                     transport
-                        .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
                         .is_err(),
                     "a sealed workload must not route to the hvf agent socket"
                 );
@@ -768,7 +762,7 @@ mod picker_hvf_tests {
     fn pick_console_transport_selects_hvf_for_accessible_workload_without_dev_env() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         // Deliberately NOT dev mode.
         env.set("MVM_ENV", "prod");
 
@@ -789,7 +783,7 @@ mod picker_hvf_tests {
         let transport = pick_console_transport(name)
             .expect("accessible workload must resolve the hvf transport");
         transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect("selected transport must connect to the workload agent socket");
     }
 }

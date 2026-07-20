@@ -35,7 +35,7 @@ let
     lib.optionals withBuilderVm [ "mvmctl/builder-vm" ]
     ++ lib.optionals withNativeLibkrun [
       "mvm-cli/libkrun-sys"
-      "mvm-vm-host/libkrun-sys"
+      "mvm-hostd/libkrun-sys"
     ];
 in
 rustPlatform.buildRustPackage {
@@ -64,7 +64,7 @@ rustPlatform.buildRustPackage {
       "--package"
       "mvmctl"
       "--package"
-      "mvm-vm-host"
+      "mvm-hostd"
     ]
     ++ lib.optionals (!withBuilderVm) [
       "--no-default-features"
@@ -78,7 +78,7 @@ rustPlatform.buildRustPackage {
     "--package"
     "mvmctl"
     "--package"
-    "mvm-vm-host"
+    "mvm-hostd"
   ];
 
   # cargo-auditable 0.6.5 runs `cargo metadata` from each rustc wrapper

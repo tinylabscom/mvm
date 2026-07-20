@@ -2,8 +2,8 @@
 //! `mvm_core::vm_backend::VmStartConfig` without exposing the conversion
 //! surface to every command file.
 
-use mvm::config;
-use mvm_backend::{image, microvm};
+use mvm_runtime::config;
+use mvm_runtime::{image, microvm};
 
 /// Parameters for building a `VmStartConfig` from runtime-specific types.
 pub struct VmStartParams<'a> {
@@ -145,7 +145,7 @@ mod tests {
     // `into_start_config()` fell through to `VmStartConfig::default()` =
     // deny-all for every `up` boot — silently ignoring `--network-preset` /
     // `--network-allow`. The resolved policy must survive the conversion so the
-    // backend (Firecracker nftables; the libkrun/Vz gateway bridge) enforces
+    // backend (Firecracker nftables; the libkrun/HVF gateway bridge) enforces
     // the requested posture instead of always deny-all.
     #[test]
     fn into_start_config_preserves_the_resolved_network_policy() {

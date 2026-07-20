@@ -357,15 +357,15 @@ yourself per [Building MicroVM Images](/guides/building-microvm-images).
 ```
 
 ```bash
-mkdir -p ~/.config/mvm/secrets
-printf '%s\n' 'sk-ant-…' > ~/.config/mvm/secrets/anthropic
-chmod 0400 ~/.config/mvm/secrets/anthropic
+mkdir -p ~/.mvm/config/secrets
+printf '%s\n' 'sk-ant-…' > ~/.mvm/config/secrets/anthropic
+chmod 0400 ~/.mvm/config/secrets/anthropic
 
 cd my-claude-code-vm
 mvmctl machine build
 mvmctl machine run --manifest . --profile dev \
   --mount "$PWD:/workspace:rw" \
-  --mount "$HOME/.config/mvm/secrets:/mnt/secrets"
+  --mount "$HOME/.mvm/config/secrets:/mnt/secrets"
 ```
 
 Inside the guest, your workload can read the file you mounted under
@@ -375,4 +375,4 @@ secret refs instead.
 
 Why a microVM and not a process sandbox: process sandboxes share the host kernel and trust it. A microVM gives the agent its own kernel, so a kernel exploit can't pivot to the host.
 
-Full security composition (per-service uid, seccomp tier, secrets mode, verified boot) is documented in [ADR-002](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/002-microvm-security-posture.md) and the [Rootless workloads section](/guides/building-microvm-images#rootless-workloads).
+Full security composition (per-service uid, seccomp tier, secrets mode, verified boot) is documented in [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md) and the [Rootless workloads section](/guides/building-microvm-images#rootless-workloads).

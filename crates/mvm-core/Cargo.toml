@@ -13,6 +13,10 @@ anyhow.workspace = true
 base64.workspace = true
 serde_jcs = "0.1"
 chrono.workspace = true
+# The no_std + alloc foundation crate. `plan::validity` re-exports its
+# `FreshnessClaims`; `plan::{types,verb,verb_trust}` are module aliases
+# onto its `plan` submodules.
+mvm-protocol.workspace = true
 # `protocol::signed_config` verifies
 # subprocess startup config envelopes via Ed25519. The verify path
 # is consumed by every subprocess crate at parse time; mvm-core is
@@ -87,7 +91,7 @@ reqwest = { workspace = true, optional = true }
 default = []
 # The per-VM name-constrained egress CA
 # (`crypto::egress_ca`). Pulls `rcgen` (sync — ring/yasna, no tokio), so the
-# runtime-free default build is unaffected. Enabled by mvm-backend (cert
+# runtime-free default build is unaffected. Enabled by mvm-runtime (cert
 # delivery) and mvm-hostd (the TLS terminator).
 egress-ca = ["dep:rcgen"]
 # The `client` module (`MvmClient` trait + DTOs + `MockBackend`). Pulls
@@ -122,14 +126,16 @@ attestation-sev-snp = []
 attestation-tdx = []
 # Derive `schemars::JsonSchema` on the protocol types the
 # host↔guest RPC surface embeds (`AgentProfile`, `BackpressureReason`), so
-# `mvm-guest`'s `emit_protocol_schema` bin can emit the protocol schema.
+# `mvm-agentd`'s `emit_protocol_schema` bin can emit the protocol schema.
 # Off by default: the schema is a build-time codegen input, never linked
-# into the runtime. Keeps the default closure schemars-free.
-schema = ["dep:schemars"]
+# into the runtime. Keeps the default closure schemars-free. Forwards to
+# `mvm-protocol/schema` because the RPC surface embeds mvm-protocol plan
+# types (e.g. `VerbGrant`) that need their JsonSchema derive turned on too.
+schema = ["dep:schemars", "mvm-protocol/schema"]
 
 # Emit the host-services broker JSON Schema (the in-guest SDK type-codegen
 # input). `required-features` keeps `schemars` out of any default build — the
-# bin only exists under `--features schema`, mirroring `mvm-guest`'s
+# bin only exists under `--features schema`, mirroring `mvm-agentd`'s
 # `emit_protocol_schema`.
 [[bin]]
 name = "emit_broker_schema"

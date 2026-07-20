@@ -201,7 +201,6 @@ fn admit_entrypoint_boot(
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: params.lowered_secrets.secret_release,
         secrets: params.lowered_secrets.secrets.clone(),
-        auth: mvm_core::plan::AuthPolicy::none(),
         no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,
@@ -320,7 +319,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         .map(|w| super::managed_secrets::lower_workload_secrets(&w))
         .filter(|lowered| !lowered.secrets.is_empty())
         .unwrap_or_default();
-    let backend_name = mvm_backend::backend::AnyBackend::auto_select()
+    let backend_name = mvm_runtime::backend::AnyBackend::auto_select()
         .name()
         .to_string();
     let admit_backend = backend_name.clone();
@@ -590,8 +589,8 @@ pub(in crate::commands) fn dispatch(
                 && let Ok(Some(rec)) = mvm_core::session::read_session(id)
                 && rec.state == mvm_core::session::SessionState::Killed
             {
-                let event = mvm_guest::vsock::EntrypointEvent::Error {
-                    kind: mvm_guest::vsock::RunEntrypointError::SessionKilled,
+                let event = mvm_agentd::vsock::EntrypointEvent::Error {
+                    kind: mvm_agentd::vsock::RunEntrypointError::SessionKilled,
                     message: format!("session {id} killed externally"),
                 };
                 return Ok(exit_code_for(&event));
@@ -602,13 +601,13 @@ pub(in crate::commands) fn dispatch(
 }
 
 fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i32> {
-    let transport = mvm::vsock_transport::for_vm(vm_name)
+    let transport = mvm_runtime::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on '{vm_name}'"))?;
     let mut stream = transport
-        .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on '{vm_name}'"))?;
 
-    let terminal = mvm_guest::vsock::send_run_entrypoint(
+    let terminal = mvm_agentd::vsock::send_run_entrypoint(
         &mut stream,
         stdin,
         timeout_secs,
@@ -616,13 +615,13 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         // plain vsock-egress workloads route through the loopback SOCKS5 client.
         workload_egress_env(vm_name),
         |event| match event {
-            mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
+            mvm_agentd::vsock::EntrypointEvent::Stdout { chunk } => {
                 let _ = std::io::stdout().write_all(chunk);
             }
-            mvm_guest::vsock::EntrypointEvent::Stderr { chunk } => {
+            mvm_agentd::vsock::EntrypointEvent::Stderr { chunk } => {
                 let _ = std::io::stderr().write_all(chunk);
             }
-            mvm_guest::vsock::EntrypointEvent::Control {
+            mvm_agentd::vsock::EntrypointEvent::Control {
                 header_json,
                 payload,
             } => {
@@ -692,7 +691,7 @@ fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
     if !mvm_core::config::vm_vsock_egress_marker_path(vm_name).is_file() {
         return Vec::new();
     }
-    mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
+    mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
 }
 
 /// Whether the per-VM egress CA sidecar exists — i.e. egress substitution
@@ -748,7 +747,7 @@ fn build_substitution_env(placeholders: Vec<(String, String)>) -> Vec<(String, S
     if placeholders.is_empty() {
         return Vec::new();
     }
-    let proxy = mvm_guest::forward_proxy::proxy_env_url();
+    let proxy = mvm_agentd::forward_proxy::proxy_env_url();
     // Both upper- and lower-case forms — toolchains differ on which they read.
     let mut env = vec![
         ("HTTP_PROXY".to_string(), proxy.clone()),
@@ -760,8 +759,8 @@ fn build_substitution_env(placeholders: Vec<(String, String)>) -> Vec<(String, S
     env
 }
 
-fn exit_code_for(event: &mvm_guest::vsock::EntrypointEvent) -> i32 {
-    use mvm_guest::vsock::{EntrypointEvent, RunEntrypointError};
+fn exit_code_for(event: &mvm_agentd::vsock::EntrypointEvent) -> i32 {
+    use mvm_agentd::vsock::{EntrypointEvent, RunEntrypointError};
     match event {
         EntrypointEvent::Exit { code } => *code,
         EntrypointEvent::Error { kind, message } => {
@@ -843,7 +842,7 @@ mod tests {
 
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
         let mut sidecar = GuestSidecar::for_oci_run("audit-probe", true, true);
@@ -899,7 +898,7 @@ mod tests {
 
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
         let sidecar = GuestSidecar::for_oci_run("egress-probe", true, true);
@@ -951,20 +950,20 @@ mod tests {
 
     #[test]
     fn test_exit_code_normal_exit_zero() {
-        let evt = mvm_guest::vsock::EntrypointEvent::Exit { code: 0 };
+        let evt = mvm_agentd::vsock::EntrypointEvent::Exit { code: 0 };
         assert_eq!(exit_code_for(&evt), 0);
     }
 
     #[test]
     fn test_exit_code_normal_exit_preserves_nonzero() {
-        let evt = mvm_guest::vsock::EntrypointEvent::Exit { code: 7 };
+        let evt = mvm_agentd::vsock::EntrypointEvent::Exit { code: 7 };
         assert_eq!(exit_code_for(&evt), 7);
     }
 
     #[test]
     fn test_exit_code_timeout_maps_to_124() {
-        let evt = mvm_guest::vsock::EntrypointEvent::Error {
-            kind: mvm_guest::vsock::RunEntrypointError::Timeout,
+        let evt = mvm_agentd::vsock::EntrypointEvent::Error {
+            kind: mvm_agentd::vsock::RunEntrypointError::Timeout,
             message: "killed".into(),
         };
         assert_eq!(exit_code_for(&evt), 124);
@@ -972,8 +971,8 @@ mod tests {
 
     #[test]
     fn test_exit_code_wrapper_crash_maps_to_137() {
-        let evt = mvm_guest::vsock::EntrypointEvent::Error {
-            kind: mvm_guest::vsock::RunEntrypointError::WrapperCrashed,
+        let evt = mvm_agentd::vsock::EntrypointEvent::Error {
+            kind: mvm_agentd::vsock::RunEntrypointError::WrapperCrashed,
             message: "segfault".into(),
         };
         assert_eq!(exit_code_for(&evt), 137);
@@ -984,8 +983,8 @@ mod tests {
         // 142 = 128 + SIGALRM (14) — stable signal-style exit code
         // SDKs match on to distinguish "session killed externally"
         // from "wrapper crashed" (137 = 128 + SIGKILL).
-        let evt = mvm_guest::vsock::EntrypointEvent::Error {
-            kind: mvm_guest::vsock::RunEntrypointError::SessionKilled,
+        let evt = mvm_agentd::vsock::EntrypointEvent::Error {
+            kind: mvm_agentd::vsock::RunEntrypointError::SessionKilled,
             message: "killed".into(),
         };
         assert_eq!(exit_code_for(&evt), 142);
@@ -993,7 +992,7 @@ mod tests {
 
     #[test]
     fn test_exit_code_busy_payload_invalid_internal_all_map_to_1() {
-        use mvm_guest::vsock::RunEntrypointError as E;
+        use mvm_agentd::vsock::RunEntrypointError as E;
         for kind in [
             E::Busy,
             E::PayloadCap,
@@ -1001,7 +1000,7 @@ mod tests {
             E::InternalError,
         ] {
             // SessionKilled is excluded — has its own dedicated exit code.
-            let evt = mvm_guest::vsock::EntrypointEvent::Error {
+            let evt = mvm_agentd::vsock::EntrypointEvent::Error {
                 kind,
                 message: "x".into(),
             };
@@ -1042,7 +1041,7 @@ mod tests {
             "OPENAI_API_KEY".to_string(),
             "mvm-secret-abc123".to_string(),
         )]);
-        let proxy = mvm_guest::forward_proxy::proxy_env_url();
+        let proxy = mvm_agentd::forward_proxy::proxy_env_url();
         // HTTP(S)_PROXY (upper + lower) point at the in-guest forward proxy.
         assert_eq!(
             env.iter()
@@ -1062,7 +1061,7 @@ mod tests {
     fn vsock_egress_env_empty_without_marker() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         assert!(super::vsock_egress_env("plain-vm").is_empty());
     }
 
@@ -1070,7 +1069,7 @@ mod tests {
     fn vsock_egress_env_emits_http_proxy_vars_when_marker_present() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let marker = mvm_core::config::vm_vsock_egress_marker_path("plain-vm");
         std::fs::create_dir_all(marker.parent().expect("marker parent"))
             .expect("mkdir marker parent");
@@ -1095,7 +1094,7 @@ mod tests {
     fn workload_egress_env_prefers_substitution_env_over_plain_vsock_env() {
         let mut env_guard = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env_guard.set("MVM_DATA_DIR", dir.path());
+        env_guard.set("MVM_HOME", dir.path());
 
         let marker = mvm_core::config::vm_vsock_egress_marker_path("pref-vm");
         std::fs::create_dir_all(marker.parent().expect("marker parent"))

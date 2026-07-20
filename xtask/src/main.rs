@@ -13,6 +13,7 @@ mod check_audit_positional;
 mod check_binary_size;
 mod check_builder_shell_job_sites;
 mod check_claim_catalog;
+mod check_cli_runtime_surface;
 mod check_closure_budget;
 mod check_core_runtime_free;
 mod check_doc_claims;
@@ -28,12 +29,13 @@ mod check_machine_doc_guards;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
 mod check_no_host_nix;
+mod check_no_network_literals;
 mod check_no_overclaim;
 mod check_no_spec_refs_in_comments;
+mod check_no_string_backend_dispatch;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
-mod check_sdk_split;
-mod check_spec_numbers;
+mod check_single_home;
 mod check_trust_gradient;
 mod check_two_surfaces;
 mod check_vsock_only_egress;
@@ -128,17 +130,25 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_two_surfaces::run(&workspace)
         }
-        Some("check-spec-numbers") => {
-            let workspace = workspace_root();
-            check_spec_numbers::run(&workspace)
-        }
-        Some("check-sdk-split") => {
-            let workspace = workspace_root();
-            check_sdk_split::run(&workspace)
-        }
         Some("check-no-spec-refs-in-comments") => {
             let workspace = workspace_root();
             check_no_spec_refs_in_comments::run(&workspace)
+        }
+        Some("check-no-string-backend-dispatch") => {
+            let workspace = workspace_root();
+            check_no_string_backend_dispatch::run(&workspace)
+        }
+        Some("check-single-home") => {
+            let workspace = workspace_root();
+            check_single_home::run(&workspace)
+        }
+        Some("check-no-network-literals") => {
+            let workspace = workspace_root();
+            check_no_network_literals::run(&workspace)
+        }
+        Some("check-cli-runtime-surface") => {
+            let workspace = workspace_root();
+            check_cli_runtime_surface::run(&workspace)
         }
         Some("check-claim-catalog") => {
             let workspace = workspace_root();
@@ -184,7 +194,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-sdk-split, check-spec-numbers, check-two-surfaces, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -242,19 +252,25 @@ fn main() -> Result<()> {
                 "  check-runtime-overlay-version           Plan 124 C: assert the runtime-overlay flake's overlayVersion matches the workspace version"
             );
             eprintln!(
-                "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from specs/claims/ outside exempt paths"
-            );
-            eprintln!(
-                "  check-sdk-split                        assert shared runtime/build crates stay off mvm-sdk while mvm-cli keeps the single-CLI SDK path"
-            );
-            eprintln!(
-                "  check-spec-numbers                     Reject duplicate numeric prefixes in specs/plans and specs/adrs"
+                "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from claim frontmatter embedded in specs/adrs/ outside exempt paths"
             );
             eprintln!(
                 "  check-no-spec-refs-in-comments         Reject plan/PR/ADR/sprint/workstream citations in source comments"
             );
             eprintln!(
-                "  check-claim-catalog                    Verify specs/claims/catalog.md witnesses still exist in the tree"
+                "  check-no-string-backend-dispatch       Reject backend.name() == \"…\" / matches!(…name()…) dispatch — use VmBackend::kind()"
+            );
+            eprintln!(
+                "  check-single-home                      Reject host-path derivations that bypass mvm-core::config's single MVM_HOME root"
+            );
+            eprintln!(
+                "  check-cli-runtime-surface              Reject mvm_runtime::vm::name_registry + AnyBackend reaches in mvm-cli drive-a-machine code — route through the mvm-client facade"
+            );
+            eprintln!(
+                "  check-no-network-literals              Reject baked IPs/ports/tmp-sockets — route through mvm-core::dev_network / guest_netd"
+            );
+            eprintln!(
+                "  check-claim-catalog                    Verify the claims ledger embedded in specs/adrs/001-microvm-security-posture.md — witnesses still exist in the tree"
             );
             eprintln!(
                 "  check-trust-gradient                   Verify trust-gradient ledger: monotonic tiers, workload forbidden authorities, witnesses"
@@ -263,7 +279,7 @@ fn main() -> Result<()> {
                 "  check-require-grant-token-allowlist     assert mvm.require_grant=1 appears only in the four backend builders + mvm-guest/vsock.rs"
             );
             eprintln!(
-                "  check-mvm-host-binaries-sync            Plan 115 / ADR-065: assert Rust manifest and Nix attrset agree"
+                "  check-mvm-host-binaries-sync            Plan 115 / ADR-004: assert Rust manifest and Nix attrset agree"
             );
             eprintln!(
                 "  perf <subcommand>                       Plan 60 Phase 9 perf gates (rootfs-size, boot)"

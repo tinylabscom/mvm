@@ -33,19 +33,12 @@ pub(super) fn list_machines(args: MachineListArgs) -> Result<()> {
         println!("no machines");
     } else {
         let now = chrono::Utc::now();
-        let registry_path = mvm::vm::name_registry::registry_path();
-        let registry =
-            mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
         let rows: Vec<MachineLsRow> = specs
             .iter()
             .map(|spec| MachineLsRow {
                 name: spec.name.clone(),
                 status: machine_status_label(&spec.name).to_string(),
-                health: health_cell(
-                    registry
-                        .lookup(&spec.name)
-                        .and_then(|reg| reg.readiness.as_ref()),
-                ),
+                health: health_cell(mvm_client::readiness_of(&spec.name).as_ref()),
                 source: spec
                     .image
                     .as_deref()
@@ -75,13 +68,8 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
         if let Some(resolved_digest) = spec.resolved_digest.as_deref() {
             println!("resolved-digest: {resolved_digest}");
         }
-        let registry_path = mvm::vm::name_registry::registry_path();
-        let registry =
-            mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
-        let readiness = registry
-            .lookup(&spec.name)
-            .and_then(|reg| reg.readiness.as_ref());
-        println!("health: {}", health_cell(readiness));
+        let readiness = mvm_client::readiness_of(&spec.name);
+        println!("health: {}", health_cell(readiness.as_ref()));
         println!("net: {}", spec.net);
         println!("allow-host: {}", spec.allow_host.join(","));
         println!("cpus: {}", spec.cpus);
@@ -90,7 +78,6 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
             println!("mem-initial: {mem_initial}");
         }
         println!("profile: {}", spec.profile);
-        println!("ssh-agent: {}", spec.ssh_agent);
         if !spec.volumes.is_empty() {
             println!("volumes: {}", spec.volumes.join(","));
         }

@@ -160,10 +160,6 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "ManifestNetwork::is_empty")]
     pub network: ManifestNetwork,
 
-    /// Optional machine-oriented auth hints.
-    #[serde(default, skip_serializing_if = "ManifestAuth::is_empty")]
-    pub auth: ManifestAuth,
-
     /// Optional development-only machine hints.
     #[serde(default, skip_serializing_if = "ManifestDev::is_empty")]
     pub dev: ManifestDev,
@@ -298,7 +294,6 @@ impl Manifest {
             image: self.image.clone()?,
             net: self.net,
             allow_hosts: self.network.allow_hosts.clone(),
-            ssh_agent: self.auth.ssh_agent,
             init: self.dev.init.clone(),
             volumes: self.dev.volumes.clone(),
             cpus: u32::from(self.cpus),
@@ -395,19 +390,6 @@ impl ManifestNetwork {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ManifestAuth {
-    #[serde(default)]
-    pub ssh_agent: bool,
-}
-
-impl ManifestAuth {
-    fn is_empty(&self) -> bool {
-        !self.ssh_agent
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ManifestDev {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub init: Vec<String>,
@@ -426,7 +408,6 @@ pub struct ManifestMachineWorkflow {
     pub image: String,
     pub net: bool,
     pub allow_hosts: Vec<String>,
-    pub ssh_agent: bool,
     pub init: Vec<String>,
     pub volumes: Vec<String>,
     pub cpus: u32,
@@ -794,7 +775,6 @@ mod tests {
         assert_eq!(m.data_disk, "0");
         assert!(!m.net);
         assert!(m.network.allow_hosts.is_empty());
-        assert!(!m.auth.ssh_agent);
         assert!(m.dev.init.is_empty());
         assert!(m.dev.volumes.is_empty());
         assert!(m.name.is_none());
@@ -972,9 +952,6 @@ mod tests {
             [network]
             allow_hosts = ["api.example.com", "db.example.com:5432"]
 
-            [auth]
-            ssh_agent = true
-
             [dev]
             init = ["pip install -r requirements.txt"]
             volumes = ["./src:/work:rw", "./cache:/cache"]
@@ -983,7 +960,6 @@ mod tests {
         let workflow = m.machine_workflow().expect("image-backed machine workflow");
         assert!(m.net);
         assert_eq!(m.network.allow_hosts.len(), 2);
-        assert!(m.auth.ssh_agent);
         assert_eq!(m.dev.init, vec!["pip install -r requirements.txt"]);
         assert_eq!(m.dev.volumes, vec!["./src:/work:rw", "./cache:/cache"]);
         assert_eq!(workflow.cpus, 4);

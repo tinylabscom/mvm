@@ -12,7 +12,7 @@
 #           authority. None may appear in the agent's own crate symbols.
 set -euo pipefail
 
-PKG=mvm-guest
+PKG=mvm-agentd
 BIN=mvm-guest-agent
 
 echo "::group::Build production agent (release, no dev-shell)"

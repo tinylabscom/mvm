@@ -31,14 +31,15 @@ pub const PLAN_FILENAME: &str = "plan.json";
 /// every subsequent lifecycle event.
 pub const PLAN_MODE: u32 = 0o600;
 
-/// Resolve `~/.mvm/vms/<vm_name>/`.
+/// Resolve `<mvm_home>/vms/<vm_name>/`, failing when no home root
+/// resolves (neither `MVM_HOME` nor `$HOME` set) rather than falling
+/// back to `/tmp` for plan material.
 pub fn vm_state_dir(vm_name: &str) -> Result<PathBuf> {
-    Ok(mvm_core::config::mvm_data_dir_strict()?
-        .join("vms")
-        .join(vm_name))
+    mvm_core::config::mvm_home_strict()?;
+    Ok(mvm_core::config::vm_state_dir(vm_name))
 }
 
-/// Resolve `~/.mvm/vms/<vm_name>/plan.json`.
+/// Resolve `<mvm_home>/vms/<vm_name>/plan.json`.
 pub fn plan_path(vm_name: &str) -> Result<PathBuf> {
     Ok(vm_state_dir(vm_name)?.join(PLAN_FILENAME))
 }
@@ -118,7 +119,7 @@ mod tests {
     fn fixture_plan() -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
             .plan_id("plan-persist-test")
-            .runtime_profile("vz")
+            .runtime_profile("hvf")
             .build()
     }
 

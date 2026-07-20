@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 #[cfg(test)]
 pub(super) fn first_nameserver_from_resolv_conf(body: &str) -> Option<String> {
-    mvm_guest::guest_net::first_nameserver_from_resolv_conf(body)
+    mvm_agentd::guest_net::first_nameserver_from_resolv_conf(body)
 }
 
 #[cfg(test)]
@@ -201,7 +201,7 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
                 // would fight the scrolling output). Quiet mode keeps the spinner:
                 // the Stage 0 build is otherwise silent for minutes and would read
                 // as a hang.
-                let verbose = mvm::ui::is_verbose();
+                let verbose = mvm_runtime::ui::is_verbose();
                 let _heartbeat = (!verbose)
                     .then(|| BuildHeartbeat::start("Preparing the builder VM (one-time setup)"));
                 bootstrap_builder_vm_image_via_root_dir_stage0(
@@ -1034,8 +1034,8 @@ fn run_stage0_root_dir(
 
     // Dispatch Stage 0 through the `BuilderVm` trait. QEMU when explicitly
     // chosen (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including
-    // the Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
-    // That preserves the "Stage 0 is libkrun even on Vz-default hosts"
+    // the HVF auto-detect default on macOS-26+, since HVF Stage 0 is still a gap.
+    // That preserves the "Stage 0 is libkrun even on HVF-default hosts"
     // invariant. `verbose` forwards the in-guest nix `--print-build-logs`
     // output to host stderr.
     //

@@ -20,17 +20,16 @@
 //! ## Usage
 //!
 //! ```text
-//! cargo xtask perf rootfs-size --rootfs ~/.cache/mvm/.../rootfs.ext4
-//! cargo xtask perf boot --runs 30 --rootfs ~/.cache/mvm/.../rootfs.ext4
+//! cargo xtask perf rootfs-size --rootfs ~/.mvm/cache/.../rootfs.ext4
+//! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! ```
 //!
 //! ## What this does NOT do (yet)
 //!
 //! - **Regression alert against historical p50.** A ">10% p50
 //!   increase fails the test" gate would need a historical-baseline
-//!   file (probably in `specs/perf/baseline.json`) that this command
-//!   compares against. Substrate-only today; the boot subcommand
-//!   asserts against absolute thresholds.
+//!   file that this command compares against. Substrate-only today;
+//!   the boot subcommand asserts against absolute thresholds.
 //! - **Snapshot-clone-boot benchmark.** Currently the boot
 //!   subcommand only times cold boots. Snapshot-clone timing
 //!   needs the snapshot pool, which doesn't ship in this slice.
@@ -131,21 +130,21 @@ pub fn all_budgets() -> Vec<PerfBudget> {
             name: "rootfs_size",
             limit: ROOTFS_MAX_BYTES,
             unit: "bytes",
-            source: "plan-60 Phase 9 + ADR-013",
+            source: "plan-60 Phase 9 + ADR-005",
             description: "Minimal-template ext4 rootfs size",
         },
         PerfBudget {
             name: "firecracker_cold_boot",
             limit: FIRECRACKER_BOOT_BUDGET.as_millis() as u64,
             unit: "ms",
-            source: "ADR-013 §\"Per-backend boot budgets\"",
+            source: "ADR-005 §\"Per-backend boot budgets\"",
             description: "Firecracker cold-boot wall-clock (1 vCPU / 256 MiB)",
         },
         PerfBudget {
             name: "libkrun_cold_boot",
             limit: LIBKRUN_BOOT_BUDGET.as_millis() as u64,
             unit: "ms",
-            source: "ADR-013 §\"Per-backend boot budgets\"",
+            source: "ADR-005 §\"Per-backend boot budgets\"",
             description: "Libkrun cold-boot wall-clock",
         },
         PerfBudget {
@@ -318,7 +317,7 @@ fn boot_subcommand(args: &[String]) -> Result<()> {
         rootfs.display()
     );
     // The actual N-run benchmark loop is deferred — it links against
-    // `mvm_backend` to invoke `start_with_mode` + measure. Substrate
+    // `mvm_runtime` to invoke `start_with_mode` + measure. Substrate
     // today: arg parsing + threshold lookup + the budget assertion
     // shape so consumers can scaffold.
     bail!(

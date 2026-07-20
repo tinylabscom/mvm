@@ -29,7 +29,7 @@
 //! the test is the regression fence.
 
 use ed25519_dalek::SigningKey;
-use mvm::vm::overlay::{
+use mvm_runtime::vm::overlay::{
     FsOverlayManager, OverlayManager, SignedDestructionReceipt, sign_destruction_receipt,
     verify_destruction_receipt,
 };
@@ -131,7 +131,7 @@ async fn auditor_refuses_certificate_with_tampered_tenant_field() {
     assert!(
         matches!(
             err,
-            mvm::vm::overlay::DestructionVerifyError::SignatureInvalid
+            mvm_runtime::vm::overlay::DestructionVerifyError::SignatureInvalid
         ),
         "expected SignatureInvalid, got {err:?}"
     );
@@ -165,7 +165,7 @@ async fn auditor_refuses_certificate_signed_by_wrong_pubkey() {
     let err = verify_destruction_receipt(&signed, Some(&operator_key.verifying_key())).unwrap_err();
     assert!(matches!(
         err,
-        mvm::vm::overlay::DestructionVerifyError::PubkeyMismatch { .. }
+        mvm_runtime::vm::overlay::DestructionVerifyError::PubkeyMismatch { .. }
     ));
 }
 
@@ -201,7 +201,7 @@ async fn auditor_can_verify_against_certs_embedded_pubkey() {
 /// independently of the destroy/sign integration.
 #[test]
 fn signature_payload_format_pinned_at_v1() {
-    let receipt = mvm::vm::overlay::DestructionReceipt {
+    let receipt = mvm_runtime::vm::overlay::DestructionReceipt {
         tenant: "acme".to_string(),
         workload: "wkl".to_string(),
         destroyed_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap(),

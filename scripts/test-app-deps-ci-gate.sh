@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Plan 73 Followup D — `app-deps-audit` CI gate.
 #
-# ADR-047 §"CI gate" calls for a workflow lane that exercises the
+# ADR-014 §"CI gate" calls for a workflow lane that exercises the
 # application-dep install pipeline end-to-end on every PR. The full
 # end-to-end shape (real `nix build` driving the libkrun/cloud-hypervisor
 # builder VM, real `uv pip install` + `pip-audit`) requires a working
@@ -39,7 +39,7 @@
 #      carries a high-severity finding, then assert the prod gate
 #      (`apply_install_gate(..., Prod)`) refuses it. Drives the
 #      `mvm-app-deps-fixture-tool` example bin which is the same
-#      seal/verify path the orchestrator uses; exercises ADR-047
+#      seal/verify path the orchestrator uses; exercises ADR-014
 #      §"Gate semantics" prod-rejection end-to-end.
 #
 # What this script DOES NOT cover (named so future readers know):
@@ -102,8 +102,8 @@ fi
 # writes into the user's real ~/.mvm/ cache.
 SCRATCH="$(mktemp -d -t mvm-app-deps-ci-XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
-export MVM_DEPS_VOLUMES_DIR="$SCRATCH/volumes"
-mkdir -p "$MVM_DEPS_VOLUMES_DIR"
+DEPS_VOLUMES_DIR="$SCRATCH/volumes"
+mkdir -p "$DEPS_VOLUMES_DIR"
 
 PASS=0
 FAIL=0
@@ -158,22 +158,22 @@ assert_eq "dependencies.tool"     "$(jq -r '.dependencies.tool' <<<"$LAUNCH")"  
 
 echo "==> 2. seal a clean fixture volume"
 CLEAN_OUT="$SCRATCH/clean-seal.json"
-"$FIXTURE_BIN" seal-clean --cache-root "$MVM_DEPS_VOLUMES_DIR" --out-json "$CLEAN_OUT"
+"$FIXTURE_BIN" seal-clean --cache-root "$DEPS_VOLUMES_DIR" --out-json "$CLEAN_OUT"
 CLEAN_HASH="$(jq -r '.volume_hash' "$CLEAN_OUT")"
 assert_nonempty "clean fixture volume_hash" "$CLEAN_HASH"
 assert_eq "clean fixture volume_dir exists" \
-    "$([ -d "$MVM_DEPS_VOLUMES_DIR/$CLEAN_HASH" ] && echo y || echo n)" "y"
+    "$([ -d "$DEPS_VOLUMES_DIR/$CLEAN_HASH" ] && echo y || echo n)" "y"
 assert_eq "clean fixture meta.json present" \
-    "$([ -f "$MVM_DEPS_VOLUMES_DIR/$CLEAN_HASH/meta.json" ] && echo y || echo n)" "y"
+    "$([ -f "$DEPS_VOLUMES_DIR/$CLEAN_HASH/meta.json" ] && echo y || echo n)" "y"
 assert_eq "clean fixture sbom.cdx.json present" \
-    "$([ -f "$MVM_DEPS_VOLUMES_DIR/$CLEAN_HASH/sbom.cdx.json" ] && echo y || echo n)" "y"
+    "$([ -f "$DEPS_VOLUMES_DIR/$CLEAN_HASH/sbom.cdx.json" ] && echo y || echo n)" "y"
 assert_eq "clean fixture cve.json present" \
-    "$([ -f "$MVM_DEPS_VOLUMES_DIR/$CLEAN_HASH/cve.json" ] && echo y || echo n)" "y"
+    "$([ -f "$DEPS_VOLUMES_DIR/$CLEAN_HASH/cve.json" ] && echo y || echo n)" "y"
 assert_eq "clean fixture fetch.log present" \
-    "$([ -f "$MVM_DEPS_VOLUMES_DIR/$CLEAN_HASH/fetch.log" ] && echo y || echo n)" "y"
+    "$([ -f "$DEPS_VOLUMES_DIR/$CLEAN_HASH/fetch.log" ] && echo y || echo n)" "y"
 
 echo "==> 3. mvmctl deps inspect <clean_hash> --json"
-INSPECT="$("$MVMCTL_BIN" deps inspect "$CLEAN_HASH" --cache-root "$MVM_DEPS_VOLUMES_DIR" --json)"
+INSPECT="$("$MVMCTL_BIN" deps inspect "$CLEAN_HASH" --cache-root "$DEPS_VOLUMES_DIR" --json)"
 assert_eq "inspect volume_hash echoes"   "$(jq -r '.volume_hash' <<<"$INSPECT")" "$CLEAN_HASH"
 assert_eq "inspect meta.schema_version"  "$(jq -r '.meta.schema_version' <<<"$INSPECT")" "1"
 # `top_components` carries the SBOM the fixture seeded; sbom_summary
@@ -208,14 +208,14 @@ assert_eq "inspect.cve.total_findings == 0 (clean)" \
 
 echo "==> 4. seal a volume with a HIGH CVE finding, gate-check under --prod"
 CVE_OUT="$SCRATCH/cve-seal.json"
-"$FIXTURE_BIN" seal-with-high-cve --cache-root "$MVM_DEPS_VOLUMES_DIR" --out-json "$CVE_OUT"
+"$FIXTURE_BIN" seal-with-high-cve --cache-root "$DEPS_VOLUMES_DIR" --out-json "$CVE_OUT"
 CVE_HASH="$(jq -r '.volume_hash' "$CVE_OUT")"
 assert_nonempty "cve fixture volume_hash" "$CVE_HASH"
 
 # `gate-check` exits 0 when the gate ACCEPTS, nonzero when it
 # REJECTS. We want a rejection.
 echo "    running gate-check --prod against high-CVE volume (expect REJECTION)"
-if "$FIXTURE_BIN" gate-check --cache-root "$MVM_DEPS_VOLUMES_DIR" \
+if "$FIXTURE_BIN" gate-check --cache-root "$DEPS_VOLUMES_DIR" \
     --volume-hash "$CVE_HASH" --gate prod 2>/dev/null; then
     echo "    FAIL: prod gate ACCEPTED a high-CVE volume — claim 9 is broken" >&2
     FAIL=$((FAIL + 1))
@@ -226,18 +226,18 @@ fi
 
 # And the dev gate must NOT refuse — same volume, dev posture, accept.
 echo "    running gate-check --dev against high-CVE volume (expect ACCEPT + warn)"
-if "$FIXTURE_BIN" gate-check --cache-root "$MVM_DEPS_VOLUMES_DIR" \
+if "$FIXTURE_BIN" gate-check --cache-root "$DEPS_VOLUMES_DIR" \
     --volume-hash "$CVE_HASH" --gate dev 2>/dev/null; then
     echo "    ok: dev gate admitted high-CVE volume (warn-and-continue)"
     PASS=$((PASS + 1))
 else
-    echo "    FAIL: dev gate refused — ADR-047 says --dev warn-and-continues" >&2
+    echo "    FAIL: dev gate refused — ADR-014 says --dev warn-and-continues" >&2
     FAIL=$((FAIL + 1))
 fi
 
 # Same gate-check against the clean volume under --prod must accept.
 echo "    running gate-check --prod against CLEAN volume (expect ACCEPT)"
-if "$FIXTURE_BIN" gate-check --cache-root "$MVM_DEPS_VOLUMES_DIR" \
+if "$FIXTURE_BIN" gate-check --cache-root "$DEPS_VOLUMES_DIR" \
     --volume-hash "$CLEAN_HASH" --gate prod 2>/dev/null; then
     echo "    ok: prod gate accepted clean volume"
     PASS=$((PASS + 1))
@@ -252,9 +252,9 @@ fi
 # ─────────────────────────────────────────────────────────────────
 
 echo "==> 5. tamper cve.json on clean volume; inspect must refuse"
-printf 'FORGED' >> "$MVM_DEPS_VOLUMES_DIR/$CLEAN_HASH/cve.json"
+printf 'FORGED' >> "$DEPS_VOLUMES_DIR/$CLEAN_HASH/cve.json"
 if "$MVMCTL_BIN" deps inspect "$CLEAN_HASH" \
-    --cache-root "$MVM_DEPS_VOLUMES_DIR" --json >/dev/null 2>&1; then
+    --cache-root "$DEPS_VOLUMES_DIR" --json >/dev/null 2>&1; then
     echo "    FAIL: inspect ACCEPTED a tampered volume — verify_sealed_volume drift" >&2
     FAIL=$((FAIL + 1))
 else

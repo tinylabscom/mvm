@@ -277,21 +277,23 @@ impl ObserverAllowlist {
     /// surfaces a `BuildError::AllowlistRead` error explaining what the operator
     /// must create.
     ///
-    /// HOME must be set for the per-user path to be considered. If HOME is
-    /// unset we refuse outright — we don't fall back to `/tmp` or any other
-    /// default, because a writable-by-anyone fallback directory would let a
-    /// local user place a malicious allowlist that any process running with
-    /// HOME unset (e.g. a misconfigured systemd unit or chroot) would trust.
-    /// Operator action in that case is "set HOME" or "place
-    /// /etc/mvm/observers/allowlist.toml" — both are explicit.
+    /// A home root (`MVM_HOME` | `$HOME`) must resolve for the per-user
+    /// path to be considered. If neither is set we refuse outright — we
+    /// don't fall back to `/tmp` or any other default, because a
+    /// writable-by-anyone fallback directory would let a local user place
+    /// a malicious allowlist that any process running without a home
+    /// (e.g. a misconfigured systemd unit or chroot) would trust.
+    /// Operator action in that case is "set MVM_HOME (or HOME)" or
+    /// "place /etc/mvm/observers/allowlist.toml" — both are explicit.
     pub fn load_from_host_config() -> Result<Self, BuildError> {
-        let home = std::env::var("HOME").map_err(|_| BuildError::AllowlistRead {
-            path: "$HOME unset".to_string(),
-            detail: "HOME environment variable is not set; cannot resolve user allowlist path. \
-                     Either set HOME or run with /etc/mvm/observers/allowlist.toml present."
-                .into(),
-        })?;
-        let user_path = std::path::PathBuf::from(home).join(".mvm/observers/allowlist.toml");
+        let home_root =
+            mvm_core::config::mvm_home_strict().map_err(|_| BuildError::AllowlistRead {
+                path: "<mvm home unset>".to_string(),
+                detail: "neither MVM_HOME nor HOME is set; cannot resolve user allowlist path. \
+                     Either set one or run with /etc/mvm/observers/allowlist.toml present."
+                    .into(),
+            })?;
+        let user_path = home_root.join("observers/allowlist.toml");
         if user_path.exists() {
             return Self::load_from_path(&user_path);
         }
@@ -507,7 +509,7 @@ fn validate_policy_path_segment(segment: &str, kind: &str) -> Result<(), BuildEr
 /// `mvm-cli → mvm-supervisor → mvm-cli`). Inline the same parse logic
 /// here: `"<tenant>:<workload>"` → `~/.mvm/policies/<tenant>/<workload>.toml`.
 /// This `BundleShim` reads `network.observers` directly off the bundle
-/// without depending on `mvm_core::policy::NetworkPolicy`. The shim stays
+/// without depending on `mvm_core::policy::BundleNetworkPolicy`. The shim stays
 /// private to this function so it can later be swapped for the real type.
 ///
 /// `pub` (not `pub(crate)`) because `run_with_bridge` in the leaf bin
@@ -551,11 +553,11 @@ pub fn resolve_observer_chain_from_plan(
         });
     }
 
-    let home = std::env::var("HOME").map_err(|_| BuildError::AllowlistRead {
-        path: "$HOME unset".to_string(),
-        detail: "HOME is unset; cannot resolve policy bundle path".to_string(),
+    let home_root = mvm_core::config::mvm_home_strict().map_err(|_| BuildError::AllowlistRead {
+        path: "<mvm home unset>".to_string(),
+        detail: "neither MVM_HOME nor HOME is set; cannot resolve policy bundle path".to_string(),
     })?;
-    let policies_root = std::path::PathBuf::from(&home).join(".mvm/policies");
+    let policies_root = home_root.join("policies");
     let path = policies_root.join(tenant).join(format!("{workload}.toml"));
 
     if !path.exists() {
@@ -952,7 +954,6 @@ mod tests {
             network_policy: PolicyRef(policy_ref.into()),
             fs_policy: FsPolicyRef("local-default".into()),
             secrets: Vec::new(),
-            auth: Default::default(),
             egress_policy: PolicyRef("local-default".into()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
@@ -993,7 +994,7 @@ mod tests {
     fn resolve_observer_chain_uses_supplied_bundle_for_generated_ref() {
         use mvm_core::policy::bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION};
         use mvm_core::policy::policies::{
-            ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy,
+            ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy,
             ToolPolicy, WasiCapPolicy,
         };
 
@@ -1002,7 +1003,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             bundle_id: PolicyId("acme/generated-cli-egress".to_string()),
             bundle_version: 1,
-            network: NetworkPolicy {
+            network: BundleNetworkPolicy {
                 observers: vec!["flow-count-metrics".to_string()],
                 ..Default::default()
             },

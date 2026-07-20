@@ -103,7 +103,7 @@ mvmctl machine forward oc -p 3000:3000
 Each `-v` flag mounts a host directory as an ext4 drive read-only by
 default. Secrets land at `/mnt/secrets/` (mode 0440 root:mvm by the
 init script) and are also re-staged to `/run/mvm-secrets/<svc>/`
-with mode 0400 owned by the per-service uid (ADR-002 §W2.1) so
+with mode 0400 owned by the per-service uid (ADR-001 §W2.1) so
 sibling services on the same microVM can't cross-read.
 
 ### Custom config + API keys at runtime

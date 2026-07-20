@@ -13,7 +13,7 @@
 //!   pull the embedded bytes.
 //!
 //! The check asserts those four sets are identical to each other AND that every
-//! name is a real `[[bin]]` of `mvm-guest` or `mvm-guest-helpers`. A drift — a
+//! name is a real `[[bin]]` of `mvm-agentd`. A drift — a
 //! renamed bin, a list left behind, or a name that no longer maps to a bin —
 //! fails here instead of silently shipping a rootfs missing (or misnaming) a
 //! guest binary.
@@ -84,7 +84,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     if !invalid.is_empty() {
         bail!(
             "guest-binary lists reference names that are not `[[bin]]`s of \
-             mvm-guest / mvm-guest-helpers: {:?}\n  known bins: {:?}",
+             mvm-agentd: {:?}\n  known bins: {:?}",
             invalid,
             universe,
         );
@@ -97,20 +97,12 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The set of every `[[bin]]` name declared by `mvm-guest` and
-/// `mvm-guest-helpers` — the universe a listed guest binary must belong to.
+/// The set of every `[[bin]]` name declared by `mvm-agentd` — the universe a
+/// listed guest binary must belong to.
 fn guest_bin_universe(workspace: &Path) -> Result<BTreeSet<String>> {
-    let mut out = BTreeSet::new();
-    for crate_rel in [
-        "crates/mvm-guest/Cargo.toml",
-        "crates/mvm-guest-helpers/Cargo.toml",
-    ] {
-        let path = workspace.join(crate_rel);
-        let src =
-            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        out.extend(parse_bin_names(&src));
-    }
-    Ok(out)
+    let path = workspace.join("crates/mvm-agentd/Cargo.toml");
+    let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    Ok(parse_bin_names(&src))
 }
 
 /// `[[bin]] name = "..."` names in a Cargo.toml. A `name =` line counts only when
@@ -210,7 +202,7 @@ mod tests {
     fn parse_bin_names_skips_package_name() {
         let manifest = r#"
 [package]
-name = "mvm-guest"
+name = "mvm-agentd"
 
 [[bin]]
 name = "mvm-guest-agent"
@@ -222,7 +214,7 @@ name = "mvm-oci-init"
         assert!(bins.contains("mvm-guest-agent"));
         assert!(bins.contains("mvm-oci-init"));
         assert!(
-            !bins.contains("mvm-guest"),
+            !bins.contains("mvm-agentd"),
             "package name must not be a bin"
         );
     }

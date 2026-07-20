@@ -6,10 +6,10 @@ use clap::Args as ClapArgs;
 use std::sync::Arc;
 
 use super::Cli;
-use mvm::storage::{
+use mvm_core::user_config::MvmConfig;
+use mvm_runtime::storage::{
     DeviceMapperBackend, DmsetupBackend, MockBackend, PoolConfig, ThinPool, ThinPoolImpl,
 };
-use mvm_core::user_config::MvmConfig;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -75,7 +75,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         );
         println!("  volumes: {}", stats.volume_count);
         for name in &volumes {
-            if let Ok(vs) = pool.volume_stats(&mvm::storage::VolumeId::new(name)) {
+            if let Ok(vs) = pool.volume_stats(&mvm_runtime::storage::VolumeId::new(name)) {
                 println!(
                     "    {name}: {} / {} bytes",
                     vs.used_bytes, vs.virtual_size_bytes

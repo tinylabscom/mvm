@@ -10,19 +10,21 @@ authors.workspace = true
 
 [dependencies]
 mvm-core.workspace = true
-mvm-guest.workspace = true
-mvm = { workspace = true, default-features = false }
+mvm-agentd.workspace = true
+mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
-mvm-backend = { workspace = true, default-features = false }
-mvm-mcp = { workspace = true, optional = true }
-mvm-oci.workspace = true
+mvm-fs.workspace = true
 mvm-hostd.workspace = true
-# `mvmctl` still owns authoring/runtime-record flows through `mvm-sdk`,
-# while obvious IR-only call sites depend directly on `mvm-ir`.
-mvm-ir.workspace = true
+# The `MvmClient` facade: read-only listing/inspect commands route through
+# `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
+mvm-client.workspace = true
+# `mvmctl compile` reads the Workload IR (mvm_protocol::ir, re-exported from
+# mvm_protocol::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true
-mvm-deps-audit.workspace = true
+# Direct IR access (`mvm_protocol::ir::…`) for the command surfaces that
+# only need the DTOs, not the rest of the SDK's build-time tooling.
+mvm-protocol.workspace = true
 anyhow.workspace = true
 # Real ext4 inode lookup for the Stage 0 post-build check (replaces the
 # old raw-byte substring scan over rootfs.ext4).
@@ -61,7 +63,6 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
-mvm-ext4.workspace = true
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
@@ -79,15 +80,17 @@ libc.workspace = true
 # isn't installed on the host.
 default = ["builder-vm", "pure-mkfs"]
 contributor-bootstrap = [
-    "mvm/contributor-bootstrap",
+    "mvm-runtime/contributor-bootstrap",
     "mvm-build/contributor-bootstrap",
-    "mvm-backend/contributor-bootstrap",
 ]
-mcp = ["dep:mvm-mcp"]
+# The MCP server (crate::mcp — dispatcher/protocol/server/session/tools)
+# needs no deps beyond what mvm-cli already carries unconditionally
+# (serde, serde_json, anyhow, tracing, tracing-subscriber).
+mcp = []
 builder-vm = ["mvm-build/builder-vm"]
 # In-process, pure-Rust rootfs materialization (no builder VM / mkfs) for the
 # `run --image` path. Default: the run path builds the ext4 image with the
-# memory-safe `mvm-ext4` writer instead of shelling out to a builder VM. The
+# memory-safe `mvm-fs` writer instead of shelling out to a builder VM. The
 # `builder-vm` feature stays default for `dev up`, and `MVM_MATERIALIZE_BUILDER_VM`
 # routes the run path back through the builder VM when set.
 pure-mkfs = ["mvm-build/pure-mkfs"]
@@ -118,10 +121,10 @@ release-artifact-bootstrap = []
 custom-dns = ["mvm-hostd/custom-dns"]
 dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
 manifest-verify = [
-    "mvm/manifest-verify",
+    "mvm-runtime/manifest-verify",
     "mvm-core/manifest-verify",
 ]
-template-registry-s3 = ["mvm/template-registry-s3"]
+template-registry-s3 = ["mvm-runtime/template-registry-s3"]
 
 [lints]
 workspace = true

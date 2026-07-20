@@ -1,7 +1,7 @@
 # mvm Nix function-service factory
 
 `mkFunctionService` bakes the wrapper + entrypoint files that mvm's
-`RunEntrypoint` verb consumes (mvm ADR-007). Bundled into every
+`RunEntrypoint` verb consumes (mvm ADR-005). Bundled into every
 mvm-emitted artifact when the workload declares
 `entrypoint.kind = "function"` (plan 0003 / ADR-0009).
 

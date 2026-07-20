@@ -49,7 +49,7 @@ check:
 # `cargo install cargo-zigbuild`, a `zig` on PATH, and
 # `rustup target add x86_64-unknown-linux-gnu`. musl is intentionally not the
 # default — libc's ioctl request arg is c_int there vs c_ulong on glibc, so the
-# COW FICLONE path (mvm-backend) only type-checks against glibc.
+# COW FICLONE path (mvm-runtime) only type-checks against glibc.
 check-linux TARGET="x86_64-unknown-linux-gnu":
     cargo zigbuild --target {{TARGET}} --workspace --lib --all-features
 
@@ -57,12 +57,12 @@ check-linux TARGET="x86_64-unknown-linux-gnu":
 run *ARGS:
     cargo run -- {{ARGS}}
 
-# Run mvmctl with the dev env set (worktree-local MVM_DATA_DIR).
+# Run mvmctl with the dev env set (worktree-local MVM_HOME).
 dev *ARGS:
     sh ./bin/dev {{ARGS}}
 
-# Run cargo with the dev env set (worktree-local MVM_DATA_DIR /
-# MVM_CACHE_DIR / CARGO_TARGET_DIR).
+# Run cargo with the dev env set (worktree-local MVM_HOME /
+# CARGO_TARGET_DIR / CARGO_HOME).
 dev-cargo *ARGS:
     bash -c 'source scripts/dev-env.sh && cargo {{ARGS}}'
 
@@ -93,18 +93,18 @@ runtime-overlay-build *ARGS:
 # Build the publishable SDK artifacts without building the full Rust workspace.
 sdk-build: sdk-build-python sdk-build-typescript
 
-# Build the Python SDK wheel + sdist into sdks/python/dist/.
+# Build the Python SDK wheel + sdist into crates/mvm-sdk/sdks/python/dist/.
 sdk-build-python:
-    uv build sdks/python --out-dir sdks/python/dist
+    uv build crates/mvm-sdk/sdks/python --out-dir crates/mvm-sdk/sdks/python/dist
 
 # Install TypeScript SDK dependencies locally. Run once after a fresh clone or
 # whenever package-lock.json changes.
 sdk-install-typescript:
-    npm --prefix sdks/typescript ci
+    npm --prefix crates/mvm-sdk/sdks/typescript ci
 
-# Build the TypeScript SDK into sdks/typescript/dist/.
+# Build the TypeScript SDK into crates/mvm-sdk/sdks/typescript/dist/.
 sdk-build-typescript:
-    npm --prefix sdks/typescript run build
+    npm --prefix crates/mvm-sdk/sdks/typescript run build
 
 # ── Testing (nextest) ────────────────────────────────────────────────────
 
@@ -149,6 +149,14 @@ test-ci:
 test-cargo:
     cargo test --workspace
 
+# BDD conformance suite (cucumber-rs): builds mvmctl, then runs every
+# Gherkin scenario under features/suites/ against it. Scenarios tagged
+# `@wip` describe not-yet-implemented coverage and are filtered out by the
+# runner, so this stays green as later suites land their steps.
+bdd:
+    cargo build --bin mvmctl
+    cargo test -p mvm-conformance --test conformance --features bdd
+
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
 # a targeted rebuild or CI.
@@ -186,8 +194,8 @@ lint: fmt-check clippy
 
 # ── CI Gate ──────────────────────────────────────────────────────────────
 
-# Full CI gate: lint + test + doctests (nextest skips doctests).
-ci: lint test test-doc
+# Full CI gate: lint + test + doctests (nextest skips doctests) + BDD.
+ci: lint test test-doc bdd
 
 # Alias for ci
 preflight: ci
@@ -240,7 +248,7 @@ _release-prep VERSION:
     rm Cargo.toml.bak
     cargo update -w
     # The runtime-overlay flake pins its version to the workspace version
-    # (check-runtime-overlay-version fails closed on a mismatch, ADR-051); the
+    # (check-runtime-overlay-version fails closed on a mismatch, ADR-018); the
     # nix package versions should track too. Bump them alongside Cargo.toml.
     sed -i.bak -E "s/(overlayVersion[[:space:]]*=[[:space:]]*\")[^\"]*(\")/\1$V\2/" nix/images/runtime-overlay/flake.nix
     rm nix/images/runtime-overlay/flake.nix.bak
@@ -421,21 +429,21 @@ audit:
 deny:
     cargo deny check
 
-# Combined supply-chain gate (ADR-002 §W5.2)
+# Combined supply-chain gate (ADR-001 §W5.2)
 supply-chain: audit deny
 
-# Verify production guest agent has no dev-only Exec symbols (ADR-002 §W4.3)
+# Verify production guest agent has no dev-only Exec symbols (ADR-001 §W4.3)
 security-gate-prod-agent:
     ./scripts/check-prod-agent-no-exec.sh
 
-# Run the GuestRequest deserializer fuzzer (ADR-002 §W4.2). Default 5min.
+# Run the GuestRequest deserializer fuzzer (ADR-001 §W4.2). Default 5min.
 # Override with: just fuzz-guest-request 3600
 fuzz-guest-request SECONDS="300":
-    cd crates/mvm-guest && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{SECONDS}}
+    cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{SECONDS}}
 
-# Run the AuthenticatedFrame envelope fuzzer (ADR-002 §W4.2). Default 5min.
+# Run the AuthenticatedFrame envelope fuzzer (ADR-001 §W4.2). Default 5min.
 fuzz-authenticated-frame SECONDS="300":
-    cd crates/mvm-guest && cargo +nightly fuzz run fuzz_authenticated_frame -- -max_total_time={{SECONDS}}
+    cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_authenticated_frame -- -max_total_time={{SECONDS}}
 
 # Check for outdated dependencies
 outdated:

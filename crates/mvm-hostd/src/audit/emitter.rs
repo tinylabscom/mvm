@@ -45,7 +45,7 @@ use mvm_core::plan::ExecutionPlan;
 
 /// Resolve the default audit-chain directory: `~/.mvm/audit/`.
 pub fn default_audit_dir() -> Result<PathBuf> {
-    Ok(mvm_core::config::mvm_data_dir_strict()?.join("audit"))
+    Ok(mvm_core::config::mvm_home_strict()?.join("audit"))
 }
 
 /// Resolve the default per-tenant audit-chain file:

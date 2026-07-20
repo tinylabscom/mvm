@@ -56,15 +56,16 @@
 //! handles statically.
 
 use anyhow::{Context, Result, bail};
-use mvm_ir::{App, Workload};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+
+use crate::commands::build::trace_secret_scan::SecretFinding;
+use mvm_protocol::ir::{App, Workload};
 
 use super::managed_secrets::lower_app_secrets;
 use crate::commands::build::sandbox_record::{
     LoadedRecording, auto_exec_record_script, script_language_from_path,
 };
-use crate::commands::build::trace_secret_scan::SecretFinding;
 use mvm_core::plan::SynthesisInput;
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 
@@ -350,7 +351,6 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         tool_policy_ref: None,
         secret_release: lowered_secrets.secret_release,
         secrets: lowered_secrets.secrets,
-        auth: mvm_core::plan::AuthPolicy::none(),
         audit_event_prefix: None,
         cpus: app.resources.cpu_cores.max(1) as u32,
         mem_mib: app.resources.memory_mb.max(64) as u64,

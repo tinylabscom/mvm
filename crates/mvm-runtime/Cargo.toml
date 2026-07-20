@@ -1,0 +1,117 @@
+[package]
+name = "mvm-runtime"
+version.workspace = true
+edition.workspace = true
+description = "VM lifecycle orchestration + VmBackend implementations for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+autobins = false
+
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + backend-local vsock listeners)"
+
+[dependencies]
+# `egress-ca`: `substitution_spawn::build_egress_tls_delivery`
+# mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
+# guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
+mvm-core = { workspace = true, features = ["egress-ca"] }
+# The NetworkProvider seam this crate implements (BridgeTapNetworkProvider).
+# Acyclic: mvm-net deps only mvm-core + mvm-protocol.
+mvm-net.workspace = true
+mvm-agentd.workspace = true
+# IR `HealthCheck` that `machine::persist` (de)serializes. Direct dep
+# on the no_std foundation crate now that the IR lives there.
+mvm-protocol.workspace = true
+# `builder-vm`/`pure-mkfs` for the overlay-aware admission gate
+# (`builder_vm::admit_overlay_aware`) called from every backend's
+# `start` impl.
+mvm-build = { workspace = true, default-features = false, features = [
+    "builder-vm",
+    "pure-mkfs",
+] }
+# Direct use of the pure in-process ext4 materializer
+# (`mvm_fs::rootfs`) for read-only host-directory share images.
+mvm-fs.workspace = true
+libkrun-sys.workspace = true
+mio.workspace = true
+anyhow.workspace = true
+# `OverlayManager` is an async trait carrying chrono timestamps +
+# thiserror'd typed errors.
+async-trait = "0.1"
+thiserror.workspace = true
+base64.workspace = true
+# `LocalBackend`/`VolumeBackend` put/get payloads + the content-addressed
+# volume digest store.
+bytes = "1"
+chrono.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+# Folded in with the former mvm-base crate: the base substrate's ui
+# (ANSI output, in-house spinners + prompts) and secret handling (secrecy).
+# Crypto helpers come from mvm_core::crypto, already available via the
+# mvm-core dep above.
+secrecy.workspace = true
+# The lean S3 client (replaced the heavier `opendal` whose ~70-crate
+# closure the dep budget rejects). `aws` gives the S3 builder + its
+# reqwest/rustls path; `template-registry-s3` pulls it for the template
+# registry, `storage-s3` pulls it for the S3 `MountProvider`.
+object_store = { version = "0.11", optional = true, default-features = false, features = [
+    "aws",
+] }
+# Stream adapter for object_store's list(), used by the S3 `MountProvider`.
+# Already in the `storage-s3` dep tree via object_store/reqwest, so gating
+# it here adds nothing new.
+futures = { version = "0.3", optional = true }
+# `wasm_backend`'s host engine: instantiates a user-supplied WASI module.
+# Optional + off by default (`wasm-backend` feature) so the default workspace
+# build carries no wasmtime — it is a large dependency tree, like
+# object_store behind `storage-s3` above.
+wasmtime = { version = "46", optional = true }
+wasmtime-wasi = { version = "46", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+# `libc` for `kill(pid, 0)` liveness probes + SIGTERM/SIGKILL signaling
+# in `LibkrunBackend::{stop, status, list}`. `which` for the
+# supervisor-binary path resolver fallback (after env override + adjacent
+# to current exe, fall back to PATH lookup).
+libc.workspace = true
+which.workspace = true
+ext4-view.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+tracing.workspace = true
+# `fs`: `LocalBackend`'s atomic put (write-tmp + fsync + rename) over
+# `tokio::fs`.
+tokio = { workspace = true, features = ["fs"] }
+fs2.workspace = true
+# DEK held in `EncryptedStorage` is zeroized on drop.
+zeroize.workspace = true
+
+[dev-dependencies]
+mvm-core = { workspace = true, features = ["test-support"] }
+
+# KVM backend. Pre-generated bindings + safe ioctl wrappers;
+# the in-repo kvm::x86_boot logic is pure and platform-independent.
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.21"
+kvm-bindings = "0.11"
+
+[features]
+default = []
+contributor-bootstrap = ["mvm-build/contributor-bootstrap"]
+manifest-verify = ["mvm-core/manifest-verify"]
+template-registry-s3 = ["dep:object_store"]
+# Real S3-backed `MountProvider` (`storage::volume::s3`). Off by default;
+# pulls object_store + its reqwest/rustls closure only when enabled.
+storage-s3 = ["dep:object_store", "dep:futures"]
+# The claim-free host-wasmtime portability tier (`WasmBackend`). Off by
+# default; pulls the wasmtime + wasmtime-wasi closure only when enabled.
+wasm-backend = ["dep:wasmtime", "dep:wasmtime-wasi"]
+
+[lints]
+workspace = true

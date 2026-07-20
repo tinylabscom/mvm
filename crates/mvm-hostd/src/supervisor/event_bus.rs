@@ -60,7 +60,7 @@ pub const DEFAULT_CAPACITY: usize = 256;
 /// One lifecycle event the supervisor publishes. The enum is
 /// intentionally narrow — every variant maps to one state-machine
 /// edge in `crate::supervisor::state::PlanStateMachine` or
-/// `mvm::vm::instance_snapshot`'s pause/resume pipeline. New
+/// `mvm_runtime::vm::instance_snapshot`'s pause/resume pipeline. New
 /// variants are wire-stable additions when consumers run a binary
 /// older than the publisher; `#[serde(deny_unknown_fields)]` on
 /// any future on-wire form will require a `PROTOCOL_VERSION` bump.

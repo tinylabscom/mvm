@@ -27,7 +27,7 @@
 //! - Not a tool gate. [`crate::supervisor::tool_gate::ToolGate`] +
 //!   [`crate::supervisor::policy_tool_gate::PolicyToolGate`] decide
 //!   allow/deny; this module decides "given allow, what happens".
-//! - Not a transport. The MCP server (`mvm-mcp/src/server.rs`) and
+//! - Not a transport. The MCP server (`mvm-cli::mcp::server`) and
 //!   the future agent vsock RPC are the
 //!   two consumers; both call [`ToolRegistry::invoke`] after the
 //!   gate clears.

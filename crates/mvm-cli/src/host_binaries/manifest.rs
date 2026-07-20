@@ -64,6 +64,6 @@ pub const SEED_BINARIES: &[&str] = &["stage0-init", "mvm-rootfs-patcher"];
 /// These stay out of the builder/dev VM rootfs, but the source-built fallback
 /// must still compile and cache them alongside the primary host binaries.
 pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary {
-    package: "mvm-guest-helpers",
+    package: "mvm-agentd",
     name: "mvm-egress-client",
 }];

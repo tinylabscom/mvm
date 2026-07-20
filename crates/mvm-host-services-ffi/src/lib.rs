@@ -11,7 +11,7 @@
 //!
 //! The veneer holds no key and is not a security boundary: it runs in the
 //! untrusted guest and rides the advisory broker transport
-//! ([`mvm_guest::broker_client`]). Every gate — the `ExecutionPlan.services`
+//! ([`mvm_agentd::broker_client`]). Every gate — the `ExecutionPlan.services`
 //! binding, the category-forcing and size/rate caps on `host.audit.v1`, the
 //! correlation-id assignment — lives host-side. This layer only translates
 //! between the C ABI and the typed Rust transport.
@@ -43,9 +43,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
 
+use mvm_agentd::vsock::{BROKER_PORT, connect_host_vsock};
+use mvm_agentd::{host_audit, host_cost, host_time};
 use mvm_core::protocol::host_audit::{EmitBatchRequest, EmitRequest};
-use mvm_guest::vsock::{BROKER_PORT, connect_host_vsock};
-use mvm_guest::{host_audit, host_cost, host_time};
 
 /// Call succeeded; `out` carries the typed response JSON.
 pub const MVM_HSVC_OK: i32 = 0;
@@ -372,8 +372,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
+    use mvm_agentd::vsock::{read_frame, write_frame};
     use mvm_core::protocol::broker::{ServiceCall, ServiceErrorCode, ServiceResponse};
-    use mvm_guest::vsock::{read_frame, write_frame};
 
     use super::*;
 

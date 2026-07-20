@@ -1,0 +1,98 @@
+//! Cfg-free egress-substitution plan decode shared by every workload backend.
+//!
+//! libkrun, hvf, and the Linux-gated Firecracker path (`microvm.rs`) all decode
+//! the admitted plan's secret bindings through this one function — no OS gate,
+//! no per-backend copy.
+
+use anyhow::Result;
+use std::path::Path;
+
+/// Decode the admitted plan's egress secret bindings from `<state_dir>/plan.json`.
+///
+/// `Some((secrets, redaction, tenant))` when the admitted plan carries egress
+/// secrets, else `None` (legacy / non-admitted / no-secret boot — nothing to
+/// wire). A missing `plan.json` or an undecodable placeholder plan is the no-op
+/// path, not an error.
+pub fn decode_plan_secrets_from_state(
+    state_dir: &Path,
+) -> Result<
+    Option<(
+        Vec<mvm_core::plan::SecretBinding>,
+        mvm_core::policy::RedactionPolicy,
+        String,
+    )>,
+> {
+    let plan_path = state_dir.join("plan.json");
+    let plan_json = match std::fs::read_to_string(&plan_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "read plan.json at {} for egress substitution: {e}",
+                plan_path.display()
+            ));
+        }
+    };
+    // Both producers land here: the pre-start persist writes the bare
+    // `ExecutionPlan` (the shape the firecracker bridge parses too) and the
+    // gateway-bridge stash writes the signed envelope. Accept either.
+    let plan = match mvm_core::plan::plan_from_admitted_json(&plan_json) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "plan.json not a decodable admitted plan; skipping egress substitution");
+            return Ok(None);
+        }
+    };
+    if plan.secrets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((plan.secrets, plan.redaction, plan.tenant.0)))
+}
+
+/// True when the workload's persisted plan carries at least one bound secret
+/// (i.e. the credential-substitution endpoint will own `EGRESS_PORT`). The
+/// transparent-TCP vsock egress path (Phase A) is scoped to the `false` case so
+/// the two never contend for the port.
+pub fn state_has_bound_secrets(state_dir: &Path) -> Result<bool> {
+    Ok(decode_plan_secrets_from_state(state_dir)?
+        .map(|(secrets, _, _)| !secrets.is_empty())
+        .unwrap_or(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returns_none_when_no_plan_json() {
+        let dir = std::env::temp_dir().join(format!("mvm-egress-shared-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No plan.json in the fresh dir → no-op path, not an error.
+        let out = decode_plan_secrets_from_state(&dir).unwrap();
+        assert!(out.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn returns_none_when_plan_json_undecodable() {
+        let dir =
+            std::env::temp_dir().join(format!("mvm-egress-shared-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plan.json"), b"not a plan").unwrap();
+        let out = decode_plan_secrets_from_state(&dir).unwrap();
+        assert!(out.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod phase_a_tests {
+    use super::state_has_bound_secrets;
+
+    #[test]
+    fn state_has_bound_secrets_is_false_for_empty_state() {
+        let dir = tempfile::tempdir().unwrap();
+        // No plan file written → no secrets.
+        assert!(!state_has_bound_secrets(dir.path()).unwrap());
+    }
+}

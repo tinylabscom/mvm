@@ -65,24 +65,20 @@ tar.workspace = true
 lzma-rs = "0.3"
 
 mvm-core.workspace = true
-mvm-ext4.workspace = true
-mvm-guest-helpers.workspace = true
-# Read xattrs during the pure walk so a tree carrying attrs the writer can't
-# represent (e.g. `security.capability`) routes to the builder-VM fallback
-# instead of silently dropping them. Already in the mvmctl closure via mvm-oci.
-xattr = { workspace = true, optional = true }
-mvm-guest.workspace = true
+mvm-fs.workspace = true
+mvm-agentd.workspace = true
 # `LibkrunNetworkProvider` impls the `NetworkProvider`
-# seam. mvm-network deps only mvm-core + mvm-sdk, so this edge is acyclic.
+# seam. mvm-net deps only mvm-core + mvm-sdk, so this edge is acyclic.
 # Optional + folded into `builder-vm`: the provider is gated with
 # `libkrun_builder`, so a default build pulls neither.
-mvm-network = { workspace = true, optional = true }
-# `install_app_deps` reuses the sealed-volume audit primitives for
-# cache-hit verification. The orchestrator owns the cache probe +
-# miss-path placeholder; the audit types stay in a dedicated leaf
-# crate so the supervisor and the builder VM go through the same
-# wire shapes without pulling the full SDK.
-mvm-deps-audit.workspace = true
+mvm-net = { workspace = true, optional = true }
+# `install_app_deps` reuses
+# `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
+# for cache-hit verification. The orchestrator owns the cache
+# probe + miss-path placeholder; the audit primitives stay in
+# `mvm-sdk` so the supervisor and the builder VM go through the
+# same types.
+mvm-sdk.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 fs2.workspace = true
@@ -149,7 +145,10 @@ rand = "0.8"
 # Builder-daemon readiness-probe tests bind a real UnixListener under a
 # temp dir to drive `serve_connection` end-to-end.
 tempfile.workspace = true
-mvm-ext4.workspace = true
+# The pure-materialize fallback-routing test plants a real oversized xattr on
+# a fixture file to prove the failure routes to the builder VM. The walk
+# itself (and its xattr capture) lives in mvm-fs.
+xattr.workspace = true
 
 [features]
 default = []
@@ -157,10 +156,11 @@ default = []
 # `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
 # every mvm-build build pulling the sigstore dependency tree.
 manifest-verify = ["mvm-core/manifest-verify"]
-# In-process, pure-Rust ext4 materialization (no builder VM / mkfs). Off by
-# default so the mvmctl default closure does not gain `mvm-ext4` until the pure
-# path is the run-path default; enabled where `materialize_ext4_pure` is used.
-pure-mkfs = ["dep:xattr"]
+# In-process, pure-Rust ext4 materialization (no builder VM / mkfs),
+# delegating the walk + emission to `mvm_fs::rootfs`. Off by default so the
+# mvmctl default closure keeps the pure path opt-in until it is the run-path
+# default; enabled where `materialize_ext4_pure` is used.
+pure-mkfs = []
 # Folded in with the mvm-egress-proxy bin. Off by default;
 # tests/dev enable it so the `mvm-egress-proxy` bin honors a
 # `MVM_EGRESS_ALLOWLIST=host1,host2` override. Production binaries (no
@@ -177,7 +177,7 @@ dev-shell = []
 # writer too — including an isolated `-p` build that never asks for
 # `pure-mkfs` on its own (e.g. the per-VM supervisor crate).
 contributor-bootstrap = []
-builder-vm = ["dep:libkrun-sys", "dep:mvm-network", "pure-mkfs"]
+builder-vm = ["dep:libkrun-sys", "dep:mvm-net", "pure-mkfs"]
 
 [lints]
 workspace = true

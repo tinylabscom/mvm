@@ -139,11 +139,8 @@ jobs:
       - name: Gated doc claims (plan 74 W0)
         run: cargo run -p xtask -- check-doc-claims
 
-      - name: No overclaiming (gated phrases from specs/claims/)
+      - name: No overclaiming (gated phrases from claim frontmatter in specs/adrs/)
         run: cargo run -p xtask -- check-no-overclaim
-
-      - name: Unique spec numbers
-        run: cargo run -p xtask -- check-spec-numbers
 
       # Plan 115 / ADR-065 — Rust manifest ⇔ Nix attrset parity.
       # Adding or renaming a host binary requires updating both
@@ -272,7 +269,6 @@ jobs:
   # Note: cargo-audit, cargo-deny, reproducibility, and prod-agent-no-exec
   # were duplicated here AND in security.yml. They now live only in
   # security.yml (which fires on the same triggers — push to main + PRs).
-  # See specs/plans/40-cli-surface-polish.md follow-up note.
 
   # ── Lane: sealed-prod vsock allowlist locked (plan 76 Phase 1) ────
   # Plan 76 §"Phase 8 — Security regression gate" (partial). The big
@@ -284,7 +280,7 @@ jobs:
   # named lane gives reviewers a single discoverable signal that
   # "the prod surface didn't change" — same intent as
   # `prod-agent-runentry-contract` in security.yml for the symbol
-  # contract (ADR-002 §W4.3), one step earlier in the gate stack.
+  # contract (ADR-001 §W4.3), one step earlier in the gate stack.
   #
   # The actual assertions live in mvm-guest and mvm-core tests; this
   # lane is a thin filter so a PR that widens the prod allowlist
@@ -686,7 +682,7 @@ jobs:
         run: cargo test
 
   # ── Lane: libkrun (macOS Apple Silicon, paths-gated) ──
-  # macos-latest is ~10x the per-minute cost of ubuntu-latest (ADR-038),
+  # macos-latest is ~10x the per-minute cost of ubuntu-latest (ADR-012),
   # so this lane is path-gated: it only spins up the heavy steps when a
   # PR touches libkrun code or its direct consumers, or on pushes to
   # main where the cost is worth catching post-merge drift.
@@ -718,10 +714,9 @@ jobs:
           filters: |
             libkrun:
               - 'crates/deps/libkrun-sys/**'
-              - 'crates/mvm-backend/src/libkrun.rs'
-              - 'crates/mvm-backend/Cargo.toml'
+              - 'crates/mvm-runtime/src/libkrun.rs'
+              - 'crates/mvm-runtime/Cargo.toml'
               - 'crates/mvm-providers/src/apple_container/**'
-              - 'specs/plans/57-libkrun-spike.md'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -757,7 +752,7 @@ jobs:
         # Sanity: the fallback path (no libkrun-sys) keeps compiling.
         # Mirrors how every other workspace consumer that touches
         # libkrun-sys builds.
-        run: cargo build -p libkrun-sys -p mvm-backend
+        run: cargo build -p libkrun-sys -p mvm-runtime
 
       - name: Build libkrun-sys with libkrun-sys (lib + bin + examples)
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
@@ -767,9 +762,9 @@ jobs:
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
         run: cargo test -p libkrun-sys --features libkrun-sys
 
-      - name: Test mvm-backend (libkrun module)
+      - name: Test mvm-runtime (libkrun module)
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
-        run: cargo test -p mvm-backend libkrun
+        run: cargo test -p mvm-runtime libkrun
 
       - name: Clippy libkrun-sys --features libkrun-sys --all-targets
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
@@ -851,7 +846,7 @@ jobs:
       - name: Fetch Firecracker CI kernel + build rootfs
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
         # The mvm Firecracker path uses the upstream Firecracker-CI
-        # kernel (`crates/mvm-backend/src/firecracker.rs` downloads
+        # kernel (`crates/mvm-runtime/src/firecracker.rs` downloads
         # `firecracker-ci/<ver>/x86_64/vmlinux-5.10.*` from S3), NOT the
         # Nix `vmlinux` outputs — on x86_64 those are bzImage (for
         # libkrun/Vz, which accept bzImage), and
@@ -911,8 +906,7 @@ jobs:
   # acceptance criterion it ratifies.
   #
   # Lanes share the same paths-filter so they run as a group when
-  # any of `crates/mvm-oci/**`, `crates/mvm-build/src/oci_to_rootfs/**`,
-  # `crates/mvm-build/tests/oci_*`, or `crates/mvm-cli/src/commands/image.rs`
+  # any of `crates/mvm-fs/**` or `crates/mvm-cli/src/commands/image/**`
   # changes — or on every push to `main`.
   #
   # The lanes deliberately stay lightweight (each runs a single
@@ -933,11 +927,8 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-build/src/oci_to_rootfs/**'
-              - 'crates/mvm-build/tests/oci_unpack_attacks.rs'
-              - 'crates/mvm-build/tests/oci_unpack_common/**'
-              - 'crates/mvm-cli/src/commands/image.rs'
+              - 'crates/mvm-fs/**'
+              - 'crates/mvm-cli/src/commands/image/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -965,7 +956,7 @@ jobs:
         # path traversal, hardlink chains, device-node sneak-ins,
         # symlink escapes, per-entry / per-layer size caps, null-byte
         # injection. Plan 85 §R1.
-        run: cargo test --test oci_unpack_attacks -p mvm-build -- --include-ignored
+        run: cargo test --test oci_unpack_attacks -p mvm-fs -- --include-ignored
 
   oci-digest-mismatch-reject:
     name: oci-digest-mismatch-reject (Plan 85 §AC4)
@@ -980,9 +971,8 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-build/src/oci_to_rootfs/**'
-              - 'crates/mvm-cli/src/commands/image.rs'
+              - 'crates/mvm-fs/**'
+              - 'crates/mvm-cli/src/commands/image/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1010,7 +1000,7 @@ jobs:
         # exercises the streaming verifier against a deliberately
         # tampered blob; sibling tests cover cap-exceeded and
         # retry-exhaust paths.
-        run: cargo test --test hermetic_registry -p mvm-oci rejects
+        run: cargo test --test hermetic_registry -p mvm-fs rejects
 
   oci-malformed-manifest:
     name: oci-malformed-manifest (Plan 85 §AC4)
@@ -1025,7 +1015,7 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
+              - 'crates/mvm-fs/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1056,7 +1046,7 @@ jobs:
         # accepts multiple positional filters as an OR. cargo test
         # itself only takes one TESTNAME positional, so the `--` is
         # what lets us filter for both modules in one run.
-        run: "cargo test -p mvm-oci -- manifest:: reference::"
+        run: "cargo test -p mvm-fs -- manifest:: reference::"
 
   oci-mutable-tag-prod-reject:
     name: oci-mutable-tag-prod-reject (Plan 85 §AC2/AC4)
@@ -1071,8 +1061,8 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-cli/src/commands/image.rs'
+              - 'crates/mvm-fs/**'
+              - 'crates/mvm-cli/src/commands/image/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1122,8 +1112,7 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-build/src/oci_to_rootfs/**'
+              - 'crates/mvm-fs/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1152,16 +1141,16 @@ jobs:
         if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
         # Unpack the same layer set into two clean staging dirs and
         # assert byte-identical content modulo inode metadata.
-        run: cargo test -p mvm-oci reproducibility_two_unpacks_match_modulo_inode
+        run: cargo test -p mvm-fs reproducibility_two_unpacks_match_modulo_inode
 
       - name: Byte-identical ext4 materialization
         if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
-        # ADR-051's per-version cache hinges on byte-identical ext4
+        # ADR-018's per-version cache hinges on byte-identical ext4
         # output across two materialize_to_ext4 runs over byte-
         # identical input. Linux-gated via `#![cfg(target_os = "linux")]`
         # at the top of the test module; on this lane (`ubuntu-latest`)
         # it runs.
-        run: cargo test --test oci_ext4_materialization -p mvm-build materialize_is_byte_deterministic
+        run: cargo test --test oci_ext4_materialization -p mvm-fs materialize_is_byte_deterministic
 
   oci-image-runner-smoke:
     name: oci-image-runner-smoke (Plan 85 §Phase B)
@@ -1176,9 +1165,7 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-build/src/oci_to_rootfs/**'
-              - 'crates/mvm-build/tests/oci_ext4_materialization.rs'
+              - 'crates/mvm-fs/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1217,4 +1204,4 @@ jobs:
         # additionally requires libkrun/KVM, which github-hosted
         # runners cannot provide (no nested KVM). The boot half is
         # tracked separately in the self-hosted libkrun lane.
-        run: cargo test --test oci_ext4_materialization -p mvm-build
+        run: cargo test --test oci_ext4_materialization -p mvm-fs

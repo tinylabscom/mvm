@@ -17,7 +17,7 @@
 //! 3. Locate or build `mvm-libkrun-supervisor` (env override / next-to-exe /
 //!    source checkout build / PATH).
 //! 4. Read the builder VM image from
-//!    `~/.cache/mvm/builder-vm/<arch>/` — vmlinux + rootfs.ext4 +
+//!    `~/.mvm/cache/builder-vm/<arch>/` — vmlinux + rootfs.ext4 +
 //!    cmdline.txt + manifest.json, the shape the builder-vm flake
 //!    emits. Populated by `bootstrap_builder_vm_image`
 //!    (`mvm-cli::commands::env::builder_vm`).
@@ -47,7 +47,7 @@
 //!
 //! ## Not the runtime backend
 //!
-//! `LibkrunBackend` (`crates/mvm-backend/src/libkrun.rs`) is for
+//! `LibkrunBackend` (`crates/mvm-runtime/src/libkrun.rs`) is for
 //! running user microVMs; this module is for building them. The
 //! two share `mvm-libkrun`'s FFI but compose differently — the
 //! builder mounts a workspace + persistent `/nix`-store disk and
@@ -265,7 +265,7 @@ fn builder_vsock_egress_cmdline(base_cmdline: &str) -> String {
 fn apply_builder_vsock_egress(krun: KrunContext) -> KrunContext {
     krun.with_cmdline(BUILDER_VSOCK_EGRESS_TOKEN)
         .with_vsock_direct()
-        .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT)
+        .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
 }
 
 fn builder_boot_contract_cmdline(base_cmdline: &str) -> String {
@@ -329,7 +329,7 @@ pub(crate) struct BuilderVsockEgressEndpoint {
 impl BuilderVsockEgressEndpoint {
     fn spawn(state_dir: &Path) -> Result<Self, BuilderVmError> {
         let transport_path = state_dir.join(mvm_core::config::vsock_socket_filename(
-            mvm_guest::vsock::EGRESS_PORT,
+            mvm_agentd::vsock::EGRESS_PORT,
         ));
         Self::spawn_with_transport(
             state_dir,
@@ -677,7 +677,7 @@ pub struct LibkrunBuilderVm {
     pub nix_store_mib: u32,
     /// Optional caller-supplied bootstrap image. When set, `run_build`
     /// boots from this kernel/rootfs/cmdline instead of looking up the
-    /// builder VM image in `~/.cache/mvm/builder-vm/<arch>/`.
+    /// builder VM image in `~/.mvm/cache/builder-vm/<arch>/`.
     ///
     /// This is the Stage 0 escape from the chicken-and-egg on source
     /// checkouts: a local dev image that contains `/sbin/mvm-host-vm-init`
@@ -758,7 +758,7 @@ impl LibkrunBuilderVm {
     }
 
     /// Boot from a caller-supplied kernel/rootfs/cmdline instead of
-    /// resolving the builder VM image from `~/.cache/mvm/builder-vm/`.
+    /// resolving the builder VM image from `~/.mvm/cache/builder-vm/`.
     pub fn with_image_override(mut self, image: BuilderVmImage) -> Self {
         self.image_override = Some(image);
         self
@@ -1075,9 +1075,9 @@ impl LibkrunBuilderVm {
             )
             .add_disk("input", path_to_str(&input_disk, "input_disk")?, true)
             .add_disk("output", path_to_str(&output_disk, "output_disk")?, false)
-            .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
+            .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT);
         if guest_agent_vsock {
-            krun = krun.add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+            krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
             builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
@@ -1114,7 +1114,7 @@ impl LibkrunBuilderVm {
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
             krun = apply_networking_mode(krun);
@@ -1152,7 +1152,7 @@ impl LibkrunBuilderVm {
         let guest_agent_rx = if guest_agent_vsock {
             Some(spawn_vsock_socket_observer(
                 &vm_state_dir,
-                mvm_guest::vsock::GUEST_AGENT_PORT,
+                mvm_agentd::vsock::GUEST_AGENT_PORT,
                 Duration::from_secs(60),
             ))
         } else {
@@ -1195,7 +1195,7 @@ impl LibkrunBuilderVm {
             Ok(result) => {
                 if let Some(rx) = guest_agent_rx {
                     tracing::info!(
-                        summary = %describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT),
+                        summary = %describe_vsock_socket_observation(rx, mvm_agentd::vsock::GUEST_AGENT_PORT),
                         "builder guest-agent socket observation"
                     );
                 }
@@ -1204,7 +1204,7 @@ impl LibkrunBuilderVm {
             }
             Err(BuilderVmError::NixBuildFailed(message)) => {
                 let guest_agent_summary = guest_agent_rx.map(|rx| {
-                    describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT)
+                    describe_vsock_socket_observation(rx, mvm_agentd::vsock::GUEST_AGENT_PORT)
                 });
                 return Err(BuilderVmError::NixBuildFailed(format!(
                     "{message}\n{}\n{}",
@@ -1421,7 +1421,7 @@ fn builder_shell_krun_context(
         .add_virtio_fs("work", path_to_str(params.work_dir, "work_dir")?)
         .add_virtio_fs("out", path_to_str(params.artifact_out, "artifact_out")?)
         .add_virtio_fs("job", path_to_str(params.job_dir, "job_dir")?)
-        .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
+        .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT);
 
     for disk in params.extra_disks {
         krun = krun.add_disk(
@@ -1588,9 +1588,9 @@ impl BuilderVm for LibkrunBuilderVm {
             )
             .add_disk("input", path_to_str(&input_disk, "input_disk")?, true)
             .add_disk("output", path_to_str(&output_disk, "output_disk")?, false)
-            .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
+            .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT);
         if guest_agent_vsock {
-            krun = krun.add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+            krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
             builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
@@ -1619,7 +1619,7 @@ impl BuilderVm for LibkrunBuilderVm {
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
             krun = apply_networking_mode(krun);
@@ -1662,7 +1662,7 @@ impl BuilderVm for LibkrunBuilderVm {
         let guest_agent_rx = if guest_agent_vsock {
             Some(spawn_vsock_socket_observer(
                 &vm_state_dir,
-                mvm_guest::vsock::GUEST_AGENT_PORT,
+                mvm_agentd::vsock::GUEST_AGENT_PORT,
                 Duration::from_secs(60),
             ))
         } else {
@@ -1725,7 +1725,7 @@ impl BuilderVm for LibkrunBuilderVm {
 
     fn cleanup(&self) -> Result<(), BuilderVmError> {
         // Hygiene: prune old job dirs under
-        // `~/.cache/mvm/builder-vm/jobs/` past N days. No-op until a
+        // `~/.mvm/cache/builder-vm/jobs/` past N days. No-op until a
         // retention policy is picked.
         Ok(())
     }
@@ -1843,8 +1843,8 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // libkrun's add_virtio_fs takes only (tag, host_path) —
             // every share is RW from the guest's perspective. The
             // `BuilderVmMount::read_only` flag is currently ignored
-            // on this backend; Vz's impl will honour it via
-            // VZSharedDirectory's `readOnly:` parameter.
+            // on this backend; a hypervisor with native virtio-fs
+            // read-only support can honour it instead.
             krun = krun.add_virtio_fs(
                 mount.tag.clone(),
                 path_to_str(&mount.host_path, "mount_host_path")?,
@@ -1859,7 +1859,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             krun = krun
                 .with_cmdline(builder_vsock_egress_cmdline(cmdline))
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
         }
         let egress_endpoint = if builder_uses_vsock_egress(&self.image) {
             BuilderVsockEgressEndpoint::spawn(&config.vm_state_dir).map(Some)?
@@ -2183,7 +2183,7 @@ pub(crate) fn host_arch_tag() -> &'static str {
     }
 }
 
-/// `~/.cache/mvm/builder-vm/`. Wrapper around
+/// `~/.mvm/cache/builder-vm/`. Wrapper around
 /// `mvm_core::config::mvm_cache_dir()` to keep the per-arch
 /// subdirs in one place. Created lazily by callers — this
 /// function does not touch the filesystem.
@@ -2640,7 +2640,7 @@ fn prepopulate_stage0_nix_store_image(
 #[cfg(feature = "pure-mkfs")]
 fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), BuilderVmError> {
     let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
-    let size_bytes = blocks_4k * mvm_ext4::BLOCK_SIZE as u64;
+    let size_bytes = blocks_4k * mvm_fs::ext4::BLOCK_SIZE as u64;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -2648,7 +2648,7 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
         .map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
         })?;
-    let summary = mvm_ext4::mkfs::format_empty_ext4(&mut file, size_bytes).map_err(|e| {
+    let summary = mvm_fs::ext4::mkfs::format_empty_ext4(&mut file, size_bytes).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pure-Rust ext4 format of {}: {e}",
             store_image.display()
@@ -2794,22 +2794,20 @@ pub(crate) fn unique_job_id() -> String {
 // them.
 
 const LIBKRUN_SUPERVISOR_BIN: &str = "mvm-libkrun-supervisor";
-const LIBKRUN_SUPERVISOR_PACKAGE: &str = "mvm-vm-host";
+const LIBKRUN_SUPERVISOR_PACKAGE: &str = "mvm-hostd";
 const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
     "Cargo.toml",
     "Cargo.lock",
-    "crates/mvm-vm-host/Cargo.toml",
-    "crates/mvm-vm-host/src",
     "crates/deps/libkrun-sys/Cargo.toml",
     "crates/deps/libkrun-sys/src",
-    "crates/mvm-backend/Cargo.toml",
-    "crates/mvm-backend/src",
+    "crates/mvm-runtime/Cargo.toml",
+    "crates/mvm-runtime/src",
     "crates/mvm-build/Cargo.toml",
     "crates/mvm-build/src",
     "crates/mvm-core/Cargo.toml",
     "crates/mvm-core/src",
-    "crates/mvm-guest/Cargo.toml",
-    "crates/mvm-guest/src",
+    "crates/mvm-agentd/Cargo.toml",
+    "crates/mvm-agentd/src",
     "crates/mvm-hostd/Cargo.toml",
     "crates/mvm-hostd/src",
 ];
@@ -2820,7 +2818,7 @@ const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
 const SUPERVISOR_BUILD_LOG_FILENAME: &str = "mvm-supervisor-build.log";
 
 /// Locate the `mvm-libkrun-supervisor` binary. Mirrors the resolver in
-/// `mvm-backend::libkrun::resolve_supervisor_path` (kept local rather than
+/// `mvm-runtime::libkrun::resolve_supervisor_path` (kept local rather than
 /// re-exported to keep the dep graph flat). Order: env override → next to
 /// current_exe → current source checkout build → PATH.
 /// Where [`resolve_supervisor_path`] found the supervisor binary. The source
@@ -3212,7 +3210,7 @@ fn auto_build_supervisor_from_source_checkout() -> Result<Option<PathBuf>, Build
             "build",
             "-q",
             "-p",
-            "mvm-vm-host",
+            "mvm-hostd",
             "--bin",
             "mvm-libkrun-supervisor",
             "--features",
@@ -3226,7 +3224,7 @@ fn auto_build_supervisor_from_source_checkout() -> Result<Option<PathBuf>, Build
         })?;
     if !status.success() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys exited with {} while preparing the libkrun builder supervisor",
+            "cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys exited with {} while preparing the libkrun builder supervisor",
             status.code().unwrap_or(-1),
         )));
     }
@@ -3287,7 +3285,7 @@ fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
                 "using mvm-libkrun-supervisor from $PATH — a source checkout's `cargo build` \
                  does not refresh this installed copy, so it can lag the driver and reintroduce \
                  stale-supervisor failures. Rebuild a fresh one next to the exe with \
-                 `cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys`."
+                 `cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys`."
             );
             Ok(path)
         }
@@ -3299,7 +3297,7 @@ fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
             Err(BuilderVmError::LibkrunUnavailable(
                 "mvm-libkrun-supervisor binary not found. \
                  Looked for: $MVM_LIBKRUN_SUPERVISOR_PATH, alongside the current exe, and on $PATH. \
-                 Build it with `cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys` \
+                 Build it with `cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys` \
                  or set MVM_LIBKRUN_SUPERVISOR_PATH=/abs/path/to/the/binary."
                     .to_string(),
             ))
@@ -3423,7 +3421,7 @@ fn wait_for_vsock_socket(
     Ok(())
 }
 
-/// Distinct from `mvm-backend::LibkrunBackend::start` which
+/// Distinct from `mvm-runtime::LibkrunBackend::start` which
 /// only waits for the PID file to appear and then returns —
 /// that consumer wants a long-lived background VM. The
 /// builder VM is a one-shot; the caller can't make progress
@@ -3537,7 +3535,7 @@ fn drain_builder_observations(
 ) {
     if let Some(rx) = guest_agent_rx {
         tracing::info!(
-            summary = %describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT),
+            summary = %describe_vsock_socket_observation(rx, mvm_agentd::vsock::GUEST_AGENT_PORT),
             "builder guest-agent socket observation"
         );
     }
@@ -3546,7 +3544,7 @@ fn drain_builder_observations(
 
 /// Spawn a background thread that reads the
 /// `HostVmResponse::Result` frame `mvm-host-vm-init` sends over
-/// AF_VSOCK port [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`]
+/// AF_VSOCK port [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`]
 /// right before reboot. Returns a `Receiver` the caller drains
 /// after the supervisor exits via [`log_vsock_response_outcome`].
 ///
@@ -3575,7 +3573,7 @@ pub fn spawn_vsock_response_listener(
 
     let (tx, rx) = mpsc::channel();
     let socket_path = vm_state_dir.join(mvm_core::config::vsock_socket_filename(
-        mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+        mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
     ));
 
     std::thread::Builder::new()
@@ -4143,7 +4141,7 @@ pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
 /// single cmd.sh / install_spec and powering off, the guest
 /// detects `<job_dir>/<DISPATCH_SOCK_MARKER>` and enters the
 /// dispatch loop that reads `HostVmRequest` frames over
-/// AF_VSOCK port [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`].
+/// AF_VSOCK port [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`].
 ///
 /// The caller pairs this with a `PersistentBuilderSupervisor`
 /// constructed against [`PersistentVmHandle::dispatch_socket_path`].
@@ -4276,19 +4274,19 @@ impl LibkrunPersistentHostVm {
             .add_virtio_fs("work", path_to_str(&self.workspace_root, "workspace_root")?)
             .add_virtio_fs("out", path_to_str(&job_dir, "job_dir")?)
             .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
-            .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT)
+            .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT)
             // The workload-vsock nesting hop. The in-host-VM forwarder
             // listens here; the outer host reaches a workload's
             // Firecracker vsock via `<vm_state_dir>/vsock-21472.sock`.
             // libkrun registers vsock ports at launch, so this must be
             // added up front even though workloads start later.
-            .add_vsock_port(mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT)
+            .add_vsock_port(mvm_agentd::builder_agent::WORKLOAD_FORWARD_PORT)
             // The resident builder control daemon's typed control plane
             // mvm-host-vm-init launches `mvm-builderd` at boot;
             // the host reaches it via `<vm_state_dir>/vsock-21473.sock`.
-            .add_vsock_port(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT);
+            .add_vsock_port(mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT);
         if guest_agent_vsock {
-            krun = krun.add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+            krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
             builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
@@ -4307,7 +4305,7 @@ impl LibkrunPersistentHostVm {
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
             krun = apply_networking_mode(krun);
@@ -4342,7 +4340,7 @@ impl LibkrunPersistentHostVm {
             wait_for_vsock_socket(
                 &mut child,
                 &vm_state_dir,
-                mvm_guest::vsock::GUEST_AGENT_PORT,
+                mvm_agentd::vsock::GUEST_AGENT_PORT,
                 Duration::from_secs(30),
                 "builder guest agent",
             )?;
@@ -4416,13 +4414,13 @@ impl PersistentVmHandle {
     }
 
     /// Host-side path of the libkrun-managed Unix socket that
-    /// proxies to AF_VSOCK [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`]
+    /// proxies to AF_VSOCK [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`]
     /// inside the guest. `PersistentBuilderSupervisor::new` takes
     /// this directly.
     pub fn dispatch_socket_path(&self) -> PathBuf {
         self.vm_state_dir
             .join(mvm_core::config::vsock_socket_filename(
-                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+                mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
             ))
     }
 
@@ -4651,7 +4649,7 @@ mod tests {
             matches!(ctx.networking, libkrun_sys::NetworkingMode::VsockDirect),
             "Stage 0 builder boots must use the explicit vsock device, not TSI"
         );
-        assert_eq!(ctx.host_listen_ports, vec![mvm_guest::vsock::EGRESS_PORT]);
+        assert_eq!(ctx.host_listen_ports, vec![mvm_agentd::vsock::EGRESS_PORT]);
     }
 
     fn ok_mounts(scratch: &TempDir) -> BuilderMounts {
@@ -5056,14 +5054,14 @@ mod tests {
         // non-allowlisted top-level dir that must be pruned from the
         // staged snapshot.
         let workspace = scratch.path().join("mvm-ws");
-        std::fs::create_dir_all(workspace.join("crates/mvm-guest/src")).unwrap();
-        std::fs::create_dir_all(workspace.join("crates/mvm-guest/target/debug")).unwrap();
+        std::fs::create_dir_all(workspace.join("crates/mvm-agentd/src")).unwrap();
+        std::fs::create_dir_all(workspace.join("crates/mvm-agentd/target/debug")).unwrap();
         std::fs::create_dir_all(workspace.join("public")).unwrap();
         std::fs::write(workspace.join("Cargo.toml"), "[workspace]").unwrap();
         std::fs::write(workspace.join("Cargo.lock"), "").unwrap();
-        std::fs::write(workspace.join("crates/mvm-guest/Cargo.toml"), "x").unwrap();
-        std::fs::write(workspace.join("crates/mvm-guest/src/lib.rs"), "x").unwrap();
-        std::fs::write(workspace.join("crates/mvm-guest/target/debug/junk"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-agentd/Cargo.toml"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-agentd/src/lib.rs"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-agentd/target/debug/junk"), "x").unwrap();
         std::fs::write(workspace.join("public/index.html"), "x").unwrap();
 
         let job = BuilderJob::Flake {
@@ -5085,9 +5083,13 @@ mod tests {
         // Filtered mvm-workspace snapshot: members copied, build artifacts
         // and non-allowlisted top-level dirs pruned.
         assert!(job_dir.join("mvm-src/Cargo.lock").exists());
-        assert!(job_dir.join("mvm-src/crates/mvm-guest/src/lib.rs").exists());
         assert!(
-            !job_dir.join("mvm-src/crates/mvm-guest/target").exists(),
+            job_dir
+                .join("mvm-src/crates/mvm-agentd/src/lib.rs")
+                .exists()
+        );
+        assert!(
+            !job_dir.join("mvm-src/crates/mvm-agentd/target").exists(),
             "target/ must be pruned from the staged snapshot"
         );
         assert!(
@@ -5336,12 +5338,11 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
-            .join("mvm")
+            .join("cache")
             .join("builder-vm")
             .join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -5360,12 +5361,11 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
-            .join("mvm")
+            .join("cache")
             .join("builder-vm")
             .join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -5394,12 +5394,11 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
-            .join("mvm")
+            .join("cache")
             .join("builder-vm")
             .join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -5429,12 +5428,11 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
-            .join("mvm")
+            .join("cache")
             .join("builder-vm")
             .join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -5478,16 +5476,15 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch = host_arch_tag().to_string();
-        let cache_root = scratch.path().join("mvm");
+        let cache_root = scratch.path().join("cache");
         let script = scratch.path().join("bootstrap-builder-vm.sh");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$XDG_CACHE_HOME/mvm/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -5524,13 +5521,10 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("HOME", scratch.path());
-        env.set("MVM_CACHE_DIR", scratch.path().join("isolated-cache"));
+        env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let arch = host_arch_tag().to_string();
-        let source_arch_dir = scratch
-            .path()
-            .join(".cache")
-            .join("mvm")
+        let source_arch_dir = std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir())
             .join("builder-vm")
             .join(&arch);
         std::fs::create_dir_all(&source_arch_dir).unwrap();
@@ -5552,6 +5546,7 @@ mod tests {
         let target_arch_dir = scratch
             .path()
             .join("isolated-cache")
+            .join("cache")
             .join("builder-vm")
             .join(&arch);
 
@@ -5583,13 +5578,10 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("HOME", scratch.path());
-        env.set("MVM_CACHE_DIR", scratch.path().join("isolated-cache"));
+        env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let arch = host_arch_tag().to_string();
-        let source_arch_dir = scratch
-            .path()
-            .join(".cache")
-            .join("mvm")
+        let source_arch_dir = std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir())
             .join("builder-vm")
             .join(&arch);
         std::fs::create_dir_all(&source_arch_dir).unwrap();
@@ -5610,7 +5602,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_CACHE_DIR/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -5622,6 +5614,7 @@ mod tests {
         let target_arch_dir = scratch
             .path()
             .join("isolated-cache")
+            .join("cache")
             .join("builder-vm")
             .join(&arch);
 
@@ -7043,13 +7036,13 @@ mod tests {
         );
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
-        let bootstrap_cache = if std::env::var_os("MVM_CACHE_DIR").is_some() {
+        let bootstrap_cache = if std::env::var_os("MVM_HOME").is_some() {
             None
         } else {
             Some(tempfile::tempdir().expect("bootstrap cache tempdir"))
         };
         if let Some(cache) = &bootstrap_cache {
-            env.set("MVM_CACHE_DIR", cache.path());
+            env.set("MVM_HOME", cache.path());
         }
 
         let workspace_root =

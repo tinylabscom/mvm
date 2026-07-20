@@ -31,7 +31,7 @@ doctest = false
 #     locations) and a working libkrun shared library at link time.
 #
 # This crate stays narrowly focused on the FFI surface — backend
-# dispatch lives in mvm-backend.
+# dispatch lives in mvm-runtime.
 
 [dependencies]
 mvm-core.workspace = true
@@ -39,7 +39,7 @@ libc.workspace = true
 tracing = "0.1"
 # `serde` is always on (with `derive`) so the `KrunContext`,
 # `KrunDisk`, and `SupervisorConfig` types are serializable from
-# any consumer — notably `mvm-backend::LibkrunBackend`, which
+# any consumer — notably `mvm-runtime::LibkrunBackend`, which
 # builds the supervisor's JSON without ever enabling `libkrun-sys`
 # itself. Compile cost is marginal; serde is already in nearly
 # every other workspace crate's dep graph.
@@ -53,14 +53,14 @@ serde = { workspace = true }
 # both. Always-on (not feature-gated) because `SupervisorConfig` is
 # always-on per the comment above.
 serde_json.workspace = true
-# We intentionally do NOT pull `mvm-guest` from regular deps: that
-# would form a diamond (mvm-libkrun → mvm-guest → mvm-core ← mvm-libkrun)
+# We intentionally do NOT pull `mvm-agentd` from regular deps: that
+# would form a diamond (mvm-libkrun → mvm-agentd → mvm-core ← mvm-libkrun)
 # that, while not a true cycle, inflates build parallelism unnecessarily.
 # mvm-core is now a pure sink — it does NOT depend on mvm-libkrun (commit
 # 5073268b inverted that dep). The supervisor receives the vsock port list
 # via the JSON config — the symbolic `GUEST_AGENT_PORT` constant is only
 # needed by callers composing the config, not the supervisor consuming it.
-# The `libkrun-smoke` example keeps `mvm-guest` as a dev-dep because
+# The `libkrun-smoke` example keeps `mvm-agentd` as a dev-dep because
 # dev-deps are excluded from cycle analysis.
 #
 # The `mvm-libkrun-supervisor` bin lives in its own leaf crate
@@ -92,12 +92,12 @@ tempfile.workspace = true
 mvm-core = { workspace = true, features = ["test-support"] }
 # The smoke example shares `GUEST_AGENT_PORT` with the production vsock
 # plumbing.
-mvm-guest.workspace = true
+mvm-agentd.workspace = true
 # `ensure_signed()` is the codesigning gate. macOS rejects
 # any process that calls `Hypervisor.framework` without
 # `com.apple.security.hypervisor`; the smoke binary self-signs on
-# first run and re-spawns, same as `mvmctl up --hypervisor vz` does.
-mvm-backend.workspace = true
+# first run and re-spawns, same as `mvmctl up --hypervisor hvf` does.
+mvm-runtime.workspace = true
 # Unit tests for `KrunContext`'s serde shape (incl. the new
 # `virtio_fs_mounts` field with `#[serde(default)]`
 # back-compat) exercise the JSON pipe shape the supervisor binary

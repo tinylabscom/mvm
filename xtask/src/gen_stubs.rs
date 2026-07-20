@@ -6,9 +6,9 @@
 //! per-language generators (see [`artifacts`]):
 //!
 //! * The **workload IR** — `mvm-sdk`'s `ir::Workload` →
-//!   `schema/workload-ir-v0.json` → `sdks/.../_ir`.
-//! * The **host↔guest protocol** — `mvm-guest`'s `GuestRequest` /
-//!   `GuestResponse` → `schema/protocol-v0.json` → `sdks/.../_protocol`.
+//!   `schema/workload-ir-v0.json` → `crates/mvm-sdk/.../_ir`.
+//! * The **host↔guest protocol** — `mvm-agentd`'s `GuestRequest` /
+//!   `GuestResponse` → `schema/protocol-v0.json` → `crates/mvm-sdk/.../_protocol`.
 //!
 //! The xtask packages every step into one command so a dev who edits
 //! either the IR or the protocol types runs `cargo xtask gen-stubs`
@@ -82,8 +82,8 @@ fn artifacts() -> &'static [StubArtifact] {
                 "emit_workload_schema",
             ],
             schema_path: "schema/workload-ir-v0.json",
-            python_path: "sdks/python/mvm/_ir/workload.py",
-            ts_path: "sdks/typescript/src/ir/workload.ts",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_ir/workload.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/ir/workload.ts",
             class_name: "Workload",
             stem: "workload-ir-v0",
         },
@@ -93,15 +93,15 @@ fn artifacts() -> &'static [StubArtifact] {
                 "run",
                 "-q",
                 "-p",
-                "mvm-guest",
+                "mvm-agentd",
                 "--features",
                 "schema",
                 "--bin",
                 "emit_protocol_schema",
             ],
             schema_path: "schema/protocol-v0.json",
-            python_path: "sdks/python/mvm/_protocol/protocol.py",
-            ts_path: "sdks/typescript/src/protocol/protocol.ts",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_protocol/protocol.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/protocol/protocol.ts",
             class_name: "Protocol",
             stem: "protocol-v0",
         },
@@ -118,8 +118,8 @@ fn artifacts() -> &'static [StubArtifact] {
                 "emit_broker_schema",
             ],
             schema_path: "schema/broker-services-v0.json",
-            python_path: "sdks/python/mvm/_broker/services.py",
-            ts_path: "sdks/typescript/src/broker/services.ts",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_broker/services.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/broker/services.ts",
             class_name: "BrokerServices",
             stem: "broker-services-v0",
         },
@@ -356,8 +356,14 @@ mod tests {
         assert!(proto.emit_args.contains(&"--features"));
         assert!(proto.emit_args.contains(&"schema"));
         assert!(proto.emit_args.contains(&"emit_protocol_schema"));
-        assert_eq!(proto.python_path, "sdks/python/mvm/_protocol/protocol.py");
-        assert_eq!(proto.ts_path, "sdks/typescript/src/protocol/protocol.ts");
+        assert_eq!(
+            proto.python_path,
+            "crates/mvm-sdk/sdks/python/mvm/_protocol/protocol.py"
+        );
+        assert_eq!(
+            proto.ts_path,
+            "crates/mvm-sdk/sdks/typescript/src/protocol/protocol.ts"
+        );
         assert_eq!(proto.class_name, "Protocol");
     }
 

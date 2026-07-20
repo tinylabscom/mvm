@@ -27,7 +27,7 @@ jobs:
           import pathlib
           import tomllib
 
-          root = pathlib.Path(".")
+          root = pathlib.Path("crates/mvm-sdk")
           release = tomllib.loads((root / "sdks" / "release.toml").read_text())
           project = tomllib.loads((root / "sdks" / "python" / "pyproject.toml").read_text())
 
@@ -52,7 +52,7 @@ jobs:
       - name: Build sdist + wheel
         run: |
           python -m pip install --upgrade build twine
-          python -m build sdks/python --outdir dist
+          python -m build crates/mvm-sdk/sdks/python --outdir dist
           python -m twine check dist/*
 
       - name: Smoke install built wheel

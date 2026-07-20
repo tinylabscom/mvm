@@ -12,10 +12,9 @@
 //! "exec not available" regardless of any runtime configuration.
 
 use anyhow::{Context, Result, anyhow};
-use mvm::vsock_transport;
-use mvm_backend::backend::AnyBackend;
 use mvm_core::vm_backend::{RequiredCapabilities, VmId, VmStartConfig, VmVolume};
-use mvm_ir::HealthCheck;
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::vsock_transport;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -373,7 +372,7 @@ pub struct ExecRequest {
     pub stdin: Vec<u8>,
     /// Recorded liveness declaration (phase A: presence only). Persisted with a
     /// persistent machine so it survives + is inspectable; not yet probed.
-    pub healthcheck: Option<HealthCheck>,
+    pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
 }
 
 pub(crate) fn select_exec_backend(
@@ -526,9 +525,9 @@ pub fn build_healthcheck(
     timeout_secs: u32,
     retries: u32,
     start_period_secs: u32,
-) -> Option<HealthCheck> {
+) -> Option<mvm_protocol::ir::HealthCheck> {
     let cmd = cmd?;
-    Some(HealthCheck {
+    Some(mvm_protocol::ir::HealthCheck {
         command: vec!["/bin/sh".into(), "-lc".into(), cmd.to_string()],
         interval_secs,
         timeout_secs,
@@ -775,7 +774,7 @@ fn clean_add_dir_staging(add_dirs: &[AddDir], staging_dir: &str) {
     if add_dirs.is_empty() {
         return;
     }
-    let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+    let _ = mvm_runtime::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
 }
 
 /// Decide whether snapshot restore is safe for this request.
@@ -922,11 +921,12 @@ fn run_inner(
         match &req.image {
             ImageSource::Template(name) => {
                 let (spec, vmlinux, initrd, rootfs, rev) =
-                    mvm::vm::template::lifecycle::template_artifacts_dispatched(name)
+                    mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(name)
                         .with_context(|| format!("Loading template '{name}'"))?;
-                let snap = mvm::vm::template::lifecycle::template_snapshot_info_dispatched(name)
-                    .ok()
-                    .flatten();
+                let snap =
+                    mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
+                        .ok()
+                        .flatten();
                 (
                     vmlinux,
                     initrd,
@@ -961,13 +961,16 @@ fn run_inner(
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
     let mut vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
-    let staging_dir = format!("{}/{}/extras", mvm::config::VMS_DIR, vm_name);
-    let mut volumes: Vec<mvm_backend::image::RuntimeVolume> = Vec::new();
+    let staging_dir = mvm_core::config::vm_state_dir(&vm_name)
+        .join("extras")
+        .display()
+        .to_string();
+    let mut volumes: Vec<mvm_runtime::image::RuntimeVolume> = Vec::new();
     let mut add_dir_labels: Vec<String> = Vec::new();
     for (idx, dir) in req.add_dirs.iter().enumerate() {
         let label = format!("mvm-extra-{idx}");
         let image_path = format!("{staging_dir}/extra-{idx}.ext4");
-        mvm_backend::image::build_dir_image_ro(&dir.host_path, &label, &image_path).with_context(
+        mvm_runtime::image::build_dir_image_ro(&dir.host_path, &label, &image_path).with_context(
             || {
                 format!(
                     "preparing --add-dir image for '{}' -> '{}'",
@@ -975,7 +978,7 @@ fn run_inner(
                 )
             },
         )?;
-        volumes.push(mvm_backend::image::RuntimeVolume {
+        volumes.push(mvm_runtime::image::RuntimeVolume {
             host: image_path,
             guest: dir.guest_path.clone(),
             size: String::new(),
@@ -998,7 +1001,7 @@ fn run_inner(
     // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
     // absence is the dev-VM exemption. This is host-local and side-effect-free;
     // foreground OCI launches must never boot the builder/dev VM just to probe.
-    let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
+    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
 
     // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
     // dev run boots from the unpacked tree over virtio-fs (no ext4 materialize);
@@ -1048,7 +1051,7 @@ fn run_inner(
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
-    // `..Default::default()`) so the libkrun/Vz backends take the legacy
+    // `..Default::default()`) so the libkrun/HVF backends take the legacy
     // `run_supervisor` dispatch. Routing template restores through
     // admission would add an `admit_for_run` call here and a
     // `populate_audit_substrate` invocation after the struct literal.
@@ -1089,9 +1092,9 @@ fn run_inner(
         // unrestricted return None (no forwarding tunnel). The identity is
         // minted here so the guest cmdline token and the host worker's
         // expected-session validate against identical values.
-        network_tunnel: mvm_backend::network_tunnel_for_launch(
+        network_tunnel: mvm_runtime::network_tunnel_for_launch(
             &req.network_policy,
-            mvm_backend::TunnelLaunchIdentity {
+            mvm_runtime::TunnelLaunchIdentity {
                 tenant_id: "local".to_string(),
                 vm_id: vm_name.clone(),
                 boot_id: uuid::Uuid::new_v4().to_string(),
@@ -1108,7 +1111,7 @@ fn run_inner(
     }
 
     // Admit the transient run as a locally-signed workload. Setting
-    // tenant_id + plan_json makes the libkrun/Vz supervisor spawn the gateway
+    // tenant_id + plan_json makes the libkrun/HVF supervisor spawn the gateway
     // bridge (so it enforces `network_policy` + chain-audits the run) instead
     // of the legacy unfiltered path; on Firecracker the policy already enforces
     // via the FlakeRunConfig firewall. Force cold boot when admitted — the
@@ -1169,9 +1172,9 @@ fn run_inner(
             match restore_via_snapshot(&vm_name, tmpl, snap, &start_config) {
                 Ok(()) => true,
                 Err(e) => {
-                    // macOS / Lima QEMU returns os error 95 (EOPNOTSUPP) on vsock
-                    // snapshots; cold boot still works there. Fall back rather
-                    // than failing the whole exec.
+                    // macOS backends without Firecracker (HVF, libkrun) return os
+                    // error 95 (EOPNOTSUPP) on vsock snapshots; cold boot still
+                    // works there. Fall back rather than failing the whole exec.
                     ui::warn(&format!("Snapshot restore failed: {e}; cold-booting."));
                     false
                 }
@@ -1213,9 +1216,10 @@ fn run_inner(
     let _ = backend.stop_transient(&VmId(vm_name.clone()));
 
     // Top the warm pool back toward target after the run (best-effort,
-    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; Vz
-    // boot+capture rewarm stays explicit via `pool warm` so teardown does not
-    // spawn background work that can contend with foreground launches.
+    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; the
+    // image-bound boot+capture rewarm the removed Vz backend used to do
+    // stays explicit via `pool warm` so teardown does not spawn background
+    // work that can contend with foreground launches.
     if let Err(e) = crate::commands::pool::replenish_after_launch(&backend, &start_config) {
         tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
     }
@@ -1229,7 +1233,7 @@ fn run_inner(
             continue;
         }
         let image_path = format!("{staging_dir}/extra-{idx}.ext4");
-        if let Err(e) = mvm_backend::image::rsync_image_to_host(&image_path, &dir.host_path) {
+        if let Err(e) = mvm_runtime::image::rsync_image_to_host(&image_path, &dir.host_path) {
             ui::warn(&format!(
                 "writable --add-dir sync-back failed for '{}' -> '{}': {e:#}",
                 dir.host_path, dir.guest_path,
@@ -1293,8 +1297,8 @@ fn restore_via_snapshot(
     snap_info: &mvm_core::template::SnapshotInfo,
     start_config: &VmStartConfig,
 ) -> Result<()> {
-    let slot = mvm_backend::microvm::allocate_slot(vm_name)?;
-    let run_config = mvm_backend::microvm::FlakeRunConfig {
+    let slot = mvm_runtime::microvm::allocate_slot(vm_name)?;
+    let run_config = mvm_runtime::microvm::FlakeRunConfig {
         name: vm_name.to_string(),
         slot,
         vmlinux_path: start_config.kernel_path.clone().unwrap_or_default(),
@@ -1330,16 +1334,16 @@ fn restore_via_snapshot(
         network_tunnel: start_config.network_tunnel.clone(),
     };
     let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
-        mvm::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
+        mvm_runtime::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
     } else {
-        mvm::vm::template::lifecycle::current_revision_id(template_id)?
+        mvm_runtime::vm::template::lifecycle::current_revision_id(template_id)?
     };
     let snap_dir = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
         mvm_core::manifest::slot_snapshot_dir(template_id, &rev)
     } else {
         mvm_core::template::template_snapshot_dir(template_id, &rev)
     };
-    mvm_backend::microvm::restore_from_template_snapshot(
+    mvm_runtime::microvm::restore_from_template_snapshot(
         template_id,
         &run_config,
         &snap_dir,
@@ -1376,7 +1380,7 @@ fn run_in_guest(
     }
 
     let transport = vsock_transport::for_vm(vm_name)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     // Inbound vsock RPC audit. exec.rs is a top-level module that can't
     // reach the private `commands::shared` re-export, so inline the audit
     // emit here. The detail format matches
@@ -1397,13 +1401,13 @@ fn run_in_guest(
     } else {
         Some(String::from_utf8_lossy(&req.stdin).into_owned())
     };
-    let terminal = mvm_guest::vsock::send_exec_streaming(
+    let terminal = mvm_agentd::vsock::send_exec_streaming(
         &mut stream,
         &wrapper,
         stdin_str,
         req.timeout_secs,
         |event| match event {
-            mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+            mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
                 if capture {
                     out.extend_from_slice(chunk);
                 } else {
@@ -1412,7 +1416,7 @@ fn run_in_guest(
                     let _ = so.flush();
                 }
             }
-            mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+            mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
                 if capture {
                     err.extend_from_slice(chunk);
                 } else {
@@ -1425,8 +1429,8 @@ fn run_in_guest(
         },
     )?;
     let exit_code = match terminal {
-        mvm_guest::vsock::ExecEvent::Exit { code } => code,
-        mvm_guest::vsock::ExecEvent::TimedOut => {
+        mvm_agentd::vsock::ExecEvent::Exit { code } => code,
+        mvm_agentd::vsock::ExecEvent::TimedOut => {
             let msg = timeout_exit_message(req.timeout_secs);
             if capture {
                 err.extend_from_slice(format!("{msg}\n").as_bytes());
@@ -1540,9 +1544,9 @@ pub fn boot_session_vm(
     admit: Option<&SessionAdmit<'_>>,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
-        mvm::vm::template::lifecycle::template_artifacts_dispatched(env)
+        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(env)
             .with_context(|| format!("Loading template '{env}'"))?;
-    let snap_info = mvm::vm::template::lifecycle::template_snapshot_info_dispatched(env)
+    let snap_info = mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(env)
         .ok()
         .flatten();
 
@@ -1551,7 +1555,7 @@ pub fn boot_session_vm(
     // concurrent boots in the same session don't collide.
     let vm_name = format!("{}-{}", vm_name_prefix, transient_vm_name());
 
-    let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
+    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
 
     // Session VMs default to the legacy no-admission path. When `admit`
     // returns a substrate, the plan-bearing fields below and any config-drive
@@ -1583,9 +1587,9 @@ pub fn boot_session_vm(
         // None (no forwarding tunnel), so plain session/MCP boots are unaffected.
         // The identity is minted here so the guest cmdline token and the host
         // worker's expected-session validate against identical values.
-        network_tunnel: mvm_backend::network_tunnel_for_launch(
+        network_tunnel: mvm_runtime::network_tunnel_for_launch(
             network_policy,
-            mvm_backend::TunnelLaunchIdentity {
+            mvm_runtime::TunnelLaunchIdentity {
                 tenant_id: "local".to_string(),
                 vm_id: vm_name.clone(),
                 boot_id: uuid::Uuid::new_v4().to_string(),
@@ -1623,7 +1627,7 @@ pub fn boot_session_vm(
         start_config.bundle_json = sub.bundle_json;
         start_config.config_files.extend(sub.config_files);
         admitted_workload = true;
-        if matches!(backend.name(), "firecracker" | "vz" | "libkrun" | "hvf") {
+        if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
             mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
                 .context("persisting admitted session plan before backend start")?;
         }
@@ -1700,7 +1704,7 @@ pub fn dispatch_in_session(
     };
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     // Inbound vsock RPC audit. Mirrors run_in_guest's emit; was lost when
     // this function migrated from send_request to send_exec_streaming.
     let verb = "exec";
@@ -1713,20 +1717,20 @@ pub fn dispatch_in_session(
 
     let mut out = Vec::<u8>::new();
     let mut err = Vec::<u8>::new();
-    let terminal = mvm_guest::vsock::send_exec_streaming(
+    let terminal = mvm_agentd::vsock::send_exec_streaming(
         &mut stream,
         &wrapper,
         None,
         timeout_secs,
         |event| match event {
-            mvm_guest::vsock::ExecEvent::Stdout { chunk } => out.extend_from_slice(chunk),
-            mvm_guest::vsock::ExecEvent::Stderr { chunk } => err.extend_from_slice(chunk),
+            mvm_agentd::vsock::ExecEvent::Stdout { chunk } => out.extend_from_slice(chunk),
+            mvm_agentd::vsock::ExecEvent::Stderr { chunk } => err.extend_from_slice(chunk),
             _ => {}
         },
     )?;
     let exit_code = match terminal {
-        mvm_guest::vsock::ExecEvent::Exit { code } => code,
-        mvm_guest::vsock::ExecEvent::TimedOut => {
+        mvm_agentd::vsock::ExecEvent::Exit { code } => code,
+        mvm_agentd::vsock::ExecEvent::TimedOut => {
             err.extend_from_slice(format!("{}\n", timeout_exit_message(timeout_secs)).as_bytes());
             EXEC_TIMEOUT_EXIT_CODE
         }
@@ -1763,7 +1767,7 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         // would only answer `ProtocolMismatch` to the next request and
         // that is *not* "reachable" from the caller's perspective.
         if let Ok(transport) = vsock_transport::for_vm(vm_name)
-            && let Ok(mut stream) = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            && let Ok(mut stream) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             && {
                 // Bound each probe: a transport whose socket is bound but whose
                 // guest agent hasn't replied yet (e.g. still booting, or an
@@ -1775,9 +1779,9 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
                 // The stream is a throwaway probe (dropped below), so the timeout
                 // never touches a real agent-RPC data stream.
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
-                mvm_guest::vsock::negotiate_protocol(
+                mvm_agentd::vsock::negotiate_protocol(
                     &mut stream,
-                    vec![mvm_guest::vsock::GuestCapability::Ping],
+                    vec![mvm_agentd::vsock::GuestCapability::Ping],
                 )
                 .is_ok()
             }
@@ -1811,7 +1815,7 @@ mod tests {
 
     #[test]
     fn validate_backend_for_egress_refuses_unavailable_hvf_before_boot_work() {
-        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
@@ -1842,7 +1846,7 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn select_backend_name_for_egress_picks_hvf_when_proxy_support_is_available() {
-        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2610,10 +2614,11 @@ mod tests {
 
         let cache = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
         env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "download");
         let initrd_dir = cache
             .path()
+            .join("cache")
             .join("verity-initrd")
             .join(env!("CARGO_PKG_VERSION"))
             .join(if cfg!(target_arch = "aarch64") {
@@ -2711,9 +2716,9 @@ mod tests {
     fn staging_cleanup_skipped_without_add_dirs() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls_for_handler = calls.clone();
-        let _handler = mvm::shell_mock::install_handler(move |_script: &str| {
+        let _handler = mvm_runtime::shell_mock::install_handler(move |_script: &str| {
             calls_for_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            mvm::shell_mock::MockResponse {
+            mvm_runtime::shell_mock::MockResponse {
                 exit_code: 0,
                 stdout: String::new(),
             }
@@ -2732,12 +2737,12 @@ mod tests {
     fn staging_cleanup_enabled_with_add_dirs() {
         let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let scripts_for_handler = scripts.clone();
-        let _handler = mvm::shell_mock::install_handler(move |script: &str| {
+        let _handler = mvm_runtime::shell_mock::install_handler(move |script: &str| {
             scripts_for_handler
                 .lock()
                 .expect("mutex must not be poisoned")
                 .push(script.to_string());
-            mvm::shell_mock::MockResponse {
+            mvm_runtime::shell_mock::MockResponse {
                 exit_code: 0,
                 stdout: String::new(),
             }

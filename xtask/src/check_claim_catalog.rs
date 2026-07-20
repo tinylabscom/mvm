@@ -3,11 +3,13 @@
 //! mvm's security claims (CLAUDE.md §"Security model") are each backed
 //! by named tests and CI lanes. Prose drifts: a witness gets renamed,
 //! the claim paragraph still names the old one, and nothing notices.
-//! This lint makes `specs/claims/catalog.md` the machine-checked map
-//! from each claim to its witnesses and fails when a named witness no
-//! longer exists in the tree — the same "catalog can't outrun reality"
-//! discipline an arc42 Ch.10 architecture doc enforces, scoped to what's
-//! mechanically checkable.
+//! This lint makes the claims ledger table embedded in
+//! `specs/adrs/001-microvm-security-posture.md` (between the
+//! `<!-- claims-catalog:begin -->` / `<!-- claims-catalog:end -->`
+//! markers) the machine-checked map from each claim to its witnesses
+//! and fails when a named witness no longer exists in the tree — the
+//! same "catalog can't outrun reality" discipline an arc42 Ch.10
+//! architecture doc enforces, scoped to what's mechanically checkable.
 //!
 //! Catalog row shape (a 5-column markdown table):
 //!   | # | Claim | Witnesses | Authority | Status |
@@ -16,23 +18,35 @@
 //!     (a test fn or the impl symbol the claim exercises).
 //!   - `ci:NAME` — must appear literally in some `.github/workflows/*`.
 //!
-//! `catalog.md` also carries degenerate claim frontmatter (status
-//! `Shipped`, no gated phrases) so `check-no-overclaim` — which parses
-//! every `specs/claims/*.md` — treats it as an inert, already-shipped
-//! claim rather than choking on missing frontmatter.
+//! The ledger also carries degenerate claim frontmatter (status
+//! `Shipped`, no gated phrases) so `check-no-overclaim` — which scans
+//! `specs/adrs/**/*.md` for embedded claim frontmatter blocks — treats
+//! it as an inert, already-shipped claim rather than choking on missing
+//! frontmatter.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 const KNOWN_STATUSES: [&str; 4] = ["Shipped", "Preview", "Planned", "Not-claimed"];
+const BEGIN_MARKER: &str = "<!-- claims-catalog:begin -->";
+const END_MARKER: &str = "<!-- claims-catalog:end -->";
 
 pub fn run(workspace: &Path) -> Result<()> {
-    let catalog_path = workspace.join("specs").join("claims").join("catalog.md");
-    let source = std::fs::read_to_string(&catalog_path)
-        .with_context(|| format!("reading {}", catalog_path.display()))?;
+    let adr_path = workspace
+        .join("specs")
+        .join("adrs")
+        .join("001-microvm-security-posture.md");
+    let source = std::fs::read_to_string(&adr_path)
+        .with_context(|| format!("reading {}", adr_path.display()))?;
+    let ledger = extract_ledger_section(&source).with_context(|| {
+        format!(
+            "locating the claims ledger between `{BEGIN_MARKER}` and `{END_MARKER}` in {}",
+            adr_path.display()
+        )
+    })?;
 
-    let rows = parse_rows(&source)
-        .with_context(|| format!("parsing the table in {}", catalog_path.display()))?;
+    let rows = parse_rows(ledger)
+        .with_context(|| format!("parsing the claims ledger table in {}", adr_path.display()))?;
 
     let mut errors: Vec<String> = Vec::new();
     structural_checks(&rows, &mut errors);
@@ -61,7 +75,7 @@ pub fn run(workspace: &Path) -> Result<()> {
             eprintln!("[error] {e}");
         }
         bail!(
-            "check-claim-catalog: {} problem(s) in specs/claims/catalog.md",
+            "check-claim-catalog: {} problem(s) in the claims ledger (specs/adrs/001-microvm-security-posture.md)",
             errors.len()
         );
     }
@@ -72,6 +86,22 @@ pub fn run(workspace: &Path) -> Result<()> {
         needles.len()
     );
     Ok(())
+}
+
+/// Slice out the text strictly between `BEGIN_MARKER` and `END_MARKER`.
+/// The ADR carries several other markdown tables (STRIDE threat-model
+/// rows, compliance mappings) with their own pipe-delimited rows;
+/// scoping to the marker-delimited region keeps those from ever being
+/// mistaken for claim-catalog rows.
+fn extract_ledger_section(source: &str) -> Result<&str> {
+    let start = source
+        .find(BEGIN_MARKER)
+        .ok_or_else(|| anyhow::anyhow!("begin marker not found"))?
+        + BEGIN_MARKER.len();
+    let end = source[start..]
+        .find(END_MARKER)
+        .ok_or_else(|| anyhow::anyhow!("end marker not found"))?;
+    Ok(&source[start..start + end])
 }
 
 struct Row {
@@ -415,5 +445,36 @@ mod tests {
     #[test]
     fn split_row_drops_outer_pipes() {
         assert_eq!(split_row("| a | b |"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn extract_ledger_section_slices_between_markers() {
+        let source = "# ADR\n\nsome prose\n\n<!-- claims-catalog:begin -->\nTABLE HERE\n<!-- claims-catalog:end -->\n\nmore prose\n";
+        let section = extract_ledger_section(source).unwrap();
+        assert_eq!(section, "\nTABLE HERE\n");
+    }
+
+    #[test]
+    fn extract_ledger_section_ignores_unrelated_tables_outside_markers() {
+        let source = "\
+| ID | STRIDE | Adv. | Threat | Mitigation |
+| --- | --- | --- | --- | --- |
+| X-S1 | S | G | some threat | some mitigation |
+
+<!-- claims-catalog:begin -->
+| # | Claim | Witnesses | Authority | Status |
+|---|-------|-----------|-----------|--------|
+| 1 | First claim | fn:foo_one | seccomp | Shipped |
+<!-- claims-catalog:end -->
+";
+        let section = extract_ledger_section(source).unwrap();
+        let rows = parse_rows(section).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].number, 1);
+    }
+
+    #[test]
+    fn extract_ledger_section_errors_without_markers() {
+        assert!(extract_ledger_section("no markers here").is_err());
     }
 }

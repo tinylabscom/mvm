@@ -78,7 +78,7 @@ pub struct TemplateSpec {
 
 /// Path helpers
 pub fn templates_base_dir() -> String {
-    format!("{}/templates", crate::config::mvm_data_dir())
+    format!("{}/templates", crate::config::mvm_home())
 }
 
 pub fn template_dir(template_id: &str) -> String {

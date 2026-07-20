@@ -1,7 +1,8 @@
 //! Canonical guest CPU architecture. `arm64` canonicalizes to
-//! `aarch64`; `amd64` to `x86_64`. This is the single arch type —
-//! it replaces `mvm-build`'s `runtime_overlay::Arch` and the stringly
-//! `target_arch` fields (migrated in a later task).
+//! `aarch64`; `amd64` to `x86_64`. This is the single arch type; its
+//! `Display` form (`"aarch64"` / `"x86_64"`) is the canonical cache
+//! directory-name segment that string-typed layers (e.g. the fs-layer
+//! runtime-overlay cache in `mvm_fs::overlay`) consume.
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 

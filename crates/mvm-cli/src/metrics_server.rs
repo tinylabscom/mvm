@@ -91,19 +91,17 @@ fn handle_connection(mut stream: TcpStream) {
 /// Concatenate per-VM Prometheus scrape files written by supervisor-side
 /// observers (e.g. `FlowCountMetrics::write_scrape_file`) onto the global
 /// metrics output. The supervisor and CLI run as the same user and share
-/// `~/.mvm/audit/` (mode 0700), so the filesystem is the
-/// cross-process surface — no new RPC, no new socket. File-name contract:
-/// `metrics-<vm>-flow-count.prom`.
+/// the audit dir (`<mvm_home>/audit/`, mode 0700), so the filesystem is
+/// the cross-process surface — no new RPC, no new socket. File-name
+/// contract: `metrics-<vm>-flow-count.prom`.
 ///
-/// `var_os` is preferred over `var` so a non-UTF-8 `HOME` is treated as
-/// unset rather than falling through `Err(NotUnicode)` into an
-/// unintended path.
+/// No-op when no home root resolves (neither `MVM_HOME` nor `$HOME` set)
+/// — never falls back to a world-writable directory.
 fn append_per_vm_scrape_files(out: &mut String) {
-    let Some(home) = std::env::var_os("HOME") else {
+    if mvm_core::config::mvm_home_strict().is_err() {
         return;
-    };
-    let dir = std::path::PathBuf::from(home).join(".mvm/audit");
-    append_per_vm_scrape_files_from(out, &dir);
+    }
+    append_per_vm_scrape_files_from(out, &mvm_core::config::mvm_audit_dir());
 }
 
 /// Mirrors the `ObserverAllowlist::load_from_path` hardening pattern in
@@ -230,7 +228,7 @@ mod tests {
     #[test]
     fn append_per_vm_scrape_files_from_filters_prefix_and_suffix() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let audit = tmpdir.path().join(".mvm/audit");
+        let audit = tmpdir.path().join("audit");
         std::fs::create_dir_all(&audit).unwrap();
         std::fs::write(
             audit.join("metrics-vm-a-flow-count.prom"),
@@ -265,7 +263,7 @@ mod tests {
     fn append_per_vm_scrape_files_from_skips_symlinks() {
         use std::os::unix::fs::symlink;
         let tmpdir = tempfile::tempdir().unwrap();
-        let audit = tmpdir.path().join(".mvm/audit");
+        let audit = tmpdir.path().join("audit");
         std::fs::create_dir_all(&audit).unwrap();
 
         let real = audit.join("metrics-vm-real-flow-count.prom");
@@ -286,7 +284,7 @@ mod tests {
     #[test]
     fn append_per_vm_scrape_files_from_caps_file_size() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let audit = tmpdir.path().join(".mvm/audit");
+        let audit = tmpdir.path().join("audit");
         std::fs::create_dir_all(&audit).unwrap();
 
         let big = audit.join("metrics-vm-big-flow-count.prom");

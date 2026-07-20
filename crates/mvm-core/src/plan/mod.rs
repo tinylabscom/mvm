@@ -25,16 +25,18 @@
 //!   valid plan now".
 
 pub mod bundle;
-pub mod execution_plan;
 pub mod signing;
 pub mod synthesis;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-pub mod types;
 pub mod validity;
-pub mod verb;
-pub mod verb_grant;
-pub mod verb_trust;
+
+// `execution_plan`, `types`, `verb`, `verb_grant`, `verb_trust` are
+// pure-DTO leaves that now live in `mvm-protocol`; re-exported here as
+// module aliases so every existing
+// `crate::plan::{execution_plan,types,verb,verb_grant,verb_trust}::X` path
+// keeps resolving unchanged.
+pub use mvm_protocol::plan::{execution_plan, types, verb, verb_grant, verb_trust};
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,
@@ -54,11 +56,11 @@ pub use synthesis::{
 };
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, AuthMode, AuthPolicy, DepsVolumeBinding, DepsVolumeBindingError, FsPolicyRef,
-    HostShareGrant, KeyRotationSpec, Nonce, NonceParseError, PlanId, PlanSeccompTier,
-    PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin, Resources,
-    RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef,
-    TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+    AuditTaxonomy, DepsVolumeBinding, DepsVolumeBindingError, FsPolicyRef, HostShareGrant,
+    KeyRotationSpec, Nonce, NonceParseError, PlanId, PlanSeccompTier, PlanSeccompTierParseError,
+    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef, TenantId, TimeoutSpec, Variant,
+    WorkloadId, WorkloadIntent,
 };
 pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,

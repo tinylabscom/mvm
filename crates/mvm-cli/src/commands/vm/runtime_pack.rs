@@ -293,7 +293,7 @@ mod tests {
 
     use mvm_core::pack_cache::VerifiedPackDir;
     use mvm_core::packs::Sha256Hex;
-    use mvm_core::plan::bundle::KeyId;
+    use mvm_core::plan::bundle::key_id_from_identity;
     use mvm_core::util::test_env::TestEnv;
 
     use super::*;
@@ -304,7 +304,7 @@ mod tests {
             verified: mvm_core::packs::VerifiedPack {
                 pack_hash: Sha256Hex::from_bytes(b"runtime-pack-test"),
                 file_count: 4,
-                signer_key_id: KeyId::from_identity("test-identity"),
+                signer_key_id: key_id_from_identity("test-identity"),
             },
         }
     }
@@ -349,11 +349,9 @@ mod tests {
     /// runtime-pack source specifically.
     #[test]
     fn resolve_fails_closed_when_no_pack_is_cached() {
-        let cache = tempfile::TempDir::new().expect("cache tempdir");
-        let data = tempfile::TempDir::new().expect("data tempdir");
+        let root = tempfile::TempDir::new().expect("mvm root tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", root.path());
 
         let err = resolve_runtime_pack_image_source(false)
             .expect_err("no promoted runtime pack must refuse rather than fall back");
@@ -369,11 +367,9 @@ mod tests {
     /// propagating an error.
     #[test]
     fn try_runtime_pack_returns_none_when_no_pack_is_cached() {
-        let cache = tempfile::TempDir::new().expect("cache tempdir");
-        let data = tempfile::TempDir::new().expect("data tempdir");
+        let root = tempfile::TempDir::new().expect("mvm root tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", root.path());
 
         assert!(try_runtime_pack_image_source(false).is_none());
     }
@@ -385,11 +381,9 @@ mod tests {
     /// itself produces the host policy either call site would use.
     #[test]
     fn resolve_and_try_share_trust_inputs_construction() {
-        let cache = tempfile::TempDir::new().expect("cache tempdir");
-        let data = tempfile::TempDir::new().expect("data tempdir");
+        let root = tempfile::TempDir::new().expect("mvm root tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", root.path());
 
         let explicit_err = resolve_runtime_pack_image_source(false)
             .expect_err("no cached pack refuses the explicit path");
@@ -476,7 +470,7 @@ mod not_instant_reason_tests {
         let diagnosis = PackDiagnosis::Rejected {
             pack_hash: hash("pack"),
             reason: PackVerifyError::ExpiredSignature {
-                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+                key_id: mvm_core::plan::bundle::key_id_from_identity("test-identity"),
                 expired_at,
             },
         };
@@ -489,7 +483,7 @@ mod not_instant_reason_tests {
         let diagnosis = PackDiagnosis::Rejected {
             pack_hash: hash("pack"),
             reason: PackVerifyError::Revoked {
-                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+                key_id: mvm_core::plan::bundle::key_id_from_identity("test-identity"),
                 reason: "compromised signing key".to_string(),
             },
         };
@@ -503,7 +497,7 @@ mod not_instant_reason_tests {
         let diagnosis = PackDiagnosis::Rejected {
             pack_hash: hash("pack"),
             reason: PackVerifyError::UnknownSigningKey {
-                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+                key_id: mvm_core::plan::bundle::key_id_from_identity("test-identity"),
             },
         };
         let reason = not_instant_reason(&diagnosis).expect("Rejected must produce a reason");

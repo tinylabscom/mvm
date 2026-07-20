@@ -122,7 +122,7 @@ pub fn workload_build_fingerprint(
 /// Directory holding `fingerprint -> revision` cache records
 /// (`~/.mvm/dev/build-cache/`).
 fn build_cache_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_data_dir())
+    PathBuf::from(mvm_core::config::mvm_home())
         .join("dev")
         .join("build-cache")
 }
@@ -274,7 +274,7 @@ mod tests {
         let flake = tempfile::tempdir().unwrap();
         write(flake.path(), "flake.nix", "{ outputs = _: {}; }");
         let ws = tempfile::tempdir().unwrap();
-        write(ws.path(), "crates/mvm-guest/src/lib.rs", "fn main() {}");
+        write(ws.path(), "crates/mvm-agentd/src/lib.rs", "fn main() {}");
 
         let a = workload_build_fingerprint(flake.path(), None, BuildMode::Prod, Some(ws.path()))
             .unwrap();
@@ -292,12 +292,12 @@ mod tests {
         let flake = tempfile::tempdir().unwrap();
         write(flake.path(), "flake.nix", "{ outputs = _: {}; }");
         let ws = tempfile::tempdir().unwrap();
-        write(ws.path(), "crates/mvm-guest/src/lib.rs", "fn a() {}");
+        write(ws.path(), "crates/mvm-agentd/src/lib.rs", "fn a() {}");
 
         let before =
             workload_build_fingerprint(flake.path(), None, BuildMode::Prod, Some(ws.path()))
                 .unwrap();
-        write(ws.path(), "crates/mvm-guest/src/lib.rs", "fn b() {}");
+        write(ws.path(), "crates/mvm-agentd/src/lib.rs", "fn b() {}");
         let after =
             workload_build_fingerprint(flake.path(), None, BuildMode::Prod, Some(ws.path()))
                 .unwrap();

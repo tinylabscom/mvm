@@ -19,10 +19,9 @@
 
 #![cfg(target_os = "linux")]
 
-use mvm_build::runtime_overlay::{
-    OverlayBuildSpec, RuntimeOverlayResolver, build_overlay_with_nix,
-};
+use mvm_build::runtime_overlay::{OverlayBuildSpec, build_overlay_with_nix};
 use mvm_core::arch::GuestArch;
+use mvm_fs::overlay::RuntimeOverlayResolver;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -79,7 +78,7 @@ fn build_produces_resolver_compatible_artifact() {
     let spec = OverlayBuildSpec::new(workspace.clone(), arch, result_link.clone());
 
     let artifact = build_overlay_with_nix(&spec).expect("nix build runtime-overlay");
-    assert_eq!(artifact.arch, arch);
+    assert_eq!(artifact.arch, arch.to_string());
     assert!(artifact.overlay_ext4.exists());
     assert!(artifact.sidecar.exists());
     assert!(artifact.roothash_file.exists());
@@ -115,7 +114,7 @@ fn build_produces_resolver_compatible_artifact() {
     let resolver =
         RuntimeOverlayResolver::new(cache.path().to_path_buf(), artifact.version.clone());
     let resolved = resolver
-        .resolve(arch)
+        .resolve(&arch.to_string())
         .expect("resolver must accept the freshly-built artifact");
     assert_eq!(resolved.version, artifact.version);
     assert_eq!(resolved.roothash, artifact.roothash);
@@ -188,7 +187,7 @@ fn build_is_byte_deterministic_for_same_workspace() {
     assert_eq!(
         bytes_a, bytes_b,
         "byte-deterministic invariant: overlay.ext4 must be \
-         byte-identical across builds (ADR-051 verity cache)"
+         byte-identical across builds (ADR-018 verity cache)"
     );
 }
 

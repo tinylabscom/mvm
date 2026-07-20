@@ -6,7 +6,7 @@ Two routes from this file produce the same Workload IR:
     statically and emits flake.nix + launch.json + bundled src/. The
     host never imports or executes this script.
 
-  - `python app.py` (after `pip install ./sdks/python`) imports `mvm`,
+  - `python app.py` (after `pip install ./crates/mvm-sdk/sdks/python`) imports `mvm`,
     the decorator records the declaration, and the user can pipe
     `mvm.emit_json()` to disk for the same IR. This route runs the
     script and is useful for IDE introspection.

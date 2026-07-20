@@ -1,6 +1,6 @@
 //! Idempotent extraction of embedded host-vm binaries to a
 //! content-hashed dir under the supplied cache root (typically
-//! `~/.cache/mvm/host-bins`). Re-verifies each binary's SHA-256
+//! `~/.mvm/cache/host-bins`). Re-verifies each binary's SHA-256
 //! against the embedded constant on every call — a corrupted or
 //! tampered on-disk cache fails closed.
 

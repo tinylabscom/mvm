@@ -24,83 +24,27 @@
 
 use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 
 use crate::security::SIG_ALG_ED25519;
 
-// ============================================================================
-// Errors
-// ============================================================================
-
-#[derive(Debug, Error)]
-pub enum SignedConfigError {
-    /// Envelope JSON did not parse.
-    #[error("signed config: envelope parse failed: {source}")]
-    EnvelopeParse {
-        #[source]
-        source: serde_json::Error,
-    },
-    /// Base64 decode of the payload or signature failed.
-    #[error("signed config: base64 decode failed: {source}")]
-    BadEncoding {
-        #[source]
-        source: base64::DecodeError,
-    },
-    /// Signature was the wrong length (Ed25519 is exactly 64 bytes).
-    #[error("signed config: signature length {got} != expected {want}")]
-    BadSignatureLength { got: usize, want: usize },
-    /// The envelope's `signer_key_id` did not match the expected
-    /// verifying key. Structurally distinct from `SignatureMismatch`
-    /// so the audit trail can name the failure mode.
-    #[error("signed config: signer_key_id {got} did not match expected {expected}")]
-    UnexpectedSignerKey { got: String, expected: String },
-    /// The signature didn't verify against the bundled key. Most
-    /// likely cause: a compromised supervisor handed a forged config
-    /// to a subprocess that's checking against the pinned release key.
-    #[error("signed config: signature verification failed")]
-    SignatureMismatch,
-    /// `sig_alg` is not one this codepath knows how to verify.
-    #[error("signed config: unsupported sig_alg {sig_alg} (only Ed25519 supported in W1b.2b.3)")]
-    UnsupportedAlgorithm { sig_alg: u8 },
-}
+pub use mvm_protocol::protocol::signed_config::{SignedConfigEnvelope, SignedConfigError};
 
 // ============================================================================
-// Envelope
+// Key id
 // ============================================================================
 
-/// Wire envelope. The inner config bytes are base64-encoded so the
-/// envelope is grep-friendly JSON; an alternative would have been
-/// multipart binary, but the readability matches the project's other
-/// audit / sidecar conventions. Per-byte overhead vs raw bytes is
-/// ~33%, fine for a single subprocess startup config (~1-4 KiB).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SignedConfigEnvelope {
-    /// Algorithm-identifier byte. One of [`SIG_ALG_ED25519`] or
-    /// `SIG_ALG_ECDSA_P256` (the latter reserved for future use).
-    pub sig_alg: u8,
-    /// Hex-encoded SHA-256 of the signer's verifying key. Lets the
-    /// subprocess sanity-check that the envelope is signed by the key
-    /// it expects, *before* doing the more-expensive signature verify.
-    pub signer_key_id: String,
-    /// Base64-encoded inner config bytes (the
-    /// [`SubprocessConfig`-shaped JSON each subprocess crate parses).
-    pub payload_b64: String,
-    /// Base64-encoded signature over the (raw, pre-base64) inner
-    /// config bytes.
-    pub signature_b64: String,
-}
-
-impl SignedConfigEnvelope {
-    /// Canonical key id for a verifying key — hex SHA-256 of the
-    /// 32-byte public key bytes.
-    pub fn key_id_for(verifying_key: &VerifyingKey) -> String {
-        let bytes = verifying_key.to_bytes();
-        let hash = Sha256::digest(bytes);
-        hex_encode(&hash)
-    }
+/// Canonical key id for a verifying key — hex SHA-256 of the 32-byte
+/// public key bytes.
+///
+/// A free function rather than an inherent method on
+/// [`SignedConfigEnvelope`]: that type now lives in `mvm-protocol`, and
+/// the orphan rule forbids `mvm-core` from adding inherent `impl`s to a
+/// foreign type.
+pub fn key_id_for(verifying_key: &VerifyingKey) -> String {
+    let bytes = verifying_key.to_bytes();
+    let hash = Sha256::digest(bytes);
+    hex_encode(&hash)
 }
 
 // ============================================================================
@@ -158,7 +102,7 @@ pub fn verify_envelope(
         });
     }
 
-    let expected_id = SignedConfigEnvelope::key_id_for(expected_verifying_key);
+    let expected_id = key_id_for(expected_verifying_key);
     if envelope.signer_key_id != expected_id {
         return Err(SignedConfigError::UnexpectedSignerKey {
             got: envelope.signer_key_id.clone(),
@@ -168,10 +112,14 @@ pub fn verify_envelope(
 
     let payload = base64::engine::general_purpose::STANDARD
         .decode(&envelope.payload_b64)
-        .map_err(|source| SignedConfigError::BadEncoding { source })?;
+        .map_err(|source| SignedConfigError::BadEncoding {
+            reason: source.to_string(),
+        })?;
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(&envelope.signature_b64)
-        .map_err(|source| SignedConfigError::BadEncoding { source })?;
+        .map_err(|source| SignedConfigError::BadEncoding {
+            reason: source.to_string(),
+        })?;
 
     if sig_bytes.len() != 64 {
         return Err(SignedConfigError::BadSignatureLength {
@@ -226,7 +174,7 @@ mod tests {
 
     fn sign(payload: &[u8], sk: &SigningKey) -> SignedConfigEnvelope {
         let signature = sk.sign(payload);
-        let signer_key_id = SignedConfigEnvelope::key_id_for(&sk.verifying_key());
+        let signer_key_id = key_id_for(&sk.verifying_key());
         wrap_payload(
             payload,
             SIG_ALG_ED25519,
@@ -335,8 +283,8 @@ mod tests {
     #[test]
     fn key_id_is_deterministic_for_a_given_key() {
         let (_, vk) = fresh_keys();
-        let id_a = SignedConfigEnvelope::key_id_for(&vk);
-        let id_b = SignedConfigEnvelope::key_id_for(&vk);
+        let id_a = key_id_for(&vk);
+        let id_b = key_id_for(&vk);
         assert_eq!(id_a, id_b);
         assert_eq!(id_a.len(), 64); // 32-byte SHA-256 → 64 hex chars
     }

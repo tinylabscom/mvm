@@ -8,27 +8,29 @@ pub mod audit;
 pub mod dns_pin;
 pub mod network_policy;
 pub mod secret_binding;
-pub mod security;
 pub mod security_profile;
 
 // Tenant policy bundles — authoring, resolution, signing, TOML loading.
 // Folded in from the former `mvm-policy` crate. mvmd consumes the
 // resolver + bundle types via the facade.
-pub mod bundle;
-pub mod policies;
 pub mod projection;
 pub mod projection_fs_env;
-pub mod redaction;
 pub mod resolver;
-pub mod reversible_replacement;
 pub mod signing;
 pub mod toml_loader;
 
+// `security`, `reversible_replacement`, `policies`, `redaction`, and
+// `bundle` are pure-DTO leaves that now live in `mvm-protocol`; re-exported
+// here as module aliases so every existing
+// `crate::policy::{security,reversible_replacement,policies,redaction,bundle}::X`
+// path keeps resolving unchanged.
+pub use mvm_protocol::policy::{bundle, policies, redaction, reversible_replacement, security};
+
 pub use bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION, TenantOverlay};
 pub use policies::{
-    ArtifactPolicy, AuditPolicy, DEFAULT_BODY_CAP_BYTES, EgressPolicy, FlowByteLogDirections,
-    FlowByteLogSpec, FsGrantSpec, KeyPolicy, L4RuleSpec, NetworkPolicy, PiiPolicy, ToolPolicy,
-    WasiCapPolicy,
+    ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, DEFAULT_BODY_CAP_BYTES, EgressPolicy,
+    FlowByteLogDirections, FlowByteLogSpec, FsGrantSpec, KeyPolicy, L4RuleSpec, PiiPolicy,
+    ToolPolicy, WasiCapPolicy,
 };
 pub use projection::{
     CanonicalEgress, CanonicalRule, ProjectionError, Proto, WasiEgress, WasiOutboundGrant,

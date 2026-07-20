@@ -14,14 +14,14 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
-use mvm_backend::checkpoint::{
-    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, capture_fs_quick,
-    capture_vm_full, checkpoint_is_vz, fork_checkpoint, fork_vm_full_fc,
-};
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
+use mvm_runtime::checkpoint::{
+    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, capture_fs_quick,
+    capture_vm_full, checkpoint_is_vz, fork_checkpoint, fork_vm_full_fc,
+};
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -289,7 +289,7 @@ fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Option<PathBuf>>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let meta: mvm_backend::base::runtime_meta::VmRuntimeMeta =
+    let meta: mvm_runtime::base::runtime_meta::VmRuntimeMeta =
         serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
     Ok(meta.rootfs_path.map(PathBuf::from))
 }
@@ -297,11 +297,9 @@ fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Option<PathBuf>>
 /// Best-effort liveness: a VM is "running" iff one of its per-backend PID
 /// files names a live process. Mirrors the per-backend `kill(pid, 0)` probe.
 ///
-/// NOTE: libkrun writes its pid file into `vm_state_dir(name)`
-/// (`~/.mvm/vms/<name>/libkrun.pid`). Firecracker writes `fc.pid`
-/// into the VMS_DIR-based per-VM directory (`~/microvm/vms/<name>/fc.pid`)
-/// which is a separate tree — probing `vm_state_dir/<name>/fc.pid` is always
-/// a miss for a live FC VM and must not be done here.
+/// NOTE: libkrun writes `libkrun.pid` and Firecracker writes `fc.pid`, both
+/// into the shared per-VM directory (`<mvm_home>/vms/<name>/`). The file
+/// names are backend-disjoint, so both probes read the same tree.
 fn vm_is_running(name: &str) -> bool {
     let state_dir = vm_state_dir(name);
     // libkrun.pid lives under vm_state_dir (the host metadata store).
@@ -316,9 +314,9 @@ fn vm_is_running(name: &str) -> bool {
         return true;
     }
 
-    // fc.pid lives under ~/microvm/vms/<name>/fc.pid (the VMS_DIR FC workspace),
-    // not under vm_state_dir. Probe that separately so a live FC VM is detected.
-    if let Some(fc_pid_path) = mvm_backend::microvm::fc_pid_path(name)
+    // Firecracker's fc.pid is written via fc_pid_path() (strict resolver —
+    // None in hermetic environments). Probe it so a live FC VM is detected.
+    if let Some(fc_pid_path) = mvm_runtime::microvm::fc_pid_path(name)
         && let Ok(s) = std::fs::read_to_string(&fc_pid_path)
         && let Ok(pid) = s.trim().parse::<libc::pid_t>()
     {
@@ -348,11 +346,11 @@ fn vm_is_quiesced(name: &str) -> bool {
 /// live pid cannot
 /// distinguish paused from running. The pause verb stamps the fc pid into
 /// `fc.paused` (under `vm_state_dir`); resume removes it. Quiesced iff the
-/// marker matches the live fc pid at its native location (`~/microvm/vms/<name>/fc.pid`).
+/// marker matches the live fc pid at `<mvm_home>/vms/<name>/fc.pid`.
 fn fc_pause_marker_matches_live_pid(name: &str) -> bool {
     let marker = std::fs::read_to_string(vm_state_dir(name).join("fc.paused")).ok();
     let live =
-        mvm_backend::microvm::fc_pid_path(name).and_then(|p| std::fs::read_to_string(p).ok());
+        mvm_runtime::microvm::fc_pid_path(name).and_then(|p| std::fs::read_to_string(p).ok());
     matches!((marker, live), (Some(m), Some(l)) if !m.trim().is_empty() && m.trim() == l.trim())
 }
 
@@ -370,7 +368,7 @@ fn runtime_contract_for_checkpoint(
     Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     Option<String>,
 )> {
-    Ok(mvm_backend::base::runtime_meta::read(name)?
+    Ok(mvm_runtime::base::runtime_meta::read(name)?
         .map(|meta| {
             (
                 Some(meta.runtime_source_policy),
@@ -381,7 +379,7 @@ fn runtime_contract_for_checkpoint(
 }
 
 fn ensure_save_restore_supported(action: &str) -> Result<()> {
-    let backend = mvm_backend::backend::AnyBackend::auto_select();
+    let backend = mvm_runtime::backend::AnyBackend::auto_select();
     let available = backend.snapshot_capability();
     if !available.satisfies(SnapshotCapability::SaveRestore) {
         bail!(
@@ -461,7 +459,7 @@ fn capture_vm_full_for_running_vm(
         tag,
         created_unix,
     };
-    let control = mvm_backend::firecracker::FcVmFullControl::new(name);
+    let control = mvm_runtime::firecracker::FcVmFullControl::new(name);
     capture_vm_full(store, params, &control)
 }
 
@@ -561,14 +559,14 @@ fn diff(a: &str, b: &str, json: bool) -> Result<()> {
     let meta_b = store
         .read_meta(&id_b)
         .with_context(|| format!("reading checkpoint {b:?}"))?;
-    let d = mvm_backend::checkpoint::diff_checkpoints(&meta_a, &meta_b);
+    let d = mvm_runtime::checkpoint::diff_checkpoints(&meta_a, &meta_b);
 
     if json {
         crate::json_out::emit_json(&d)?;
         return Ok(());
     }
 
-    use mvm_backend::checkpoint::{BlobStatus, LineageRelation};
+    use mvm_runtime::checkpoint::{BlobStatus, LineageRelation};
     ui::info(&format!("checkpoint diff: {a} -> {b}"));
     if d.class_a != d.class_b {
         ui::info(&format!(
@@ -801,9 +799,10 @@ fn fork_vm_full_arm(
 
 fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     // A vm_full fork restores a saved machine state whose cpu/mem are baked
-    // into the snapshot; Vz validates device config against the saved state
-    // and refuses a mismatch. Accepting these flags would silently fail at
-    // restore time with a confusing hypervisor error — refuse early.
+    // into the snapshot; the removed Vz backend validated device config
+    // against the saved state and refused a mismatch. Accepting these flags
+    // would silently fail at restore time with a confusing hypervisor error
+    // — refuse early.
     if p.cpus_override.is_some() {
         anyhow::bail!(
             "--cpus is not valid for a vm_full fork: a memory restore resumes the saved \
@@ -840,7 +839,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     // Firecracker vm_full fork. A forked child restores the parent's saved guest
     // memory verbatim, which carries the parent's IP/MAC. VMGenID reseeds the
     // guest RNG on restore but does not re-address the network, so a booted child
-    // would collide with its parent on the shared 172.16.0.x bridge. The host-tap
+    // would collide with its parent on the shared dev-subnet bridge. The host-tap
     // side is remappable, but re-IP'ing the guest is a per-child network-model
     // decision that is not yet settled — refuse cleanly rather than boot a
     // colliding child. The restore mechanism stays reachable behind an explicit
@@ -912,7 +911,6 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: mvm_core::plan::SecretReleasePolicy::default(),
         secrets: Vec::new(),
-        auth: mvm_core::plan::AuthPolicy::none(),
         no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,
@@ -940,7 +938,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         .map(|ctx| ctx.admitted.plan.tenant.0.clone());
 
     // Mint the child's verb-grant sidecar up front so it's readable below for
-    // post-restore delivery. Mirrors the Vz fork path.
+    // post-restore delivery. Mirrors the former Vz backend's fork path.
     if let Some(ref plan_json_str) = child_plan_json {
         let mint_cfg = mvm_core::vm_backend::VmStartConfig {
             name: p.child_vm_name.clone(),
@@ -950,7 +948,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
     }
 
-    let restorer = mvm_backend::firecracker::FcForkRestorer;
+    let restorer = mvm_runtime::firecracker::FcForkRestorer;
     let fork_result = fork_vm_full_fc(
         p.store,
         ForkParams {
@@ -977,7 +975,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
     // agent over the FC vsock UDS, re-pinning it to the child's plan instead
     // of running class-gate-only. `FcForkRestorer::restore_fork` already
     // resumed the VMM with a zero VMGenID token before returning; this is the
-    // real token + grant delivery, mirroring the Vz fork path and
+    // real token + grant delivery, mirroring the former Vz backend's fork path and
     // `warm_restore_instance_from_path`'s own post-restore signal.
     if let Some(mut grant_env) = read_grant_envelope_for(&p.child_vm_name) {
         if let Some(parent_vm_name) = p.store.read_meta(p.checkpoint).ok().map(|m| m.vm_name)
@@ -986,13 +984,13 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
             grant_env.predecessor_session_id = Some(session_id);
             grant_env.predecessor_plan_nonce_hex = Some(plan_nonce.as_hex().to_string());
         }
-        match mvm_backend::microvm::resolve_running_vm_dir(&p.child_vm_name) {
+        match mvm_runtime::microvm::resolve_running_vm_dir(&p.child_vm_name) {
             Ok(vm_dir) => {
-                let vsock_path_str = mvm_backend::microvm::firecracker_vsock_uds_path(&vm_dir);
+                let vsock_path_str = mvm_runtime::microvm::firecracker_vsock_uds_path(&vm_dir);
                 const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
                 let mut agent_ready = false;
                 for _ in 0..POLL_ATTEMPTS {
-                    if mvm_guest::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
+                    if mvm_agentd::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
                         agent_ready = true;
                         break;
                     }
@@ -1001,7 +999,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
                 if agent_ready {
                     let token =
                         mvm_core::crypto::vmgenid::fresh_generation_token(&p.child_vm_name).token;
-                    match mvm_guest::vsock::post_restore_with_grant_at(
+                    match mvm_agentd::vsock::post_restore_with_grant_at(
                         &vsock_path_str,
                         token,
                         Some(grant_env),
@@ -1077,8 +1075,8 @@ struct BootForkedChildParams<'a> {
 /// The rootfs is the already-materialized instance file (`prepare_instance_rootfs`
 /// returns early when source == instance, so nothing gets clobbered).
 fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
-    use mvm_backend::backend::AnyBackend;
     use mvm_core::util::parse_human_size;
+    use mvm_runtime::backend::AnyBackend;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
@@ -1121,7 +1119,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: mvm_core::plan::SecretReleasePolicy::default(),
         secrets: Vec::new(),
-        auth: mvm_core::plan::AuthPolicy::none(),
         no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,
@@ -1355,7 +1352,7 @@ mod tests {
     fn stopped_vm_is_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         assert!(
             vm_is_quiesced("no-such-vm-stopped"),
             "stopped VM must be quiesced"
@@ -1365,20 +1362,19 @@ mod tests {
     // ── fc_pause_marker_matches_live_pid ─────────────────────────────────
 
     /// A paused FC VM: `fc.paused` in vm_state_dir matches the live fc pid at
-    /// `$HOME/microvm/vms/<name>/fc.pid` → quiesced (checkpoint allowed).
+    /// `<mvm_home>/vms/<name>/fc.pid` → quiesced (checkpoint allowed).
     #[test]
     fn fc_paused_vm_with_matching_marker_is_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
-        // fc_pid_path resolves under $HOME, so redirect HOME to the tmp tree.
-        env.set("HOME", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let pid = unsafe { libc::getpid() };
         let pid_str = pid.to_string();
 
-        // Write fc.pid at the location fc_pid_path() resolves to.
-        let fc_dir = tmp.path().join("microvm").join("vms").join("fcpausedvm");
+        // Write fc.pid at the location fc_pid_path() resolves to — the same
+        // per-VM directory vm_state_dir names (one tree, disjoint file names).
+        let fc_dir = tmp.path().join("vms").join("fcpausedvm");
         std::fs::create_dir_all(&fc_dir).unwrap();
         std::fs::write(fc_dir.join("fc.pid"), &pid_str).unwrap();
 
@@ -1403,13 +1399,12 @@ mod tests {
     fn fc_running_without_marker_is_not_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
-        env.set("HOME", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let pid = unsafe { libc::getpid() };
 
         // Write fc.pid (vm is running) but no fc.paused marker.
-        let fc_dir = tmp.path().join("microvm").join("vms").join("fcrunningvm");
+        let fc_dir = tmp.path().join("vms").join("fcrunningvm");
         std::fs::create_dir_all(&fc_dir).unwrap();
         std::fs::write(fc_dir.join("fc.pid"), pid.to_string()).unwrap();
 
@@ -1432,13 +1427,12 @@ mod tests {
     fn fc_stale_marker_is_not_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
-        env.set("HOME", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let live_pid = unsafe { libc::getpid() };
         let stale_pid = live_pid.saturating_add(1);
 
-        let fc_dir = tmp.path().join("microvm").join("vms").join("fcstalevm");
+        let fc_dir = tmp.path().join("vms").join("fcstalevm");
         std::fs::create_dir_all(&fc_dir).unwrap();
         std::fs::write(fc_dir.join("fc.pid"), live_pid.to_string()).unwrap();
 
@@ -1465,7 +1459,7 @@ mod tests {
     fn resolve_rootfs_from_mode_json_when_present() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let vm_name = "mode-json-rootfs-vm";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -1477,8 +1471,8 @@ mod tests {
         std::fs::write(&rootfs_file, b"fake rootfs").unwrap();
 
         // Write mode.json carrying the rootfs_path (as record_from_rootfs would).
-        let meta = mvm_backend::base::runtime_meta::VmRuntimeMeta {
-            mode: mvm_backend::base::runtime_meta::StartModeKind::Detached,
+        let meta = mvm_runtime::base::runtime_meta::VmRuntimeMeta {
+            mode: mvm_runtime::base::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
@@ -1494,12 +1488,12 @@ mod tests {
 
     /// When mode.json carries `rootfs_path` but the file no longer exists on
     /// disk, the error mentions the pause workflow (same user-visible guidance
-    /// as the Vz supervisor-config path).
+    /// as the former Vz backend's supervisor-config path).
     #[test]
     fn mode_json_rootfs_path_missing_on_disk_produces_actionable_error() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let vm_name = "mode-json-gone-vm";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -1507,8 +1501,8 @@ mod tests {
 
         // Write mode.json pointing at a rootfs that does NOT exist.
         let gone_path = tmp.path().join("gone").join("rootfs.ext4");
-        let meta = mvm_backend::base::runtime_meta::VmRuntimeMeta {
-            mode: mvm_backend::base::runtime_meta::StartModeKind::Detached,
+        let meta = mvm_runtime::base::runtime_meta::VmRuntimeMeta {
+            mode: mvm_runtime::base::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
@@ -1558,7 +1552,7 @@ mod tests {
     fn resource_shape_no_plan_no_flags_uses_defaults() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let store = CheckpointStore::at(tmp.path().join("store"));
         let ckpt_id = seed_checkpoint(&store, "origin-vm");
@@ -1625,7 +1619,7 @@ mod tests {
 
         // Confirm the no-clobber seam fires: prepare_instance_rootfs_inner
         // returns the same path without touching the file when src == instance.
-        let out = mvm_backend::base::cow::prepare_instance_rootfs_inner(
+        let out = mvm_runtime::base::cow::prepare_instance_rootfs_inner(
             &instance,
             instance.to_str().unwrap(),
         )
@@ -1824,7 +1818,7 @@ mod tests {
     fn read_grant_envelope_for_returns_none_when_absent() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let result = read_grant_envelope_for("no-such-vm-read-grant-test");
         assert!(result.is_none());
@@ -1838,7 +1832,7 @@ mod tests {
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let vm_name = "test-fork-grant-read-sidecar";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -1876,7 +1870,7 @@ mod tests {
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let vm_name = "test-fork-grant-predecessor";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -1953,29 +1947,25 @@ mod tests {
 
     // ── vm_is_running / vm_is_quiesced: Firecracker fc.pid path ──────────
 
-    /// A live FC VM whose fc.pid lives under ~/microvm/vms/<name>/fc.pid (the
-    /// VMS_DIR workspace) must be detected as running — so fs_quick refuses to
-    /// checkpoint it. The file is NOT in vm_state_dir; placing it there would be
-    /// a silent miss and allow a corrupt-rootfs checkpoint.
+    /// A live FC VM whose fc.pid lives under `<mvm_home>/vms/<name>/fc.pid`
+    /// must be detected as running — so fs_quick refuses to checkpoint it.
     #[test]
     fn live_fc_vm_is_not_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        // Point MVM_DATA_DIR somewhere clean so vm_state_dir has no stale pids.
-        env.set("MVM_DATA_DIR", tmp.path().join("mvm"));
-        // Set HOME to the temp dir so fc_pid_path points there.
-        env.set("HOME", tmp.path());
+        // Point MVM_HOME somewhere clean so the per-VM dirs have no stale pids.
+        env.set("MVM_HOME", tmp.path().join("mvm"));
 
-        // Construct ~/microvm/vms/<name>/fc.pid with the current process PID.
+        // Construct <mvm_home>/vms/<name>/fc.pid with the current process PID.
         let vm_name = "live-fc-vm-quiesce-test";
-        let fc_vms_dir = tmp.path().join("microvm").join("vms").join(vm_name);
+        let fc_vms_dir = tmp.path().join("mvm").join("vms").join(vm_name);
         std::fs::create_dir_all(&fc_vms_dir).unwrap();
         let pid = unsafe { libc::getpid() };
         std::fs::write(fc_vms_dir.join("fc.pid"), pid.to_string()).unwrap();
 
         assert!(
             !vm_is_quiesced(vm_name),
-            "a live FC VM (fc.pid present at VMS_DIR path) must NOT be quiesced"
+            "a live FC VM (fc.pid present in its per-VM dir) must NOT be quiesced"
         );
     }
 
@@ -1984,11 +1974,10 @@ mod tests {
     fn resolve_quiesced_vm_rootfs_refuses_live_fc_vm() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path().join("mvm"));
-        env.set("HOME", tmp.path());
+        env.set("MVM_HOME", tmp.path().join("mvm"));
 
         let vm_name = "live-fc-refuse-test";
-        let fc_vms_dir = tmp.path().join("microvm").join("vms").join(vm_name);
+        let fc_vms_dir = tmp.path().join("mvm").join("vms").join(vm_name);
         std::fs::create_dir_all(&fc_vms_dir).unwrap();
         let pid = unsafe { libc::getpid() };
         std::fs::write(fc_vms_dir.join("fc.pid"), pid.to_string()).unwrap();
@@ -2003,18 +1992,17 @@ mod tests {
         assert!(msg.contains(vm_name), "error must name the VM: {msg}");
     }
 
-    /// A stopped FC VM (no fc.pid file at the VMS_DIR path) is quiesced.
+    /// A stopped FC VM (no fc.pid file in its per-VM dir) is quiesced.
     #[test]
     fn stopped_fc_vm_is_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path().join("mvm"));
-        env.set("HOME", tmp.path());
+        env.set("MVM_HOME", tmp.path().join("mvm"));
 
         // No fc.pid written — VM is stopped.
         assert!(
             vm_is_quiesced("stopped-fc-vm-test"),
-            "stopped FC VM (no fc.pid at VMS_DIR path) must be quiesced"
+            "stopped FC VM (no fc.pid in its per-VM dir) must be quiesced"
         );
     }
 

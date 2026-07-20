@@ -2,7 +2,7 @@
 //!
 //! mvm's Nix factories emit `/etc/mvm/runtime.json` at image
 //! build time. The mvm agent parses that file at boot via
-//! `mvm_guest::runtime_config::RuntimeConfig` (with
+//! `mvm_agentd::runtime_config::RuntimeConfig` (with
 //! `serde(deny_unknown_fields)`). If our emit drifts from the
 //! upstream schema, the agent boot fails before the worker pool
 //! initializes — silently, on every shipped image.
@@ -19,7 +19,7 @@
 //! with mvm by hand; pulling in the real upstream type makes drift
 //! detection automatic.
 
-use mvm_guest::runtime_config::{ConcurrencyConfig, InProcessMode, RuntimeConfig};
+use mvm_agentd::runtime_config::{ConcurrencyConfig, InProcessMode, RuntimeConfig};
 
 fn parse(label: &str, json: &str) -> RuntimeConfig {
     serde_json::from_str::<RuntimeConfig>(json).unwrap_or_else(|err| {
