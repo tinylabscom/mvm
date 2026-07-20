@@ -369,7 +369,8 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-agentd \
          --bin mvm-guest-agent --bin mvm-guest-netinit --bin mvm-guest-netd \
          --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-verity-init \
-         --bin mvm-egress-client --features mvm-agentd/dev-shell"
+         --bin mvm-egress-client --features mvm-agentd/dev-shell \
+         --features mvm-agentd/addons"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
     let mut cmd = Command::new(&cargo);
@@ -396,6 +397,8 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "mvm-egress-client",
         "--features",
         "mvm-agentd/dev-shell",
+        "--features",
+        "mvm-agentd/addons",
     ])
     .env("RUSTC", &rustc)
     .env("CARGO_TARGET_DIR", target_dir)

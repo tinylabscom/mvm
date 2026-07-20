@@ -73,20 +73,25 @@ path = "src/bin/mvm-oci-init.rs"
 name = "mvm-oci-entrypoint"
 path = "src/bin/mvm-oci-entrypoint.rs"
 
-# In-guest loopback DNS resolver for local addons.
+# In-guest loopback DNS resolver for local addons. Gated behind the
+# `addons` feature so the sealed agent's default closure stays
+# tokio-free (see the feature's doc comment below).
 [[bin]]
 name = "mvm-addon-dns"
 path = "src/bin/mvm-addon-dns.rs"
+required-features = ["addons"]
 
 # In-guest loopback TCP ↔ host-vsock bridge for local addons.
 [[bin]]
 name = "mvm-addon-vsock-bridge"
 path = "src/bin/mvm-addon-vsock-bridge.rs"
+required-features = ["addons"]
 
 # In-guest loopback SOCKS5/HTTP-proxy → host-vsock egress client.
 [[bin]]
 name = "mvm-egress-client"
 path = "src/bin/mvm-egress-client.rs"
+required-features = ["addons"]
 
 # In-guest one-shot workload-exit-code reporter over AF_VSOCK.
 [[bin]]
@@ -152,6 +157,14 @@ dev-shell = []
 # agent, so the lean-agent closure stays schemars-free. Pulls
 # `mvm-core/schema` for the shared `AgentProfile`/`BackpressureReason` types.
 schema = ["dep:schemars", "mvm-core/schema"]
+# The async loopback addon/egress helper bins (`mvm-addon-dns`,
+# `mvm-addon-vsock-bridge`, `mvm-egress-client`) and their shared vsock
+# session helper. Off by default so the sealed agent's request-serving
+# path — vsock, worker_pool, runner — stays synchronous and pulls no
+# async runtime. The helper bins are separate processes launched by
+# `/init`, never linked into `mvm-guest-agent`, so gating them here costs
+# the sealed agent nothing.
+addons = ["dep:tokio", "dep:hickory-proto"]
 
 [dependencies]
 mvm-core.workspace = true
@@ -175,10 +188,13 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # mvm-addon-dns's in-guest resolver parses/answers DNS over loopback.
-hickory-proto.workspace = true
+# Optional: only the `addons` feature's helper bins use it.
+hickory-proto = { workspace = true, optional = true }
 # The addon/egress helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
-# mvm-egress-client) run an async loopback listener per bin.
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# mvm-egress-client) run an async loopback listener per bin. Optional so
+# the sealed agent's default closure stays tokio-free — see the `addons`
+# feature.
+tokio = { workspace = true, optional = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 # The `netinit` module's `RouteInstaller` trait + types +
 # install loop + tests are cross-platform; only `RawNetlinkInstaller`
 # itself is Linux-only (a synchronous AF_NETLINK socket via libc — no

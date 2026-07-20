@@ -8,6 +8,11 @@
 #
 # Baked unconditionally (it is inert unless `/init` starts it), like mvm-exit-report.
 # Always built without any dev-shell feature — it has no interactive surface.
+#
+# Requires the `addons` feature: the async loopback helper bins (this one,
+# mvm-addon-dns, mvm-addon-vsock-bridge) are the only mvm-agentd consumers of
+# tokio, so the crate keeps them behind that feature to hold the sealed
+# agent's default build tokio-free.
 
 { pkgs
 , lib
@@ -27,6 +32,7 @@ pkgs.rustPlatform.buildRustPackage {
   cargoBuildFlags = [
     "--package" "mvm-agentd"
     "--bin" "mvm-egress-client"
+    "--features" "mvm-agentd/addons"
   ];
 
   cargoTestFlags = [

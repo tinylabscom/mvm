@@ -252,7 +252,9 @@ impl GuestAgentBuildSpec {
 
     /// `cargo zigbuild` argv. Builds the guest runtime bins with `dev-shell`
     /// (the `run --image` exec path uses the dev-shell-gated handler,
-    /// matching `nix/packages/mvm-guest-agent.nix`).
+    /// matching `nix/packages/mvm-guest-agent.nix`) and `addons` (the
+    /// async loopback helper bins — `mvm-egress-client` here — require it
+    /// so the sealed agent's default build stays tokio-free).
     pub fn argv(&self) -> Vec<String> {
         let cargo = self
             .cargo
@@ -283,6 +285,8 @@ impl GuestAgentBuildSpec {
             "mvm-egress-client".to_string(),
             "--features".to_string(),
             "mvm-agentd/dev-shell".to_string(),
+            "--features".to_string(),
+            "mvm-agentd/addons".to_string(),
         ]
     }
 
@@ -580,6 +584,11 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "mvm-addon-dns".to_string(),
         "--bin".to_string(),
         "mvm-exit-report".to_string(),
+        // mvm-egress-client + mvm-addon-dns are the async loopback helper
+        // bins gated behind mvm-agentd's `addons` feature (see its
+        // Cargo.toml) so the sealed agent's default build stays tokio-free.
+        "--features".to_string(),
+        "mvm-agentd/addons".to_string(),
     ];
     run_zigbuild(&spec, cargo.as_os_str(), &prod_args)?;
     let output_dir = spec.output_dir();

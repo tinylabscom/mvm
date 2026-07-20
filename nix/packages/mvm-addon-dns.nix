@@ -8,6 +8,11 @@
 # Always built without any dev-shell-style feature flag — the DNS
 # binary has no `do_exec`-equivalent surface and the same artifact is
 # safe for dev and prod images.
+#
+# Requires the `addons` feature: this bin (along with mvm-egress-client
+# and mvm-addon-vsock-bridge) is the only mvm-agentd consumer of tokio,
+# so the crate keeps it behind that feature to hold the sealed agent's
+# default build tokio-free.
 
 { pkgs
 , lib
@@ -28,6 +33,7 @@ pkgs.rustPlatform.buildRustPackage {
   cargoBuildFlags = [
     "--package" "mvm-agentd"
     "--bin" "mvm-addon-dns"
+    "--features" "mvm-agentd/addons"
   ];
 
   cargoTestFlags = [

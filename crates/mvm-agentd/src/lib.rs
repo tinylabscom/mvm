@@ -2,8 +2,10 @@
 // Depends on mvm-core
 
 /// Loopback DNS resolver (`mvm-addon-dns`).
+#[cfg(feature = "addons")]
 pub mod addon_dns;
 /// Loopback TCP ↔ host-vsock bridge (`mvm-addon-vsock-bridge`).
+#[cfg(feature = "addons")]
 pub mod addon_vsock_bridge;
 /// In-guest host-services broker client: dials the supervisor's guest-facing
 /// broker port over vsock and exchanges a framed `ServiceCall` for a framed
@@ -25,6 +27,7 @@ pub mod builder_transfer;
 #[cfg(feature = "dev-shell")]
 pub mod console;
 /// Loopback SOCKS5 → host-vsock egress proxy (`mvm-egress-client`).
+#[cfg(feature = "addons")]
 pub mod egress_client;
 pub mod entrypoint;
 /// In-guest forward-proxy front: parses a workload's proxied request into a
@@ -42,6 +45,7 @@ pub mod guest_net;
 /// Guest-side `/dev/net/tun` helper for the shared packet-tunnel data plane.
 pub mod guest_tun;
 /// Shared in-guest vsock session helper for the addon/egress helper bins.
+#[cfg(feature = "addons")]
 mod guest_vsock_session;
 /// In-guest `host.audit.v1` typed methods: `emit` / `emit_batch` over the
 /// broker transport, letting a workload append to the chain-signed audit log.

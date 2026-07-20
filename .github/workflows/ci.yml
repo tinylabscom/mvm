@@ -252,6 +252,14 @@ jobs:
         # all-default run.
         run: cargo nextest run -p mvm-agentd --features dev-shell
 
+      - name: Run addon/egress helper tests
+        # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
+        # mvm-egress-client) and their shared vsock session helper live behind
+        # the off-by-default `addons` feature, so the default workspace run
+        # skips their tests. Run mvm-agentd with the feature on so they stay
+        # exercised on every PR.
+        run: cargo nextest run -p mvm-agentd --features addons
+
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
