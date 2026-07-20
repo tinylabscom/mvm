@@ -35,7 +35,7 @@ Current crate set (14): `mvm-agentd, mvm-build, mvm-cli, mvm-client, mvm-conform
 Each of these is a deliberate call made during execution, diverging from the literal crate map in [02-architecture.md](02-architecture.md) §Crate map. None is drift — each has a stated rationale, and each should be revisited explicitly (not silently overridden) if circumstances change.
 
 - **`mvm-host-services-ffi` kept separate**, not folded into `mvm-agentd` as the crate map says. It's a `cdylib` (lib name `mvm_host_services`) that the SDK Python/TypeScript runtimes `dlopen` and that nix bakes into the runtime-overlay. Folding it in would change the artifact name and break both the FFI contract and the nix packaging contract. It stays a standalone crate; its dependency on the renamed guest crate was updated to point at `mvm-agentd`.
-- **`qemu.rs` kept** in `mvm-runtime`. SPRINT WS1e literally says "delete qemu.rs" and the backend/egress model in [02-architecture.md](02-architecture.md) lists QEMU as dropped, but the standing direction from outside this sprint is to keep QEMU as an opt-in Linux dev substrate. The drop is deferred/contested — flagged here for an explicit decision, not silently kept or silently dropped.
+- **`qemu.rs` kept** in `mvm-runtime` — **RATIFIED**. SPRINT WS1e literally said "delete qemu.rs" and the backend/egress model in [02-architecture.md](02-architecture.md) listed QEMU as dropped, but the standing direction from outside this sprint is to keep QEMU as an opt-in Linux dev substrate. Decision: **keep it.** QEMU stays a Tier-2 dev/test backend (never workload-bearing, so claim-10 egress enforcement is deliberately not wired into its start path — it carries no untrusted multi-tenant workload); its host-side vsock bridge is allowlisted as substrate category 9. The "delete qemu" lines in SPRINT WS1e / 02-architecture.md are reconciled to this decision.
 - **`egress_server.rs` parked/dead** — it moved into `mvm-hostd` during the `mvm-vm-host` → `mvm-hostd` consolidation, but it's unwired: it references a removed `EgressGate::admitted_addrs` API from an earlier API refactor. It needs to either be revived during the WS-NET networking consolidation (see [03-networking.md](03-networking.md) / [06-execution-plan.md](06-execution-plan.md) WS-NET) or deleted outright. Leaving it as dead code past WS-NET would violate the WS8 "0 dead modules" gate.
 - **`mvm-storage` landed at `crate::storage::volume`, not bare `crate::storage`.** `mvm-runtime` already had an unrelated `crate::storage` module (the dm-thin CoW pool for instance rootfs/snapshots — `ThinPool`/`DmsetupBackend`/its own `StorageError`), imported verbatim from the pre-consolidation `mvm` crate. A flat merge would have collided on `backend.rs`/`mod.rs` filenames and on two distinct `StorageError` types with the same name. `volume` nests the former `mvm-storage` crate (the `VolumeBackend`/`StorageProvider` data-plane traits) as a sibling of `pool`/`thin`/`backend` under the existing `storage` module — same host-storage-substrate grouping, no symbol or file clash.
 - **`architecture.yml`'s category-10 "substrate server" invariant is CI-only** — there's no local xtask mirror of it. The absorbed `substrate_server_category` metadata was merged into `mvm-hostd` along with the rest of `mvm-vm-host`. If that CI gate flags the single-host-binary consolidation (i.e. it was written assuming multiple substrate-server binaries and now sees one), the gate needs to be reconciled to match — the consolidation into one host binary is what the plan intends, so the gate is what should move, not the crate structure.
@@ -87,3 +87,22 @@ Phases 1b through 4 have not started. One line each:
 - **WS14** mvmd contract freeze.
 
 Full descriptions and acceptance gates for every item above: [06-execution-plan.md](06-execution-plan.md).
+
+## Deferred follow-ups (post-merge)
+
+- **aarch64-linux nix CI lane.** The nix flakes are already fully multi-arch
+  (`systems = ["aarch64-linux" "x86_64-linux"]` + `forAllSystems`, arch-aware
+  kernel/package derivations, both `nixosConfigurations` siblings, release
+  verification covers both). The gap is coverage, not the flakes: CI runners are
+  x86_64 Linux, so the aarch64-linux nix path is exercised locally (every Mac
+  builder VM + the KVM box) but not in a CI lane. Adding one means emulation
+  (binfmt/qemu — slow) or a paid ARM runner; deferred as low-ROI mid-refactor.
+  Cheap symmetry step when picked up: add an aarch64 case to
+  `nix/tests/mk-guest-eval.nix` (currently pins `x86_64-linux`, a pure-eval
+  metadata test, not an image build).
+- **`dev-shell` → `interactive` feature rename.** The feature gates the workload
+  microVM console + `do_exec` + run-code (claims 4/15); the name misleads (reads
+  as the removed builder-VM shell). Rename touches the Cargo feature, the
+  `#[cfg]` sites, `mkGuest`'s `withDevShell`, `nix/tests/mk-guest-eval.nix`, the
+  two `check-prod-agent-no-{console,exec}.sh` scripts, and claim 4/15 prose. Its
+  own slice, after the branch is green (it edits the claim-enforcing CI scripts).
