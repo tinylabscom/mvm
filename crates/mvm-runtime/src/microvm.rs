@@ -2392,8 +2392,25 @@ pub fn configure_flake_microvm_with_drives_dir(
     socket: &str,
     drives_dir: &str,
 ) -> Result<()> {
-    let slot = &config.slot;
+    configure_logger(socket, abs_dir)?;
+    // Verity-root workloads rely on `mvm-verity-init` to mount the runtime
+    // overlay. Injected OCI `/init` is different: it can mount a plain
+    // read-only overlay ext4 itself even when the rootfs is not verity-backed.
+    // Resolve the overlay unconditionally so both boot shapes keep the same
+    // attach contract. Shared by the boot-source cmdline tokens and the
+    // drives block below — resolved once, since it's the same triple.
+    let overlay = resolved_runtime_overlay(config);
+    configure_boot_source(socket, config, overlay)?;
+    configure_machine(socket, config)?;
+    configure_drives(socket, config, drives_dir, overlay)?;
+    configure_network(socket, config)?;
+    configure_vsock(socket, drives_dir)?;
+    configure_balloon(socket, config)?;
+    Ok(())
+}
 
+/// Configure the Firecracker logger sink (`/logger`).
+fn configure_logger(socket: &str, abs_dir: &str) -> Result<()> {
     ui::info("Configuring logger...");
     api_put_socket(
         socket,
@@ -2402,7 +2419,19 @@ pub fn configure_flake_microvm_with_drives_dir(
             r#"{{"log_path": "{dir}/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true}}"#,
             dir = abs_dir,
         ),
-    )?;
+    )
+}
+
+/// Configure the Firecracker boot source (`/boot-source`): kernel image
+/// path, initrd, and the full kernel cmdline — guest IP/gateway, dm-verity
+/// roothash, runtime-overlay tokens, egress CA, secret placeholders, and
+/// verb-grant sidecars.
+fn configure_boot_source(
+    socket: &str,
+    config: &FlakeRunConfig,
+    overlay: Option<(&str, &str, &str)>,
+) -> Result<()> {
+    let slot = &config.slot;
 
     // Boot args: pass guest IP and gateway via kernel cmdline.
     // When initrd is present (NixOS guest or verity initrd), the initrd
@@ -2430,12 +2459,6 @@ pub fn configure_flake_microvm_with_drives_dir(
     // roothash-requested boot with no verity initramfs must error rather than
     // silently mount /dev/vda unsealed.
     let effective_initrd = resolve_effective_initrd(config)?;
-    // Verity-root workloads rely on `mvm-verity-init` to mount the runtime
-    // overlay. Injected OCI `/init` is different: it can mount a plain
-    // read-only overlay ext4 itself even when the rootfs is not verity-backed.
-    // Resolve the overlay unconditionally so both boot shapes keep the same
-    // attach contract.
-    let overlay = resolved_runtime_overlay(config);
     let verity_args: Option<String> =
         build_verity_cmdline_args(config.roothash.as_deref(), overlay.map(|(_, _, h)| h));
     let runtime_overlay_args =
@@ -2522,8 +2545,12 @@ pub fn configure_flake_microvm_with_drives_dir(
             )
         }
     };
-    api_put_socket(socket, "/boot-source", &boot_source)?;
+    api_put_socket(socket, "/boot-source", &boot_source)
+}
 
+/// Configure the Firecracker machine (`/machine-config`): vCPU count and
+/// memory size.
+fn configure_machine(socket: &str, config: &FlakeRunConfig) -> Result<()> {
     ui::info(&format!(
         "Setting machine config: {} vCPUs, {} MiB",
         config.cpus, config.memory
@@ -2536,8 +2563,20 @@ pub fn configure_flake_microvm_with_drives_dir(
             cpus = config.cpus,
             mem = config.memory,
         ),
-    )?;
+    )
+}
 
+/// Configure every Firecracker block device: rootfs, the dm-verity
+/// sidecars, the runtime overlay pair, the config/secrets drives, and any
+/// extra `--volume` mounts. Firecracker assigns drive letters in API-call
+/// order, so this sequence — and each drive's conditional inclusion — is
+/// load-bearing for dm-verity correctness and must not be reordered.
+fn configure_drives(
+    socket: &str,
+    config: &FlakeRunConfig,
+    drives_dir: &str,
+    overlay: Option<(&str, &str, &str)>,
+) -> Result<()> {
     // Verity-on means the rootfs is read-only and re-mounted via
     // /dev/dm-0; opening a writable handle would let any host process
     // mutate the bytes the Merkle tree was built against and silently
@@ -2654,6 +2693,12 @@ pub fn configure_flake_microvm_with_drives_dir(
         )?;
     }
 
+    Ok(())
+}
+
+/// Configure the Firecracker network interface (`/network-interfaces/net1`).
+fn configure_network(socket: &str, config: &FlakeRunConfig) -> Result<()> {
+    let slot = &config.slot;
     ui::info(&format!(
         "Setting network interface: {} (MAC {})",
         slot.tap_dev, slot.mac
@@ -2666,8 +2711,11 @@ pub fn configure_flake_microvm_with_drives_dir(
             mac = slot.mac,
             tap = slot.tap_dev,
         ),
-    )?;
+    )
+}
 
+/// Configure the Firecracker vsock device (`/vsock`).
+fn configure_vsock(socket: &str, drives_dir: &str) -> Result<()> {
     ui::info("Setting vsock device...");
     prepare_vsock_runtime_dir(drives_dir);
     let vsock = firecracker_vsock_uds_path(drives_dir);
@@ -2679,19 +2727,20 @@ pub fn configure_flake_microvm_with_drives_dir(
             cid = mvm_agentd::vsock::GUEST_CID,
             vsock = vsock,
         ),
-    )?;
+    )
+}
 
-    // Virtio-balloon. Only attached when the workload opted in via
-    // `mem_initial`. The device boots pre-inflated to `memory -
-    // mem_initial` MiB so the host commits only `mem_initial` MiB
-    // until the reclaim controller deflates the balloon.
-    //
-    // `deflate_on_oom = true` is mandatory: under guest memory
-    // pressure the device must yield pages back, otherwise the guest
-    // OOM-kills the workload while the host still has memory it
-    // could give back. `stats_polling_interval_s = 1` lets the host
-    // controller poll real guest commitment without driving the
-    // guest's stat refresh too aggressively.
+/// Configure the Firecracker virtio-balloon device (`/balloon`), only when
+/// the workload opted in via `mem_initial`. The device boots pre-inflated to
+/// `memory - mem_initial` MiB so the host commits only `mem_initial` MiB
+/// until the reclaim controller deflates the balloon.
+///
+/// `deflate_on_oom = true` is mandatory: under guest memory pressure the
+/// device must yield pages back, otherwise the guest OOM-kills the workload
+/// while the host still has memory it could give back.
+/// `stats_polling_interval_s = 1` lets the host controller poll real guest
+/// commitment without driving the guest's stat refresh too aggressively.
+fn configure_balloon(socket: &str, config: &FlakeRunConfig) -> Result<()> {
     if let Some(initial) = config.mem_initial {
         let amount_mib = config.memory.saturating_sub(initial);
         ui::info(&format!(
@@ -2707,7 +2756,6 @@ pub fn configure_flake_microvm_with_drives_dir(
             ),
         )?;
     }
-
     Ok(())
 }
 
