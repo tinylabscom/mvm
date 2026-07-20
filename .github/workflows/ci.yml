@@ -204,6 +204,13 @@ jobs:
         # closure), so the default workspace run skips these. Cover them here.
         run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
 
+      - name: test-support feature tests (mock backend)
+        # The mock VM backend + its tests are gated behind `test-support` so the
+        # mock never ships in the production closure. The default workspace run
+        # skips its tests — run the workspace with the feature on so they stay
+        # covered on every PR.
+        run: cargo nextest run --workspace --features test-support
+
   test:
     name: Test
     runs-on: ubuntu-latest
