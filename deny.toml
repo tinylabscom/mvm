@@ -150,11 +150,10 @@ skip = [
     "unicode-width",
     "which",
 
-    # reqwest 0.12 (mvm) vs 0.13 (oci-client). Unifying was evaluated
-    # and rejected: oci-client hard-pins 0.13 (and forces aws-lc-rs —
-    # see the B4 block), a transitive 0.12 holdout remains regardless,
-    # and the bump collapses no transitive duplicates. Revisit when
-    # oci-client is forked.
+    # reqwest 0.13 (workspace) vs 0.12 (object_store, behind the
+    # off-by-default storage-s3 feature). The workspace migrated to 0.13
+    # with the RustCrypto 0.11 line; object_store still pins 0.12.
+    # Revisit when object_store bumps or storage-s3 is removed.
     "reqwest",
 
     # rand 0.8 (workspace direct) vs rand 0.10 (hickory-proto 0.26).
