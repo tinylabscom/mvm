@@ -11,7 +11,9 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_client::{LocalBackend, MachineId, MvmClient, PauseOpts, ResumeOpts};
+use mvm_client::{
+    LocalBackend, MachineId, MvmClient, PauseOpts, ResumeOpts, require_hypervisor_selectable,
+};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
@@ -59,7 +61,7 @@ pub(in crate::commands) struct ResumeArgs {
 
 pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConfig) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(&args.hypervisor)?;
+    require_hypervisor_selectable(&args.hypervisor)?;
 
     let client = LocalBackend::with_hypervisor(&args.hypervisor);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -92,7 +94,7 @@ pub(in crate::commands) fn run_resume(
     _cfg: &MvmConfig,
 ) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(&args.hypervisor)?;
+    require_hypervisor_selectable(&args.hypervisor)?;
 
     let client = LocalBackend::with_hypervisor(&args.hypervisor);
     let runtime = tokio::runtime::Builder::new_current_thread()
