@@ -899,6 +899,19 @@ impl<L, R> Either<L, R> {
 pub type PostureSink = std::cell::Cell<mvm_build::run_image::RootStrategy>;
 pub type RuntimeSourcePolicySink = std::cell::Cell<mvm_core::vm_backend::RuntimeSourcePolicy>;
 
+/// A backend that advertises a host-vsock egress proxy carries all guest
+/// egress over vsock with no routable guest NIC. The L3 packet tunnel is a
+/// second, incompatible egress data plane for the same workload — and its
+/// guest bring-up writes `/etc/resolv.conf`, which fails on a read-only
+/// sealed rootfs. A workload must boot with exactly one egress data plane,
+/// so drop the tunnel for host-vsock-proxy backends; backends without one
+/// (their only vsock-only egress IS this tunnel) keep it.
+fn drop_l3_tunnel_for_host_vsock_proxy(config: &mut VmStartConfig, backend: &AnyBackend) {
+    if config.network_tunnel.is_some() && backend.capabilities().host_vsock_proxy {
+        config.network_tunnel = None;
+    }
+}
+
 fn run_inner(
     req: ExecRequest,
     capture: bool,
@@ -978,6 +991,7 @@ fn run_inner(
     }
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
+    drop_l3_tunnel_for_host_vsock_proxy(&mut start_config, &backend);
     let t_admitted = timing.then(std::time::Instant::now);
 
     // Reap stale standbys, try a warm-pool claim, then fall back to
@@ -1821,6 +1835,7 @@ pub fn boot_session_vm(
         && start_config.network_tunnel.is_none()
         && snap_info.is_some()
         && backend.capabilities().snapshots;
+    drop_l3_tunnel_for_host_vsock_proxy(&mut start_config, &backend);
     let booted = if use_snapshot {
         let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
         match restore_via_snapshot(&vm_name, env, snap, &start_config) {
@@ -1991,6 +2006,48 @@ mod tests {
         );
         assert_eq!(hc.interval_secs, 10);
         assert_eq!(build_healthcheck(None, 30, 5, 3, 0), None);
+    }
+
+    fn fixture_network_tunnel() -> mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
+        mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
+            guest_port: mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
+            session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
+                tenant_id: "local".to_string(),
+                vm_id: "test-vm".to_string(),
+                boot_id: "test-boot".to_string(),
+                session_nonce: "test-nonce".to_string(),
+                requested_features: Default::default(),
+                maximum_frame_size: 65536,
+            },
+        }
+    }
+
+    #[test]
+    fn drop_l3_tunnel_for_host_vsock_proxy_drops_it_on_libkrun() {
+        let mut config = VmStartConfig {
+            network_tunnel: Some(fixture_network_tunnel()),
+            ..Default::default()
+        };
+        let backend = AnyBackend::from_hypervisor("libkrun");
+        drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
+        assert!(
+            config.network_tunnel.is_none(),
+            "libkrun carries all egress over its host-vsock proxy; the L3 tunnel is a redundant second data plane"
+        );
+    }
+
+    #[test]
+    fn drop_l3_tunnel_for_host_vsock_proxy_keeps_it_on_firecracker() {
+        let mut config = VmStartConfig {
+            network_tunnel: Some(fixture_network_tunnel()),
+            ..Default::default()
+        };
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
+        assert!(
+            config.network_tunnel.is_some(),
+            "firecracker has no host-vsock proxy; the L3 tunnel is its only vsock-only egress path"
+        );
     }
 
     #[test]
