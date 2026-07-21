@@ -205,7 +205,7 @@ highest):
 ## Limits
 
 - **Dev-mode only.** `mvmctl machine run` requires a guest agent built with the
-  `dev-shell` Cargo feature, which is the default for the dev images
+  `interactive` Cargo feature, which is the default for the dev images
   `mvmctl` ships with. Production guest images omit the feature and the
   Exec handler is physically absent from the binary.
 - **Network access.** The guest gets the same network configuration

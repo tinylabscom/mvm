@@ -15,11 +15,11 @@ hunt down scattered `match` statements.
 |---|---|---|
 | Guest CPU architecture | `GuestArch` | `mvm_core::arch` |
 | Kernel artifact format | `KernelFormat` | `mvm_core::kernel_format` |
-| MicroVM backend identity | `MicrovmBackend` | `mvm_backend::compat` |
-| Rootfs format | `RootfsFormat` | `mvm_backend::compat` |
-| Capability matrix | `BackendCompat` + `compat()` | `mvm_backend::compat` |
+| MicroVM backend identity | `MicrovmBackend` | `mvm_runtime::compat` |
+| Rootfs format | `RootfsFormat` | `mvm_runtime::compat` |
+| Capability matrix | `BackendCompat` + `compat()` | `mvm_runtime::compat` |
 
-`mvm-core` holds only pure types (no runtime deps); `mvm-backend` owns backend
+`mvm-core` holds only pure types (no runtime deps); `mvm-runtime` owns backend
 identity and the capability table.
 
 ## Add a new architecture
@@ -33,14 +33,14 @@ identity and the capability table.
    `guest_arches` and add a `(GuestArch::Riscv64, &[…])` entry to
    `kernel_formats`.
 5. Add a test asserting alias normalization and that the relevant backends
-   accept it (`cargo test -p mvm-core arch::`, `cargo test -p mvm-backend compat::`).
+   accept it (`cargo test -p mvm-core arch::`, `cargo test -p mvm-runtime compat::`).
 
 That's it — `ArtifactValidator` and the config writers consume the table, so no
 other file changes.
 
 ## Add a new backend
 
-1. Add a variant to `MicrovmBackend` (`crates/mvm-backend/src/compat.rs`).
+1. Add a variant to `MicrovmBackend` (`crates/mvm-runtime/src/compat.rs`).
 2. Add a `static` `BackendCompat` row describing its real capabilities —
    `guest_arches`, per-arch `kernel_formats`, `rootfs_formats`,
    `required_boot_args`, `supports_snapshots`, `supports_jailer`, `networking` —
@@ -50,7 +50,7 @@ other file changes.
    `//` comment citing the source or stating the assumption. The model is allowed
    to *declare* requirements for a backend that has no runtime impl yet.
 3. (Optional, when you want config generation) add a `BackendConfigWriter` impl
-   under `crates/mvm-backend/src/artifacts/config/` and wire it into the
+   under `crates/mvm-runtime/src/artifacts/config/` and wire it into the
    `mvmctl artifact model-config --backend <name>` dispatch.
 4. Add accept/reject tests to `compat::tests`.
 
@@ -72,7 +72,7 @@ real-mode setup code *plus* a compressed payload — exactly the wrapper these V
 don't unwrap. An x86 backend needs the uncompressed ELF `vmlinux`, not the
 `bzImage`. The Nix image build is where this bites (it once copied
 `${kernel}/bzImage` to a file *named* `vmlinux`), so `sniff_kernel_format`
-(`crates/mvm-backend/src/artifacts/builders/nix.rs`) detects a stray bzImage by
+(`crates/mvm-runtime/src/artifacts/builders/nix.rs`) detects a stray bzImage by
 its setup-header magic `HdrS` at offset `0x202` and classifies it `Raw`.
 `Raw` isn't in any direct-boot backend's `kernel_formats`, so `ArtifactValidator`
 rejects it with a clear format error at build time — instead of the kernel

@@ -42,7 +42,7 @@ MVM_VERSION=v0.16.1 curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm
 cargo build --release --bin mvmctl
-cargo build --release -p mvm-vm-host --bin mvm-bridge
+cargo build --release -p mvm-hostd --bin mvm-bridge
 cargo build --release -p mvm-hostd --bin mvm-substitution-endpoint
 install -m 0755 \
   target/release/mvmctl \

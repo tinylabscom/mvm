@@ -37,7 +37,7 @@ MVM_VERSION=v0.16.1 curl -fsSL https://raw.githubusercontent.com/tinylabscom/mvm
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm
 cargo build --release --bin mvmctl
-cargo build --release -p mvm-vm-host \
+cargo build --release -p mvm-hostd \
   --bin mvm-bridge --bin mvm-hvf-supervisor \
   --bin mvm-libkrun-supervisor --features libkrun-sys
 cargo build --release -p mvm-hostd --bin mvm-substitution-endpoint
@@ -86,7 +86,7 @@ If you configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/sta
 mvmctl doctor
 ```
 
-`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, the dev path uses the HVF builder; source image builds auto-detect the builder backend (HVF on macOS 26+ Apple Silicon), and `mvmctl dev up` retries with libkrun when the HVF builder path fails. Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
+`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, image builds auto-detect the HVF builder; if HVF fails to create its VM, mvm transparently retries with libkrun (the same auto-fallback that covers every builder entry point — `mvmctl bootstrap`, `machine build`, `machine run`). Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
 
 ## First microVM
 

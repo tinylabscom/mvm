@@ -1,13 +1,13 @@
 ---
 title: Dev Image
-description: How `mvmctl dev` boots a development microVM, the default image that ships with mvm, and how to write your own.
+description: How to boot a development microVM with an interactive shell, the fastest zero-config path to one, and how to write your own.
 ---
 
-A **dev image** is a microVM image whose entrypoint is an interactive shell — what `mvmctl dev` boots when you want a sandboxed shell for build/test/exploration. It's just an `mkGuest` call with `entrypoint.shell` set; the same library, the same flake shape, the same builder pipeline as any other mvm image.
+A **dev image** is a microVM image whose entrypoint is an interactive shell — what you boot when you want a sandboxed shell for build/test/exploration. It's just an `mkGuest` call with `entrypoint.shell` set; the same library, the same flake shape, the same builder pipeline as any other mvm image. There's no separate "dev VM" command anymore: a dev image is a workload like any other, booted through `mvmctl machine`.
 
 There are two paths:
 
-1. **Use the default dev image that ships with mvm** — zero config, run `mvmctl dev up` and you're in a shell. Good for "I just want a sandboxed Linux shell to poke around in." See [The default dev image](#the-default-dev-image) below.
+1. **Boot a shell with zero config** — no flake needed: `mvmctl machine run --image alpine -it -- /bin/sh`. Good for "I just want a sandboxed Linux shell to poke around in." See [The fastest path](#the-fastest-path) below.
 2. **Write your own dev image** — declare it in your project's flake using `mvm.lib.<system>.mkGuest`. Adds your packages, your services, your config. The mvm repository's internals stay untouched — you're a consumer of the library, not a fork. See [Writing your own dev image](#writing-your-own-dev-image) below.
 
 Per [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md), the dev/prod distinction is encoded in the entrypoint shape (`shell` → accessible, `command`/`services` → sealed). The same `mvm.lib.<system>.mkGuest` API serves both.
@@ -36,7 +36,7 @@ A dev image is just an mkGuest call with `entrypoint.shell` set. Your project's 
           entrypoint.command = [ "/usr/local/bin/serve" ];
         };
 
-        # Dev image — what `mvmctl dev up` builds.
+        # Dev image — what `mvmctl machine create` + `start` below builds.
         dev = mvm.lib.${system}.mkGuest {
           name = "my-app-dev";
 
@@ -73,9 +73,11 @@ memory_mib = 1024
 Then:
 
 ```sh
-mvmctl dev up         # builds the .dev output, boots it, drops you into the shell
-mvmctl dev down       # stop the dev VM
-mvmctl machine console        # reattach to the running shell
+mvmctl machine create --name my-app-dev   # reads mvm.toml (profile = "dev") from cwd
+mvmctl machine start my-app-dev           # builds the .dev output, boots it
+mvmctl machine console my-app-dev         # attach the interactive shell
+# Ctrl-D / exit detaches — the machine and any background services keep running.
+mvmctl machine stop my-app-dev            # tear it down
 ```
 
 You **never edit anything inside the mvm repository** to customize your dev image. Your project owns its dev image; mvm is the library.
@@ -117,13 +119,17 @@ dev = mvm.lib.${system}.mkGuest {
 
 See [Building MicroVM Images](/guides/building-microvm-images#sealed-vs-accessible--the-same-flake-works-for-both) for the full sealed/accessible matrix.
 
-## The default dev image
+## The fastest path
 
-If your project doesn't declare a `.dev` flake output, `mvmctl dev up` falls back to the default image that ships with mvm — a minimal busybox rootfs with a shell entrypoint. It exists so you can run `mvmctl dev up` with zero config and get something useful.
+For "I just want a shell," skip the flake entirely:
 
-The default image is **not** a starter template — don't fork it. It's there for the "I just want a shell" case. Once you have specific package or service requirements, switch to writing your own per the section above.
+```sh
+mvmctl machine run --image alpine -it -- /bin/sh
+```
 
-(Internally the default lives at the workspace's `nix/profiles/minimal.nix` — but that file is a test fixture, not a user-facing entry point. The library's `mvm.lib.<system>.mkGuest` is what you should be calling.)
+This pulls (or reuses the cached) `alpine` OCI image, boots a transient microVM, and attaches your terminal to `/bin/sh` inside it. Exiting the shell tears the VM down — the same lifecycle as any other transient `machine run`. No `flake.nix`, no `mvm.toml`, no host Nix.
+
+Once you have specific package or service requirements — beyond what an off-the-shelf OCI image gives you — switch to writing your own dev image per the section above.
 
 ## Building the dev image locally
 
@@ -141,7 +147,7 @@ nix eval .#dev.passthru.mvm
 # { accessible = true; entrypointKind = "shell"; expectedBootMs = 300; ... }
 ```
 
-`mvmctl dev up` runs the same `nix build` under the hood and boots the result.
+`mvmctl machine start` (against a manifest with `profile = "dev"`) runs the same `nix build` under the hood and boots the result.
 
 ### Cross-platform build notes
 
@@ -159,7 +165,7 @@ The current shape:
 
 - mvm exposes `mvm.lib.<system>.mkGuest` — a stable function the library promises not to break.
 - Your project's flake calls `mkGuest` and exports a `.dev` package.
-- `mvmctl dev` reads `mvm.toml`, runs `nix build .#dev` against your flake, boots the result.
+- `mvmctl machine start` reads `mvm.toml`, runs `nix build .#dev` against your flake, and boots the result.
 - mvm's internal layout (where `mkGuest` lives, what tests use it, etc.) can change freely without your project noticing.
 
 [Building MicroVM Images](/guides/building-microvm-images) covers the same model for production (sealed) images. The dev case is the same library with `entrypoint.shell` set.

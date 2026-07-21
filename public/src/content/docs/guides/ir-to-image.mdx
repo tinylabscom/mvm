@@ -259,7 +259,7 @@ What it provides:
 
 - **Firecracker kernel** (`vmlinux`)
 - **Busybox-as-PID-1 init** — under-5-second cold boot, no systemd
-- **Guest agent** — Rust binary built from `mvm-src`, communicates over vsock (ADR-001 W4.1, W6.1.2). In production builds, the `do_exec` symbol is gated out of the agent (CI claim 4); the `dev-shell` feature flag enables it for dev images only.
+- **Guest agent** — Rust binary built from `mvm-src`, communicates over vsock (ADR-001 W4.1, W6.1.2). In production builds, the `do_exec` symbol is gated out of the agent (CI claim 4); the `interactive` feature flag enables it for dev images only.
 - **Networking** — `eth0` configured via kernel boot args, NAT to host
 - **Privilege model** — PID 1 runs as uid 0 (kernel requirement); the entrypoint and agent run rootless (uid 1000 in prod, uid 0 in dev for the dev shell)
 - **Hardening** — `setpriv --no-new-privs` (W2.3), seccomp `standard` (W2.4), per-service uids (W2.1), read-only `/etc` overlay (W2.2), dm-verity verified boot (W3)
@@ -560,7 +560,7 @@ Once the rootfs is booted and the agent is up, a function call is just a vsock R
 host (mvmctl machine run --entrypoint --flake <dir>, stdin=[[], {"name": "Alice"}])
      │
      ▼  vsock: RunEntrypoint { stdin = encoded([args, kwargs]) }
-agent (uid 990, dev_image: do_exec gated by `dev-shell` feature)
+agent (uid 990, dev_image: do_exec gated by `interactive` feature)
      │
      ▼  fork+exec /etc/mvm/entrypoint → /usr/lib/mvm/wrappers/runner
 wrapper (cold: per-call process; warm: per-pool process)
@@ -618,13 +618,13 @@ The IR hash isn't decorative — it's load-bearing in the admission path.
 
 The admission profile is the security-posture binding. It records the declared intent, selected seccomp tier, network/filesystem/egress/tool policy refs, secret-release posture, and audit taxonomy. It is deliberately not a new runtime engine: seccomp is still enforced by the guest manifest, network and tool policies are still enforced by their existing resolvers. The profile makes those choices signed and auditable.
 
-**Audit emissions** (`crates/mvm-supervisor/src/audit_recorder.rs`):
+**Audit emissions** (`crates/mvm-hostd/src/supervisor/audit_recorder.rs`):
 
 - `plan.admitted` — admission accepted, chain-signed
 - `plan.launched` — backend dispatch succeeded
 - `plan.failed` — admission rejected, with reason
 
-All three reference `(plan_id, plan_version)`, the IR hash, and admission labels such as `intent`, `admission_profile`, and `seccomp_tier`. The log is hash-chained: entry N includes the hash of entry N-1. Tampering breaks `mvm_supervisor::verify_audit_chain`, which `mvmctl audit verify` surfaces as a nonzero exit.
+All three reference `(plan_id, plan_version)`, the IR hash, and admission labels such as `intent`, `admission_profile`, and `seccomp_tier`. The log is hash-chained: entry N includes the hash of entry N-1. Tampering breaks `mvm_hostd::supervisor::verify_audit_chain`, which `mvmctl audit verify` surfaces as a nonzero exit.
 
 The contract: **every workload mvm runs is launched from a signed ExecutionPlan that names a specific IR hash**. No IR hash, no launch.
 

@@ -59,7 +59,7 @@ exists.
 Today mvm builds rootfs from a Nix flake or from a bundled template
 catalog. There is no `mvmctl image pull` command, no OCI layer
 unpacker, and no digest-pinned launch path. The
-[round-trip OCI bridge](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-backend/src/docker.rs)
+[round-trip OCI bridge](https://github.com/tinylabscom/mvm/blob/main/crates/mvm-runtime/src/docker.rs)
 loads mvm-built images into Docker; it does NOT pull upstream images.
 
 To move to Preview: ship `mvmctl image pull` with digest
