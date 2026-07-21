@@ -55,7 +55,11 @@ pub trait WorkloadBackend: VmBackend {
 
 impl WorkloadBackend for FirecrackerBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        EgressSubstitutionTransport::NftTerminator
+        // Vsock-only (Model-B): the guest dials the egress port over vsock,
+        // Firecracker muxes it to the per-VM host unix socket that owns claim-10
+        // enforcement and claims 12/13. No transparent :80/:443 terminator (no
+        // routable NIC to intercept) — proxy-aware substitution only, like hvf.
+        EgressSubstitutionTransport::VsockUdsChannel
     }
 }
 impl WorkloadBackend for LibkrunBackend {
@@ -140,11 +144,11 @@ mod tests {
     }
 
     #[test]
-    fn firecracker_declares_nft_terminator() {
+    fn firecracker_declares_vsock_uds_channel() {
         let transport = FirecrackerBackend.egress_substitution_transport();
-        assert_eq!(transport, EgressSubstitutionTransport::NftTerminator);
+        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(transport.supports_transparent_terminator());
+        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
@@ -192,12 +196,6 @@ mod tests {
     }
 
     #[test]
-    fn transparent_egress_terminator_requirement_accepts_firecracker() {
-        require_transparent_egress_terminator(&FirecrackerBackend)
-            .expect("firecracker declares the nft terminator leg");
-    }
-
-    #[test]
     fn transparent_egress_terminator_requirement_accepts_libkrun() {
         require_transparent_egress_terminator(&LibkrunBackend)
             .expect("libkrun declares the rvproxy terminator leg");
@@ -209,11 +207,15 @@ mod tests {
         let mock = MockBackend::new();
         #[cfg(feature = "test-support")]
         let backends: Vec<&dyn WorkloadBackend> = vec![
+            &FirecrackerBackend as &dyn WorkloadBackend,
             &HvfBackend as &dyn WorkloadBackend,
             &mock as &dyn WorkloadBackend,
         ];
         #[cfg(not(feature = "test-support"))]
-        let backends: Vec<&dyn WorkloadBackend> = vec![&HvfBackend as &dyn WorkloadBackend];
+        let backends: Vec<&dyn WorkloadBackend> = vec![
+            &FirecrackerBackend as &dyn WorkloadBackend,
+            &HvfBackend as &dyn WorkloadBackend,
+        ];
         for backend in backends {
             let err = match require_transparent_egress_terminator(backend) {
                 Ok(()) => panic!("{} should not satisfy the terminator gate", backend.name()),

@@ -214,11 +214,17 @@ impl VmBackend for FirecrackerBackend {
         // `VmStartConfig::mem_initial_mib` is `Some`. Capability is
         // advertised unconditionally so the host-side controller can
         // discover support before deciding to plumb a workload.
+        //
+        // A workload guest is vsock-only: it attaches no routable NIC, so all
+        // ingress/egress rides the host-mediated vsock proxy — matching the
+        // libkrun/HVF posture.
         VmCapabilities {
             pause_resume: true,
             snapshots: true,
             vsock: true,
-            tap_networking: true,
+            tap_networking: false,
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
             balloon: true,
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
@@ -907,7 +913,10 @@ mod tests {
         assert!(caps.pause_resume);
         assert!(caps.snapshots);
         assert!(caps.vsock);
-        assert!(caps.tap_networking);
+        // vsock-only (Model-B): no routable NIC, egress rides the host vsock proxy.
+        assert!(!caps.tap_networking);
+        assert!(caps.no_routable_guest_nic);
+        assert!(caps.host_vsock_proxy);
     }
 
     #[test]
@@ -1179,10 +1188,13 @@ mod tests {
 
     #[test]
     fn test_any_backend_capabilities() {
+        // The default backend is Firecracker, now a vsock-only workload backend.
         let backend = AnyBackend::default_backend();
         let caps = backend.capabilities();
         assert!(caps.vsock);
-        assert!(caps.tap_networking);
+        assert!(!caps.tap_networking);
+        assert!(caps.no_routable_guest_nic);
+        assert!(caps.host_vsock_proxy);
     }
 
     #[test]

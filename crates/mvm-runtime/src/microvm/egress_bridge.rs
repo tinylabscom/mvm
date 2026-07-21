@@ -145,71 +145,65 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
     )
 }
 
-/// Spawn the per-VM substitution endpoint **before** the guest boots,
-/// so the `(var → placeholder)` pairs it mints (and
-/// writes to `vm_substitution_env_path`) are available when `boot_args` is built
-/// and can ride the cmdline (`mvm.secret_env=`) into a sealed entrypoint. Binds
-/// the terminator listener too; the nft REDIRECT that feeds it is installed
-/// post-boot by [`install_egress_redirect`] (it needs the guest's TAP). No-op
-/// when the plan carries no egress secrets. Returns an armed [`EndpointGuard`]
-/// the caller defuses once the VM is fully up.
+/// Spawn the per-VM substitution endpoint **before** the guest boots, so the
+/// `(var → placeholder)` pairs it mints (and writes to `vm_substitution_env_path`)
+/// are available when `boot_args` is built and can ride the cmdline
+/// (`mvm.secret_env=`) into a sealed entrypoint.
+///
+/// vsock-only (Model-B): the endpoint binds the per-port host UDS Firecracker's
+/// userspace virtio-vsock muxes a guest dial to `CID_HOST:EGRESS_PORT` onto
+/// (`<vsock>_<port>`), NOT a host AF_VSOCK listener the guest can never reach.
+/// A secret-bound run gets the substitution wire path; a secret-free run whose
+/// policy admits egress gets the raw vsock relay. Its `EgressGate` is the sole
+/// claim-10 authority — there is no NIC and no nft REDIRECT to gate elsewhere.
+/// Deny-all secret-free runs keep the endpoint defused (the guest is never told
+/// to start the egress client). Returns an armed [`EndpointGuard`] the caller
+/// defuses once the VM is fully up.
 #[cfg(target_os = "linux")]
-pub(super) fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
-    use crate::egress_redirect::terminator_port_for;
-    use crate::substitution_spawn::spawn_substitution_endpoint;
-    use std::net::SocketAddr;
-
-    let name = &config.slot.name;
-    let state_dir = mvm_core::config::vm_state_dir(name);
-    let Some((secrets, redaction, tenant)) =
-        crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?
-    else {
-        return Ok(EndpointGuard { vm_name: None });
+pub(super) fn spawn_egress_endpoint(
+    config: &FlakeRunConfig,
+    drives_dir: &str,
+) -> Result<EndpointGuard> {
+    use crate::substitution_spawn::{
+        EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
 
-    // Per-slot terminator port so concurrent VMs never collide host-side.
-    // 0.0.0.0: a PREROUTING REDIRECT delivers the forwarded packet to a local
-    // socket on the host, so the terminator must accept on the host's addrs.
-    let term_port = terminator_port_for(config.slot.index);
-    let listen = SocketAddr::from(([0, 0, 0, 0], term_port));
-    // `mvmctl up` staged the per-VM name-constrained intermediate (cert+key) in
-    // the sidecar. Hand the KEY to the endpoint so the `https` terminator can
-    // mint per-SNI leaves; it never reaches the guest. Absent ⇒ `http`-only.
-    let tls_intermediate = crate::substitution_spawn::read_egress_intermediate(&state_dir)?;
-    spawn_substitution_endpoint(crate::substitution_spawn::SubstitutionSpawnParams {
-        vm_name: name,
-        state_dir: &state_dir,
-        tenant: &tenant,
-        secrets: &secrets,
-        redaction: &redaction,
-        transport: crate::substitution_spawn::EndpointTransport::Vsock {
-            port: mvm_agentd::vsock::EGRESS_PORT,
-        },
-        terminator_listen: Some(listen),
-        tls_intermediate,
-        network_policy: None,
-        raw_egress: false,
-    })?;
-    Ok(EndpointGuard::new(name))
-}
-
-/// Install the per-VM nft TAP REDIRECT (`:80`/`:443` → the terminator)
-/// **after** the guest boots (the TAP exists). No-op when the plan carries no
-/// egress secrets. Persists the table so it outlives this frame; `stop_vm`
-/// removes it by name.
-#[cfg(target_os = "linux")]
-pub(super) fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
-    use crate::egress_redirect::{EgressRedirect, terminator_port_for};
-
     let name = &config.slot.name;
     let state_dir = mvm_core::config::vm_state_dir(name);
-    if crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?.is_none() {
-        return Ok(());
+    let default_redaction = mvm_core::policy::RedactionPolicy::default();
+    let decoded = crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?;
+    let (secrets, redaction, tenant): (&[_], &mvm_core::policy::RedactionPolicy, &str) =
+        match &decoded {
+            Some((secrets, redaction, tenant)) => (secrets.as_slice(), redaction, tenant.as_str()),
+            None => (&[], &default_redaction, "local"),
+        };
+    if secrets.is_empty() && !config.network_policy.allows_egress() {
+        return Ok(EndpointGuard { vm_name: None });
     }
-    let term_port = terminator_port_for(config.slot.index);
-    let redirect = EgressRedirect::install(name, &config.slot.tap_dev, term_port)?;
-    redirect.persist();
-    Ok(())
+    // `mvmctl up` staged the per-VM name-constrained intermediate (cert+key) in
+    // the sidecar. Hand the KEY to the endpoint so it can terminate host-bound
+    // TLS and substitute inside the stream; it never reaches the guest. Absent
+    // (secret-free / http-only) ⇒ `None`.
+    let tls_intermediate = crate::substitution_spawn::read_egress_intermediate(&state_dir)?;
+    spawn_substitution_endpoint(SubstitutionSpawnParams {
+        vm_name: name,
+        state_dir: &state_dir,
+        tenant,
+        secrets,
+        redaction,
+        transport: EndpointTransport::Uds {
+            path: std::path::PathBuf::from(format!(
+                "{}_{}",
+                crate::microvm::firecracker_vsock_uds_path(drives_dir),
+                mvm_agentd::vsock::EGRESS_PORT
+            )),
+        },
+        terminator_listen: None,
+        tls_intermediate,
+        network_policy: Some(&config.network_policy),
+        raw_egress: secrets.is_empty(),
+    })?;
+    Ok(EndpointGuard::new(name))
 }
 
 #[cfg(test)]
@@ -641,6 +635,81 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::default(),
             network_tunnel: None,
         }
+    }
+
+    // The Model-B egress endpoint must speak `Uds` at the FC per-port socket
+    // (`<vsock>_<EGRESS_PORT>`), gate egress itself (`network_policy: Some`), run
+    // no host TCP terminator (`terminator_listen: None`), and serve the raw relay
+    // for a secret-free egress workload (`egress_mode: raw`). Drive the real
+    // spawn with a stub endpoint bin (via `MVM_SUBSTITUTION_ENDPOINT_PATH`) that
+    // copies its stdin config to a file for inspection.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn spawn_egress_endpoint_binds_per_port_uds_and_self_gates() {
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        // Stub endpoint: dump the config JSON to a file, then emit one handshake
+        // line so `read_handshake_line` in the spawn helper succeeds.
+        let cfg_out = home.path().join("captured-config.json");
+        let stub = home.path().join("stub-endpoint.sh");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncat > {}\necho 'ready handshake'\n",
+                cfg_out.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
+
+        // A secret-free workload whose policy admits egress: no plan.json is
+        // written, so `decode_plan_secrets_from_state` yields no secrets and the
+        // endpoint serves the raw relay.
+        let mut config = baseline_run_config(None);
+        config.network_policy = mvm_core::network_policy::NetworkPolicy::preset(
+            mvm_core::network_policy::NetworkPreset::Dev,
+        );
+        // The spawn helper writes the pid file into the state dir and the minted
+        // handshake into `vm_substitution_env_path`; ensure both parents exist.
+        let state_dir = mvm_core::config::vm_state_dir(&config.slot.name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        if let Some(parent) = mvm_core::config::vm_substitution_env_path(&config.slot.name).parent()
+        {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+
+        let drives_dir = home.path().join("drives");
+        let guard = spawn_egress_endpoint(&config, drives_dir.to_str().unwrap())
+            .expect("spawn with stub endpoint should succeed");
+        assert!(guard.vm_name.is_some(), "an egress workload arms the guard");
+
+        let captured = std::fs::read_to_string(&cfg_out).expect("stub wrote config");
+        let v: serde_json::Value = serde_json::from_str(&captured).expect("config is JSON");
+        assert_eq!(v["transport"]["kind"], "uds");
+        let expected_uds = format!(
+            "{}_{}",
+            crate::microvm::firecracker_vsock_uds_path(drives_dir.to_str().unwrap()),
+            mvm_agentd::vsock::EGRESS_PORT
+        );
+        assert_eq!(v["transport"]["path"], expected_uds);
+        assert_eq!(v["egress_mode"], "raw");
+        assert!(
+            v.get("network_policy").is_some(),
+            "the endpoint is the sole claim-10 authority: {v}"
+        );
+        assert!(
+            v.get("terminator_listen").is_none(),
+            "Model-B runs no host TCP terminator: {v}"
+        );
     }
 
     #[test]

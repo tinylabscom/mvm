@@ -283,7 +283,10 @@ mod tests {
 
         let fc = by("firecracker").unwrap();
         assert_eq!(fc.snapshot_tier, "live-memory");
-        assert!(fc.tap_networking, "firecracker uses a host TAP device");
+        assert!(
+            !fc.tap_networking,
+            "firecracker is vsock-only: no routable guest NIC"
+        );
         assert!(fc.vsock);
         assert!(fc.balloon);
         assert!(

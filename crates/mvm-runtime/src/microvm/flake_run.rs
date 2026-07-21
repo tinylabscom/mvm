@@ -8,15 +8,13 @@ use crate::base::shell::run_in_vm;
 use crate::base::ui;
 use crate::firecracker;
 use crate::image::RuntimeVolume;
-use crate::network_provider::BridgeTapNetworkProvider;
 use crate::network_tunnel_spawn::{
     NetworkTunnelListener, NetworkTunnelWorkerSpawnParams,
     spawn_network_tunnel_worker_if_configured,
 };
-use mvm_net::{NetworkProvider, NetworkSpec};
 
 use super::daemon::{api_put_socket, start_vm_firecracker};
-use super::guards::{FirecrackerGuard, TapGuard};
+use super::guards::FirecrackerGuard;
 use super::{firecracker_vsock_uds_path, require_linux_env};
 
 // ============================================================================
@@ -241,21 +239,10 @@ fn run_configured_firecracker(
 ) -> Result<()> {
     let slot = &config.slot;
 
-    // Provision the VM's bridge+TAP network + egress policy through the
-    // NetworkProvider seam. `provision` is transactional
-    // — it drops the TAP itself if the policy apply fails — and the TapGuard
-    // below re-arms to tear the TAP down if a *later* start step fails. Same
-    // operations, same order, as the direct calls this replaces.
-    BridgeTapNetworkProvider::new()
-        .provision(
-            &mvm_core::protocol::vm_backend::VmId(slot.name.clone()),
-            &NetworkSpec {
-                policy: firecracker_tap_policy(config),
-                slot_index: slot.index,
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("network provision: {e}"))?;
-    let mut tap_guard = TapGuard::new(slot);
+    // A workload guest is vsock-only: it attaches no routable NIC, so there is
+    // no host TAP / bridge to provision and no kernel-firewall egress moat to
+    // arm. Claim-10 egress enforcement lives on the host-side vsock egress
+    // endpoint's `EgressGate` (spawned below), matching libkrun/HVF.
 
     // Spawn `mvm-bridge` alongside the Firecracker VM.
     // The sidecar runs under
@@ -280,8 +267,8 @@ fn run_configured_firecracker(
     // watchdog hard-fail policy would tear down an otherwise healthy
     // VM. Before the egress moat landed, no producer wrote `plan.json`
     // pre-boot on this path, so the bridge never actually spawned;
-    // the gate preserves that default while the moat (substitution
-    // endpoint + nft redirect below) runs unconditionally.
+    // the gate preserves that default while the moat (the vsock egress
+    // endpoint below) runs unconditionally.
     #[cfg(target_os = "linux")]
     let mut bridge_guard = if std::env::var("MVM_GATEWAY_BRIDGE").as_deref() == Ok("1") {
         super::egress_bridge::spawn_fc_bridge(&config.slot.name, abs_dir)?
@@ -299,15 +286,15 @@ fn run_configured_firecracker(
     }
     let mut fc_guard = FirecrackerGuard::new(abs_dir);
 
-    // Spawn the substitution endpoint BEFORE configuring boot args,
-    // so the placeholders it mints land in
-    // `vm_substitution_env_path` and `configure_flake_microvm` can carry them on
-    // the cmdline (`mvm.secret_env=`) into a sealed entrypoint. The endpoint
-    // binds its listener now; the nft REDIRECT that feeds it is installed
-    // post-boot (the TAP must exist). The guard reaps the endpoint if any step
-    // below fails before the VM is fully up. No-op without egress secrets.
+    // Spawn the substitution endpoint BEFORE configuring boot args, so the
+    // placeholders it mints land in `vm_substitution_env_path` and
+    // `configure_flake_microvm` can carry them on the cmdline (`mvm.secret_env=`)
+    // into a sealed entrypoint. The endpoint binds the per-port host UDS the
+    // guest reaches over vsock and self-enforces the resolved egress policy — no
+    // TAP, no nft REDIRECT. The guard reaps the endpoint if any step below fails
+    // before the VM is fully up. Defused for a deny-all secret-free run.
     #[cfg(target_os = "linux")]
-    let mut endpoint_guard = super::egress_bridge::spawn_egress_endpoint(config)?;
+    let mut endpoint_guard = super::egress_bridge::spawn_egress_endpoint(config, abs_dir)?;
     let mut tunnel_guard =
         spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
             state_dir: &mvm_core::config::vm_state_dir(&config.name),
@@ -366,32 +353,12 @@ fn run_configured_firecracker(
         );
     }
 
-    // When the admitted plan carries secret bindings, stand up this
-    // VM's transparent egress moat now that the guest is healthy:
-    //   1. spawn the per-VM substitution endpoint with the terminator listener
-    //      bound on a per-slot host port, and
-    //   2. install the nft TAP prerouting REDIRECT that steers the guest's
-    //      outbound :80 to that terminator.
-    // Fail closed: a secret-bearing workload must not keep running without its
-    // substitution path, so any failure rolls the VM back. Linux-only (nft +
-    // the FC path itself). The plan source is the same `plan.json` the bridge
-    // parsed; a missing/unsigned file means a legacy/non-admitted boot with no
-    // secrets — nothing to install.
-    #[cfg(target_os = "linux")]
-    if let Err(e) = super::egress_bridge::install_egress_redirect(config) {
-        // Roll back the running VM + its network. The guards were about to be
-        // defused; instead let them fire by returning before defuse — but the
-        // bridge watchdog already detached, so tear down explicitly. `stop_vm`
-        // reaps the substitution endpoint, so the (still-armed) endpoint_guard's
-        // Drop is then a harmless no-op.
-        warn!(vm = %config.slot.name, "egress redirect install failed; rolling back VM: {e}");
-        let _ = super::control::stop_vm(&config.slot.name);
-        return Err(e);
-    }
+    // The egress endpoint spawned pre-boot is the whole moat now: it self-gates
+    // egress over the guest's vsock channel, so there is no post-boot nft
+    // REDIRECT to install once the guest is healthy.
 
     // VM is fully started — defuse guards so normal stop path handles cleanup
     fc_guard.defuse();
-    tap_guard.defuse();
     #[cfg(target_os = "linux")]
     endpoint_guard.defuse();
     tunnel_guard.defuse();

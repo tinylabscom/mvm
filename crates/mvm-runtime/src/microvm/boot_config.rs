@@ -5,7 +5,6 @@
 use anyhow::{Context, Result};
 use tracing::instrument;
 
-use crate::base::config::BRIDGE_IP;
 use crate::base::ui;
 
 use super::daemon::{api_put_socket, prepare_vsock_runtime_dir};
@@ -189,7 +188,8 @@ pub fn configure_flake_microvm_with_drives_dir(
     configure_boot_source(socket, config, overlay)?;
     configure_machine(socket, config)?;
     configure_drives(socket, config, drives_dir, overlay)?;
-    configure_network(socket, config)?;
+    // No routable NIC: a workload guest has no `/network-interfaces` device.
+    // All ingress and egress ride the vsock device configured below.
     configure_vsock(socket, drives_dir)?;
     configure_balloon(socket, config)?;
     Ok(())
@@ -208,26 +208,38 @@ fn configure_logger(socket: &str, abs_dir: &str) -> Result<()> {
     )
 }
 
+/// The always-present kernel cmdline prefix for a workload boot. A vsock-only
+/// guest has no routable NIC, so it carries no `mvm.ip=`/`mvm.gw=` token — the
+/// guest configures no eth0 and every byte of ingress/egress rides vsock.
+fn base_boot_args() -> String {
+    "console=ttyS0 reboot=k panic=1 net.ifnames=0".to_string()
+}
+
+/// Kernel cmdline token that turns on the in-guest vsock egress client.
+/// Emitted only when outbound egress is allowed and the workload carries no
+/// bound secrets, so the raw relay never contends with the substitution
+/// endpoint for the shared egress port. Mirrors the libkrun/HVF gate.
+fn vsock_egress_cmdline_token(config: &FlakeRunConfig) -> Option<String> {
+    let state_dir = mvm_core::config::vm_state_dir(&config.slot.name);
+    (config.network_policy.allows_egress()
+        && !crate::egress_shared::state_has_bound_secrets(&state_dir).unwrap_or(false))
+    .then(|| "mvm.vsock_egress=1".to_string())
+}
+
 /// Configure the Firecracker boot source (`/boot-source`): kernel image
-/// path, initrd, and the full kernel cmdline — guest IP/gateway, dm-verity
-/// roothash, runtime-overlay tokens, egress CA, secret placeholders, and
-/// verb-grant sidecars.
+/// path, initrd, and the full kernel cmdline — dm-verity roothash,
+/// runtime-overlay tokens, egress CA, the vsock egress switch, secret
+/// placeholders, and verb-grant sidecars. A workload guest has no routable
+/// NIC, so the cmdline carries no guest IP/gateway.
 fn configure_boot_source(
     socket: &str,
     config: &FlakeRunConfig,
     overlay: Option<(&str, &str, &str)>,
 ) -> Result<()> {
-    let slot = &config.slot;
-
-    // Boot args: pass guest IP and gateway via kernel cmdline.
     // When initrd is present (NixOS guest or verity initrd), the initrd
     // handles root mounting. When absent (minimal guest, no verity),
     // the kernel mounts /dev/vda directly.
-    let base_args = format!(
-        "console=ttyS0 reboot=k panic=1 net.ifnames=0 mvm.ip={ip}/24 mvm.gw={gw}",
-        ip = slot.guest_ip,
-        gw = BRIDGE_IP,
-    );
+    let base_args = base_boot_args();
 
     // dm-verity boot path: when verity is on, the kernel
     // mounts the verity initramfs first, which is `mvm-verity-init`
@@ -271,6 +283,13 @@ fn configure_boot_source(
     // `mvm.egress_ca=` token into the guest trust bundle (cert only — the key
     // stays host-side in the terminator endpoint).
     let boot_args = match egress_ca_cmdline_token(&config.slot.name) {
+        Some(token) => format!("{boot_args} {token}"),
+        None => boot_args,
+    };
+    // Turn on the in-guest vsock egress client for a secret-free egress
+    // workload — the guest speaks raw egress over vsock to the host endpoint,
+    // matching the libkrun/HVF vsock-only path (no routable NIC to bypass it).
+    let boot_args = match vsock_egress_cmdline_token(config) {
         Some(token) => format!("{boot_args} {token}"),
         None => boot_args,
     };
@@ -482,24 +501,6 @@ fn configure_drives(
     Ok(())
 }
 
-/// Configure the Firecracker network interface (`/network-interfaces/net1`).
-fn configure_network(socket: &str, config: &FlakeRunConfig) -> Result<()> {
-    let slot = &config.slot;
-    ui::info(&format!(
-        "Setting network interface: {} (MAC {})",
-        slot.tap_dev, slot.mac
-    ));
-    api_put_socket(
-        socket,
-        "/network-interfaces/net1",
-        &format!(
-            r#"{{"iface_id": "net1", "guest_mac": "{mac}", "host_dev_name": "{tap}"}}"#,
-            mac = slot.mac,
-            tap = slot.tap_dev,
-        ),
-    )
-}
-
 /// Configure the Firecracker vsock device (`/vsock`).
 fn configure_vsock(socket: &str, drives_dir: &str) -> Result<()> {
     ui::info("Setting vsock device...");
@@ -576,6 +577,53 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::default(),
             network_tunnel: None,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // vsock-only (Model-B) boot cmdline
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn base_boot_args_carries_no_routable_nic_tokens() {
+        // A vsock-only workload guest has no routable NIC, so the base cmdline
+        // must emit no guest IP / gateway — the guest configures no eth0 and all
+        // traffic rides vsock.
+        let args = base_boot_args();
+        assert!(
+            !args.contains("mvm.ip="),
+            "vsock-only guest carries no guest IP: {args}"
+        );
+        assert!(
+            !args.contains("mvm.gw="),
+            "vsock-only guest carries no gateway: {args}"
+        );
+        assert!(args.contains("console=ttyS0"));
+        assert!(args.contains("net.ifnames=0"));
+    }
+
+    #[test]
+    fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+
+        // Deny-all default → no token (short-circuits before any fs read).
+        let mut deny = baseline_run_config(None);
+        deny.network_policy = mvm_core::network_policy::NetworkPolicy::deny_all();
+        assert_eq!(vsock_egress_cmdline_token(&deny), None);
+
+        // Allow-egress, no bound secrets → the guest runs the vsock egress client.
+        let mut allow = baseline_run_config(None);
+        allow.network_policy = mvm_core::network_policy::NetworkPolicy::preset(
+            mvm_core::network_policy::NetworkPreset::Dev,
+        );
+        assert_eq!(
+            vsock_egress_cmdline_token(&allow).as_deref(),
+            Some("mvm.vsock_egress=1")
+        );
     }
 
     // ------------------------------------------------------------------
