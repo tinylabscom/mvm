@@ -124,3 +124,67 @@ pub(super) fn registry_env_key(registry: &str) -> Result<String> {
     }
     Ok(key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn registry_env_key_normalizes_registry_host() {
+        assert_eq!(registry_env_key("ghcr.io").expect("key"), "GHCR_IO");
+        assert_eq!(
+            registry_env_key("registry.example.test:5000").expect("key"),
+            "REGISTRY_EXAMPLE_TEST_5000"
+        );
+    }
+
+    #[test]
+    fn registry_auth_prefers_registry_specific_bearer_token() {
+        let image_ref: ImageReference = "ghcr.io/acme/app:latest".parse().expect("image ref");
+        let auth = registry_auth_from_lookup(&image_ref, |name| match name {
+            "MVM_OCI_BEARER_TOKEN_GHCR_IO" => Some("registry-token".to_string()),
+            "MVM_OCI_BEARER_TOKEN" => Some("global-token".to_string()),
+            _ => None,
+        })
+        .expect("auth resolution");
+
+        assert_eq!(auth.source, "env:MVM_OCI_BEARER_TOKEN_GHCR_IO");
+        assert!(auth.auth.is_authenticated());
+        assert_eq!(auth.auth.kind(), "bearer");
+    }
+
+    #[test]
+    fn registry_auth_falls_back_to_global_bearer_token() {
+        let image_ref: ImageReference = "ghcr.io/acme/app:latest".parse().expect("image ref");
+        let auth = registry_auth_from_lookup(&image_ref, |name| match name {
+            "MVM_OCI_BEARER_TOKEN" => Some("global-token".to_string()),
+            _ => None,
+        })
+        .expect("auth resolution");
+
+        assert_eq!(auth.source, "env:MVM_OCI_BEARER_TOKEN");
+        assert_eq!(auth.auth.kind(), "bearer");
+    }
+
+    #[test]
+    fn registry_auth_has_no_docker_config_dependency() {
+        let image_ref: ImageReference = "ghcr.io/acme/app:latest".parse().expect("image ref");
+        let requested = RefCell::new(Vec::new());
+        let auth = registry_auth_from_lookup(&image_ref, |name| {
+            requested.borrow_mut().push(name.to_string());
+            None
+        })
+        .expect("auth resolution");
+
+        assert_eq!(auth.source, "anonymous");
+        assert!(!auth.auth.is_authenticated());
+        assert_eq!(
+            requested.into_inner(),
+            vec![
+                "MVM_OCI_BEARER_TOKEN_GHCR_IO".to_string(),
+                "MVM_OCI_BEARER_TOKEN".to_string()
+            ]
+        );
+    }
+}
