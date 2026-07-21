@@ -130,8 +130,8 @@ pub(in crate::commands) enum Commands {
     /// Manage built manifest slots
     #[command(hide = true)]
     Manifest(manifest::Args),
-    /// Inspect cached OCI images
-    #[command(hide = true)]
+    /// Inspect and manage cached OCI images
+    #[command(display_order = 9)]
     Image(image::Args),
     /// Inspect the dm-thin storage pool
     #[command(hide = true)]
@@ -158,13 +158,13 @@ pub(in crate::commands) enum Commands {
     #[command(hide = true)]
     Reconcile(ops::reconcile::Args),
     /// Manage local secret namespaces
-    #[command(hide = true)]
+    #[command(display_order = 10)]
     Secret(ops::secret::Args),
-    /// Seal or verify portable VM bundles
-    #[command(hide = true)]
+    /// Seal, fetch, and verify portable VM bundles
+    #[command(display_order = 11)]
     Bundle(bundle::Args),
     /// Manage trusted bundle publishers
-    #[command(hide = true)]
+    #[command(display_order = 12)]
     Trust(trust::Args),
     /// Inspect cached application dependencies
     #[command(hide = true)]
