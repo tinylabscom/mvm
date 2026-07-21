@@ -18,6 +18,7 @@ mod check_closure_budget;
 mod check_core_runtime_free;
 mod check_doc_claims;
 mod check_duplicate_majors;
+mod check_file_size;
 mod check_forbidden_deps;
 mod check_guest_agent_in_all_images;
 mod check_guest_agent_runtime_free;
@@ -173,6 +174,10 @@ fn main() -> Result<()> {
         Some("check-runtime-overlay-version") => {
             let workspace = workspace_root();
             check_runtime_overlay_version::run(&workspace)
+        }
+        Some("check-file-size") => {
+            let workspace = workspace_root();
+            check_file_size::run(&workspace)
         }
         Some("check-binary-size") => check_binary_size::run(&args[2..]),
         Some("check-kernel-config-budget") => check_kernel_config_budget::run(&args[2..]),
