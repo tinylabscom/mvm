@@ -102,15 +102,20 @@ mvmctl machine ls                              # list (alias: ps)
 mvmctl machine inspect web
 ```
 
-### Dev environment
+### The builder VM
 
-The dev environment is the **builder VM**, not a workload VM:
+Nix builds run inside a **headless builder VM** that mvm manages for you — there
+is no interactive shell into it. It exists only to run `nix build`, and you debug
+it through its logs. It auto-bootstraps on the first `machine build` / `machine
+run`; to set up host tooling and pre-acquire its image ahead of time:
 
 ```bash
-mvmctl dev            # boot + drop into a dev shell
-mvmctl dev status
-mvmctl dev down
+mvmctl bootstrap      # host setup + pre-fetch the builder VM image (fast first build)
+mvmctl doctor         # diagnose host deps + the resolved builder/runtime backend
 ```
+
+For an interactive shell you want a *workload* microVM, not the builder — use a
+transient run against a dev-tier image: `mvmctl machine run --image alpine -it -- /bin/sh`.
 
 ### Examples
 
@@ -386,14 +391,14 @@ for m in remote.list_machines(Default::default()).await? {
 }
 ```
 
-The **studio** desktop app is exactly this pattern — a `GatewayBackend` by
-default, or the in-process `LocalBackend` when built `--features local` with
-`MVM_STUDIO_BACKEND=local` — one `dyn MvmClient` behind its Tauri commands. Its
-`Cargo.toml`:
+The **studio** desktop app is exactly this pattern — the in-process
+`LocalBackend` (built into `mvm-client`) or the remote `GatewayBackend` (the
+`remote` feature), selected at runtime via `MVM_STUDIO_BACKEND`, one
+`dyn MvmClient` behind its Tauri commands. Its `Cargo.toml`:
 
 ```toml
-mvm-client       = { path = "../mvm/crates/mvm-client", features = ["remote"] }
-mvm-client-local = { path = "../mvm/crates/mvm-client-local" }   # optional, gated by a `local` feature
+# LocalBackend ships by default; the `remote` feature adds the REST GatewayBackend.
+mvm-client = { path = "../mvm/crates/mvm-client", features = ["remote"] }
 ```
 
 **Embedding the runtime in a host-side daemon** (the **mvmd** fleet orchestrator,
@@ -479,8 +484,8 @@ claims), each backed by a named test or workflow gate. In summary:
 14. **Every `run --image` admission records OCI image provenance** in the
     chain-signed audit log.
 15. **No interactive access to a sealed production microVM** — the console is
-    `dev-shell`-gated, the prod rootfs is verity-sealed, console capture is
-    write-only, and the host gate refuses `console` on a sealed VM.
+    `interactive`-feature-gated, the prod rootfs is verity-sealed, console
+    capture is write-only, and the host gate refuses `console` on a sealed VM.
 
 The guest agent runs as an unprivileged uid under `setpriv`; `~/.mvm` and
 `~/.mvm/cache` are mode 0700. **Out of scope** (named in ADR-001): a malicious
@@ -569,14 +574,20 @@ details.
 
 ### Repository layout
 
-15-crate Cargo workspace; the full map is in [CLAUDE.md](CLAUDE.md). The short
-version: `mvm-core` (types / plans / policy / crypto — no runtime deps) →
-`mvm-build` (Nix builder pipeline) → `mvm-backend` (every `VmBackend` impl) →
-`mvm` (runtime) → `mvm-cli` (the `mvmctl` surface), plus `mvm-guest` (vsock
-protocol + agent), `mvm-hostd` (host daemons: broker / signers / supervisor),
-`mvm-vm-host` (per-VM supervisor binaries), `mvm-sdk` (decorator parser + IR +
-runtime), `mvm-client*` (the local/remote client facade the SDKs and frontends
-share), and `xtask` (lint gates). Language SDKs live under `crates/mvm-sdk/`.
+14-crate Cargo workspace. The dependency spine runs low → high:
+`mvm-protocol` (`no_std` + alloc: wire types / Workload IR / policy / audit-log
+verify — wasm-capable) → `mvm-core` (std: config / paths / crypto / signed
+execution plans — no async by default) → { `mvm-fs` (ext4 / OCI / overlay),
+`mvm-net` (vsock + egress tunnel), `mvm-build` (Nix builder pipeline) } →
+`mvm-runtime` (the `VmBackend` trait plus the libkrun / HVF / Firecracker / QEMU
+impls and VM lifecycle) → `mvm-client` (the local/remote client facade the SDKs
+and frontends share) → `mvm-cli` (the `mvmctl` surface). Alongside the spine:
+`mvm-hostd` (host daemons — broker, signers, per-VM supervisor binaries),
+`mvm-agentd` (in-guest vsock protocol + agent), `mvm-sdk` (decorator parser →
+Workload IR → Nix template, plus the runtime SDK), and `deps/libkrun-sys` (the
+libkrun FFI + safe wrapper). `xtask` holds the CI lint gates and
+`mvm-conformance` runs the BDD security-claim suite. The full module map is in
+[CLAUDE.md](CLAUDE.md). Language SDK surfaces live under `crates/mvm-sdk/`.
 
 ## License
 

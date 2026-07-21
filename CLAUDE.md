@@ -83,40 +83,50 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 ### Workspace Structure
 
-15-crate Cargo workspace (plan 121 consolidated 32→15 + `crates/deps/libkrun-sys`; ADR-022 §1 is the map). Root facade re-exports the libraries:
+14-crate Cargo workspace (Bar-A consolidation took 32→16, then to the current set). Root facade (`src/lib.rs`) re-exports the libraries.
 
-- `mvm-core` -- types, IDs, config, protocol, signing, routing, crypto. Absorbs `plan` (typed signed `ExecutionPlan`), `policy` (incl. `policy::security` session-policy), and `crypto` (the former `mvm-security`: attestation/keystore/secret_store/snapshot crypto + opt-in cosign behind `manifest-verify`). **The default build has no async/runtime deps** (plan 126 B5): `tokio` is optional, pulled only by the off-by-default `hostd-transport` feature (the `protocol` hostd IPC transport that mvmd consumes via `mvmctl::core::protocol`) or `manifest-verify` (sigstore). `core::framing` moved to `mvm_hostd::framing` (plan 126 B5). The `xtask check-core-runtime-free` gate asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
-- `mvm-sdk` -- build-time SDK (decorator + runtime authoring) **and the `ir` module** (the canonical `Workload` IR, was `mvm-ir`). `mvm-sdk-macros` is the separate proc-macro crate.
-- `mvm-guest` -- vsock protocol, console, integrations, agent; `runner` module + `mvm-runner` `[[bin]]` (in-guest function entrypoint).
-- `mvm-build` -- Nix builder pipeline; also hosts `egress_proxy` (lib) and the builder-VM-only `[[bin]]`s `mvm-host-vm-init` + `mvm-egress-proxy` (cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
-- `mvm` -- runtime: shell, VM lifecycle, UI, templates. Re-exports `shell`/`ui`/`shell_mock`/`cow`/`runtime_meta` from `mvm-backend::base` to preserve the mvmd `mvmctl::runtime::*` contract.
-- `mvm-backend` -- `VmBackend` trait + every backend impl + selection/dispatch; `base` (host substrate, was `mvm-base`), `libkrun`/`hvf_backend`/`firecracker`/`qemu`/`mock` dispatch.
-- `crates/deps/libkrun-sys` -- the one true C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt); was `mvm-libkrun`. Lives low so `mvm-build` can consume the wrapper.
-- `mvm-hostd` -- host-side daemon roles: `supervisor` + `jailer` (libs) + `broker`/`host_signer`/`audit_signer` (libs + three subprocess `[[bin]]`s — the process moat). Was `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`.
-- `mvm-vm-host` -- per-VM supervisor host processes (one per guest): cfg-gated `[[bin]]`s `mvm-libkrun-supervisor` / `mvm-hvf-supervisor` / `mvm-bridge` (the shared external-VMM gateway/audit sidecar for Firecracker); the lib carries the unified bridge config/passt-hash parsers.
-- `mvm-guest-helpers` -- in-guest helper `[[bin]]`s `mvm-addon-dns` + `mvm-addon-vsock-bridge`, baked into the rootfs by mkGuest.
-- `mvm-cli` -- Clap CLI, bootstrap, update, doctor, template commands; `build.rs` embeds the host binaries.
-- `mvm-mcp`, `mvm-oci`, `mvm-storage` -- unchanged. `mvm-verify` -- wasm-clean audit-log verifier (ADR-024, zero `mvm-*` deps). `xtask` -- tooling + claim-gate lints.
+**Libraries, low → high:**
 
-Root package: `src/lib.rs` (facade re-exports `mvmctl::core`=mvm-core, `mvmctl::runtime`=mvm, `mvmctl::build`=mvm-build, `mvmctl::guest`=mvm-guest, `mvmctl::backend`=mvm-backend, `mvmctl::security`=`mvm_core::crypto`) + `src/main.rs` (thin CLI entry -> `mvm_cli::run()`)
+- `mvm-protocol` -- `#![no_std]` + alloc, `forbid(unsafe_code)`; the wasm/browser-capable foundation. The audit-log verifier (and, incrementally, the `Workload` IR + wire protocol + policy DTOs). Builds on `wasm32-unknown-unknown`.
+- `mvm-core` -- std: types, IDs, config/paths (`MVM_HOME`), crypto, signing, routing. Absorbs `plan` (typed signed `ExecutionPlan`), `policy`, `crypto` (attestation/keystore/secret_store/snapshot + opt-in cosign behind `manifest-verify`). **Default build has no async deps**: `tokio` is optional, pulled only by the off-by-default `hostd-transport` or `manifest-verify` features. `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
+- `mvm-fs` -- image → mountable rootfs: OCI distribution client (registry/manifest/layer fetch + allow-listed `unpack/`) + a pure-Rust, memory-safe, deterministic ext4 writer (no `mkfs`, no subprocess) + `overlay`. Absorbs the old `mvm-ext4` + `mvm-oci`.
+- `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge/native-gateway/passt impl lives in `mvm-runtime`.
+- `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
+- `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait + every backend impl (`libkrun`/`hvf_backend`+`hvf/`/`firecracker`/`qemu`/`mock`), VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
+- `mvm-client` -- the local/remote client facade behind one `dyn MvmClient`: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature). The CLI and SDKs route through it.
+- `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries; folds the old `mvm-mcp` behind an `mcp` feature.
+
+**Top of graph (daemons, SDK, FFI):**
+
+- `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`/`mvm-bridge`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
+- `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
+- `mvm-sdk` -- build-time SDK: decorator parser → canonical `Workload` IR → Nix template, plus the runtime SDK. Language SDK surfaces live under `crates/mvm-sdk/sdks/`.
+- `mvm-host-services-ffi` -- a C-ABI cdylib every language SDK dlopens (host.audit/time/cost broker clients); kept a separate crate because folding it would break the FFI contract.
+- `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
+
+`xtask` -- tooling + claim-gate lints. `mvm-conformance` -- dev-only cucumber-rs BDD harness running the security-claim scenarios against `mvmctl` (not a dependency of any shipped crate).
+
+Root package: `src/lib.rs` (facade: `mvmctl::core`=mvm-core, `mvmctl::runtime`/`::backend`=mvm-runtime, `mvmctl::build`=mvm-build, `mvmctl::guest`=mvm-agentd, `mvmctl::security`=`mvm_core::crypto`) + `src/main.rs` (thin entry → `mvm_cli::run()`).
 
 Binary: `mvmctl` (from root, delegates to mvm-cli)
 
-**Dependency direction (high → low):** `mvm-cli` → {`mvm`, `mvm-backend`, `mvm-hostd`, `mvm-sdk`, ...} → `mvm` → `mvm-backend` → `mvm-build` → {`libkrun-sys`, `mvm-guest`, `mvm-sdk`} → `mvm-core`. `mvm-core` is the foundation (no `mvm-*` deps). The per-VM/per-role bin crates (`mvm-vm-host`, the `mvm-hostd` bins) sit at the top; nothing depends on them as a library.
+**Dependency direction (high → low):** `mvm-cli` → {`mvm-runtime`, `mvm-hostd`, `mvm-client`, `mvm-sdk`} → `mvm-client` → `mvm-runtime` → {`mvm-fs`, `mvm-net`, `mvm-build`} → `mvm-core` → `mvm-protocol`. `mvm-protocol` (no_std) is the foundation; `mvm-core` builds on it. `mvm-agentd` (guest) and the per-role bin crates sit at the top; nothing depends on them as a library.
 
 **Key module locations:**
 
-mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver/policies), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `dev_network.rs`, `config.rs` (XDG)
+mvm-protocol: `verify` (audit-log verifier), `ir/` (Workload IR), wire/policy DTOs.
 
-mvm-backend: `base/` (shell, ui, linux_env, cow, runtime_meta, config — was mvm-base), `libkrun.rs`/`hvf_backend.rs`/`hvf/`/`firecracker.rs`/`qemu.rs`/`mock.rs` (dispatch), `codesign.rs`, `artifacts/`
+mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `config.rs` (paths/`MVM_HOME`)
 
-mvm-build: `pipeline/` (`build.rs` = `pool_build`, `dev_build.rs`), `egress_proxy/`, `src/bin/mvm-host-vm-init*` + `src/bin/mvm-egress-proxy.rs`, `nix/`
+mvm-runtime: `backend.rs`/`libkrun.rs`/`hvf_backend.rs`+`hvf/`/`firecracker.rs`/`qemu.rs`/`mock.rs` (dispatch), `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `base/` (shell, ui, linux_env, cow), `storage/`, `network/`, `codesign.rs`, `artifacts/`
 
-mvm-guest: `vsock.rs`, `console.rs`, `integrations.rs`, `builder_agent.rs`, `runner/`
+mvm-fs: `oci/unpack/` (allow-listed unpacker), `oci/`, the ext4 writer, `overlay`
 
-mvm-hostd: `supervisor/`, `broker/`, `host_signer/`, `audit_signer/`, `jailer/` + `src/bin/{mvm-broker,mvm-host-signer,mvm-audit-signer}.rs`
+mvm-agentd: `vsock/`, `console.rs`, `integrations.rs`, `src/bin/mvm-guest-agent/` (the agent bin), `runner/`
 
-mvm-cli: `commands/` (local microVM substrate commands: env, build/run, guest RPC, artifacts/trust, local ops). Tenant lifecycle, tenant policy authoring/review, and deploy-to-control-plane commands live in mvmd, not mvmctl.
+mvm-hostd: `supervisor/` (incl. `gateway_bridge/`), `broker/`, `host_signer/`, `audit_signer/`, `jailer/`, `src/bin/{mvm-broker,mvm-host-signer,mvm-audit-signer}.rs`, the per-VM supervisor bins
+
+mvm-cli: `commands/` (env, build/run, `machine`, guest RPC, artifacts/trust, local ops); `doctor/`, `commands/vm/up/`, `commands/image/`, `commands/ops/bench/` are decomposed module trees. Tenant lifecycle + deploy-to-control-plane commands live in mvmd, not mvmctl.
 
 ### Trait Architecture
 
