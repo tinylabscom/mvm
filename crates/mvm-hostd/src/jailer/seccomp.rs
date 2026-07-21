@@ -42,6 +42,9 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("fsync", libc::SYS_fsync),
     ("openat", libc::SYS_openat),
     ("close", libc::SYS_close),
+    // glibc's resolver seeks while reading /etc/hosts (getaddrinfo); a missing
+    // `lseek` SIGSYS-kills the endpoint mid-egress on a Linux host.
+    ("lseek", libc::SYS_lseek),
     // arch divergence: x86_64 keeps `stat` / `lstat` as their own
     // syscalls; aarch64 folds both into `fstatat` (see aarch64 block).
     ("stat", libc::SYS_stat),
@@ -146,6 +149,9 @@ pub(crate) const BRIDGE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("fsync", libc::SYS_fsync),
     ("openat", libc::SYS_openat),
     ("close", libc::SYS_close),
+    // glibc's resolver seeks while reading /etc/hosts (getaddrinfo); a missing
+    // `lseek` SIGSYS-kills the endpoint mid-egress on a Linux host.
+    ("lseek", libc::SYS_lseek),
     // arch divergence: aarch64 does not expose `stat` / `lstat` as
     // their own syscalls — both fold into `newfstatat` (syscall 79; libc
     // exposes no bare `SYS_fstatat` on aarch64). The policy layer still
@@ -304,6 +310,9 @@ mod tests {
         assert!(syscall_name_to_nr("write").is_some());
         assert!(syscall_name_to_nr("splice").is_some());
         assert!(syscall_name_to_nr("fsync").is_some());
+        // glibc resolver path — omitting it SIGSYS-killed the substitution
+        // endpoint mid-egress on a live Firecracker host.
+        assert!(syscall_name_to_nr("lseek").is_some());
     }
 
     #[test]
