@@ -9,8 +9,8 @@
 //!   + embeds them into a shipped mvmctl.
 //! - `crates/mvm-build/src/oci_runtime_inject.rs` — the `MvmRuntimeBinaries`
 //!   struct whose field docs name each bin.
-//! - `crates/mvm-cli/src/commands/image/mod.rs` — the `find("…")` lookups that
-//!   pull the embedded bytes.
+//! - `crates/mvm-cli/src/commands/image/materialize.rs` — the `find("…")`
+//!   lookups that pull the embedded bytes.
 //!
 //! The check asserts those four sets are identical to each other AND that every
 //! name is a real `[[bin]]` of `mvm-agentd`. A drift — a
@@ -26,7 +26,7 @@ use std::path::Path;
 const GUEST_AGENT_BUILD: &str = "crates/mvm-build/src/guest_agent_build.rs";
 const CLI_BUILD_RS: &str = "crates/mvm-cli/build.rs";
 const OCI_INJECT: &str = "crates/mvm-build/src/oci_runtime_inject.rs";
-const IMAGE_MOD: &str = "crates/mvm-cli/src/commands/image/mod.rs";
+const IMAGE_MOD: &str = "crates/mvm-cli/src/commands/image/materialize.rs";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let universe = guest_bin_universe(workspace)?;
@@ -45,7 +45,7 @@ pub fn run(workspace: &Path) -> Result<()> {
             extract_runtime_struct(workspace, OCI_INJECT)?,
         ),
         (
-            "image/mod.rs find() lookups",
+            "image/materialize.rs find() lookups",
             extract_find_calls(workspace, IMAGE_MOD)?,
         ),
     ];
