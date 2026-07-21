@@ -1,0 +1,844 @@
+//! Runtime-overlay attachment + status resolution for `mvmctl up` boots —
+//! the verity-sealed guest-binary overlay every workload backend consumes,
+//! and the audit label describing which source strategy actually landed.
+
+use anyhow::Result;
+
+use crate::commands::runtime_overlay::{
+    RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
+    runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
+};
+use crate::ui;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeSourceStatus {
+    OverlayRequired,
+    OverlayPreferred,
+    OverlayPreferredFallbackUsed,
+    RootfsOnlyByPolicy,
+}
+
+impl RuntimeSourceStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::OverlayRequired => "overlay-required",
+            Self::OverlayPreferred => "overlay-preferred",
+            Self::OverlayPreferredFallbackUsed => "overlay-preferred-fallback-used",
+            Self::RootfsOnlyByPolicy => "rootfs-only-by-policy",
+        }
+    }
+}
+
+
+pub(crate) fn resolve_runtime_source_status(
+    start_config: &mvm_core::vm_backend::VmStartConfig,
+) -> RuntimeSourceStatus {
+    match start_config.runtime_source_policy {
+        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => {
+            RuntimeSourceStatus::OverlayRequired
+        }
+        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => {
+            if start_config.runtime_overlay_path.is_some()
+                && start_config.runtime_overlay_verity_path.is_some()
+                && start_config.runtime_overlay_roothash.is_some()
+            {
+                RuntimeSourceStatus::OverlayPreferred
+            } else {
+                RuntimeSourceStatus::OverlayPreferredFallbackUsed
+            }
+        }
+        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => {
+            RuntimeSourceStatus::RootfsOnlyByPolicy
+        }
+    }
+}
+
+
+pub(crate) fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::VmStartConfig) {
+    let status = resolve_runtime_source_status(start_config);
+    tracing::info!(
+        runtime_source_status = status.label(),
+        runtime_source_policy = start_config.runtime_source_policy.audit_label(),
+        overlay_attached = start_config.runtime_overlay_path.is_some(),
+        "resolved guest runtime source"
+    );
+    ui::info(&format!("Runtime source: {}", status.label()));
+}
+
+
+fn apply_runtime_overlay_artifact(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    artifact: mvm_fs::overlay::RuntimeOverlayArtifact,
+) {
+    start_config.runtime_overlay_path = Some(artifact.overlay_ext4.display().to_string());
+    start_config.runtime_overlay_verity_path = Some(artifact.sidecar.display().to_string());
+    start_config.runtime_overlay_version = Some(artifact.version);
+    start_config.runtime_overlay_roothash = Some(artifact.roothash);
+}
+
+
+/// Attach the verity-sealed runtime overlay by
+/// populating `VmStartConfig`'s overlay fields from the resolver's cache
+/// probe. Backends that can consume the sealed overlay attach it as extra
+/// read-only block devices and thread the matching roothash through the
+/// guest cmdline; unsupported backends ignore the fields.
+/// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
+/// fields `None` and the VM boots legacy. The seeded resolve is a pure
+/// cache read — no build, no download, no `nix` — so this is safe on
+/// every host.
+pub(crate) fn attach_runtime_overlay(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<()> {
+    if !matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun") {
+        return Ok(());
+    }
+    match mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(resolver, arch) {
+        Ok(a) => {
+            apply_runtime_overlay_artifact(start_config, a);
+            Ok(())
+        }
+        Err(e) => {
+            if start_config.runtime_source_policy
+                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+            {
+                anyhow::bail!(
+                    "runtime overlay required for {hypervisor} boot but unavailable: {e}"
+                );
+            }
+            // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
+            tracing::debug!(backend = hypervisor, error = %e, "runtime overlay not attached");
+            Ok(())
+        }
+    }
+}
+
+
+/// Production wrapper: build the resolver from the mvm cache dir + the
+/// running mvmctl version, then attach for `hypervisor`. Called at each
+/// workload-boot `VmStartConfig` construction in [`run`].
+///
+/// Ordinary starts always re-resolve the overlay for the current host build.
+/// Callers that need same-version continuity across lifecycle state must use
+/// [`attach_runtime_overlay_if_cached_version`] with an explicit pin.
+pub(crate) fn attach_runtime_overlay_if_cached(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+) -> Result<()> {
+    attach_runtime_overlay_if_cached_version(start_config, hypervisor, None)
+}
+
+
+pub(crate) fn attach_runtime_overlay_if_cached_version(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    expected_version: Option<&str>,
+) -> Result<()> {
+    let version = expected_version.unwrap_or(env!("CARGO_PKG_VERSION"));
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = mvm_core::arch::GuestArch::host();
+    if expected_version.is_none()
+        && start_config.runtime_source_policy
+            == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+        && matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun")
+        && runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+        && runtime_overlay_source_checkout_root().is_some()
+    {
+        let artifact = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
+            &cache_root,
+            version,
+            arch,
+        )?;
+        apply_runtime_overlay_artifact(start_config, artifact);
+        return Ok(());
+    }
+    let resolver =
+        mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.to_string());
+    match attach_runtime_overlay(start_config, hypervisor, &resolver, arch) {
+        Ok(()) => Ok(()),
+        Err(_err)
+            if start_config.runtime_source_policy
+                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay =>
+        {
+            if expected_version.is_some() {
+                return Err(anyhow::anyhow!(
+                    "runtime overlay version {version} is required for this boot and was not found in the local cache"
+                ));
+            }
+            let acquire_mode = runtime_overlay_acquire_mode();
+            let source_checkout_root = match acquire_mode {
+                RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
+                    runtime_overlay_source_checkout_root()
+                }
+                RuntimeOverlayAcquireMode::DownloadPublishedArtifact => None,
+            };
+            match acquire_mode {
+                RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
+                    ui::info(
+                        "Runtime overlay missing from cache; building it from the source checkout...",
+                    );
+                }
+                RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
+                    ui::info(
+                        "Runtime overlay missing from cache; downloading the published artifact now...",
+                    );
+                }
+            }
+            let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+                cache_root: &cache_root,
+                expected_version: version,
+                arch,
+                source_checkout_root: source_checkout_root.as_deref(),
+            })?;
+            apply_runtime_overlay_artifact(start_config, artifact);
+            tracing::info!(
+                runtime_overlay_version = version,
+                backend = hypervisor,
+                "runtime overlay cache populated for required-overlay boot"
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+
+#[cfg(test)]
+mod runtime_overlay_attach_tests {
+    use super::*;
+    use crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
+    use mvm_core::arch::GuestArch;
+    use mvm_core::util::test_env::TestEnv;
+    use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+    use mvm_fs::ext4::Node;
+    use mvm_fs::overlay::RuntimeOverlayResolver;
+    use sha2::{Digest, Sha256};
+
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn valid_overlay_ext4_bytes(version: &str, include_egress_client: bool) -> Vec<u8> {
+        let mut nodes = vec![
+            Node::File {
+                path: "/agent".into(),
+                mode: 0o555,
+                data: b"agent".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/agent-interactive".into(),
+                mode: 0o555,
+                data: b"agent-dev".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/netinit".into(),
+                mode: 0o555,
+                data: b"netinit".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/netd".into(),
+                mode: 0o555,
+                data: b"netd".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/seccomp-apply".into(),
+                mode: 0o555,
+                data: b"seccomp".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/runner".into(),
+                mode: 0o555,
+                data: b"runner".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/addon-dns".into(),
+                mode: 0o555,
+                data: b"addon-dns".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/exit-report".into(),
+                mode: 0o555,
+                data: b"exit-report".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/VERSION".into(),
+                mode: 0o444,
+                data: format!("{version}\n").into_bytes(),
+                xattrs: Vec::new(),
+            },
+        ];
+        if include_egress_client {
+            nodes.push(Node::File {
+                path: "/egress-client".into(),
+                mode: 0o555,
+                data: b"egress".to_vec(),
+                xattrs: Vec::new(),
+            });
+        }
+        mvm_fs::ext4::build_image(&nodes).expect("build valid overlay ext4 fixture")
+    }
+
+    /// Stage a complete overlay cache entry (the four files the resolver
+    /// validates) in the layout `resolve` expects.
+    fn seed_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
+        let layout = RuntimeOverlayResolver::new(cache.to_path_buf(), version.to_string())
+            .layout(&arch.to_string());
+        std::fs::create_dir_all(&layout.artifact_dir).unwrap();
+        let overlay_ext4 = valid_overlay_ext4_bytes(version, true);
+        let sidecar = b"verity-bytes";
+        let roothash = format!("{}\n", "a".repeat(64));
+        let version_text = format!("{version}\n");
+        std::fs::write(&layout.overlay_ext4, &overlay_ext4).unwrap();
+        std::fs::write(&layout.sidecar, sidecar).unwrap();
+        std::fs::write(&layout.roothash_file, &roothash).unwrap();
+        std::fs::write(&layout.version_file, &version_text).unwrap();
+        std::fs::write(
+            &layout.checksum_manifest_file,
+            format!(
+                "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
+                sha256_hex(&overlay_ext4),
+                sha256_hex(sidecar),
+                sha256_hex(roothash.as_bytes()),
+                sha256_hex(version_text.as_bytes()),
+            ),
+        )
+        .unwrap();
+        if let Some(workspace_root) =
+            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+        {
+            let fingerprint =
+                mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
+                    &workspace_root,
+                )
+                .expect("compute runtime-overlay source fingerprint");
+            std::fs::write(
+                &layout.local_source_fingerprint_file,
+                format!("{fingerprint}\n"),
+            )
+            .unwrap();
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let digest = Sha256::digest(bytes);
+        hex::encode(digest)
+    }
+
+    fn write_fixture(dir: &std::path::Path, name: &str, bytes: &[u8]) {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    fn runtime_overlay_archive_bytes(
+        ext4_bytes: &[u8],
+        verity_bytes: &[u8],
+        roothash_bytes: &[u8],
+        version_bytes: &[u8],
+    ) -> Vec<u8> {
+        let checksums = format!(
+            "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
+            sha256_hex(ext4_bytes),
+            sha256_hex(verity_bytes),
+            sha256_hex(roothash_bytes),
+            sha256_hex(version_bytes),
+        );
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        append_archive_file(&mut tar, "overlay.ext4", ext4_bytes);
+        append_archive_file(&mut tar, "overlay.verity", verity_bytes);
+        append_archive_file(&mut tar, "overlay.roothash", roothash_bytes);
+        append_archive_file(&mut tar, "VERSION", version_bytes);
+        append_archive_file(&mut tar, "checksums-sha256.txt", checksums.as_bytes());
+        let encoder = tar.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(u64::try_from(bytes.len()).unwrap());
+        header.set_cksum();
+        tar.append_data(&mut header, path, bytes).unwrap();
+    }
+
+    fn seed_release_fixture(base: &std::path::Path, version: &str, arch: GuestArch) {
+        let names = mvm_fs::overlay::RuntimeOverlayArtifactNames::for_arch(&arch.to_string());
+        let release_dir = base.join(format!("v{version}"));
+        std::fs::create_dir_all(&release_dir).unwrap();
+
+        let ext4_bytes = b"downloaded-ext4";
+        let verity_bytes = b"downloaded-verity";
+        let roothash_text = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
+        let version_text = format!("{version}\n");
+        let archive_bytes = runtime_overlay_archive_bytes(
+            ext4_bytes,
+            verity_bytes,
+            roothash_text,
+            version_text.as_bytes(),
+        );
+        write_fixture(&release_dir, &names.archive, &archive_bytes);
+        write_fixture(
+            &release_dir,
+            &names.archive_checksum,
+            format!("{}  {}\n", sha256_hex(&archive_bytes), names.archive).as_bytes(),
+        );
+    }
+
+    #[test]
+    fn firecracker_with_cached_overlay_populates_all_three_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap();
+        assert!(sc.runtime_overlay_path.is_some(), "ext4 path set");
+        assert!(sc.runtime_overlay_verity_path.is_some(), "verity path set");
+        assert_eq!(
+            sc.runtime_overlay_roothash.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
+    }
+
+    #[test]
+    fn hvf_with_cached_overlay_populates_all_three_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay(&mut sc, "hvf", &resolver, arch).unwrap();
+        assert!(sc.runtime_overlay_path.is_some());
+        assert!(sc.runtime_overlay_verity_path.is_some());
+        assert!(sc.runtime_overlay_roothash.is_some());
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
+    }
+
+    #[test]
+    fn libkrun_with_cached_overlay_populates_all_three_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap();
+        assert!(sc.runtime_overlay_path.is_some());
+        assert!(sc.runtime_overlay_verity_path.is_some());
+        assert!(sc.runtime_overlay_roothash.is_some());
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
+    }
+
+    #[test]
+    fn unsupported_backend_never_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay(&mut sc, "mock", &resolver, arch).unwrap();
+        assert!(sc.runtime_overlay_path.is_none());
+        assert!(sc.runtime_overlay_roothash.is_none());
+    }
+
+    #[test]
+    fn firecracker_cold_cache_leaves_fields_unset_non_fatal() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap(); // empty cache
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap();
+        assert!(
+            sc.runtime_overlay_path.is_none(),
+            "cold cache must not attach (legacy boot)"
+        );
+    }
+
+    #[test]
+    fn firecracker_cold_cache_errors_when_overlay_is_required() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap(); // empty cache
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        let err = attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap_err();
+        assert!(err.to_string().contains("runtime overlay required"));
+    }
+
+    #[test]
+    fn hvf_cold_cache_errors_when_overlay_is_required() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        let err = attach_runtime_overlay(&mut sc, "hvf", &resolver, arch).unwrap_err();
+        assert!(err.to_string().contains("runtime overlay required"));
+        assert!(err.to_string().contains("hvf"));
+    }
+
+    #[test]
+    fn libkrun_cold_cache_errors_when_overlay_is_required() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        let err = attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap_err();
+        assert!(err.to_string().contains("runtime overlay required"));
+        assert!(err.to_string().contains("libkrun"));
+    }
+
+    #[test]
+    fn qemu_with_cached_overlay_populates_all_three_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay(&mut sc, "qemu", &resolver, arch).unwrap();
+        assert!(sc.runtime_overlay_path.is_some());
+        assert!(sc.runtime_overlay_verity_path.is_some());
+        assert!(sc.runtime_overlay_roothash.is_some());
+    }
+
+    #[test]
+    fn qemu_cold_cache_errors_when_overlay_is_required() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        let err = attach_runtime_overlay(&mut sc, "qemu", &resolver, arch).unwrap_err();
+        assert!(err.to_string().contains("runtime overlay required"));
+        assert!(err.to_string().contains("qemu"));
+    }
+
+    #[test]
+    fn required_overlay_cache_miss_downloads_overlay_and_attaches_it() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let cache = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+        env.set("MVM_HOME", cache.path());
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
+
+        let release_root = tempfile::tempdir().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_release_fixture(release_root.path(), version, arch);
+        env.set(
+            "MVM_OVERLAY_BASE_URL",
+            format!("file://{}", release_root.path().display()),
+        );
+
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", None).unwrap();
+
+        let layout = RuntimeOverlayResolver::new(cache.path().join("cache"), version.to_string())
+            .layout(&arch.to_string());
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(version));
+        assert_eq!(
+            sc.runtime_overlay_path.as_deref(),
+            Some(layout.overlay_ext4.to_str().expect("utf-8 overlay path"))
+        );
+        assert_eq!(
+            sc.runtime_overlay_verity_path.as_deref(),
+            Some(layout.sidecar.to_str().expect("utf-8 verity path"))
+        );
+        assert_eq!(
+            sc.runtime_overlay_roothash.as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+        assert!(layout.overlay_ext4.is_file());
+        assert!(layout.sidecar.is_file());
+        assert!(layout.roothash_file.is_file());
+        assert!(layout.version_file.is_file());
+    }
+
+    #[test]
+    fn runtime_overlay_acquire_mode_honors_explicit_download_override() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
+        assert_eq!(
+            runtime_overlay_acquire_mode(),
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+        );
+    }
+
+    #[test]
+    fn runtime_overlay_acquire_mode_honors_explicit_build_override() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "build");
+        assert_eq!(
+            runtime_overlay_acquire_mode(),
+            RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+        );
+    }
+
+    #[test]
+    fn attach_runtime_overlay_if_cached_version_uses_requested_cached_version() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", dir.path());
+
+        let current = env!("CARGO_PKG_VERSION");
+        let pinned = if current == "0.17.0" {
+            "0.17.1"
+        } else {
+            "0.17.0"
+        };
+        let arch = GuestArch::host();
+        seed_cache(&dir.path().join("cache"), current, arch);
+        seed_cache(&dir.path().join("cache"), pinned, arch);
+
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(pinned)).unwrap();
+
+        let expected_layout =
+            RuntimeOverlayResolver::new(dir.path().join("cache"), pinned.to_string())
+                .layout(&arch.to_string());
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(pinned));
+        assert_eq!(
+            sc.runtime_overlay_path.as_deref(),
+            Some(
+                expected_layout
+                    .overlay_ext4
+                    .to_str()
+                    .expect("utf-8 overlay path")
+            )
+        );
+        assert_eq!(
+            sc.runtime_overlay_verity_path.as_deref(),
+            Some(expected_layout.sidecar.to_str().expect("utf-8 verity path"))
+        );
+    }
+
+    #[test]
+    fn attach_runtime_overlay_if_cached_version_refuses_drift_to_other_cached_version() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", dir.path());
+
+        let current = env!("CARGO_PKG_VERSION");
+        let missing = if current == "0.17.0" {
+            "0.17.1"
+        } else {
+            "0.17.0"
+        };
+        let arch = GuestArch::host();
+        seed_cache(&dir.path().join("cache"), current, arch);
+
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        let err = attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(missing))
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("required for this boot"), "{msg}");
+        assert!(msg.contains(missing), "{msg}");
+        assert!(
+            sc.runtime_overlay_path.is_none(),
+            "missing pinned version must not attach"
+        );
+        assert!(
+            sc.runtime_overlay_version.is_none(),
+            "missing pinned version must not silently drift to a different cache entry"
+        );
+    }
+
+    #[test]
+    fn attach_runtime_overlay_if_cached_prefers_current_host_version_for_plain_boot() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", dir.path());
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
+
+        let current = env!("CARGO_PKG_VERSION");
+        let older = if current == "0.17.0" {
+            "0.16.9"
+        } else {
+            "0.17.0"
+        };
+        let arch = GuestArch::host();
+        seed_cache(&dir.path().join("cache"), current, arch);
+        seed_cache(&dir.path().join("cache"), older, arch);
+
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
+
+        let expected_layout =
+            RuntimeOverlayResolver::new(dir.path().join("cache"), current.to_string())
+                .layout(&arch.to_string());
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(current));
+        assert_eq!(
+            sc.runtime_overlay_path.as_deref(),
+            Some(
+                expected_layout
+                    .overlay_ext4
+                    .to_str()
+                    .expect("utf-8 overlay path")
+            )
+        );
+    }
+
+    #[test]
+    fn attach_runtime_overlay_if_cached_ignores_stale_recorded_version_on_plain_boot() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", dir.path());
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
+
+        let current = env!("CARGO_PKG_VERSION");
+        let stale = if current == "0.17.0" {
+            "0.16.9"
+        } else {
+            "0.17.0"
+        };
+        let arch = GuestArch::host();
+        seed_cache(&dir.path().join("cache"), current, arch);
+        seed_cache(&dir.path().join("cache"), stale, arch);
+
+        let mut sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+            runtime_overlay_version: Some(stale.to_string()),
+            ..VmStartConfig::default()
+        };
+        attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
+
+        let expected_layout =
+            RuntimeOverlayResolver::new(dir.path().join("cache"), current.to_string())
+                .layout(&arch.to_string());
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(current));
+        assert_eq!(
+            sc.runtime_overlay_path.as_deref(),
+            Some(
+                expected_layout
+                    .overlay_ext4
+                    .to_str()
+                    .expect("utf-8 overlay path")
+            )
+        );
+    }
+
+    #[test]
+    fn prefer_overlay_reports_fallback_when_overlay_not_attached() {
+        let sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
+            ..VmStartConfig::default()
+        };
+        assert_eq!(
+            resolve_runtime_source_status(&sc),
+            RuntimeSourceStatus::OverlayPreferredFallbackUsed
+        );
+    }
+
+    #[test]
+    fn prefer_overlay_reports_overlay_when_all_artifacts_attached() {
+        let sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
+            runtime_overlay_path: Some("/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/overlay.verity".into()),
+            runtime_overlay_roothash: Some("a".repeat(64)),
+            ..VmStartConfig::default()
+        };
+        assert_eq!(
+            resolve_runtime_source_status(&sc),
+            RuntimeSourceStatus::OverlayPreferred
+        );
+    }
+
+    #[test]
+    fn rootfs_only_reports_rootfs_only_by_policy() {
+        let sc = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+            ..VmStartConfig::default()
+        };
+        assert_eq!(
+            resolve_runtime_source_status(&sc),
+            RuntimeSourceStatus::RootfsOnlyByPolicy
+        );
+    }
+}
+
