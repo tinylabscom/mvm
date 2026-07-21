@@ -436,13 +436,13 @@ fn quickstart_docs_lead_with_image_backed_run() {
     let image_heading = content
         .find("## 1. Run an OCI Image")
         .expect("quickstart must lead with an OCI image run section");
-    let dev_heading = content
-        .find("## 2. Launch the Dev Environment")
-        .expect("quickstart must still document the dev environment");
+    let builder_heading = content
+        .find("## 2. Prepare the Builder VM")
+        .expect("quickstart must still document the builder VM after the image path");
 
     assert!(
-        image_heading < dev_heading,
-        "quickstart must put the image-backed one-shot path before dev/flake workflows"
+        image_heading < builder_heading,
+        "quickstart must put the image-backed one-shot path before the builder/flake workflows"
     );
     assert!(
         content.contains("mvmctl machine run --image alpine -- uname -a")
