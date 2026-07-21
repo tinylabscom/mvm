@@ -89,7 +89,6 @@ pub(super) fn shares_from_volume_cfg(
         .collect()
 }
 
-
 fn generated_policy_ref(tenant: &str, vm_name: &str) -> Result<String> {
     fn valid_component(s: &str) -> bool {
         !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains(':')
@@ -106,7 +105,6 @@ fn generated_policy_ref(tenant: &str, vm_name: &str) -> Result<String> {
     }
     Ok(format!("{tenant}:{vm_name}"))
 }
-
 
 pub(super) fn generated_policy_bundle_for_network_policy(
     tenant: &str,
@@ -233,7 +231,6 @@ pub(super) fn generated_policy_bundle_for_network_policy(
     Ok(Some((policy_ref, bundle)))
 }
 
-
 #[cfg(test)]
 mod bundle_pin_tests {
     use super::*;
@@ -290,7 +287,6 @@ mod bundle_pin_tests {
         (archive, key_id)
     }
 
-
     #[test]
     fn bundle_pin_from_archive_recovers_signature_and_sha() {
         let sk = {
@@ -306,7 +302,6 @@ mod bundle_pin_tests {
         let sig_arr = pin.signature_bytes().expect("base64 decodes");
         assert_eq!(sig_arr.len(), 64);
     }
-
 
     #[test]
     fn bundle_pin_from_archive_missing_signature_errors() {
@@ -336,7 +331,6 @@ mod bundle_pin_tests {
         assert!(msg.contains("manifest.sig"), "msg was: {msg}");
     }
 
-
     #[test]
     fn in_memory_bundle_resolver_returns_archive_bytes() {
         let bytes = b"hello-archive".to_vec();
@@ -344,5 +338,4 @@ mod bundle_pin_tests {
         let out = mvm_core::plan::BundleResolver::resolve(&resolver, "anything").unwrap();
         assert_eq!(out, bytes);
     }
-
 }

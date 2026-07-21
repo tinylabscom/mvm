@@ -3,7 +3,7 @@
 //! into a chain-signed emitter, and the `plan.policy_resolved` /
 //! `plan.failed` event helpers admission wires around it.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::commands::vm::audit_chain::{AuditEmitter, default_audit_dir};
 use crate::commands::vm::policy_resolver::ResolveError;
@@ -17,7 +17,6 @@ pub(super) fn build_default_audit_emitter(
         None => AuditEmitter::new(signing_key),
     }
 }
-
 
 pub(super) fn build_policy_audit_emitter(
     signing_key: ed25519_dalek::SigningKey,
@@ -36,7 +35,6 @@ pub(super) fn build_policy_audit_emitter(
     }
 }
 
-
 pub(super) fn emit_policy_resolved(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
@@ -46,7 +44,6 @@ pub(super) fn emit_policy_resolved(
         tracing::warn!(error = %e, "audit emit_policy_resolved failed (non-fatal)");
     }
 }
-
 
 pub(super) fn emit_policy_resolve_failure(
     plan: &mvm_core::plan::ExecutionPlan,
@@ -72,7 +69,6 @@ pub(super) fn emit_policy_resolve_failure(
     }
 }
 
-
 pub(super) fn emit_policy_audit_invalid(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,
@@ -86,15 +82,15 @@ pub(super) fn emit_policy_audit_invalid(
     }
 }
 
-
 #[cfg(test)]
 mod policy_audit_admission_tests {
     use super::*;
     use mvm_core::plan::SynthesisInput;
     use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
+    use std::io::Write;
 
-    use crate::commands::vm::host_signer::load_or_init_at;
     use super::super::admission::resolve_policy_for_admission;
+    use crate::commands::vm::host_signer::load_or_init_at;
 
     fn write_rootfs(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join("rootfs.ext4");
@@ -102,7 +98,6 @@ mod policy_audit_admission_tests {
         f.write_all(bytes).expect("write rootfs");
         path
     }
-
 
     #[test]
     fn admission_emits_policy_resolved_live_when_bundle_parses() {
@@ -212,7 +207,6 @@ chain_signing = true
         );
     }
 
-
     #[test]
     fn admission_uses_bundle_audit_file_destination() {
         use mvm_core::plan::PolicyRef;
@@ -321,7 +315,6 @@ stream_destinations = ["file://{}"]
         );
     }
 
-
     #[test]
     fn admission_audits_rejected_unsigned_policy_audit() {
         use mvm_core::plan::PolicyRef;
@@ -417,7 +410,6 @@ chain_signing = false
         assert!(content.contains("chain_signing"));
     }
 
-
     #[test]
     fn admission_fails_when_policy_bundle_missing() {
         // A plan whose refs name `acme:nope` but no bundle exists on
@@ -492,7 +484,6 @@ chain_signing = false
             "audit chain must classify the failure: {content}"
         );
     }
-
 
     #[test]
     fn admission_fails_when_policy_bundle_has_unknown_disabled_inspector() {
@@ -590,7 +581,6 @@ disabled_inspectors = ["ssrf_guarrd"]
             "audit chain must classify the failure: {content}"
         );
     }
-
 
     #[test]
     fn admission_fails_when_policy_bundle_has_bad_l4_cidr() {
@@ -694,5 +684,4 @@ port_hi  = 443
             "audit chain must classify the failure: {content}"
         );
     }
-
 }

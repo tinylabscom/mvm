@@ -23,13 +23,15 @@ use super::audit::{
     build_default_audit_emitter, build_policy_audit_emitter, emit_policy_audit_invalid,
     emit_policy_resolve_failure, emit_policy_resolved,
 };
+#[cfg(any(feature = "mcp", test))]
+use super::oci_persist::persists_plan_before_start;
 use super::policy::{
     InMemoryBundleResolver, bundle_pin_from_archive, generated_policy_bundle_for_network_policy,
 };
 
-pub(super) const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
+pub(in crate::commands::vm) const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
 
-pub(super) struct AdmitPlanForBootParams<'a> {
+pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     pub tenant: &'a str,
     pub vm_name: &'a str,
     pub backend_name: &'a str,
@@ -97,7 +99,6 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     pub restrict_agent_verbs: bool,
 }
 
-
 /// Bundle of artifacts produced by a successful admission: the
 /// admitted plan + the audit emitter wired against the host signer.
 /// Callers thread this through `cmd_run` so the `plan.launched` and
@@ -108,13 +109,13 @@ pub(super) struct AdmitPlanForBootParams<'a> {
 /// xtask `check-no-display-on-secret-types` lint would catch a
 /// derived `Debug` that forwarded; the manual impl prints only the
 /// plan_id + signer_id and elides the emitter's signing material.
-pub(super) struct AdmissionContext {
-    pub(super) admitted: AdmittedPlan,
-    pub(super) emitter: AuditEmitter,
+pub(in crate::commands::vm) struct AdmissionContext {
+    pub(in crate::commands::vm) admitted: AdmittedPlan,
+    pub(in crate::commands::vm) emitter: AuditEmitter,
     /// The resolved tenant `PolicyBundle` (Slice 3 (b)) the bridge enforces
     /// per-tenant L4 egress against; `None` for a local-default plan.
-    pub(super) policy_bundle: Option<PolicyBundle>,
-    pub(super) host_signer_public_path: std::path::PathBuf,
+    pub(in crate::commands::vm) policy_bundle: Option<PolicyBundle>,
+    pub(in crate::commands::vm) host_signer_public_path: std::path::PathBuf,
 }
 
 // allow(secret-debug): hand-written Debug elides the AuditEmitter's
@@ -129,7 +130,6 @@ impl std::fmt::Debug for AdmissionContext {
             .finish()
     }
 }
-
 
 /// Run admission (`synthesize → sign → verify → check_window →
 /// nonce`) right before a backend `start()`. Called from every
@@ -157,7 +157,7 @@ impl std::fmt::Debug for AdmissionContext {
 /// the rest of the supervisor surface uses). Once `mvm-hostd` lifts
 /// the supervisor in-process, the proper `mvm_core::crypto::image_verify`
 /// signed-manifest path can replace this.
-pub(super) fn admit_plan_for_boot(
+pub(in crate::commands::vm) fn admit_plan_for_boot(
     p: AdmitPlanForBootParams<'_>,
 ) -> Result<Option<AdmissionContext>> {
     if p.no_supervisor {
@@ -242,13 +242,15 @@ pub(super) fn admit_plan_for_boot(
         redaction: p.redaction.clone(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         audit_labels: Default::default(),
-        agent_verbs: crate::commands::vm::agent_verbs::parse_agent_verb_override(&p.agent_verb_override)?
-            .or_else(|| {
-                crate::commands::vm::agent_verbs::default_agent_verbs(
-                    p.restrict_agent_verbs,
-                    !p.shares.is_empty(),
-                )
-            }),
+        agent_verbs: crate::commands::vm::agent_verbs::parse_agent_verb_override(
+            &p.agent_verb_override,
+        )?
+        .or_else(|| {
+            crate::commands::vm::agent_verbs::default_agent_verbs(
+                p.restrict_agent_verbs,
+                !p.shares.is_empty(),
+            )
+        }),
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
@@ -385,8 +387,7 @@ pub(super) fn admit_plan_for_boot(
     }))
 }
 
-
-pub(super) fn guest_profile_for_boot(
+pub(in crate::commands::vm) fn guest_profile_for_boot(
     is_dev_mode: bool,
     rootfs_path: &std::path::Path,
 ) -> AgentProfile {
@@ -396,7 +397,6 @@ pub(super) fn guest_profile_for_boot(
         AgentProfile::SealedProd
     }
 }
-
 
 fn security_policy_for_profile(profile: AgentProfile) -> SecurityPolicy {
     match profile {
@@ -408,7 +408,6 @@ fn security_policy_for_profile(profile: AgentProfile) -> SecurityPolicy {
         },
     }
 }
-
 
 pub(super) fn attach_guest_security_policy_config(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
@@ -429,8 +428,7 @@ pub(super) fn attach_guest_security_policy_config(
     Ok(())
 }
 
-
-pub(super) fn attach_guest_boot_config_for_plan(
+pub(in crate::commands::vm) fn attach_guest_boot_config_for_plan(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     plan: &mvm_core::plan::ExecutionPlan,
     host_signer_public_path: &std::path::Path,
@@ -439,7 +437,6 @@ pub(super) fn attach_guest_boot_config_for_plan(
     attach_host_signer_pubkey_config_for_plan(start_config, plan, host_signer_public_path)?;
     attach_guest_security_policy_config(start_config, profile)
 }
-
 
 pub(super) fn attach_guest_boot_config(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
@@ -453,7 +450,6 @@ pub(super) fn attach_guest_boot_config(
         profile,
     )
 }
-
 
 pub(super) fn attach_host_signer_pubkey_config_for_plan(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
@@ -495,7 +491,6 @@ pub(super) fn attach_host_signer_pubkey_config_for_plan(
         });
     Ok(())
 }
-
 
 /// Build the boot-time admission hook for an **untrusted transient run** —
 /// deny-all egress, no secrets, tenant `local`. The locally-signed
@@ -577,13 +572,11 @@ fn untrusted_transient_admit_in(
     }
 }
 
-
 #[derive(Debug)]
 pub(super) struct PolicyAdmissionResolution {
     pub(super) slots_mode: &'static str,
     pub(super) audit: Option<mvm_core::policy::AuditPolicy>,
 }
-
 
 /// Run the policy resolver against the admitted plan and return the
 /// policy-derived audit configuration for emitter construction.
@@ -625,7 +618,6 @@ pub(super) fn resolve_policy_for_admission(
     }
 }
 
-
 /// Emit `plan.launched` against the supplied admission context. No-op
 /// when admission was skipped (`--no-supervisor`). Tolerates emission
 /// failure with a `tracing::warn` so a flaky audit fs can't block a
@@ -637,14 +629,15 @@ pub(super) fn resolve_policy_for_admission(
 /// Plan persistence failure is non-fatal — the launch already
 /// succeeded; the cost is that lifecycle audit will be unbound on
 /// this VM until the next launch.
-pub(super) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
+pub(in crate::commands::vm) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
     let Some(ctx) = ctx else { return };
     if let Err(e) = ctx.emitter.emit_launched(&ctx.admitted.plan, backend) {
         tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
     }
-    if let Err(e) =
-        crate::commands::vm::plan_persist::write_plan(&ctx.admitted.plan.workload.0, &ctx.admitted.plan)
-    {
+    if let Err(e) = crate::commands::vm::plan_persist::write_plan(
+        &ctx.admitted.plan.workload.0,
+        &ctx.admitted.plan,
+    ) {
         tracing::warn!(
             error = %e,
             "persisting admitted plan to ~/.mvm/vms/<vm>/plan.json failed (non-fatal)"
@@ -652,14 +645,13 @@ pub(super) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
     }
 }
 
-
 /// Record the resolved boot posture (which rootfs strategy the run-path tier
 /// gate actually selected) on the chain-signed admission log. Fires alongside
 /// `plan.launched`, reflecting the decision `run_inner` made — never a
 /// re-derivation — so a virtiofs-root dev boot and an Option-B block boot are
 /// distinguishable in the tamper-evident chain. No-op when admission was
 /// skipped (no plan to bind to).
-pub(super) fn emit_boot_posture_if(
+pub(in crate::commands::vm) fn emit_boot_posture_if(
     ctx: &Option<AdmissionContext>,
     strategy: mvm_build::run_image::RootStrategy,
     runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
@@ -678,7 +670,6 @@ pub(super) fn emit_boot_posture_if(
     }
 }
 
-
 /// Tier A.1 admission enforcement: refuse to boot if any volume about to
 /// be attached isn't named in the verified `ExecutionPlan.shares`. No-op
 /// when admission was skipped (no plan to enforce against). Called right
@@ -695,19 +686,21 @@ pub(super) fn enforce_shares_if(
     Ok(())
 }
 
-
 /// Emit `plan.failed` against the supplied admission context. No-op
 /// when admission was skipped. `class` is a short grep-friendly tag
 /// (e.g. `backend-start`, `snapshot-restore`); `err` becomes the
 /// rendered error chain.
-pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &anyhow::Error) {
+pub(in crate::commands::vm) fn emit_failed_if(
+    ctx: &Option<AdmissionContext>,
+    class: &str,
+    err: &anyhow::Error,
+) {
     let Some(ctx) = ctx else { return };
     let msg = format!("{err:#}");
     if let Err(e) = ctx.emitter.emit_failed(&ctx.admitted.plan, class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
     }
 }
-
 
 #[cfg(test)]
 mod host_signer_pubkey_config_tests {
@@ -785,7 +778,6 @@ mod host_signer_pubkey_config_tests {
     }
 }
 
-
 // ── admit_plan_for_boot tests ────────────────────────────
 //
 // These tests stay scoped to the helper rather than `cmd_run` itself
@@ -807,7 +799,6 @@ mod admit_plan_tests {
         f.write_all(bytes).expect("write rootfs");
         path
     }
-
 
     #[test]
     fn no_supervisor_short_circuits_to_none() {
@@ -843,7 +834,6 @@ mod admit_plan_tests {
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
     }
-
 
     #[test]
     fn admits_real_rootfs_and_returns_plan_id() {
@@ -901,7 +891,6 @@ mod admit_plan_tests {
         assert!(content.contains(&ctx.admitted.plan_id.0));
     }
 
-
     // The shared untrusted-transient admit closure (used by both `mvmctl run`
     // and the MCP code-runner) must produce a real audit substrate — a
     // non-empty `tenant_id` + signed `plan_json`. That substrate is precisely
@@ -945,7 +934,6 @@ mod admit_plan_tests {
         assert!(chain.contains("plan.admitted"));
     }
 
-
     #[test]
     fn admission_failure_when_rootfs_missing() {
         // sha256_file fails when the file does not exist; the helper
@@ -983,7 +971,6 @@ mod admit_plan_tests {
             "error must name rootfs: {err}"
         );
     }
-
 
     #[test]
     fn two_admissions_in_same_run_produce_distinct_plan_ids() {
@@ -1052,7 +1039,6 @@ mod admit_plan_tests {
         assert_ne!(a1.admitted.plan.nonce, a2.admitted.plan.nonce);
     }
 
-
     #[test]
     fn emit_launched_and_failed_no_op_when_admission_skipped() {
         // emit_*_if must be a no-op when admission was skipped — the
@@ -1066,7 +1052,6 @@ mod admit_plan_tests {
             &anyhow::anyhow!("simulated failure"),
         );
     }
-
 
     #[test]
     fn emit_boot_posture_audits_runtime_source_policy_label() {
@@ -1123,7 +1108,6 @@ mod admit_plan_tests {
             "audit chain must carry runtime_source_policy label from the enum: {content}"
         );
     }
-
 
     // ──────────────────────────────────────────────────────────────
     // Policy resolver wired into admission
@@ -1191,7 +1175,6 @@ mod admit_plan_tests {
         assert!(content.contains(&ctx.admitted.plan_id.0));
     }
 
-
     #[test]
     fn admission_weaves_allow_list_into_signed_generated_policy_bundle() {
         use mvm_core::network_policy::{HostPort, NetworkPolicy};
@@ -1252,7 +1235,6 @@ mod admit_plan_tests {
         );
     }
 
-
     #[test]
     fn admission_weaves_unrestricted_policy_into_signed_generated_policy_bundle() {
         let keys_dir = tempfile::tempdir().unwrap();
@@ -1292,7 +1274,6 @@ mod admit_plan_tests {
         assert_eq!(bundle.egress.mode.as_deref(), Some("open"));
         assert!(bundle.network.l4.is_empty());
     }
-
 
     #[test]
     fn up_populates_agent_verbs_default_and_override() {

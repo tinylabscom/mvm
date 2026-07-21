@@ -16,25 +16,30 @@ mod policy;
 mod runtime_source;
 
 pub(super) use admission::{
-    AdmissionContext, AdmitPlanForBootParams, SECURITY_POLICY_FILENAME, admit_plan_for_boot,
-    attach_guest_boot_config, attach_guest_boot_config_for_plan,
-    attach_guest_security_policy_config, attach_host_signer_pubkey_config_for_plan,
-    emit_boot_posture_if, emit_failed_if, emit_launched_if, guest_profile_for_boot,
+    AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot,
+    attach_guest_boot_config_for_plan, emit_boot_posture_if, emit_failed_if, emit_launched_if,
+    guest_profile_for_boot,
 };
+// Referenced only from `invoke.rs`'s test module (asserting the attached
+// security-policy config-drive file name) — cfg-gated so a non-test build
+// doesn't carry an unused re-export.
+#[cfg(test)]
+pub(super) use admission::SECURITY_POLICY_FILENAME;
 #[cfg(feature = "mcp")]
 pub(in crate::commands) use admission::untrusted_transient_admit;
 
-pub(super) use kernel::{resolve_pinned_kernel, resolve_workload_kernel};
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
+pub(super) use kernel::resolve_workload_kernel;
 
-pub(crate) use oci_persist::{persistent_oci_effective_initrd, persists_plan_before_start};
 pub(super) use oci_persist::load_workload_ir;
-pub(in crate::commands) use oci_persist::{PersistentImageStartParams, start_persistent_oci_machine};
+pub(in crate::commands) use oci_persist::{
+    PersistentImageStartParams, start_persistent_oci_machine,
+};
+pub(crate) use oci_persist::{persistent_oci_effective_initrd, persists_plan_before_start};
 
 pub(crate) use runtime_source::{
-    RuntimeSourceStatus, attach_runtime_overlay, attach_runtime_overlay_if_cached,
-    attach_runtime_overlay_if_cached_version, emit_runtime_source_status,
-    resolve_runtime_source_status,
+    attach_runtime_overlay_if_cached, attach_runtime_overlay_if_cached_version,
+    emit_runtime_source_status,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -234,4 +239,3 @@ pub(in crate::commands) struct Args {
     #[arg(long = "redact", value_name = "HOST[=audit]")]
     pub redact: Vec<String>,
 }
-

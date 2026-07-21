@@ -18,7 +18,6 @@ use crate::commands::vm::shared::VmStartParams;
 
 use crate::commands::vm::readiness::record_vm_readiness;
 
-
 use super::admission::{
     AdmitPlanForBootParams, admit_plan_for_boot, attach_guest_boot_config, emit_failed_if,
     emit_launched_if, enforce_shares_if, guest_profile_for_boot,
@@ -42,8 +41,7 @@ pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
     matches!(hypervisor, "firecracker" | "libkrun" | "hvf")
 }
 
-
-pub(super) fn load_workload_ir(
+pub(in crate::commands::vm) fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_protocol::ir::Workload>> {
     let Some(ir_path) = workload_ir_path else {
@@ -55,7 +53,6 @@ pub(super) fn load_workload_ir(
         .with_context(|| format!("parsing workload IR at {}", ir_path.display()))?;
     Ok(Some(workload))
 }
-
 
 pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub name: &'a str,
@@ -85,7 +82,6 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub has_ad_hoc_argv: bool,
 }
 
-
 fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) -> bool {
     let runtime_lean = rootfs_path
         .parent()
@@ -100,7 +96,6 @@ fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) 
         mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
     runtime_lean && verity_path.is_some() && roothash.is_some()
 }
-
 
 pub(crate) fn persistent_oci_effective_initrd(
     rootfs_path: &std::path::Path,
@@ -126,7 +121,6 @@ pub(crate) fn persistent_oci_effective_initrd(
     Ok(None)
 }
 
-
 fn register_vm_name(vm_name: &str, network_name: &str) {
     // Through the client boundary: mvm-client owns the host name-registry reach
     // (load → deregister-stale → register → save), so the CLI stays off the
@@ -136,7 +130,6 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
         network_name,
     ));
 }
-
 
 pub(in crate::commands) fn start_persistent_oci_machine(
     params: PersistentImageStartParams<'_>,
@@ -279,7 +272,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     mvm_core::audit_emit!(VmStart, vm: name);
     Ok(())
 }
-
 
 #[cfg(test)]
 mod runtime_source_policy_for_workload_boot_tests {
@@ -523,7 +515,6 @@ mod runtime_source_policy_for_workload_boot_tests {
     }
 }
 
-
 #[cfg(test)]
 mod persists_plan_before_start_tests {
     use super::*;
@@ -543,5 +534,4 @@ mod persists_plan_before_start_tests {
         assert!(!persists_plan_before_start("qemu"));
         assert!(!persists_plan_before_start("mock"));
     }
-
 }

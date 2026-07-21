@@ -29,7 +29,6 @@ impl RuntimeSourceStatus {
     }
 }
 
-
 pub(crate) fn resolve_runtime_source_status(
     start_config: &mvm_core::vm_backend::VmStartConfig,
 ) -> RuntimeSourceStatus {
@@ -53,7 +52,6 @@ pub(crate) fn resolve_runtime_source_status(
     }
 }
 
-
 pub(crate) fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::VmStartConfig) {
     let status = resolve_runtime_source_status(start_config);
     tracing::info!(
@@ -65,7 +63,6 @@ pub(crate) fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::Vm
     ui::info(&format!("Runtime source: {}", status.label()));
 }
 
-
 fn apply_runtime_overlay_artifact(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     artifact: mvm_fs::overlay::RuntimeOverlayArtifact,
@@ -75,7 +72,6 @@ fn apply_runtime_overlay_artifact(
     start_config.runtime_overlay_version = Some(artifact.version);
     start_config.runtime_overlay_roothash = Some(artifact.roothash);
 }
-
 
 /// Attach the verity-sealed runtime overlay by
 /// populating `VmStartConfig`'s overlay fields from the resolver's cache
@@ -115,7 +111,6 @@ pub(crate) fn attach_runtime_overlay(
     }
 }
 
-
 /// Production wrapper: build the resolver from the mvm cache dir + the
 /// running mvmctl version, then attach for `hypervisor`. Called at each
 /// workload-boot `VmStartConfig` construction in [`run`].
@@ -129,7 +124,6 @@ pub(crate) fn attach_runtime_overlay_if_cached(
 ) -> Result<()> {
     attach_runtime_overlay_if_cached_version(start_config, hypervisor, None)
 }
-
 
 pub(crate) fn attach_runtime_overlay_if_cached_version(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
@@ -203,7 +197,6 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
         Err(err) => Err(err),
     }
 }
-
 
 #[cfg(test)]
 mod runtime_overlay_attach_tests {
@@ -841,4 +834,3 @@ mod runtime_overlay_attach_tests {
         );
     }
 }
-

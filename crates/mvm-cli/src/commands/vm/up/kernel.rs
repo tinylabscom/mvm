@@ -11,7 +11,7 @@
 /// Firecracker's direct/manifest boot path already performs this same
 /// fallback; without it here the flake path would refuse a kernel-less
 /// mkGuest workload that the manifest path boots fine.
-pub(super) fn resolve_workload_kernel(
+pub(in crate::commands::vm) fn resolve_workload_kernel(
     vmlinux_path: &str,
     hypervisor: &str,
 ) -> anyhow::Result<String> {
@@ -42,7 +42,6 @@ pub(super) fn resolve_workload_kernel(
     )
 }
 
-
 /// Resolve the locally-built workload kernel from the mvm cache for a
 /// `--kernel-pin` boot. Does not fall back to the image-supplied kernel or
 /// the builder-VM fallback: the pin is explicit, so an absent cache entry
@@ -58,7 +57,6 @@ pub(super) fn resolve_pinned_kernel(
     resolve_pinned_kernel_with(cache_dir, arch, source_checkout, download_published_kernel)
 }
 
-
 #[cfg(feature = "builder-vm")]
 fn download_published_kernel(
     arch: &str,
@@ -67,7 +65,6 @@ fn download_published_kernel(
 ) -> anyhow::Result<()> {
     crate::update::download_kernel(arch, variant, dest)
 }
-
 
 #[cfg(not(feature = "builder-vm"))]
 fn download_published_kernel(
@@ -79,7 +76,6 @@ fn download_published_kernel(
         "kernel-pin: downloading published workload kernels requires mvm-cli's builder-vm feature"
     )
 }
-
 
 fn resolve_pinned_kernel_with<F>(
     cache_dir: &std::path::Path,
@@ -111,7 +107,6 @@ where
     }
 }
 
-
 /// Resolve a `--kernel-pin` request to a concrete workload-kernel path, or
 /// `None` when no pin was requested (the caller then falls back to the image's
 /// own kernel / the default microVM image). The pin selects the locally-built
@@ -127,14 +122,14 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
     } else {
         "x86_64"
     };
-    let source_checkout = crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout();
+    let source_checkout =
+        crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout();
     Ok(Some(resolve_pinned_kernel(
         &cache_dir,
         arch,
         source_checkout,
     )?))
 }
-
 
 pub(super) fn persistent_oci_uses_prod_kernel(
     profile: &str,
@@ -143,7 +138,6 @@ pub(super) fn persistent_oci_uses_prod_kernel(
     profile != "dev"
         || runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
 }
-
 
 #[cfg(test)]
 mod resolve_workload_kernel_tests {
@@ -223,7 +217,6 @@ mod resolve_workload_kernel_tests {
     }
 }
 
-
 #[cfg(test)]
 mod resolve_pinned_kernel_tests {
     use super::*;
@@ -286,4 +279,3 @@ mod resolve_pinned_kernel_tests {
         );
     }
 }
-
