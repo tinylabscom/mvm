@@ -291,6 +291,9 @@ fn update_fod_hash(flake_ref: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // The one test here is macOS-only; keep the glob gated to match, else it is
+    // an unused import when the test compiles out (e.g. the Linux test build).
+    #[cfg(target_os = "macos")]
     use super::*;
 
     /// `update_fod_hash` needs a real Linux builder to run `nix build`
