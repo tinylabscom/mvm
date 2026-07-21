@@ -1,0 +1,923 @@
+//! Security posture checks folded in from the old `mvmctl security` verb:
+//! audit log, host FDE, data-dir/socket/snapshot modes, and signing.
+
+use anyhow::Result;
+
+use super::Check;
+use super::builder::dev_vm_socket_path;
+use mvm_core::platform::{self, Platform};
+
+pub(super) fn security_audit_log_check() -> Check {
+    let path = mvm_core::audit::default_audit_log();
+    let exists = std::path::Path::new(&path).exists();
+    Check {
+        name: "audit log",
+        category: "security",
+        ok: true, // informational
+        info: if exists {
+            format!("present at {path}")
+        } else {
+            format!("not yet created at {path}")
+        },
+    }
+}
+
+/// Host full-disk-encryption check for encryption at rest.
+///
+/// `LocalBackend` volumes rely on host FDE for at-rest protection (we
+/// deliberately don't roll our own per-volume crypto on dev boxes).
+/// On a dev host this check is **informational/warning-only** — the
+/// `ok` flag stays `true` so a non-FDE laptop can still run mvmctl,
+/// but the report surfaces the gap so users can enable FileVault /
+/// LUKS before relying on local volumes for sensitive data.
+///
+/// On mvmd workers the analogous check is **enforced** (refuses
+/// `LocalVirtiofs` bucket creation when FDE is absent).
+pub(super) fn security_host_fde_check() -> Check {
+    let detection = detect_host_fde_status();
+    Check {
+        name: "host FDE (volumes at-rest)",
+        category: "security",
+        ok: true, // warn-only on a dev box
+        info: detection.info,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostFdeStatus {
+    pub(crate) enabled: bool,
+    pub(crate) info: String,
+}
+
+impl HostFdeStatus {
+    fn enabled(info: impl Into<String>) -> Self {
+        Self {
+            enabled: true,
+            info: info.into(),
+        }
+    }
+
+    fn not_enabled(info: impl Into<String>) -> Self {
+        Self {
+            enabled: false,
+            info: info.into(),
+        }
+    }
+}
+
+/// Enforce encrypted backing for a LocalBackend volume mount.
+///
+/// Local virtio-fs volumes are plaintext while mounted in the guest, so the
+/// backing directory itself must live on an encrypted filesystem or encrypted
+/// device. Unknown detection fails closed here because mounting the volume is
+/// the point where mvm would otherwise expose sensitive local data without the
+/// documented at-rest guarantee.
+pub(crate) fn require_local_volume_host_path_encrypted(path: &std::path::Path) -> Result<()> {
+    let status = detect_host_path_encryption_status(path);
+    if status.enabled {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "LocalBackend volume mounts require the mounted host directory to live \
+         on encrypted backing storage. {}",
+        status.info
+    )
+}
+
+pub(crate) fn detect_host_path_encryption_status(path: &std::path::Path) -> HostFdeStatus {
+    let plat = platform::current();
+    if matches!(plat, Platform::MacOS) {
+        match std::process::Command::new("diskutil")
+            .arg("info")
+            .arg(path)
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                parse_macos_diskutil_encryption_status(path, &stdout)
+            }
+            _ => HostFdeStatus::not_enabled(format!(
+                "could not determine encryption state for {} (diskutil unavailable)",
+                path.display()
+            )),
+        }
+    } else if matches!(plat, Platform::LinuxNative | Platform::LinuxNoKvm) {
+        match std::process::Command::new("findmnt")
+            .args(["-no", "SOURCE", "-T"])
+            .arg(path)
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                match std::process::Command::new("lsblk")
+                    .args(["-no", "TYPE", &dev])
+                    .output()
+                {
+                    Ok(types) if types.status.success() => {
+                        let s = String::from_utf8_lossy(&types.stdout);
+                        parse_linux_volume_backing_types(path, &dev, &s)
+                    }
+                    _ => HostFdeStatus::not_enabled(format!(
+                        "could not inspect block-device type chain for {} ({dev})",
+                        path.display()
+                    )),
+                }
+            }
+            _ => HostFdeStatus::not_enabled(format!(
+                "could not determine backing device for {} (findmnt unavailable)",
+                path.display()
+            )),
+        }
+    } else {
+        HostFdeStatus::not_enabled("unsupported platform for encrypted-volume detection")
+    }
+}
+
+/// Best-effort detection of host full-disk encryption.
+///
+/// macOS: `fdesetup status` returns "FileVault is On." when enabled.
+/// Linux: `lsblk -no TYPE / 2>&1 | grep crypt` succeeds when the root
+/// FS sits on a dm-crypt mapping. Both checks fail closed (return
+/// "unknown") if the underlying tool is missing.
+pub(crate) fn detect_host_fde_status() -> HostFdeStatus {
+    let plat = platform::current();
+    if matches!(plat, Platform::MacOS) {
+        match std::process::Command::new("fdesetup")
+            .arg("status")
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                parse_filevault_status(&stdout)
+            }
+            Ok(_) | Err(_) => HostFdeStatus::not_enabled(
+                "could not determine FileVault state (fdesetup unavailable)",
+            ),
+        }
+    } else if matches!(plat, Platform::LinuxNative | Platform::LinuxNoKvm) {
+        match std::process::Command::new("findmnt")
+            .args(["-no", "SOURCE", "/"])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                match std::process::Command::new("lsblk")
+                    .args(["-no", "TYPE", &dev])
+                    .output()
+                {
+                    Ok(types) if types.status.success() => {
+                        let s = String::from_utf8_lossy(&types.stdout);
+                        parse_linux_block_types(&dev, &s)
+                    }
+                    _ => HostFdeStatus::not_enabled(format!(
+                        "could not inspect type chain for {dev}"
+                    )),
+                }
+            }
+            _ => {
+                HostFdeStatus::not_enabled("could not determine root device (findmnt unavailable)")
+            }
+        }
+    } else {
+        HostFdeStatus::not_enabled("unsupported platform for FDE detection")
+    }
+}
+
+fn parse_filevault_status(stdout: &str) -> HostFdeStatus {
+    if stdout.contains("FileVault is On") {
+        HostFdeStatus::enabled("FileVault enabled (LocalBackend volumes encrypted at rest)")
+    } else {
+        HostFdeStatus::not_enabled(format!(
+            "FileVault appears OFF — run `sudo fdesetup enable` before storing \
+             sensitive data in LocalBackend volumes ({})",
+            stdout.trim()
+        ))
+    }
+}
+
+fn parse_linux_block_types(dev: &str, types: &str) -> HostFdeStatus {
+    if types.lines().any(|l| l.trim() == "crypt") {
+        HostFdeStatus::enabled(format!(
+            "root device {dev} sits on a dm-crypt mapping (LUKS enabled; \
+             LocalBackend volumes encrypted at rest)"
+        ))
+    } else {
+        HostFdeStatus::not_enabled(format!(
+            "root device {dev} does NOT appear to be encrypted — enable LUKS \
+             on root before storing sensitive data in LocalBackend volumes"
+        ))
+    }
+}
+
+fn parse_linux_volume_backing_types(
+    path: &std::path::Path,
+    dev: &str,
+    types: &str,
+) -> HostFdeStatus {
+    if types.lines().any(|l| l.trim() == "crypt") {
+        HostFdeStatus::enabled(format!(
+            "{} is backed by {dev}, which sits on a dm-crypt/LUKS mapping",
+            path.display()
+        ))
+    } else {
+        HostFdeStatus::not_enabled(format!(
+            "{} is backed by {dev}, which does NOT appear to sit on a \
+             dm-crypt/LUKS mapping",
+            path.display()
+        ))
+    }
+}
+
+fn parse_macos_diskutil_encryption_status(
+    path: &std::path::Path,
+    diskutil_output: &str,
+) -> HostFdeStatus {
+    for line in diskutil_output.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().to_ascii_lowercase();
+        let encrypted = value.starts_with("yes") || value.starts_with("encrypted");
+        if matches!(key, "FileVault" | "Encrypted") && encrypted {
+            return HostFdeStatus::enabled(format!(
+                "{} is on a macOS volume reported as encrypted ({key}: {})",
+                path.display(),
+                value
+            ));
+        }
+    }
+    HostFdeStatus::not_enabled(format!(
+        "{} is not on a macOS volume reported as encrypted by diskutil",
+        path.display()
+    ))
+}
+
+/// The mvm root (`mvm_home`) should be mode 0700 — it is the single
+/// tree the security model owns; every subdirectory inherits its
+/// privacy from this boundary.
+pub(super) fn security_data_dir_mode_check() -> Check {
+    let dir = mvm_core::config::mvm_home();
+    let Ok(meta) = std::fs::symlink_metadata(&dir) else {
+        return Check {
+            name: "data dir mode",
+            category: "security",
+            ok: false,
+            info: format!("not present at {dir} — run `mvmctl bootstrap`"),
+        };
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        let expected = 0o700;
+        Check {
+            name: "data dir mode",
+            category: "security",
+            ok: mode == expected,
+            info: if mode == expected {
+                format!("0{mode:o} at {dir}")
+            } else {
+                format!("expected 0{expected:o}, got 0{mode:o} at {dir}")
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        Check {
+            name: "data dir mode",
+            category: "security",
+            ok: true,
+            info: "non-Unix host; mode check skipped".to_string(),
+        }
+    }
+}
+
+/// Dev VM vsock proxy socket should be mode 0700.
+pub(super) fn security_proxy_socket_mode_check() -> Check {
+    let path = dev_vm_socket_path();
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return Check {
+            name: "vsock socket mode",
+            category: "security",
+            ok: true,
+            info: format!("dev VM not running (no socket at {path})"),
+        };
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        let expected = 0o700;
+        Check {
+            name: "vsock socket mode",
+            category: "security",
+            ok: mode == expected,
+            info: if mode == expected {
+                format!("0{mode:o}")
+            } else {
+                format!(
+                    "expected 0{expected:o}, got 0{mode:o} — same-host other users may have access"
+                )
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        Check {
+            name: "vsock socket mode",
+            category: "security",
+            ok: true,
+            info: "non-Unix host; mode check skipped".to_string(),
+        }
+    }
+}
+
+/// Cached pre-built dev image presence (informational; absence triggers
+/// a hash-verified download).
+pub(super) fn security_dev_image_check() -> Check {
+    let version = env!("CARGO_PKG_VERSION");
+    let prebuilt_dir = format!("{}/prebuilt/v{version}", mvm_core::config::mvm_share_dir());
+    let kernel = format!("{prebuilt_dir}/vmlinux");
+    let rootfs = format!("{prebuilt_dir}/rootfs.ext4");
+    let cached = std::path::Path::new(&kernel).exists() && std::path::Path::new(&rootfs).exists();
+    Check {
+        name: "pre-built dev image",
+        category: "security",
+        ok: true,
+        info: if cached {
+            format!("cached at {prebuilt_dir}")
+        } else {
+            "not cached; next `mvmctl bootstrap` will download + hash-verify".to_string()
+        },
+    }
+}
+
+/// `deny.toml` at the workspace root (supply-chain policy).
+pub(super) fn security_deny_config_check() -> Check {
+    let cwd = std::env::current_dir().ok();
+    let found = cwd.as_deref().and_then(|start| {
+        let mut cur: Option<&std::path::Path> = Some(start);
+        while let Some(p) = cur {
+            if p.join("deny.toml").exists() && p.join("Cargo.toml").exists() {
+                return Some(p.to_path_buf());
+            }
+            cur = p.parent();
+        }
+        None
+    });
+    Check {
+        name: "cargo-deny policy",
+        category: "security",
+        ok: true,
+        info: match found {
+            Some(p) => format!("deny.toml at {}", p.display()),
+            None => "deny.toml not found from cwd (expected only in source checkouts)".to_string(),
+        },
+    }
+}
+
+pub(super) fn security_default_network_check() -> Check {
+    let path = mvm_core::dev_network::network_path("default");
+    let exists = std::path::Path::new(&path).exists();
+    Check {
+        name: "default dev network",
+        category: "security",
+        ok: true,
+        info: if exists {
+            "configured".to_string()
+        } else {
+            "not configured — run `mvmctl network create default`".to_string()
+        },
+    }
+}
+
+/// Claim 10: *no untrusted workload reaches the network unless
+/// explicitly admitted by policy.* `NetworkPolicy::default()` is
+/// `deny_all()` rather than `unrestricted()`, so the safe posture is
+/// the one workloads get without opting in. This check makes the
+/// runtime default visible in `mvmctl doctor` so the claim is
+/// observably enforced rather than implicit in the codepath.
+///
+/// Pure read of the policy default — no I/O, no platform branching.
+/// A future regression that flipped the default back to `unrestricted`
+/// would surface here loudly.
+pub(super) fn security_network_policy_default_check() -> Check {
+    use mvm_core::policy::network_policy::NetworkPolicy;
+    let default = NetworkPolicy::default();
+    // `NetworkPolicy::deny_all()` constructs the canonical deny-all
+    // shape; equality against that is the load-bearing assertion.
+    // Comparing against the constructor rather than introspecting
+    // variants keeps this check resilient to future variant adds.
+    let is_deny_all = default == NetworkPolicy::deny_all();
+    Check {
+        name: "network policy default (claim 10)",
+        category: "security",
+        ok: is_deny_all,
+        info: if is_deny_all {
+            "deny_all (claim 10 holds — egress refused unless explicitly admitted)".to_string()
+        } else {
+            "unrestricted — claim 10 does NOT hold; ADR-002 §10 regression. \
+             Workloads boot with open egress unless --network-preset is set explicitly."
+                .to_string()
+        },
+    }
+}
+
+/// `~/.mvm/snapshot.key` should be mode 0600.
+///
+/// Absence is informational — the file is created lazily on first
+/// snapshot seal. Existence with looser perms is a security finding:
+/// any local user could read the key and forge sidecars.
+pub(super) fn security_snapshot_key_check() -> Check {
+    let path = mvm_core::crypto::snapshot_hmac::default_key_path(std::path::Path::new(
+        &mvm_core::config::mvm_home(),
+    ));
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return Check {
+            name: "snapshot HMAC key",
+            category: "security",
+            ok: true,
+            info: format!(
+                "not yet created at {} (lazy — created on first snapshot seal)",
+                path.display()
+            ),
+        };
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        let expected = 0o600;
+        let len_ok = meta.len() == mvm_core::crypto::snapshot_hmac::HMAC_KEY_BYTES as u64;
+        Check {
+            name: "snapshot HMAC key",
+            category: "security",
+            ok: mode == expected && len_ok,
+            info: if mode != expected {
+                format!(
+                    "expected mode 0{expected:o}, got 0{mode:o} at {} — \
+                     a local-user-readable HMAC key can be used to forge sidecars",
+                    path.display()
+                )
+            } else if !len_ok {
+                format!(
+                    "key file at {} is {} bytes (expected {}) — corrupt; rotate by deleting the file",
+                    path.display(),
+                    meta.len(),
+                    mvm_core::crypto::snapshot_hmac::HMAC_KEY_BYTES
+                )
+            } else {
+                format!("0{mode:o} at {}", path.display())
+            },
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        Check {
+            name: "snapshot HMAC key",
+            category: "security",
+            ok: true,
+            info: "non-Unix host; mode check skipped".to_string(),
+        }
+    }
+}
+
+/// All template snapshot directories should be mode 0700.
+/// Walks `~/.mvm/templates/*/artifacts/*/snapshot/`,
+/// reports the first looser-perm directory found (or "all OK" /
+/// "none built yet" otherwise).
+pub(super) fn security_snapshot_dirs_check() -> Check {
+    let templates_dir = mvm_core::domain::template::templates_base_dir();
+    let templates_path = std::path::Path::new(&templates_dir);
+    if !templates_path.exists() {
+        return Check {
+            name: "snapshot dir mode",
+            category: "security",
+            ok: true,
+            info: format!("no templates directory at {templates_dir}"),
+        };
+    }
+
+    let mut total = 0u32;
+    let mut bad: Option<(std::path::PathBuf, u32)> = None;
+    if let Ok(entries) = std::fs::read_dir(templates_path) {
+        for tpl in entries.flatten() {
+            let artifacts = tpl.path().join("artifacts");
+            let Ok(rev_entries) = std::fs::read_dir(&artifacts) else {
+                continue;
+            };
+            for rev in rev_entries.flatten() {
+                let snap = rev.path().join("snapshot");
+                if !snap.is_dir() {
+                    continue;
+                }
+                total += 1;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = std::fs::symlink_metadata(&snap) {
+                        let mode = meta.permissions().mode() & 0o777;
+                        if mode != 0o700 && bad.is_none() {
+                            bad = Some((snap, mode));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if total == 0 {
+        return Check {
+            name: "snapshot dir mode",
+            category: "security",
+            ok: true,
+            info: format!("no snapshots built yet under {templates_dir}"),
+        };
+    }
+    match bad {
+        Some((path, mode)) => Check {
+            name: "snapshot dir mode",
+            category: "security",
+            ok: false,
+            info: format!(
+                "expected 0700, got 0{mode:o} at {} (1 of {total} snapshot dir{}; \
+                 looser perms let local users tamper with snapshots)",
+                path.display(),
+                if total == 1 { "" } else { "s" }
+            ),
+        },
+        None => Check {
+            name: "snapshot dir mode",
+            category: "security",
+            ok: true,
+            info: format!(
+                "0700 across {total} snapshot dir{}",
+                if total == 1 { "" } else { "s" }
+            ),
+        },
+    }
+}
+
+/// macOS-only: every sign target (mvmctl plus the supervisor binaries) needs
+/// the VZ and Hypervisor entitlements. Probes all paths from
+/// `collect_sign_targets` so an unsigned supervisor is not left unreported.
+/// Off macOS the check is n/a (returns the early-exit n/a `Check`).
+pub(super) fn security_signing_check() -> Check {
+    use mvm_runtime::codesign::{collect_sign_targets, entitlements_present};
+    let targets = collect_sign_targets();
+    // `entitlements_present` returns `None` off macOS for every path, so if
+    // the first target gives `None` the whole check is n/a.
+    let probed: Vec<(std::path::PathBuf, Option<bool>)> = targets
+        .into_iter()
+        .map(|p| {
+            let r = entitlements_present(&p);
+            (p, r)
+        })
+        .collect();
+    signing_check_from_probes(&probed)
+}
+
+/// Pure mapping: per-target probe results → Check. Separate so tests can
+/// drive it with fixture data without invoking codesign or the filesystem.
+fn signing_check_from_probes(probes: &[(std::path::PathBuf, Option<bool>)]) -> Check {
+    // All None → not on macOS; the question is n/a.
+    if probes.iter().all(|(_, r)| r.is_none()) {
+        return Check {
+            name: "signing",
+            category: "security",
+            ok: true,
+            info: "n/a (macOS only)".to_string(),
+        };
+    }
+    // Collect names of targets that are verifiably unsigned (Some(false)).
+    let unsigned: Vec<String> = probes
+        .iter()
+        .filter_map(|(p, r)| {
+            if *r == Some(false) {
+                Some(
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("<unknown>")
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+    if unsigned.is_empty() {
+        Check {
+            name: "signing",
+            category: "security",
+            ok: true,
+            info: "VZ + Hypervisor entitlements present on all sign targets".to_string(),
+        }
+    } else {
+        Check {
+            name: "signing",
+            category: "security",
+            ok: false,
+            info: format!(
+                "entitlements missing on: {} — run `mvmctl sign`",
+                unsigned.join(", ")
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::util::test_env::TestEnv;
+
+    struct EnvGuard {
+        _env: TestEnv,
+        _tmp_root: Option<tempfile::TempDir>,
+    }
+
+    impl EnvGuard {
+        fn new(root: Option<tempfile::TempDir>) -> Self {
+            let mut env = TestEnv::new();
+            if let Some(r) = root.as_ref() {
+                env.set("MVM_HOME", r.path());
+            }
+            EnvGuard {
+                _env: env,
+                _tmp_root: root,
+            }
+        }
+    }
+
+    // ── signing_check_from_probes unit tests ────────────────────────
+
+    #[test]
+    fn signing_check_all_none_is_na() {
+        // Off macOS every probe returns None → n/a, ok: true.
+        let probes = vec![(std::path::PathBuf::from("/usr/local/bin/mvmctl"), None)];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok);
+        assert!(c.info.contains("n/a"), "expected n/a, got: {}", c.info);
+    }
+
+    #[test]
+    fn signing_check_all_signed_is_ok() {
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-hvf-supervisor"),
+                Some(true),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok, "all signed → ok; got: {}", c.info);
+        assert!(
+            c.info.contains("all sign targets"),
+            "expected 'all sign targets', got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_one_unsigned_supervisor_is_not_ok() {
+        // mvmctl signed, supervisor unsigned — doctor must NOT report OK.
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-hvf-supervisor"),
+                Some(false),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(!c.ok, "unsigned supervisor must fail; got: {}", c.info);
+        assert!(
+            c.info.contains("mvm-hvf-supervisor"),
+            "info must name the unsigned target; got: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains("mvmctl sign"),
+            "info must carry the remediation hint; got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_mixed_none_and_false_treats_false_as_unsigned() {
+        // Some targets return None (probe failed / tooling unavailable),
+        // others return Some(false) (verifiably unsigned). The None ones
+        // must not be counted as "unsigned" — only confirmed Some(false)
+        // targets appear in the remediation list.
+        let probes = vec![
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvmctl"),
+                Some(true),
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-libkrun-supervisor"),
+                None,
+            ),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-hvf-supervisor"),
+                Some(false),
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(!c.ok, "at least one Some(false) → not ok; got: {}", c.info);
+        assert!(
+            c.info.contains("mvm-hvf-supervisor"),
+            "must name the unsigned binary; got: {}",
+            c.info
+        );
+        assert!(
+            !c.info.contains("mvm-libkrun-supervisor"),
+            "None probe must not be listed as unsigned; got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn signing_check_all_unknown_probes_is_ok() {
+        // All probes return None → on macOS this means codesign wasn't
+        // available for every target (treated as "unknown, not a failure").
+        // The n/a branch fires only when ALL are None.
+        let probes = vec![
+            (std::path::PathBuf::from("/usr/local/bin/mvmctl"), None),
+            (
+                std::path::PathBuf::from("/usr/local/bin/mvm-hvf-supervisor"),
+                None,
+            ),
+        ];
+        let c = signing_check_from_probes(&probes);
+        assert!(c.ok, "all None → n/a, ok; got: {}", c.info);
+    }
+
+    #[test]
+    fn signing_check_is_in_security_category() {
+        let c = security_signing_check();
+        assert_eq!(c.category, "security");
+        assert_eq!(c.name, "signing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn security_data_dir_mode_check_reads_the_root_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _g = EnvGuard::new(Some(data));
+        let c = security_data_dir_mode_check();
+        assert!(
+            c.ok,
+            "expected ok because data dir is 0700, got: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains("0700"),
+            "info should report the data dir's mode, got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn security_network_policy_default_check_reports_claim_10_holding() {
+        // Invariant: `NetworkPolicy::default()` returns
+        // `deny_all`. If a future regression flips it back to
+        // `unrestricted`, this check fails loudly in doctor — pinning
+        // claim 10 against silent drift.
+        let c = security_network_policy_default_check();
+        assert_eq!(c.category, "security");
+        assert!(c.ok, "claim 10 must hold; doctor saw: {}", c.info);
+        assert!(
+            c.info.contains("deny_all"),
+            "info should call out deny_all; got: {}",
+            c.info
+        );
+        assert!(
+            c.info.contains("claim 10 holds"),
+            "info should name claim 10 so operators searching the doctor \
+             output for the claim find it; got: {}",
+            c.info
+        );
+    }
+
+    #[test]
+    fn filevault_parser_accepts_on_status() {
+        let status = parse_filevault_status("FileVault is On.\n");
+        assert!(status.enabled, "expected enabled: {}", status.info);
+        assert!(
+            status.info.contains("encrypted at rest"),
+            "info should state the at-rest guarantee, got: {}",
+            status.info
+        );
+    }
+
+    #[test]
+    fn filevault_parser_rejects_off_status() {
+        let status = parse_filevault_status("FileVault is Off.\n");
+        assert!(!status.enabled, "expected disabled");
+        assert!(
+            status.info.contains("FileVault appears OFF"),
+            "expected FileVault remediation, got: {}",
+            status.info
+        );
+    }
+
+    #[test]
+    fn linux_fde_parser_accepts_crypt_in_device_chain() {
+        let status = parse_linux_block_types("/dev/mapper/cryptroot", "disk\npart\ncrypt\n");
+        assert!(status.enabled, "expected enabled: {}", status.info);
+        assert!(
+            status.info.contains("LUKS enabled"),
+            "expected LUKS marker, got: {}",
+            status.info
+        );
+    }
+
+    #[test]
+    fn linux_fde_parser_rejects_plain_device_chain() {
+        let status = parse_linux_block_types("/dev/nvme0n1p2", "disk\npart\n");
+        assert!(!status.enabled, "expected disabled");
+        assert!(
+            status.info.contains("does NOT appear to be encrypted"),
+            "expected LUKS remediation, got: {}",
+            status.info
+        );
+    }
+
+    #[test]
+    fn linux_volume_backing_parser_accepts_crypt_chain() {
+        let path = std::path::Path::new("/volumes/work");
+        let status =
+            parse_linux_volume_backing_types(path, "/dev/mapper/mvm-volume-work", "crypt\n");
+        assert!(status.enabled, "expected enabled: {}", status.info);
+        assert!(
+            status.info.contains("dm-crypt/LUKS"),
+            "expected dm-crypt marker, got: {}",
+            status.info
+        );
+    }
+
+    #[test]
+    fn linux_volume_backing_parser_rejects_plain_chain() {
+        let path = std::path::Path::new("/volumes/work");
+        let status = parse_linux_volume_backing_types(path, "/dev/sda2", "disk\npart\n");
+        assert!(!status.enabled, "expected disabled");
+        assert!(
+            status.info.contains("does NOT appear"),
+            "expected encrypted-backing refusal, got: {}",
+            status.info
+        );
+    }
+
+    #[test]
+    fn macos_diskutil_parser_accepts_filevault_volume() {
+        let path = std::path::Path::new("/Users/alice/volumes/work");
+        let status = parse_macos_diskutil_encryption_status(
+            path,
+            "Device Identifier: disk3s1\nFileVault: Yes (Unlocked)\n",
+        );
+        assert!(status.enabled, "expected enabled: {}", status.info);
+        assert!(
+            status.info.contains("reported as encrypted"),
+            "expected encrypted marker, got: {}",
+            status.info
+        );
+    }
+
+    #[test]
+    fn macos_diskutil_parser_accepts_encrypted_volume() {
+        let path = std::path::Path::new("/Volumes/secure-work");
+        let status = parse_macos_diskutil_encryption_status(
+            path,
+            "Device Identifier: disk4s1\nEncrypted: Yes\n",
+        );
+        assert!(status.enabled, "expected enabled: {}", status.info);
+    }
+
+    #[test]
+    fn macos_diskutil_parser_rejects_unencrypted_volume() {
+        let path = std::path::Path::new("/Volumes/plain");
+        let status = parse_macos_diskutil_encryption_status(
+            path,
+            "Device Identifier: disk4s1\nEncrypted: No\nFileVault: No\n",
+        );
+        assert!(!status.enabled, "expected disabled");
+        assert!(
+            status
+                .info
+                .contains("not on a macOS volume reported as encrypted"),
+            "expected encrypted-backing refusal, got: {}",
+            status.info
+        );
+    }
+}

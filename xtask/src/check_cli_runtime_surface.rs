@@ -96,7 +96,7 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "build substrate: backend selection",
     ),
     (
-        "doctor.rs",
+        "doctor/security.rs",
         &[Rule::AnyBackend],
         "diagnostics: probes the auto-selected backend",
     ),
