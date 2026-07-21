@@ -167,7 +167,7 @@ mvmctl build --vcpus 4 --mem 2G               # CLI overrides; persisted to the 
 
 Build artifacts are stored in a content-addressed registry under `~/.mvm/templates/<sha256(canonical_manifest_path)>/artifacts/revisions/<revision_hash>/`. The manifest's *path* identifies the project; `revision_hash = sha256(flake.lock + profile)` content-addresses the actual build outputs.
 
-Snapshots (`--snapshot`) are Firecracker-only. On Apple Virtualization or Docker the flag downgrades gracefully to image-only.
+Snapshots (`--snapshot`) are Firecracker-only. On the non-Firecracker backends (libkrun / HVF / QEMU) the flag downgrades gracefully to image-only.
 
 ## Listing / inspecting / removing
 
@@ -202,7 +202,7 @@ If no current revision exists, you get an error with a hint to run `mvmctl build
 
 ### Backend mismatch
 
-If the slot was built on Firecracker but you boot on Apple Virtualization (or vice versa), `mvmctl machine run` warns and proceeds when artifacts are compatible (cold-boot from rootfs); hard-errors only when the artifact shape can't be loaded.
+If the slot was built on Firecracker but you boot on a different backend (or vice versa), `mvmctl machine run` warns and proceeds when artifacts are compatible (cold-boot from rootfs); hard-errors only when the artifact shape can't be loaded.
 
 ## Local registry inspection / cleanup
 
