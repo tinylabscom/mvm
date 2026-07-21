@@ -17,7 +17,7 @@ const ALLOWLIST: &[&str] = &[
     "crates/mvm-runtime/src/microvm/egress_bridge.rs",
     "crates/mvm-runtime/src/qemu.rs",
     "crates/mvm-runtime/src/libkrun.rs",
-    "crates/mvm-agentd/src/vsock.rs",
+    "crates/mvm-agentd/src/vsock/verb_grant.rs",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
