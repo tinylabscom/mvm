@@ -1,8 +1,6 @@
 //! Live libkrun / HVF / Firecracker probes (tracked follow-up — see the
 //! `bench` module docs).
 
-use std::path::PathBuf;
-
 use anyhow::{Context, Result, bail};
 
 use super::MicrovmLaunchArgs;
@@ -462,7 +460,7 @@ pub(in crate::commands::ops) fn write_boot_timing_sidecar(
     vm_name: &str,
     boot_millis: &mvm_agentd::vsock::BootTimingReport,
 ) -> Result<()> {
-    let path = PathBuf::from(mvm_core::config::mvm_state_dir())
+    let path = std::path::PathBuf::from(mvm_core::config::mvm_state_dir())
         .join("bench")
         .join(format!("boot-timing-{vm_name}.json"));
     if let Some(parent) = path.parent() {
