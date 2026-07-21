@@ -16,12 +16,12 @@ nothing more, nothing less.
 | [Python SDK user](#python-sdk) | `--workflow python-sdk` | Run a `@mvm.app()`-decorated Python script. |
 | [TypeScript / Node SDK user](#typescript-sdk) | `--workflow typescript-sdk` | Run an `mvm.app()` TypeScript app. |
 | [Prebuilt bundle operator](#bundle-run) | `--workflow bundle-run` | Launch a signed `.mvmpkg` artifact. |
-| [`mvmctl dev` user](#dev-shell) | `--workflow dev-shell` | Drop into a builder-VM shell for tinkering. |
+| [Interactive shell user](#dev-shell) | `--workflow dev-shell` | Boot a dev-tier image and drop into an interactive shell. |
 
 The preflight filter (plan 74 W5 / ADR-017 §1) only fails on missing
 prerequisites your workflow actually needs. A bundle operator no
-longer sees a "missing `cargo`" failure they don't care about; a
-`mvmctl dev` user no longer needs host rustup.
+longer sees a "missing `cargo`" failure they don't care about; an
+interactive-shell user no longer needs host rustup.
 
 ## <a id="cli-image-user"></a>CLI user with an OCI image
 
@@ -74,10 +74,10 @@ source checkout); subsequent runs reuse the warm builder. Skip the
 
 - `host nix not required` errors → none expected. mvm's builder VM
   owns Nix; the host doesn't need it.
-- `dev VM not running — run mvmctl dev up to verify` → that's just
-  doctor telling you tool checks were skipped because the builder
-  VM is asleep. It's not a failure; `mvmctl machine run` boots it on
-  demand.
+- `skipped — dev VM not running; run mvmctl bootstrap to verify` →
+  that's just doctor telling you tool checks were skipped because the
+  builder VM is asleep. It's not a failure; `mvmctl machine run` boots
+  it on demand.
 - `disk space < N GiB` → free space on `~/.mvm/` (default cache
   location); `mvmctl cache info` shows what's there.
 
@@ -155,31 +155,38 @@ remain.
   signed-plan path failed to find a matching `PlanArtifact`. Pull
   a fresh copy from the publisher.
 
-## <a id="dev-shell"></a>`mvmctl dev` user
+## <a id="dev-shell"></a>Interactive shell user
 
-You want a shell with a real Linux toolchain — for building, testing,
-or just exploring.
+You want a shell inside a microVM — for building, testing, or just
+exploring. There's no standalone dev VM to boot into anymore: the
+builder VM is headless (it only exists to run `nix build` on your
+behalf), so an interactive shell means booting a dev-tier *workload*
+and attaching your terminal to it.
 
 ```bash
 mvmctl doctor --workflow dev-shell              # preflight (no host rust needed)
-mvmctl dev                                      # boot + drop into shell
-# inside the shell: do work; exit / Ctrl+D returns you to the host
+mvmctl machine run --image alpine -it -- /bin/sh  # boot + drop into shell
+# inside the shell: do work; exit / Ctrl+D tears the VM down
 ```
 
-`mvmctl dev` auto-bootstraps the first time (downloads the dev image
-or builds it locally from `nix/images/dev-shell/`). Your project
-directory is bind-mounted at `/work`. Background services keep
-running after you exit; `mvmctl dev down` stops them.
+`machine run -it` boots a fresh transient microVM and is foreground-only
+— exiting the shell tears the VM down, the same as any other transient
+`machine run`. For a shell you can leave running and re-enter later, use
+a persistent machine instead: `mvmctl machine create --name devbox
+--image alpine`, then `mvmctl machine start devbox` and `mvmctl machine
+shell devbox`.
 
 **Failure recovery:**
 
-- `builder VM image missing` → `mvmctl dev up` downloads or builds
-  it. From a source checkout, the in-repo flakes are always
+- `skipped — dev VM not running; run mvmctl bootstrap to verify` →
+  only relevant when your source is `--flake` (an OCI `--image` run
+  pulls the image directly and never touches the builder VM);
+  `mvmctl bootstrap` pre-fetches the builder VM image, or builds it
+  locally from a source checkout where the in-repo flakes are always
   preferred over published artifacts.
-- `dev shell exited immediately with no command output` → check
-  `~/.mvm/dev/console.log` for the kernel/init transcript. Plan
-  72 W5.D documented the nine bring-up bugs that produced this
-  symptom; if you hit one of them the log names it.
+- Shell exits immediately with no output → `mvmctl machine logs
+  <name>` shows the kernel/init transcript; pass `--name` on the run
+  so you have a name to look it up by.
 
 ## See also
 

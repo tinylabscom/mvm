@@ -20,7 +20,7 @@ on launcher and service traits.
 Concrete runtime backends implement `mvm_core::vm_backend::VmBackend` — the one runtime
 behavior contract. Backend *discovery* (which backends exist and their metadata) lives in the
 compile-time descriptor registry described below; the closed enum
-`mvm_backend::backend::AnyBackend` is the dispatch layer for the operations that are still
+`mvm_runtime::backend::AnyBackend` is the dispatch layer for the operations that are still
 genuinely backend-specific:
 
 - applies platform auto-selection policy,
@@ -37,7 +37,7 @@ genuinely backend-specific:
 | QEMU | Explicit opt-in (`--hypervisor qemu`) | Linux dev/test backend |
 | Mock | Explicit opt-in (`--hypervisor mock`) | Test-only in-memory backend |
 
-The backend descriptor registry in `crates/mvm-backend/src/catalog.rs` is the single source of
+The backend descriptor registry in `crates/mvm-runtime/src/catalog.rs` is the single source of
 truth for backend discovery: each `BackendDescriptor` carries the selector, aliases, isolation
 tier, per-VM marker file, started-VM probe order, and the listing/support sets that `mvmctl
 doctor` and `mvmctl ls` read. Both enum (`AnyBackend`) and trait-object (`Arc<dyn VmBackend>`)
@@ -97,14 +97,14 @@ The workspace is organized by responsibility rather than by platform:
 | Area | Crates | Role |
 |------|--------|------|
 | Core types and contracts | `mvm-core` | Shared types, protocols, config helpers, canonical lightweight traits |
-| Runtime backends | `mvm-backend`, `mvm`, `mvm-vm-host` | VM lifecycle, backend adapters, per-VM host helpers |
+| Runtime backends | `mvm-runtime` | VM lifecycle, backend adapters, storage/volume backends |
 | Build pipeline | `mvm-build` | Builder VM flow, artifact production, builder backend seams |
-| Host policy / supervision | `mvm-hostd` | Admission, audit, policy enforcement, launch preparation |
-| Guest / protocol surfaces | `mvm-guest`, `mvm-guest-helpers`, `mvm-mcp` | Guest agent and protocol-facing tooling |
-| Domain-specific subsystems | `mvm-storage`, `mvm-net`, `mvm-oci`, `mvm-verify` | Storage, networking, OCI, audit verification |
-| CLI / SDK surface | `mvm-cli`, `mvm-sdk`, `mvm-sdk-macros` | User interface and workload authoring APIs |
+| Host policy / supervision | `mvm-hostd` | Admission, audit, policy enforcement, launch preparation, per-VM host processes |
+| Guest / protocol surfaces | `mvm-agentd` | Guest agent and in-guest protocol tooling |
+| Domain-specific subsystems | `mvm-fs`, `mvm-net`, `mvm-protocol` | OCI/filesystem handling, networking, audit-log verification |
+| CLI / SDK surface | `mvm-cli`, `mvm-sdk` | User interface and workload authoring APIs (the `mcp` feature folds the former MCP-server crate into `mvm-cli`) |
 
-The root crate (`mvm`) is the facade/runtime integration crate. `mvm-cli` is the binary-facing
+The root crate (`mvmctl`) is the facade/runtime integration crate. `mvm-cli` is the binary-facing
 command surface.
 
 ## Dependency Graph
@@ -113,20 +113,18 @@ At a high level:
 
 ```text
 mvm-core
-├── mvm-storage
 ├── mvm-net
 ├── mvm-build
-├── mvm-backend
+├── mvm-runtime
 ├── mvm-hostd
-├── mvm-guest
-├── mvm
+├── mvm-agentd
 └── mvm-cli
 ```
 
 Interpretation:
 
 - `mvm-core` is the dependency root and should stay runtime-light.
-- `mvm-backend`, `mvm-build`, and `mvm-hostd` are peer owning crates for their
+- `mvm-runtime`, `mvm-build`, and `mvm-hostd` are peer owning crates for their
   respective execution domains.
 - `mvm-cli` sits at the top of the stack and composes the lower layers.
 
@@ -147,7 +145,7 @@ These are the main behavior seams in the current codebase:
 | `VmBackendForBuilder` | `mvm-build` | Low-level builder backend seam |
 | `BackendLauncher` | `mvm-hostd` | Host-side backend launch preparation/execution |
 | `NetworkProvider` | `mvm-net` | Network provisioning / policy seam |
-| `VolumeBackend` | `mvm-storage` | Storage backend seam |
+| `VolumeBackend` | `mvm-runtime` | Storage backend seam |
 
 ### Ownership rule
 
@@ -162,7 +160,7 @@ Backend- or subsystem-specific seams stay in the owning crate:
 - `VmBackendForBuilder` belongs in `mvm-build`.
 - `BackendLauncher` belongs in `mvm-hostd`.
 - `NetworkProvider` belongs in `mvm-net`.
-- `VolumeBackend` belongs in `mvm-storage`.
+- `VolumeBackend` belongs in `mvm-runtime`.
 
 This keeps `mvm-core` small while still giving the rest of the workspace stable contracts.
 
@@ -172,7 +170,7 @@ Runtime launch is layered:
 
 1. `mvm-cli` parses intent and assembles launch configuration.
 2. `mvm-hostd` handles admission, audit, and launch-time host policy.
-3. `mvm-backend` selects a concrete `VmBackend` implementation.
+3. `mvm-runtime` selects a concrete `VmBackend` implementation.
 4. The selected backend boots the Nix-built artifacts.
 
 The ownership split is deliberate: `VmBackend` owns runtime behavior, the compile-time backend
