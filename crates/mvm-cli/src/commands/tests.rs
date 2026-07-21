@@ -60,6 +60,61 @@ fn top_level_command_summaries_stay_short() {
 }
 
 #[test]
+fn global_option_summaries_stay_short() {
+    let longest_allowed = 48;
+    let long_summaries = cli_command()
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .filter_map(|arg| {
+            arg.get_long_help()
+                .or_else(|| arg.get_help())
+                .and_then(|help| {
+                    let help = help.to_string();
+                    (help.chars().count() > longest_allowed)
+                        .then(|| format!("--{}: {help}", arg.get_id()))
+                })
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        long_summaries.is_empty(),
+        "global option summaries must be {longest_allowed} chars or shorter:\n{}",
+        long_summaries.join("\n")
+    );
+}
+
+#[test]
+fn machine_run_option_summaries_stay_short() {
+    let longest_allowed = 64;
+    let command = cli_command();
+    let machine = command
+        .find_subcommand("machine")
+        .expect("machine command must exist");
+    let run = machine
+        .find_subcommand("run")
+        .expect("machine run command must exist");
+    let long_summaries = run
+        .get_arguments()
+        .filter(|arg| !arg.is_hide_set())
+        .filter_map(|arg| {
+            arg.get_long_help()
+                .or_else(|| arg.get_help())
+                .and_then(|help| {
+                    let help = help.to_string();
+                    (help.chars().count() > longest_allowed)
+                        .then(|| format!("{}: {help}", arg.get_id()))
+                })
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        long_summaries.is_empty(),
+        "machine run option summaries must be {longest_allowed} chars or shorter:\n{}",
+        long_summaries.join("\n")
+    );
+}
+
+#[test]
 fn internal_subprocess_commands_are_hidden_from_help() {
     // Subprocess/internal commands must not clutter the user-facing
     // surface. They stay dispatchable but `hide = true`.
