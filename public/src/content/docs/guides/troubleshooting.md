@@ -3,33 +3,31 @@ title: Troubleshooting
 description: Common issues and their solutions.
 ---
 
-## Builder VM and Dev Shell Issues
+## Builder VM Issues
 
-The builder VM is the Linux environment mvmctl uses for Nix evaluation and image builds. You normally do not enter it yourself: `mvmctl build --flake .` is a host command that stages work for the builder VM and copies artifacts back to the host cache. `mvmctl dev shell` is only for manual debugging. See [Builder VM](/guides/builder-vm/) for the full model.
+The builder VM is the Linux environment mvmctl uses for Nix evaluation and image builds. It is headless — you never enter it, not even for debugging: `mvmctl build --flake .` is a host command that stages work for the builder VM and copies artifacts back to the host cache, streaming the build's own output to your terminal. See [Builder VM](/guides/builder-vm/) for the full model.
 
-### "Dev VM is not running"
+### "skipped — dev VM not running"
 
 ```
-Error: Dev VM is not running. Start it with: mvmctl dev up
+skipped — dev VM not running; run `mvmctl bootstrap` to verify
 ```
 
-**Fix**: `mvmctl dev up` (idempotent — installs Firecracker if missing, no-ops otherwise).
+This is `mvmctl doctor` telling you a check was skipped because the builder VM is asleep, not a failure — it boots on demand.
 
-### Dev VM is stuck
+**Fix**: `mvmctl bootstrap` (idempotent — pre-fetches or builds the builder VM image, no-ops if it's already warm).
+
+### Builder VM store is stuck or degraded
 
 ```bash
-mvmctl dev down
-mvmctl dev up
+mvmctl cache repair
 ```
 
-If that fails, rebuild from scratch:
-```bash
-mvmctl dev rebuild
-```
+This clears `~/.mvm/cache/builder-vm/` so the next `mvmctl bootstrap`/`mvmctl build` cold-rebuilds it. Use it for a dangling-store error such as `error: path '/nix/store/…-source/flake.nix' does not exist`.
 
 Or for a full reset:
 ```bash
-mvmctl uninstall
+mvmctl env uninstall
 mvmctl bootstrap
 ```
 
@@ -47,9 +45,9 @@ mvmctl doctor
 ```
 
 - **Daemon absent / socket not answering**: the builder VM may not be up. Run
-  `mvmctl dev up`, then re-check `mvmctl doctor`.
-- **Still not ready after `dev up`**: recycle the builder VM with `mvmctl dev
-  down && mvmctl dev up`; if it persists, `mvmctl dev rebuild`.
+  `mvmctl bootstrap`, then re-check `mvmctl doctor`.
+- **Still not ready after `bootstrap`**: repair the builder store with
+  `mvmctl cache repair`, then `mvmctl bootstrap` again.
 
 A build job can be cancelled from the host; the daemon stops the in-flight
 operation and returns a cancellation result rather than leaving a wedged build.
@@ -69,10 +67,10 @@ isolation) can panic in the libkrun guest during virtio device activation,
 before userspace. The Stage 0 device topology is identical to a warm build, so
 this is not a device-count problem; it surfaces in the upstream VMM's
 device-activation path under the bundled Stage 0 kernel. It does **not** occur on
-a normal cold `mvmctl dev up` against the default cache.
+a normal cold `mvmctl bootstrap` against the default cache.
 
 **Fix**: Don't run a builder bootstrap against a fully-isolated empty cache. Use
-the default cache, or pre-warm the builder once (`mvmctl dev up` with the default
+the default cache, or pre-warm the builder once (`mvmctl bootstrap` with the default
 cache) before pointing a test at an isolated `MVM_HOME`. Isolated roots
 seed the builder VM image and runtime overlay opportunistically from the
 default `~/.mvm/cache`, so a pre-warmed default cache keeps isolated runs
@@ -95,11 +93,9 @@ mvmctl machine logs <name> --hypervisor   # Firecracker logs
 
 **Cause**: Insufficient permissions or TAP device name collision.
 
-**Fix**:
-```bash
-# Check for orphaned TAP devices (inside the dev VM)
-mvmctl dev shell -- ip link show | grep tap
-```
+**Fix**: There's no shell into the builder VM to inspect this directly.
+Check `mvmctl doctor` for the resolved network backend, and
+`mvmctl machine logs <name>` for the failing VM's own boot output.
 
 ### Instance won't start after sleep
 
@@ -116,12 +112,9 @@ mvmctl machine run --flake <project-dir> --name <name> -d
 ### Nix build fails
 
 ```bash
-# Re-run the normal host-orchestrated build.
-mvmctl build --flake .
-
-# If you need an interactive Linux debug environment:
-mvmctl dev shell
-nix build .#default
+# Re-run the normal host-orchestrated build; the error streams back
+# from the builder VM the same way as the first attempt.
+mvmctl build --flake . -vv
 ```
 
 ### "Cache miss" rebuilds
@@ -155,9 +148,9 @@ error: No space left on device
 # Check Nix store size (mvmctl doctor warns if >20 GiB)
 mvmctl doctor
 
-# For manual cleanup inside a debug shell:
-mvmctl dev shell
-nix-collect-garbage -d
+# Remove old build artifacts and run Nix garbage collection
+# inside the builder VM (no shell needed):
+mvmctl env cleanup
 ```
 
 ### Hash mismatch (fixed-output derivation)
@@ -284,26 +277,31 @@ mvmctl machine stop  <N>          # tear it down (prompts; add --yes to skip)
 
 ### MicroVM has no internet
 
-```bash
-# Inside the dev VM, check NAT rules
-mvmctl dev shell -- sudo iptables -t nat -L
+There's no shell into the builder VM to inspect NAT/TAP state directly.
+Start from the network policy the VM was launched with:
 
-# Check the TAP device exists
-mvmctl dev shell -- ip link show tap0
+```bash
+mvmctl doctor              # resolved network backend (gvproxy/passt/native)
+mvmctl machine logs <name>  # guest-side boot + networking errors
 ```
+
+Remember networking is deny-by-default: a transient `machine run` needs
+`--net` or `--allow-host` before outbound traffic works at all.
 
 ### Can't access project files inside microVM
 
-The Firecracker microVM has an **isolated filesystem**. Use `mvmctl dev shell` to access the dev VM where your home directory is mounted, or pass host shares with `--mount`.
+The Firecracker microVM has an **isolated filesystem** and there's no shell into the builder VM to bridge it. Pass host shares explicitly with `--mount HOST:GUEST[:rw]` (see [Sandboxed Exec](/guides/exec/)).
 
 ## Performance Issues
 
-### Dev VM is slow
+### Builder VM is slow
 
-Adjust resources (or persist the override with `mvmctl config set dev_vm_cpus 8 && mvmctl config set dev_vm_mem_gib 16`):
+Persist a resource override, then re-provision it:
 ```bash
-mvmctl dev down
-mvmctl dev up --cpus 8 --memory 16
+mvmctl ops config set dev_vm_cpus 8
+mvmctl ops config set dev_vm_mem_gib 16
+mvmctl cache repair
+mvmctl bootstrap
 ```
 
 ### Wrong backend selected
@@ -378,9 +376,13 @@ RUST_LOG=debug mvmctl <command>
 RUST_LOG=mvm=trace mvmctl <command>
 ```
 
-## Dev Image Signature Verification (plan 36)
+## Builder Pack Signature Verification
 
-### "Cosign verification failed for {variant}-image-{arch}.manifest.json"
+The builder VM image ships as a release artifact (the "builder pack") under
+the same cosign-signed-manifest + SHA-256 + revocation model that used to
+also cover the now-removed dev-image fetch path.
+
+### "Cosign verification failed for builder-vm-{arch}.manifest.json"
 
 The cosign-signed manifest didn't validate against the project's release-workflow OIDC identity. Treat this as a supply-chain incident until proven otherwise.
 
@@ -391,10 +393,10 @@ Triage in this order:
 3. **Verify with the cosign CLI** to localize the failure:
    ```bash
    cosign verify-blob \
-     --bundle dev-image-aarch64.manifest.json.bundle \
+     --bundle builder-vm-aarch64.manifest.json.bundle \
      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
      --certificate-identity-regexp "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.14.0" \
-     dev-image-aarch64.manifest.json
+     builder-vm-aarch64.manifest.json
    ```
    Same identity wording mvmctl uses internally.
 4. **Open a security issue** if the signature is genuinely invalid against the official identity. Don't ship a workaround locally.
@@ -403,15 +405,15 @@ Emergency rotation when Sigstore TUF/Rekor is unavailable: `MVM_SKIP_COSIGN_VERI
 
 ### "Manifest is for v0.14.1 but mvmctl is v0.14.0"
 
-Plan 36 pins `manifest.version` to `mvmctl --version` exactly. Either:
+The manifest pins `manifest.version` to `mvmctl --version` exactly. Either:
 - Upgrade `mvmctl` to match (`brew upgrade mvmctl` / `cargo install mvmctl`); or
 - Use a manifest from the matching release (re-export from the v0.14.0 release page).
 
-### "Integrity check failed for dev-rootfs-aarch64.ext4"
+### "Integrity check failed for rootfs.ext4"
 
 SHA-256 of the downloaded artifact doesn't match the manifest's recorded digest. Possible causes, in order:
 
-1. Mid-flight corruption — retry `mvmctl dev up` to re-download.
+1. Mid-flight corruption — retry with `mvmctl bootstrap` (or `mvmctl pack download --kind builder`) to re-download.
 2. Mirror/CDN cache poisoning — rare but real; open a security issue with the SHA-256 you got vs what the manifest says.
 3. The release was re-uploaded after the manifest was signed (publishing process bug) — wait for the next tag.
 

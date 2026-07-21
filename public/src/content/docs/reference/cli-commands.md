@@ -309,7 +309,7 @@ with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
 `mvmctl exec` into `run` (it was already a strict superset); `run` adds a
 security `--profile`, OCI `--image`, signed `--receipt`, `--json`/`--dry-run`,
 and the SDK `--mode`/`--dev`/`--prod` transport. Arbitrary command dispatch
-requires a dev-feature guest agent (the `do_exec` handler is `dev-shell`-gated,
+requires a dev-feature guest agent (the `do_exec` handler is `interactive`-gated,
 claim 4); production guests run their baked entrypoint via `mvmctl machine run --entrypoint` (no shell).
 
 | Command | Description |

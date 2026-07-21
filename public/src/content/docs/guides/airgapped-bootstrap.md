@@ -5,155 +5,110 @@ description: How to run mvmctl in environments that can't reach github.com witho
 
 # Air-gapped Bootstrap
 
-mvmctl normally fetches its dev image (kernel + rootfs) and the
-project's [cosign-signed manifest](verify-release) from GitHub
-Releases. In regulated, government, or otherwise air-gapped
-environments where the host can't reach `github.com`, plan 36 ships
-a sanctioned trusted path: `mvmctl dev import-image` runs the same
-cosign signature + SHA-256 + version-pin + max-age + revocation
-verification pipeline against operator-provided local files.
+In regulated, government, or otherwise air-gapped environments where
+the host can't reach the network at all, the sanctioned path is a
+**signed portable bundle** (`.mvmpkg`): build or seal one on a
+connected host, then verify and launch it on the air-gapped host from
+local files only — no network access needed for that step.
 
-This is the *only* recommended way to run mvmctl in an air-gapped
-host. Setting `MVM_SKIP_HASH_VERIFY=1` to bypass the network fetch
-disables the supply-chain check entirely, which is exactly the
-unsafe escape this path exists to discourage.
+:::note[What changed]
+The former `mvmctl dev import-image` command — a local-file import
+path specifically for the dev/workload microVM image, verified against
+a cosign-signed manifest — was removed along with the standalone
+`mvmctl dev` command. Its would-be successor (the `dev-image` pack
+class) has no publish/fetch path wired yet: `mvmctl pack download
+--kind dev-image` refuses explicitly rather than pretending to work.
+Signed bundles are the current sanctioned air-gapped path for shipping
+a prebuilt workload; this guide describes that flow.
+:::
 
 ## What you need
 
-For your target architecture (`aarch64` or `x86_64`), four files
-from the GitHub release page:
-
-| File | Purpose |
-|------|---------|
-| `dev-image-{arch}.manifest.json` | Cosign-signed manifest — the trust anchor. Records SHA-256 of every other file. |
-| `dev-image-{arch}.manifest.json.bundle` | Cosign signature bundle for the manifest. |
-| `dev-vmlinux-{arch}` | Kernel binary. |
-| `dev-rootfs-{arch}.ext4` | Root filesystem. |
-
-All four come from the same release tag — they're a set. Mismatched
-manifest + artifacts will fail SHA-256 verification.
+A signed `.mvmpkg` bundle from a trusted publisher, plus that
+publisher's raw 32-byte Ed25519 public key (no PEM, no headers). The
+bundle carries its own manifest (per-artifact SHA-256, target arch,
+publisher `key_id`) and the artifact bytes in one archive — nothing
+else needs to cross the air gap for a single workload.
 
 ## Workflow
 
-### 1. Fetch the four files from a connected host
-
-On a host that can reach github.com:
+### 1. Enroll the publisher's key (once, on the air-gapped host)
 
 ```bash
-VERSION=v0.14.0  # match the mvmctl version that will consume them
-ARCH=aarch64     # or x86_64
-BASE="https://github.com/tinylabscom/mvm/releases/download/${VERSION}"
-
-for f in \
-  "dev-image-${ARCH}.manifest.json" \
-  "dev-image-${ARCH}.manifest.json.bundle" \
-  "dev-vmlinux-${ARCH}" \
-  "dev-rootfs-${ARCH}.ext4"
-do
-  curl -LO "${BASE}/${f}"
-done
+mvmctl trust add ./publisher.pub
+mvmctl trust list
 ```
 
-### 2. (Optional) Verify the manifest before transit
+This writes `~/.mvm/trusted-publishers/<key_id>.pub`. No network
+access required — the key file itself has to reach the host by some
+other channel (sneakernet, artifact mirror, USB).
 
-The connected host can verify the manifest now to catch
-manifest-only tampering before sneakernet:
-
-```bash
-cosign verify-blob \
-  --bundle "dev-image-${ARCH}.manifest.json.bundle" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  --certificate-identity-regexp "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/${VERSION}" \
-  "dev-image-${ARCH}.manifest.json"
-```
-
-Expect `Verified OK`. mvmctl re-runs this check during `import-image`,
-so this step is optional — it just gives you a fast-fail before
-transferring 200 MB of rootfs over a slow side channel.
-
-### 3. Transfer to the air-gapped host
+### 2. Transfer the bundle
 
 Sneakernet, internal artifact mirror, signed USB, scp through a jump
-host — whatever your environment allows. The four files must arrive
-together; any one being modified or replaced in transit will fail
-verification on import.
+host — whatever your environment allows.
 
-### 4. Import on the air-gapped host
+### 3. Verify before installing
 
 ```bash
-mvmctl dev import-image \
-  --manifest dev-image-aarch64.manifest.json \
-  --bundle   dev-image-aarch64.manifest.json.bundle \
-  --vmlinux  dev-vmlinux-aarch64 \
-  --rootfs   dev-rootfs-aarch64.ext4
+mvmctl bundle fetch ./my-app.mvmpkg
 ```
 
-mvmctl runs the full verification pipeline:
+`bundle fetch` accepts a local path (or an `https://` URL) and, for a
+local path, does no network I/O at all: it checks the manifest
+signature against the enrolled publisher's `key_id` in the local trust
+store, then re-verifies every artifact's SHA-256, and reports the
+parsed manifest. It rejects an unknown `key_id`, a tampered manifest,
+or a tampered artifact before anything is installed.
 
-1. Cosign-verify the manifest signature against the project's
-   release-workflow OIDC identity.
-2. Pin `manifest.version == mvmctl --version` exactly.
-3. Warn (don't fail) if the manifest is past its 90-day max-age.
-4. Check the revocation list (skipped if cached and offline; see
-   below).
-5. Verify each artifact's SHA-256 against the manifest's recorded
-   digests.
-6. Copy the verified bytes into `~/.mvm/dev/prebuilt/v{version}/`.
-
-On success, the next `mvmctl dev up` boots the dev VM from the
-imported artifacts without re-running verification or touching the
-network.
-
-## Revocation list in air-gapped environments
-
-The project's [revocation list](verify-release#recall-revocation-list)
-lives at a separate `revocations` release tag and tells mvmctl that
-specific versions have been recalled. mvmctl caches the list under
-`~/.mvm/cache/revocations/` and the cache policy is generous for
-offline tolerance:
-
-- Cache valid for **24 hours** before refresh.
-- **7 days** of cached staleness tolerated when the network is
-  unavailable.
-- A 404 on the upstream URL is treated as "no recalls today" — not
-  an error.
-
-For long-running air-gapped deployments, periodically transfer a
-fresh `revoked-versions.json` + `.bundle` pair into
-`~/.mvm/cache/revocations/`:
+### 4. Install and run
 
 ```bash
-# On a connected host:
-BASE="https://github.com/tinylabscom/mvm/releases/download/revocations"
-curl -LO "${BASE}/revoked-versions.json"
-curl -LO "${BASE}/revoked-versions.json.bundle"
-
-# Transfer both files, then on the air-gapped host:
-mkdir -p ~/.mvm/cache/revocations
-cp revoked-versions.json ~/.mvm/cache/revocations/
-cp revoked-versions.json.bundle ~/.mvm/cache/revocations/
-touch ~/.mvm/cache/revocations/revoked-versions.json
+mvmctl bundle install ./my-app.mvmpkg
+mvmctl manifest ls                        # find the installed slot (keyed by bundle sha256)
+mvmctl machine run --manifest <bundle-sha256>
 ```
 
-`mvmctl dev up` will read the cached file, cosign-verify it, and
-enforce any matching recall.
+`bundle install` re-runs the same verification as `fetch`, then
+atomically extracts the archive into `~/.mvm/bundles/<bundle_sha256>/`.
+
+The bundle trust model above — a local `key_id`-pinned Ed25519 trust
+store — is self-contained and carries no revocation list of its own.
+
+## Provisioning the builder VM
+
+A `--flake` source still needs the builder VM's Nix toolchain, which
+ships as its own release artifact (the "builder pack") under a
+separate cosign/OIDC-based keyless trust model. That model does
+consult a [revocation list](verify-release#recall-revocation-list) —
+mvmctl caches it under `~/.mvm/cache/revocations/`, valid for 24 hours
+before refresh and tolerated up to 7 days stale when the network is
+unavailable; a 404 on the upstream URL is treated as "no recalls
+today," not an error.
+
+On a connected host, fetch and verify the builder pack:
+
+```bash
+mvmctl pack download --kind builder    # fetch + verify, don't activate
+mvmctl pack update --kind builder      # fetch + verify + activate
+```
+
+Carrying the resulting cache into a fully air-gapped host isn't a wired
+CLI flow today. If your source is `--flake`, that means the builder
+pack currently has to be fetched from a host that can reach the
+network. Sources that don't need the builder VM at all — an OCI
+`--image`, or a sealed `.mvmpkg` bundle as above — remain fully
+air-gap-friendly once transferred.
 
 ## Failure modes
 
-`mvmctl dev import-image` fails closed. The most common errors and
-what they mean:
+`mvmctl bundle fetch` / `mvmctl bundle install` fail closed. The most
+common errors and what they mean:
 
 | Error wording | Cause | Fix |
 |--------------|-------|-----|
-| `Cosign verification failed for the imported manifest` | Manifest + bundle don't match, or manifest was tampered with after signing | Re-export both files together from the same release tag |
-| `Imported manifest is for a different mvmctl version` | manifest.version doesn't match `mvmctl --version` exactly | Use a manifest from the matching release; or upgrade mvmctl first |
-| `Manifest is for arch X but this host is Y` | Wrong arch | Re-export the manifest for your host arch |
-| `kernel SHA-256 mismatch` / `rootfs SHA-256 mismatch` | Artifact tampered or corrupted in transit | Re-transfer the full set; check transit medium |
-| `Imported manifest is on the project's revocation list` | The release was recalled | Use a non-revoked release |
-
-Every failure path bumps a Prometheus counter exposed via
-`mvmctl metrics --json` (and the `mvmctl status` JSON output). For
-fleet operators, plan 23 wires the same counters into mvmd's
-reconciliation loop so attack-shaped spikes — rapid
-`dev_image_verify_sig_invalid_total` increases across hosts, in
-particular — surface as alerts.
+| `trust store has no entry for key_id <id>` | The bundle's publisher key isn't enrolled on this host | `mvmctl trust add <pubkey>` for the correct publisher, or double-check you transferred the right key file |
+| `signature does not verify under trusted key <id>` | The manifest was tampered with after signing, or paired with the wrong signature | Re-export the bundle from the publisher; never hand-edit a `.mvmpkg` archive |
+| `artifact <name> sha256 mismatch` | Artifact bytes were tampered with or corrupted in transit | Re-transfer the bundle; check the transit medium |
+| `manifest references artifact <name> but it is missing from the archive` | Truncated or corrupted archive | Re-transfer the full `.mvmpkg` file |
+| `archive entry path is unsafe: ...` | Malicious or malformed archive contents | Get a fresh bundle from a trusted publisher |
