@@ -188,6 +188,18 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     })
 }
 
+/// Return the kernel path and format produced by the real libkrun relay
+/// mapping, without spawning a supervisor. Available only to the conformance
+/// harness so it can verify the host-specific kernel preparation contract.
+#[cfg(feature = "test-support")]
+pub fn map_kernel_for_test(
+    spec: &VmmSpec,
+    state_dir: &Path,
+) -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> {
+    let config = relay_libkrun_supervisor_config(spec, state_dir)?;
+    Ok((config.krun.kernel_path, config.krun.kernel_format))
+}
+
 impl VmmDriver for LibkrunDriver {
     fn name(&self) -> &str {
         self.backend.name()
@@ -228,16 +240,7 @@ impl VmmDriver for LibkrunDriver {
         let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
         let _ = crate::libkrun::open_console_capture(&console_log);
 
-        let mut cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
-
-        // Host-side kernel prep: on x86_64 libkrun needs an ELF vmlinux, so
-        // extract it and mark the format. A no-op on aarch64 (raw Image
-        // passthrough). Reuses the raw backend's single kernel resolver.
-        if let Some(kpath) = cfg.krun.kernel_path.clone() {
-            let (resolved, format) = crate::libkrun::libkrun_kernel_for_host(&kpath)?;
-            cfg.krun.kernel_path = Some(resolved);
-            cfg.krun.kernel_format = format;
-        }
+        let cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
 
         let pid_file = vm_libkrun_pid(&spec.name);
         // Remove any stale PID file so the poll below detects this launch's.
@@ -564,6 +567,28 @@ mod tests {
         assert_eq!(cfg.krun.kernel_path.as_deref(), Some("/img/Image"));
         assert_eq!(cfg.vm_state_dir, "/state/w");
         assert_eq!(cfg.pid_file_name, None);
+    }
+
+    #[test]
+    fn relay_config_prepares_the_kernel_for_the_host_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("vmlinux");
+        std::fs::write(&kernel, b"\x7fELFconformance-kernel").unwrap();
+        let spec = spec_with(KernelImage::Path(kernel.clone()), vec![], vec![]);
+
+        let cfg = relay_libkrun_supervisor_config(&spec, dir.path()).unwrap();
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(
+                cfg.krun.kernel_format,
+                mvm_core::kernel_format::KernelFormat::Elf
+            );
+        } else {
+            assert_eq!(
+                cfg.krun.kernel_format,
+                mvm_core::kernel_format::KernelFormat::Raw
+            );
+        }
+        assert_eq!(cfg.krun.kernel_path.as_deref(), kernel.to_str());
     }
 
     #[test]

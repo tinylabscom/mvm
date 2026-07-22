@@ -2,4 +2,5 @@
 
 mod cli;
 mod readme_contract;
+mod verified_boot;
 mod workload_identity;

@@ -187,7 +187,6 @@ mod tests {
             ordered,
             vec![
                 ("firecracker".to_string(), true),
-                ("libkrun".to_string(), false),
                 ("qemu".to_string(), false),
             ]
         );

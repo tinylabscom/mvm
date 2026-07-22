@@ -20,7 +20,8 @@ pub(super) struct WarmStartReport {
     substrate: Option<WarmStartSubstrate>,
     /// Backend name → `supports_standby_pool()`. The standby pool
     /// (pre-pay spawn/codesign latency) is a *different* axis from the snapshot tier above;
-    /// only libkrun implements it today.
+    /// Firecracker implements it today; backends without warm-start support
+    /// are omitted with the rest of their warm-start row.
     standby_pool: BTreeMap<String, bool>,
     /// Live count of idle standbys recorded under `~/.mvm/pool/` (best-effort; `None` if
     /// the pool dir can't be read).
@@ -112,9 +113,9 @@ pub(super) fn render_capability_table(rows: &[BackendCapabilityRow]) {
 }
 
 /// Enumerate every backend's `snapshot_capability()` tier and, on Linux,
-/// probe the fast-resume substrate. Surfaced so a user knows which backend
-/// resumes from RAM (Firecracker live-memory, HVF save/restore) vs. reboots
-/// from a disk snapshot (libkrun) before relying on a warm start.
+/// probe the fast-resume substrate. Surfaced so a user knows which admitted
+/// backend resumes from RAM vs. reboots from a disk snapshot before relying
+/// on a warm start.
 pub(super) fn collect_warm_start_support() -> WarmStartReport {
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
@@ -205,7 +206,7 @@ pub(super) fn render_warm_start_support(r: &WarmStartReport) {
     }
 
     // The standby pool (pre-pay spawn latency), a separate axis from
-    // the snapshot tiers above. Only libkrun implements it today.
+    // the snapshot tiers above.
     let pool_title = "Standby pool (per backend)";
     println!("\n{}", pool_title);
     println!("{}", "-".repeat(pool_title.len()));
@@ -233,7 +234,7 @@ mod tests {
         let r = collect_warm_start_support();
         // The honest per-backend warm-start matrix.
         assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
-        assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
+        assert_eq!(r.backends.get("libkrun"), None);
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
     }
 
@@ -247,7 +248,6 @@ mod tests {
             ordered_backends,
             vec![
                 ("firecracker".to_string(), "live-memory"),
-                ("libkrun".to_string(), "disk-only"),
                 ("qemu".to_string(), "disk-only"),
             ]
         );
@@ -255,7 +255,6 @@ mod tests {
             ordered_standby_pool,
             vec![
                 ("firecracker".to_string(), true),
-                ("libkrun".to_string(), true),
                 ("qemu".to_string(), false),
             ]
         );
@@ -264,10 +263,10 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        // Firecracker and libkrun implement the standby pool; QEMU does not.
-        // Report honest values for every backend; none may be silently dropped.
+        // Firecracker implements the standby pool; QEMU does not. The runner
+        // seam does not expose libkrun's legacy standby implementation.
         assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
-        assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
+        assert_eq!(r.standby_pool.get("libkrun"), None);
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 
@@ -276,10 +275,10 @@ mod tests {
         let rows = collect_capability_table();
         let by = |name: &str| rows.iter().find(|r| r.backend == name).cloned();
 
-        // The Tier 3 `mock` test double is excluded; the three real
-        // backends are present, in stable name order.
+        // The Tier 3 `mock` test double and backends without warm-start
+        // support are excluded; the remaining rows use stable name order.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
-        assert_eq!(names, vec!["firecracker", "libkrun", "qemu"]);
+        assert_eq!(names, vec!["firecracker", "qemu"]);
 
         let fc = by("firecracker").unwrap();
         assert_eq!(fc.snapshot_tier, "live-memory");
@@ -291,17 +290,7 @@ mod tests {
             "Firecracker implements live standby warm-spawn"
         );
 
-        let krun = by("libkrun").unwrap();
-        assert_eq!(krun.snapshot_tier, "disk-only");
-        assert!(
-            !krun.tap_networking,
-            "libkrun uses a userspace gateway, not a host TAP"
-        );
-        assert!(krun.vsock);
-        assert!(
-            krun.standby_pool,
-            "libkrun still pre-pays spawn latency through the supervisor pool"
-        );
+        assert!(by("libkrun").is_none());
 
         let qemu = by("qemu").unwrap();
         assert_eq!(qemu.snapshot_tier, "disk-only");
