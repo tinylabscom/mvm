@@ -176,10 +176,10 @@ fuzz_target!(|data: &[u8]| {
 ```
 
 **TDD steps** (fuzz builds, not nextest)
-- [ ] **Step 1: Add the target + manifest entry.**
-- [ ] **Step 2: Build the target (pinned nightly used by the fuzz lane).** From `crates/mvm-agentd/fuzz`, `cargo +$(cat rust-toolchain.toml | sed -n 's/channel = "\(.*\)"/\1/p') fuzz build fuzz_dns_codec` — expect it compiles.
-- [ ] **Step 3: Smoke run.** `cargo fuzz run fuzz_dns_codec -- -runs=100000 -max_len=4096` — expect no crash. Add a seed corpus file `corpus/fuzz_dns_codec/example_a.bin` (the Task 1 example-query bytes).
-- [ ] **Step 4: Commit.** `test(fuzz): DNS codec fuzz target sibling to the vsock-framing fuzzers`.
+- [x] **Step 1: Add the target + manifest entry.**
+- [x] **Step 2: Build the target (pinned nightly used by the fuzz lane).** From `crates/mvm-agentd/fuzz`, `cargo +$(cat rust-toolchain.toml | sed -n 's/channel = "\(.*\)"/\1/p') fuzz build fuzz_dns_codec` — expect it compiles.
+- [x] **Step 3: Smoke run.** `cargo fuzz run fuzz_dns_codec -- -runs=100000 -max_len=4096` — expect no crash. Add a seed corpus file `corpus/fuzz_dns_codec/example_a.bin` (the Task 1 example-query bytes).
+- [x] **Step 4: Commit.** `test(fuzz): DNS codec fuzz target sibling to the vsock-framing fuzzers`.
 
 ---
 
