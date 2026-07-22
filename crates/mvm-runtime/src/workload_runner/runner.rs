@@ -32,7 +32,8 @@ use crate::substitution_spawn::{
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::{
-    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, network_tunnel_socket, workload_spec,
+    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_no_dir_share_volumes,
+    network_tunnel_socket, workload_spec,
 };
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
@@ -243,6 +244,12 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     /// ALWAYS spawned — it is the sole egress gate now, even for the no-secret
     /// raw path.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
+        // Fail closed before any side effect (endpoint/tunnel spawn) runs: a
+        // `DirShare` volume has no `VmmSpec` representation on this driver
+        // seam, so refuse it here rather than silently dropping it later in
+        // `workload_blocks`.
+        ensure_no_dir_share_volumes(inputs.config)?;
+
         let state_dir = vm_state_dir(&inputs.config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
@@ -368,7 +375,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
             secrets,
             redaction,
             network_policy: &config.network_policy,
-            cmdline: cmdline::workload_cmdline(config, &state_dir).unwrap_or_default(),
+            cmdline: cmdline::runner_cmdline(config, &state_dir),
         };
         // The supervisor + endpoint are detached/disk-backed; the live handle is
         // reconstructed by id via `attach`, so the boot handle is dropped here.
@@ -936,6 +943,134 @@ mod tests {
                 "booted cmdline missing {needle:?}: {cmdline}"
             );
         }
+    }
+
+    fn disk_volume(host: &str, guest: &str, read_only: bool) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: host.into(),
+            guest: guest.into(),
+            size: String::new(),
+            read_only,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            encrypted: false,
+        }
+    }
+
+    fn dir_share_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: host.into(),
+            guest: guest.into(),
+            size: String::new(),
+            read_only: false,
+            kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+            encrypted: false,
+        }
+    }
+
+    /// A `--volume` disk (claim 11's sealed app-dep disk, or any other
+    /// `Disk`-kind volume) must reach a runner-booted guest both as an
+    /// attached `BlockDev` and as an `mvm.uvols=` cmdline entry naming it —
+    /// otherwise the guest has the bytes on `/dev/vdb` but no manifest saying
+    /// what they are for.
+    #[test]
+    fn start_carries_a_disk_volume_into_both_blocks_and_the_uvols_token() {
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        let cfg = VmStartConfig {
+            volumes: vec![disk_volume("/vol/data.img", "/data", true)],
+            ..config("w-uvol")
+        };
+        runner.start(&cfg).expect("start succeeds");
+
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs.len(), 1);
+        let spec = &specs[0];
+
+        // The rootfs takes /dev/vda; the volume disk lands right after it.
+        assert_eq!(
+            spec.blocks
+                .iter()
+                .map(|b| b.device_node())
+                .collect::<Vec<_>>(),
+            vec!["/dev/vda", "/dev/vdb"]
+        );
+        assert_eq!(spec.blocks[1].source, PathBuf::from("/vol/data.img"));
+        assert!(spec.blocks[1].read_only);
+
+        assert!(
+            spec.cmdline.contains("mvm.uvols=uvol0:"),
+            "booted cmdline missing the uvols token: {}",
+            spec.cmdline
+        );
+    }
+
+    #[test]
+    fn start_emits_no_uvols_token_when_there_are_no_volumes() {
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        runner.start(&config("w-no-uvol")).expect("start succeeds");
+
+        let specs = runner.driver.booted_specs();
+        assert!(
+            !specs[0].cmdline.contains("mvm.uvols="),
+            "cmdline must carry no uvols token with no volumes: {}",
+            specs[0].cmdline
+        );
+    }
+
+    /// A `DirShare` volume has no `VmmSpec` representation on this driver
+    /// seam. `start_workload` must refuse it before spawning the gating
+    /// endpoint or the broker — never boot a VM missing a share the caller
+    /// asked for.
+    #[test]
+    fn start_workload_refuses_a_dir_share_volume_before_any_side_effect() {
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        let cfg = VmStartConfig {
+            volumes: vec![dir_share_volume("/host/dir", "/mnt/share")],
+            ..config("w-dirshare-refused")
+        };
+        let result = runner.start_workload(&WorkloadLaunchInputs {
+            config: &cfg,
+            tenant: "tenant-x",
+            secrets: &[],
+            redaction: &redaction,
+            network_policy: &policy,
+            cmdline: String::new(),
+        });
+        let message = match result {
+            Ok(_) => panic!("a DirShare volume must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(message.contains("/host/dir"), "message: {message}");
+        assert!(message.contains("/mnt/share"), "message: {message}");
+
+        assert!(
+            runner.driver.booted_specs().is_empty(),
+            "refused start must never reach the driver"
+        );
+        assert!(
+            runner.spawner.seen.lock().unwrap().is_none(),
+            "refused start must never spawn the gating endpoint"
+        );
+        assert!(
+            runner.broker.seen.lock().unwrap().is_none(),
+            "refused start must never register the broker"
+        );
     }
 
     #[test]
