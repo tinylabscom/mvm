@@ -14,7 +14,8 @@ use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{
-    BackendKind, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
+    VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::driver::{RunningVm, VmmDriver};
@@ -186,15 +187,24 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
         self.driver.name()
     }
 
-    // The runner is driver-generic, but the only `VmmDriver` wired up today is
-    // `HvfDriver` — mirror `AnyBackend::kind()`'s `HvfRunner -> Hvf` mapping. A
-    // future second driver would need this to become driver-dispatched too.
     fn kind(&self) -> BackendKind {
-        BackendKind::Hvf
+        self.driver.kind()
     }
 
     fn capabilities(&self) -> VmCapabilities {
         self.driver.capabilities()
+    }
+
+    fn snapshot_capability(&self) -> SnapshotCapability {
+        self.driver.snapshot_capability()
+    }
+
+    fn security_profile(&self) -> BackendSecurityProfile {
+        self.driver.security_profile()
+    }
+
+    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
+        self.driver.guest_channel_info(id)
     }
 
     fn is_available(&self) -> Result<bool> {
@@ -332,6 +342,7 @@ mod tests {
     use mvm_agentd::vsock::EGRESS_PORT;
     use mvm_core::plan::{SecretBinding, SecretSource};
 
+    use crate::driver::HvfDriver;
     use crate::driver::mock::MockDriver;
 
     /// An `EndpointSpawner` test double: records the request it was handed and
@@ -536,6 +547,27 @@ mod tests {
         assert_eq!(runner.name(), want_name);
         assert_eq!(runner.capabilities().vsock, want_caps.vsock);
         assert!(runner.is_available().unwrap());
+    }
+
+    #[test]
+    fn vmbackend_kind_snapshot_security_and_channel_delegate_to_the_hvf_driver() {
+        // Proves the runner reads these from the driver rather than the old
+        // `BackendKind::Hvf` hardcode / the VmBackend trait's fail-closed
+        // defaults — a runner wrapping a *different* driver would report that
+        // driver's own values instead.
+        let driver = HvfDriver::new();
+        let want_kind = driver.kind();
+        let want_snapshot = driver.snapshot_capability();
+        let want_security_tier = driver.security_profile().tier;
+        let id = VmId("kind-delegation-test-vm".into());
+        let want_channel_err = driver.guest_channel_info(&id).is_err();
+        let runner = WorkloadRunner::new(driver, RecordingSpawner::new("/run/ep.sock"));
+
+        assert_eq!(runner.kind(), want_kind);
+        assert_eq!(runner.kind(), BackendKind::Hvf);
+        assert_eq!(runner.snapshot_capability(), want_snapshot);
+        assert_eq!(runner.security_profile().tier, want_security_tier);
+        assert_eq!(runner.guest_channel_info(&id).is_err(), want_channel_err);
     }
 
     #[test]
