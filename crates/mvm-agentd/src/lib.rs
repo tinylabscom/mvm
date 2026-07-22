@@ -20,11 +20,11 @@ pub mod builder_session;
 /// Builder-VM file transfer over vsock (the hvf VMM has no virtio-fs).
 pub mod builder_transfer;
 /// PTY-over-vsock interactive console — the single dev-only interactive path
-/// into a guest. Gated behind `dev-shell` so the relay symbols are absent from
+/// into a guest. Gated behind `interactive` so the relay symbols are absent from
 /// a sealed production agent (claim 15: no interactive access to a sealed prod
 /// microVM), mirroring `do_exec`. The host-side console client talks to it over
 /// vsock and is unaffected by this gate.
-#[cfg(feature = "dev-shell")]
+#[cfg(feature = "interactive")]
 pub mod console;
 /// Loopback SOCKS5 → host-vsock egress proxy (`mvm-egress-client`).
 #[cfg(feature = "addons")]
@@ -82,9 +82,9 @@ pub mod vsock;
 pub mod worker_pool;
 pub mod worker_protocol;
 
-/// Process control RPC handler. Dev-only: gated behind `dev-shell` so
+/// Process control RPC handler. Dev-only: gated behind `interactive` so
 /// symbols are stripped from production guest agents.
-#[cfg(feature = "dev-shell")]
+#[cfg(feature = "interactive")]
 pub mod process_rpc;
 
 /// Streaming exec core — runs `sh -c <cmd>` and emits `ExecEvent` chunks

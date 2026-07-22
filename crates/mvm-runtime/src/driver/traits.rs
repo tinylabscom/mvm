@@ -5,7 +5,10 @@
 //! describes and nothing more.
 
 use anyhow::Result;
-use mvm_core::vm_backend::{SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus};
+use mvm_core::vm_backend::{
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmCapabilities,
+    VmExitStatus, VmId, VmStatus,
+};
 
 use crate::driver::spec::VmmSpec;
 
@@ -17,12 +20,16 @@ impl<T: std::io::Read + std::io::Write + Send> DuplexStream for T {}
 pub trait VmmDriver: Send + Sync {
     /// Stable backend token (`"libkrun"`, `"firecracker"`, `"hvf"`, `"mock"`).
     fn name(&self) -> &str;
+    /// The typed discriminant; branch on this, never on `name()`.
+    fn kind(&self) -> BackendKind;
     /// Whether this VMM can run on the current host.
     fn is_available(&self) -> Result<bool>;
     /// Coarse capability flags.
     fn capabilities(&self) -> VmCapabilities;
     /// Honest warm-start tier.
     fn snapshot_capability(&self) -> SnapshotCapability;
+    /// Which of the CI-enforced security claims this VMM's boot path holds.
+    fn security_profile(&self) -> BackendSecurityProfile;
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
 
@@ -31,6 +38,10 @@ pub trait VmmDriver: Send + Sync {
     /// handle is disk-backed (pid file + exit record), so no in-memory boot state
     /// is needed; a returned handle whose VM has since exited reports `Stopped`.
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>>;
+
+    /// Guest communication channel info for VM `id`. Errors when the VMM has
+    /// none to report.
+    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo>;
 }
 
 /// A live VM handle. Launch-model-agnostic: an in-process VMM, a subprocess,

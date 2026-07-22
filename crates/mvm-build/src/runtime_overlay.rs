@@ -173,7 +173,7 @@ pub fn build_runtime_overlay_from_guest_binaries(
     std::fs::create_dir_all(&root)?;
 
     stage_runtime_overlay_binary(&bins.agent, &root.join("agent"))?;
-    stage_runtime_overlay_binary(&bins.agent_dev_shell, &root.join("agent-dev-shell"))?;
+    stage_runtime_overlay_binary(&bins.agent_interactive, &root.join("agent-interactive"))?;
     stage_runtime_overlay_binary(&bins.netinit, &root.join("netinit"))?;
     stage_runtime_overlay_binary(&bins.netd, &root.join("netd"))?;
     stage_runtime_overlay_binary(&bins.seccomp_apply, &root.join("seccomp-apply"))?;
@@ -1118,7 +1118,7 @@ mod tests {
     fn valid_overlay_ext4_bytes() -> Vec<u8> {
         let paths: &[&str] = &[
             "/agent",
-            "/agent-dev-shell",
+            "/agent-interactive",
             "/netinit",
             "/netd",
             "/seccomp-apply",
@@ -1938,7 +1938,7 @@ mod tests {
         };
         let bins = RuntimeOverlayGuestBinaries {
             agent: make_bin("agent"),
-            agent_dev_shell: make_bin("agent-dev-shell"),
+            agent_interactive: make_bin("agent-interactive"),
             netinit: make_bin("netinit"),
             netd: make_bin("netd"),
             seccomp_apply: make_bin("seccomp-apply"),

@@ -17,6 +17,11 @@ default = []
 # The remote REST `GatewayBackend` + `connect(Target::Gateway)`. Off by default
 # so a pure-local consumer stays light; a fleet/studio build turns it on.
 remote = ["mvm-core/client-remote"]
+# Forwards to `mvm-runtime/test-support`: the hermetic in-memory mock backend
+# `LocalBackend::with_hypervisor("mock")` drives in `pause`/`resume`'s
+# canned-snapshot test path. Off by default so the mock never reaches a
+# production build; the crate's own pause/resume test suite turns it on.
+test-support = ["mvm-runtime/test-support"]
 
 [dependencies]
 mvm-core = { workspace = true, features = ["client"] }

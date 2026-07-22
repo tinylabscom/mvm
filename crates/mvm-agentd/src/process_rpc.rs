@@ -1,7 +1,7 @@
 //! Process control RPC handler.
 //!
 //! **Dev-only.** The whole module is gated behind
-//! `#[cfg(feature = "dev-shell")]` in `lib.rs`, so its symbols are
+//! `#[cfg(feature = "interactive")]` in `lib.rs`, so its symbols are
 //! absent from the production guest agent (the combined
 //! `prod-agent-runentry-contract` CI gate enforces the symbol
 //! contract).

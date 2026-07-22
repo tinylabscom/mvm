@@ -5,7 +5,7 @@
   #
   # The libkrun-direct launcher (`LibkrunBuilderVm`) replaces the
   # libkrun-backed builder VM (`nix/images/builder/`, which is actually
-  # the dev-shell image despite the name). This flake is the artifact
+  # the interactive image despite the name). This flake is the artifact
   # `LibkrunBuilderVm` boots into: a small Linux kernel + ext4
   # rootfs containing Nix + a curated build-tools subset +
   # `mvm-host-vm-init` at `/sbin/mvm-host-vm-init`.
@@ -16,7 +16,7 @@
   # alongside the existing dev-image outputs.
   #
   # Distinct from `nix/images/builder/flake.nix` which produces the
-  # dev-shell image (`mvm-dev`) — the rootfs a user `dev shell`s
+  # interactive image (`mvm-dev`) — the rootfs a user `dev shell`s
   # into. The two flakes coexist and `mvmctl dev up` picks the right
   # one via `find_builder_vm_flake` / `find_dev_image_flake`.
   #
@@ -36,7 +36,7 @@
   #
   # ── Builder VM package set ────────────────────────────────────────
   #
-  # Narrower than the dev-shell image:
+  # Narrower than the interactive image:
   #
   # - Static busybox (provides `/bin/sh`, `udhcpc`, `sync`, basic
   #   POSIX utilities — small footprint).
@@ -153,7 +153,7 @@
           };
         });
 
-      # Narrower than the dev-shell image. See module-level docs
+      # Narrower than the interactive image. See module-level docs
       # above for the rationale on each.
       #
       # The application-dependency install pipeline: `uv` / `pnpm`

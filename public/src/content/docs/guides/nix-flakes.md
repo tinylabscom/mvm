@@ -3,7 +3,7 @@ title: Writing Nix Flakes
 description: Create custom Nix flakes that build microVM images for mvm.
 ---
 
-mvmctl uses Nix flakes to produce reproducible microVM images. You run `mvmctl build` from the host, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM. The result is a kernel and rootfs that can boot on any supported runtime backend, including Firecracker, Apple Virtualization, and libkrun.
+mvmctl uses Nix flakes to produce reproducible microVM images. You run `mvmctl build` from the host, and mvm runs Nix evaluation and `nix build` inside the Linux builder VM. The result is a kernel and rootfs that can boot on any supported runtime backend, including Firecracker, HVF, libkrun, and QEMU.
 
 You do not need to enter a dev shell to build a flake. The dev shell is only for manually debugging the Linux build environment. See [Builder VM](/guides/builder-vm/) for the full host-vs-builder model.
 

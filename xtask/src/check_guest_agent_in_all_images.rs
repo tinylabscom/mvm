@@ -8,7 +8,7 @@
 //!
 //! There are two distinct launch mechanisms:
 //!   1. **mkGuest `/init`** (`nix/lib/mk-guest.nix`) — the workload and
-//!      dev-shell images. Forks the agent via `setpriv … -- "$MVM_AGENT_BIN"`.
+//!      interactive images. Forks the agent via `setpriv … -- "$MVM_AGENT_BIN"`.
 //!   2. **`mvm-host-vm-init`** — PID 1 of the libkrun builder VM. Forks
 //!      the agent via `fork_guest_agent()`.
 //!
@@ -27,7 +27,7 @@ const AGENT_LAUNCHERS: &[(&str, &str, &str)] = &[
     // mkGuest's /init resolves the agent into `$MVM_AGENT_BIN` and execs
     // it under setpriv; the var exists only in the agent-fork block.
     (
-        "workload + dev-shell microVM (mkGuest /init)",
+        "workload + interactive microVM (mkGuest /init)",
         "nix/lib/mk-guest.nix",
         "MVM_AGENT_BIN",
     ),
@@ -101,6 +101,10 @@ mod tests {
                 "duplicate launcher ({rel}, {marker})"
             );
         }
-        assert_eq!(AGENT_LAUNCHERS.len(), 2, "workload/dev-shell + builder VM");
+        assert_eq!(
+            AGENT_LAUNCHERS.len(),
+            2,
+            "workload/interactive + builder VM"
+        );
     }
 }

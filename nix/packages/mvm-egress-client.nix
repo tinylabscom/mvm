@@ -7,7 +7,7 @@
 # env requests vsock egress; `socks5h` pushes DNS host-side (no guest resolver).
 #
 # Baked unconditionally (it is inert unless `/init` starts it), like mvm-exit-report.
-# Always built without any dev-shell feature — it has no interactive surface.
+# Always built without any interactive feature — it has no interactive surface.
 #
 # Requires the `addons` feature: the async loopback helper bins (this one,
 # mvm-addon-dns, mvm-addon-vsock-bridge) are the only mvm-agentd consumers of

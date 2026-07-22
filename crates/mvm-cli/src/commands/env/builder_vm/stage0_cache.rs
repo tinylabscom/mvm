@@ -834,7 +834,7 @@ pub(super) fn promote_builder_vm_stage0_cache(
 /// `builder-vm-image` release-workflow job into the local cache dir,
 /// SHA-256-verified.
 ///
-/// Mirrors `download_dev_image_inner` for the dev-shell image, minus
+/// Mirrors `download_dev_image_inner` for the interactive image, minus
 /// cosign signing (the signed-manifest path extends to builder-vm
 /// artifacts as a follow-up). The required artifacts are `vmlinux`,
 /// `rootfs.ext4`, `cmdline.txt`, and `manifest.json`; the runtime

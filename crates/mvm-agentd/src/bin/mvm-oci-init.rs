@@ -16,10 +16,11 @@ mod linux {
 
     const AGENT_FALLBACK: &str = "/usr/local/bin/mvm-guest-agent";
     const AGENT_OVERLAY: &str = "/mvm/runtime/agent";
-    const AGENT_OVERLAY_DEV_SHELL: &str = "/mvm/runtime/agent-dev-shell";
+    const AGENT_OVERLAY_INTERACTIVE: &str = "/mvm/runtime/agent-interactive";
     const NETINIT_FALLBACK: &str = "/usr/local/bin/mvm-guest-netinit";
     const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";
     const EGRESS_CLIENT: &str = "/usr/local/bin/mvm-egress-client";
+    const EGRESS_CLIENT_OVERLAY: &str = "/mvm/runtime/egress-client";
 
     pub fn main() {
         mount_pseudofs();
@@ -31,7 +32,19 @@ mod linux {
         run_one(resolve_exec([NETINIT_OVERLAY, NETINIT_FALLBACK]), "netinit");
         if cmdline_has_flag("mvm.vsock_egress=1") {
             bring_loopback_up();
-            spawn_one(Path::new(EGRESS_CLIENT), "egress-client");
+            // Egress is required when this flag is set; the client is the only guest
+            // path to the admitted network. Resolve overlay-first (respecting the
+            // runtime-source policy) and fail closed rather than boot a workload that
+            // silently cannot reach its allow-listed egress.
+            let Some(egress_client) = resolve_egress_client() else {
+                eprintln!(
+                    "mvm-oci-init: mvm.vsock_egress=1 but no egress client resolved from \
+                     /mvm/runtime and no baked fallback — refusing to boot a workload that \
+                     cannot reach its admitted egress"
+                );
+                std::process::exit(1);
+            };
+            spawn_one(&egress_client, "egress-client");
         }
         // The guest agent is the mvm vsock control plane — the whole reason this
         // init exists (scratch/distroless/Alpine all get it from the overlay).
@@ -283,7 +296,7 @@ mod linux {
             (
                 mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
                 mvm_core::security::AgentProfile::Dev,
-            ) => &[AGENT_OVERLAY_DEV_SHELL],
+            ) => &[AGENT_OVERLAY_INTERACTIVE],
             (
                 mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
                 mvm_core::security::AgentProfile::SealedProd
@@ -292,7 +305,7 @@ mod linux {
             (
                 mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
                 mvm_core::security::AgentProfile::Dev,
-            ) => &[AGENT_OVERLAY_DEV_SHELL, AGENT_OVERLAY, AGENT_FALLBACK],
+            ) => &[AGENT_OVERLAY_INTERACTIVE, AGENT_OVERLAY, AGENT_FALLBACK],
             (
                 mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
                 mvm_core::security::AgentProfile::SealedProd
@@ -304,6 +317,28 @@ mod linux {
                 | mvm_core::security::AgentProfile::SealedProd
                 | mvm_core::security::AgentProfile::Builder,
             ) => &[AGENT_FALLBACK],
+        };
+        candidates
+            .iter()
+            .map(Path::new)
+            .find(|path| is_exec(path))
+            .map(Path::to_path_buf)
+    }
+
+    fn resolve_egress_client() -> Option<PathBuf> {
+        resolve_egress_client_for(runtime_source_policy(), is_executable)
+    }
+
+    fn resolve_egress_client_for(
+        runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+        is_exec: impl Fn(&Path) -> bool,
+    ) -> Option<PathBuf> {
+        let candidates: &[&str] = match runtime_source_policy {
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => &[EGRESS_CLIENT_OVERLAY],
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => {
+                &[EGRESS_CLIENT_OVERLAY, EGRESS_CLIENT]
+            }
+            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &[EGRESS_CLIENT],
         };
         candidates
             .iter()
@@ -515,13 +550,13 @@ mod linux {
         }
 
         #[test]
-        fn resolve_guest_agent_for_dev_required_overlay_prefers_dev_shell_overlay() {
+        fn resolve_guest_agent_for_dev_required_overlay_prefers_interactive_overlay() {
             let got = resolve_guest_agent_for(
                 mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
                 mvm_core::security::AgentProfile::Dev,
-                |path| path == Path::new(AGENT_OVERLAY_DEV_SHELL),
+                |path| path == Path::new(AGENT_OVERLAY_INTERACTIVE),
             );
-            assert_eq!(got, Some(PathBuf::from(AGENT_OVERLAY_DEV_SHELL)));
+            assert_eq!(got, Some(PathBuf::from(AGENT_OVERLAY_INTERACTIVE)));
         }
 
         #[test]
@@ -551,6 +586,74 @@ mod linux {
             let got = resolve_guest_agent_for(
                 mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
                 mvm_core::security::AgentProfile::SealedProd,
+                |_path| false,
+            );
+            assert_eq!(got, None);
+        }
+
+        #[test]
+        fn resolve_egress_client_for_required_overlay_resolves_overlay() {
+            let got = resolve_egress_client_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                |path| path == Path::new(EGRESS_CLIENT_OVERLAY),
+            );
+            assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT_OVERLAY)));
+        }
+
+        #[test]
+        fn resolve_egress_client_for_required_overlay_returns_none_when_nothing_executable() {
+            // No executable candidate -> None, which main() treats as fatal
+            // (fail closed) rather than booting a workload with no egress path.
+            let got = resolve_egress_client_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                |_path| false,
+            );
+            assert_eq!(got, None);
+        }
+
+        #[test]
+        fn resolve_egress_client_for_required_overlay_does_not_fall_back_to_baked() {
+            // Only the baked path is executable; required-overlay must not accept it.
+            let got = resolve_egress_client_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                |path| path == Path::new(EGRESS_CLIENT),
+            );
+            assert_eq!(got, None);
+        }
+
+        #[test]
+        fn resolve_egress_client_for_prefer_overlay_prefers_overlay_when_both_present() {
+            let got = resolve_egress_client_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+                |_path| true,
+            );
+            assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT_OVERLAY)));
+        }
+
+        #[test]
+        fn resolve_egress_client_for_prefer_overlay_falls_back_to_baked() {
+            let got = resolve_egress_client_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+                |path| path == Path::new(EGRESS_CLIENT),
+            );
+            assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT)));
+        }
+
+        #[test]
+        fn resolve_egress_client_for_rootfs_only_ignores_overlay_and_uses_baked() {
+            // Overlay executable but policy is rootfs-only -> only the baked
+            // candidate is considered, so it wins.
+            let got = resolve_egress_client_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+                |path| path == Path::new(EGRESS_CLIENT_OVERLAY) || path == Path::new(EGRESS_CLIENT),
+            );
+            assert_eq!(got, Some(PathBuf::from(EGRESS_CLIENT)));
+        }
+
+        #[test]
+        fn resolve_egress_client_for_rootfs_only_returns_none_when_baked_missing() {
+            let got = resolve_egress_client_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
                 |_path| false,
             );
             assert_eq!(got, None);

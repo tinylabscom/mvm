@@ -40,7 +40,7 @@ runtime microVM
 
 This separation is deliberate. A build can take seconds or minutes because it may fetch and compile Nix closures. A runtime boot benchmark should normally measure only the already-built image booting, not the build phase.
 
-## You Do Not Need a Dev Shell to Build
+## There Is No Shell Into The Builder VM
 
 The normal build command is:
 
@@ -50,20 +50,13 @@ mvmctl build --flake .
 
 That command should be run from your project directory on the host. `mvmctl` takes care of starting or reaching the builder VM, staging the flake, running the build, and copying the result back.
 
-Use an interactive shell only when you want to debug the builder environment:
+The builder VM is headless by design — there is no interactive shell into it, not even for debugging. You never "enter" it to inspect the Linux build environment, manually run `nix build`, or check Nix store disk usage; you debug through its logs and structured output instead:
 
-```bash
-mvmctl dev shell
-```
+- `mvmctl build --flake .` prints the build's own progress and errors.
+- `mvmctl doctor` reports the resolved builder backend and its readiness.
+- A failing `nix build` inside the builder VM surfaces its error back to the host command that triggered it — there's no separate shell session to reproduce it in.
 
-Examples of things a dev shell is useful for:
-
-- inspecting the Linux build environment;
-- manually running `nix build` to debug a flake error;
-- checking disk usage in the builder VM's Nix store;
-- reproducing an issue that only appears inside the Linux build boundary.
-
-Examples of things that should not require a dev shell:
+None of the following ever require or offer a shell into the builder VM:
 
 - `mvmctl build --flake .`;
 - `mvmctl run`;
@@ -115,14 +108,13 @@ The builder VM and runtime microVM have different jobs:
 
 Do not benchmark the builder VM when you want runtime boot time. The builder VM exists so that the host can ask for Linux builds without becoming a Linux build machine itself.
 
-## Persistent builder personas
+## Persistent builder VM
 
-There are two builder personas in the developer experience:
-
-| Persona | Command shape | Interaction model | Purpose |
-|---|---|---|---|
-| Developer builder VM | `cargo run -- dev up` / `mvmctl dev up` | Persistent and debuggable; may open an interactive shell with `--shell`. | Keep the Linux development/build boundary warm while a developer iterates. |
-| Build worker VM | `cargo run -- build` / `mvmctl build` | Persistent but non-interactive. | Run normal Nix/image build jobs without making the user manage the VM. |
+There is exactly one builder persona: a persistent, non-interactive build
+worker VM. It stays warm across builds (`cargo run -- build` / `mvmctl
+build`) so a developer iterating on a flake doesn't pay a builder-VM boot
+on every invocation. There is no separate "developer" persona with a
+shell — the builder VM is headless in every mode.
 
 The low-level persistent-builder controls already exist:
 
@@ -139,7 +131,7 @@ mvmctl persistent-builder stop
 mvmctl build --no-persistent-builder
 ```
 
-The intended top-level DX is that developers do not need to invoke the low-level controls for normal use. `dev up` should ensure the interactive/developer builder is present, and `build` should use a persistent non-interactive builder by default when the platform supports it. If the persistent path is unavailable, the command should say why it fell back rather than silently changing the trust and performance model.
+The intended top-level DX is that developers do not need to invoke the low-level controls for normal use: `mvmctl bootstrap` pre-fetches the builder VM image, and `build` uses a persistent non-interactive builder by default when the platform supports it. If the persistent path is unavailable, the command should say why it fell back rather than silently changing the trust and performance model.
 
 ## Communication Model
 
@@ -206,7 +198,7 @@ The builder VM keeps build state warm so repeated builds avoid re-fetching the w
 
 The first build is allowed to be slower because it may bootstrap the builder image and populate the Nix store. Later builds should be dominated by changed inputs.
 
-When `mvmctl` is running from this source checkout, the builder image is local-build only. A populated `~/.mvm/cache/builder-vm/<arch>/` cache can be reused only when its source fingerprint matches the current `nix/images/builder-vm/{flake.nix,flake.lock}` inputs, its recorded artifact digests still match the cached `vmlinux`, `rootfs.ext4`, and optional `cmdline.txt`, and its provenance summary matches the same source fingerprint and artifact filename set. On cache miss, fingerprint drift, artifact drift, or provenance drift, mvm uses a dev image that contains `/sbin/mvm-host-vm-init` as a Stage 0 bootstrap image to build `nix/images/builder-vm/` into a hidden staging directory, validates the kernel and rootfs, records the source fingerprint, artifact digests, and non-sensitive provenance summary, then promotes the staged output into the live cache. It prefers a local Stage 0 seed from `~/.mvm/dev/current/`, `~/.mvm/dev/prebuilt/v*/`, or `~/.mvm/dev/builds/*/`; if none of those images satisfies the Stage 0 contract, it may download the normal published dev image through the signed/hash-verified dev-image path and use it as the bootstrap seed only. It still refuses to download a published builder-VM image in a source checkout, so edits under `nix/images/builder-vm/` are built locally and are not masked by release artifacts. With `--verbose`, source-checkout cache decisions include a safe reason code such as `hit`, `missing_artifact`, `invalid_stage0_artifacts`, `missing_fingerprint`, `fingerprint_mismatch`, `missing_artifact_digest_manifest`, `artifact_digest_mismatch`, `missing_provenance`, or `provenance_mismatch`; these diagnostics do not print artifact contents, local paths, or raw digest metadata. `mvmctl dev status` also reports the builder-cache kind, readiness, and the same safe reason code without attempting a rebuild. `mvmctl dev cache inspect` exposes the same safe builder-cache summary plus dev-image presence, and `--json` emits only sanitized labels for automation.
+When `mvmctl` is running from this source checkout, the builder image is local-build only. A populated `~/.mvm/cache/builder-vm/<arch>/` cache can be reused only when its source fingerprint matches the current `nix/images/builder-vm/{flake.nix,flake.lock}` inputs, its recorded artifact digests still match the cached `vmlinux`, `rootfs.ext4`, and optional `cmdline.txt`, and its provenance summary matches the same source fingerprint and artifact filename set. On cache miss, fingerprint drift, artifact drift, or provenance drift, mvm uses a dev image that contains `/sbin/mvm-host-vm-init` as a Stage 0 bootstrap image to build `nix/images/builder-vm/` into a hidden staging directory, validates the kernel and rootfs, records the source fingerprint, artifact digests, and non-sensitive provenance summary, then promotes the staged output into the live cache. It prefers a local Stage 0 seed from `~/.mvm/dev/current/`, `~/.mvm/dev/prebuilt/v*/`, or `~/.mvm/dev/builds/*/`; if none of those images satisfies the Stage 0 contract, it may download the normal published dev image through the signed/hash-verified dev-image path and use it as the bootstrap seed only. It still refuses to download a published builder-VM image in a source checkout, so edits under `nix/images/builder-vm/` are built locally and are not masked by release artifacts. With `--verbose`, source-checkout cache decisions include a safe reason code such as `hit`, `missing_artifact`, `invalid_stage0_artifacts`, `missing_fingerprint`, `fingerprint_mismatch`, `missing_artifact_digest_manifest`, `artifact_digest_mismatch`, `missing_provenance`, or `provenance_mismatch`; these diagnostics do not print artifact contents, local paths, or raw digest metadata. `mvmctl doctor` reports the builder-cache readiness and the resolved builder backend without attempting a rebuild, and its `--json` output emits only sanitized labels for automation.
 
 ## Benchmarking Runtime Boot
 

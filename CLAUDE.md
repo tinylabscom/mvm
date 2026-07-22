@@ -22,7 +22,7 @@ brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy
 ```
 
 - `libkrun` — the in-process VMM. `mvm-libkrun-supervisor` links against it.
-- `libkrunfw` — bundles the TSI-patched Linux kernel libkrun's guests boot. Plan 86 / Plan 72 W5.D bullet 10 — `mvm-libkrun::extract_bundled_kernel()` pulls the kernel out of the dylib's `.rodata` at runtime.
+- `libkrunfw` — bundles the TSI-patched Linux kernel libkrun's guests boot. Plan 86 / Plan 72 W5.D bullet 10 — `libkrun-sys::extract_bundled_kernel()` pulls the kernel out of the dylib's `.rodata` at runtime.
 - `gvproxy` — userspace virtio-net gateway. Plan 88 / ADR-003 §"Cross-platform backends" — passt is Linux-only, so macOS dispatches to gvproxy via libkrun's `krun_add_net_unixgram` path. `MVM_NETWORKING` unset → per-OS default (macOS=gvproxy, Linux=passt); `passt`, `gvproxy`, and the opt-in `native` are accepted. `native` (ADR-003 — the hvf Rust gateway) requires `MVM_GATEWAY_BIN` to name the gateway binary and falls back to the per-OS default without it; it is parity-gated and not yet validated end-to-end, so the default never selects it. Plan 102 W6.A removed the `tsi` mode (TSI bypassed virtio-net entirely, violating the claim-10 no-bypass invariant — see ADR-014).
 
 On Linux contributor hosts swap `gvproxy` for `passt` from the distro
@@ -83,40 +83,50 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 ### Workspace Structure
 
-15-crate Cargo workspace (plan 121 consolidated 32→15 + `crates/deps/libkrun-sys`; ADR-022 §1 is the map). Root facade re-exports the libraries:
+14-crate Cargo workspace (Bar-A consolidation took 32→16, then to the current set). Root facade (`src/lib.rs`) re-exports the libraries.
 
-- `mvm-core` -- types, IDs, config, protocol, signing, routing, crypto. Absorbs `plan` (typed signed `ExecutionPlan`), `policy` (incl. `policy::security` session-policy), and `crypto` (the former `mvm-security`: attestation/keystore/secret_store/snapshot crypto + opt-in cosign behind `manifest-verify`). **The default build has no async/runtime deps** (plan 126 B5): `tokio` is optional, pulled only by the off-by-default `hostd-transport` feature (the `protocol` hostd IPC transport that mvmd consumes via `mvmctl::core::protocol`) or `manifest-verify` (sigstore). `core::framing` moved to `mvm_hostd::framing` (plan 126 B5). The `xtask check-core-runtime-free` gate asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
-- `mvm-sdk` -- build-time SDK (decorator + runtime authoring) **and the `ir` module** (the canonical `Workload` IR, was `mvm-ir`). `mvm-sdk-macros` is the separate proc-macro crate.
-- `mvm-guest` -- vsock protocol, console, integrations, agent; `runner` module + `mvm-runner` `[[bin]]` (in-guest function entrypoint).
-- `mvm-build` -- Nix builder pipeline; also hosts `egress_proxy` (lib) and the builder-VM-only `[[bin]]`s `mvm-host-vm-init` + `mvm-egress-proxy` (cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
-- `mvm` -- runtime: shell, VM lifecycle, UI, templates. Re-exports `shell`/`ui`/`shell_mock`/`cow`/`runtime_meta` from `mvm-backend::base` to preserve the mvmd `mvmctl::runtime::*` contract.
-- `mvm-backend` -- `VmBackend` trait + every backend impl + selection/dispatch; `base` (host substrate, was `mvm-base`), `libkrun`/`hvf_backend`/`firecracker`/`qemu`/`mock` dispatch.
-- `crates/deps/libkrun-sys` -- the one true C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt); was `mvm-libkrun`. Lives low so `mvm-build` can consume the wrapper.
-- `mvm-hostd` -- host-side daemon roles: `supervisor` + `jailer` (libs) + `broker`/`host_signer`/`audit_signer` (libs + three subprocess `[[bin]]`s — the process moat). Was `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`.
-- `mvm-vm-host` -- per-VM supervisor host processes (one per guest): cfg-gated `[[bin]]`s `mvm-libkrun-supervisor` / `mvm-hvf-supervisor` / `mvm-bridge` (the shared external-VMM gateway/audit sidecar for Firecracker); the lib carries the unified bridge config/passt-hash parsers.
-- `mvm-guest-helpers` -- in-guest helper `[[bin]]`s `mvm-addon-dns` + `mvm-addon-vsock-bridge`, baked into the rootfs by mkGuest.
-- `mvm-cli` -- Clap CLI, bootstrap, update, doctor, template commands; `build.rs` embeds the host binaries.
-- `mvm-mcp`, `mvm-oci`, `mvm-storage` -- unchanged. `mvm-verify` -- wasm-clean audit-log verifier (ADR-024, zero `mvm-*` deps). `xtask` -- tooling + claim-gate lints.
+**Libraries, low → high:**
 
-Root package: `src/lib.rs` (facade re-exports `mvmctl::core`=mvm-core, `mvmctl::runtime`=mvm, `mvmctl::build`=mvm-build, `mvmctl::guest`=mvm-guest, `mvmctl::backend`=mvm-backend, `mvmctl::security`=`mvm_core::crypto`) + `src/main.rs` (thin CLI entry -> `mvm_cli::run()`)
+- `mvm-protocol` -- `#![no_std]` + alloc, `forbid(unsafe_code)`; the wasm/browser-capable foundation. The audit-log verifier (and, incrementally, the `Workload` IR + wire protocol + policy DTOs). Builds on `wasm32-unknown-unknown`.
+- `mvm-core` -- std: types, IDs, config/paths (`MVM_HOME`), crypto, signing, routing. Absorbs `plan` (typed signed `ExecutionPlan`), `policy`, `crypto` (attestation/keystore/secret_store/snapshot + opt-in cosign behind `manifest-verify`). **Default build has no async deps**: `tokio` is optional, pulled only by the off-by-default `hostd-transport` or `manifest-verify` features. `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
+- `mvm-fs` -- image → mountable rootfs: OCI distribution client (registry/manifest/layer fetch + allow-listed `unpack/`) + a pure-Rust, memory-safe, deterministic ext4 writer (no `mkfs`, no subprocess) + `overlay`. Absorbs the old `mvm-ext4` + `mvm-oci`.
+- `mvm-net` -- `NetworkProvider` trait + provisioning/policy/registry seam (vsock/UDS + egress-tunnel plumbing). Was `mvm-network`; the concrete TAP/bridge/native-gateway/passt impl lives in `mvm-runtime`.
+- `mvm-build` -- Nix builder pipeline + artifact cache; hosts the builder-VM-only `[[bin]]`s (`mvm-host-vm-init` etc., cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
+- `mvm-runtime` -- the big runtime crate (absorbs `mvm` + `mvm-backend` + `mvm-base`): the `VmBackend` trait + every backend impl (`libkrun`/`hvf_backend`+`hvf/`/`firecracker`/`qemu`/`mock`), VM lifecycle (`vm/` templates + checkpoints), `microvm/` (Firecracker driver), `base/` (shell/ui/linux_env/cow host substrate), `storage/` (dm-thin), `network/` (the TAP/gateway impl behind the `mvm-net` seam). Re-exports the `mvmctl::runtime`/`::backend` contract.
+- `mvm-client` -- the local/remote client facade behind one `dyn MvmClient`: `LocalBackend` (default) + `GatewayBackend` (the `remote` feature). The CLI and SDKs route through it.
+- `mvm-cli` -- Clap CLI (the `mvmctl` surface), bootstrap/doctor/build/run/machine commands; `build.rs` embeds the host binaries; folds the old `mvm-mcp` behind an `mcp` feature.
+
+**Top of graph (daemons, SDK, FFI):**
+
+- `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`/`mvm-bridge`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
+- `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
+- `mvm-sdk` -- build-time SDK: decorator parser → canonical `Workload` IR → Nix template, plus the runtime SDK. Language SDK surfaces live under `crates/mvm-sdk/sdks/`.
+- `mvm-host-services-ffi` -- a C-ABI cdylib every language SDK dlopens (host.audit/time/cost broker clients); kept a separate crate because folding it would break the FFI contract.
+- `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
+
+`xtask` -- tooling + claim-gate lints. `mvm-conformance` -- dev-only cucumber-rs BDD harness running the security-claim scenarios against `mvmctl` (not a dependency of any shipped crate).
+
+Root package: `src/lib.rs` (facade: `mvmctl::core`=mvm-core, `mvmctl::runtime`/`::backend`=mvm-runtime, `mvmctl::build`=mvm-build, `mvmctl::guest`=mvm-agentd, `mvmctl::security`=`mvm_core::crypto`) + `src/main.rs` (thin entry → `mvm_cli::run()`).
 
 Binary: `mvmctl` (from root, delegates to mvm-cli)
 
-**Dependency direction (high → low):** `mvm-cli` → {`mvm`, `mvm-backend`, `mvm-hostd`, `mvm-sdk`, ...} → `mvm` → `mvm-backend` → `mvm-build` → {`libkrun-sys`, `mvm-guest`, `mvm-sdk`} → `mvm-core`. `mvm-core` is the foundation (no `mvm-*` deps). The per-VM/per-role bin crates (`mvm-vm-host`, the `mvm-hostd` bins) sit at the top; nothing depends on them as a library.
+**Dependency direction (high → low):** `mvm-cli` → {`mvm-runtime`, `mvm-hostd`, `mvm-client`, `mvm-sdk`} → `mvm-client` → `mvm-runtime` → {`mvm-fs`, `mvm-net`, `mvm-build`} → `mvm-core` → `mvm-protocol`. `mvm-protocol` (no_std) is the foundation; `mvm-core` builds on it. `mvm-agentd` (guest) and the per-role bin crates sit at the top; nothing depends on them as a library.
 
 **Key module locations:**
 
-mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver/policies), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `dev_network.rs`, `config.rs` (XDG)
+mvm-protocol: `verify` (audit-log verifier), `ir/` (Workload IR), wire/policy DTOs.
 
-mvm-backend: `base/` (shell, ui, linux_env, cow, runtime_meta, config — was mvm-base), `libkrun.rs`/`hvf_backend.rs`/`hvf/`/`firecracker.rs`/`qemu.rs`/`mock.rs` (dispatch), `codesign.rs`, `artifacts/`
+mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `config.rs` (paths/`MVM_HOME`)
 
-mvm-build: `pipeline/` (`build.rs` = `pool_build`, `dev_build.rs`), `egress_proxy/`, `src/bin/mvm-host-vm-init*` + `src/bin/mvm-egress-proxy.rs`, `nix/`
+mvm-runtime: `backend.rs`/`libkrun.rs`/`hvf_backend.rs`+`hvf/`/`firecracker.rs`/`qemu.rs`/`mock.rs` (dispatch), `microvm/` (Firecracker driver), `vm/` (templates + `template/lifecycle/`, checkpoints), `base/` (shell, ui, linux_env, cow), `storage/`, `network/`, `codesign.rs`, `artifacts/`
 
-mvm-guest: `vsock.rs`, `console.rs`, `integrations.rs`, `builder_agent.rs`, `runner/`
+mvm-fs: `oci/unpack/` (allow-listed unpacker), `oci/`, the ext4 writer, `overlay`
 
-mvm-hostd: `supervisor/`, `broker/`, `host_signer/`, `audit_signer/`, `jailer/` + `src/bin/{mvm-broker,mvm-host-signer,mvm-audit-signer}.rs`
+mvm-agentd: `vsock/`, `console.rs`, `integrations.rs`, `src/bin/mvm-guest-agent/` (the agent bin), `runner/`
 
-mvm-cli: `commands/` (local microVM substrate commands: env, build/run, guest RPC, artifacts/trust, local ops). Tenant lifecycle, tenant policy authoring/review, and deploy-to-control-plane commands live in mvmd, not mvmctl.
+mvm-hostd: `supervisor/` (incl. `gateway_bridge/`), `broker/`, `host_signer/`, `audit_signer/`, `jailer/`, `src/bin/{mvm-broker,mvm-host-signer,mvm-audit-signer}.rs`, the per-VM supervisor bins
+
+mvm-cli: `commands/` (env, build/run, `machine`, guest RPC, artifacts/trust, local ops); `doctor/`, `commands/vm/up/`, `commands/image/`, `commands/ops/bench/` are decomposed module trees. Tenant lifecycle + deploy-to-control-plane commands live in mvmd, not mvmctl.
 
 ### Trait Architecture
 
@@ -152,7 +162,7 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 - **No `clippy::too_many_arguments`**: `#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions in hand-written code (the only legitimate use is bindgen-generated FFI like `crates/deps/libkrun-sys/src/sys.rs`). When a function trips the lint, introduce a dedicated struct with a builder (Rust best practice) carrying those arguments and pass the built value. See AGENTS.md §"Clippy: Zero Warnings, Always".
 - **Reuse first — never reimplement what exists**: before writing anything, search the workspace (`rg`, the facade re-exports, the owning module) for a helper, type, trait impl, or crate that already does the job, and call it. Duplicated logic drifts and is this repo's most common bug source. If an existing helper is *almost* right, extend it — don't fork a second copy. Concrete standing rules: all `~/.mvm` paths go through `mvm-core::config` helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) — never build them inline with `std::env::var("HOME")` + `.join(...)` (that ignores `MVM_HOME` and breaks worktree isolation); shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
 - **Best-practice construction**: prefer many small single-purpose functions (each trivially unit-testable) over large branchy ones; use the **builder pattern** for types with more than a couple of (especially optional) fields instead of long positional constructors; express behavior that varies by backend/env/mode as a **trait with impls** (`VmBackend`, `ShellEnvironment`), not a `match` scattered across call sites; group related values into named config/params **structs** rather than threading bare arguments through layers; make illegal states unrepresentable with newtypes/enums over stringly-typed flags; and don't over-abstract (YAGNI) — reach for a trait/builder only when there's a real second case. If you can't write a focused test for a function, it's too big — split it. (See AGENTS.md §"Reuse First; Compose Small, Testable Units".)
-- **Source-checkout builds never depend on mvm-published artifacts**: when `mvmctl` is run from a source checkout of this repo (anywhere `find_dev_image_flake()` / `find_builder_vm_flake()` returns `Some`), every VM image is built locally from the in-repo flakes — both the builder VM image (`nix/images/builder-vm/`) and the user-facing image (`nix/images/dev-shell/`, user `--flake`, etc.). The mvm-published prebuilts on GitHub releases are end-user infrastructure only; they are never a prerequisite for any source-checkout workflow. A contributor modifying `nix/images/builder-vm/flake.nix` must see their change the next time the builder VM boots — via `mvmctl bootstrap` or auto-bootstrap on the next build — with no release-pipeline round-trip. See ADR-007 §"Two artifact layers, two acquisition paths" for the resolution rule and ADR-007 §"Why the contributor path doesn't download" for the rationale.
+- **Source-checkout builds never depend on mvm-published artifacts**: when `mvmctl` is run from a source checkout of this repo (anywhere `find_dev_image_flake()` / `find_builder_vm_flake()` returns `Some`), every VM image is built locally from the in-repo flakes — both the builder VM image (`nix/images/builder-vm/`) and the user-facing image (user `--flake`, OCI images, `nix/images/runtime-overlay/`, etc.). The mvm-published prebuilts on GitHub releases are end-user infrastructure only; they are never a prerequisite for any source-checkout workflow. A contributor modifying `nix/images/builder-vm/flake.nix` must see their change the next time the builder VM boots — via `mvmctl bootstrap` or auto-bootstrap on the next build — with no release-pipeline round-trip. See ADR-007 §"Two artifact layers, two acquisition paths" for the resolution rule and ADR-007 §"Why the contributor path doesn't download" for the rationale.
 - **Host Nix is never used by mvmctl**, even when present: `mvmctl` does not shell out to a host `nix` binary, does not consult `nix-darwin`'s `linux-builder`, and does not honor `nix-daemon` URLs in any code path. Every Nix evaluation goes through a VM we launched; builds run inside that builder VM via libkrun (macOS) or Firecracker (Linux). The reason is determinism and consistency: the same `mvmctl` produces the same artifacts on every host regardless of what the host happens to have installed. A contributor with host Nix installed must not see different behavior from a contributor without it. This invariant supersedes ADR-004's "host Nix remains an opt-in power-user path" clause for everything inside `mvmctl`.
 
 ## Security model
@@ -221,12 +231,12 @@ the source gap analysis is at
    on a flipped data block.
 4. **The guest agent does not contain `do_exec` in production
    builds.** `prod-agent-no-exec` job in `.github/workflows/ci.yml`
-   builds the agent without `dev-shell` and asserts the
+   builds the agent without `interactive` and asserts the
    `mvm_guest_agent::do_exec` symbol is absent (W4.3).
 5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
-   targets at `crates/mvm-guest/fuzz/` cover `GuestRequest` and
+   targets at `crates/mvm-agentd/fuzz/` cover `GuestRequest` and
    `AuthenticatedFrame` (W4.2). Plan 88 W6 adds
-   `crates/mvm-libkrun/fuzz/fuzz_supervisor_config.rs` against the
+   `crates/deps/libkrun-sys/fuzz/fuzz_targets/fuzz_supervisor_config.rs` against the
    host-side `SupervisorConfig` parser the `mvm-libkrun-supervisor`
    binary reads on stdin. `#[serde(deny_unknown_fields)]` on every
    host↔guest type ensures unexpected fields fail-closed (W4.1). The
@@ -250,7 +260,7 @@ the source gap analysis is at
    then dispatches the backend. Each admission emits
    `plan.admitted` / `plan.launched` / `plan.failed` chain-signed
    entries to `~/.mvm/audit/<tenant>.jsonl`; tampering breaks
-   `mvm_supervisor::verify_audit_chain` (surfaced via
+   `mvm_hostd::supervisor::verify_audit_chain` (surfaced via
    `mvmctl trust audit verify`, which exits nonzero on detected drift).
    Workspace `cargo test` exercises rejection paths on every PR
    (plan 64 W1–W4 — `synthesize_plan`, `host_signer::load_or_init_at`,
@@ -280,7 +290,7 @@ the source gap analysis is at
    `LibkrunBuilderVm::run_build` Install arm) installs deps into a
    sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
    `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, and a
-   hash-chained `meta.json`; `mvm-supervisor`'s admission verifier
+   hash-chained `meta.json`; `mvm-hostd`'s supervisor admission verifier
    calls `mvm_sdk::compile::deps_audit::verify_sealed_volume` before
    launch and refuses tampered volumes; `mvmctl up --prod` fails
    closed on high/critical CVE findings or stub SBOM/CVE
@@ -328,8 +338,8 @@ the source gap analysis is at
     the ADR-001 numbered table is queued in Plan 111. Plan 85 Phase E
     + F wire the user-facing OCI image runner to the same audit chain
     that backs claim 8 — see `specs/claims/claim-10-oci-image-provenance.md`.
-    `mvmctl image pull` materializes the layer set in `mvm-oci`'s
-    allow-listed unpacker (`mvm_oci::unpack::unpack_layer`),
+    `mvmctl image pull` materializes the layer set in `mvm-fs`'s
+    allow-listed unpacker (`mvm_fs::oci::unpack::unpack_layer`),
     materializes an ext4 rootfs — by default in-process on the host
     via the memory-safe pure-Rust writer (`mvm_build::rootfs::
     materialize_ext4_pure`; ADR-004 supersedes ADR-017's builder-VM
@@ -343,7 +353,7 @@ the source gap analysis is at
     `plan.oci_provenance` entry via
     `AuditEmitter::emit_oci_provenance`
     (`crates/mvm-cli/src/commands/vm/audit_chain.rs`) carrying those
-    labels; `mvm_supervisor::verify_audit_chain` continues to detect
+    labels; `mvm_hostd::supervisor::verify_audit_chain` continues to detect
     drift, surfaced via `mvmctl trust audit verify`. `--prod` refuses
     mutable references before any network fetch
     (`crates/mvm-cli/src/commands/image.rs::
@@ -361,9 +371,9 @@ the source gap analysis is at
     surface.
 15. **No interactive access to a sealed production microVM.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
-    console (`crates/mvm-guest/src/console.rs`), which is gated behind
-    the `dev-shell` Cargo feature — so a sealed prod agent (built
-    `--no-default-features`, `withDevShell = false` in `mkGuest`) links
+    console (`crates/mvm-agentd/src/console.rs`), which is gated behind
+    the `interactive` Cargo feature — so a sealed prod agent (built
+    `--no-default-features`, `withInteractive = false` in `mkGuest`) links
     no console symbol, exactly mirroring claim 4's `do_exec` exclusion.
     Plan 165 WS-C. Five independent layers: (1) only the dev `/init`
     variant serves a shell; (2) the prod rootfs is dm-verity sealed
@@ -373,7 +383,7 @@ the source gap analysis is at
     `prod_console_attachment_has_no_input`); (4) the host
     `enforce_accessible_gate` refuses `mvmctl console` on a sealed VM
     (`console_refused_on_sealed_image`); (5) the agent console + `do_exec`
-    are `dev-shell`-gated. CI: the `prod-agent-no-console` symbol-grep job
+    are `interactive`-gated. CI: the `prod-agent-no-console` symbol-grep job
     in `.github/workflows/security.yml` (`scripts/check-prod-agent-no-console.sh`)
     asserts the console symbol is absent from a production agent build,
     sibling to `prod-agent-runentry-contract`. Serial-console passthrough

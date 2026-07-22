@@ -163,6 +163,9 @@ jobs:
       - name: runtime-overlay version pinned to workspace
         run: cargo run -p xtask -- check-runtime-overlay-version
 
+      - name: no oversized production file bodies (≤1500 non-test lines)
+        run: cargo run -p xtask -- check-file-size
+
       - name: SDK stubs match the Rust schemas (no drift)
         run: cargo run -p xtask -- check-stubs
 
@@ -204,6 +207,13 @@ jobs:
         # closure), so the default workspace run skips these. Cover them here.
         run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
 
+      - name: test-support feature tests (mock backend)
+        # The mock VM backend + its tests are gated behind `test-support` so the
+        # mock never ships in the production closure. The default workspace run
+        # skips its tests — run the workspace with the feature on so they stay
+        # covered on every PR.
+        run: cargo nextest run --workspace --features test-support
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -243,14 +253,14 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
 
-      - name: Run dev-shell agent handler tests
-        # The default workspace run builds the guest agent without `dev-shell`,
+      - name: Run interactive agent handler tests
+        # The default workspace run builds the guest agent without `interactive`,
         # so the dev-tier handlers (exec, run-code, run-detached) and their
         # tests are compiled out. Run mvm-agentd with the feature on so the
         # detached-workload handler is actually exercised on every PR — a fresh
         # agent that links the handler but can't run the workload would slip an
         # all-default run.
-        run: cargo nextest run -p mvm-agentd --features dev-shell
+        run: cargo nextest run -p mvm-agentd --features interactive
 
       - name: Run addon/egress helper tests
         # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,

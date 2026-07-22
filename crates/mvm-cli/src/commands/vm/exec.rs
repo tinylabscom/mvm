@@ -2,7 +2,7 @@
 //!
 //! The former bare `mvmctl exec` was folded into `run`: `run` was already a
 //! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
-//! `run --profile dev -- <argv>` covers its dev-shell case. The `Args`
+//! `run --profile dev -- <argv>` covers its interactive case. The `Args`
 //! struct + internal request machinery stay — `run_secure` reuses them.
 
 use anyhow::{Context, Result};
@@ -91,13 +91,13 @@ pub(in crate::commands) struct Args {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(in crate::commands) enum RunProfile {
-    /// No env injection and no host directory shares.
+    /// No environment variables or host mounts.
     Restrictive,
-    /// Explicit env is allowed; host directory shares must stay read-only.
+    /// Environment variables and read-only host mounts.
     Standard,
-    /// Dev-mode ergonomics: explicit env and writable host shares are allowed.
+    /// Environment variables and writable host mounts.
     Dev,
-    /// Escape hatch for local experiments; requires MVM_ACK_PERMISSIVE_RUN=1.
+    /// Local escape hatch; requires MVM_ACK_PERMISSIVE_RUN=1.
     Permissive,
 }
 
@@ -1993,7 +1993,7 @@ mod tests {
         assert!(!grant_eligible(false, true, false, true));
         // Transient baked-entrypoint (no pty, no argv, prod, sealed) → eligible.
         assert!(grant_eligible(false, false, false, true));
-        // Same run but image not sealed (dev-shell / OCI) → NOT eligible.
+        // Same run but image not sealed (interactive / OCI) → NOT eligible.
         assert!(!grant_eligible(false, false, false, false));
     }
 }

@@ -178,41 +178,44 @@ A compromised CDN or GitHub Releases page cannot forge a valid signature without
 
 ---
 
-## Verifying the Dev Image and Builder Image Manifests (plan 36)
+## Verifying the Builder Image Manifest
 
-Starting with the plan-36 work, every release also publishes a cosign-keyless-signed manifest for the dev image (consumed by `mvmctl dev up`) and the builder image (consumed by mvmd's pool-build pipeline). The manifest is the trust anchor — it carries SHA-256 of every image artifact, the Nix store hash, the source git SHA, and the SHA-256 of every flake lockfile, all bound by one cosign signature.
+Every release also publishes a cosign-keyless-signed manifest for the builder image (consumed by `mvmctl bootstrap` / `mvmctl pack download --kind builder` and mvmd's pool-build pipeline). The manifest is the trust anchor — it carries SHA-256 of every image artifact, the Nix store hash, the source git SHA, and the SHA-256 of every flake lockfile, all bound by one cosign signature.
 
-mvmctl verifies these automatically on every `mvmctl dev up`. To verify manually:
+mvmctl verifies this automatically on every builder-pack fetch (`mvmctl bootstrap`, or the first `machine build` / `machine run --flake ...` that needs the builder VM). To verify manually:
 
 ```bash
 VERSION=v0.14.0  # replace with the release you're verifying
 ARCH=aarch64     # or x86_64
-VARIANT=dev      # or builder
 
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/${VARIANT}-image-${ARCH}.manifest.json"
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/${VARIANT}-image-${ARCH}.manifest.json.bundle"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/builder-vm-${ARCH}.pack-manifest.json"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/builder-vm-${ARCH}.pack-manifest.json.bundle"
 
 cosign verify-blob \
-  --bundle "${VARIANT}-image-${ARCH}.manifest.json.bundle" \
+  --bundle "builder-vm-${ARCH}.pack-manifest.json.bundle" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   --certificate-identity-regexp "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/${VERSION}" \
-  "${VARIANT}-image-${ARCH}.manifest.json"
+  "builder-vm-${ARCH}.pack-manifest.json"
 ```
 
 A successful verification prints `Verified OK`. After verification, every artifact whose SHA-256 is recorded in the manifest can be checked with `sha256sum` and the manifest's value:
 
 ```bash
-jq -r '.artifacts[] | "\(.sha256)  \(.name)"' "${VARIANT}-image-${ARCH}.manifest.json" \
+jq -r '.artifacts[] | "\(.sha256)  \(.name)"' "builder-vm-${ARCH}.pack-manifest.json" \
   | sha256sum --check
 ```
 
-### Air-gapped install
-
-`mvmctl dev import-image` runs the same verification against local files for hosts that can't reach github.com. See [Air-gapped Bootstrap](airgapped-bootstrap) for the operator workflow.
+:::note[What changed]
+This section used to also cover a dev-image variant, verified locally via
+`mvmctl dev import-image`. That command was removed along with `mvmctl dev`;
+the dev-image pack class has no publish/fetch path today. See
+[Air-gapped Bootstrap](airgapped-bootstrap) for the current air-gapped path
+(signed `.mvmpkg` bundles).
+:::
 
 ### Recall (revocation list)
 
-A separate `revocations` release tag publishes a cosign-signed `revoked-versions.json`. mvmctl checks this list on every `dev up` and refuses to use any image whose version is recalled. The recall reason is surfaced verbatim in the failure message, pointing at the upgrade path.
+A separate `revocations` release tag publishes a cosign-signed `revoked-versions.json`. mvmctl checks this list on every builder-pack fetch and refuses to use any image whose version is recalled. The recall reason is surfaced verbatim in the failure message, pointing at the upgrade path.
 
 ```bash
 curl -LO "https://github.com/tinylabscom/mvm/releases/download/revocations/revoked-versions.json"

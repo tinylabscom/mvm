@@ -7,7 +7,7 @@ description: Get a microVM running in under 5 minutes.
 [First-Use Happy Paths](/getting-started/happy-paths/) lists a
 three-command sequence for each mvm audience: OCI-image CLI users,
 flake CLI users, Python SDK users, TypeScript SDK users, prebuilt bundle
-operators, and `mvmctl dev` users. Each path is paired with
+operators, and interactive-shell users. Each path is paired with
 `mvmctl doctor --workflow <name>` so the preflight only flags blockers
 your audience actually has.
 :::
@@ -24,8 +24,8 @@ This pulls or reuses the cached image, records OCI provenance, boots a transient
 microVM, runs the command, and tears the VM down. You do not need host Nix for
 this path.
 
-Use this when you want "run this command in a fresh microVM." Use the flake,
-manifest, and dev-shell flows below when you are building a custom image or a
+Use this when you want "run this command in a fresh microVM." Use the flake
+and manifest flows below when you are building a custom image or a
 repeatable project environment.
 
 For a scenario-led map of when to use each machine workflow, read
@@ -41,44 +41,48 @@ mvmctl machine exec alpine-dev -- uname -a
 mvmctl machine stop alpine-dev
 ```
 
-## 2. Launch the Dev Environment
+## 2. Prepare the Builder VM (optional)
 
 ```bash
-mvmctl dev
+mvmctl bootstrap
 ```
 
-This single command detects your platform and handles everything. **Builds run in a builder microVM that mvm sets up automatically — you don't need Nix on your host.** The builder owns its own `/nix/store` and keeps it warm across builds. Where the builder VM runs depends on your platform:
+`nix build` for a `--flake` source runs inside a **headless builder
+VM** — a build engine, not something you get a shell into. It
+auto-bootstraps the first time you run `mvmctl machine build` or
+`mvmctl machine run --flake ...`; `mvmctl bootstrap` pre-fetches it
+ahead of time so that first build isn't slowed by a cold-start fetch.
+**Builds run in a builder microVM that mvm sets up automatically — you
+don't need Nix on your host.** The builder owns its own `/nix/store`
+and keeps it warm across builds. Where the builder VM runs depends on
+your platform:
 
-**On Linux with `/dev/kvm`:**
-1. Selects Firecracker as the runtime backend
-2. Bootstraps the builder microVM on first build (one-time fetch); `nix build` runs inside it
-3. Drops you into a dev shell
-
-**On macOS 26+ Apple Silicon:**
-1. Selects the HVF backend (Hypervisor.framework, vsock-only, no Homebrew deps)
-2. Boots the builder microVM there; `nix build` runs inside it
-3. Drops you into a dev shell
-
-**On macOS 13–25 Apple Silicon:**
-1. Selects libkrun (the in-process VMM from the `slp/krun` Homebrew trio)
-2. Same builder microVM, hosted on libkrun
-3. Drops you into a dev shell
+- **Linux with `/dev/kvm`:** auto-selects the QEMU builder backend;
+  your built workloads boot on Firecracker.
+- **macOS 26+ Apple Silicon:** auto-selects the HVF builder backend
+  (Hypervisor.framework, vsock-only, no Homebrew deps), with an
+  automatic fallback to libkrun if HVF fails to create its VM.
+- **macOS 13–25 Apple Silicon:** auto-selects the libkrun builder
+  backend (the in-process VMM from the `slp/krun` Homebrew trio).
 
 mvm targets Apple Silicon on macOS and `/dev/kvm` on Linux. There is no Docker
 or container runtime path; a host without a supported microVM backend surfaces a
 backend-unavailable error rather than silently degrading.
 
-Inside the dev shell your project directory is bind-mounted at `/work`. Exit with `exit` or `Ctrl+D` -- background services keep running.
+`mvmctl doctor` reports the resolved builder backend and flags any missing
+host dependencies. For an interactive shell, boot a workload instead — see
+[Interactive Console](#7-interactive-console) below.
 
 :::note
-Release binaries download the builder image (~200MB) and dev microVM image on first run. From a source checkout, `mvmctl dev up` builds from the in-repo flakes.
+Release binaries download the builder image (~200MB) on first use. From a
+source checkout, the builder VM image is always built locally from the
+in-repo flakes.
 :::
 
 ## 3. Day-to-Day Commands
 
 ```bash
 mvmctl ls         # List running VMs (aliases: ps, status)
-mvmctl dev shell  # Open a shell in the dev microVM
 mvmctl machine stop --all       # Stop all running VMs
 mvmctl doctor     # Check system dependencies and configuration
 mvmctl machine console vm # Interactive shell into a running VM (PTY-over-vsock)

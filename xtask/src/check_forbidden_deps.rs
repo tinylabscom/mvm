@@ -7,16 +7,14 @@
 //!    even transitively. Lockfile-based so it catches a pull before code
 //!    review has to inspect `cargo tree`.
 //! 2. **Default-closure ban.** The deliberately-gated heavy deps
-//!    (`sigstore`, `opendal`, `pgp`) were cut from the shipped CLI and
-//!    are retained only behind off-by-default features. They legitimately
-//!    remain in `Cargo.lock` as optional packages, so a lockfile-name
-//!    check would false-positive; instead we assert they stay out of
-//!    `mvmctl`'s *default-feature* dependency closure (`cargo tree`).
+//!    (`sigstore`, `opendal`, `pgp`, `aws-lc-rs`) were cut from the
+//!    shipped CLI and must stay out of `mvmctl`'s *default-feature*
+//!    dependency closure. They legitimately remain in `Cargo.lock` as
+//!    optional packages, so a lockfile-name check would false-positive;
+//!    instead we assert they are absent from the `cargo tree` closure.
 //!
-//! `aws-lc-rs` is a deliberate omission from set (2): it is currently in
-//! the default closure via `oci-client -> rustls` and cannot be banned
-//! until that is unwound upstream. `tokio` staying out of `mvm-core` is
-//! covered by the separate `check-core-runtime-free` gate, not here.
+//! `tokio` staying out of `mvm-core` is covered by the separate
+//! `check-core-runtime-free` gate, not here.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -27,8 +25,8 @@ const FORBIDDEN_SUBSTRINGS: &[&str] = &["mysql"];
 
 /// Banned from `mvmctl`'s default-feature closure. Exact package names —
 /// these are off-by-default-feature-only deps that must not ship in the
-/// stock CLI. (`aws-lc-rs` is intentionally absent; see module docs.)
-const FORBIDDEN_IN_DEFAULT_CLOSURE: &[&str] = &["sigstore", "opendal", "pgp"];
+/// stock CLI.
+const FORBIDDEN_IN_DEFAULT_CLOSURE: &[&str] = &["sigstore", "opendal", "pgp", "aws-lc-rs"];
 
 pub fn run(workspace: &Path) -> Result<()> {
     let mut failures: Vec<String> = Vec::new();
@@ -69,7 +67,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     eprintln!(
         "check-forbidden-deps: clean (no sea-*/mysql in Cargo.lock; \
          {} absent from mvmctl's default closure)",
-        FORBIDDEN_IN_DEFAULT_CLOSURE.join("/"),
+        FORBIDDEN_IN_DEFAULT_CLOSURE.join(", "),
     );
     Ok(())
 }
@@ -193,10 +191,14 @@ rustls v0.23.37
     }
 
     #[test]
-    fn closure_violations_does_not_ban_aws_lc_rs() {
-        // aws-lc-rs is in the default closure today (oci-client -> rustls)
-        // and must stay un-banned until that is unwound upstream.
+    fn closure_violations_bans_aws_lc_rs() {
+        // aws-lc-rs is absent from the default closure (the in-repo OCI client
+        // replaced oci-client which was the former entry point). This ban
+        // prevents it from creeping back.
         let names = ["mvmctl", "rustls", "aws-lc-rs"];
-        assert!(closure_violations(&names, FORBIDDEN_IN_DEFAULT_CLOSURE).is_empty());
+        assert_eq!(
+            closure_violations(&names, FORBIDDEN_IN_DEFAULT_CLOSURE),
+            vec!["aws-lc-rs"],
+        );
     }
 }

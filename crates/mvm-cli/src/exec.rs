@@ -7,8 +7,8 @@
 //! surface.
 //!
 //! Dev-mode only: the guest agent's Exec handler is gated at compile time
-//! by the `dev-shell` Cargo feature. Production guest binaries are built
-//! without `dev-shell`, so the handler is not present and `exec` returns
+//! by the `interactive` Cargo feature. Production guest binaries are built
+//! without `interactive`, so the handler is not present and `exec` returns
 //! "exec not available" regardless of any runtime configuration.
 
 use anyhow::{Context, Result, anyhow};
@@ -899,6 +899,19 @@ impl<L, R> Either<L, R> {
 pub type PostureSink = std::cell::Cell<mvm_build::run_image::RootStrategy>;
 pub type RuntimeSourcePolicySink = std::cell::Cell<mvm_core::vm_backend::RuntimeSourcePolicy>;
 
+/// A backend that advertises a host-vsock egress proxy carries all guest
+/// egress over vsock with no routable guest NIC. The L3 packet tunnel is a
+/// second, incompatible egress data plane for the same workload — and its
+/// guest bring-up writes `/etc/resolv.conf`, which fails on a read-only
+/// sealed rootfs. A workload must boot with exactly one egress data plane,
+/// so drop the tunnel for host-vsock-proxy backends; backends without one
+/// (their only vsock-only egress IS this tunnel) keep it.
+fn drop_l3_tunnel_for_host_vsock_proxy(config: &mut VmStartConfig, backend: &AnyBackend) {
+    if config.network_tunnel.is_some() && backend.capabilities().host_vsock_proxy {
+        config.network_tunnel = None;
+    }
+}
+
 fn run_inner(
     req: ExecRequest,
     capture: bool,
@@ -917,137 +930,37 @@ fn run_inner(
     // Resolve image artifacts: either a named template or a pre-built pair.
     // For templates, also probe for a pre-built snapshot so we can skip the
     // cold-boot cost when the request is snapshot-eligible.
-    let (vmlinux, initrd, rootfs, revision, flake_ref, profile, snap_info, template_id) =
-        match &req.image {
-            ImageSource::Template(name) => {
-                let (spec, vmlinux, initrd, rootfs, rev) =
-                    mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(name)
-                        .with_context(|| format!("Loading template '{name}'"))?;
-                let snap =
-                    mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
-                        .ok()
-                        .flatten();
-                (
-                    vmlinux,
-                    initrd,
-                    rootfs,
-                    rev,
-                    spec.flake_ref.clone(),
-                    Some(spec.profile.clone()),
-                    snap,
-                    Some(name.clone()),
-                )
-            }
-            ImageSource::Prebuilt {
-                kernel_path,
-                rootfs_path,
-                initrd_path,
-                label,
-                ..
-            } => (
-                kernel_path.clone(),
-                initrd_path.clone(),
-                rootfs_path.clone(),
-                String::new(),
-                label.clone(),
-                None,
-                None,
-                None,
-            ),
-        };
+    let resolved = resolve_image_artifacts(&req.image)?;
 
     let t_image_resolved = timing.then(std::time::Instant::now);
 
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
-    let mut vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
-    let staging_dir = mvm_core::config::vm_state_dir(&vm_name)
-        .join("extras")
-        .display()
-        .to_string();
-    let mut volumes: Vec<mvm_runtime::image::RuntimeVolume> = Vec::new();
-    let mut add_dir_labels: Vec<String> = Vec::new();
-    for (idx, dir) in req.add_dirs.iter().enumerate() {
-        let label = format!("mvm-extra-{idx}");
-        let image_path = format!("{staging_dir}/extra-{idx}.ext4");
-        mvm_runtime::image::build_dir_image_ro(&dir.host_path, &label, &image_path).with_context(
-            || {
-                format!(
-                    "preparing --add-dir image for '{}' -> '{}'",
-                    dir.host_path, dir.guest_path
-                )
-            },
-        )?;
-        volumes.push(mvm_runtime::image::RuntimeVolume {
-            host: image_path,
-            guest: dir.guest_path.clone(),
-            size: String::new(),
-            read_only: dir.read_only,
-            // `--add-dir` builds an RO ext4 image, so this is a disk.
-            ..Default::default()
-        });
-        add_dir_labels.push(label);
-    }
+    let AddDirStaging {
+        vm_name,
+        staging_dir,
+        volumes,
+        add_dir_labels,
+    } = stage_add_dir_volumes(&req)?;
 
-    // Snapshot path is taken when the request is eligible; otherwise cold boot.
-    let mut use_snapshot = snapshot_eligible(
-        &req.image,
-        &req.add_dirs,
-        snap_info.is_some(),
-        backend.capabilities().snapshots,
-    );
-
-    // Probe for the verity sidecar alongside the rootfs: production microVMs
-    // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
-    // absence is the dev-VM exemption. This is host-local and side-effect-free;
-    // foreground OCI launches must never boot the builder/dev VM just to probe.
-    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
-
-    // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
-    // dev run boots from the unpacked tree over virtio-fs (no ext4 materialize);
-    // prod, sealed, and block backends stay on the materialized rootfs (claim 3).
-    let virtiofs_root = resolve_virtiofs_root(
-        &req.image,
-        backend.capabilities().virtiofs_root,
-        verity_path.is_some(),
-    );
+    // Snapshot eligibility, the dm-verity sidecar probe, the virtiofs-root
+    // tier gate, and the effective initrd all fall out of the resolved image
+    // + backend capabilities; see `resolve_boot_strategy`.
+    let boot = resolve_boot_strategy(&req, &backend, &resolved)?;
 
     // Report the resolved strategy to the command layer for chain-audit. This is
     // the single source of truth — the same value that drives the boot below —
     // so the `plan.boot_posture` entry can never diverge from what actually
     // booted.
-    let root_strategy = if virtiofs_root.is_some() {
-        mvm_build::run_image::RootStrategy::VirtiofsRoot
-    } else {
-        mvm_build::run_image::RootStrategy::BlockExt4
-    };
     if let Some(sink) = posture {
-        sink.set(root_strategy);
+        sink.set(boot.root_strategy);
     }
-    let runtime_source_policy = runtime_source_policy_for(
-        &req.image,
-        backend.name(),
-        verity_path.is_some(),
-        root_strategy,
-    );
     if let Some(sink) = runtime_source_policy_sink {
-        sink.set(runtime_source_policy);
+        sink.set(boot.runtime_source_policy);
     }
-    let effective_initrd = effective_transient_initrd(
-        &req.image,
-        initrd.as_deref(),
-        &rootfs,
-        runtime_source_policy,
-        root_strategy,
-    )?;
+    let mut use_snapshot = boot.use_snapshot;
 
     let t_drives_ready = timing.then(std::time::Instant::now);
-
-    // Pre-open console data sockets for interactive PTY runs against
-    // non-sealed images. OCI/dev images can carry verity sidecars and still be
-    // interactive, so the sidecar's sealed bit is the load-bearing signal here.
-    let image_sealed = crate::commands::vm::image_is_sealed(std::path::Path::new(&rootfs));
-    let dev_console = transient_run_dev_console(req.pty, image_sealed);
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
@@ -1055,56 +968,7 @@ fn run_inner(
     // `run_supervisor` dispatch. Routing template restores through
     // admission would add an `admit_for_run` call here and a
     // `populate_audit_substrate` invocation after the struct literal.
-    let mut start_config = VmStartConfig {
-        name: vm_name.clone(),
-        rootfs_path: rootfs.clone(),
-        virtiofs_root,
-        kernel_path: Some(vmlinux.clone()),
-        initrd_path: effective_initrd,
-        verity_path,
-        roothash,
-        dev_console,
-        revision_hash: revision.clone(),
-        flake_ref: flake_ref.clone(),
-        profile: profile.clone(),
-        cpus: req.cpus,
-        memory_mib: req.memory_mib,
-        mem_initial_mib: req.mem_initial_mib,
-        ports: Vec::new(),
-        volumes: volumes
-            .iter()
-            .map(|v| VmVolume {
-                host: v.host.clone(),
-                guest: v.guest.clone(),
-                size: v.size.clone(),
-                read_only: v.read_only,
-                kind: v.kind,
-                encrypted: v.encrypted,
-            })
-            .collect(),
-        config_files: Vec::new(),
-        secret_files: Vec::new(),
-        runner_dir: None,
-        network_policy: req.network_policy.clone(),
-        // Derive the userspace L3 egress tunnel from the resolved policy: an
-        // admitted allow-list gets a `mvm-network-tunnel-worker` (the smoltcp
-        // forwarder) whose gate enforces exactly those flows; deny-all /
-        // unrestricted return None (no forwarding tunnel). The identity is
-        // minted here so the guest cmdline token and the host worker's
-        // expected-session validate against identical values.
-        network_tunnel: mvm_runtime::network_tunnel_for_launch(
-            &req.network_policy,
-            mvm_runtime::TunnelLaunchIdentity {
-                tenant_id: "local".to_string(),
-                vm_id: vm_name.clone(),
-                boot_id: uuid::Uuid::new_v4().to_string(),
-                session_nonce: uuid::Uuid::new_v4().to_string(),
-            },
-        ),
-        warm_pool_size: req.warm_pool_size,
-        runtime_source_policy,
-        ..Default::default()
-    };
+    let mut start_config = build_start_config(&req, &vm_name, &resolved, &boot, &volumes);
     // The tunnel worker spawns on the cold-boot path, not snapshot-restore.
     if start_config.network_tunnel.is_some() {
         use_snapshot = false;
@@ -1117,7 +981,7 @@ fn run_inner(
     // via the FlakeRunConfig firewall. Force cold boot when admitted — the
     // bridge spawn is on the cold-boot path, not snapshot-restore.
     if let Some(admit_fn) = admit
-        && let Some(sub) = admit_fn(std::path::Path::new(&rootfs), &vm_name)?
+        && let Some(sub) = admit_fn(std::path::Path::new(&resolved.rootfs), &vm_name)?
     {
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
@@ -1127,83 +991,23 @@ fn run_inner(
     }
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
+    drop_l3_tunnel_for_host_vsock_proxy(&mut start_config, &backend);
     let t_admitted = timing.then(std::time::Instant::now);
 
-    // Reap dead/expired standbys before claiming/booting. There is no daemon, so
-    // this on-use reap is what enforces the standby TTL between invocations —
-    // without it a one-off run (or runs against different images) leaves warm
-    // spares resident until a manual `cache prune`. Best-effort; never blocks.
-    crate::commands::pool::reap_stale_standbys_best_effort();
-
-    // Try a warm-pool claim before snapshot/cold-boot. A claimed
-    // standby is pre-booted to agent-ready and runs under its own standby-id, so
-    // rebind `vm_name` for the Ctrl-C handler, run_in_guest, and teardown below.
-    // try_warm_claim gates internally (warm_pool_size > 0, admitted tenant +
-    // signed plan threaded into start_config, no extra volumes, backend supports
-    // the pool); any miss/error fails open to the snapshot/cold-boot paths.
-    let warm_claimed =
-        match crate::commands::pool::try_warm_claim(&backend, &start_config, false, None) {
-            Ok(Some(id)) => {
-                ui::info(&format!(
-                    "Claimed a warm standby ({}) — skipping cold boot.",
-                    id.0
-                ));
-                vm_name = id.0;
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                tracing::warn!(error = %e, "warm-claim attempt errored; cold-booting");
-                false
-            }
-        };
-
-    let booted = warm_claimed
-        || if use_snapshot {
-            let tmpl = template_id
-                .as_deref()
-                .expect("snapshot_eligible only true for ImageSource::Template");
-            let snap = snap_info
-                .as_ref()
-                .expect("snapshot_eligible requires snap_info.is_some()");
-            ui::info(&format!(
-                "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
-            ));
-            match restore_via_snapshot(&vm_name, tmpl, snap, &start_config) {
-                Ok(()) => true,
-                Err(e) => {
-                    // macOS backends without Firecracker (HVF, libkrun) return os
-                    // error 95 (EOPNOTSUPP) on vsock snapshots; cold boot still
-                    // works there. Fall back rather than failing the whole exec.
-                    ui::warn(&format!("Snapshot restore failed: {e}; cold-booting."));
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-    if !booted {
-        ui::info(&format!("Booting transient VM '{vm_name}'..."));
-        if let Err(e) = backend.start(&start_config) {
-            clean_add_dir_staging(&req.add_dirs, &staging_dir);
-            return Err(e).context("starting transient microVM");
-        }
-    }
+    // Reap stale standbys, try a warm-pool claim, then fall back to
+    // snapshot-restore / cold boot. See `boot_transient_vm`.
+    let boot_attempt = BootAttempt {
+        backend: &backend,
+        start_config: &start_config,
+        resolved: &resolved,
+        add_dirs: &req.add_dirs,
+        staging_dir: &staging_dir,
+    };
+    let vm_name = boot_transient_vm(vm_name, use_snapshot, &boot_attempt)?;
     let t_backend_started = timing.then(std::time::Instant::now);
 
     // Install Ctrl-C handler that tears the VM down.
-    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let interrupted = interrupted.clone();
-        let vm_name = vm_name.clone();
-        let backend_name = backend.name().to_string();
-        let _ = crate::signal::set_ctrlc_handler(move || {
-            interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
-            let backend = AnyBackend::from_hypervisor(&backend_name);
-            let _ = backend.stop_transient(&VmId(vm_name.clone()));
-        });
-    }
+    let interrupted = install_ctrlc_teardown(&vm_name, backend.name());
 
     // Run the command + always tear down.
     let run_outcome = run_in_guest(&vm_name, &req, &add_dir_labels, capture, timing);
@@ -1213,35 +1017,13 @@ fn run_inner(
         Err(e) => (Err(e), None),
     };
 
-    let _ = backend.stop_transient(&VmId(vm_name.clone()));
-
-    // Top the warm pool back toward target after the run (best-effort,
-    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; the
-    // image-bound boot+capture rewarm the removed Vz backend used to do
-    // stays explicit via `pool warm` so teardown does not spawn background
-    // work that can contend with foreground launches.
-    if let Err(e) = crate::commands::pool::replenish_after_launch(&backend, &start_config) {
-        tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
-    }
-
-    // Writable --add-dir uses rsync-back. With the VM stopped the
-    // ext4 image is no longer in use, so we mount it host-side and rsync
-    // its contents over the host directory before nuking the staging dir.
-    // Failures here are warned but do not override the guest exit code.
-    for (idx, dir) in req.add_dirs.iter().enumerate() {
-        if dir.read_only {
-            continue;
-        }
-        let image_path = format!("{staging_dir}/extra-{idx}.ext4");
-        if let Err(e) = mvm_runtime::image::rsync_image_to_host(&image_path, &dir.host_path) {
-            ui::warn(&format!(
-                "writable --add-dir sync-back failed for '{}' -> '{}': {e:#}",
-                dir.host_path, dir.guest_path,
-            ));
-        }
-    }
-
-    clean_add_dir_staging(&req.add_dirs, &staging_dir);
+    teardown_transient_vm(
+        &backend,
+        &vm_name,
+        &start_config,
+        &req.add_dirs,
+        &staging_dir,
+    );
     let t_torn_down = timing.then(std::time::Instant::now);
 
     // Emit the phase breakdown when every seam was marked (i.e. timing was
@@ -1282,6 +1064,418 @@ fn run_inner(
         anyhow::bail!("interrupted");
     }
     result
+}
+
+/// Kernel/rootfs/initrd + provenance resolved from `req.image`: either a
+/// named template lookup (which also probes for a snapshot) or a pre-built
+/// kernel/rootfs pair carried through as-is.
+struct ResolvedImage {
+    vmlinux: String,
+    initrd: Option<String>,
+    rootfs: String,
+    revision: String,
+    flake_ref: String,
+    profile: Option<String>,
+    snap_info: Option<mvm_core::template::SnapshotInfo>,
+    template_id: Option<String>,
+}
+
+/// Resolve image artifacts: either a named template or a pre-built pair. For
+/// templates, also probe for a pre-built snapshot so the caller can skip the
+/// cold-boot cost when the request turns out to be snapshot-eligible.
+fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
+    match image {
+        ImageSource::Template(name) => {
+            let (spec, vmlinux, initrd, rootfs, rev) =
+                mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(name)
+                    .with_context(|| format!("Loading template '{name}'"))?;
+            let snap_info =
+                mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
+                    .ok()
+                    .flatten();
+            Ok(ResolvedImage {
+                vmlinux,
+                initrd,
+                rootfs,
+                revision: rev,
+                flake_ref: spec.flake_ref.clone(),
+                profile: Some(spec.profile.clone()),
+                snap_info,
+                template_id: Some(name.clone()),
+            })
+        }
+        ImageSource::Prebuilt {
+            kernel_path,
+            rootfs_path,
+            initrd_path,
+            label,
+            ..
+        } => Ok(ResolvedImage {
+            vmlinux: kernel_path.clone(),
+            initrd: initrd_path.clone(),
+            rootfs: rootfs_path.clone(),
+            revision: String::new(),
+            flake_ref: label.clone(),
+            profile: None,
+            snap_info: None,
+            template_id: None,
+        }),
+    }
+}
+
+/// Per-`--add-dir` staging: a small RO ext4 image built for each host
+/// directory mapping, plus the VM name / staging dir the images live under.
+struct AddDirStaging {
+    vm_name: String,
+    staging_dir: String,
+    volumes: Vec<mvm_runtime::image::RuntimeVolume>,
+    add_dir_labels: Vec<String>,
+}
+
+/// Build read-only ext4 images for each `--add-dir`, staged in a transient
+/// VM's `extras` subdirectory so cleanup is straightforward.
+fn stage_add_dir_volumes(req: &ExecRequest) -> Result<AddDirStaging> {
+    let vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
+    let staging_dir = mvm_core::config::vm_state_dir(&vm_name)
+        .join("extras")
+        .display()
+        .to_string();
+    let mut volumes: Vec<mvm_runtime::image::RuntimeVolume> = Vec::new();
+    let mut add_dir_labels: Vec<String> = Vec::new();
+    for (idx, dir) in req.add_dirs.iter().enumerate() {
+        let label = format!("mvm-extra-{idx}");
+        let image_path = format!("{staging_dir}/extra-{idx}.ext4");
+        mvm_runtime::image::build_dir_image_ro(&dir.host_path, &label, &image_path).with_context(
+            || {
+                format!(
+                    "preparing --add-dir image for '{}' -> '{}'",
+                    dir.host_path, dir.guest_path
+                )
+            },
+        )?;
+        volumes.push(mvm_runtime::image::RuntimeVolume {
+            host: image_path,
+            guest: dir.guest_path.clone(),
+            size: String::new(),
+            read_only: dir.read_only,
+            // `--add-dir` builds an RO ext4 image, so this is a disk.
+            ..Default::default()
+        });
+        add_dir_labels.push(label);
+    }
+    Ok(AddDirStaging {
+        vm_name,
+        staging_dir,
+        volumes,
+        add_dir_labels,
+    })
+}
+
+/// The run-path tier gate's outputs for one boot: whether the request is
+/// still snapshot-restore eligible, the dm-verity sidecar (if any), the
+/// virtiofs root candidate, the resolved rootfs strategy + runtime source
+/// policy, and the effective initrd.
+struct BootStrategy {
+    use_snapshot: bool,
+    verity_path: Option<String>,
+    roothash: Option<String>,
+    virtiofs_root: Option<String>,
+    root_strategy: mvm_build::run_image::RootStrategy,
+    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+    effective_initrd: Option<String>,
+}
+
+/// Resolve the boot strategy for `resolved`: snapshot eligibility, the
+/// dm-verity sidecar probe, the virtiofs-root tier gate, the runtime source
+/// policy, and the effective initrd. All of these fall out of the resolved
+/// image + `req` + the backend's capabilities.
+fn resolve_boot_strategy(
+    req: &ExecRequest,
+    backend: &AnyBackend,
+    resolved: &ResolvedImage,
+) -> Result<BootStrategy> {
+    // Snapshot path is taken when the request is eligible; otherwise cold boot.
+    let use_snapshot = snapshot_eligible(
+        &req.image,
+        &req.add_dirs,
+        resolved.snap_info.is_some(),
+        backend.capabilities().snapshots,
+    );
+
+    // Probe for the verity sidecar alongside the rootfs: production microVMs
+    // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
+    // absence is the dev-VM exemption. This is host-local and side-effect-free;
+    // foreground OCI launches must never boot the builder/dev VM just to probe.
+    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&resolved.rootfs);
+
+    // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
+    // dev run boots from the unpacked tree over virtio-fs (no ext4 materialize);
+    // prod, sealed, and block backends stay on the materialized rootfs (claim 3).
+    let virtiofs_root = resolve_virtiofs_root(
+        &req.image,
+        backend.capabilities().virtiofs_root,
+        verity_path.is_some(),
+    );
+    let root_strategy = if virtiofs_root.is_some() {
+        mvm_build::run_image::RootStrategy::VirtiofsRoot
+    } else {
+        mvm_build::run_image::RootStrategy::BlockExt4
+    };
+    let runtime_source_policy = runtime_source_policy_for(
+        &req.image,
+        backend.name(),
+        verity_path.is_some(),
+        root_strategy,
+    );
+    let effective_initrd = effective_transient_initrd(
+        &req.image,
+        resolved.initrd.as_deref(),
+        &resolved.rootfs,
+        runtime_source_policy,
+        root_strategy,
+    )?;
+
+    Ok(BootStrategy {
+        use_snapshot,
+        verity_path,
+        roothash,
+        virtiofs_root,
+        root_strategy,
+        runtime_source_policy,
+        effective_initrd,
+    })
+}
+
+/// Build the `VmStartConfig` for the transient boot from the resolved image +
+/// boot-strategy state. Admission (tenant/plan binding) and the runtime
+/// overlay attach happen in the caller, after this returns — this only
+/// assembles the struct.
+fn build_start_config(
+    req: &ExecRequest,
+    vm_name: &str,
+    resolved: &ResolvedImage,
+    boot: &BootStrategy,
+    volumes: &[mvm_runtime::image::RuntimeVolume],
+) -> VmStartConfig {
+    // Pre-open console data sockets for interactive PTY runs against
+    // non-sealed images. OCI/dev images can carry verity sidecars and still be
+    // interactive, so the sidecar's sealed bit is the load-bearing signal here.
+    let image_sealed = crate::commands::vm::image_is_sealed(std::path::Path::new(&resolved.rootfs));
+    let dev_console = transient_run_dev_console(req.pty, image_sealed);
+
+    VmStartConfig {
+        name: vm_name.to_string(),
+        rootfs_path: resolved.rootfs.clone(),
+        virtiofs_root: boot.virtiofs_root.clone(),
+        kernel_path: Some(resolved.vmlinux.clone()),
+        initrd_path: boot.effective_initrd.clone(),
+        verity_path: boot.verity_path.clone(),
+        roothash: boot.roothash.clone(),
+        dev_console,
+        revision_hash: resolved.revision.clone(),
+        flake_ref: resolved.flake_ref.clone(),
+        profile: resolved.profile.clone(),
+        cpus: req.cpus,
+        memory_mib: req.memory_mib,
+        mem_initial_mib: req.mem_initial_mib,
+        ports: Vec::new(),
+        volumes: volumes
+            .iter()
+            .map(|v| VmVolume {
+                host: v.host.clone(),
+                guest: v.guest.clone(),
+                size: v.size.clone(),
+                read_only: v.read_only,
+                kind: v.kind,
+                encrypted: v.encrypted,
+            })
+            .collect(),
+        config_files: Vec::new(),
+        secret_files: Vec::new(),
+        runner_dir: None,
+        network_policy: req.network_policy.clone(),
+        // Derive the userspace L3 egress tunnel from the resolved policy: an
+        // admitted allow-list gets a `mvm-network-tunnel-worker` (the smoltcp
+        // forwarder) whose gate enforces exactly those flows; deny-all /
+        // unrestricted return None (no forwarding tunnel). The identity is
+        // minted here so the guest cmdline token and the host worker's
+        // expected-session validate against identical values.
+        network_tunnel: mvm_runtime::network_tunnel_for_launch(
+            &req.network_policy,
+            mvm_runtime::TunnelLaunchIdentity {
+                tenant_id: "local".to_string(),
+                vm_id: vm_name.to_string(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                session_nonce: uuid::Uuid::new_v4().to_string(),
+            },
+        ),
+        warm_pool_size: req.warm_pool_size,
+        runtime_source_policy: boot.runtime_source_policy,
+        ..Default::default()
+    }
+}
+
+/// Everything [`boot_transient_vm`] needs beyond the caller-varying
+/// `vm_name` / `use_snapshot`.
+struct BootAttempt<'a> {
+    backend: &'a AnyBackend,
+    start_config: &'a VmStartConfig,
+    resolved: &'a ResolvedImage,
+    add_dirs: &'a [AddDir],
+    staging_dir: &'a str,
+}
+
+/// Boot the transient VM: try to claim a warm standby first, then a
+/// snapshot restore (when eligible), then fall back to a cold boot from
+/// `attempt.start_config`. Reaps expired standbys first — best-effort TTL
+/// housekeeping since there is no daemon to do it between invocations.
+///
+/// Returns the effective VM name — a claimed standby runs under its own
+/// standby id, not `vm_name`. On a cold-boot failure the `--add-dir`
+/// staging is cleaned up and the error is returned, exactly as the inline
+/// boot sequence this replaces used to do.
+fn boot_transient_vm(
+    vm_name: String,
+    use_snapshot: bool,
+    attempt: &BootAttempt<'_>,
+) -> Result<String> {
+    // Reap dead/expired standbys before claiming/booting. There is no daemon, so
+    // this on-use reap is what enforces the standby TTL between invocations —
+    // without it a one-off run (or runs against different images) leaves warm
+    // spares resident until a manual `cache prune`. Best-effort; never blocks.
+    crate::commands::pool::reap_stale_standbys_best_effort();
+
+    // Try a warm-pool claim before snapshot/cold-boot. A claimed standby is
+    // pre-booted to agent-ready and runs under its own standby-id, so the
+    // returned name diverges from `vm_name` — the caller rebinds it for the
+    // Ctrl-C handler, run_in_guest, and teardown. try_warm_claim gates
+    // internally (warm_pool_size > 0, admitted tenant + signed plan threaded
+    // into start_config, no extra volumes, backend supports the pool); any
+    // miss/error fails open to the snapshot/cold-boot paths.
+    let (vm_name, warm_claimed) = match crate::commands::pool::try_warm_claim(
+        attempt.backend,
+        attempt.start_config,
+        false,
+        None,
+    ) {
+        Ok(Some(id)) => {
+            ui::info(&format!(
+                "Claimed a warm standby ({}) — skipping cold boot.",
+                id.0
+            ));
+            (id.0, true)
+        }
+        Ok(None) => (vm_name, false),
+        Err(e) => {
+            tracing::warn!(error = %e, "warm-claim attempt errored; cold-booting");
+            (vm_name, false)
+        }
+    };
+
+    let booted = warm_claimed
+        || if use_snapshot {
+            let tmpl = attempt
+                .resolved
+                .template_id
+                .as_deref()
+                .expect("snapshot_eligible only true for ImageSource::Template");
+            let snap = attempt
+                .resolved
+                .snap_info
+                .as_ref()
+                .expect("snapshot_eligible requires snap_info.is_some()");
+            ui::info(&format!(
+                "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
+            ));
+            match restore_via_snapshot(&vm_name, tmpl, snap, attempt.start_config) {
+                Ok(()) => true,
+                Err(e) => {
+                    // macOS backends without Firecracker (HVF, libkrun) return os
+                    // error 95 (EOPNOTSUPP) on vsock snapshots; cold boot still
+                    // works there. Fall back rather than failing the whole exec.
+                    ui::warn(&format!("Snapshot restore failed: {e}; cold-booting."));
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+    if !booted {
+        ui::info(&format!("Booting transient VM '{vm_name}'..."));
+        if let Err(e) = attempt.backend.start(attempt.start_config) {
+            clean_add_dir_staging(attempt.add_dirs, attempt.staging_dir);
+            return Err(e).context("starting transient microVM");
+        }
+    }
+    Ok(vm_name)
+}
+
+/// Arm the Ctrl-C handler for this transient run: on interrupt, flag the
+/// returned `AtomicBool` and best-effort stop the VM immediately, rather
+/// than waiting for the in-flight guest command to return. The normal
+/// teardown sequence still runs afterward when the run returns — this only
+/// shortens the window an interrupted VM stays up.
+fn install_ctrlc_teardown(
+    vm_name: &str,
+    backend_name: &str,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handler_interrupted = interrupted.clone();
+    let vm_name = vm_name.to_string();
+    let backend_name = backend_name.to_string();
+    let _ = crate::signal::set_ctrlc_handler(move || {
+        handler_interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+        let backend = AnyBackend::from_hypervisor(&backend_name);
+        let _ = backend.stop_transient(&VmId(vm_name.clone()));
+    });
+    interrupted
+}
+
+/// Tear down the transient VM after the guest command finishes (or fails to
+/// dispatch): stop the backend VM, top up the warm pool toward its target,
+/// sync back any writable `--add-dir` mounts, and remove the staging dir.
+///
+/// The caller invokes this unconditionally after capturing the guest
+/// command's `Result` in a local — there is no `?` between the backend
+/// start and this call, so teardown always runs on both the success and
+/// error paths.
+fn teardown_transient_vm(
+    backend: &AnyBackend,
+    vm_name: &str,
+    start_config: &VmStartConfig,
+    add_dirs: &[AddDir],
+    staging_dir: &str,
+) {
+    let _ = backend.stop_transient(&VmId(vm_name.to_string()));
+
+    // Top the warm pool back toward target after the run (best-effort,
+    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; the
+    // image-bound boot+capture rewarm the removed Vz backend used to do
+    // stays explicit via `pool warm` so teardown does not spawn background
+    // work that can contend with foreground launches.
+    if let Err(e) = crate::commands::pool::replenish_after_launch(backend, start_config) {
+        tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
+    }
+
+    // Writable --add-dir uses rsync-back. With the VM stopped the
+    // ext4 image is no longer in use, so we mount it host-side and rsync
+    // its contents over the host directory before nuking the staging dir.
+    // Failures here are warned but do not override the guest exit code.
+    for (idx, dir) in add_dirs.iter().enumerate() {
+        if dir.read_only {
+            continue;
+        }
+        let image_path = format!("{staging_dir}/extra-{idx}.ext4");
+        if let Err(e) = mvm_runtime::image::rsync_image_to_host(&image_path, &dir.host_path) {
+            ui::warn(&format!(
+                "writable --add-dir sync-back failed for '{}' -> '{}': {e:#}",
+                dir.host_path, dir.guest_path,
+            ));
+        }
+    }
+
+    clean_add_dir_staging(add_dirs, staging_dir);
 }
 
 /// Restore a transient microVM from a template snapshot instead of cold-booting.
@@ -1641,6 +1835,7 @@ pub fn boot_session_vm(
         && start_config.network_tunnel.is_none()
         && snap_info.is_some()
         && backend.capabilities().snapshots;
+    drop_l3_tunnel_for_host_vsock_proxy(&mut start_config, &backend);
     let booted = if use_snapshot {
         let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
         match restore_via_snapshot(&vm_name, env, snap, &start_config) {
@@ -1811,6 +2006,48 @@ mod tests {
         );
         assert_eq!(hc.interval_secs, 10);
         assert_eq!(build_healthcheck(None, 30, 5, 3, 0), None);
+    }
+
+    fn fixture_network_tunnel() -> mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
+        mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
+            guest_port: mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
+            session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
+                tenant_id: "local".to_string(),
+                vm_id: "test-vm".to_string(),
+                boot_id: "test-boot".to_string(),
+                session_nonce: "test-nonce".to_string(),
+                requested_features: Default::default(),
+                maximum_frame_size: 65536,
+            },
+        }
+    }
+
+    #[test]
+    fn drop_l3_tunnel_for_host_vsock_proxy_drops_it_on_libkrun() {
+        let mut config = VmStartConfig {
+            network_tunnel: Some(fixture_network_tunnel()),
+            ..Default::default()
+        };
+        let backend = AnyBackend::from_hypervisor("libkrun");
+        drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
+        assert!(
+            config.network_tunnel.is_none(),
+            "libkrun carries all egress over its host-vsock proxy; the L3 tunnel is a redundant second data plane"
+        );
+    }
+
+    #[test]
+    fn drop_l3_tunnel_for_host_vsock_proxy_keeps_it_on_firecracker() {
+        let mut config = VmStartConfig {
+            network_tunnel: Some(fixture_network_tunnel()),
+            ..Default::default()
+        };
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
+        assert!(
+            config.network_tunnel.is_some(),
+            "firecracker has no host-vsock proxy; the L3 tunnel is its only vsock-only egress path"
+        );
     }
 
     #[test]
@@ -2684,7 +2921,7 @@ mod tests {
 
     #[test]
     fn interactive_sealed_run_leaves_dev_console_unset() {
-        // A sealed image has no dev-shell agent; pre-opening sockets is
+        // A sealed image has no interactive agent; pre-opening sockets is
         // wasteful. enforce_accessible_gate refuses the attach separately.
         assert!(!transient_run_dev_console(true, true));
     }

@@ -3,9 +3,9 @@
 # Built from `crates/mvm-agentd` in the workspace. Baked
 # unconditionally into every guest rootfs (prod and dev) so the guest
 # can record its exit status before poweroff regardless of whether
-# dev-shell features are compiled in.
+# interactive features are compiled in.
 #
-# Always built without any dev-shell-style feature flag — the exit
+# Always built without any interactive-style feature flag — the exit
 # reporter has no `do_exec`-equivalent surface and the same artifact
 # is safe for dev and prod images.
 

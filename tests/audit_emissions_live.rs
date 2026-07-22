@@ -1022,6 +1022,7 @@ fn cleanup_emits_slot_prune_audit_entry_even_with_no_builds() {
 /// real Nix; `--hypervisor mock` routes backend dispatch to
 /// [`mvm_runtime::MockBackend`]; `-d` detaches; `--no-supervisor`
 /// skips plan-64 admission.
+#[cfg(feature = "test-support")]
 fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
     let stub_dir = sandbox.home_path().join("stub");
     std::fs::create_dir_all(&stub_dir).expect("mkdir stub");
@@ -1068,6 +1069,7 @@ fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
 /// follow-up commands would find a stale socket and fail to connect.
 /// Hosting the agent in the test process keeps it alive across every
 /// subprocess invocation for the duration of the test.
+#[cfg(feature = "test-support")]
 struct MockVmAgentFixture {
     _agent: mvm_runtime::mock_guest_agent::MockGuestAgent,
 }
@@ -1076,6 +1078,7 @@ struct MockVmAgentFixture {
 /// spawn a [`MockGuestAgent`](mvm_runtime::mock_guest_agent::MockGuestAgent)
 /// listening at `<vm_dir>/runtime/v.sock`. Returns when the listener
 /// is ready to accept connections.
+#[cfg(feature = "test-support")]
 fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture {
     // The subprocess resolves mvm_home() from the MVM_HOME the sandbox
     // sets, so it computes the same path we compute here.
@@ -1087,6 +1090,7 @@ fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn machine_run_with_mock_backend_emits_vm_start_audit_entry() {
     // End-to-end test of `mvmctl machine run` against the in-memory
     // `MockBackend`. Pre-MockBackend this row needed a real
@@ -1110,6 +1114,7 @@ fn machine_run_with_mock_backend_emits_vm_start_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn set_ttl_emits_vm_ttl_set_audit_entry() {
     // `mvmctl set-ttl <vm> <duration>` operates on the persistent
     // name registry that `mvmctl up` populates. Bring up a mock
@@ -1146,6 +1151,7 @@ fn set_ttl_emits_vm_ttl_set_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn set_ttl_clear_emits_vm_ttl_set_with_cleared_detail() {
     // Negative-shape complement: `set-ttl --clear` removes the
     // TTL and emits the same `vm_ttl_set` kind but with
@@ -1173,6 +1179,7 @@ fn set_ttl_clear_emits_vm_ttl_set_with_cleared_detail() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn pause_emits_workload_sleep_audit_entry() {
     // Plan 65 W3: `mvmctl pause --hypervisor mock` exercises the
     // snapshot-and-seal path against `CannedIO` (deterministic
@@ -1211,6 +1218,7 @@ fn pause_emits_workload_sleep_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn resume_emits_workload_wake_audit_entry() {
     // Plan 65 W3: pause-then-resume against the mock backend.
     // The seal-and-verify round-trip works because `CannedIO`
@@ -2214,6 +2222,7 @@ fn build_emits_template_build_audit_entry_against_stub_outdir() {
 // ============================================================================
 
 #[test]
+#[cfg(feature = "test-support")]
 fn fs_write_emits_vm_fs_mutate_audit_entry() {
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-fsw");
@@ -2251,6 +2260,7 @@ fn fs_write_emits_vm_fs_mutate_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn fs_mkdir_emits_vm_fs_mutate_audit_entry() {
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-fsmk");
@@ -2279,6 +2289,7 @@ fn fs_mkdir_emits_vm_fs_mutate_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn fs_rm_emits_vm_fs_mutate_audit_entry() {
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-fsrm");
@@ -2307,6 +2318,7 @@ fn fs_rm_emits_vm_fs_mutate_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn fs_mv_emits_vm_fs_mutate_audit_entry() {
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-fsmv");
@@ -2335,6 +2347,7 @@ fn fs_mv_emits_vm_fs_mutate_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn fs_ls_does_not_emit_mutation_audit_entry() {
     // Read-only: `fs ls` doesn't mutate state — must not emit
     // any *mutation-class* LocalAudit kind (`VmFsMutate`,
@@ -2377,6 +2390,7 @@ fn fs_ls_does_not_emit_mutation_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn proc_start_emits_vm_proc_start_audit_entry() {
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-ps");
@@ -2405,6 +2419,7 @@ fn proc_start_emits_vm_proc_start_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn proc_signal_emits_vm_proc_signal_audit_entry() {
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-psg");
@@ -2440,6 +2455,7 @@ fn proc_signal_emits_vm_proc_signal_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn proc_kill_emits_kill_audit_entry() {
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-pk");
@@ -2468,6 +2484,7 @@ fn proc_kill_emits_kill_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn proc_stdin_emits_vm_proc_stdin_audit_entry() {
     let sandbox = AuditSandbox::new();
     let _fixture = start_mock_vm_agent(&sandbox, "t-pst");
@@ -2504,6 +2521,7 @@ fn proc_stdin_emits_vm_proc_stdin_audit_entry() {
 }
 
 #[test]
+#[cfg(feature = "test-support")]
 fn proc_ls_does_not_emit_mutation_audit_entry() {
     // Read-only: `proc ls` doesn't mutate process state — must
     // not emit any mutation-class LocalAudit kind. It *does*
