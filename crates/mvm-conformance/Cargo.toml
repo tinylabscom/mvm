@@ -34,6 +34,9 @@ tokio.workspace = true
 # through a crate rename as long as the produced binary is still named
 # `mvmctl`.
 assert_cmd.workspace = true
+# Parses the `build address --json` report in the workload-identity steps.
+# Dev-only: `cargo tree -p mvm-conformance -e no-dev` must not gain it.
+serde_json.workspace = true
 
 [lints]
 workspace = true
