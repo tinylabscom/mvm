@@ -1,5 +1,8 @@
 //! Chain-signed DNS decision audit events.
 
+#[cfg(target_os = "linux")]
+use std::future::Future;
+
 use mvm_core::protocol::dns::DnsRecordType;
 use mvm_runtime::vmm::egress_gate::DnsVerdict;
 
@@ -12,10 +15,6 @@ pub async fn emit_dns_query(
     qtype: DnsRecordType,
     verdict: &DnsVerdict,
 ) {
-    let qtype = match qtype {
-        DnsRecordType::A => "a",
-        DnsRecordType::Aaaa => "aaaa",
-    };
     let (event, verdict_label, ips) = match verdict {
         DnsVerdict::Refused => ("dns.refused", "refused", String::new()),
         DnsVerdict::Resolved(ips) => (
@@ -26,6 +25,34 @@ pub async fn emit_dns_query(
                 .collect::<Vec<_>>()
                 .join(","),
         ),
+    };
+    emit_dns_event(recorder, name, qtype, event, verdict_label, ips).await;
+}
+
+/// Record a DNS query refused before resolution because its workload exceeded a limit.
+pub async fn emit_dns_rate_limited(recorder: &Recorder, name: &str, qtype: DnsRecordType) {
+    emit_dns_event(
+        recorder,
+        name,
+        qtype,
+        "dns.refused",
+        "rate_limited",
+        String::new(),
+    )
+    .await;
+}
+
+async fn emit_dns_event(
+    recorder: &Recorder,
+    name: &str,
+    qtype: DnsRecordType,
+    event: &'static str,
+    verdict_label: &'static str,
+    ips: String,
+) {
+    let qtype = match qtype {
+        DnsRecordType::A => "a",
+        DnsRecordType::Aaaa => "aaaa",
     };
     let labels = [
         ("qname".to_string(), name.to_string()),
@@ -49,6 +76,17 @@ pub fn emit_dns_query_blocking(
     qtype: DnsRecordType,
     verdict: &DnsVerdict,
 ) {
+    emit_blocking(name, emit_dns_query(recorder, name, qtype, verdict));
+}
+
+/// Record a rate-limited DNS query from the blocking vsock transport.
+#[cfg(target_os = "linux")]
+pub fn emit_dns_rate_limited_blocking(recorder: &Recorder, name: &str, qtype: DnsRecordType) {
+    emit_blocking(name, emit_dns_rate_limited(recorder, name, qtype));
+}
+
+#[cfg(target_os = "linux")]
+fn emit_blocking(name: &str, emit: impl Future<Output = ()>) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(qname = %name, "DNS audit runtime unavailable");
         return;
@@ -60,7 +98,7 @@ pub fn emit_dns_query_blocking(
         tracing::warn!(qname = %name, "DNS audit requires a multi-thread runtime on the blocking transport");
         return;
     }
-    tokio::task::block_in_place(|| handle.block_on(emit_dns_query(recorder, name, qtype, verdict)));
+    tokio::task::block_in_place(|| handle.block_on(emit));
 }
 
 #[cfg(test)]
@@ -139,6 +177,22 @@ mod tests {
             Some("93.184.216.34,2606:2800:220:1:248:1893:25c8:1946")
         );
         assert_eq!(entry.labels.len(), 5, "no query payload bytes are audited");
+        assert_eq!(metrics.snapshot().audit_dns_total, 1);
+    }
+
+    #[tokio::test]
+    async fn emits_rate_limited_query_as_a_distinct_refusal() {
+        let (recorder, signer, metrics) = fixture();
+        emit_dns_rate_limited(&recorder, "busy.test", DnsRecordType::A).await;
+
+        let entries = signer.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "dns.refused");
+        assert_eq!(
+            entries[0].labels.get("verdict").map(String::as_str),
+            Some("rate_limited")
+        );
+        assert_eq!(entries[0].labels.get("ips").map(String::as_str), Some(""));
         assert_eq!(metrics.snapshot().audit_dns_total, 1);
     }
 }

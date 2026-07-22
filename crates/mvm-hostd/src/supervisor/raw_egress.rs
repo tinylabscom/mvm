@@ -54,13 +54,17 @@ pub async fn serve_raw_egress(
     recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) {
+    let rate_guard = Arc::new(dns_handler::DnsRateGuard::default());
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let gate = Arc::clone(&gate);
                 let recorder = recorder.clone();
+                let rate_guard = Arc::clone(&rate_guard);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_raw_conn(stream, &gate, recorder, timeout).await {
+                    if let Err(e) =
+                        handle_raw_conn(stream, &gate, recorder, rate_guard, timeout).await
+                    {
                         tracing::warn!(error = %e, "raw egress connection failed");
                     }
                 });
@@ -80,6 +84,7 @@ async fn handle_raw_conn<S>(
     mut guest: S,
     gate: &EgressGate,
     recorder: Option<Arc<Recorder>>,
+    rate_guard: Arc<dns_handler::DnsRateGuard>,
     timeout: Duration,
 ) -> std::io::Result<()>
 where
@@ -93,7 +98,8 @@ where
         return http_forward::serve_http_forward(guest, gate, timeout).await;
     }
     if target == dns_handler::FRAME_LINE {
-        return dns_handler::serve_dns(guest, gate, recorder.as_deref(), timeout).await;
+        return dns_handler::serve_dns(guest, gate, recorder.as_deref(), &rate_guard, timeout)
+            .await;
     }
     match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
         EgressVerdict::Allow { ips, port } => {
@@ -232,6 +238,7 @@ pub async fn serve_raw_egress_vsock(
     timeout: Duration,
 ) {
     use crate::supervisor::substitution_proxy::vsock;
+    let rate_guard = Arc::new(dns_handler::DnsRateGuard::default());
     loop {
         let listen_fd = listener.raw_fd();
         let conn_fd = match vsock::accept(listen_fd) {
@@ -241,7 +248,13 @@ pub async fn serve_raw_egress_vsock(
                 return;
             }
         };
-        if let Err(e) = handle_raw_conn_blocking(conn_fd, &gate, recorder.clone(), timeout) {
+        if let Err(e) = handle_raw_conn_blocking(
+            conn_fd,
+            &gate,
+            recorder.clone(),
+            Arc::clone(&rate_guard),
+            timeout,
+        ) {
             tracing::warn!(error = %e, "raw egress vsock connection failed");
         }
     }
@@ -252,6 +265,7 @@ fn handle_raw_conn_blocking(
     conn_fd: std::os::fd::RawFd,
     gate: &EgressGate,
     recorder: Option<Arc<Recorder>>,
+    rate_guard: Arc<dns_handler::DnsRateGuard>,
     timeout: Duration,
 ) -> std::io::Result<()> {
     let owned = unsafe { OwnedFd::from_raw_fd(conn_fd) };
@@ -264,7 +278,13 @@ fn handle_raw_conn_blocking(
         return http_forward::serve_http_forward_blocking(guest, gate, timeout);
     }
     if target == dns_handler::FRAME_LINE {
-        return dns_handler::serve_dns_blocking(guest, gate, recorder.as_deref(), timeout);
+        return dns_handler::serve_dns_blocking(
+            guest,
+            gate,
+            recorder.as_deref(),
+            &rate_guard,
+            timeout,
+        );
     }
     let (ips, port) =
         match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
@@ -715,7 +735,14 @@ mod tests {
         let gate = EgressGate::default_deny();
         let (mut client, server) = tokio::io::duplex(1024);
         let h = tokio::spawn(async move {
-            handle_raw_conn(server, &gate, None, Duration::from_secs(1)).await
+            handle_raw_conn(
+                server,
+                &gate,
+                None,
+                Arc::new(dns_handler::DnsRateGuard::default()),
+                Duration::from_secs(1),
+            )
+            .await
         });
         client.write_all(b"93.184.216.34:80\n").await.unwrap();
 
@@ -742,7 +769,14 @@ mod tests {
         );
         let (mut client, server) = tokio::io::duplex(4096);
         let h = tokio::spawn(async move {
-            handle_raw_conn(server, &gate, None, Duration::from_secs(1)).await
+            handle_raw_conn(
+                server,
+                &gate,
+                None,
+                Arc::new(dns_handler::DnsRateGuard::default()),
+                Duration::from_secs(1),
+            )
+            .await
         });
         // Over-long line with no newline → read_target_line returns None → close.
         let junk = vec![b'x'; MAX_TARGET_LINE + 10];
@@ -761,7 +795,14 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         let h2 = tokio::spawn(async move {
-            handle_raw_conn(server2, &gate2, None, Duration::from_secs(1)).await
+            handle_raw_conn(
+                server2,
+                &gate2,
+                None,
+                Arc::new(dns_handler::DnsRateGuard::default()),
+                Duration::from_secs(1),
+            )
+            .await
         });
         client2.write_all(b"not-an-address\n").await.unwrap();
         let mut ack2 = [0u8; 1];
@@ -778,7 +819,14 @@ mod tests {
         let gate = EgressGate::default_deny();
         let (mut client, server) = tokio::io::duplex(4096);
         let handler = tokio::spawn(async move {
-            handle_raw_conn(server, &gate, None, Duration::from_secs(1)).await
+            handle_raw_conn(
+                server,
+                &gate,
+                None,
+                Arc::new(dns_handler::DnsRateGuard::default()),
+                Duration::from_secs(1),
+            )
+            .await
         });
         let query = [
             0x22, 0x22, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0x07, b'b', b'l', b'o', b'c',

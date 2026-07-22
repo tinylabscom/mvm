@@ -89,6 +89,7 @@ pub mod plan;
 pub mod platform;
 pub mod policy;
 pub mod protocol;
+pub mod rate_limit;
 pub mod residency;
 /// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
 /// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
