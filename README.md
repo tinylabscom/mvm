@@ -493,7 +493,8 @@ The guest agent runs as an unprivileged uid under `setpriv`; `~/.mvm` and
 multi-tenant guests (one guest = one workload), and hardware-backed key
 attestation.
 
-- The claim ledger (claim → witness, machine-checked): [`specs/claims/catalog.md`](specs/claims/catalog.md)
+- The claim ledger (claim → witness, machine-checked): the conformance claim
+  catalog embedded in [ADR-001](specs/adrs/001-microvm-security-posture.md)
 - The source of truth (threat model, tier matrix): [ADR-001](specs/adrs/001-microvm-security-posture.md)
 - Live posture on your host: `mvmctl doctor`
 - Audit chain verification: `mvmctl trust audit verify` (exits nonzero on drift)
@@ -559,9 +560,10 @@ Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
   through `mvm-core::config` helpers, never inline `$HOME` joins.
 - **Specs discipline.** Design docs live in `specs/` (ADRs in `specs/adrs/`,
   plans in `specs/plans/`). If your change lands a plan workstream, tick the
-  matching boxes in the plan and `specs/REFACTOR-STATUS.md` in the same PR. If it
-  touches a security claim, keep
-  [`specs/claims/catalog.md`](specs/claims/catalog.md) in sync — the
+  matching boxes in the plan and refresh the
+  [refactor status dashboard](specs/refactor/README.md) in the same PR. If it
+  touches a security claim, keep the conformance claim catalog in
+  [ADR-001](specs/adrs/001-microvm-security-posture.md) in sync — the
   claim→witness mapping is machine-checked.
 
 Keep PRs focused (one concern each) and write commit messages that explain
