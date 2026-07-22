@@ -3,13 +3,11 @@
 
 use std::io::{Read, Write};
 
-use mvm_agentd::vsock::{GuestRequest, GuestResponse, HOST_CID};
+use mvm_agentd::vsock::{GuestRequest, GuestResponse, HOST_CID, MAX_FRAME_SIZE, write_frame};
 
 pub(crate) const AF_VSOCK: i32 = 40;
 pub(crate) const SOCK_STREAM: i32 = 1;
 pub(crate) const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
-pub(crate) const MAX_FRAME_SIZE: usize = 256 * 1024;
-
 #[repr(C)]
 pub(crate) struct SockAddrVm {
     pub(crate) svm_family: u16,
@@ -43,7 +41,8 @@ pub(crate) fn read_request(file: &mut std::fs::File) -> Option<GuestRequest> {
     if file.read_exact(&mut len_buf).is_err() {
         return None;
     }
-    let frame_len = u32::from_be_bytes(len_buf) as usize;
+    let frame_len =
+        usize::try_from(u32::from_be_bytes(len_buf)).expect("u32 frame length fits usize");
     if frame_len > MAX_FRAME_SIZE {
         eprintln!("frame too large: {} bytes", frame_len);
         return None;
@@ -55,29 +54,30 @@ pub(crate) fn read_request(file: &mut std::fs::File) -> Option<GuestRequest> {
     serde_json::from_slice(&buf).ok()
 }
 
-pub(crate) fn write_response(file: &mut std::fs::File, resp: &GuestResponse) {
-    let data = match serde_json::to_vec(resp) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("failed to serialize response: {}", e);
-            return;
+pub(crate) fn write_response(file: &mut impl Write, resp: &GuestResponse) {
+    let fallback = GuestResponse::Error {
+        message: "guest response exceeded the protocol frame cap".to_string(),
+    };
+    let selected = match serde_json::to_vec(resp) {
+        Ok(encoded) if encoded.len() <= MAX_FRAME_SIZE => resp,
+        Ok(_) => &fallback,
+        Err(error) => {
+            eprintln!("failed to serialize vsock response: {error}");
+            &fallback
         }
     };
-    let len = (data.len() as u32).to_be_bytes();
-    if let Err(e) = file.write_all(&len) {
-        eprintln!("failed to write vsock response: {e}");
-    }
-    if let Err(e) = file.write_all(&data) {
-        eprintln!("failed to write vsock response: {e}");
-    }
-    if let Err(e) = file.flush() {
-        eprintln!("failed to flush vsock response: {e}");
+    if let Err(error) = write_frame(file, selected) {
+        // Do not append a fallback after an I/O error: the original frame may
+        // already be partially written, so another prefix would corrupt it.
+        eprintln!("failed to write vsock response: {error}");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_agentd::vsock::read_frame;
+    use std::io::Cursor;
 
     /// Only the host CID (2) may drive the control port.
     #[test]
@@ -101,5 +101,27 @@ mod tests {
         for cid in [4u32, 42, 5252, u32::MAX - 1] {
             assert!(!peer_cid_is_authorized(cid), "cid {cid} must be rejected");
         }
+    }
+
+    #[test]
+    fn oversized_response_is_replaced_by_one_bounded_error_frame() {
+        let oversized = GuestResponse::Error {
+            message: "x".repeat(MAX_FRAME_SIZE),
+        };
+        let mut wire = Cursor::new(Vec::new());
+        write_response(&mut wire, &oversized);
+
+        assert!(wire.get_ref().len() <= MAX_FRAME_SIZE + 4);
+        wire.set_position(0);
+        let response: GuestResponse = read_frame(&mut wire).expect("bounded response frame");
+        assert!(matches!(
+            response,
+            GuestResponse::Error { message }
+                if message == "guest response exceeded the protocol frame cap"
+        ));
+        assert_eq!(
+            usize::try_from(wire.position()).expect("cursor position fits usize"),
+            wire.get_ref().len()
+        );
     }
 }

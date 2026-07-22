@@ -177,9 +177,7 @@ pub fn require_capabilities(
 /// (`Exit` or `Error`) for the caller to inspect.
 ///
 /// The wire format is the same length-prefixed JSON envelope as every
-/// other vsock verb. v1 emits exactly three frames per call: one
-/// `Stdout`, one `Stderr`, and one terminal event. v2 may chunk
-/// progressively without changing this consumer — termination is
+/// other vsock verb. Output may span multiple bounded frames; termination is
 /// detected via [`EntrypointEvent::is_terminal`], not frame count.
 pub fn send_run_entrypoint<F>(
     stream: &mut UnixStream,

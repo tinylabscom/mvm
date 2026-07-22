@@ -1,13 +1,13 @@
 //! Guest-side TUN device helpers for the shared network tunnel.
 //!
-//! This module is the smallest real data-plane building block after the shared
+//! This module is the guest-side data-plane device after the shared
 //! `HELLO` / `HELLO_ACK` / `CONFIG` bootstrap:
 //! - open the guest's `/dev/net/tun`,
 //! - bind it to the host-authored interface name (`mvm-net0` by default),
 //! - exchange raw IP packets through ordinary blocking `Read` / `Write`.
 //!
-//! The live packet pump lands in a later slice; this module keeps the device
-//! side isolated and reusable.
+//! The device side stays isolated from the live packet pump so both remain
+//! independently testable.
 
 use std::fs::File;
 use std::io::{Read, Write};

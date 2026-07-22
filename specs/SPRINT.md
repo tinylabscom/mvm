@@ -178,6 +178,15 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 
 ### Phase 1 — Foundations
 
+- [x] **Cross-cutting guest protocol hardening (Plan 254):** made the logical
+  control/data-plane split executable with exhaustive verb classification,
+  64 total / 48 data request admission, symmetric 256 KiB frame limits,
+  48 KiB filesystem/process chunks, offset-addressed `fs`/`cp` transfers, and
+  host-CID-only console data admission. Guest protocol v2 is a hard cutover;
+  schemas and Python/TypeScript bindings are regenerated. Host workspace tests
+  and checks plus affected-crate clippy are green; Linux workspace-wide clippy
+  remains the required merge-CI gate.
+
 **WS1 — crate restructure** (the spine; each sub-step keeps tests green)
 - [ ] 1a `mvm-protocol`: extract `mvm-sdk::ir` + wire + policy + `mvm-verify`; make it `#![no_std]` + `alloc`; add a `wasm32-unknown-unknown` CI build; `unsafe_code = "forbid"`.
 - [ ] 1b `mvm-core`: rebuild on `mvm-protocol`; own single-dir config, crypto, keystore, attestation, catalog, `log`.

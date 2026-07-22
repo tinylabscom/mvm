@@ -289,6 +289,8 @@ mod tests {
                 mode: 0,
                 create_parents: false,
                 follow_symlinks: false,
+                offset: None,
+                truncate: true,
             },
             GuestRequest::FsList {
                 path: "/x".into(),
@@ -480,6 +482,8 @@ mod tests {
                 mode: 0,
                 create_parents: false,
                 follow_symlinks: false,
+                offset: None,
+                truncate: true,
             },
             GuestRequest::FsRead {
                 path: "/x".into(),

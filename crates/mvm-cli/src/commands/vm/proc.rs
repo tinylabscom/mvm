@@ -292,21 +292,32 @@ fn cmd_stdin(name: &str, token: &str, content: Option<String>) -> Result<()> {
             buf
         }
     };
-    let req = GuestRequest::ProcSendInput {
-        pid_token: token.to_string(),
-        bytes,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_proc(proc_request(name, req)?)?;
-    match result {
-        ProcResult::InputAccepted { bytes_accepted } => {
-            eprintln!("accepted {bytes_accepted} bytes");
-            mvm_core::audit_emit!(VmProcStdin, vm: name, "token={token} bytes={bytes_accepted}");
-            Ok(())
+    let mut total_accepted = 0_u64;
+    for chunk in bytes
+        .chunks(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE)
+        .chain(bytes.is_empty().then_some(bytes.as_slice()))
+    {
+        let req = GuestRequest::ProcSendInput {
+            pid_token: token.to_string(),
+            bytes: chunk.to_vec(),
+        };
+        super::shared::emit_vsock_rpc_audit(name, &req);
+        match unwrap_proc(proc_request(name, req)?)? {
+            ProcResult::InputAccepted { bytes_accepted } => {
+                let expected = u64::try_from(chunk.len()).expect("chunk length fits u64");
+                if bytes_accepted != expected {
+                    bail!("Guest accepted {bytes_accepted} stdin bytes, expected {expected}");
+                }
+                total_accepted = total_accepted
+                    .checked_add(bytes_accepted)
+                    .ok_or_else(|| anyhow::anyhow!("Accepted stdin byte count overflow"))?;
+            }
+            other => bail!("Unexpected ProcResult variant for SendInput: {other:?}"),
         }
-        other => bail!("Unexpected ProcResult variant for SendInput: {:?}", other),
     }
+    eprintln!("accepted {total_accepted} bytes");
+    mvm_core::audit_emit!(VmProcStdin, vm: name, "token={token} bytes={total_accepted}");
+    Ok(())
 }
 
 fn cmd_wait(name: &str, token: &str, timeout: Option<u64>) -> Result<()> {

@@ -506,6 +506,8 @@ class FsWrite:
     path: str
     create_parents: Optional[bool] = False
     follow_symlinks: Optional[bool] = False
+    offset: Optional[int] = None
+    truncate: Optional[bool] = True
 
 
 @dataclass

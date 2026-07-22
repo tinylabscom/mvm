@@ -285,10 +285,8 @@ pub enum FsChangeKind {
 /// stream for one call. The agent emits exactly one terminal event
 /// per call.
 ///
-/// v1 buffers each stream fully before sending one `Stdout` and one
-/// `Stderr` event (sizes bounded by agent caps). v2 may chunk
-/// progressively without changing the type or the protocol shape:
-/// the host already reads frames in a loop until terminal.
+/// Buffered output is split into bounded `Stdout` and `Stderr` events without
+/// changing the protocol shape: the host reads frames until terminal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

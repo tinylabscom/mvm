@@ -90,6 +90,26 @@ fn evt(e: EntrypointEvent) -> GuestResponse {
     GuestResponse::EntrypointEvent(e)
 }
 
+fn emit_entrypoint_bytes(file: &mut std::fs::File, bytes: &[u8], stdout: bool) {
+    for chunk in bytes.chunks(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE) {
+        let event = if stdout {
+            EntrypointEvent::Stdout {
+                chunk: chunk.to_vec(),
+            }
+        } else {
+            EntrypointEvent::Stderr {
+                chunk: chunk.to_vec(),
+            }
+        };
+        write_response(file, &evt(event));
+    }
+}
+
+fn emit_entrypoint_output(file: &mut std::fs::File, stdout: &[u8], stderr: &[u8]) {
+    emit_entrypoint_bytes(file, stdout, true);
+    emit_entrypoint_bytes(file, stderr, false);
+}
+
 /// Handle a `RunEntrypoint` request. Writes streaming events directly via
 /// `write_response` and returns the terminal event for the dispatcher to
 /// send through the existing `match` arm pattern.
@@ -171,8 +191,7 @@ fn handle_run_entrypoint(
             stderr,
             controls,
         } => {
-            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
-            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            emit_entrypoint_output(file, &stdout, &stderr);
             emit_controls(file, controls);
             evt(EntrypointEvent::Exit { code })
         }
@@ -181,8 +200,7 @@ fn handle_run_entrypoint(
             stderr,
             controls,
         } => {
-            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
-            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            emit_entrypoint_output(file, &stdout, &stderr);
             emit_controls(file, controls);
             evt(EntrypointEvent::Error {
                 kind: RunEntrypointError::Timeout,
@@ -195,8 +213,7 @@ fn handle_run_entrypoint(
             stderr,
             controls,
         } => {
-            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
-            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            emit_entrypoint_output(file, &stdout, &stderr);
             emit_controls(file, controls);
             let stream_name = match stream {
                 PayloadCapStream::Stdin => "stdin",
@@ -218,8 +235,7 @@ fn handle_run_entrypoint(
             stderr,
             controls,
         } => {
-            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
-            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            emit_entrypoint_output(file, &stdout, &stderr);
             emit_controls(file, controls);
             evt(EntrypointEvent::Error {
                 kind: RunEntrypointError::WrapperCrashed,
@@ -275,8 +291,7 @@ fn dispatch_via_warm_pool(
             controls,
             outcome,
         }) => {
-            write_response(file, &evt(EntrypointEvent::Stdout { chunk: stdout }));
-            write_response(file, &evt(EntrypointEvent::Stderr { chunk: stderr }));
+            emit_entrypoint_output(file, &stdout, &stderr);
             emit_controls(file, controls);
             match outcome {
                 WorkerOutcome::Exit { code } => evt(EntrypointEvent::Exit { code }),
@@ -695,6 +710,8 @@ pub(crate) fn handle_fs_write(
     content: Vec<u8>,
     mode: u32,
     create_parents: bool,
+    offset: u64,
+    truncate: bool,
 ) -> GuestResponse {
     GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
         mvm_agentd::fs_rpc::FsRequest::Write {
@@ -702,6 +719,8 @@ pub(crate) fn handle_fs_write(
             content: &content,
             mode,
             create_parents,
+            offset,
+            truncate,
         },
     ))
 }

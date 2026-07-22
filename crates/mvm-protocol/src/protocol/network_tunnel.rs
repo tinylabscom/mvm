@@ -1,17 +1,16 @@
 //! Shared guest-TUN ↔ host-UDS network tunnel contract.
 //!
-//! This module defines the first stable wire/config seam for a production
+//! This module defines the stable wire/config seam for the production
 //! vsock-only data path:
 //!
 //! guest TUN -> framed packets -> AF_VSOCK -> host UDS -> host worker
 //!
-//! The implementation deliberately stops at the contract:
+//! The contract covers:
 //! - session-bound identity and feature negotiation,
 //! - guest network configuration,
 //! - frame typing and bounded decoding.
 //!
-//! The host/guest packet pumps land in later slices; pinning the contract here
-//! first lets both ends converge on one fail-closed shape.
+//! Host and guest packet pumps consume this shared fail-closed shape.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

@@ -122,34 +122,26 @@ fn copy_host_to_guest(host: &Path, vm: &str, guest_path: &str, args: &Args) -> R
     if !args.force && guest_exists(vm, guest_path)? {
         bail!("Guest destination {vm}:{guest_path} exists; pass --force to overwrite");
     }
-    let req = GuestRequest::FsWrite {
-        path: guest_path.to_string(),
-        content,
-        mode: DEFAULT_MODE,
-        create_parents: args.create_parents,
-        follow_symlinks: false,
-    };
-    // Inbound vsock RPC audit. Emit before dispatch so a failure
-    // on the wire still leaves an audit trail of "host tried to
-    // write to this guest path".
-    super::shared::emit_vsock_rpc_audit(vm, &req);
-    match unwrap_fs(super::fs::fs_request(vm, req)?)? {
-        FsResult::Write { bytes_written } => {
-            mvm_core::audit_emit!(
-                VmFileCopy,
-                vm: vm,
-                "direction=host_to_guest path={guest_path} bytes={bytes_written}"
-            );
-            Ok(CopySummary::new(
-                CopyDirection::HostToGuest,
-                vm,
-                guest_path,
-                bytes_written,
-                args,
-            ))
-        }
-        other => bail!("Unexpected FsResult variant for Write: {:?}", other),
-    }
+    let bytes_written = super::fs::write_guest_chunks(
+        vm,
+        guest_path,
+        &content,
+        DEFAULT_MODE,
+        args.create_parents,
+        false,
+    )?;
+    mvm_core::audit_emit!(
+        VmFileCopy,
+        vm: vm,
+        "direction=host_to_guest path={guest_path} bytes={bytes_written}"
+    );
+    Ok(CopySummary::new(
+        CopyDirection::HostToGuest,
+        vm,
+        guest_path,
+        bytes_written,
+        args,
+    ))
 }
 
 fn copy_guest_to_host(vm: &str, guest_path: &str, host: &Path, args: &Args) -> Result<CopySummary> {
@@ -181,51 +173,39 @@ fn copy_guest_to_host(vm: &str, guest_path: &str, host: &Path, args: &Args) -> R
             )
         })?;
     }
-    let req = GuestRequest::FsRead {
-        path: guest_path.to_string(),
-        offset: None,
-        length: stat.size,
-        follow_symlinks: true,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(vm, &req);
-    match unwrap_fs(super::fs::fs_request(vm, req)?)? {
-        FsResult::Read { content, .. } => {
-            if content.len() as u64 != stat.size {
-                bail!(
-                    "Guest read returned {} bytes, expected {}",
-                    content.len(),
-                    stat.size
-                );
-            }
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true);
-            if args.force {
-                options.truncate(true);
-            } else {
-                options.create_new(true);
-            }
-            let mut file = options
-                .open(host)
-                .with_context(|| format!("Failed to open host destination {}", host.display()))?;
-            file.write_all(&content)
-                .with_context(|| format!("Failed to write host destination {}", host.display()))?;
-            mvm_core::audit_emit!(
-                VmFileCopy,
-                vm: vm,
-                "direction=guest_to_host path={guest_path} bytes={}",
-                content.len()
-            );
-            Ok(CopySummary::new(
-                CopyDirection::GuestToHost,
-                vm,
-                guest_path,
-                content.len() as u64,
-                args,
-            ))
-        }
-        other => bail!("Unexpected FsResult variant for Read: {:?}", other),
+    let content = super::fs::read_guest_chunks(vm, guest_path, 0, stat.size)?;
+    let content_len = u64::try_from(content.len()).expect("content length fits u64");
+    if content_len != stat.size {
+        bail!(
+            "Guest read returned {} bytes, expected {}",
+            content.len(),
+            stat.size
+        );
     }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    if args.force {
+        options.truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = options
+        .open(host)
+        .with_context(|| format!("Failed to open host destination {}", host.display()))?;
+    file.write_all(&content)
+        .with_context(|| format!("Failed to write host destination {}", host.display()))?;
+    mvm_core::audit_emit!(
+        VmFileCopy,
+        vm: vm,
+        "direction=guest_to_host path={guest_path} bytes={content_len}"
+    );
+    Ok(CopySummary::new(
+        CopyDirection::GuestToHost,
+        vm,
+        guest_path,
+        content_len,
+        args,
+    ))
 }
 
 impl CopySummary {

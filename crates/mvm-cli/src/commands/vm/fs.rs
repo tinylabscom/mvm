@@ -193,22 +193,9 @@ fn unwrap_fs(result: FsResult) -> Result<FsResult> {
 }
 
 fn cmd_read(name: &str, path: &str, offset: u64, length: u64) -> Result<()> {
-    let req = GuestRequest::FsRead {
-        path: path.to_string(),
-        offset: if offset == 0 { None } else { Some(offset) },
-        length,
-        follow_symlinks: true,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(fs_request(name, req)?)?;
-    match result {
-        FsResult::Read { content, .. } => {
-            std::io::stdout().write_all(&content)?;
-            Ok(())
-        }
-        other => bail!("Unexpected FsResult variant for Read: {:?}", other),
-    }
+    let content = read_guest_chunks(name, path, offset, length)?;
+    std::io::stdout().write_all(&content)?;
+    Ok(())
 }
 
 fn cmd_write(
@@ -227,24 +214,96 @@ fn cmd_write(
             buf
         }
     };
-    let req = GuestRequest::FsWrite {
-        path: path.to_string(),
-        content: bytes,
-        mode,
-        create_parents,
-        follow_symlinks,
-    };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(name, &req);
-    let result = unwrap_fs(fs_request(name, req)?)?;
-    match result {
-        FsResult::Write { bytes_written } => {
-            eprintln!("wrote {} bytes", bytes_written);
-            mvm_core::audit_emit!(VmFsMutate, vm: name, "op=write path={path} bytes={bytes_written}");
-            Ok(())
+    let bytes_written =
+        write_guest_chunks(name, path, &bytes, mode, create_parents, follow_symlinks)?;
+    eprintln!("wrote {} bytes", bytes_written);
+    mvm_core::audit_emit!(VmFsMutate, vm: name, "op=write path={path} bytes={bytes_written}");
+    Ok(())
+}
+
+pub(super) fn read_guest_chunks(
+    name: &str,
+    path: &str,
+    start_offset: u64,
+    length: u64,
+) -> Result<Vec<u8>> {
+    let chunk_cap =
+        u64::try_from(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE).expect("wire chunk size fits u64");
+    let capacity = usize::try_from(length).unwrap_or(usize::MAX);
+    let mut content = Vec::with_capacity(capacity.min(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE));
+    let mut offset = start_offset;
+    let mut remaining = length;
+    while remaining > 0 {
+        let requested = remaining.min(chunk_cap);
+        let req = GuestRequest::FsRead {
+            path: path.to_string(),
+            offset: Some(offset),
+            length: requested,
+            follow_symlinks: true,
+        };
+        super::shared::emit_vsock_rpc_audit(name, &req);
+        match unwrap_fs(fs_request(name, req)?)? {
+            FsResult::Read {
+                content: chunk,
+                total_size,
+            } => {
+                let chunk_len = u64::try_from(chunk.len()).expect("chunk length fits u64");
+                if chunk_len > requested {
+                    bail!("Guest read returned a chunk larger than requested");
+                }
+                content.extend_from_slice(&chunk);
+                offset = offset
+                    .checked_add(chunk_len)
+                    .ok_or_else(|| anyhow::anyhow!("Guest read offset overflow"))?;
+                remaining -= chunk_len;
+                if chunk_len < requested || offset >= total_size {
+                    break;
+                }
+            }
+            other => bail!("Unexpected FsResult variant for Read: {other:?}"),
         }
-        other => bail!("Unexpected FsResult variant for Write: {:?}", other),
     }
+    Ok(content)
+}
+
+pub(super) fn write_guest_chunks(
+    name: &str,
+    path: &str,
+    content: &[u8],
+    mode: u32,
+    create_parents: bool,
+    follow_symlinks: bool,
+) -> Result<u64> {
+    let mut offset = 0_u64;
+    for (index, chunk) in content
+        .chunks(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE)
+        .chain(content.is_empty().then_some(content))
+        .enumerate()
+    {
+        let req = GuestRequest::FsWrite {
+            path: path.to_string(),
+            content: chunk.to_vec(),
+            mode,
+            create_parents: create_parents && index == 0,
+            follow_symlinks,
+            offset: Some(offset),
+            truncate: index == 0,
+        };
+        super::shared::emit_vsock_rpc_audit(name, &req);
+        match unwrap_fs(fs_request(name, req)?)? {
+            FsResult::Write { bytes_written } => {
+                let expected = u64::try_from(chunk.len()).expect("chunk length fits u64");
+                if bytes_written != expected {
+                    bail!("Guest wrote {bytes_written} bytes, expected {expected}");
+                }
+                offset = offset
+                    .checked_add(bytes_written)
+                    .ok_or_else(|| anyhow::anyhow!("Guest write offset overflow"))?;
+            }
+            other => bail!("Unexpected FsResult variant for Write: {other:?}"),
+        }
+    }
+    Ok(offset)
 }
 
 fn cmd_ls(name: &str, path: &str, json: bool) -> Result<()> {
