@@ -183,6 +183,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 **WS0.6 — BDD conformance harness (cucumber-rs)** (see §2.7)
 
 - [ ] Add `features/suites/sN_<name>/` + the `crates/mvm-conformance` cucumber-rs runner + a `just bdd` recipe (folded into `just ci`); seed scenarios for the current security claims and the top-level CLI verbs, wired through `mvm-client`.
+  - [x] Gate every software-publication path on a reusable GitHub Actions workflow that runs `just bdd`: runtime releases, kernel release assets, SDK registry releases, and crates.io publication. Keep emergency revocation-list publication independent of the product suite.
 - [ ] Standing rule for every later WS: land its Gherkin scenarios in the same change (feature-first — the scenario is written and red before the implementation).
 - Gate: `just bdd` green in CI; each security claim has a scenario.
 

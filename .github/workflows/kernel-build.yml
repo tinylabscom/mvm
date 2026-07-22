@@ -29,8 +29,14 @@ permissions:
   contents: write # release asset upload on tags
 
 jobs:
+  bdd:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/bdd.yml
+
   kernel:
     name: Build kernels (${{ matrix.arch }})
+    needs: [bdd]
+    if: ${{ always() && (needs.bdd.result == 'success' || needs.bdd.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:

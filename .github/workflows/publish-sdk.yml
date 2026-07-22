@@ -27,6 +27,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  bdd:
+    if: ${{ github.event_name == 'release' }}
+    uses: ./.github/workflows/bdd.yml
+
   preflight:
     if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'sdk-v') }}
     runs-on: ubuntu-latest
@@ -107,7 +111,7 @@ jobs:
 
   publish_pypi_release:
     if: ${{ github.event_name == 'release' }}
-    needs: preflight
+    needs: [preflight, bdd]
     uses: ./.github/workflows/publish-pypi.yml
     with:
       dry_run: false
@@ -121,7 +125,7 @@ jobs:
 
   publish_npm_release:
     if: ${{ github.event_name == 'release' }}
-    needs: preflight
+    needs: [preflight, bdd]
     uses: ./.github/workflows/publish-npm.yml
     with:
       dry_run: false
