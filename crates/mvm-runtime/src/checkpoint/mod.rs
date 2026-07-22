@@ -175,33 +175,88 @@ pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<
     Ok(())
 }
 
-/// Walk a checkpoint's lineage from `id` up to its genesis root, proving the
-/// hash chain at every hop. For each record it recomputes `meta_digest` from
-/// the record's own fields and refuses a drift from the stored value; the
-/// hash-link to the parent is enforced by looking the parent up *by its
-/// content-address*, so editing any ancestor's sealed record — its content
-/// manifest, its lineage, anything the digest covers — is caught here even
-/// though the edit is invisible to the plain parent-name back-pointer the old
-/// model used.
+/// Resolves the signature-authenticated content-address a checkpoint's creation
+/// was recorded under in the chain-signed audit log.
 ///
-/// Fails closed on: a record whose stored digest no longer matches its fields
-/// (post-seal edit), a parent hash-link that resolves to no stored checkpoint
-/// (dangling lineage), or a revisited digest (a would-be cycle — infeasible for
+/// Injected (rather than called directly) so this crate's lineage walk stays
+/// free of host-key loading, tenant resolution, and audit-file layout — those
+/// live in the layer above (the CLI), which owns the host signer. An
+/// implementation MUST verify the audit chain's signatures before trusting any
+/// label it returns, so the value it yields is one no party but the host could
+/// have produced.
+pub trait CheckpointChainAnchor {
+    /// The content-address recorded for `meta`'s creation in the tenant's
+    /// signature-verified audit chain (`checkpoint.created`'s `meta_digest`, or
+    /// `checkpoint.forked`'s `child_digest`), or `None` if the chain carries no
+    /// creation entry for it.
+    fn recorded_creation_digest(&self, meta: &CheckpointMeta) -> Result<Option<CheckpointDigest>>;
+}
+
+/// Verify one checkpoint record against the signed audit chain: its stored
+/// `meta_digest` must equal a recomputation of its own fields (catches a
+/// post-seal edit that left the digest stale) AND must equal the
+/// signature-verified digest the audit chain recorded at creation (catches a
+/// full local re-forge, where an attacker rewrites content, digest, and links
+/// all consistently — that survives recompute alone but not the signed chain,
+/// which it cannot re-sign without the host key). Fails closed on a drift, a
+/// mismatch against the chain, or the absence of any signed creation entry.
+fn verify_checkpoint_against_chain(
+    anchor: &dyn CheckpointChainAnchor,
+    meta: &CheckpointMeta,
+) -> Result<()> {
+    let recomputed = meta.compute_meta_digest();
+    if recomputed != meta.meta_digest {
+        anyhow::bail!(
+            "checkpoint '{}' meta_digest drift: stored {}, recomputed {} \
+             (its meta.json was edited after sealing)",
+            meta.id,
+            meta.meta_digest,
+            recomputed
+        );
+    }
+    match anchor.recorded_creation_digest(meta)? {
+        Some(recorded) if recorded == recomputed => Ok(()),
+        Some(recorded) => anyhow::bail!(
+            "checkpoint '{}' content-address {recomputed} does not match the \
+             signed audit chain, which recorded {recorded} at creation \
+             (the on-disk record was edited after it was audited)",
+            meta.id
+        ),
+        None => anyhow::bail!(
+            "checkpoint '{}' has no signed audit entry to anchor its \
+             content-address; refusing to treat an un-audited record as verified",
+            meta.id
+        ),
+    }
+}
+
+/// Walk a checkpoint's lineage from `id` up to its genesis root, verifying each
+/// record against the **signed** audit chain via `anchor`: at every hop the
+/// record's recomputed content-address must equal both its stored `meta_digest`
+/// and the digest the host signed into the audit chain at creation. The
+/// parent hash-link is followed by content-address, so editing any ancestor's
+/// sealed record — content manifest, lineage, anything the digest covers — is
+/// caught here even though it is invisible to a plain parent-name back-pointer.
+///
+/// Fails closed on: a drift between a record and its stored digest, a record
+/// whose digest disagrees with the signed chain (or has no signed entry), a
+/// parent hash-link that resolves to no stored checkpoint (dangling lineage),
+/// or a revisited digest (a would-be cycle — cryptographically infeasible for
 /// genuine content-addresses, refused rather than looped on).
-pub fn verify_lineage(store: &CheckpointStore, id: &CheckpointId) -> Result<()> {
+///
+/// Threat boundary: this proves integrity against edits made *after* the host
+/// signed each record. A malicious host that holds the signing key is out of
+/// scope (it is out of scope for the whole audit chain), as is a checkpoint
+/// that was never audited — for which there is nothing signed to anchor to.
+pub fn verify_lineage(
+    store: &CheckpointStore,
+    id: &CheckpointId,
+    anchor: &dyn CheckpointChainAnchor,
+) -> Result<()> {
     let mut current = store.read_meta(id)?;
     let mut seen: Vec<CheckpointDigest> = Vec::new();
     loop {
-        let recomputed = current.compute_meta_digest();
-        if recomputed != current.meta_digest {
-            anyhow::bail!(
-                "checkpoint '{}' meta_digest drift: stored {}, recomputed {} \
-                 (its meta.json was edited after sealing)",
-                current.id,
-                current.meta_digest,
-                recomputed
-            );
-        }
+        verify_checkpoint_against_chain(anchor, &current)?;
         if seen.contains(&current.meta_digest) {
             anyhow::bail!(
                 "checkpoint '{}' lineage revisits digest {}: refusing a cyclic chain",
@@ -218,7 +273,8 @@ pub fn verify_lineage(store: &CheckpointStore, id: &CheckpointId) -> Result<()> 
         };
         // Resolving the parent by its content-address *is* the hash-link check:
         // by_digest only returns a record whose meta_digest equals the link, and
-        // that record's own digest is re-verified on the next iteration.
+        // that record's own digest is re-verified (against disk + chain) on the
+        // next iteration.
         current = store.by_digest(&parent_digest)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "checkpoint lineage is broken: no checkpoint has parent-linked digest {parent_digest}"
@@ -254,13 +310,22 @@ pub fn checkpoint_is_vz(meta: &mvm_core::checkpoint::CheckpointMeta) -> bool {
 }
 
 /// Branch a new sandbox lineage from a checkpoint: verify the source content's
-/// integrity, CoW-clone it into `dest_dir`, and record a child checkpoint whose
-/// `parent` points back to the source. Boot of the child is the caller's job.
+/// integrity AND its content-address against the signed audit chain, CoW-clone
+/// it into `dest_dir`, and record a child checkpoint whose `parent` hash-links
+/// to the source. Boot of the child is the caller's job.
+///
+/// The parent is verified against the signed chain (`anchor`) before any bytes
+/// are cloned, so a fork never builds on a checkpoint whose sealed record was
+/// edited after it was audited — fail-closed.
 ///
 /// fs_quick only — a vm_full checkpoint carries saved memory and must be forked
 /// through [`fork_vm_full_fc`], which restores the memory state into the new
 /// identity.
-pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<CheckpointMeta> {
+pub fn fork_checkpoint(
+    store: &CheckpointStore,
+    params: ForkParams,
+    anchor: &dyn CheckpointChainAnchor,
+) -> Result<CheckpointMeta> {
     let parent = store.read_meta(&params.checkpoint)?;
     if parent.class != CheckpointClass::FsQuick {
         anyhow::bail!(
@@ -270,6 +335,9 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
     }
 
     verify_content(store, &parent)?;
+    // The parent's sealed record must still match the digest the host signed at
+    // creation — refuse to branch from a checkpoint edited after it was audited.
+    verify_checkpoint_against_chain(anchor, &parent)?;
 
     std::fs::create_dir_all(&params.dest_dir)
         .with_context(|| format!("creating {}", params.dest_dir.display()))?;
@@ -311,6 +379,7 @@ pub fn fork_vm_full_fc(
     store: &CheckpointStore,
     params: ForkParams,
     restorer: &dyn ForkVmFullRestorer,
+    anchor: &dyn CheckpointChainAnchor,
 ) -> Result<CheckpointMeta> {
     let parent = store.read_meta(&params.checkpoint)?;
     if parent.class != CheckpointClass::VmFull {
@@ -320,6 +389,9 @@ pub fn fork_vm_full_fc(
         );
     }
     verify_content(store, &parent)?;
+    // Same fail-closed posture as fork_checkpoint: the parent's sealed record
+    // must still match the digest the host signed at creation before we clone.
+    verify_checkpoint_against_chain(anchor, &parent)?;
 
     if !FORK_ALLOW_PARENT_RUNNING && vm_is_running(&parent.vm_name) {
         anyhow::bail!(
@@ -805,6 +877,46 @@ mod tests {
             .build()
     }
 
+    /// Anchor that echoes each record's own recomputed digest: the signed audit
+    /// chain agrees with what's on disk — the honest case.
+    struct AgreeingAnchor;
+    impl CheckpointChainAnchor for AgreeingAnchor {
+        fn recorded_creation_digest(
+            &self,
+            meta: &CheckpointMeta,
+        ) -> Result<Option<CheckpointDigest>> {
+            Ok(Some(meta.compute_meta_digest()))
+        }
+    }
+
+    /// Anchor that reports a fixed, unrelated digest for every record: models a
+    /// signed chain that disagrees with the on-disk record (post-audit edit).
+    struct DisagreeingAnchor(CheckpointDigest);
+    impl CheckpointChainAnchor for DisagreeingAnchor {
+        fn recorded_creation_digest(
+            &self,
+            _meta: &CheckpointMeta,
+        ) -> Result<Option<CheckpointDigest>> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    /// Anchor with no signed creation entry for anything: models an un-audited
+    /// checkpoint, which chain-anchored verification must refuse.
+    struct UnauditedAnchor;
+    impl CheckpointChainAnchor for UnauditedAnchor {
+        fn recorded_creation_digest(
+            &self,
+            _meta: &CheckpointMeta,
+        ) -> Result<Option<CheckpointDigest>> {
+            Ok(None)
+        }
+    }
+
+    fn unrelated_digest() -> CheckpointDigest {
+        CheckpointDigest::parse(format!("sha256:{}", "f".repeat(64))).unwrap()
+    }
+
     #[test]
     fn write_then_read_roundtrips() {
         let tmp = tempfile::tempdir().unwrap();
@@ -923,6 +1035,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
+            &AgreeingAnchor,
         )
         .unwrap();
         assert_eq!(child.parent.as_ref().unwrap(), &parent.meta_digest);
@@ -960,6 +1073,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
+            &AgreeingAnchor,
         )
         .unwrap_err();
         assert!(err.to_string().contains("vm_full"));
@@ -983,6 +1097,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
+            &AgreeingAnchor,
         )
         .unwrap_err();
         assert!(err.to_string().contains("integrity") || err.to_string().contains("sha256"));
@@ -1059,6 +1174,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
+            &AgreeingAnchor,
         )
         .unwrap();
         assert_eq!(child.content.len(), 2);
@@ -1751,6 +1867,7 @@ mod tests {
                 child_tenant_id: None,
             },
             &restorer,
+            &AgreeingAnchor,
         )
         .unwrap();
 
@@ -1793,6 +1910,7 @@ mod tests {
                 child_tenant_id: None,
             },
             &restorer,
+            &AgreeingAnchor,
         )
         .unwrap_err();
         assert!(
@@ -1833,7 +1951,7 @@ mod tests {
         let meta = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
         assert_eq!(meta.meta_digest, meta.compute_meta_digest());
         // A freshly captured genesis checkpoint is a valid one-node lineage.
-        verify_lineage(&store, &meta.id).unwrap();
+        verify_lineage(&store, &meta.id, &AgreeingAnchor).unwrap();
     }
 
     #[test]
@@ -1852,6 +1970,7 @@ mod tests {
                 child_plan_json: None,
                 child_tenant_id: None,
             },
+            &AgreeingAnchor,
         )
         .unwrap();
         assert_eq!(child.parent.as_ref().unwrap(), &parent.meta_digest);
@@ -1863,7 +1982,7 @@ mod tests {
         let store = CheckpointStore::at(tmp.path().join("store"));
         let root = seed_linked_meta(&store, "g0", None, "aa");
         assert!(root.parent.is_none());
-        verify_lineage(&store, &root.id).unwrap();
+        verify_lineage(&store, &root.id, &AgreeingAnchor).unwrap();
     }
 
     #[test]
@@ -1873,7 +1992,7 @@ mod tests {
         let g0 = seed_linked_meta(&store, "g0", None, "aa");
         let g1 = seed_linked_meta(&store, "g1", Some(g0.meta_digest.clone()), "bb");
         let g2 = seed_linked_meta(&store, "g2", Some(g1.meta_digest.clone()), "cc");
-        verify_lineage(&store, &g2.id).unwrap();
+        verify_lineage(&store, &g2.id, &AgreeingAnchor).unwrap();
         // Each hop is a hash-link to the parent's content-address.
         assert_eq!(g2.parent.as_ref().unwrap(), &g1.meta_digest);
         assert_eq!(g1.parent.as_ref().unwrap(), &g0.meta_digest);
@@ -1892,7 +2011,7 @@ mod tests {
         let g2 = seed_linked_meta(&store, "g2", Some(g1.meta_digest.clone()), "cc");
 
         // Baseline: the intact chain verifies.
-        verify_lineage(&store, &g2.id).unwrap();
+        verify_lineage(&store, &g2.id, &AgreeingAnchor).unwrap();
 
         // Tamper the ANCESTOR (g0): rewrite its recorded content sha, leaving
         // its stored meta_digest (and g1's hash-link to it) stale.
@@ -1902,7 +2021,7 @@ mod tests {
         tampered.content[0].sha256 = "0".repeat(64);
         std::fs::write(&g0_meta_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
 
-        let err = verify_lineage(&store, &g2.id).unwrap_err();
+        let err = verify_lineage(&store, &g2.id, &AgreeingAnchor).unwrap_err();
         assert!(
             err.to_string().contains("meta_digest drift"),
             "expected a meta_digest drift error, got: {err}"
@@ -1916,7 +2035,7 @@ mod tests {
         // A child hash-linked to a digest no stored checkpoint carries.
         let orphan_parent = CheckpointDigest::parse(format!("sha256:{}", "e".repeat(64))).unwrap();
         let child = seed_linked_meta(&store, "child", Some(orphan_parent), "cc");
-        let err = verify_lineage(&store, &child.id).unwrap_err();
+        let err = verify_lineage(&store, &child.id, &AgreeingAnchor).unwrap_err();
         assert!(
             err.to_string().contains("lineage is broken"),
             "expected a dangling-parent error, got: {err}"
@@ -1935,6 +2054,101 @@ mod tests {
         std::fs::write(&blob, b"flipped-bytes").unwrap();
         assert!(verify_content(&store, &parent).is_err());
         assert_eq!(parent.meta_digest, parent.compute_meta_digest());
+    }
+
+    // ── chain-anchored verification (the signed-chain leg) ───────────────────
+
+    #[test]
+    fn verify_lineage_fails_when_chain_recorded_digest_disagrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let root = seed_linked_meta(&store, "g0", None, "aa");
+        // The on-disk record is internally consistent (recompute == stored), but
+        // the signed chain recorded a different content-address at creation — a
+        // full local re-forge that only the signed chain can catch.
+        let err =
+            verify_lineage(&store, &root.id, &DisagreeingAnchor(unrelated_digest())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the signed audit chain"),
+            "expected a chain-mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_lineage_refuses_a_node_with_no_signed_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let root = seed_linked_meta(&store, "g0", None, "aa");
+        let err = verify_lineage(&store, &root.id, &UnauditedAnchor).unwrap_err();
+        assert!(
+            err.to_string().contains("no signed audit entry"),
+            "expected an un-audited-node error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn fork_fails_closed_when_parent_disagrees_with_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let dest = tmp.path().join("childvm-state");
+        // Parent bytes and stored digest agree, but the signed chain recorded a
+        // different digest at creation → refuse to fork, before cloning a byte.
+        let err = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("c1"),
+                child_vm_name: "childvm".into(),
+                dest_dir: dest.clone(),
+                created_unix: 2,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &DisagreeingAnchor(unrelated_digest()),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the signed audit chain"),
+            "expected a chain-mismatch error, got: {err}"
+        );
+        assert!(
+            !dest.join("rootfs.ext4").exists(),
+            "fork must fail closed before cloning a chain-inconsistent parent"
+        );
+        assert!(
+            store.read_meta(&CheckpointId::new("c1")).is_err(),
+            "no child checkpoint record must be written"
+        );
+    }
+
+    #[test]
+    fn fork_fails_closed_when_parent_has_no_signed_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let dest = tmp.path().join("childvm-state");
+        let err = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("c1"),
+                child_vm_name: "childvm".into(),
+                dest_dir: dest.clone(),
+                created_unix: 2,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &UnauditedAnchor,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no signed audit entry"),
+            "expected an un-audited-parent error, got: {err}"
+        );
+        assert!(!dest.join("rootfs.ext4").exists());
     }
 
     // SAFETY: serialized by HOME_TEST_LOCK.

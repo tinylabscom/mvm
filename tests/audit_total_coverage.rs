@@ -176,6 +176,8 @@ const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
     ("diff", AuditPosture::ReadOnly),
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::ReadOnly),
+    // Reads the signed audit chain to verify lineage; emits nothing itself.
+    ("verify", AuditPosture::ReadOnly),
 ];
 
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[

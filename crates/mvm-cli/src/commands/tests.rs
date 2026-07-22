@@ -2285,6 +2285,29 @@ fn test_checkpoint_rm_json_parses() {
 }
 
 #[test]
+fn test_checkpoint_verify_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "checkpoint",
+        "verify",
+        "ckpt-abc",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Machine(machine::Args {
+            action: machine::MachineAction::Vm(group::VmCmd::Checkpoint(
+                checkpoint::CheckpointArgs {
+                    command: checkpoint::CheckpointCmd::Verify { json: true, .. }
+                }
+            ))
+        })
+    ));
+}
+
+#[test]
 fn test_checkpoint_create_defaults_fs_quick() {
     let cli = Cli::try_parse_from(["mvmctl", "machine", "checkpoint", "create", "myvm"]).unwrap();
     assert!(matches!(
