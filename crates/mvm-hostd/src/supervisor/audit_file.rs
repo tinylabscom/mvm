@@ -378,6 +378,19 @@ mod tests {
             .labels
             .insert("workflow".to_string(), "wf-1".to_string());
         signer.sign_and_emit(&entry).await.unwrap();
+        // A checkpoint.forked entry carrying content-address labels. These ride
+        // opaquely inside the signed bytes as ordinary BTreeMap labels, so the
+        // wasm mirror must accept them with no change to its MirrorEntry shape.
+        let mut forked = make_entry("tenant-a", "checkpoint.forked");
+        forked.labels.insert(
+            "parent_digest".to_string(),
+            format!("sha256:{}", "b".repeat(64)),
+        );
+        forked.labels.insert(
+            "child_digest".to_string(),
+            format!("sha256:{}", "c".repeat(64)),
+        );
+        signer.sign_and_emit(&forked).await.unwrap();
         signer
             .sign_and_emit(&make_entry("tenant-a", "plan.failed"))
             .await
@@ -386,9 +399,10 @@ mod tests {
         let content = std::fs::read_to_string(signer.tenant_path("tenant-a")).unwrap();
         let verified = mvm_protocol::verify::verify_audit_chain_bytes(&content, &vk)
             .expect("mvm-protocol's verifier must accept a chain mvm-supervisor wrote");
-        assert_eq!(verified.count, 2);
+        assert_eq!(verified.count, 3);
         assert_eq!(verified.entries[0].event, "plan.launched");
         assert_eq!(verified.entries[0].tenant, "tenant-a");
+        assert_eq!(verified.entries[1].event, "checkpoint.forked");
 
         // And it must reject a tampered stream just like the native path.
         let tampered = content.replacen("plan.launched", "plan.hijacked", 1);

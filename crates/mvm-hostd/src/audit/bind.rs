@@ -16,22 +16,19 @@ pub fn class_str(class: CheckpointClass) -> &'static str {
     }
 }
 
-/// Emit `checkpoint.created` for a freshly captured checkpoint.
+/// Emit `checkpoint.created` for a freshly captured checkpoint. The bound
+/// content-address is the record's `meta_digest` — it covers the whole manifest
+/// and the parent hash-link, not just the first blob's sha.
 pub fn bind_checkpoint_created(
     emitter: &AuditEmitter,
     plan: &ExecutionPlan,
     meta: &CheckpointMeta,
 ) -> Result<()> {
-    let content_sha = meta
-        .content
-        .first()
-        .map(|b| b.sha256.as_str())
-        .unwrap_or("");
     emitter.emit_checkpoint_created(
         plan,
         meta.id.as_str(),
         class_str(meta.class),
-        content_sha,
+        meta.meta_digest.as_str(),
         &meta.vm_name,
     )
 }
@@ -42,10 +39,17 @@ pub fn bind_checkpoint_restored(
     plan: &ExecutionPlan,
     meta: &CheckpointMeta,
 ) -> Result<()> {
-    emitter.emit_checkpoint_restored(plan, meta.id.as_str(), &meta.vm_name)
+    emitter.emit_checkpoint_restored(
+        plan,
+        meta.id.as_str(),
+        meta.meta_digest.as_str(),
+        &meta.vm_name,
+    )
 }
 
-/// Emit `checkpoint.forked` recording the parent→child lineage.
+/// Emit `checkpoint.forked` recording the parent→child lineage. The bound
+/// `parent_digest` is the child's own hash-link (`child.parent`), so the
+/// audited lineage is the content-address chain the fork actually recorded.
 pub fn bind_checkpoint_forked(
     emitter: &AuditEmitter,
     plan: &ExecutionPlan,
@@ -53,7 +57,15 @@ pub fn bind_checkpoint_forked(
     child: &CheckpointMeta,
     child_vm_name: &str,
 ) -> Result<()> {
-    emitter.emit_checkpoint_forked(plan, parent.as_str(), child.id.as_str(), child_vm_name)
+    let parent_digest = child.parent.as_ref().map(|d| d.as_str()).unwrap_or("");
+    emitter.emit_checkpoint_forked(
+        plan,
+        parent.as_str(),
+        child.id.as_str(),
+        child_vm_name,
+        parent_digest,
+        child.meta_digest.as_str(),
+    )
 }
 
 #[cfg(test)]
@@ -99,7 +111,9 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("checkpoint.created"));
         assert!(content.contains("vm_full")); // class derived from meta
-        assert!(content.contains("abcd")); // content hash from meta.content.first()
+        assert!(content.contains("meta_digest"));
+        // The record's content-address, sourced from meta.meta_digest.
+        assert!(content.contains(meta.meta_digest.as_str()));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 
