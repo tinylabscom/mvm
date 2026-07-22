@@ -482,11 +482,11 @@ impl DnsRateGuard {
 ```
 
 **TDD steps**
-- [ ] **Step 1: Failing tests.** (a) move/duplicate the broker's `try_take` unit tests into `rate_limit.rs` (deterministic — `new(0)` never admits, `new(1)` admits once then denies within the same second); (b) `DnsRateGuard::admit` returns `None` when the bucket is empty; the concurrency `Semaphore` caps in-flight to `max_inflight`.
-- [ ] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-core rate_limit` / `-p mvm-hostd dns_handler`
-- [ ] **Step 3: Impl.** Lift `TokenBucket` verbatim into `mvm_core::rate_limit`; point the broker at it (delete the private copy + its now-duplicate `use`); implement `DnsRateGuard` and gate `serve_dns` (rate-limited query → encode `Refused`/drop + `emit_dns_query` with `verdict=rate_limited`, no upstream lookup).
-- [ ] **Step 4: Run — expect PASS.** `cargo nextest run -p mvm-core -p mvm-hostd`.
-- [ ] **Step 5: Commit.** `feat: shared TokenBucket + per-workload DNS rate-limit and concurrency cap`.
+- [x] **Step 1: Failing tests.** (a) move/duplicate the broker's `try_take` unit tests into `rate_limit.rs` (deterministic — `new(0)` never admits, `new(1)` admits once then denies within the same second); (b) `DnsRateGuard::admit` returns `None` when the bucket is empty; the concurrency `Semaphore` caps in-flight to `max_inflight`.
+- [x] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-core rate_limit` / `-p mvm-hostd dns_handler`
+- [x] **Step 3: Impl.** Lift `TokenBucket` verbatim into `mvm_core::rate_limit`; point the broker at it (delete the private copy + its now-duplicate `use`); implement `DnsRateGuard` and gate `serve_dns` (rate-limited query → encode `Refused`/drop + `emit_dns_query` with `verdict=rate_limited`, no upstream lookup).
+- [x] **Step 4: Run — expect PASS.** `cargo nextest run -p mvm-core -p mvm-hostd`.
+- [x] **Step 5: Commit.** `feat: shared TokenBucket + per-workload DNS rate-limit and concurrency cap`.
 
 ---
 
