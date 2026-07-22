@@ -169,6 +169,9 @@ jobs:
       - name: SDK stubs match the Rust schemas (no drift)
         run: cargo run -p xtask -- check-stubs
 
+      - name: Python and TypeScript IR fixtures match the Rust semantic address
+        run: cargo run -p xtask -- check-ir-parity
+
       # Feature-gated test runs that the default `Test` workspace pass skips.
       # They live here, not in `Test`, so they run in parallel off the merge
       # queue's critical path (this job has headroom; `Test` is the long pole).

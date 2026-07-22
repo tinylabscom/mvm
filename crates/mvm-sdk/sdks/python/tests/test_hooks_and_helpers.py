@@ -138,7 +138,7 @@ def test_app_with_all_four_hook_phases_emits_merged_hooks():
     assert hooks["before_stop"][0] == {"kind": "shell", "line": "pkill app"}
 
 
-def test_app_without_hooks_serializes_as_none():
+def test_app_without_optional_rust_fields_omits_them():
     _reset()
     mvm.workload(id="hello-no-hooks")
 
@@ -154,14 +154,9 @@ def test_app_without_hooks_serializes_as_none():
 
     payload = json.loads(mvm.emit_json())
     app = payload["apps"][0]
-    # The Python emit serializes the dataclass directly (no
-    # skip-serializing-on-default), so an undeclared hooks block lands
-    # as JSON null. The Rust IR's `#[serde(default,
-    # skip_serializing_if = "Hooks::is_empty")]` does drop it on the
-    # producing side — equivalence of the two paths happens at the
-    # consumer (Nix factory) which treats null and an empty struct
-    # identically.
-    assert app["hooks"] is None
+    assert "hooks" not in app
+    assert "files" not in app
+    assert "health_check" not in app
 
 
 def test_env_with_literal_and_secret_helpers():

@@ -1139,13 +1139,24 @@ def _to_plain(obj: Any) -> Any:
     return obj
 
 
-# Fields whose absence is canonical (Rust skip_serializing_if). Adding to
-# this set is the same kind of additive-field move as growing the IR with
-# `addons`: the canonical output stays byte-stable for legacy workloads.
-# `alias` and `params` belong to AddonUse; their None-emission would
-# diverge from the Rust IR (which uses skip-if-none / skip-if-empty).
+# Fields the Rust IR skip-serializes when empty/absent (skip-if-none /
+# skip-if-empty). Emitting them as JSON ``null`` is not equivalent: the Rust
+# `Workload` deserializer rejects ``null`` for the non-`Option` fields
+# (``hooks`` is a struct, ``files`` a list), so a null here makes the emitted
+# IR fail to round-trip through the host. Omitting them when unset keeps
+# ``emit_json`` deserializable and canonical — the same content identity a
+# TypeScript- or Rust-emitted document resolves to. ``alias``/``params``
+# belong to AddonUse.
 _SKIP_IF_NONE_FIELDS: frozenset[str] = frozenset(
-    {"addons", "threat_tier", "alias", "params"}
+    {
+        "addons",
+        "threat_tier",
+        "hooks",
+        "files",
+        "health_check",
+        "alias",
+        "params",
+    }
 )
 
 
