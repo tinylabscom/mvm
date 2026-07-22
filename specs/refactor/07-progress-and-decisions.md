@@ -9,6 +9,7 @@ The execution reality: what's landed, what's been deliberately deviated from pla
 - **92 → 30 ADRs, renumbered contiguous 001–030**, rewritten to absolute decision form (17,973 → 3,912 lines). All machine-checked gates green on the resulting set: claim-catalog (16 claims / 38 witnesses), trust-gradient, adr-coverage. Detail: [08-adr-consolidation.md](08-adr-consolidation.md).
 - **Dead workspace deps dropped** (`dfc70f6a7`).
 - **BDD cucumber harness** scaffolded.
+- **BDD publication gate** wired: runtime releases, kernel release assets, SDK registry releases, and crates.io publication all depend on one reusable workflow that runs `just bdd`; structural tests prevent those dependencies from being removed silently. Emergency revocation-list publication remains independent so urgent trust revocations cannot be delayed by the product suite.
 - **Worktrees swept** to the 2-tree working set.
 - **SDK python/typescript moved** to `crates/mvm-sdk/sdks/`.
 - **`bin/dev` → `scripts/dev`.**
