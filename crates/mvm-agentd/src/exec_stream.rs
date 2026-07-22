@@ -57,16 +57,19 @@ fn drain_into<F: FnMut(ExecEvent)>(
     if room == 0 {
         return true;
     }
-    let new = &b[*sent..];
-    let take = new.len().min(room);
-    let chunk = new[..take].to_vec();
-    emit(if stdout {
-        ExecEvent::Stdout { chunk }
-    } else {
-        ExecEvent::Stderr { chunk }
-    });
-    *sent += take;
-    take < new.len()
+    let available = (b.len() - *sent).min(room);
+    let end = *sent + available;
+    while *sent < end {
+        let chunk_end = (*sent + crate::vsock::MAX_DATA_CHUNK_SIZE).min(end);
+        let chunk = b[*sent..chunk_end].to_vec();
+        emit(if stdout {
+            ExecEvent::Stdout { chunk }
+        } else {
+            ExecEvent::Stderr { chunk }
+        });
+        *sent = chunk_end;
+    }
+    end < b.len()
 }
 
 /// SIGKILL the child's entire process group. The child is spawned with

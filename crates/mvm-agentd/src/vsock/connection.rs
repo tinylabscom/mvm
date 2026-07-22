@@ -276,17 +276,7 @@ pub(super) fn connect(instance_dir: &str, timeout_secs: u64) -> Result<UnixStrea
 ///
 /// Uses 4-byte big-endian length prefix + JSON body (same pattern as hostd).
 pub fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResponse> {
-    let data = serde_json::to_vec(req).with_context(|| "Failed to serialize request")?;
-
-    // Write length-prefixed frame
-    let len = (data.len() as u32).to_be_bytes();
-    stream
-        .write_all(&len)
-        .with_context(|| "Failed to write frame length")?;
-    stream
-        .write_all(&data)
-        .with_context(|| "Failed to write frame body")?;
-    stream.flush()?;
+    write_frame(stream, req).with_context(|| "Failed to write request frame")?;
 
     // Read response length
     let mut len_buf = [0u8; 4];

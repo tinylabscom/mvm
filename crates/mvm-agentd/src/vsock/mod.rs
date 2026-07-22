@@ -42,8 +42,8 @@ pub use request_policy::RequestClass;
 pub use response::{
     BootTimingReport, ComponentState, GuestCapability, GuestResponse, ProtocolNegotiation,
     ProtocolUpgradeAction, ReadinessReport, ResponseContract, ResponseKind, ResponseVariant,
-    RunEntrypointError, Verb, VolumeMountErrorKind, VolumeMountResult, protocol_hello_response,
-    supported_capabilities,
+    RunEntrypointError, TrafficPlane, Verb, VolumeMountErrorKind, VolumeMountResult,
+    protocol_hello_response, supported_capabilities,
 };
 pub use response_payloads::{
     EntrypointEvent, ExecEvent, ExecOutcomeWire, FsChange, FsChangeKind, FsEntry, FsEntryKind,
@@ -161,13 +161,20 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
 /// versions the signed envelope used by authenticated frame wrappers.
 /// `PROTOCOL_VERSION` versions the `GuestRequest` / `GuestResponse`
 /// control surface served by `mvm-guest-agent`.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Oldest guest-agent control protocol this host can speak.
-pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 2;
 
 /// Maximum response frame size (256 KiB).
-const MAX_FRAME_SIZE: usize = 256 * 1024;
+pub const MAX_FRAME_SIZE: usize = 256 * 1024;
+
+/// Maximum raw user-content bytes placed in one JSON data-plane frame.
+///
+/// `Vec<u8>` serializes as a JSON integer array, whose worst case is four
+/// bytes per input byte (`255,`). Forty-eight KiB leaves room for the request
+/// or response envelope while remaining below [`MAX_FRAME_SIZE`].
+pub const MAX_DATA_CHUNK_SIZE: usize = 48 * 1024;
 
 /// Number of transport reconnect attempts before giving up.
 const CONNECT_RETRIES: u32 = 4;

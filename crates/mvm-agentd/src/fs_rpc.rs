@@ -35,7 +35,7 @@ use crate::vsock::{FsEntry, FsEntryKind, FsErrorKind, FsResult, FsStat};
 
 /// Per-call resource caps. Production agent wires `Caps::production()`
 /// at boot; tests construct tighter caps to exercise the
-/// `CapExceeded` branches without writing 16 MiB to disk.
+/// `CapExceeded` branches without allocating a full wire chunk.
 #[derive(Debug, Clone, Copy)]
 pub struct Caps {
     /// Max bytes returned by `FsRead` in a single call.
@@ -53,8 +53,8 @@ pub struct Caps {
 impl Caps {
     pub const fn production() -> Self {
         Self {
-            max_read_bytes: 16 * 1024 * 1024,
-            max_write_bytes: 1024 * 1024,
+            max_read_bytes: crate::vsock::MAX_DATA_CHUNK_SIZE as u64,
+            max_write_bytes: crate::vsock::MAX_DATA_CHUNK_SIZE as u64,
             max_list_entries: 4096,
             max_recursive_entries: 100_000,
         }
@@ -72,18 +72,81 @@ impl Default for Caps {
 /// `std::fs` semantics unless noted.
 pub trait FsOps {
     fn read_at(&self, path: &Path, offset: u64, length: u64) -> std::io::Result<(Vec<u8>, u64)>;
-    fn write(
+    fn write_at(
         &self,
         path: &Path,
         content: &[u8],
-        mode: u32,
-        create_parents: bool,
+        options: FsWriteOptions,
     ) -> std::io::Result<u64>;
     fn list(&self, path: &Path, max_entries: usize) -> std::io::Result<(Vec<FsEntry>, bool)>;
     fn stat(&self, path: &Path, follow_symlinks: bool) -> std::io::Result<FsStat>;
     fn mkdir(&self, path: &Path, mode: u32, parents: bool) -> std::io::Result<()>;
     fn remove(&self, path: &Path, recursive: bool, max_entries: u64) -> std::io::Result<u64>;
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+}
+
+/// Options for one offset-addressed filesystem write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsWriteOptions {
+    offset: u64,
+    truncate: bool,
+    mode: u32,
+    create_parents: bool,
+}
+
+impl FsWriteOptions {
+    #[must_use]
+    pub fn builder() -> FsWriteOptionsBuilder {
+        FsWriteOptionsBuilder::default()
+    }
+}
+
+/// Builder for [`FsWriteOptions`].
+#[derive(Debug, Default)]
+pub struct FsWriteOptionsBuilder {
+    options: FsWriteOptions,
+}
+
+impl FsWriteOptionsBuilder {
+    #[must_use]
+    pub fn offset(mut self, offset: u64) -> Self {
+        self.options.offset = offset;
+        self
+    }
+
+    #[must_use]
+    pub fn truncate(mut self, truncate: bool) -> Self {
+        self.options.truncate = truncate;
+        self
+    }
+
+    #[must_use]
+    pub fn mode(mut self, mode: u32) -> Self {
+        self.options.mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub fn create_parents(mut self, create_parents: bool) -> Self {
+        self.options.create_parents = create_parents;
+        self
+    }
+
+    #[must_use]
+    pub fn build(self) -> FsWriteOptions {
+        self.options
+    }
+}
+
+impl Default for FsWriteOptions {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            truncate: true,
+            mode: 0o644,
+            create_parents: false,
+        }
+    }
 }
 
 /// Production filesystem ops — delegates to `std::fs`.
@@ -132,28 +195,30 @@ impl FsOps for OsFs {
         Ok((buf, total))
     }
 
-    fn write(
+    fn write_at(
         &self,
         path: &Path,
         content: &[u8],
-        mode: u32,
-        create_parents: bool,
+        options: FsWriteOptions,
     ) -> std::io::Result<u64> {
-        use std::io::Write;
-        if create_parents && let Some(parent) = path.parent() {
+        use std::io::{Seek, SeekFrom, Write};
+        if options.create_parents
+            && let Some(parent) = path.parent()
+        {
             std::fs::create_dir_all(parent)?;
         }
         let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
+        opts.write(true).create(true).truncate(options.truncate);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(mode);
+            opts.mode(options.mode);
         }
-        let _ = mode; // silence unused-var on non-unix
+        let _ = options.mode;
         let mut f = opts.open(path)?;
+        f.seek(SeekFrom::Start(options.offset))?;
         f.write_all(content)?;
-        Ok(content.len() as u64)
+        Ok(u64::try_from(content.len()).expect("content length fits u64"))
     }
 
     fn list(&self, path: &Path, max_entries: usize) -> std::io::Result<(Vec<FsEntry>, bool)> {
@@ -197,7 +262,7 @@ impl FsOps for OsFs {
 
     fn mkdir(&self, path: &Path, mode: u32, parents: bool) -> std::io::Result<()> {
         let _ = mode; // mode-on-create requires a custom dance on
-        // unix; v1 uses default umask + post-chmod when mode != 0.
+        // Unix uses the default umask plus post-chmod when mode != 0.
         if parents {
             std::fs::create_dir_all(path)?;
         } else {
@@ -342,6 +407,8 @@ pub fn handle_request<C: PathCanonicalizer, F: FsOps>(
             content,
             mode,
             create_parents,
+            offset,
+            truncate,
         } => {
             if (content.len() as u64) > caps.max_write_bytes {
                 return err_result(
@@ -370,7 +437,13 @@ pub fn handle_request<C: PathCanonicalizer, F: FsOps>(
                 }
                 Err(e) => return err_result(map_policy_error(&e), e.to_string()),
             };
-            match fs.write(canonical.as_path(), content, mode, create_parents) {
+            let options = FsWriteOptions::builder()
+                .offset(offset)
+                .truncate(truncate)
+                .mode(mode)
+                .create_parents(create_parents)
+                .build();
+            match fs.write_at(canonical.as_path(), content, options) {
                 Ok(bytes_written) => FsResult::Write { bytes_written },
                 Err(e) => err_result(map_io_error_kind(&e), e.to_string()),
             }
@@ -545,6 +618,8 @@ pub enum FsRequest<'a> {
         content: &'a [u8],
         mode: u32,
         create_parents: bool,
+        offset: u64,
+        truncate: bool,
     },
     List {
         path: &'a str,
@@ -582,6 +657,54 @@ mod tests {
         // freely under tempdirs whose canonical paths may live
         // anywhere (`/private/var/folders/...` on macOS).
         PathPolicy::with_extra_deny::<[std::path::PathBuf; 0], std::path::PathBuf>([])
+    }
+
+    #[test]
+    fn production_chunk_caps_fit_worst_case_json_frames() {
+        let caps = Caps::production();
+        let content = vec![u8::MAX; caps.max_write_bytes as usize];
+        let request = crate::vsock::GuestRequest::FsWrite {
+            path: "/work/chunk.bin".to_string(),
+            content: content.clone(),
+            mode: 0o600,
+            create_parents: false,
+            follow_symlinks: false,
+            offset: Some(0),
+            truncate: true,
+        };
+        let response = crate::vsock::GuestResponse::FsResult(FsResult::Read {
+            content,
+            total_size: caps.max_read_bytes,
+        });
+
+        assert!(serde_json::to_vec(&request).unwrap().len() <= crate::vsock::MAX_FRAME_SIZE);
+        assert!(serde_json::to_vec(&response).unwrap().len() <= crate::vsock::MAX_FRAME_SIZE);
+    }
+
+    #[test]
+    fn offset_writes_reconstruct_a_file_without_retruncating() {
+        let dir = tmp();
+        let path = dir.path().join("chunked.bin");
+        let fs = OsFs;
+
+        fs.write_at(
+            &path,
+            b"first-",
+            FsWriteOptions::builder().truncate(true).mode(0o600).build(),
+        )
+        .expect("first chunk");
+        fs.write_at(
+            &path,
+            b"second",
+            FsWriteOptions::builder()
+                .offset(6)
+                .truncate(false)
+                .mode(0o600)
+                .build(),
+        )
+        .expect("second chunk");
+
+        assert_eq!(std::fs::read(path).unwrap(), b"first-second");
     }
 
     #[test]
@@ -627,6 +750,8 @@ mod tests {
                 content: b"too long",
                 mode: 0o644,
                 create_parents: false,
+                offset: 0,
+                truncate: true,
             },
         );
         match result {
@@ -681,6 +806,8 @@ mod tests {
                 content: &payload,
                 mode: 0o600,
                 create_parents: false,
+                offset: 0,
+                truncate: true,
             },
         );
         assert!(matches!(w, FsResult::Write { bytes_written } if bytes_written == 11));

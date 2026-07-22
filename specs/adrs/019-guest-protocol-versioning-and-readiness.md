@@ -67,6 +67,15 @@ streaming or chunked paths with their own frame caps. Payload bytes are
 never copied into audit entries, readiness reports, or receipts; where a
 receipt needs to reference output, it stores a hash, not the bytes.
 
+This is a logical and scheduling separation within the authenticated guest
+protocol, not a claim that every verb has a dedicated socket. The agent
+classifies every verb exhaustively, caps every encoded request and response at
+256 KiB, admits at most 64 concurrent sessions, and reserves 16 of those slots
+for control-plane work by limiting data-plane requests to 48. Filesystem
+payloads and process output use 48 KiB chunks so JSON encoding cannot consume
+the frame headroom. Dedicated raw transports, such as console and port-forward
+sockets, remain separate and accept only the host vsock CID.
+
 ### Backpressure is typed, non-terminal product state
 
 A backpressured operation (today: `ProcWait`) reports one of a closed set

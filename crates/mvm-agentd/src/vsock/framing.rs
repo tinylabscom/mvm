@@ -16,12 +16,13 @@ use serde::Serialize;
 
 /// Read a single length-prefixed JSON frame from a stream.
 /// Returns the deserialized value.
-pub fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
+pub fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut impl Read) -> Result<T> {
     let mut len_buf = [0u8; 4];
     stream
         .read_exact(&mut len_buf)
         .with_context(|| "Failed to read frame length")?;
-    let frame_len = u32::from_be_bytes(len_buf) as usize;
+    let frame_len =
+        usize::try_from(u32::from_be_bytes(len_buf)).expect("u32 frame length fits usize");
 
     if frame_len > MAX_FRAME_SIZE {
         bail!(
@@ -40,9 +41,18 @@ pub fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Re
 }
 
 /// Write a single length-prefixed JSON frame to a stream.
-pub fn write_frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
+pub fn write_frame<T: Serialize>(stream: &mut impl Write, value: &T) -> Result<()> {
     let data = serde_json::to_vec(value).with_context(|| "Failed to serialize frame")?;
-    let len = (data.len() as u32).to_be_bytes();
+    if data.len() > MAX_FRAME_SIZE {
+        bail!(
+            "Frame too large: {} bytes (max {})",
+            data.len(),
+            MAX_FRAME_SIZE
+        );
+    }
+    let len = u32::try_from(data.len())
+        .expect("bounded frame length fits u32")
+        .to_be_bytes();
     stream
         .write_all(&len)
         .with_context(|| "Failed to write frame length")?;
@@ -300,6 +310,7 @@ pub fn handshake_as_guest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     // ========================================================================
     // Authenticated frame tests
@@ -529,6 +540,17 @@ mod tests {
         assert_eq!(host_vk.as_bytes(), host_vk_expected.as_bytes());
         // Session ID was echoed correctly
         assert_eq!(received_session_id, session_id);
+    }
+
+    #[test]
+    fn oversized_write_is_rejected_before_writing_any_bytes() {
+        let payload = vec![0_u8; MAX_FRAME_SIZE + 1];
+        let mut output = Cursor::new(Vec::new());
+
+        let err = write_frame(&mut output, &payload).expect_err("oversized frame must fail");
+
+        assert!(err.to_string().contains("Frame too large"));
+        assert!(output.into_inner().is_empty());
     }
 
     #[test]

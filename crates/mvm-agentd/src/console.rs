@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::vsock::CONSOLE_PORT_BASE;
+use crate::vsock::{CONSOLE_PORT_BASE, HOST_CID};
 
 /// Tracks the active console session. Only one session at a time.
 static CONSOLE_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -83,6 +83,10 @@ const AF_VSOCK: i32 = 40;
 const SOCK_STREAM: i32 = 1;
 const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
 const SIGTERM: i32 = 15;
+
+fn console_peer_is_authorized(cid: u32) -> bool {
+    cid == HOST_CID
+}
 
 /// ioctl request for setting window size (Linux).
 #[cfg(target_os = "linux")]
@@ -385,10 +389,28 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
         session.data_port
     );
 
-    // Accept one connection.
-    // SAFETY: `listen_fd` is the listening socket; NULL addr/len out-params
-    // are allowed when the peer address is not needed.
-    let conn_fd = unsafe { accept(listen_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+    // Accept one host connection and capture its CID. A guest-local process
+    // must not be able to win the race for this raw PTY channel after the
+    // authenticated control request allocates it.
+    let mut peer = SockAddrVm {
+        svm_family: 0,
+        svm_reserved1: 0,
+        svm_port: 0,
+        svm_cid: 0,
+        svm_zero: [0; 4],
+    };
+    let expected_peer_len =
+        u32::try_from(std::mem::size_of::<SockAddrVm>()).expect("vsock address size fits u32");
+    let mut peer_len = expected_peer_len;
+    // SAFETY: `peer` is correctly sized for AF_VSOCK and `peer_len` bounds the
+    // kernel write into it.
+    let conn_fd = unsafe {
+        accept(
+            listen_fd,
+            (&raw mut peer).cast::<core::ffi::c_void>(),
+            &raw mut peer_len,
+        )
+    };
     // SAFETY: `listen_fd` is the open listening socket; no owning wrapper
     // holds it. Closing it stops further connections.
     unsafe {
@@ -396,6 +418,18 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
     }
     if conn_fd < 0 {
         eprintln!("console: accept failed");
+        return close_session(session);
+    }
+    let peer_known = peer_len >= expected_peer_len && peer.svm_family == AF_VSOCK as u16;
+    if !peer_known || !console_peer_is_authorized(peer.svm_cid) {
+        eprintln!(
+            "console: rejected non-host data peer (cid={}, family={})",
+            peer.svm_cid, peer.svm_family
+        );
+        // SAFETY: `conn_fd` is the accepted socket and no owner wraps it yet.
+        unsafe {
+            close(conn_fd);
+        }
         return close_session(session);
     }
 
@@ -725,6 +759,17 @@ mod tests {
     fn test_data_port_calculation() {
         assert_eq!(CONSOLE_PORT_BASE + 1, 20001);
         assert_eq!(CONSOLE_PORT_BASE + 42, 20042);
+    }
+
+    #[test]
+    fn console_data_peer_authorizes_only_the_host_cid() {
+        assert!(console_peer_is_authorized(crate::vsock::HOST_CID));
+        for cid in [0, 1, crate::vsock::GUEST_CID, VMADDR_CID_ANY] {
+            assert!(
+                !console_peer_is_authorized(cid),
+                "CID {cid} must be rejected"
+            );
+        }
     }
 
     #[test]

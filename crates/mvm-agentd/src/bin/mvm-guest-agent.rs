@@ -45,20 +45,62 @@ mod state;
 
 use std::mem::size_of;
 use std::os::fd::{FromRawFd, RawFd};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mvm_agentd::vsock::{
-    GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,
-    enforce_verb_grant, is_verb_trust_baseline, launch_requires_grant,
+    GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, TrafficPlane, TrustDecision,
+    VERB_TRUST_POLICY_PATH, enforce_verb_grant, is_verb_trust_baseline, launch_requires_grant,
     load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy, trust_decision,
 };
+
+#[derive(Debug, Clone, Copy)]
+struct ConnectionLimits {
+    total: usize,
+    data: usize,
+}
+
+impl Default for ConnectionLimits {
+    fn default() -> Self {
+        Self {
+            total: 64,
+            data: 48,
+        }
+    }
+}
+
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_DATA_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+
+struct CounterGuard {
+    counter: &'static AtomicUsize,
+}
+
+impl Drop for CounterGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire(counter: &'static AtomicUsize, limit: usize) -> Option<CounterGuard> {
+    let mut active = counter.load(Ordering::Acquire);
+    loop {
+        if active >= limit {
+            return None;
+        }
+        match counter.compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return Some(CounterGuard { counter }),
+            Err(observed) => active = observed,
+        }
+    }
+}
 
 use crate::boot::{init_entrypoint_validation, init_integrations, init_probes, init_warm_pool};
 use crate::config::parse_config;
 use crate::globals::{
     DEFAULT_SHUTDOWN_GRACE, HOT_BUSY_THRESHOLD_BITS, HOT_SAMPLE_INTERVAL_SECS, RELOAD_REQUESTED,
-    SHUTDOWN_REQUESTED, WARM_POOL,
+    SHUTDOWN_REQUESTED,
 };
 use crate::monitoring::monitoring_loop;
 use crate::signals::{apply_reload, install_signal_handlers, shutdown_subsystems};
@@ -196,6 +238,22 @@ fn handle_client(
         return;
     }
 
+    let limits = ConnectionLimits::default();
+    let _data_guard = if req.verb().traffic_plane() == TrafficPlane::Data {
+        let Some(guard) = try_acquire(&ACTIVE_DATA_REQUESTS, limits.data) else {
+            write_response(
+                &mut file,
+                &GuestResponse::Error {
+                    message: "guest data plane is at its concurrency limit".to_string(),
+                },
+            );
+            return;
+        };
+        Some(guard)
+    } else {
+        None
+    };
+
     let mut ctx = HandlerCtx {
         file: &mut file,
         state,
@@ -312,8 +370,17 @@ fn handle_client(
             content,
             mode,
             create_parents,
+            offset,
+            truncate,
             ..
-        } => handle_fs_write(path, content, mode, create_parents),
+        } => handle_fs_write(
+            path,
+            content,
+            mode,
+            create_parents,
+            offset.unwrap_or(0),
+            truncate,
+        ),
         GuestRequest::FsList { path, .. } => handle_fs_list(path),
         GuestRequest::FsStat {
             path,
@@ -581,26 +648,16 @@ fn main() {
         cfg.port
     );
 
-    // When warm-process is active, real concurrency from multiple
-    // host invokes lands in parallel — spawn a thread per
-    // accepted connection so they reach distinct workers. Cold-tier
-    // images keep the single-threaded accept loop unchanged for
-    // bit-identical behavior. `handle_client` already takes shared
-    // state through `Arc<Mutex<…>>`, so per-connection threading
-    // is a safe addition; the new pool itself does its own slot
-    // mutex / condvar bookkeeping.
+    // Every accepted connection gets its own bounded worker so a long-running
+    // data stream cannot prevent Ping, readiness, sleep, or shutdown requests
+    // from being accepted. Data dispatch has a lower cap than total dispatch,
+    // reserving capacity for control traffic.
     //
     // Poll `SHUTDOWN_REQUESTED` between accepts and after each
     // `accept()` return (signals deliver `EINTR` so accept
     // returns < 0, which already triggers the bottom-of-loop check).
     // Once the flag flips, break out and drain via
     // `shutdown_subsystems`.
-    // `warm_active` is now re-evaluated per
-    // iteration. The background init thread populates `WARM_POOL`
-    // some time after the accept loop starts, so a one-shot capture
-    // at loop entry would mis-classify all subsequent connections
-    // as cold-tier. `WARM_POOL.get()` is a relaxed atomic load —
-    // cheap enough to do per-accept.
     loop {
         if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
             break;
@@ -668,18 +725,22 @@ fn main() {
         // Stamp first-accept timing once. Idempotent inside
         // `AgentBootState` — subsequent calls are no-ops.
         boot_state.mark_first_accept();
-        let warm_active = matches!(WARM_POOL.get(), Some(Some(_)));
-        if warm_active {
-            let state = Arc::clone(&state);
-            let integration_state = Arc::clone(&integration_state);
-            let probe_state = Arc::clone(&probe_state);
-            let bs = Arc::clone(&boot_state);
-            std::thread::spawn(move || {
-                handle_client(cfd, &state, &integration_state, &probe_state, &bs);
-            });
-        } else {
-            handle_client(cfd, &state, &integration_state, &probe_state, &boot_state);
-        }
+        let limits = ConnectionLimits::default();
+        let Some(connection_guard) = try_acquire(&ACTIVE_CONNECTIONS, limits.total) else {
+            eprintln!("mvm-guest-agent: rejecting connection at concurrency limit");
+            unsafe {
+                close(cfd);
+            }
+            continue;
+        };
+        let state = Arc::clone(&state);
+        let integration_state = Arc::clone(&integration_state);
+        let probe_state = Arc::clone(&probe_state);
+        let bs = Arc::clone(&boot_state);
+        std::thread::spawn(move || {
+            let _connection_guard = connection_guard;
+            handle_client(cfd, &state, &integration_state, &probe_state, &bs);
+        });
     }
 
     // Close the listening socket so any in-flight accept on a
@@ -699,6 +760,29 @@ mod tests {
     use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
+
+    #[test]
+    fn data_plane_limit_reserves_control_plane_capacity() {
+        let limits = ConnectionLimits::default();
+        assert_eq!(limits.total, 64);
+        assert_eq!(limits.data, 48);
+        assert!(limits.total - limits.data >= 16);
+    }
+
+    #[test]
+    fn counter_guard_enforces_and_releases_capacity() {
+        static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        TEST_COUNTER.store(0, Ordering::Release);
+
+        let first = try_acquire(&TEST_COUNTER, 2).expect("first slot");
+        let second = try_acquire(&TEST_COUNTER, 2).expect("second slot");
+        assert!(try_acquire(&TEST_COUNTER, 2).is_none());
+        drop(first);
+        let replacement = try_acquire(&TEST_COUNTER, 2).expect("released slot");
+        drop(second);
+        drop(replacement);
+        assert_eq!(TEST_COUNTER.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn handle_client_accepts_protocol_hello_before_request() {
