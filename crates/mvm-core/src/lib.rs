@@ -64,6 +64,11 @@ pub mod release_trust;
 pub mod semantic_address;
 pub mod user_config;
 
+/// Test-only drift-lock proving `mvm_protocol::ir::canonicalize` and
+/// `serde_jcs` emit byte-identical canonical form for the same workload.
+#[cfg(test)]
+mod canonicalizer_equivalence;
+
 /// Cryptographic primitives — attestation, key rotation, keystore,
 /// secret store, snapshot encryption/HMAC, image (cosign) verification,
 /// seccomp, fs/mount/path/ttl policy. Folded in from the former
