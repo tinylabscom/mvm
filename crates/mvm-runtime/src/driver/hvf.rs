@@ -17,7 +17,8 @@ use mvm_agentd::vsock::{CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_co
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::vm_backend::{
-    SnapshotCapability, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
+    VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::driver::spec::KernelImage;
@@ -175,6 +176,10 @@ impl VmmDriver for HvfDriver {
         self.backend.name()
     }
 
+    fn kind(&self) -> BackendKind {
+        self.backend.kind()
+    }
+
     fn is_available(&self) -> Result<bool> {
         self.backend.is_available()
     }
@@ -185,6 +190,10 @@ impl VmmDriver for HvfDriver {
 
     fn snapshot_capability(&self) -> SnapshotCapability {
         self.backend.snapshot_capability()
+    }
+
+    fn security_profile(&self) -> BackendSecurityProfile {
+        self.backend.security_profile()
     }
 
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
@@ -276,6 +285,10 @@ impl VmmDriver for HvfDriver {
             state_dir,
             id: id.clone(),
         }))
+    }
+
+    fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
+        self.backend.guest_channel_info(id)
     }
 }
 
@@ -409,8 +422,24 @@ mod tests {
     fn identity_and_capabilities_delegate_to_the_hvf_backend() {
         let d = HvfDriver::new();
         assert_eq!(d.name(), "hvf");
+        assert_eq!(d.kind(), BackendKind::Hvf);
         assert!(d.capabilities().vsock);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
+        assert_eq!(
+            d.security_profile().tier,
+            HvfBackend.security_profile().tier
+        );
+    }
+
+    #[test]
+    fn guest_channel_info_delegates_to_the_hvf_backend() {
+        // HvfBackend declares no guest channel (the agent bridge is a fixed
+        // vsock port, not a queryable per-VM channel) — the driver must relay
+        // that same fail-closed answer rather than inventing one.
+        let d = HvfDriver::new();
+        let id = VmId("hvf-guest-channel-info-test-vm".into());
+        assert!(d.guest_channel_info(&id).is_err());
+        assert!(HvfBackend.guest_channel_info(&id).is_err());
     }
 
     #[test]

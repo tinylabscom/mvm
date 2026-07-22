@@ -7,8 +7,11 @@ use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow};
-use mvm_core::vm_backend::{SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus};
+use anyhow::{Result, anyhow, bail};
+use mvm_core::vm_backend::{
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
+    SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus,
+};
 
 use crate::driver::spec::VmmSpec;
 use crate::driver::traits::{DuplexStream, RunningVm, VmmDriver};
@@ -67,6 +70,9 @@ impl VmmDriver for MockDriver {
     fn name(&self) -> &str {
         "mock"
     }
+    fn kind(&self) -> BackendKind {
+        BackendKind::Mock
+    }
     fn is_available(&self) -> Result<bool> {
         Ok(true)
     }
@@ -78,6 +84,19 @@ impl VmmDriver for MockDriver {
     }
     fn snapshot_capability(&self) -> SnapshotCapability {
         SnapshotCapability::Unsupported
+    }
+    fn security_profile(&self) -> BackendSecurityProfile {
+        // Mirrors `MockBackend::security_profile` — the mock runs no guest and
+        // holds none of the seven CI-enforced claims.
+        BackendSecurityProfile {
+            claims: [ClaimStatus::DoesNotHold; 7],
+            layer_coverage: LayerCoverage::default(),
+            tier: "Tier 3 (test-only)",
+            notes: &[
+                "MockDriver is in-process test infrastructure.",
+                "No guest, no rootfs, no isolation; never use in production.",
+            ],
+        }
     }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         self.booted.lock().unwrap().push(spec.clone());
@@ -96,6 +115,10 @@ impl VmmDriver for MockDriver {
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
         }))
+    }
+
+    fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
+        bail!("mock driver does not provide guest channel info")
     }
 }
 
@@ -178,6 +201,30 @@ mod tests {
         );
         assert_eq!(vm.id(), &VmId("probe".into()));
         assert_eq!(driver.name(), "mock");
+    }
+
+    #[test]
+    fn mock_driver_reports_mock_identity_and_test_only_security_profile() {
+        let driver = MockDriver::default();
+        assert_eq!(driver.kind(), BackendKind::Mock);
+        let profile = driver.security_profile();
+        assert_eq!(profile.tier, "Tier 3 (test-only)");
+        assert!(
+            profile
+                .claims
+                .iter()
+                .all(|c| *c == ClaimStatus::DoesNotHold)
+        );
+    }
+
+    #[test]
+    fn mock_driver_guest_channel_info_fails_closed() {
+        let driver = MockDriver::default();
+        assert!(
+            driver
+                .guest_channel_info(&VmId("no-such-vm".into()))
+                .is_err()
+        );
     }
 
     #[test]
