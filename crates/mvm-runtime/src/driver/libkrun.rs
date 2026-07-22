@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorConfig};
-use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_libkrun_pid, vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
@@ -170,11 +170,15 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         bundle: None,
         network_policy: None,
         bridge_restart_policy: BridgeRestartPolicy::HardFail,
-        // Pointing libkrun's egress proxy at the spawner's endpoint socket is a
-        // follow-up before this dormant driver is wired; egress is not exercised
-        // yet, so both the transparent terminator and the egress relay stay unset.
+        // No transparent :80/:443 terminator: the runner routes egress through
+        // the per-VM gating endpoint over vsock only. The runner puts that
+        // endpoint's host UDS on the spec's EGRESS_PORT channel, so pinning the
+        // guest egress port's host-listen socket to it makes the endpoint the
+        // sole path off the box — the claim-10 gate and secret substitution live
+        // there. A spec without an EGRESS_PORT channel (none of the workload
+        // paths) leaves this unset and the derived socket unchanged.
         transparent_terminator_port: None,
-        egress_relay_socket: None,
+        egress_relay_socket: spec.host_socket_for_port(EGRESS_PORT),
     })
 }
 
@@ -380,11 +384,15 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn pause(&self) -> Result<()> {
-        bail!("libkrun does not support pause/resume")
+        bail!(
+            "pause is not supported by the libkrun backend (upstream C API does not expose vCPU pause)"
+        )
     }
 
     fn resume(&self) -> Result<()> {
-        bail!("libkrun does not support pause/resume")
+        bail!(
+            "resume is not supported by the libkrun backend (upstream C API does not expose vCPU pause)"
+        )
     }
 
     fn status(&self) -> Result<VmStatus> {
@@ -395,6 +403,13 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
+        // Console-port asymmetry, intentional: the runner's spec_map computes
+        // console data-socket paths under HVF's nested `vsock/` convention, but
+        // libkrun binds every per-port UDS FLAT (`<state_dir>/vsock-<port>.sock`)
+        // and its host-side resolver probes flat-first, so the driver ignores the
+        // spec's console `host_uds` and re-derives the flat path here. The nested
+        // spec path is therefore inert for libkrun by design — a future refactor
+        // must not "fix" it into the flat driver.
         // libkrun's per-port UDS convention: `<state_dir>/vsock-<port>.sock`
         // (flat), resolved through the single source of truth shared with the
         // host-side resolver — NOT HVF's nested `vsock/` convention. Restricted
@@ -420,7 +435,7 @@ impl RunningVm for LibkrunRunningVm {
 mod tests {
     use super::*;
     use crate::driver::{ConsoleCapture, VsockPort};
-    use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, WORKLOAD_EXIT_PORT};
+    use mvm_agentd::vsock::{BROKER_PORT, WORKLOAD_EXIT_PORT};
 
     fn host_dials(guest_port: u32, uds: &str) -> VsockPort {
         VsockPort {
@@ -530,6 +545,13 @@ mod tests {
         assert_eq!(cfg.gateway_events_socket, None);
         assert_eq!(cfg.signing_key_path, None);
         assert_eq!(cfg.transparent_terminator_port, None);
+        // Egress is not a role field: the spec's EGRESS_PORT channel names the
+        // per-VM gating endpoint UDS, and the relay pins the guest egress port's
+        // host-listen socket to it so the endpoint is the sole path off the box.
+        assert_eq!(
+            cfg.egress_relay_socket,
+            Some(std::path::PathBuf::from("/run/egress.sock"))
+        );
         // Physical recipe carried through.
         assert_eq!(cfg.krun.vcpus, 2);
         assert_eq!(cfg.krun.ram_mib, 512);

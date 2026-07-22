@@ -4,7 +4,6 @@
 //! only, so a non-workload backend cannot reach it.
 use crate::backend::{AnyBackend, FirecrackerBackend};
 use crate::hvf_backend::HvfBackend;
-use crate::libkrun::LibkrunBackend;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use anyhow::{Result, anyhow};
@@ -56,11 +55,6 @@ pub trait WorkloadBackend: VmBackend {
 impl WorkloadBackend for FirecrackerBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         EgressSubstitutionTransport::NftTerminator
-    }
-}
-impl WorkloadBackend for LibkrunBackend {
-    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        EgressSubstitutionTransport::RvproxyTransparentTerminator
     }
 }
 impl WorkloadBackend for HvfBackend {
@@ -125,10 +119,12 @@ mod tests {
     #[test]
     fn workload_backends_implement_marker() {
         assert_is_workload_backend::<FirecrackerBackend>();
-        assert_is_workload_backend::<LibkrunBackend>();
         assert_is_workload_backend::<HvfBackend>();
         #[cfg(feature = "test-support")]
         assert_is_workload_backend::<MockBackend>();
+        // libkrun is now a workload backend via the runner's blanket impl, not a
+        // standalone one; the refuses-bucket test below coerces a live
+        // `libkrun_runner()` to `&dyn WorkloadBackend`, which is that proof.
     }
 
     #[test]
@@ -148,14 +144,14 @@ mod tests {
     }
 
     #[test]
-    fn libkrun_declares_rvproxy_transparent_terminator() {
-        let transport = LibkrunBackend.egress_substitution_transport();
-        assert_eq!(
-            transport,
-            EgressSubstitutionTransport::RvproxyTransparentTerminator
-        );
+    fn libkrun_runner_declares_vsock_uds_channel() {
+        // Post-flip libkrun carries egress over the runner's vsock UDS channel
+        // (proxy-aware substitution, no transparent :80/:443 terminator) — the
+        // same posture as HVF, reached through the blanket runner impl.
+        let transport = crate::backend::libkrun_runner().egress_substitution_transport();
+        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(transport.supports_transparent_terminator());
+        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
@@ -198,22 +194,24 @@ mod tests {
     }
 
     #[test]
-    fn transparent_egress_terminator_requirement_accepts_libkrun() {
-        require_transparent_egress_terminator(&LibkrunBackend)
-            .expect("libkrun declares the rvproxy terminator leg");
-    }
-
-    #[test]
     fn transparent_egress_terminator_requirement_refuses_proxy_only_backends() {
+        // libkrun is now proxy-only (vsock UDS channel) like HVF, so it joins the
+        // refuses bucket. Coercing `libkrun_runner()` here also proves the runner
+        // implements `WorkloadBackend`.
+        let libkrun = crate::backend::libkrun_runner();
         #[cfg(feature = "test-support")]
         let mock = MockBackend::new();
         #[cfg(feature = "test-support")]
         let backends: Vec<&dyn WorkloadBackend> = vec![
             &HvfBackend as &dyn WorkloadBackend,
+            &libkrun as &dyn WorkloadBackend,
             &mock as &dyn WorkloadBackend,
         ];
         #[cfg(not(feature = "test-support"))]
-        let backends: Vec<&dyn WorkloadBackend> = vec![&HvfBackend as &dyn WorkloadBackend];
+        let backends: Vec<&dyn WorkloadBackend> = vec![
+            &HvfBackend as &dyn WorkloadBackend,
+            &libkrun as &dyn WorkloadBackend,
+        ];
         for backend in backends {
             let err = match require_transparent_egress_terminator(backend) {
                 Ok(()) => panic!("{} should not satisfy the terminator gate", backend.name()),
