@@ -84,10 +84,13 @@ mod tests {
 
         cases.push(("base", base_workload()));
 
-        // The key probe: JCS orders object keys by UTF-16 code units, while a
-        // naive `str` sort orders by Unicode scalar value. For U+FFFF vs
-        // U+10000 those orders are opposite, so an astral-plane key exercises
-        // exactly the case where a UTF-16-vs-scalar mismatch would surface.
+        // The key probe. RFC 8785 mandates ordering object keys by UTF-16 code
+        // units, under which U+10000 sorts before U+FFFF (its leading surrogate
+        // 0xD800 < 0xFFFF) — opposite to a scalar-value sort. serde_jcs 0.1.0
+        // does NOT implement that: it orders keys by their UTF-8 byte value,
+        // which coincides with the hand-rolled writer's scalar-value `str` sort.
+        // This entry pins that coincidence as a drift-lock; it is not evidence
+        // of RFC 8785 conformance (see this module's header).
         {
             let mut w = base_workload();
             w.extensions

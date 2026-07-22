@@ -1,7 +1,7 @@
 //! `mvmctl build <sub>` — build-time commands.
 //!
-//! `compile`/`validate`/`kernel` are the remaining build-time verbs.
-//! Image builds moved to `machine build`. Leaf modules are unchanged.
+//! `address`/`compile`/`validate`/`kernel`/`runtime-overlay` are the
+//! build-time verbs. Image builds moved to `machine build`.
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};

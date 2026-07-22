@@ -8,7 +8,6 @@
 //! asserting they line up makes this verb a conformance check on the two
 //! canonical-form realizations, not just a printer.
 
-use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -20,6 +19,7 @@ use mvm_core::user_config::MvmConfig;
 use mvm_protocol::ir::{Workload, ir_hash};
 
 use super::Cli;
+use super::ir_input::load_ir_json_workload;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -37,12 +37,6 @@ pub(in crate::commands) struct Args {
     pub json: bool,
 }
 
-/// Where the IR JSON is read from.
-enum Source {
-    Path(PathBuf),
-    Stdin,
-}
-
 /// The two content identities of a workload, already self-checked to agree.
 #[derive(Debug)]
 struct Identities {
@@ -57,52 +51,10 @@ struct AddressReport {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let workload = load_workload(&args)?;
+    let workload = load_ir_json_workload(args.from_ir.as_deref(), args.entry.as_deref())?;
     let identities = compute_identities(&workload)?;
-    print!("{}", render(&identities, args.json));
+    print!("{}", render(&identities, args.json)?);
     Ok(())
-}
-
-fn load_workload(args: &Args) -> Result<Workload> {
-    let (bytes, label) = read_source(resolve_source(args)?)?;
-    parse_workload(&bytes, &label)
-}
-
-fn resolve_source(args: &Args) -> Result<Source> {
-    if let Some(path) = &args.from_ir {
-        if args.entry.as_deref().is_some_and(|s| !s.is_empty()) {
-            bail!(
-                "--from-ir and the positional entry are mutually exclusive — pass one or the other."
-            );
-        }
-        return Ok(Source::Path(path.clone()));
-    }
-    match args.entry.as_deref() {
-        None => bail!("missing entry: pass an IR JSON path, `-` for stdin, or `--from-ir <path>`."),
-        Some("-") => Ok(Source::Stdin),
-        Some(s) => Ok(Source::Path(PathBuf::from(s))),
-    }
-}
-
-fn read_source(source: Source) -> Result<(Vec<u8>, String)> {
-    match source {
-        Source::Path(path) => {
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("reading IR JSON from {}", path.display()))?;
-            Ok((bytes, path.display().to_string()))
-        }
-        Source::Stdin => {
-            let mut buf = Vec::new();
-            std::io::stdin()
-                .read_to_end(&mut buf)
-                .context("reading IR JSON from stdin")?;
-            Ok((buf, "stdin".to_string()))
-        }
-    }
-}
-
-fn parse_workload(bytes: &[u8], label: &str) -> Result<Workload> {
-    serde_json::from_slice(bytes).with_context(|| format!("parsing IR JSON from {label}"))
 }
 
 /// Compute both identities and prove they agree. The agreement is what makes
@@ -122,20 +74,20 @@ fn compute_identities(workload: &Workload) -> Result<Identities> {
     })
 }
 
-fn render(identities: &Identities, json: bool) -> String {
+fn render(identities: &Identities, json: bool) -> Result<String> {
     if json {
         let report = AddressReport {
             semantic_address: identities.semantic_address.clone(),
             ir_hash: identities.ir_hash.clone(),
         };
-        let mut out = serde_json::to_string(&report).expect("AddressReport serializes");
+        let mut out = serde_json::to_string(&report).context("serializing address report")?;
         out.push('\n');
-        out
+        Ok(out)
     } else {
-        format!(
+        Ok(format!(
             "semantic-address: {}\nir-hash: {}\n",
             identities.semantic_address, identities.ir_hash
-        )
+        ))
     }
 }
 
@@ -193,8 +145,10 @@ mod tests {
         let pretty = serde_json::to_vec_pretty(&value).unwrap();
         assert_ne!(compact, pretty, "the two encodings must differ in bytes");
 
-        let a = compute_identities(&parse_workload(&compact, "compact").unwrap()).unwrap();
-        let b = compute_identities(&parse_workload(&pretty, "pretty").unwrap()).unwrap();
+        let from_compact: Workload = serde_json::from_slice(&compact).unwrap();
+        let from_pretty: Workload = serde_json::from_slice(&pretty).unwrap();
+        let a = compute_identities(&from_compact).unwrap();
+        let b = compute_identities(&from_pretty).unwrap();
         assert_eq!(a.semantic_address, b.semantic_address);
     }
 
@@ -229,15 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn malformed_json_is_rejected() {
-        let err = parse_workload(b"{ not json", "fixture").unwrap_err();
-        assert!(err.to_string().contains("parsing IR JSON"));
-    }
-
-    #[test]
     fn human_render_is_two_stable_lines() {
         let ids = compute_identities(&sample_workload()).unwrap();
-        let out = render(&ids, false);
+        let out = render(&ids, false).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(
@@ -250,29 +198,9 @@ mod tests {
     #[test]
     fn json_render_carries_both_identities() {
         let ids = compute_identities(&sample_workload()).unwrap();
-        let out = render(&ids, true);
+        let out = render(&ids, true).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(parsed["semantic_address"], ids.semantic_address);
         assert_eq!(parsed["ir_hash"], ids.ir_hash);
-    }
-
-    #[test]
-    fn resolve_source_rejects_conflicting_inputs() {
-        let args = Args {
-            entry: Some("a.json".to_string()),
-            from_ir: Some(PathBuf::from("b.json")),
-            json: false,
-        };
-        assert!(resolve_source(&args).is_err());
-    }
-
-    #[test]
-    fn resolve_source_requires_an_input() {
-        let args = Args {
-            entry: None,
-            from_ir: None,
-            json: false,
-        };
-        assert!(resolve_source(&args).is_err());
     }
 }
