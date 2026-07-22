@@ -47,23 +47,22 @@ impl CheckpointDigest {
     pub const PREFIX: &'static str = "sha256:";
 
     /// Validates and wraps a `sha256:<64 lowercase hex>` string. Rejects any
-    /// other prefix, wrong length, or non-lowercase-hex content.
+    /// other prefix, wrong length, or non-lowercase-hex content. Shares the
+    /// shape check with every other prefixed content-address newtype so none
+    /// can drift.
     pub fn parse(value: impl Into<String>) -> Result<Self, CheckpointDigestParseError> {
+        use crate::digest_shape::Sha256PrefixedShape;
         let value = value.into();
-        let hex_part = value
-            .strip_prefix(Self::PREFIX)
-            .ok_or_else(|| CheckpointDigestParseError::MissingPrefix(value.clone()))?;
-        if hex_part.len() != 64 {
-            return Err(CheckpointDigestParseError::WrongLength {
-                len: hex_part.len(),
-            });
-        }
-        for ch in hex_part.chars() {
-            if !matches!(ch, '0'..='9' | 'a'..='f') {
-                return Err(CheckpointDigestParseError::NonHex { ch });
+        match crate::digest_shape::validate_sha256_prefixed(&value) {
+            Sha256PrefixedShape::Ok => Ok(Self(value)),
+            Sha256PrefixedShape::MissingPrefix => {
+                Err(CheckpointDigestParseError::MissingPrefix(value))
             }
+            Sha256PrefixedShape::WrongLength { len } => {
+                Err(CheckpointDigestParseError::WrongLength { len })
+            }
+            Sha256PrefixedShape::NonHex { ch } => Err(CheckpointDigestParseError::NonHex { ch }),
         }
-        Ok(Self(value))
     }
 
     /// The `sha256:<64-hex>` string view.
@@ -250,6 +249,13 @@ impl CheckpointDigestInput<'_> {
 fn sorted_content(content: &[ContentBlob]) -> Vec<&ContentBlob> {
     let mut refs: Vec<&ContentBlob> = content.iter().collect();
     refs.sort_by(|a, b| a.name.cmp(&b.name));
+    // Blob names index the manifest (fork/restore/diff look up by name); a
+    // duplicate would make the content-address depend on tie-break order and
+    // ambiguate the lookup. Capture never emits one — assert it in debug.
+    debug_assert!(
+        refs.windows(2).all(|w| w[0].name != w[1].name),
+        "checkpoint content manifest has duplicate blob names"
+    );
     refs
 }
 
@@ -538,6 +544,83 @@ mod tests {
             .audit_ref(Some("local.jsonl#3".to_string()))
             .build();
         assert_eq!(without.meta_digest, with.meta_digest);
+    }
+
+    #[test]
+    fn meta_digest_covers_every_load_bearing_field() {
+        // Flip exactly one load-bearing field per case and assert the
+        // content-address moves. Guards a future field silently falling outside
+        // the digest input (the two excluded fields — meta_digest, audit_ref —
+        // are covered by their own tests above).
+        #[derive(Clone)]
+        struct Fields {
+            id: String,
+            class: CheckpointClass,
+            vm: String,
+            tag: Option<String>,
+            parent: Option<CheckpointDigest>,
+            created: u64,
+            content: Vec<ContentBlob>,
+            cfg: String,
+            policy: Option<RuntimeSourcePolicy>,
+            overlay: Option<String>,
+        }
+        let build = |f: &Fields| {
+            CheckpointMeta::builder(CheckpointId::new(f.id.clone()), f.class, f.vm.clone())
+                .tag(f.tag.clone())
+                .parent(f.parent.clone())
+                .created_unix(f.created)
+                .content(f.content.clone())
+                .supervisor_config_digest(f.cfg.clone())
+                .runtime_source_policy(f.policy)
+                .runtime_overlay_version(f.overlay.clone())
+                .build()
+                .meta_digest
+        };
+        let base = Fields {
+            id: "id0".into(),
+            class: CheckpointClass::FsQuick,
+            vm: "vm0".into(),
+            tag: Some("t0".into()),
+            parent: None,
+            created: 100,
+            content: vec![blob("rootfs.ext4", "aa")],
+            cfg: "cfg0".into(),
+            policy: Some(RuntimeSourcePolicy::PreferOverlay),
+            overlay: Some("0.1.0".into()),
+        };
+        let baseline = build(&base);
+
+        let mut f = base.clone();
+        f.id = "id1".into();
+        assert_ne!(baseline, build(&f), "id");
+        let mut f = base.clone();
+        f.class = CheckpointClass::VmFull;
+        assert_ne!(baseline, build(&f), "class");
+        let mut f = base.clone();
+        f.vm = "vm1".into();
+        assert_ne!(baseline, build(&f), "vm_name");
+        let mut f = base.clone();
+        f.tag = Some("t1".into());
+        assert_ne!(baseline, build(&f), "tag");
+        let mut f = base.clone();
+        f.created = 200;
+        assert_ne!(baseline, build(&f), "created_unix");
+        let mut f = base.clone();
+        f.content = vec![blob("rootfs.ext4", "bb")];
+        assert_ne!(baseline, build(&f), "content");
+        let mut f = base.clone();
+        f.cfg = "cfg1".into();
+        assert_ne!(baseline, build(&f), "supervisor_config_digest");
+        let mut f = base.clone();
+        f.policy = Some(RuntimeSourcePolicy::RequiredOverlay);
+        assert_ne!(baseline, build(&f), "runtime_source_policy");
+        let mut f = base.clone();
+        f.overlay = Some("0.2.0".into());
+        assert_ne!(baseline, build(&f), "runtime_overlay_version");
+        let mut f = base.clone();
+        f.parent = Some(parent_digest());
+        assert_ne!(baseline, build(&f), "parent");
     }
 
     #[test]
