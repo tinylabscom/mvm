@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
-use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
@@ -531,22 +531,48 @@ fn ls(json: bool) -> Result<()> {
         ui::info("(no checkpoints)");
         return Ok(());
     }
+    // The parent hash-link is a content-address on disk; resolve it back to the
+    // human checkpoint id the operator recognizes. Build the digest->id lookup
+    // once from the metas already listed rather than re-scanning per row.
+    let id_by_digest: std::collections::HashMap<&CheckpointDigest, &str> = metas
+        .iter()
+        .map(|m| (&m.meta_digest, m.id.as_str()))
+        .collect();
     println!(
         "{:<32} {:<10} {:<20} {:<8} PARENT",
         "ID", "CLASS", "VM", "TAG"
     );
     for m in &metas {
-        let class = class_str(m.class);
+        let parent_display = match &m.parent {
+            None => "-".to_string(),
+            // Unknown parent (pruned/dangling): fall back to the short digest so
+            // the link stays visible instead of silently blank.
+            Some(digest) => id_by_digest
+                .get(digest)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| short_digest(digest)),
+        };
         println!(
             "{:<32} {:<10} {:<20} {:<8} {}",
             m.id.as_str(),
-            class,
+            class_str(m.class),
             m.vm_name,
             m.tag.as_deref().unwrap_or("-"),
-            m.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
+            parent_display,
         );
     }
     Ok(())
+}
+
+/// Compact display form of a checkpoint content-address (`sha256:` + first 12
+/// hex), for the `ls` PARENT column when the human id behind a link isn't in
+/// view.
+fn short_digest(digest: &CheckpointDigest) -> String {
+    let hex = digest
+        .as_str()
+        .strip_prefix(CheckpointDigest::PREFIX)
+        .unwrap_or_else(|| digest.as_str());
+    format!("{}{}", CheckpointDigest::PREFIX, &hex[..hex.len().min(12)])
 }
 
 fn diff(a: &str, b: &str, json: bool) -> Result<()> {
