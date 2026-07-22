@@ -728,8 +728,40 @@ fn build_exec_request(
                 crate::exec::ImageSource::Template(resolved)
             }
             (None, Some(reference)) => {
+                let oci_cache_root = super::super::image::oci_cache_root();
+                // A prod run refuses a mutable OCI tag before ANY work — the
+                // digest-pin policy refusal must be what the user sees, not an
+                // incidental missing-kernel error from the local resolution
+                // below. The pull path re-checks it, so this only reorders the
+                // refusal ahead of the workload-kernel resolution.
+                super::super::image::ensure_prod_digest_pin(&reference, prod)?;
+                // Resolve the workload kernel BEFORE the pull. An `--image` run
+                // boots the materialized OCI rootfs (with its injected agent), so
+                // it needs only a workload kernel — a cached workload/default-image
+                // kernel, a local build (source checkout), or the published
+                // download — rather than building/downloading a whole default image
+                // whose rootfs we'd discard. Resolving it first makes a missing or
+                // cold-cache kernel fail fast with an actionable error instead of
+                // surfacing only after a full pull + rootfs materialization. The
+                // rootfs boots verity-sealed, so the kernel must carry dm-verity;
+                // the builder kernel (which drops it) is never a stand-in.
+                let kernel_path = ensure_workload_kernel(prod)?;
+                // Enforce that invariant host-side: a kernel with no dm-verity
+                // support would panic the guest in early init opening
+                // /dev/mapper/control, with no host signal. Fail fast instead.
+                assert_workload_kernel_supports_verity(&kernel_path)?;
+                // A source-checkout run with no embedded guest runtime cross-compiles
+                // the mvm guest binaries inside materialization — a slow,
+                // output-silent host `cargo zigbuild`. Announce it so the run does
+                // not look wedged after the OCI pull logs.
+                if super::super::image::oci_guest_runtime_compile_pending(&oci_cache_root) {
+                    ui::info(
+                        "Compiling the mvm guest runtime from your source checkout \
+                         (first build for these sources; cached afterward)…",
+                    );
+                }
                 let cached = super::super::image::resolve_or_pull_run_image(
-                    &super::super::image::oci_cache_root(),
+                    &oci_cache_root,
                     &reference,
                     prod,
                 )?;
@@ -758,18 +790,6 @@ fn build_exec_request(
                         auth_source
                     );
                 }
-                // An `--image` run boots the materialized OCI rootfs (with its
-                // injected agent), so we need only a workload kernel — a cached
-                // workload/default-image kernel, a local build (source checkout),
-                // or the published download — rather than building/downloading a
-                // whole default image whose rootfs we'd discard. The rootfs boots
-                // verity-sealed, so the kernel must carry dm-verity; the builder
-                // kernel (which drops it) is never a stand-in.
-                let kernel_path = ensure_workload_kernel(prod)?;
-                // Enforce that invariant host-side: a kernel with no dm-verity
-                // support would panic the guest in early init opening
-                // /dev/mapper/control, with no host signal. Fail fast instead.
-                assert_workload_kernel_supports_verity(&kernel_path)?;
                 crate::exec::ImageSource::Prebuilt {
                     kernel_path,
                     rootfs_path: cached.rootfs_path.display().to_string(),
