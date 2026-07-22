@@ -3,11 +3,13 @@
 //! runners above it.
 
 pub mod hvf;
+pub mod libkrun;
 pub mod mock;
 pub mod spec;
 pub mod traits;
 
 pub use hvf::HvfDriver;
+pub use libkrun::LibkrunDriver;
 pub use mock::{MockDriver, MockRunningVm};
 pub use spec::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 pub use traits::{DuplexStream, RunningVm, VmmDriver};
