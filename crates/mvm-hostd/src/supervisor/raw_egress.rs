@@ -30,6 +30,7 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::supervisor::http_forward;
+use mvm_core::guest_netd::ConnectAck;
 use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 
 /// Cap on the first `host:port` line. A guest that never sends a `\n` inside this
@@ -89,7 +90,8 @@ where
         }
         EgressVerdict::Deny | EgressVerdict::Malformed => {
             eprintln!("raw-egress: refusing target {target}");
-            // Refused: close without ever opening a host socket.
+            // Refused: nack the guest and close without ever opening a host socket.
+            write_connect_ack_async(&mut guest, ConnectAck::Fail).await?;
             Ok(())
         }
     }
@@ -143,16 +145,19 @@ where
     let connect = tokio::net::TcpStream::connect((ip, port));
     let mut upstream = match tokio::time::timeout(timeout, connect).await {
         Ok(Ok(s)) => s,
-        // Connect error or timeout → close the guest side, no splice.
+        // Connect error or timeout → nack the guest, close, no splice.
         Ok(Err(e)) => {
             eprintln!("raw-egress: connect to {ip}:{port} failed: {e}");
+            write_connect_ack_async(&mut guest, ConnectAck::Fail).await?;
             return Ok(());
         }
         Err(_) => {
             eprintln!("raw-egress: connect to {ip}:{port} timed out after {timeout:?}");
+            write_connect_ack_async(&mut guest, ConnectAck::Fail).await?;
             return Ok(());
         }
     };
+    write_connect_ack_async(&mut guest, ConnectAck::Ok).await?;
     if !leftover.is_empty() {
         upstream.write_all(&leftover).await?;
     }
@@ -167,6 +172,15 @@ where
         );
     }
     Ok(())
+}
+
+/// Write the host's one-byte connect-result ack on the async raw-egress path.
+async fn write_connect_ack_async<S>(guest: &mut S, ack: ConnectAck) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    guest.write_all(&[ack.as_byte()]).await?;
+    guest.flush().await
 }
 
 /// Serve raw-TCP egress over a host **AF_VSOCK** listener — the QEMU path,
@@ -222,6 +236,7 @@ fn handle_raw_conn_blocking(
             EgressVerdict::Allow { ip, port } => (ip, port),
             EgressVerdict::Deny | EgressVerdict::Malformed => {
                 eprintln!("raw-egress: refusing target {target}");
+                write_connect_ack_blocking(&mut guest, ConnectAck::Fail)?;
                 return Ok(());
             }
         };
@@ -231,9 +246,11 @@ fn handle_raw_conn_blocking(
             Ok(stream) => stream,
             Err(e) => {
                 eprintln!("raw-egress: connect to {ip}:{port} failed: {e}");
+                write_connect_ack_blocking(&mut guest, ConnectAck::Fail)?;
                 return Ok(());
             }
         };
+    write_connect_ack_blocking(&mut guest, ConnectAck::Ok)?;
     eprintln!("raw-egress: connected target {target} -> {ip}:{port}");
     let guest_fd = guest.as_raw_fd();
     set_nonblocking(guest_fd)?;
@@ -247,6 +264,14 @@ fn handle_raw_conn_blocking(
         stats.upstream_eof,
     );
     Ok(())
+}
+
+/// Write the host's one-byte connect-result ack on the blocking raw-egress path.
+#[cfg(target_os = "linux")]
+fn write_connect_ack_blocking(guest: &mut std::fs::File, ack: ConnectAck) -> std::io::Result<()> {
+    use std::io::Write;
+    guest.write_all(&[ack.as_byte()])?;
+    guest.flush()
 }
 
 #[cfg(target_os = "linux")]
@@ -621,12 +646,10 @@ mod tests {
     use tempfile::tempdir;
     use tokio::io::AsyncWriteExt;
 
-    /// A default-deny gate + a well-formed target ⇒ the connection is closed and
-    /// NO upstream connect happens (fail closed). We prove no connect by pointing
-    /// the target at a port nothing listens on and asserting the guest side simply
-    /// sees EOF quickly rather than a splice.
+    /// A default-deny gate + a well-formed target ⇒ the host nacks the connect and
+    /// closes without ever opening an upstream socket (fail closed).
     #[tokio::test]
-    async fn denied_target_closes_without_connecting() {
+    async fn denied_target_sends_fail_ack_then_closes() {
         let gate = EgressGate::default_deny();
         let (mut client, server) = tokio::io::duplex(1024);
         let h =
@@ -634,11 +657,14 @@ mod tests {
                 async move { handle_raw_conn(server, &gate, Duration::from_secs(1)).await },
             );
         client.write_all(b"93.184.216.34:80\n").await.unwrap();
-        // Denied ⇒ handler returns without connecting; the server half is dropped,
-        // so the client read hits EOF.
-        let mut sink = Vec::new();
-        let n = client.read_to_end(&mut sink).await.unwrap();
-        assert_eq!(n, 0, "denied target must not splice any bytes back");
+
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], ConnectAck::Fail.as_byte());
+
+        let mut rest = Vec::new();
+        client.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty(), "no tunnel bytes after a Fail ack");
         h.await.unwrap().unwrap();
     }
 
@@ -679,6 +705,9 @@ mod tests {
                 async move { handle_raw_conn(server2, &gate2, Duration::from_secs(1)).await },
             );
         client2.write_all(b"not-an-address\n").await.unwrap();
+        let mut ack2 = [0u8; 1];
+        client2.read_exact(&mut ack2).await.unwrap();
+        assert_eq!(ack2[0], ConnectAck::Fail.as_byte());
         let mut sink2 = Vec::new();
         let n2 = client2.read_to_end(&mut sink2).await.unwrap();
         assert_eq!(n2, 0, "malformed target must not splice");
@@ -720,6 +749,10 @@ mod tests {
             .await
         });
 
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], ConnectAck::Ok.as_byte());
+
         // The leftover "lead" is echoed back first, then our live "ping".
         client.write_all(b"ping").await.unwrap();
         let mut got = Vec::new();
@@ -733,6 +766,47 @@ mod tests {
         assert_eq!(&got, b"leadping");
 
         // Half-close the guest so the echo server + splice wind down.
+        client.shutdown().await.ok();
+        drop(client);
+        splicer.await.unwrap().unwrap();
+        server.await.unwrap();
+    }
+
+    /// The ack precedes any tunnel bytes: `splice` writes `ConnectAck::Ok` right
+    /// after the upstream connect succeeds and before relaying anything.
+    #[tokio::test]
+    async fn splice_sends_ok_ack_before_tunneling() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut b = [0u8; 4];
+            sock.read_exact(&mut b).await.unwrap();
+            sock.write_all(&b).await.unwrap();
+        });
+
+        let (mut client, guest) = tokio::io::duplex(1024);
+        let splicer = tokio::spawn(async move {
+            splice(
+                guest,
+                "echo",
+                addr.ip(),
+                addr.port(),
+                Vec::new(),
+                Duration::from_secs(2),
+            )
+            .await
+        });
+
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.unwrap();
+        assert_eq!(ack[0], ConnectAck::Ok.as_byte());
+
+        client.write_all(b"ping").await.unwrap();
+        let mut echoed = [0u8; 4];
+        client.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"ping");
+
         client.shutdown().await.ok();
         drop(client);
         splicer.await.unwrap().unwrap();

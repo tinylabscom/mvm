@@ -6,11 +6,13 @@
 //! The guest stays responsible for the exact prelude bytes, and the
 //! host stays responsible for all admission/policy decisions.
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 #[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
+
+use mvm_core::guest_netd::ConnectAck;
 
 /// One guest-initiated session to a host AF_VSOCK port.
 pub struct HostVsockSession<U> {
@@ -55,6 +57,17 @@ where
     /// Recover the wrapped upstream stream for flows that need a custom relay.
     pub fn into_inner(self) -> U {
         self.upstream
+    }
+
+    /// Read the host's one-byte connect-result ack that follows the target-line
+    /// frame on the raw-egress protocol. Fail-closed: EOF or an unrecognised byte
+    /// is treated as a connect failure so the caller answers its client honestly.
+    pub async fn read_connect_ack(&mut self) -> ConnectAck {
+        let mut byte = [0u8; 1];
+        match self.upstream.read_exact(&mut byte).await {
+            Ok(_) => ConnectAck::from_byte(byte[0]).unwrap_or(ConnectAck::Fail),
+            Err(_) => ConnectAck::Fail,
+        }
     }
 }
 

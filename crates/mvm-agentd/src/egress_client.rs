@@ -17,6 +17,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use crate::guest_vsock_session::HostVsockSession;
+use mvm_core::guest_netd::ConnectAck;
 
 const EGRESS_VSOCK_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
 
@@ -317,28 +318,77 @@ async fn serve(mut client: TcpStream) -> std::io::Result<()> {
     }
 }
 
-async fn serve_socks(mut client: TcpStream, target: &str) -> std::io::Result<()> {
-    let session = match connect_to_host_egress(target).await {
-        Ok(session) => session,
-        Err(err) => {
-            let _ = reply(&mut client, REP_GENERAL_FAILURE).await;
-            return Err(err);
-        }
-    };
-    reply(&mut client, REP_SUCCESS).await?;
-    session.splice(client).await
+/// Which client-facing proxy reply flavour a completed CONNECT-style session
+/// answers with, so the ack->reply mapping is one exhaustive match rather than
+/// duplicated per call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyReplyStyle {
+    Socks,
+    HttpConnect,
 }
 
-async fn serve_http_connect(mut client: TcpStream, target: &str) -> std::io::Result<()> {
-    let session = match connect_to_host_egress(target).await {
-        Ok(session) => session,
-        Err(err) => {
-            let _ = write_http_response(&mut client, "502 Bad Gateway").await;
-            return Err(err);
+/// Emit the client-facing reply for a connect outcome. Exhaustive over the
+/// (style, ack) matrix: SOCKS success/failure replies and HTTP `200`/`502`.
+async fn write_connect_reply<C>(
+    client: &mut C,
+    style: ProxyReplyStyle,
+    ack: ConnectAck,
+) -> std::io::Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    match (style, ack) {
+        (ProxyReplyStyle::Socks, ConnectAck::Ok) => reply(client, REP_SUCCESS).await,
+        (ProxyReplyStyle::Socks, ConnectAck::Fail) => reply(client, REP_GENERAL_FAILURE).await,
+        (ProxyReplyStyle::HttpConnect, ConnectAck::Ok) => reply_http_connect_ok(client).await,
+        (ProxyReplyStyle::HttpConnect, ConnectAck::Fail) => {
+            write_http_response(client, "502 Bad Gateway").await
         }
-    };
-    reply_http_connect_ok(&mut client).await?;
-    session.splice(client).await
+    }
+}
+
+/// Finish a CONNECT-style request once the host session is open: read the host
+/// connect ack, answer the client truthfully, and splice only on `Ok`. Generic
+/// over both streams so it unit-tests over in-memory duplex pipes.
+async fn complete_connect_session<C, U>(
+    mut client: C,
+    mut session: HostVsockSession<U>,
+    style: ProxyReplyStyle,
+) -> std::io::Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    let ack = session.read_connect_ack().await;
+    write_connect_reply(&mut client, style, ack).await?;
+    match ack {
+        ConnectAck::Ok => session.splice(client).await,
+        ConnectAck::Fail => Ok(()),
+    }
+}
+
+async fn serve_socks(client: TcpStream, target: &str) -> std::io::Result<()> {
+    match connect_to_host_egress(target).await {
+        Ok(session) => complete_connect_session(client, session, ProxyReplyStyle::Socks).await,
+        Err(err) => {
+            let mut client = client;
+            let _ = reply(&mut client, REP_GENERAL_FAILURE).await;
+            Err(err)
+        }
+    }
+}
+
+async fn serve_http_connect(client: TcpStream, target: &str) -> std::io::Result<()> {
+    match connect_to_host_egress(target).await {
+        Ok(session) => {
+            complete_connect_session(client, session, ProxyReplyStyle::HttpConnect).await
+        }
+        Err(err) => {
+            let mut client = client;
+            let _ = write_http_response(&mut client, "502 Bad Gateway").await;
+            Err(err)
+        }
+    }
 }
 
 async fn serve_http_forward(
@@ -949,6 +999,95 @@ mod tests {
             head: head.to_vec(),
             content_length: parse_http_content_length(head)?,
         })
+    }
+
+    #[tokio::test]
+    async fn http_connect_replies_502_when_host_nacks() {
+        let (mut client, client_bridge) = tokio::io::duplex(256);
+        let (upstream_bridge, mut host) = tokio::io::duplex(256);
+        let session = HostVsockSession::new(upstream_bridge)
+            .write_initial_bytes(b"example.com:443\n")
+            .await
+            .unwrap();
+        let task = tokio::spawn(complete_connect_session(
+            client_bridge,
+            session,
+            ProxyReplyStyle::HttpConnect,
+        ));
+
+        let mut line = vec![0u8; b"example.com:443\n".len()];
+        host.read_exact(&mut line).await.unwrap();
+        host.write_all(&[ConnectAck::Fail.as_byte()]).await.unwrap();
+        host.shutdown().await.unwrap();
+
+        let mut resp = Vec::new();
+        client.read_to_end(&mut resp).await.unwrap();
+        let text = std::str::from_utf8(&resp).unwrap();
+        assert!(text.starts_with("HTTP/1.1 502"), "{text:?}");
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_connect_replies_200_then_splices_when_host_acks_ok() {
+        let (mut client, client_bridge) = tokio::io::duplex(256);
+        let (upstream_bridge, mut host) = tokio::io::duplex(256);
+        let session = HostVsockSession::new(upstream_bridge)
+            .write_initial_bytes(b"example.com:443\n")
+            .await
+            .unwrap();
+        let task = tokio::spawn(complete_connect_session(
+            client_bridge,
+            session,
+            ProxyReplyStyle::HttpConnect,
+        ));
+
+        let mut line = vec![0u8; b"example.com:443\n".len()];
+        host.read_exact(&mut line).await.unwrap();
+        host.write_all(&[ConnectAck::Ok.as_byte()]).await.unwrap();
+
+        let expected = b"HTTP/1.1 200 Connection established\r\n\r\n";
+        let mut ok = vec![0u8; expected.len()];
+        client.read_exact(&mut ok).await.unwrap();
+        assert_eq!(&ok, expected);
+
+        client.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        host.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+        host.write_all(b"pong").await.unwrap();
+        let mut back = [0u8; 4];
+        client.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"pong");
+
+        drop(client);
+        drop(host);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn socks_replies_general_failure_when_host_nacks() {
+        let (mut client, client_bridge) = tokio::io::duplex(256);
+        let (upstream_bridge, mut host) = tokio::io::duplex(256);
+        let session = HostVsockSession::new(upstream_bridge)
+            .write_initial_bytes(b"1.2.3.4:443\n")
+            .await
+            .unwrap();
+        let task = tokio::spawn(complete_connect_session(
+            client_bridge,
+            session,
+            ProxyReplyStyle::Socks,
+        ));
+
+        let mut line = vec![0u8; b"1.2.3.4:443\n".len()];
+        host.read_exact(&mut line).await.unwrap();
+        host.write_all(&[ConnectAck::Fail.as_byte()]).await.unwrap();
+        host.shutdown().await.unwrap();
+
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[0], SOCKS5);
+        assert_eq!(reply[1], REP_GENERAL_FAILURE);
+        task.await.unwrap().unwrap();
     }
 
     async fn proxy_single_http_forward(
