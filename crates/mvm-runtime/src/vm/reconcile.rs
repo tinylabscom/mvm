@@ -378,6 +378,53 @@ pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
     report
 }
 
+/// Reap only *orphan* state dirs under the default `vms` root: dirs with no
+/// live owning process and no registry record. Unlike [`converge`] it never
+/// drops records, tears down dead-process records, or drives any resume/boot,
+/// so the throwaway transient-run path — which opts out of full convergence to
+/// avoid auto-resuming unrelated machines — can still clean up a state dir a
+/// killed or crashed prior run left behind (a SIGKILL or a closed terminal
+/// skips teardown). `protect` shields the caller's in-flight VM name, whose dir
+/// may exist before its supervisor comes up. Fail-open: returns the reaped
+/// basenames, empty on any error, and audits each reap for observability.
+pub fn reap_orphan_state_dirs(protect: Option<&str>) -> Vec<String> {
+    let registry_path = crate::vm::name_registry::registry_path();
+    let vms_root = mvm_core::config::vms_dir();
+    let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, protect);
+    for dir in &reaped {
+        mvm_core::audit_emit!(RegistryReconcile, vm: dir.as_str(), "action=orphan_state_no_record");
+    }
+    reaped
+}
+
+/// Path-explicit, audit-free seam for [`reap_orphan_state_dirs`] — the
+/// hermetically testable core. Reads the registry only to shield registered
+/// names; a registry that fails to load reaps nothing (fail-safe: never reap a
+/// registered VM's dir on a transient read error).
+pub fn reap_orphan_state_dirs_at(
+    registry_path: &Path,
+    vms_root: &Path,
+    protect: Option<&str>,
+) -> Vec<String> {
+    let mut known: BTreeSet<String> = match VmNameRegistry::load(registry_path) {
+        Ok(registry) => registry.vms.keys().cloned().collect(),
+        Err(_) => return Vec::new(),
+    };
+    if let Some(name) = protect {
+        known.insert(name.to_string());
+    }
+    let view = FsRuntimeView::new(vms_root);
+    let actions = FsReconcileActions::new(vms_root);
+    let mut reaped = Vec::new();
+    for dir in view.orphan_dirs(&known) {
+        if actions.reap_orphan(&dir).is_ok() {
+            reaped.push(dir);
+        }
+    }
+    reaped.sort();
+    reaped
+}
+
 /// Emit one `RegistryReconcile` audit line per healed item. Best-effort
 /// (the audit layer swallows write failures); consistent with the Stage 0
 /// audit-emit contract.
@@ -785,6 +832,69 @@ mod tests {
         let actions = FsReconcileActions::new(root);
         actions.reap_orphan("orphan").unwrap();
         assert!(!root.join("orphan").exists());
+    }
+
+    #[test]
+    fn reap_orphan_state_dirs_reaps_only_dead_unprotected_orphans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vms_root = tmp.path().join("vms");
+        std::fs::create_dir_all(&vms_root).unwrap();
+
+        // A registered VM with a dead process is a *record*, not an orphan: the
+        // narrow reap leaves registry records untouched (tearing them down is
+        // converge's job, not this side-effect-free sweep).
+        let registered_dir = make_state_dir(&vms_root, "registered-dead", None);
+        let registry_path = tmp.path().join("registry.json");
+        let mut registry = VmNameRegistry::default();
+        registry
+            .register_with_metadata(RegisterParams::minimal(
+                "registered-dead",
+                &registered_dir,
+                "default",
+            ))
+            .unwrap();
+        registry.save(&registry_path).unwrap();
+
+        // A live orphan (no record, live supervisor) — shielded by liveness.
+        make_state_dir(&vms_root, "live-orphan", Some(std::process::id() as i32));
+        // The in-flight run's own dir (dead, no record) — shielded by `protect`.
+        make_state_dir(&vms_root, "current-run", None);
+        // A dead orphan (no record, no live process, unprotected) — reaped.
+        make_state_dir(&vms_root, "dead-orphan", Some(i32::MAX));
+
+        let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, Some("current-run"));
+
+        assert_eq!(reaped, vec!["dead-orphan".to_string()]);
+        assert!(!vms_root.join("dead-orphan").exists(), "dead orphan reaped");
+        assert!(
+            vms_root.join("registered-dead").exists(),
+            "a registry record is not an orphan"
+        );
+        assert!(
+            vms_root.join("live-orphan").exists(),
+            "live orphan shielded"
+        );
+        assert!(
+            vms_root.join("current-run").exists(),
+            "the protected in-flight run is shielded"
+        );
+    }
+
+    #[test]
+    fn reap_orphan_state_dirs_reaps_nothing_when_the_registry_is_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vms_root = tmp.path().join("vms");
+        std::fs::create_dir_all(&vms_root).unwrap();
+        make_state_dir(&vms_root, "would-be-orphan", None);
+        // A corrupt registry fails safe: reap nothing rather than risk a
+        // registered VM's dir on a transient read error.
+        let registry_path = tmp.path().join("registry.json");
+        std::fs::write(&registry_path, b"not valid json {").unwrap();
+
+        let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, None);
+
+        assert!(reaped.is_empty());
+        assert!(vms_root.join("would-be-orphan").exists());
     }
 
     #[test]

@@ -764,17 +764,22 @@ pub fn transient_run_dev_console(pty: bool, image_sealed: bool) -> bool {
     pty && !image_sealed
 }
 
-/// Remove the transient `--add-dir` staging dir, but only when extras were
-/// actually staged. `build_dir_image_ro` builds those ext4 images inside the
-/// builder Linux env (it needs `mkfs`/`mount`), so cleanup routes back through
-/// that env — and a run with no `--add-dir` never created the dir. Skipping the
-/// call there keeps a plain OCI/workload run from waking a builder VM just to
-/// `rm -rf` a path that does not exist.
-fn clean_add_dir_staging(add_dirs: &[AddDir], staging_dir: &str) {
-    if add_dirs.is_empty() {
-        return;
+/// Remove the transient VM's host state dir (`~/.mvm/vms/<name>`, which also
+/// holds any `--add-dir` extra images) once the VM is stopped. Host-side
+/// `std::fs` — never `run_in_vm`, which targets a path *inside* the guest and
+/// (on macOS) would wake a builder VM to `rm` a path that isn't there, leaking
+/// the real host dir. Runs for every transient run, `--add-dir` or not: the
+/// backend writes `hvf.pid` / `console.log` here regardless, so a plain OCI
+/// launch created the dir and must clean it up too. Best-effort — teardown must
+/// never fail on a cleanup error.
+fn remove_transient_state_dir(staging_dir: &str) {
+    match std::fs::remove_dir_all(staging_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::debug!(error = %e, dir = staging_dir, "transient state dir cleanup failed");
+        }
     }
-    let _ = mvm_runtime::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
 }
 
 /// Decide whether snapshot restore is safe for this request.
@@ -1000,7 +1005,6 @@ fn run_inner(
         backend: &backend,
         start_config: &start_config,
         resolved: &resolved,
-        add_dirs: &req.add_dirs,
         staging_dir: &staging_dir,
     };
     let vm_name = boot_transient_vm(vm_name, use_snapshot, &boot_attempt)?;
@@ -1321,7 +1325,6 @@ struct BootAttempt<'a> {
     backend: &'a AnyBackend,
     start_config: &'a VmStartConfig,
     resolved: &'a ResolvedImage,
-    add_dirs: &'a [AddDir],
     staging_dir: &'a str,
 }
 
@@ -1344,6 +1347,13 @@ fn boot_transient_vm(
     // without it a one-off run (or runs against different images) leaves warm
     // spares resident until a manual `cache prune`. Best-effort; never blocks.
     crate::commands::pool::reap_stale_standbys_best_effort();
+
+    // Reap state dirs a killed or crashed prior transient run left behind: a
+    // SIGKILL or a closed terminal skips teardown, so `~/.mvm/vms/<name>` leaks.
+    // Narrow orphan-only reap — no registry convergence or resume — so a
+    // throwaway launch stays side-effect free; shields this run's own name,
+    // whose dir may exist before its supervisor comes up.
+    let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
 
     // Try a warm-pool claim before snapshot/cold-boot. A claimed standby is
     // pre-booted to agent-ready and runs under its own standby-id, so the
@@ -1404,7 +1414,7 @@ fn boot_transient_vm(
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if let Err(e) = attempt.backend.start(attempt.start_config) {
-            clean_add_dir_staging(attempt.add_dirs, attempt.staging_dir);
+            remove_transient_state_dir(attempt.staging_dir);
             return Err(e).context("starting transient microVM");
         }
     }
@@ -1475,7 +1485,7 @@ fn teardown_transient_vm(
         }
     }
 
-    clean_add_dir_staging(add_dirs, staging_dir);
+    remove_transient_state_dir(staging_dir);
 }
 
 /// Restore a transient microVM from a template snapshot instead of cold-booting.
@@ -2950,55 +2960,26 @@ mod tests {
     }
 
     #[test]
-    fn staging_cleanup_skipped_without_add_dirs() {
-        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let calls_for_handler = calls.clone();
-        let _handler = mvm_runtime::shell_mock::install_handler(move |_script: &str| {
-            calls_for_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            mvm_runtime::shell_mock::MockResponse {
-                exit_code: 0,
-                stdout: String::new(),
-            }
-        });
+    fn remove_transient_state_dir_removes_the_host_dir() {
+        // Every transient run (with or without --add-dir) creates its state dir
+        // when the backend writes hvf.pid / console.log there, so teardown must
+        // remove it host-side — not via run_in_vm, which targets the guest.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("vms").join("throwaway-vm");
+        std::fs::create_dir_all(&dir).expect("create state dir");
+        std::fs::write(dir.join("hvf.pid"), b"1234").expect("write pid file");
+        assert!(dir.exists());
 
-        clean_add_dir_staging(&[], "/tmp/mvm-staging");
+        remove_transient_state_dir(&dir.to_string_lossy());
 
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "no --add-dir means no builder cleanup command"
-        );
+        assert!(!dir.exists(), "the host state dir must be removed");
     }
 
     #[test]
-    fn staging_cleanup_enabled_with_add_dirs() {
-        let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let scripts_for_handler = scripts.clone();
-        let _handler = mvm_runtime::shell_mock::install_handler(move |script: &str| {
-            scripts_for_handler
-                .lock()
-                .expect("mutex must not be poisoned")
-                .push(script.to_string());
-            mvm_runtime::shell_mock::MockResponse {
-                exit_code: 0,
-                stdout: String::new(),
-            }
-        });
-        let add_dir = AddDir {
-            host_path: "/tmp/host".to_string(),
-            guest_path: "/mnt/host".to_string(),
-            read_only: true,
-        };
-
-        clean_add_dir_staging(&[add_dir], "/tmp/mvm-staging");
-
-        let scripts = scripts.lock().expect("mutex must not be poisoned");
-        assert_eq!(scripts.len(), 1, "one cleanup command must be issued");
-        assert!(
-            scripts[0].contains("rm -rf /tmp/mvm-staging"),
-            "cleanup command must remove the staging directory: {}",
-            scripts[0]
-        );
+    fn remove_transient_state_dir_is_a_noop_on_a_missing_dir() {
+        // Best-effort: an already-gone dir (or a boot that never created one) is
+        // a clean no-op, never a panic.
+        remove_transient_state_dir("/nonexistent/mvm/vms/never-created");
     }
 
     #[test]
