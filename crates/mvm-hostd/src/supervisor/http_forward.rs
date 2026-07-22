@@ -76,8 +76,8 @@ where
             return Ok(());
         }
     };
-    let (ip, port) = match gate.decide_request(&request.target) {
-        EgressVerdict::Allow { ip, port } => (ip, port),
+    let (ips, port) = match gate.decide_request(&request.target) {
+        EgressVerdict::Allow { ips, port } => (ips, port),
         EgressVerdict::Deny => {
             write_proxy_error_async(&mut guest, ProxyStatus::Forbidden).await?;
             return Ok(());
@@ -94,7 +94,7 @@ where
             return Err(error);
         }
     };
-    let response = match send_host_request(&request, body, ip, port, timeout).await {
+    let response = match send_host_request(&request, body, &ips, port, timeout).await {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(error = %error, target = %request.target, "host HTTP forward request failed");
@@ -129,8 +129,8 @@ where
             return Ok(());
         }
     };
-    let (ip, port) = match gate.decide_request(&request.target) {
-        EgressVerdict::Allow { ip, port } => (ip, port),
+    let (ips, port) = match gate.decide_request(&request.target) {
+        EgressVerdict::Allow { ips, port } => (ips, port),
         EgressVerdict::Deny => {
             write_proxy_error_blocking(&mut guest, ProxyStatus::Forbidden)?;
             return Ok(());
@@ -147,7 +147,7 @@ where
             return Err(error);
         }
     };
-    let response = match send_host_request_blocking(&request, body, ip, port, timeout) {
+    let response = match send_host_request_blocking(&request, body, &ips, port, timeout) {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(error = %error, target = %request.target, "host HTTP forward request failed");
@@ -336,7 +336,7 @@ where
 async fn send_host_request(
     request: &ForwardRequest,
     body: Vec<u8>,
-    admitted_ip: IpAddr,
+    admitted_ips: &[IpAddr],
     admitted_port: u16,
     timeout: Duration,
 ) -> std::io::Result<reqwest::Response> {
@@ -349,10 +349,11 @@ async fn send_host_request(
         .connect_timeout(timeout)
         .redirect(reqwest::redirect::Policy::none());
     if request.host.parse::<IpAddr>().is_err() {
-        builder = builder.resolve_to_addrs(
-            &request.host,
-            &[SocketAddr::new(admitted_ip, admitted_port)],
-        );
+        let socket_addrs: Vec<SocketAddr> = admitted_ips
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, admitted_port))
+            .collect();
+        builder = builder.resolve_to_addrs(&request.host, &socket_addrs);
     }
     let client = builder.build().map_err(other)?;
     let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(invalid_input)?;
@@ -370,7 +371,7 @@ async fn send_host_request(
 fn send_host_request_blocking(
     request: &ForwardRequest,
     body: Vec<u8>,
-    admitted_ip: IpAddr,
+    admitted_ips: &[IpAddr],
     admitted_port: u16,
     timeout: Duration,
 ) -> std::io::Result<reqwest::blocking::Response> {
@@ -383,10 +384,11 @@ fn send_host_request_blocking(
         .connect_timeout(timeout)
         .redirect(reqwest::redirect::Policy::none());
     if request.host.parse::<IpAddr>().is_err() {
-        builder = builder.resolve_to_addrs(
-            &request.host,
-            &[SocketAddr::new(admitted_ip, admitted_port)],
-        );
+        let socket_addrs: Vec<SocketAddr> = admitted_ips
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, admitted_port))
+            .collect();
+        builder = builder.resolve_to_addrs(&request.host, &socket_addrs);
     }
     let client = builder.build().map_err(other)?;
     let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(invalid_input)?;
