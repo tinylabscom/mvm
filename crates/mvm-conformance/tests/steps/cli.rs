@@ -45,3 +45,14 @@ fn help_lists_verb(world: &mut CliWorld, verb: String) {
         "expected top-level verb {verb:?} in `mvmctl --help` output:\n{stdout}"
     );
 }
+
+#[then(expr = "the output contains {string}")]
+fn output_contains(world: &mut CliWorld, needle: String) {
+    let output = world.last_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(needle.as_str()),
+        "expected stdout to contain {needle:?}; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
