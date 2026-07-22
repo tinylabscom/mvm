@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "id": "goodbye",
+  "apps": [
+    {
+      "name": "goodbye",
+      "source": { "kind": "local_path", "path": "." },
+      "image": { "kind": "nix_packages", "packages": ["python312"] },
+      "entrypoints": [
+        { "kind": "command", "command": ["python", "-m", "goodbye"] }
+      ],
+      "resources": { "cpu_cores": 1, "memory_mb": 256, "rootfs_size_mb": 512 }
+    }
+  ]
+}

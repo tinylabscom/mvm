@@ -57,6 +57,17 @@ fn output_contains(world: &mut CliWorld, needle: String) {
     );
 }
 
+#[then(expr = "the error output contains {string}")]
+fn error_output_contains(world: &mut CliWorld, needle: String) {
+    let output = world.last_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(needle.as_str()),
+        "expected stderr to contain {needle:?}; stderr:\n{stderr}\nstdout:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+}
+
 #[then(expr = "the help output contains {string}")]
 fn help_contains(world: &mut CliWorld, expected: String) {
     let output = world.last_output();

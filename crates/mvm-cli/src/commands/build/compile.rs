@@ -27,7 +27,6 @@
 //!   (use `mvmctl run` for the live transport).
 //! - `MVM_SDK_MODE` — env-var override that supersedes flags.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -39,6 +38,7 @@ use mvm_sdk::compile::{compile, compile_archive, is_archive_output};
 use mvm_sdk::decorator::{ParseError, parse_python, parse_typescript};
 
 use super::Cli;
+use super::ir_input::{IrJsonSource, read_ir_json_workload};
 use super::sandbox_record::{
     LoadedRecording, ScriptLanguage, auto_exec_record_script, load_recording,
     script_language_from_path,
@@ -220,10 +220,7 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
     let source = workload_source(args)?;
     match source {
         WorkloadSource::IrJsonPath(path) => {
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("reading IR JSON from {}", path.display()))?;
-            let workload: Workload = serde_json::from_slice(&bytes)
-                .with_context(|| format!("parsing IR JSON from {}", path.display()))?;
+            let workload = read_ir_json_workload(&IrJsonSource::Path(path))?;
             Ok(LoadedRecording {
                 workload,
                 findings: Vec::new(),
@@ -232,12 +229,7 @@ fn load_workload(args: &Args) -> Result<LoadedRecording> {
             })
         }
         WorkloadSource::IrJsonStdin => {
-            let mut buf = Vec::new();
-            std::io::stdin()
-                .read_to_end(&mut buf)
-                .context("reading IR JSON from stdin")?;
-            let workload: Workload =
-                serde_json::from_slice(&buf).context("parsing IR JSON from stdin")?;
+            let workload = read_ir_json_workload(&IrJsonSource::Stdin)?;
             Ok(LoadedRecording {
                 workload,
                 findings: Vec::new(),

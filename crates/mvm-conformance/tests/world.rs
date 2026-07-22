@@ -1,12 +1,20 @@
 //! Shared state cucumber threads through the steps of one scenario.
 
+use std::collections::HashMap;
 use std::process::Output;
 
 /// Constructed fresh for every scenario. Holds the result of the most
-/// recent CLI invocation so later `Then` steps can assert on it.
+/// recent CLI invocation so later `Then` steps can assert on it, plus the
+/// workload identities parsed from successful `build address` runs, keyed by
+/// fixture name.
 #[derive(Debug, Default, cucumber::World)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
+    /// `semantic_address` per fixture name, populated on a zero-exit
+    /// `build address` run.
+    pub addresses: HashMap<String, String>,
+    /// `ir_hash` per fixture name, from the same run as `addresses`.
+    pub ir_hashes: HashMap<String, String>,
 }
 
 impl CliWorld {
@@ -16,5 +24,15 @@ impl CliWorld {
         self.last_run
             .as_ref()
             .expect("no CLI invocation recorded yet — a prior `When` step must run one")
+    }
+
+    /// The stored semantic address for `fixture`, or a failed assertion
+    /// naming the fixture whose `When` step didn't run (or didn't succeed).
+    pub fn address_of(&self, fixture: &str) -> &str {
+        self.addresses.get(fixture).unwrap_or_else(|| {
+            panic!(
+                "no address recorded for {fixture:?} — its `When` step must run and succeed first"
+            )
+        })
     }
 }

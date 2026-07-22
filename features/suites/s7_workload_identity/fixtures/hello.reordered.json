@@ -1,0 +1,32 @@
+{
+  "apps": [
+    {
+      "resources": {
+        "rootfs_size_mb": 512,
+        "memory_mb": 256,
+        "cpu_cores": 1
+      },
+      "entrypoints": [
+        {
+          "env": {},
+          "working_dir": "/app",
+          "command": ["python", "-m", "hello"],
+          "kind": "command"
+        }
+      ],
+      "image": {
+        "packages": ["python312"],
+        "kind": "nix_packages"
+      },
+      "source": {
+        "exclude": [],
+        "include": ["**"],
+        "path": ".",
+        "kind": "local_path"
+      },
+      "name": "hello"
+    }
+  ],
+  "id": "hello",
+  "schema_version": "0.1"
+}

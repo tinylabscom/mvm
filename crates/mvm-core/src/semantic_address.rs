@@ -15,6 +15,15 @@
 //! `SemanticAddress` exists specifically to match the external UOR-ADDR
 //! realization byte-for-byte, so it goes through the dedicated JCS crate.
 //!
+//! Caveat on the canonical form: `serde_jcs` 0.1.0 orders object keys by their
+//! UTF-8 byte value, not the UTF-16 code-unit order true RFC 8785 mandates. The
+//! two coincide for every code point up to U+FFFF but diverge for astral-plane
+//! (>U+FFFF) keys, so an address computed here can differ from one a strictly
+//! conformant implementation would produce for a workload carrying such keys.
+//! The `canonicalizer_equivalence` test module documents and pins this
+//! divergence class; cross-implementation conformance vectors are a tracked
+//! follow-up.
+//!
 //! # What this is not
 //!
 //! A semantic address authenticates nothing, proves no provenance, is not
