@@ -3,6 +3,7 @@
 //! The `image` catalog lives in the top-level `catalog` module; `flake`
 //! validation is the `validate` subcommand.
 
+pub(super) mod address;
 #[allow(clippy::module_inception)]
 pub(in crate::commands) mod build;
 pub(super) mod compile;

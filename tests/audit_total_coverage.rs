@@ -119,6 +119,8 @@ const RUNTIME_OVERLAY_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::R
 
 // Plan 178 (D1) — build-time verbs grouped under `build <sub>`.
 const BUILD_SUB: &[(&str, AuditPosture)] = &[
+    // Reads an IR document and prints its content identity; no state change.
+    ("address", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
     ("validate", AuditPosture::ReadOnly),
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
