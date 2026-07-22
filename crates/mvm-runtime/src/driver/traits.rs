@@ -33,6 +33,12 @@ pub trait VmmDriver: Send + Sync {
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
 
+    /// The VMM-specific base kernel bootargs (console, earlycon, root/init
+    /// selection) for a workload boot with the given root/disk shape. The
+    /// shared cmdline assembler (`workload_runner::cmdline`) layers every
+    /// other token — verity, grants, egress, uvols — on top of this.
+    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String;
+
     /// Reconstruct a live handle for an already-running VM by id — the stateless
     /// lifecycle entry (stop/status/wait from a process that didn't boot it). The
     /// handle is disk-backed (pid file + exit record), so no in-memory boot state

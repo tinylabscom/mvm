@@ -295,6 +295,10 @@ impl VmmDriver for HvfDriver {
     fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
         self.backend.guest_channel_info(id)
     }
+
+    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
+        crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+    }
 }
 
 /// The per-VM agent RPC socket path (host→guest agent bridge). Matches the
@@ -441,6 +445,19 @@ mod tests {
         assert_eq!(
             d.security_profile().tier,
             HvfBackend.security_profile().tier
+        );
+    }
+
+    #[test]
+    fn workload_base_bootargs_delegates_to_hvf_bootargs() {
+        let d = HvfDriver::new();
+        assert_eq!(
+            d.workload_base_bootargs(false, true),
+            crate::hvf_bootargs::workload_bootargs(false, true)
+        );
+        assert_eq!(
+            d.workload_base_bootargs(true, false),
+            crate::hvf_bootargs::workload_bootargs(true, false)
         );
     }
 

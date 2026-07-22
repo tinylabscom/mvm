@@ -490,7 +490,11 @@ impl VmBackend for HvfBackend {
             kernel: PathBuf::from(kernel),
             // Thread a full cmdline only when we need extra workload tokens;
             // otherwise keep the supervisor default (`init=/init`).
-            cmdline: cmdline::workload_cmdline(config, &state_dir),
+            cmdline: cmdline::workload_cmdline(
+                config,
+                &state_dir,
+                crate::hvf_bootargs::workload_bootargs,
+            ),
             memory_mib: config.memory_mib,
             initramfs: cmdline::effective_initrd(config),
             disks,
@@ -996,7 +1000,9 @@ mod tests {
         assert!(!disks[1].ephemeral);
 
         let dir = tempfile::tempdir().unwrap();
-        let assembled = cmdline::workload_cmdline(&config, dir.path()).expect("cmdline");
+        let assembled =
+            cmdline::workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+                .expect("cmdline");
         assert!(
             assembled.contains("mvm.runtime_data=/dev/vdb"),
             "got: {assembled}"

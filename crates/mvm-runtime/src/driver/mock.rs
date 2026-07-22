@@ -120,6 +120,19 @@ impl VmmDriver for MockDriver {
     fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
         bail!("mock driver does not provide guest channel info")
     }
+
+    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
+        // A deterministic stand-in for a non-HVF console base — `hvc0` rather
+        // than HVF's `ttyAMA0` — so runner-level tests can prove the base
+        // comes from the driver rather than a hardcoded HVF default.
+        let mut args = "console=hvc0 panic=-1 nokaslr loglevel=8".to_string();
+        if virtiofs_root {
+            args.push_str(" rootfstype=virtiofs root=mvmroot rw init=/init");
+        } else if has_disk {
+            args.push_str(" root=/dev/vda rw init=/init");
+        }
+        args
+    }
 }
 
 /// A `MockDriver`'s live VM: a scripted exit + a per-port loopback vsock whose
@@ -215,6 +228,21 @@ mod tests {
                 .iter()
                 .all(|c| *c == ClaimStatus::DoesNotHold)
         );
+    }
+
+    #[test]
+    fn mock_driver_workload_base_bootargs_uses_hvc0_console_by_root_shape() {
+        let driver = MockDriver::default();
+        let disk_base = driver.workload_base_bootargs(false, true);
+        assert!(disk_base.contains("console=hvc0"));
+        assert!(disk_base.contains("root=/dev/vda"));
+        assert!(!disk_base.contains("ttyAMA0"));
+
+        let virtiofs_base = driver.workload_base_bootargs(true, false);
+        assert!(virtiofs_base.contains("rootfstype=virtiofs"));
+
+        let bare_base = driver.workload_base_bootargs(false, false);
+        assert!(!bare_base.contains("root="));
     }
 
     #[test]
