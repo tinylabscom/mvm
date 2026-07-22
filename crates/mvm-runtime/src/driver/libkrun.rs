@@ -172,8 +172,9 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         bridge_restart_policy: BridgeRestartPolicy::HardFail,
         // Pointing libkrun's egress proxy at the spawner's endpoint socket is a
         // follow-up before this dormant driver is wired; egress is not exercised
-        // yet, so the transparent terminator stays unset.
+        // yet, so both the transparent terminator and the egress relay stay unset.
         transparent_terminator_port: None,
+        egress_relay_socket: None,
     })
 }
 
