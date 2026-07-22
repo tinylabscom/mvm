@@ -13,5 +13,6 @@ pub use runner::{
     RealBrokerRegistrar, RealEndpointSpawner, WorkloadLaunchInputs, WorkloadRunner,
 };
 pub use spec_map::{
-    WorkloadSockets, WorkloadSpecInputs, workload_blocks, workload_spec, workload_vsock_ports,
+    WorkloadSockets, WorkloadSpecInputs, ensure_no_dir_share_volumes, workload_blocks,
+    workload_spec, workload_vsock_ports,
 };

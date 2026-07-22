@@ -6,6 +6,14 @@
 //! policy / overlay knobs — is strung together here, once, so the raw HVF
 //! backend and `WorkloadRunner::start` boot with the identical cmdline. Pure
 //! string assembly (cfg-free) so it stays unit-testable with no hypervisor.
+//!
+//! One token is deliberately NOT in that shared list: `mvm.uvols=`, the
+//! user-volume mount manifest. The raw HVF backend calls `workload_cmdline`
+//! too, but its `hvf_workload_disks` never attaches `config.volumes` as block
+//! devices — so a `mvm.uvols=` token emitted from inside `workload_cmdline`
+//! would reach the guest describing disks that were never attached. Only the
+//! runner attaches volume disks (`spec_map::workload_blocks`), so only the
+//! runner appends the token, via `runner_cmdline` below.
 
 use std::path::{Path, PathBuf};
 
@@ -129,6 +137,35 @@ pub(crate) fn workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Opti
     Some(cmdline)
 }
 
+/// The runner's full cmdline: the shared `workload_cmdline` base plus, only
+/// on this path, the `mvm.uvols=` user-volume token (see the module doc for
+/// why it can't live inside `workload_cmdline` itself).
+///
+/// `workload_cmdline` returns `None` as a shortcut meaning "no extra tokens
+/// needed — let the driver apply its own built-in default base cmdline". A
+/// volume token can't ride on that shortcut (an empty `VmmSpec.cmdline` means
+/// "ignore this string entirely"), so when a volume is present and the
+/// shortcut would otherwise apply, this synthesizes the same base bootargs
+/// `workload_cmdline`'s non-shortcut branch would have produced and appends
+/// the token to that instead of to nothing.
+pub(crate) fn runner_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
+    let base = workload_cmdline(config, state_dir);
+    let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) else {
+        return base.unwrap_or_default();
+    };
+    match base {
+        Some(base) => format!("{base} {uvols}"),
+        None => {
+            let virtiofs_root = config.virtiofs_root.is_some();
+            let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
+            format!(
+                "{} {uvols}",
+                crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +272,76 @@ mod tests {
         assert!(cmdline.contains("mvm.runtime_data=/dev/vdc"));
         assert!(cmdline.contains("mvm.runtime_hash=/dev/vdd"));
         assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
+    }
+
+    fn disk_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: host.into(),
+            guest: guest.into(),
+            size: String::new(),
+            read_only: true,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            encrypted: false,
+        }
+    }
+
+    #[test]
+    fn runner_cmdline_matches_workload_cmdline_when_no_volumes_are_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig::default();
+        assert_eq!(
+            runner_cmdline(&config, dir.path()),
+            workload_cmdline(&config, dir.path()).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn runner_cmdline_appends_uvols_to_a_non_trivial_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            network_policy: mvm_core::network_policy::NetworkPolicy::preset(
+                mvm_core::network_policy::NetworkPreset::Dev,
+            ),
+            volumes: vec![disk_volume("/vol/data.img", "/data")],
+            ..Default::default()
+        };
+        // The egress token forces workload_cmdline's non-shortcut branch, so
+        // this exercises the `Some(base)` arm of runner_cmdline's match.
+        let base = workload_cmdline(&config, dir.path()).expect("non-trivial base");
+        let cmdline = runner_cmdline(&config, dir.path());
+        assert!(cmdline.starts_with(&base));
+        assert!(
+            cmdline.contains("mvm.uvols=uvol0:"),
+            "cmdline missing uvols token: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn runner_cmdline_synthesizes_a_base_when_workload_cmdline_takes_the_shortcut() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            volumes: vec![disk_volume("/vol/data.img", "/data")],
+            ..Default::default()
+        };
+        // Deny-all + RootfsOnly + no verity/tunnel/grants: workload_cmdline
+        // alone would return None here (the "let the driver default apply"
+        // shortcut), so runner_cmdline must not silently drop the base
+        // bootargs the volume token needs to ride on.
+        assert_eq!(workload_cmdline(&config, dir.path()), None);
+        let cmdline = runner_cmdline(&config, dir.path());
+        assert!(cmdline.contains("root=/dev/vda"), "cmdline: {cmdline}");
+        assert!(cmdline.contains("init=/init"), "cmdline: {cmdline}");
+        assert!(
+            cmdline.contains("mvm.uvols=uvol0:"),
+            "cmdline missing uvols token: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn runner_cmdline_is_empty_when_neither_base_nor_volumes_are_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig::default();
+        assert_eq!(runner_cmdline(&config, dir.path()), String::new());
     }
 }

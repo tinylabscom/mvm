@@ -4,11 +4,12 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::{Result, bail};
 use mvm_agentd::vsock::{
     BROKER_PORT, EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports,
 };
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_vsock_port_socket_at};
-use mvm_core::vm_backend::VmStartConfig;
+use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 
@@ -16,16 +17,26 @@ use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirecti
 /// `/dev/vda` (slot 0), its dm-verity Merkle sidecar at `/dev/vdb` (slot 1) when
 /// the image was built with verified boot, and — only when the full runtime
 /// overlay triple (image + verity sidecar + roothash) is present — the overlay
-/// at `/dev/vdc` (slot 2) and its verity sidecar at `/dev/vdd` (slot 3).
+/// at `/dev/vdc` (slot 2) and its verity sidecar at `/dev/vdd` (slot 3). After
+/// those, every `Disk`-kind entry in `config.volumes` (a sealed app-dep volume
+/// or other `--volume` disk image) lands at the next free slot, in `volumes`
+/// order — the same order `encode_user_volumes_cmdline` walks to number its
+/// `uvol{idx}` tokens, so the Nth appended volume block matches the Nth
+/// `mvm.uvols=` entry. A `DirShare` volume has no block-device representation
+/// and is skipped here; callers must refuse it before reaching this function
+/// (see `ensure_no_dir_share_volumes`) rather than relying on this silent skip.
 ///
-/// Every device is read-only: a workload rootfs is sealed, and the verity
-/// sidecars are integrity data the guest only reads. The all-three-or-none
-/// overlay rule mirrors `VmStartConfig`'s own contract — a partial overlay set
-/// is treated as no overlay rather than a half-configured boot.
+/// The rootfs/verity/overlay devices are read-only: a workload rootfs is
+/// sealed, and the verity sidecars are integrity data the guest only reads.
+/// The all-three-or-none overlay rule mirrors `VmStartConfig`'s own contract —
+/// a partial overlay set is treated as no overlay rather than a
+/// half-configured boot. A volume's `read_only` flag is the caller's own
+/// choice, carried through verbatim.
 ///
 /// An empty `rootfs_path` yields no disks at all — an initramfs-only guest boots
-/// entirely from RAM (matching `HvfBackend`'s own empty-path skip). The verity
-/// and overlay disks presuppose a rootfs, so they are dropped with it.
+/// entirely from RAM (matching `HvfBackend`'s own empty-path skip). The verity,
+/// overlay, and user-volume disks all presuppose a rootfs, so they are dropped
+/// with it.
 pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
     let ro = |source: &str, slot: u8| BlockDev {
         source: source.into(),
@@ -54,7 +65,49 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
         blocks.push(ro(overlay_verity, 3));
     }
 
+    for volume in config
+        .volumes
+        .iter()
+        .filter(|v| matches!(v.kind, VmVolumeKind::Disk))
+    {
+        let slot = blocks.len() as u8;
+        blocks.push(BlockDev {
+            source: volume.host.clone().into(),
+            read_only: volume.read_only,
+            // A sealed app-dep / user-supplied disk persists to the host file
+            // like the rootfs — never RAM-backed, so a writable volume's
+            // mutations actually land on disk instead of vanishing on exit.
+            ephemeral: false,
+            slot,
+        });
+    }
+
     blocks
+}
+
+/// Refuse a `DirShare` volume before a `VmmSpec` is assembled: the runner's
+/// `VmmSpec` has no virtio-fs device, so a directory share can't be expressed
+/// on this path (unlike a `Disk` volume, which becomes a `BlockDev`). Fails
+/// closed with the offending volume named, rather than letting
+/// `workload_blocks` silently drop it. `VmmSpec.shares` (virtio-fs) is a
+/// deferred follow-up; the dev-tier `virtiofs_root` flat share is a separate,
+/// unrelated field and out of scope here.
+pub fn ensure_no_dir_share_volumes(config: &VmStartConfig) -> Result<()> {
+    if let Some(v) = config
+        .volumes
+        .iter()
+        .find(|v| matches!(v.kind, VmVolumeKind::DirShare))
+    {
+        bail!(
+            "directory-share volume '{}' -> '{}' cannot be attached: the WorkloadRunner has no \
+             virtio-fs device yet, so a live host-directory share can't be expressed. Use a \
+             disk-image volume instead (host:/guest:SIZE), or run this workload on a backend \
+             with virtio-fs support.",
+            v.host,
+            v.guest
+        );
+    }
+    Ok(())
 }
 
 /// The host-side unix sockets a workload's standing vsock channels bind to.
@@ -277,6 +330,124 @@ mod tests {
             ..base()
         };
         assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda"]);
+    }
+
+    fn disk_volume(host: &str, guest: &str, read_only: bool) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: host.into(),
+            guest: guest.into(),
+            size: String::new(),
+            read_only,
+            kind: VmVolumeKind::Disk,
+            encrypted: false,
+        }
+    }
+
+    fn dir_share_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: host.into(),
+            guest: guest.into(),
+            size: String::new(),
+            read_only: false,
+            kind: VmVolumeKind::DirShare,
+            encrypted: false,
+        }
+    }
+
+    #[test]
+    fn a_disk_volume_lands_at_slot_4_after_the_full_base_stack() {
+        let cfg = VmStartConfig {
+            verity_path: Some("/img/rootfs.verity".into()),
+            runtime_overlay_path: Some("/img/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
+            runtime_overlay_roothash: Some("ab".repeat(32)),
+            volumes: vec![disk_volume("/vol/data.img", "/data", true)],
+            ..base()
+        };
+        let blocks = workload_blocks(&cfg);
+        assert_eq!(
+            nodes(&blocks),
+            vec!["/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd", "/dev/vde"]
+        );
+        let vol_block = &blocks[4];
+        assert_eq!(vol_block.source, PathBuf::from("/vol/data.img"));
+        assert!(vol_block.read_only);
+        assert!(!vol_block.ephemeral);
+    }
+
+    #[test]
+    fn two_disk_volumes_preserve_order_at_slots_4_and_5() {
+        let cfg = VmStartConfig {
+            verity_path: Some("/img/rootfs.verity".into()),
+            runtime_overlay_path: Some("/img/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
+            runtime_overlay_roothash: Some("ab".repeat(32)),
+            volumes: vec![
+                disk_volume("/vol/first.img", "/first", true),
+                disk_volume("/vol/second.img", "/second", false),
+            ],
+            ..base()
+        };
+        let blocks = workload_blocks(&cfg);
+        assert_eq!(
+            nodes(&blocks),
+            vec![
+                "/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd", "/dev/vde", "/dev/vdf"
+            ]
+        );
+        assert_eq!(blocks[4].source, PathBuf::from("/vol/first.img"));
+        assert!(blocks[4].read_only);
+        assert_eq!(blocks[5].source, PathBuf::from("/vol/second.img"));
+        assert!(!blocks[5].read_only);
+    }
+
+    #[test]
+    fn a_disk_volume_with_no_verity_or_overlay_lands_right_after_the_rootfs() {
+        let cfg = VmStartConfig {
+            volumes: vec![disk_volume("/vol/data.img", "/data", false)],
+            ..base()
+        };
+        let blocks = workload_blocks(&cfg);
+        assert_eq!(nodes(&blocks), vec!["/dev/vda", "/dev/vdb"]);
+        assert_eq!(blocks[1].source, PathBuf::from("/vol/data.img"));
+    }
+
+    #[test]
+    fn a_dir_share_volume_is_skipped_by_workload_blocks() {
+        // workload_blocks itself has no Result to refuse through; the fail-closed
+        // guard lives in `ensure_no_dir_share_volumes`, which callers must run
+        // first. This only proves the low-level mapper never fabricates a bogus
+        // block device for a share it can't express.
+        let cfg = VmStartConfig {
+            volumes: vec![dir_share_volume("/host/dir", "/mnt")],
+            ..base()
+        };
+        assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda"]);
+    }
+
+    #[test]
+    fn ensure_no_dir_share_volumes_accepts_disk_only_configs() {
+        let cfg = VmStartConfig {
+            volumes: vec![disk_volume("/vol/data.img", "/data", true)],
+            ..base()
+        };
+        assert!(ensure_no_dir_share_volumes(&cfg).is_ok());
+    }
+
+    #[test]
+    fn ensure_no_dir_share_volumes_refuses_and_names_the_volume() {
+        let cfg = VmStartConfig {
+            volumes: vec![
+                disk_volume("/vol/data.img", "/data", true),
+                dir_share_volume("/host/dir", "/mnt/share"),
+            ],
+            ..base()
+        };
+        let err = ensure_no_dir_share_volumes(&cfg)
+            .expect_err("a DirShare volume must be refused, not silently dropped");
+        let message = err.to_string();
+        assert!(message.contains("/host/dir"), "message: {message}");
+        assert!(message.contains("/mnt/share"), "message: {message}");
     }
 
     #[test]
