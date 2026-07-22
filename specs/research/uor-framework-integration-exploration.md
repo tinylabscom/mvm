@@ -159,7 +159,7 @@ VM IDs, operation IDs, session IDs, capability tokens, and plan nonces need uniq
 ### Do now (host-side, zero deps)
 
 1. Add a conformance test comparing the existing `SemanticAddress` golden vector with UOR-ADDR's published JSON conformance vectors.
-2. If cross-language identity is a goal, compare Rust output with the TypeScript and Python SDK paths over a shared IR fixture.
+2. ~~If cross-language identity is a goal, compare Rust output with the TypeScript and Python SDK paths over a shared IR fixture.~~ **Completed 2026-07-22:** the checked-in `hello-parity` fixture now runs through both SDKs and the native Rust IR; all three resolve to the pinned `sha256:b7106af4133c7d678744adb3b617e7289bc3f4c131b2df03a8e9cc49aac90037` semantic address, with `xtask check-ir-parity` enforcing drift in CI.
 3. Add a semantic address for `BuildProvenance`, computed with the existing `serde_jcs` + `sha2` stack, as an optional field.
 
 ### Do later (wasm/browser layer, WS11 P4)

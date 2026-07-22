@@ -41,6 +41,7 @@ mod check_trust_gradient;
 mod check_two_surfaces;
 mod check_vsock_only_egress;
 mod gen_stubs;
+mod ir_parity;
 mod perf;
 
 fn main() -> Result<()> {
@@ -198,8 +199,16 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             gen_stubs::check(&workspace)
         }
+        Some("gen-ir-parity") => {
+            let workspace = workspace_root();
+            ir_parity::generate(&workspace)
+        }
+        Some("check-ir-parity") => {
+            let workspace = workspace_root();
+            ir_parity::check(&workspace)
+        }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -297,6 +306,12 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-stubs                             CI gate — fail if any generated schema/stub is stale"
+            );
+            eprintln!(
+                "  gen-ir-parity                          Regenerate Python/TypeScript shared IR fixtures"
+            );
+            eprintln!(
+                "  check-ir-parity                        Re-run SDK fixtures and fail on IR drift"
             );
             std::process::exit(1);
         }
