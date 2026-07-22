@@ -375,7 +375,9 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
             secrets,
             redaction,
             network_policy: &config.network_policy,
-            cmdline: cmdline::runner_cmdline(config, &state_dir),
+            cmdline: cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
+                self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+            }),
         };
         // The supervisor + endpoint are detached/disk-backed; the live handle is
         // reconstructed by id via `attach`, so the boot handle is dropped here.
@@ -943,6 +945,50 @@ mod tests {
                 "booted cmdline missing {needle:?}: {cmdline}"
             );
         }
+    }
+
+    /// The base console/earlycon/root bootargs the runner boots with must come
+    /// from the driver (`VmmDriver::workload_base_bootargs`), not a hardcoded
+    /// HVF default — proven by driving `start` through a `MockDriver` whose
+    /// base uses `hvc0` rather than HVF's `ttyAMA0` and asserting the booted
+    /// spec's cmdline carries that base.
+    #[test]
+    fn start_uses_the_drivers_base_bootargs_not_a_hardcoded_hvf_default() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let driver = MockDriver::default();
+        let cfg = VmStartConfig {
+            name: "runner-driver-base-bootargs".into(),
+            rootfs_path: "/img/rootfs.ext4".into(),
+            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
+            ..Default::default()
+        };
+
+        let runner = WorkloadRunner::new(
+            driver.clone(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        runner.start(&cfg).expect("start succeeds");
+
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs.len(), 1);
+        let cmdline = &specs[0].cmdline;
+
+        let expected_base = driver.workload_base_bootargs(false, true);
+        assert!(
+            cmdline.starts_with(&expected_base),
+            "cmdline did not start with the driver's base bootargs {expected_base:?}: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("ttyAMA0"),
+            "cmdline carried the hardcoded HVF console rather than the driver's: {cmdline}"
+        );
     }
 
     fn disk_volume(host: &str, guest: &str, read_only: bool) -> mvm_core::vm_backend::VmVolume {

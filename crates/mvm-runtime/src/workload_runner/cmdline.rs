@@ -72,10 +72,16 @@ pub(crate) fn runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &st
 /// tokens are needed (the driver then falls back to its own default base
 /// cmdline).
 ///
-/// The `ttyAMA0` console base lives in `crate::hvf_bootargs` — today's only
-/// runner driver. It moves behind a `VmmDriver` base-cmdline hook once a
-/// second driver with a different console needs to join the runner.
-pub(crate) fn workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
+/// `base_bootargs` supplies the VMM-specific console/earlycon/root base
+/// (`VmmDriver::workload_base_bootargs` for a runner driver, or
+/// `crate::hvf_bootargs::workload_bootargs` directly for the raw HVF
+/// backend, which has no driver to call through) — every other token here is
+/// shared across VMMs.
+pub(crate) fn workload_cmdline(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool, bool) -> String,
+) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
     // The userspace L3 egress tunnel: tell the guest (via mvm-guest-netinit →
     // mvm-guest-netd) to stand up its TUN and pump packets to the host worker over
@@ -99,7 +105,7 @@ pub(crate) fn workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Opti
     let mut cmdline = if verity_is_enabled {
         crate::hvf_bootargs::default_verity_bootargs()
     } else {
-        crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+        base_bootargs(virtiofs_root, has_disk)
     };
     if let Some(verity_args) = crate::microvm::build_verity_cmdline_args(
         config.roothash.as_deref(),
@@ -146,10 +152,15 @@ pub(crate) fn workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Opti
 /// volume token can't ride on that shortcut (an empty `VmmSpec.cmdline` means
 /// "ignore this string entirely"), so when a volume is present and the
 /// shortcut would otherwise apply, this synthesizes the same base bootargs
-/// `workload_cmdline`'s non-shortcut branch would have produced and appends
-/// the token to that instead of to nothing.
-pub(crate) fn runner_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
-    let base = workload_cmdline(config, state_dir);
+/// `workload_cmdline`'s non-shortcut branch would have produced (via the same
+/// `base_bootargs` closure) and appends the token to that instead of to
+/// nothing.
+pub(crate) fn runner_cmdline(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool, bool) -> String,
+) -> String {
+    let base = workload_cmdline(config, state_dir, &base_bootargs);
     let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) else {
         return base.unwrap_or_default();
     };
@@ -158,10 +169,7 @@ pub(crate) fn runner_cmdline(config: &VmStartConfig, state_dir: &Path) -> String
         None => {
             let virtiofs_root = config.virtiofs_root.is_some();
             let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
-            format!(
-                "{} {uvols}",
-                crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
-            )
+            format!("{} {uvols}", base_bootargs(virtiofs_root, has_disk))
         }
     }
 }
@@ -199,7 +207,8 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let cmdline = workload_cmdline(&config, dir.path()).expect("cmdline");
+        let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+            .expect("cmdline");
         assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
         assert!(cmdline.contains("mvm.runtime_source_policy=rootfs_only"));
@@ -231,7 +240,8 @@ mod tests {
             network_tunnel: Some(tunnel),
             ..Default::default()
         };
-        let cmdline = workload_cmdline(&config, dir.path()).expect("cmdline");
+        let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+            .expect("cmdline");
         assert!(
             cmdline.contains(&expected),
             "cmdline missing the tunnel token: {cmdline}"
@@ -262,7 +272,8 @@ mod tests {
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
-        let cmdline = workload_cmdline(&config, dir.path()).expect("cmdline");
+        let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+            .expect("cmdline");
         assert!(!cmdline.contains("root=/dev/vda"));
         assert!(!cmdline.contains("init=/init"));
         assert!(cmdline.contains("mvm.roothash="));
@@ -290,8 +301,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = VmStartConfig::default();
         assert_eq!(
-            runner_cmdline(&config, dir.path()),
-            workload_cmdline(&config, dir.path()).unwrap_or_default()
+            runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs),
+            workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+                .unwrap_or_default()
         );
     }
 
@@ -307,8 +319,9 @@ mod tests {
         };
         // The egress token forces workload_cmdline's non-shortcut branch, so
         // this exercises the `Some(base)` arm of runner_cmdline's match.
-        let base = workload_cmdline(&config, dir.path()).expect("non-trivial base");
-        let cmdline = runner_cmdline(&config, dir.path());
+        let base = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+            .expect("non-trivial base");
+        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
         assert!(cmdline.starts_with(&base));
         assert!(
             cmdline.contains("mvm.uvols=uvol0:"),
@@ -328,8 +341,11 @@ mod tests {
         // alone would return None here (the "let the driver default apply"
         // shortcut), so runner_cmdline must not silently drop the base
         // bootargs the volume token needs to ride on.
-        assert_eq!(workload_cmdline(&config, dir.path()), None);
-        let cmdline = runner_cmdline(&config, dir.path());
+        assert_eq!(
+            workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs),
+            None
+        );
+        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
         assert!(cmdline.contains("root=/dev/vda"), "cmdline: {cmdline}");
         assert!(cmdline.contains("init=/init"), "cmdline: {cmdline}");
         assert!(
@@ -342,6 +358,9 @@ mod tests {
     fn runner_cmdline_is_empty_when_neither_base_nor_volumes_are_present() {
         let dir = tempfile::tempdir().unwrap();
         let config = VmStartConfig::default();
-        assert_eq!(runner_cmdline(&config, dir.path()), String::new());
+        assert_eq!(
+            runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs),
+            String::new()
+        );
     }
 }
