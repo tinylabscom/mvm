@@ -404,6 +404,30 @@ mod tests {
         assert_eq!(verified.entries[0].tenant, "tenant-a");
         assert_eq!(verified.entries[1].event, "checkpoint.forked");
 
+        // The digest label VALUES must survive the wasm mirror intact (they are
+        // exactly what chain-anchored lineage verification reads back). Parse the
+        // forked line through the mirror's own SignedEnvelope and assert the
+        // labels round-trip.
+        let forked_line = content.lines().nth(1).expect("second entry present");
+        let mirrored: mvm_protocol::verify::SignedEnvelope =
+            serde_json::from_str(forked_line).expect("mirror parses the forked entry");
+        assert_eq!(
+            mirrored
+                .entry
+                .labels
+                .get("parent_digest")
+                .map(String::as_str),
+            Some(format!("sha256:{}", "b".repeat(64)).as_str())
+        );
+        assert_eq!(
+            mirrored
+                .entry
+                .labels
+                .get("child_digest")
+                .map(String::as_str),
+            Some(format!("sha256:{}", "c".repeat(64)).as_str())
+        );
+
         // And it must reject a tampered stream just like the native path.
         let tampered = content.replacen("plan.launched", "plan.hijacked", 1);
         let err = mvm_protocol::verify::verify_audit_chain_bytes(&tampered, &vk).unwrap_err();

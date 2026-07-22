@@ -43,6 +43,38 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use mvm_core::plan::ExecutionPlan;
 
+/// Wire-stable event names and label keys for the checkpoint audit entries.
+/// Shared so the emitter (writer) and the lineage chain-anchor (reader) can't
+/// drift on a string — a drift there would silently defeat chain-anchored
+/// lineage verification.
+pub mod checkpoint_audit {
+    /// Emitted when a VM's state is frozen into a checkpoint.
+    pub const CREATED_EVENT: &str = "checkpoint.created";
+    /// Emitted when a VM is resumed from a vm_full checkpoint (same identity).
+    pub const RESTORED_EVENT: &str = "checkpoint.restored";
+    /// Emitted when a new sandbox is branched from a checkpoint.
+    pub const FORKED_EVENT: &str = "checkpoint.forked";
+
+    /// Label: the checkpoint's own id (created/restored).
+    pub const LABEL_CHECKPOINT_ID: &str = "checkpoint_id";
+    /// Label: the checkpoint's content-address (created/restored).
+    pub const LABEL_META_DIGEST: &str = "meta_digest";
+    /// Label: the checkpoint class (created).
+    pub const LABEL_CLASS: &str = "class";
+    /// Label: the owning VM name (created/restored).
+    pub const LABEL_VM_NAME: &str = "vm_name";
+    /// Label: the parent checkpoint id (forked).
+    pub const LABEL_PARENT_ID: &str = "parent_id";
+    /// Label: the child (new) checkpoint id (forked).
+    pub const LABEL_CHILD_ID: &str = "child_id";
+    /// Label: the child VM name (forked).
+    pub const LABEL_CHILD_VM_NAME: &str = "child_vm_name";
+    /// Label: the parent's content-address, i.e. the child's hash-link (forked).
+    pub const LABEL_PARENT_DIGEST: &str = "parent_digest";
+    /// Label: the child's content-address (forked).
+    pub const LABEL_CHILD_DIGEST: &str = "child_digest";
+}
+
 /// Resolve the default audit-chain directory: `~/.mvm/audit/`.
 pub fn default_audit_dir() -> Result<PathBuf> {
     Ok(mvm_core::config::mvm_home_strict()?.join("audit"))
@@ -254,16 +286,20 @@ impl AuditEmitter {
         meta_digest: &str,
         vm_name: &str,
     ) -> Result<()> {
+        use checkpoint_audit as k;
         self.emit(
             plan,
-            "checkpoint.created",
+            k::CREATED_EVENT,
             [
-                ("checkpoint_id".to_string(), checkpoint_id.to_string()),
-                ("class".to_string(), class.to_string()),
+                (
+                    k::LABEL_CHECKPOINT_ID.to_string(),
+                    checkpoint_id.to_string(),
+                ),
+                (k::LABEL_CLASS.to_string(), class.to_string()),
                 // The record's content-address, not a single-blob sha: it covers
                 // the whole manifest plus the parent hash-link.
-                ("meta_digest".to_string(), meta_digest.to_string()),
-                ("vm_name".to_string(), vm_name.to_string()),
+                (k::LABEL_META_DIGEST.to_string(), meta_digest.to_string()),
+                (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
             ],
         )
     }
@@ -278,13 +314,17 @@ impl AuditEmitter {
         meta_digest: &str,
         vm_name: &str,
     ) -> Result<()> {
+        use checkpoint_audit as k;
         self.emit(
             plan,
-            "checkpoint.restored",
+            k::RESTORED_EVENT,
             [
-                ("checkpoint_id".to_string(), checkpoint_id.to_string()),
-                ("meta_digest".to_string(), meta_digest.to_string()),
-                ("vm_name".to_string(), vm_name.to_string()),
+                (
+                    k::LABEL_CHECKPOINT_ID.to_string(),
+                    checkpoint_id.to_string(),
+                ),
+                (k::LABEL_META_DIGEST.to_string(), meta_digest.to_string()),
+                (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
             ],
         )
     }
@@ -302,15 +342,22 @@ impl AuditEmitter {
         parent_digest: &str,
         child_digest: &str,
     ) -> Result<()> {
+        use checkpoint_audit as k;
         self.emit(
             plan,
-            "checkpoint.forked",
+            k::FORKED_EVENT,
             [
-                ("parent_id".to_string(), parent_id.to_string()),
-                ("child_id".to_string(), child_id.to_string()),
-                ("child_vm_name".to_string(), child_vm_name.to_string()),
-                ("parent_digest".to_string(), parent_digest.to_string()),
-                ("child_digest".to_string(), child_digest.to_string()),
+                (k::LABEL_PARENT_ID.to_string(), parent_id.to_string()),
+                (k::LABEL_CHILD_ID.to_string(), child_id.to_string()),
+                (
+                    k::LABEL_CHILD_VM_NAME.to_string(),
+                    child_vm_name.to_string(),
+                ),
+                (
+                    k::LABEL_PARENT_DIGEST.to_string(),
+                    parent_digest.to_string(),
+                ),
+                (k::LABEL_CHILD_DIGEST.to_string(), child_digest.to_string()),
             ],
         )
     }
