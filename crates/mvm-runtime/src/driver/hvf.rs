@@ -13,7 +13,9 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_agentd::vsock::{CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_agentd::vsock::{
+    BROKER_PORT, CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports,
+};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::vm_backend::{
@@ -163,8 +165,11 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         agent_socket: vsock_socket(spec, GUEST_AGENT_PORT),
         substitution_socket: None,
         egress_relay_socket,
-        // Builder/dev VMs run no admitted workload, so no host-services broker.
-        broker_socket: None,
+        // An admitted workload carries a BROKER_PORT relay socket; the supervisor
+        // splices the guest's BROKER_PORT dial to it so host.audit.v1 /
+        // host.secrets.v1 reach the per-VM broker (or the per-tenant host-agent
+        // daemon). Absent for a builder/dev VM, which runs no admitted workload.
+        broker_socket: vsock_socket(spec, BROKER_PORT),
         // Builder/dev VMs carry no admitted egress tunnel.
         network_tunnel_socket: None,
         console_data_sockets,
@@ -396,6 +401,14 @@ mod tests {
         }
     }
 
+    fn broker_port(uds: &str) -> VsockPort {
+        VsockPort {
+            guest_port: BROKER_PORT,
+            host_uds: uds.into(),
+            direction: VsockDirection::GuestDials,
+        }
+    }
+
     fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
         VmmSpec {
             name: "w".into(),
@@ -473,11 +486,31 @@ mod tests {
         );
         assert_eq!(cfg.agent_socket, Some(PathBuf::from("/run/agent.sock")));
         assert_eq!(cfg.substitution_socket, None);
+        // No BROKER_PORT in this spec ⇒ no broker relay (unadmitted / builder).
+        assert_eq!(cfg.broker_socket, None);
         assert!(cfg.vsock);
         // No blocks → no disks.
         assert!(cfg.disks.is_empty());
         // Empty spec cmdline ⇒ None (supervisor uses its workload default).
         assert_eq!(cfg.cmdline, None);
+    }
+
+    #[test]
+    fn relay_config_wires_the_broker_relay_when_the_spec_carries_broker_port() {
+        // An admitted workload's spec carries a BROKER_PORT channel; the
+        // supervisor config must relay it so host.audit.v1 / host.secrets.v1
+        // reach the broker. Absence ⇒ None (asserted above).
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+                broker_port("/run/broker.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.broker_socket, Some(PathBuf::from("/run/broker.sock")));
     }
 
     #[test]

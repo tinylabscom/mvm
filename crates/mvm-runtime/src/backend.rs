@@ -20,13 +20,13 @@ use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
 use crate::wasm_backend::WasmBackend;
-use crate::workload_runner::{RealEndpointSpawner, WorkloadRunner};
+use crate::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
 
 /// The hvf VMM driven through the unified workload-runner role over the
 /// driver seam. One alias keeps the long generic instantiation readable at the
 /// enum variant and its construction site.
-type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner>;
+type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
 ///
@@ -552,7 +552,11 @@ impl AnyBackend {
         // table; special-case its opt-in selector before the descriptor lookup.
         // Every other selector — `hvf` included — stays byte-identical.
         if matches!(name, "hvf-runner") {
-            return Self::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner));
+            return Self::HvfRunner(WorkloadRunner::new(
+                HvfDriver::new(),
+                RealEndpointSpawner,
+                RealBrokerRegistrar,
+            ));
         }
         catalog::descriptor_for_selector(name)
             .map(|descriptor| descriptor.instantiate())
@@ -1632,7 +1636,11 @@ mod tests {
             ("hvf", AnyBackend::Hvf(HvfBackend)),
             (
                 "hvf_runner",
-                AnyBackend::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner)),
+                AnyBackend::HvfRunner(WorkloadRunner::new(
+                    HvfDriver::new(),
+                    RealEndpointSpawner,
+                    RealBrokerRegistrar,
+                )),
             ),
         ];
         backends.extend(mock_variant_for_ssh_check());
