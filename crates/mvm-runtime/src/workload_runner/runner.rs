@@ -29,6 +29,7 @@ use crate::substitution_spawn::{
     spawn_substitution_endpoint,
 };
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
+use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, network_tunnel_socket, workload_spec,
 };
@@ -236,7 +237,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
             secrets,
             redaction,
             network_policy: &config.network_policy,
-            cmdline: String::new(),
+            cmdline: cmdline::workload_cmdline(config, &state_dir).unwrap_or_default(),
         };
         // The supervisor + endpoint are detached/disk-backed; the live handle is
         // reconstructed by id via `attach`, so the boot handle is dropped here.
@@ -340,7 +341,9 @@ mod tests {
     use std::sync::Mutex;
 
     use mvm_agentd::vsock::EGRESS_PORT;
-    use mvm_core::plan::{SecretBinding, SecretSource};
+    use mvm_core::plan::{Nonce, SecretBinding, SecretSource, VerbGrant, VerbId};
+    use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+    use mvm_core::util::test_env::TestEnv;
 
     use crate::driver::HvfDriver;
     use crate::driver::mock::MockDriver;
@@ -535,6 +538,97 @@ mod tests {
         assert_eq!(runner.wait(&id).unwrap(), exit);
         // stop reaps a nonexistent endpoint (no-op) then kills the attached handle.
         assert!(runner.stop(&VmId("w".into())).is_ok());
+    }
+
+    /// Write a `verb-grant.json` sidecar plus the host-signer public key
+    /// under `vm_name`'s state dir, the shape the grant cmdline tokens read.
+    fn seed_grant_sidecar_and_key(vm_name: &str) {
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let nonce = Nonce::from_bytes([9u8; 16]);
+        let not_after = mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: "cc".repeat(32),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant: VerbGrant {
+                session_id: vm_name.to_string(),
+                plan_nonce: nonce,
+                not_after,
+                verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+                sig: vec![0u8; 64],
+            },
+        };
+        std::fs::write(
+            state_dir.join("verb-grant.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.pub"), [0xEEu8; 32]).unwrap();
+    }
+
+    /// `WorkloadRunner::start` (the `VmBackend::start` production path) must
+    /// assemble the same security-bearing kernel cmdline the raw HVF backend
+    /// does — dm-verity, the plan-bound grant triple, vsock egress, and the
+    /// runtime-source-policy token — instead of booting with an empty
+    /// cmdline. Drives the whole trait method through a `MockDriver` and
+    /// inspects the booted `VmmSpec` it recorded.
+    #[test]
+    fn start_assembles_the_security_cmdline_tokens_via_the_shared_assembler() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        let verity = rootfs_dir.path().join("rootfs.verity");
+        let initrd = rootfs_dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let vm_name = "runner-security-cmdline-tokens";
+        seed_grant_sidecar_and_key(vm_name);
+
+        let cfg = VmStartConfig {
+            name: vm_name.into(),
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
+            ..Default::default()
+        };
+
+        let runner =
+            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        runner.start(&cfg).expect("start succeeds");
+
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs.len(), 1);
+        let cmdline = &specs[0].cmdline;
+
+        let require_grant = crate::microvm::require_grant_cmdline_token(vm_name)
+            .expect("sidecar present ⇒ enforcement token");
+        for needle in [
+            "mvm.roothash=",
+            "mvm.data=/dev/vda",
+            "mvm.verb_grant=",
+            require_grant.as_str(),
+            "mvm.host_signer_pub=",
+            "mvm.vsock_egress=1",
+            "mvm.runtime_source_policy=",
+        ] {
+            assert!(
+                cmdline.contains(needle),
+                "booted cmdline missing {needle:?}: {cmdline}"
+            );
+        }
     }
 
     #[test]
