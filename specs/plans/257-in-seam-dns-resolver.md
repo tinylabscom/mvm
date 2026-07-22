@@ -306,7 +306,7 @@ pub fn serve_dns_blocking(guest: std::fs::File, gate: &EgressGate, timeout: Dura
 
 **TDD steps**
 
-- [ ] **Step 1: Failing pure-seam tests in `egress_gate.rs`.**
+- [x] **Step 1: Failing pure-seam tests in `egress_gate.rs`.**
 ```rust
 #[test]
 fn dns_verdict_pins_first_answers_from_pin_without_upstream() {
@@ -351,8 +351,8 @@ fn dns_verdict_explicit_private_allowlist_is_kept() {
                DnsVerdict::Resolved(vec![p]));
 }
 ```
-- [ ] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-runtime dns_verdict`
-- [ ] **Step 3: Minimal `dns_verdict` impl mirroring `decide_hostname_request`'s branch.**
+- [x] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-runtime dns_verdict`
+- [x] **Step 3: Minimal `dns_verdict` impl mirroring `decide_hostname_request`'s branch.**
 ```rust
 pub fn dns_verdict<F>(&self, name: &str, qtype: DnsRecordType, resolve: F) -> DnsVerdict
 where F: Fn(&str) -> std::io::Result<Vec<IpAddr>> {
@@ -371,8 +371,8 @@ where F: Fn(&str) -> std::io::Result<Vec<IpAddr>> {
     DnsVerdict::Resolved(answers)
 }
 ```
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: Failing handler test in `dns_handler.rs`** (in-memory duplex, echoes the decode→verdict→encode path against a default-deny gate → REFUSED, and an unrestricted gate + stub resolver → answer).
+- [x] **Step 4: Run — expect PASS.**
+- [x] **Step 5: Failing handler test in `dns_handler.rs`** (in-memory duplex, echoes the decode→verdict→encode path against a default-deny gate → REFUSED, and an unrestricted gate + stub resolver → answer).
 ```rust
 #[tokio::test]
 async fn serve_dns_refuses_unadmitted_name() {
@@ -391,10 +391,10 @@ async fn serve_dns_refuses_unadmitted_name() {
     h.await.unwrap().unwrap();
 }
 ```
-- [ ] **Step 6: Run — expect FAIL.** `cargo nextest run -p mvm-hostd dns_handler`
-- [ ] **Step 7: Minimal `serve_dns`.** Read 2-byte len (reject > `MAX_DNS_MESSAGE`), read payload, `decode_query` (on `Err` → write a `Refused` response for a best-effort echoed id or close), `gate.dns_verdict(name, qtype, |h| resolve_hostname_ips_pure(h, timeout))`, map `Refused → encode_response(Refused,&[])`, `Resolved(ips) → encode_response(NoError,&ips)`, write 2-byte len + bytes. Add the `MVM_DNS/1` branch to `handle_raw_conn` (`if target == dns_handler::FRAME_LINE { return dns_handler::serve_dns(guest, gate, timeout).await; }`) and to `handle_raw_conn_blocking` (`serve_dns_blocking`). Add a small `build_a_query`/`encode_query_for_test` helper behind `#[cfg(test)]` (or a `pub(crate)` encoder) so tests can synthesize queries.
-- [ ] **Step 8: Run — expect PASS.**
-- [ ] **Step 9: Commit.** `feat(hostd): host DNS handler + MVM_DNS/1 dispatch with pins-first resolution`.
+- [x] **Step 6: Run — expect FAIL.** `cargo nextest run -p mvm-hostd dns_handler`
+- [x] **Step 7: Minimal `serve_dns`.** Read 2-byte len (reject > `MAX_DNS_MESSAGE`), read payload, `decode_query` (on `Err` → write a `Refused` response for a best-effort echoed id or close), `gate.dns_verdict(name, qtype, |h| resolve_hostname_ips_pure(h, timeout))`, map `Refused → encode_response(Refused,&[])`, `Resolved(ips) → encode_response(NoError,&ips)`, write 2-byte len + bytes. Add the `MVM_DNS/1` branch to `handle_raw_conn` (`if target == dns_handler::FRAME_LINE { return dns_handler::serve_dns(guest, gate, timeout).await; }`) and to `handle_raw_conn_blocking` (`serve_dns_blocking`). Add a small `build_a_query`/`encode_query_for_test` helper behind `#[cfg(test)]` (or a `pub(crate)` encoder) so tests can synthesize queries.
+- [x] **Step 8: Run — expect PASS.**
+- [x] **Step 9: Commit.** `feat(hostd): host DNS handler + MVM_DNS/1 dispatch with pins-first resolution`.
 
 ---
 
