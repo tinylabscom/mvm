@@ -82,12 +82,17 @@ fn attach_block(krun: KrunContext, block: &BlockDev) -> KrunContext {
 /// runner above this driver, so `relay` never sets an admission field — the
 /// supervisor takes its legacy run path and enforces nothing here.
 fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<SupervisorConfig> {
-    let kernel = match &spec.kernel {
+    let kernel_path = match &spec.kernel {
         KernelImage::Path(p) => p.to_string_lossy().into_owned(),
         KernelImage::Bundled => {
             bail!("the libkrun driver requires an explicit kernel Image; VmmSpec.kernel is Bundled")
         }
     };
+    // Prepare the kernel exactly as the raw libkrun path does, reusing the same
+    // shared helper rather than forking it: on x86_64 this converts the workload
+    // kernel to a libkrun-loadable ELF and reports the format; on aarch64 it is a
+    // passthrough at Raw. The driver must not diverge from the host kernel-prep.
+    let (kernel, kernel_format) = crate::libkrun::libkrun_kernel_for_host(&kernel_path)?;
 
     let vcpus = u8::try_from(spec.vcpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
     let state_dir_str = state_dir.to_string_lossy().into_owned();
@@ -97,6 +102,7 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // below owns the rootfs/extra-disk decision from spec.blocks.
     let mut krun = KrunContext::new(&spec.name, kernel, "")
         .with_resources(vcpus, spec.memory_mib)
+        .with_kernel_format(kernel_format)
         .with_vsock_socket_dir(state_dir_str.clone())
         .with_console_output(console_log.to_string_lossy().into_owned())
         // A libkrun workload has no guest NIC: an explicit virtio-vsock device

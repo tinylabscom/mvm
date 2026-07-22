@@ -103,7 +103,11 @@ pub(crate) fn workload_cmdline(
         return None;
     }
     let mut cmdline = if verity_is_enabled {
-        crate::hvf_bootargs::default_verity_bootargs()
+        // A verity/initramfs boot: the initramfs PID 1 owns root/init selection,
+        // so the base carries only the VMM-specific console (has_disk=false).
+        // Route through the driver seam — libkrun needs `console=hvc0`, HVF the
+        // pl011 UART — instead of hardcoding one VMM's console onto every guest.
+        base_bootargs(virtiofs_root, false)
     } else {
         base_bootargs(virtiofs_root, has_disk)
     };
@@ -283,6 +287,42 @@ mod tests {
         assert!(cmdline.contains("mvm.runtime_data=/dev/vdc"));
         assert!(cmdline.contains("mvm.runtime_hash=/dev/vdd"));
         assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
+    }
+
+    /// A verity boot must take its console base from the driver seam, not a
+    /// hardcoded HVF UART. A libkrun-style base yields `console=hvc0`; the
+    /// cmdline must never carry the pl011 `ttyAMA0`/`earlycon` that a libkrun
+    /// guest has no device for (the regression that emitted a 0-byte console).
+    #[test]
+    fn verity_cmdline_takes_the_console_from_the_driver_seam_not_a_hardcoded_uart() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some("/tmp/rootfs.verity".into()),
+            roothash: Some("a".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        // libkrun's base: a verity boot (has_disk=false) carries only the
+        // console; a disk boot adds root/init.
+        let libkrun_base = |_virtiofs: bool, has_disk: bool| {
+            if has_disk {
+                "console=hvc0 root=/dev/vda rw init=/init".to_string()
+            } else {
+                "console=hvc0".to_string()
+            }
+        };
+        let cmdline = workload_cmdline(&config, dir.path(), libkrun_base).expect("cmdline");
+        assert!(
+            cmdline.contains("console=hvc0"),
+            "verity cmdline must use the driver console base: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("ttyAMA0") && !cmdline.contains("earlycon=pl011"),
+            "verity cmdline must not hardcode the HVF UART: {cmdline}"
+        );
     }
 
     fn disk_volume(host: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
