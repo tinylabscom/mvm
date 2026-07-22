@@ -56,3 +56,50 @@ fn output_contains(world: &mut CliWorld, needle: String) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[then(expr = "the help output contains {string}")]
+fn help_contains(world: &mut CliWorld, expected: String) {
+    let output = world.last_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&expected),
+        "expected help output to contain {expected:?}:\n{stdout}"
+    );
+}
+
+#[then(expr = "the help output does not contain {string}")]
+fn help_does_not_contain(world: &mut CliWorld, unexpected: String) {
+    let output = world.last_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(&unexpected),
+        "expected help output not to contain {unexpected:?}:\n{stdout}"
+    );
+}
+
+#[then(expr = "the help options fit within {int} columns")]
+fn help_options_fit_within(world: &mut CliWorld, width: i64) {
+    let output = world.last_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let option_lines = stdout
+        .lines()
+        .skip_while(|line| line.trim() != "Options:")
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    assert!(
+        !option_lines.is_empty(),
+        "help output has no options:\n{stdout}"
+    );
+    for line in option_lines {
+        assert!(
+            line.trim_start().starts_with('-'),
+            "help option wrapped onto a continuation line:\n{line}\n\n{stdout}"
+        );
+        assert!(
+            i64::try_from(line.chars().count()).expect("line length must fit in i64") <= width,
+            "help option exceeds {width} columns:\n{line}\n\n{stdout}"
+        );
+    }
+}

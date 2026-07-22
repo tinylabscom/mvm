@@ -91,13 +91,13 @@ pub(in crate::commands) struct Args {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(in crate::commands) enum RunProfile {
-    /// No env injection and no host directory shares.
+    /// No environment variables or host mounts.
     Restrictive,
-    /// Explicit env is allowed; host directory shares must stay read-only.
+    /// Environment variables and read-only host mounts.
     Standard,
-    /// Dev-mode ergonomics: explicit env and writable host shares are allowed.
+    /// Environment variables and writable host mounts.
     Dev,
-    /// Escape hatch for local experiments; requires MVM_ACK_PERMISSIVE_RUN=1.
+    /// Local escape hatch; requires MVM_ACK_PERMISSIVE_RUN=1.
     Permissive,
 }
 

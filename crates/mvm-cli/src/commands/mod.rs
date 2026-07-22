@@ -39,31 +39,33 @@ use shared::{CHILD_PIDS, IN_CONSOLE_MODE, with_hints};
 #[derive(Parser, Debug, Clone)]
 #[command(name = "mvmctl", version, about = "Lightweight VM development tool")]
 pub(in crate::commands) struct Cli {
-    /// Log format: human (default) or json (structured)
+    /// Output format
     #[arg(long, global = true)]
     pub log_format: Option<String>,
 
-    /// Override Firecracker version (e.g., v1.14.0)
+    /// Firecracker version
     #[arg(long, global = true)]
     pub fc_version: Option<String>,
 
-    /// Override which hypervisor drives the builder VM.
-    /// Highest priority — beats `MVM_BUILDER_BACKEND`
-    /// env and the platform-default auto-detect (macOS 26+ Apple
-    /// Silicon → hvf; Linux native → qemu; everywhere else → libkrun).
-    #[arg(long, global = true, value_parser = ["libkrun", "qemu", "hvf"])]
+    /// Builder VMM: libkrun, qemu, or hvf
+    #[arg(
+        long,
+        global = true,
+        value_parser = ["libkrun", "qemu", "hvf"],
+        hide_possible_values = true
+    )]
     pub builder: Option<String>,
 
-    /// Where the builder VM's kernel comes from when its image is
-    /// (re)built: `compile` (default — build it in-image via Stage 0),
-    /// `download` (boot on a published, hash-verified kernel — skips the
-    /// kernel compile), or `auto` (download if available, else compile).
-    #[arg(long, global = true, value_parser = ["compile", "download", "auto"])]
+    /// Kernel source: compile, download, or auto
+    #[arg(
+        long,
+        global = true,
+        value_parser = ["compile", "download", "auto"],
+        hide_possible_values = true
+    )]
     pub kernel_source: Option<String>,
 
-    /// Increase log verbosity: -v (info), -vv (debug), -vvv (trace).
-    /// Default is quiet (errors only). `RUST_LOG=<filter>` overrides.
-    /// Global, so it may appear before or after a subcommand.
+    /// Increase verbosity
     #[arg(
         short = 'v',
         long = "verbose",

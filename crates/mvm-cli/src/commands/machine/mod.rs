@@ -160,129 +160,98 @@ impl MachineAction {
 /// flags and translates into the same admitted execution path.
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineRunArgs {
-    /// OCI image reference to boot (pulled or reused from the local cache).
-    /// Required for a fresh boot; optional when reconnecting to an existing
-    /// persistent machine by `--name`. Mutually exclusive with `--manifest`,
-    /// `--flake`, and `--runtime-pack`.
+    /// Boot an OCI image.
     #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake", "runtime_pack"])]
     pub image: Option<String>,
-    /// Pre-built manifest slot (path to `mvm.toml`, its directory, or a slot
-    /// name). Mutually exclusive with `--image`, `--flake`, and
-    /// `--runtime-pack`.
+    /// Boot a pre-built manifest.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake", "runtime_pack"])]
     pub manifest: Option<String>,
-    /// Nix flake reference — build in the builder VM, then boot the result.
-    /// Mutually exclusive with `--image`, `--manifest`, and `--runtime-pack`.
+    /// Build and boot a Nix flake.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest", "runtime_pack"])]
     pub flake: Option<String>,
-    /// Boot from a verified attested runtime pack in the local cache instead
-    /// of building/pulling an image. Its own image source: mutually
-    /// exclusive with `--image`, `--manifest`, and `--flake`.
+    /// Boot a verified runtime pack.
     #[arg(long, conflicts_with_all = ["image", "manifest", "flake"])]
     pub runtime_pack: bool,
-    /// Flake package variant (with `--flake`). Omit to use flake default.
+    /// Select a flake package.
     #[arg(long, value_name = "PROFILE", requires = "flake")]
     pub flake_profile: Option<String>,
-    /// Enable dev-tier outbound networking (broad egress + DNS). Off by
-    /// default (deny-all). Narrow it with `--allow-host`.
+    /// Enable outbound networking (off by default).
     #[arg(long)]
     pub net: bool,
-    /// Allow egress only to these hosts: `HOST[:PORT]` (PORT defaults to
-    /// 443), repeatable. Implies networking and **wins over `--net`**.
+    /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
-    /// vCPU cores.
+    /// Set the vCPU count.
     #[arg(long, default_value = "2")]
     pub cpus: u32,
-    /// Memory (supports human-readable: 512M, 1G, ...).
+    /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
-    /// Security profile for the run.
+    /// Select a security profile.
     #[arg(long, value_enum, default_value = "standard")]
     pub profile: RunProfile,
-    /// Restrict the guest agent to these control verbs (repeatable). Overrides
-    /// the computed sealed-prod default. Values must be production-safe verbs.
+    /// Allow a production-safe guest-agent verb (repeatable).
     #[arg(long = "agent-verb", value_name = "VERB")]
     pub agent_verb: Vec<String>,
-    /// Mount a host directory into the guest: `HOST_PATH:/GUEST_PATH[:MODE]`.
-    /// MODE defaults to `ro`; `rw` needs `--profile dev` or `permissive`.
-    /// `--volume` remains as a compatibility alias; `-v` is global verbosity.
+    /// Mount HOST_PATH at GUEST_PATH[:MODE].
     #[arg(long = "mount", visible_alias = "volume")]
     pub volume: Vec<String>,
-    /// Explicit environment variable to inject (KEY=VALUE). Repeatable.
+    /// Set a guest environment variable (KEY=VALUE; repeatable).
     #[arg(short, long)]
     pub env: Vec<String>,
-    /// Per-command timeout in seconds. Unset ⇒ no per-command kill.
+    /// Set the command timeout in seconds.
     #[arg(long)]
     pub timeout: Option<u64>,
-    /// Write a signed execution receipt to this path.
+    /// Write a signed execution receipt.
     #[arg(long, value_name = "PATH")]
     pub receipt: Option<PathBuf>,
-    /// Print a redacted machine-readable JSON summary instead of streaming output.
+    /// Print a redacted JSON summary.
     #[arg(long)]
     pub json: bool,
-    /// Validate and explain the effective run plan without booting a VM.
+    /// Show the run plan without booting.
     #[arg(long)]
     pub dry_run: bool,
-    /// Run under this machine identity. Foreground runs still tear down when
-    /// the command exits; use `machine create`/`start` for long-lived machines.
+    /// Set the machine name.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
-    /// Boot a persistent machine and return immediately. Auto-names the machine
-    /// when `--name` is absent (the chosen name is printed). Implies persistence.
+    /// Keep the machine running and return.
     #[arg(short = 'd', long)]
     pub detach: bool,
-    /// Emit a one-line JSON envelope on stdout when the machine is up.
-    /// Routes all other output to stderr. Implies persistence + detach
-    /// semantics (boot and return). Envelope shape:
-    /// `{"schema_version":1,"vm_id":"<name>","build_mode":"dev"|"prod"}`.
-    /// Used by the SDK live-mode transport to learn the vm_id and build_mode.
+    /// Return machine startup details as JSON.
     #[arg(long = "up-json")]
     pub up_json: bool,
-    /// Set a TTL on the persistent machine after boot: `30s`, `5m`, `2h`, `7d`
-    /// or a bare number of seconds. The reaper tears down expired machines.
+    /// Stop the machine after DURATION (for example, 30s or 2h).
     #[arg(long, value_name = "DURATION")]
     pub ttl: Option<String>,
-    /// Declare this workload a long-running service: the shell command is
-    /// exec'd in the guest as its liveness check (exit 0 = healthy). Its
-    /// presence promotes the run to the persistent lifecycle — it will not tear
-    /// down on a backstop; it runs until `stop`. A run whose entrypoint exits
-    /// still tears down on that exit code.
+    /// Use CMD to check service health (exit 0 is healthy).
     #[arg(long, value_name = "CMD")]
     pub healthcheck: Option<String>,
-    /// Seconds between checks. Recorded now; enforced when active probing lands.
+    /// Record check interval in seconds (not yet enforced).
     #[arg(long = "health-interval", default_value_t = 30)]
     pub health_interval: u32,
-    /// Per-check timeout in seconds. Recorded now; enforced later.
+    /// Record check timeout in seconds (not yet enforced).
     #[arg(long = "health-timeout", default_value_t = 5)]
     pub health_timeout: u32,
-    /// Consecutive failures before unhealthy. Recorded now; enforced later.
+    /// Record failures before unhealthy (not yet enforced).
     #[arg(long = "health-retries", default_value_t = 3)]
     pub health_retries: u32,
-    /// Grace period after start before checks count. Recorded now; enforced later.
+    /// Record the initial grace period (not yet enforced).
     #[arg(long = "health-start-period", default_value_t = 0)]
     pub health_start_period: u32,
-    /// Attach the foreground command to an interactive PTY.
+    /// Attach the command to an interactive PTY.
     #[arg(short = 't', long, conflicts_with_all = ["detach", "up_json", "ttl"])]
     pub tty: bool,
-    /// Accepted as an alias for `-t` so the conventional `-it` bundle parses.
+    /// Alias for `--tty` (supports the conventional `-it`).
     #[arg(
         short = 'i',
         long = "interactive",
         conflicts_with_all = ["detach", "up_json", "ttl"]
     )]
     pub interactive: bool,
-    /// Force-recreate a persistent machine whose on-disk spec exists with a
-    /// different config (stop + overwrite + restart). Without it, a config
-    /// mismatch is an error.
+    /// Recreate a named machine when its config changed.
     #[arg(long)]
     pub force: bool,
-    /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
-    /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
-    /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
-    /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
-    /// the env equivalent.
+    /// Select the VMM (firecracker, hvf, libkrun, or qemu).
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
     /// Skip plan-admission signing (hidden; for testing only).
@@ -294,40 +263,26 @@ pub(in crate::commands) struct MachineRunArgs {
     #[arg(long = "kernel-pin", value_name = "PIN", hide = true)]
     pub kernel_pin: Option<String>,
     // ── Action axis: --entrypoint dispatches the image's baked entrypoint ──
-    /// Call the image's baked `/etc/mvm/entrypoint` instead of running argv —
-    /// the production-safe call surface (no shell, no argv override): dispatches
-    /// the `RunEntrypoint` vsock verb. Source must be `--manifest`/`--flake`
-    /// (OCI `--image` runs its own command via the default argv action).
-    /// Conflicts with a trailing `-- <argv>` and with the interactive shell.
+    /// Run the image's baked entrypoint.
     #[arg(long, conflicts_with_all = ["argv", "tty", "interactive"])]
     pub entrypoint: bool,
-    /// Boot a fresh transient VM for the entrypoint call (the current default;
-    /// wired so a future warm-session default can be opted out of). Requires
-    /// `--entrypoint`.
+    /// Boot a fresh VM for the entrypoint.
     #[arg(long, requires = "entrypoint", conflicts_with = "reset")]
     pub fresh: bool,
-    /// Restore the session VM from its post-boot snapshot before the entrypoint
-    /// call. Wired but no-op in this build. Requires `--entrypoint`.
+    /// Reset the VM before the entrypoint (currently a no-op).
     #[arg(long, requires = "entrypoint")]
     pub reset: bool,
-    /// Workload IR (`workload.json`) declaring `.secrets` for the entrypoint
-    /// call: the ephemeral VM is admitted so the host spawns the substitution
-    /// endpoint and egress gets the real credential (the guest holds only the
-    /// opaque placeholder). Requires `--entrypoint`.
+    /// Load entrypoint secrets from workload IR.
     #[arg(long, value_name = "PATH", requires = "entrypoint")]
     pub from_workload_ir: Option<PathBuf>,
-    /// Dispatch the entrypoint into an already-running named machine (booted by
-    /// `machine run --name <NAME>`) instead of a transient VM, reusing its
-    /// substitution endpoint. Requires `--entrypoint` + `--name`.
+    /// Run the entrypoint on an existing named machine.
     #[arg(
         long,
         requires_all = ["entrypoint", "name"],
         conflicts_with_all = ["image", "manifest", "flake", "fresh", "reset", "detach"]
     )]
     pub attach: bool,
-    /// Argv to run inside the guest (use `--` to separate). Optional for
-    /// persistent (`-d`/`--name`) and interactive (`-t`) modes; required for a
-    /// plain transient run.
+    /// Command and arguments to run in the guest.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub argv: Vec<String>,
 }

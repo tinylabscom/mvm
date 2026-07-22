@@ -12,3 +12,23 @@ Feature: mvmctl top-level CLI surface
     And the help output lists the "doctor" verb
     And the help output lists the "ls" verb
     And the help output lists the "bootstrap" verb
+
+  Scenario: mvmctl --help keeps global option descriptions concise
+    When I run mvmctl with "--help"
+    Then the command exits with code 0
+    And the help output contains "Output format"
+    And the help output contains "Builder VMM: libkrun, qemu, or hvf"
+    And the help output contains "Kernel source: compile, download, or auto"
+    And the help options fit within 80 columns
+    But the help output does not contain "Highest priority"
+    And the help output does not contain "platform-default auto-detect"
+
+  Scenario: machine run help keeps option descriptions concise
+    When I run mvmctl with "machine run --help"
+    Then the command exits with code 0
+    And the help output contains "Boot an OCI image"
+    And the help output contains "Allow outbound access to HOST[:PORT] (repeatable)"
+    And the help output contains "Select the VMM (firecracker, hvf, libkrun, or qemu)"
+    And the help output contains "Record check interval in seconds (not yet enforced)"
+    But the help output does not contain "Mutually exclusive with"
+    And the help output does not contain "production-safe call surface"
