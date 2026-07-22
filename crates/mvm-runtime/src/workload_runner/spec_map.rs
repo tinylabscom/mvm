@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use mvm_agentd::vsock::{
-    EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports,
+    BROKER_PORT, EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports,
 };
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::VmStartConfig;
@@ -66,6 +66,12 @@ pub struct WorkloadSockets<'a> {
     pub egress_gateway: &'a Path,
     /// Workload exit: the guest dials `WORKLOAD_EXIT_PORT` to report its exit code.
     pub exit: &'a Path,
+    /// Host-services broker: the guest dials `BROKER_PORT`; the per-VM broker (or
+    /// the per-tenant host-agent daemon) binds here to serve `host.audit.v1` /
+    /// `host.secrets.v1`. Present only for an **admitted** workload — an
+    /// unadmitted VM carries no broker port, so a stray guest dial stays
+    /// `ECONNREFUSED` (fail-closed).
+    pub broker: Option<&'a Path>,
     /// Optional packet-tunnel host socket for the future guest-TUN ↔ host-worker
     /// data path. Present only when the launch config explicitly enables it.
     pub network_tunnel: Option<(u32, PathBuf)>,
@@ -76,8 +82,9 @@ pub struct WorkloadSockets<'a> {
 }
 
 /// The standing vsock ports every workload VM carries: the agent RPC channel the
-/// host dials, the two channels the guest dials (egress + exit), and — only when
-/// `dev_console` is set — the pre-opened interactive console data ports.
+/// host dials, the channels the guest dials (egress + exit, plus the broker when
+/// admitted), and — only when `dev_console` is set — the pre-opened interactive
+/// console data ports.
 pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
     let mut ports = vec![
         VsockPort {
@@ -96,6 +103,15 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
             direction: VsockDirection::GuestDials,
         },
     ];
+    // Only an admitted workload carries the broker channel; an unadmitted VM
+    // gets none, so a stray guest dial to BROKER_PORT stays ECONNREFUSED.
+    if let Some(broker) = socks.broker {
+        ports.push(VsockPort {
+            guest_port: BROKER_PORT,
+            host_uds: broker.into(),
+            direction: VsockDirection::GuestDials,
+        });
+    }
     if let Some((guest_port, host_uds)) = &socks.network_tunnel {
         ports.push(VsockPort {
             guest_port: *guest_port,
@@ -269,6 +285,7 @@ mod tests {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
+            broker: None,
             network_tunnel: None,
             console_data: Vec::new(),
         };
@@ -296,6 +313,7 @@ mod tests {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
+            broker: None,
             network_tunnel: None,
             console_data: Vec::new(),
         }
@@ -307,6 +325,7 @@ mod tests {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
+            broker: None,
             network_tunnel: Some((5302, PathBuf::from("/run/tunnel.sock"))),
             console_data: Vec::new(),
         };
@@ -318,6 +337,38 @@ mod tests {
             .expect("tunnel port present");
         assert_eq!(tunnel.direction, VsockDirection::GuestDials);
         assert_eq!(tunnel.host_uds, PathBuf::from("/run/tunnel.sock"));
+    }
+
+    #[test]
+    fn workload_vsock_ports_emit_the_broker_channel_only_when_admitted() {
+        // Admitted (broker socket present) ⇒ a BROKER_PORT GuestDials channel.
+        let admitted = WorkloadSockets {
+            agent: Path::new("/run/agent.sock"),
+            egress_gateway: Path::new("/run/egress.sock"),
+            exit: Path::new("/run/workload.exit"),
+            broker: Some(Path::new("/run/broker.sock")),
+            network_tunnel: None,
+            console_data: Vec::new(),
+        };
+        let broker = workload_vsock_ports(&admitted)
+            .into_iter()
+            .find(|p| p.guest_port == BROKER_PORT)
+            .expect("admitted VM carries the broker channel");
+        assert_eq!(broker.direction, VsockDirection::GuestDials);
+        assert_eq!(broker.host_uds, PathBuf::from("/run/broker.sock"));
+
+        // Unadmitted (broker None) ⇒ no BROKER_PORT channel, so a stray guest
+        // dial stays ECONNREFUSED.
+        let unadmitted = WorkloadSockets {
+            broker: None,
+            ..sample_sockets()
+        };
+        assert!(
+            workload_vsock_ports(&unadmitted)
+                .iter()
+                .all(|p| p.guest_port != BROKER_PORT),
+            "unadmitted VM must carry no broker port"
+        );
     }
 
     #[test]
@@ -460,6 +511,7 @@ mod tests {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
+            broker: None,
             network_tunnel: None,
             console_data,
         };
@@ -488,6 +540,7 @@ mod tests {
             agent: Path::new("/run/agent.sock"),
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
+            broker: None,
             network_tunnel: None,
             console_data: Vec::new(),
         };
@@ -509,6 +562,7 @@ mod tests {
                 agent: Path::new("/run/agent.sock"),
                 egress_gateway: Path::new("/run/egress.sock"),
                 exit: Path::new("/run/workload.exit"),
+                broker: None,
                 network_tunnel: None,
                 console_data,
             },

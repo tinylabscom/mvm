@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use mvm_agentd::vsock::BROKER_PORT;
 use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
 use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
@@ -76,6 +77,103 @@ impl EndpointSpawner for RealEndpointSpawner {
     }
 }
 
+/// What the runner needs to register the per-VM host-services broker after boot.
+pub struct BrokerRegisterRequest<'a> {
+    /// VM name — the registration's `vm_id`, workload id, and per-VM chain key.
+    pub vm_name: &'a str,
+    /// Per-VM state dir (audit-signer pid/sock + the daemon tenant-ref marker).
+    pub state_dir: &'a Path,
+    /// Tenant from the admitted plan. `None` ⇒ unadmitted ⇒ a defused no-op:
+    /// no broker services and no BROKER_PORT in the spec, so a stray guest dial
+    /// stays `ECONNREFUSED` (fail-closed).
+    pub tenant: Option<&'a str>,
+    /// The `BROKER_PORT` socket the broker/daemon binds — the same path the spec
+    /// wires the guest's `BROKER_PORT` relay to. `None` on the unadmitted path.
+    pub broker_listen_socket: Option<&'a Path>,
+}
+
+/// Register/spawn the per-VM host-services broker for an admitted workload,
+/// returning a guard whose Drop reaps until defused. The claims-12/13 seam:
+/// `host.audit.v1` / `host.secrets.v1` reach the guest over `BROKER_PORT`, and
+/// no raw secret ever crosses that channel. Behind a trait so the runner is
+/// unit-testable with no real broker subprocess.
+pub trait BrokerRegistrar: Send + Sync {
+    fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard>;
+}
+
+/// RAII guard around the registered broker services: Drop reaps them until the
+/// VM is confirmed up and `defuse`d (the `stop` path then owns teardown). Wraps
+/// the existing `ServicesGuard` so no reaping logic is duplicated.
+pub struct BrokerGuard(crate::host_agent_spawn::ServicesGuard);
+
+impl BrokerGuard {
+    /// A guard that reaps nothing on drop — the unadmitted / spawn-failed path.
+    fn defused() -> Self {
+        Self(crate::host_agent_spawn::ServicesGuard::None)
+    }
+
+    /// Disarm: the VM is up; the `stop` path now owns teardown.
+    pub fn defuse(&mut self) {
+        self.0.defuse();
+    }
+}
+
+/// The production `BrokerRegistrar`: delegates to the existing per-tenant
+/// host-agent registration (default) or the per-VM broker fork
+/// (`MVM_HOST_AGENT_DAEMON=0`). No broker logic is reimplemented here — this is
+/// the same registration the raw backend `start` paths run, lifted onto the
+/// runner so a workload moved here keeps its host services.
+pub struct RealBrokerRegistrar;
+
+impl BrokerRegistrar for RealBrokerRegistrar {
+    fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard> {
+        // Unadmitted (no tenant, hence no broker socket): register nothing. The
+        // spec carries no BROKER_PORT either, so a stray guest dial fails closed.
+        let (Some(tenant), Some(broker_listen_socket)) = (req.tenant, req.broker_listen_socket)
+        else {
+            return Ok(BrokerGuard::defused());
+        };
+
+        // Best-effort, matching the raw backends: an absent broker only disables
+        // host.audit.v1 for this VM — the workload still runs and the host-side
+        // audit chain is intact — so a spawn failure is logged, never a rollback.
+        let guard = if crate::host_agent_spawn::host_agent_daemon_enabled() {
+            match crate::host_agent_spawn::register_host_agent_services_if_admitted(
+                crate::host_agent_spawn::HostAgentServicesParams {
+                    workload_id: req.vm_name,
+                    tenant_id: Some(tenant),
+                    vm_name: req.vm_name,
+                    state_dir: req.state_dir,
+                    broker_listen_socket,
+                },
+            ) {
+                Ok(g) => crate::host_agent_spawn::ServicesGuard::Agent(g),
+                Err(e) => {
+                    tracing::warn!(vm = %req.vm_name, error = %e, "host-agent registration failed; host.audit.v1 unavailable for this VM");
+                    crate::host_agent_spawn::ServicesGuard::None
+                }
+            }
+        } else {
+            match crate::broker_services_spawn::spawn_broker_services_if_admitted(
+                crate::broker_services_spawn::BrokerServicesSpawnParams {
+                    workload_id: req.vm_name,
+                    tenant_id: Some(tenant),
+                    vm_name: req.vm_name,
+                    state_dir: req.state_dir,
+                    broker_listen_socket,
+                },
+            ) {
+                Ok(g) => crate::host_agent_spawn::ServicesGuard::Fork(g),
+                Err(e) => {
+                    tracing::warn!(vm = %req.vm_name, error = %e, "host-services broker spawn failed; host.audit.v1 unavailable for this VM");
+                    crate::host_agent_spawn::ServicesGuard::None
+                }
+            }
+        };
+        Ok(BrokerGuard(guard))
+    }
+}
+
 /// Everything the runner needs to start a workload: the admitted launch config,
 /// its tenant/secrets/redaction/policy, and the kernel cmdline the role above
 /// assembled.
@@ -94,6 +192,11 @@ pub struct WorkloadLaunchInputs<'a> {
 struct StandingSockets {
     agent: PathBuf,
     exit: PathBuf,
+    /// Host-services broker socket, resolved only for an admitted workload
+    /// (`tenant_id.is_some()`). `None` for an unadmitted VM, which carries no
+    /// broker channel at all. The one path threaded into both the spec and the
+    /// `BrokerRegistrar::register` call so the relay target and bind path match.
+    broker: Option<PathBuf>,
     network_tunnel: Option<(u32, PathBuf)>,
     console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
@@ -107,6 +210,12 @@ fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets
         // guest agent bridge can't drift out of the host's reach.
         agent: mvm_core::config::vm_inhouse_agent_socket_at(state_dir),
         exit: state_dir.join("workload.exit"),
+        // Admitted-only: an unadmitted VM gets no broker channel, so a stray
+        // guest BROKER_PORT dial stays ECONNREFUSED (fail-closed).
+        broker: config
+            .tenant_id
+            .is_some()
+            .then(|| mvm_core::config::vm_vsock_port_socket_at(state_dir, BROKER_PORT)),
         network_tunnel: network_tunnel_socket(state_dir, config),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, config.dev_console),
@@ -115,14 +224,19 @@ fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets
 
 /// Starts workloads over the `VmmDriver` seam: spawn the per-VM gating endpoint,
 /// map the config to a `VmmSpec`, boot via the driver.
-pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner> {
+pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> {
     driver: D,
     spawner: S,
+    broker: B,
 }
 
-impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
-    pub fn new(driver: D, spawner: S) -> Self {
-        Self { driver, spawner }
+impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
+    pub fn new(driver: D, spawner: S, broker: B) -> Self {
+        Self {
+            driver,
+            spawner,
+            broker,
+        }
     }
 
     /// Spawn the gating endpoint, compose the spec, and boot. The endpoint is
@@ -166,6 +280,7 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
                 agent: &socks.agent,
                 egress_gateway: &egress_uds,
                 exit: &socks.exit,
+                broker: socks.broker.as_deref(),
                 network_tunnel: socks.network_tunnel,
                 console_data: socks.console_data,
             },
@@ -175,6 +290,20 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
 
         let vm = self.driver.boot(&spec)?;
         tunnel_guard.defuse();
+
+        // Register the per-VM host-services broker (host.audit.v1 /
+        // host.secrets.v1) for an admitted workload — the same registration the
+        // raw backends run, lifted here so a workload on this runner keeps those
+        // services. The guard's Drop reaps on any early return until it's defused;
+        // registration is best-effort (a failure is logged inside `register`,
+        // never a launch rollback).
+        let mut broker_guard = self.broker.register(&BrokerRegisterRequest {
+            vm_name: &inputs.config.name,
+            state_dir: &state_dir,
+            tenant: inputs.config.tenant_id.as_deref(),
+            broker_listen_socket: socks.broker.as_deref(),
+        })?;
+        broker_guard.defuse();
         Ok(vm)
     }
 }
@@ -183,7 +312,9 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
 /// seam (`boot` on start, `attach` for stop/status/wait/pause/resume) instead of
 /// per-backend code. State is disk-backed under the per-VM `vm_state_dir`, so a
 /// stateless CLI invocation reconstructs a handle by id.
-impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for WorkloadRunner<D, S> {
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static> VmBackend
+    for WorkloadRunner<D, S, B>
+{
     fn name(&self) -> &str {
         self.driver.name()
     }
@@ -255,6 +386,12 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
         // when the VM spawned none.
         reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
         reap_network_tunnel_worker(&vm_state_dir(&id.0));
+        // Reap the per-VM broker + audit-signer (fork path) and deregister from
+        // the per-tenant host-agent daemon (daemon path), so neither can outlive
+        // the guest. Each is an idempotent no-op for the other path and for a VM
+        // that registered none.
+        crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
+        crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
         self.driver.attach(id)?.kill()
     }
 
@@ -325,8 +462,8 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
     }
 }
 
-impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> WorkloadBackend
-    for WorkloadRunner<D, S>
+impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+    WorkloadBackend for WorkloadRunner<D, S, B>
 {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         // The runner always routes egress through the per-VM vsock UDS endpoint —
@@ -384,6 +521,38 @@ mod tests {
         }
     }
 
+    /// A `BrokerRegistrar` test double: records the request it saw and returns a
+    /// defused no-op guard (spawns no broker subprocess). `Mutex` for the
+    /// `Send + Sync` bound a `VmBackend`'s registrar must satisfy.
+    struct RecordingBrokerRegistrar {
+        seen: Mutex<Option<RecordedBroker>>,
+    }
+
+    struct RecordedBroker {
+        vm_name: String,
+        tenant: Option<String>,
+        broker_listen_socket: Option<PathBuf>,
+    }
+
+    impl RecordingBrokerRegistrar {
+        fn new() -> Self {
+            Self {
+                seen: Mutex::new(None),
+            }
+        }
+    }
+
+    impl BrokerRegistrar for RecordingBrokerRegistrar {
+        fn register(&self, req: &BrokerRegisterRequest<'_>) -> Result<BrokerGuard> {
+            *self.seen.lock().unwrap() = Some(RecordedBroker {
+                vm_name: req.vm_name.to_string(),
+                tenant: req.tenant.map(str::to_string),
+                broker_listen_socket: req.broker_listen_socket.map(Path::to_path_buf),
+            });
+            Ok(BrokerGuard::defused())
+        }
+    }
+
     fn config(name: &str) -> VmStartConfig {
         VmStartConfig {
             name: name.into(),
@@ -413,8 +582,11 @@ mod tests {
     fn start_workload_threads_endpoint_uds_into_egress_port() {
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
-        let runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
 
         let cfg = config("w-egress");
         let vm = runner
@@ -449,8 +621,11 @@ mod tests {
         let redaction = RedactionPolicy::default();
 
         // No secrets ⇒ raw TCP egress.
-        let raw_runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        let raw_runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
         let cfg = config("w-raw");
         raw_runner
             .start_workload(&WorkloadLaunchInputs {
@@ -474,8 +649,11 @@ mod tests {
         );
 
         // One secret ⇒ WireRequest substitution (raw_egress false).
-        let wire_runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        let wire_runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
         let cfg = config("w-wire");
         let secrets = [keystore_secret()];
         wire_runner
@@ -498,8 +676,11 @@ mod tests {
     fn start_workload_passes_the_network_policy_and_tenant_to_the_spawner() {
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
-        let runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
 
         let cfg = config("w-policy");
         runner
@@ -519,6 +700,128 @@ mod tests {
         assert_eq!(recorded.policy, NetworkPolicy::deny_all());
     }
 
+    fn admitted_config(name: &str) -> VmStartConfig {
+        VmStartConfig {
+            name: name.into(),
+            rootfs_path: "/img/rootfs.ext4".into(),
+            tenant_id: Some("tenant-x".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn start_workload_registers_the_broker_and_wires_it_into_the_spec_when_admitted() {
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        let cfg = admitted_config("w-broker-admitted");
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "tenant-x",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: String::new(),
+            })
+            .expect("start_workload succeeds");
+
+        // register saw the tenant + the resolved BROKER_PORT bind socket.
+        let expected_socket =
+            mvm_core::config::vm_vsock_port_socket("w-broker-admitted", BROKER_PORT);
+        let recorded = runner.broker.seen.lock().unwrap();
+        let recorded = recorded.as_ref().expect("register was called");
+        assert_eq!(recorded.vm_name, "w-broker-admitted");
+        assert_eq!(recorded.tenant.as_deref(), Some("tenant-x"));
+        assert_eq!(
+            recorded.broker_listen_socket.as_deref(),
+            Some(expected_socket.as_path())
+        );
+
+        // The spec carries the same socket as a GuestDials BROKER_PORT channel, so
+        // the supervisor relay target and the daemon's bind path are identical.
+        let specs = runner.driver.booted_specs();
+        let broker = specs[0]
+            .vsock
+            .iter()
+            .find(|p| p.guest_port == BROKER_PORT)
+            .expect("admitted spec carries a BROKER_PORT channel");
+        assert_eq!(broker.direction, crate::driver::VsockDirection::GuestDials);
+        assert_eq!(broker.host_uds, expected_socket);
+    }
+
+    #[test]
+    fn start_workload_broker_is_a_defused_no_op_when_unadmitted() {
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        // config() sets no tenant_id ⇒ unadmitted.
+        let cfg = config("w-broker-unadmitted");
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "local",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: String::new(),
+            })
+            .expect("start_workload succeeds");
+
+        // register is still called, but with no tenant + no broker socket.
+        let recorded = runner.broker.seen.lock().unwrap();
+        let recorded = recorded.as_ref().expect("register is still called");
+        assert_eq!(recorded.tenant, None);
+        assert_eq!(recorded.broker_listen_socket, None);
+
+        // The spec carries NO BROKER_PORT channel, so a stray guest dial to
+        // BROKER_PORT stays ECONNREFUSED (fail-closed).
+        let specs = runner.driver.booted_specs();
+        assert!(
+            specs[0].vsock.iter().all(|p| p.guest_port != BROKER_PORT),
+            "unadmitted VM must carry no broker port"
+        );
+    }
+
+    #[test]
+    fn stop_reaps_the_host_agent_tenant_ref_marker() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let vm_name = "runner-stop-reaps-broker";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        // Plant the daemon-path tenant-ref marker `register` writes; the stop reap
+        // must remove it, proving `reap_host_agent_services_from_state` ran.
+        std::fs::write(state_dir.join("host-agent.tenant"), "tenant-x").unwrap();
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        runner.stop(&VmId(vm_name.into())).expect("stop succeeds");
+
+        assert!(
+            !state_dir.join("host-agent.tenant").exists(),
+            "stop must reap the host-agent registration marker"
+        );
+    }
+
     #[test]
     fn vmbackend_start_then_status_wait_stop_via_the_driver() {
         let exit = VmExitStatus {
@@ -528,6 +831,7 @@ mod tests {
         let runner = WorkloadRunner::new(
             MockDriver::with_exit(exit),
             RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
         );
 
         let id = runner.start(&config("w")).expect("start succeeds");
@@ -605,8 +909,11 @@ mod tests {
             ..Default::default()
         };
 
-        let runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
         runner.start(&cfg).expect("start succeeds");
 
         let specs = runner.driver.booted_specs();
@@ -636,7 +943,11 @@ mod tests {
         let driver = MockDriver::default();
         let want_name = driver.name().to_string();
         let want_caps = driver.capabilities();
-        let runner = WorkloadRunner::new(driver, RecordingSpawner::new("/run/ep.sock"));
+        let runner = WorkloadRunner::new(
+            driver,
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
 
         assert_eq!(runner.name(), want_name);
         assert_eq!(runner.capabilities().vsock, want_caps.vsock);
@@ -655,7 +966,11 @@ mod tests {
         let want_security_tier = driver.security_profile().tier;
         let id = VmId("kind-delegation-test-vm".into());
         let want_channel_err = driver.guest_channel_info(&id).is_err();
-        let runner = WorkloadRunner::new(driver, RecordingSpawner::new("/run/ep.sock"));
+        let runner = WorkloadRunner::new(
+            driver,
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
 
         assert_eq!(runner.kind(), want_kind);
         assert_eq!(runner.kind(), BackendKind::Hvf);
@@ -669,8 +984,11 @@ mod tests {
         use mvm_agentd::vsock::CONSOLE_PORT_BASE;
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
-        let runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
 
         let cfg = VmStartConfig {
             dev_console: true,
@@ -720,8 +1038,11 @@ mod tests {
     fn start_workload_without_dev_console_carries_only_three_vsock_entries() {
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
-        let runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
 
         let cfg = VmStartConfig {
             dev_console: false,

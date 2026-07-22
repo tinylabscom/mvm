@@ -9,8 +9,8 @@ pub mod runner;
 pub mod spec_map;
 
 pub use runner::{
-    EndpointSpawnRequest, EndpointSpawner, RealEndpointSpawner, WorkloadLaunchInputs,
-    WorkloadRunner,
+    BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, EndpointSpawnRequest, EndpointSpawner,
+    RealBrokerRegistrar, RealEndpointSpawner, WorkloadLaunchInputs, WorkloadRunner,
 };
 pub use spec_map::{
     WorkloadSockets, WorkloadSpecInputs, workload_blocks, workload_spec, workload_vsock_ports,
