@@ -225,7 +225,7 @@ pub(super) fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error
         krun.add_vsock_port2(port, &socket, /* listen = */ true)?;
     }
     for &port in &ctx.host_listen_ports {
-        let socket = ctx.vsock_socket_path(port);
+        let socket = ctx.host_listen_socket_path(port);
         // listen=false: the host (supervisor) binds the listener; do NOT
         // pre-unlink — the supervisor created it. libkrun proxies guest
         // connects on `port` to that socket.

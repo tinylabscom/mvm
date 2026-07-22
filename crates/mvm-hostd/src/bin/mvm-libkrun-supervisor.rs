@@ -155,11 +155,26 @@ fn main() -> ExitCode {
     dispatch_config(cfg)
 }
 
+/// When `cfg.egress_relay_socket` is set, pin the guest egress port's
+/// host-side socket to that explicit UDS instead of the dir-derived
+/// `vsock-<port>.sock` path. No-op when `None` (every construction
+/// site today) — the derived path is unchanged.
+fn apply_egress_relay_override(cfg: &mut SupervisorConfig) {
+    if let Some(sock) = cfg.egress_relay_socket.clone() {
+        cfg.krun.set_host_listen_socket_override(
+            mvm_agentd::vsock::EGRESS_PORT,
+            sock.to_string_lossy().into_owned(),
+        );
+    }
+}
+
 /// Shared tail: given a finalized `SupervisorConfig` (from the legacy stdin
 /// decode OR a verified prelaunch attach), bind the workload-exit control
 /// listener and route to the bridge/legacy boot path. Extracted so both
 /// entrypoints run identical post-config logic.
-fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
+fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
+    apply_egress_relay_override(&mut cfg);
+
     append_supervisor_breadcrumb(
         std::path::Path::new(&cfg.vm_state_dir),
         "dispatch_config",
@@ -655,7 +670,9 @@ fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, det
 
 #[cfg(test)]
 mod tests {
-    use super::{append_supervisor_breadcrumb, should_use_bridge_route};
+    use super::{
+        append_supervisor_breadcrumb, apply_egress_relay_override, should_use_bridge_route,
+    };
     use libkrun_sys::{BridgeRestartPolicy, KrunContext, NetworkingMode, SupervisorConfig};
 
     fn sample_cfg(networking: NetworkingMode, tenant_id: Option<&str>) -> SupervisorConfig {
@@ -675,6 +692,7 @@ mod tests {
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
         }
     }
 
@@ -708,6 +726,40 @@ mod tests {
         assert!(
             should_use_bridge_route(&cfg),
             "gateway-backed admitted workloads must keep the bridge route"
+        );
+    }
+
+    #[test]
+    fn apply_egress_relay_override_pins_egress_port_when_set() {
+        let mut cfg = sample_cfg(NetworkingMode::Tsi, None);
+        cfg.krun = cfg
+            .krun
+            .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
+        cfg.egress_relay_socket = Some(std::path::PathBuf::from(
+            "/run/mvm/vm-1/substitution-endpoint.sock",
+        ));
+        apply_egress_relay_override(&mut cfg);
+        assert_eq!(
+            cfg.krun
+                .host_listen_socket_path(mvm_agentd::vsock::EGRESS_PORT),
+            std::path::PathBuf::from("/run/mvm/vm-1/substitution-endpoint.sock")
+        );
+    }
+
+    #[test]
+    fn apply_egress_relay_override_is_noop_when_unset() {
+        let mut cfg = sample_cfg(NetworkingMode::Tsi, None);
+        cfg.krun = cfg
+            .krun
+            .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
+        let derived = cfg
+            .krun
+            .host_listen_socket_path(mvm_agentd::vsock::EGRESS_PORT);
+        apply_egress_relay_override(&mut cfg);
+        assert_eq!(
+            cfg.krun
+                .host_listen_socket_path(mvm_agentd::vsock::EGRESS_PORT),
+            derived
         );
     }
 }
