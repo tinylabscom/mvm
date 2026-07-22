@@ -669,6 +669,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         transparent_terminator_port: Some(crate::egress_redirect::terminator_port_for_vm_name(
             &config.name,
         )),
+        egress_relay_socket: None,
     })
 }
 
@@ -2187,6 +2188,7 @@ mod tests {
             network_policy: None,
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
         };
         let json = serde_json::to_string(&cfg).expect("serialize");
         persist_supervisor_config_dump(dir.path(), &json).expect("persist supervisor config");
