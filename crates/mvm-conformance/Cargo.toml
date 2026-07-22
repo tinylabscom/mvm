@@ -34,6 +34,9 @@ tokio.workspace = true
 # through a crate rename as long as the produced binary is still named
 # `mvmctl`.
 assert_cmd.workspace = true
+# Per-scenario isolated `MVM_HOME` so cache-precondition scenarios (e.g. a cold
+# workload-kernel cache) stay hermetic and never touch the dev's real `~/.mvm`.
+tempfile.workspace = true
 
 [lints]
 workspace = true

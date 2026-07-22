@@ -30,15 +30,28 @@ use cucumber::gherkin::{Feature, Rule, Scenario};
 use world::CliWorld;
 
 const PENDING_TAG: &str = "wip";
+/// Scenarios that boot a real microVM and reach the network; opt in with
+/// `MVM_BDD_LIVE=1` (skipped in the default hermetic lane).
+const LIVE_TAG: &str = "live";
 
 #[tokio::main]
 async fn main() {
-    CliWorld::filter_run(features_dir(), not_pending).await;
+    CliWorld::filter_run(features_dir(), should_run).await;
 }
 
-/// Keep a scenario only if it isn't tagged as pending-implementation.
-fn not_pending(_feature: &Feature, _rule: Option<&Rule>, scenario: &Scenario) -> bool {
-    !scenario.tags.iter().any(|tag| tag == PENDING_TAG)
+/// Keep a scenario unless it is pending-implementation (`@wip`) or a live
+/// scenario (`@live`) that must be opted into. A `@live` scenario boots a real
+/// microVM and reaches the network, so it can't run in the default hermetic
+/// lane — set `MVM_BDD_LIVE=1` on a host with a working backend to include it.
+fn should_run(_feature: &Feature, _rule: Option<&Rule>, scenario: &Scenario) -> bool {
+    let tags = &scenario.tags;
+    if tags.iter().any(|tag| tag == PENDING_TAG) {
+        return false;
+    }
+    if tags.iter().any(|tag| tag == LIVE_TAG) && std::env::var_os("MVM_BDD_LIVE").is_none() {
+        return false;
+    }
+    true
 }
 
 /// `features/suites/` lives at the repo root, two levels above this crate's
