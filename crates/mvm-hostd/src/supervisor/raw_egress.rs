@@ -29,6 +29,7 @@ use hickory_proto::rr::{Name, RData, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::{dns_handler, http_forward};
 use mvm_core::guest_netd::ConnectAck;
 use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
@@ -50,14 +51,16 @@ const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 pub async fn serve_raw_egress(
     listener: tokio::net::UnixListener,
     gate: Arc<EgressGate>,
+    recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let gate = Arc::clone(&gate);
+                let recorder = recorder.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_raw_conn(stream, &gate, timeout).await {
+                    if let Err(e) = handle_raw_conn(stream, &gate, recorder, timeout).await {
                         tracing::warn!(error = %e, "raw egress connection failed");
                     }
                 });
@@ -76,6 +79,7 @@ pub async fn serve_raw_egress(
 async fn handle_raw_conn<S>(
     mut guest: S,
     gate: &EgressGate,
+    recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) -> std::io::Result<()>
 where
@@ -89,7 +93,7 @@ where
         return http_forward::serve_http_forward(guest, gate, timeout).await;
     }
     if target == dns_handler::FRAME_LINE {
-        return dns_handler::serve_dns(guest, gate, timeout).await;
+        return dns_handler::serve_dns(guest, gate, recorder.as_deref(), timeout).await;
     }
     match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
         EgressVerdict::Allow { ips, port } => {
@@ -224,6 +228,7 @@ where
 pub async fn serve_raw_egress_vsock(
     listener: crate::supervisor::substitution_proxy::vsock::VsockListener,
     gate: Arc<EgressGate>,
+    recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) {
     use crate::supervisor::substitution_proxy::vsock;
@@ -236,7 +241,7 @@ pub async fn serve_raw_egress_vsock(
                 return;
             }
         };
-        if let Err(e) = handle_raw_conn_blocking(conn_fd, &gate, timeout) {
+        if let Err(e) = handle_raw_conn_blocking(conn_fd, &gate, recorder.clone(), timeout) {
             tracing::warn!(error = %e, "raw egress vsock connection failed");
         }
     }
@@ -246,6 +251,7 @@ pub async fn serve_raw_egress_vsock(
 fn handle_raw_conn_blocking(
     conn_fd: std::os::fd::RawFd,
     gate: &EgressGate,
+    recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) -> std::io::Result<()> {
     let owned = unsafe { OwnedFd::from_raw_fd(conn_fd) };
@@ -258,7 +264,7 @@ fn handle_raw_conn_blocking(
         return http_forward::serve_http_forward_blocking(guest, gate, timeout);
     }
     if target == dns_handler::FRAME_LINE {
-        return dns_handler::serve_dns_blocking(guest, gate, timeout);
+        return dns_handler::serve_dns_blocking(guest, gate, recorder.as_deref(), timeout);
     }
     let (ips, port) =
         match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
@@ -708,10 +714,9 @@ mod tests {
     async fn denied_target_sends_fail_ack_then_closes() {
         let gate = EgressGate::default_deny();
         let (mut client, server) = tokio::io::duplex(1024);
-        let h =
-            tokio::spawn(
-                async move { handle_raw_conn(server, &gate, Duration::from_secs(1)).await },
-            );
+        let h = tokio::spawn(async move {
+            handle_raw_conn(server, &gate, None, Duration::from_secs(1)).await
+        });
         client.write_all(b"93.184.216.34:80\n").await.unwrap();
 
         let mut ack = [0u8; 1];
@@ -736,10 +741,9 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         let (mut client, server) = tokio::io::duplex(4096);
-        let h =
-            tokio::spawn(
-                async move { handle_raw_conn(server, &gate, Duration::from_secs(1)).await },
-            );
+        let h = tokio::spawn(async move {
+            handle_raw_conn(server, &gate, None, Duration::from_secs(1)).await
+        });
         // Over-long line with no newline → read_target_line returns None → close.
         let junk = vec![b'x'; MAX_TARGET_LINE + 10];
         client.write_all(&junk).await.unwrap();
@@ -756,10 +760,9 @@ mod tests {
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
             "2026-01-01T00:00:00Z",
         );
-        let h2 =
-            tokio::spawn(
-                async move { handle_raw_conn(server2, &gate2, Duration::from_secs(1)).await },
-            );
+        let h2 = tokio::spawn(async move {
+            handle_raw_conn(server2, &gate2, None, Duration::from_secs(1)).await
+        });
         client2.write_all(b"not-an-address\n").await.unwrap();
         let mut ack2 = [0u8; 1];
         client2.read_exact(&mut ack2).await.unwrap();
@@ -774,10 +777,9 @@ mod tests {
     async fn dns_marker_dispatches_to_policy_gated_handler() {
         let gate = EgressGate::default_deny();
         let (mut client, server) = tokio::io::duplex(4096);
-        let handler =
-            tokio::spawn(
-                async move { handle_raw_conn(server, &gate, Duration::from_secs(1)).await },
-            );
+        let handler = tokio::spawn(async move {
+            handle_raw_conn(server, &gate, None, Duration::from_secs(1)).await
+        });
         let query = [
             0x22, 0x22, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0x07, b'b', b'l', b'o', b'c',
             b'k', b'e', b'd', 0x04, b't', b'e', b's', b't', 0, 0, 1, 0, 1,

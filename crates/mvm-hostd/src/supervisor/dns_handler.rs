@@ -10,7 +10,8 @@ use mvm_core::protocol::dns::{
 use mvm_runtime::vmm::egress_gate::{DnsVerdict, EgressGate};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::supervisor::raw_egress;
+use crate::supervisor::audit_recorder::Recorder;
+use crate::supervisor::{dns_audit, raw_egress};
 
 /// First-line marker that selects DNS framing on the shared egress stream.
 pub const FRAME_LINE: &str = "MVM_DNS/1";
@@ -20,11 +21,16 @@ pub const FRAME_LINE: &str = "MVM_DNS/1";
 /// The query and response are DNS-over-TCP framed. Oversized frames are
 /// rejected before allocation, and policy refusal never performs an upstream
 /// lookup.
-pub async fn serve_dns<S>(guest: S, gate: &EgressGate, timeout: Duration) -> std::io::Result<()>
+pub async fn serve_dns<S>(
+    guest: S,
+    gate: &EgressGate,
+    recorder: Option<&Recorder>,
+    timeout: Duration,
+) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    serve_dns_with_resolver(guest, gate, timeout, |name, lookup_timeout| {
+    serve_dns_with_resolver(guest, gate, recorder, timeout, |name, lookup_timeout| {
         raw_egress::resolve_hostname_ips_pure(name, lookup_timeout)
     })
     .await
@@ -33,6 +39,7 @@ where
 async fn serve_dns_with_resolver<S, F>(
     mut guest: S,
     gate: &EgressGate,
+    recorder: Option<&Recorder>,
     timeout: Duration,
     resolve: F,
 ) -> std::io::Result<()>
@@ -52,6 +59,9 @@ where
             })
             .await
             .map_err(std::io::Error::other)?;
+            if let Some(recorder) = recorder {
+                dns_audit::emit_dns_query(recorder, &question.name, question.qtype, &verdict).await;
+            }
             encode_verdict(&question, verdict)
         }
         Err(_) => encode_malformed_refusal(&query),
@@ -139,6 +149,7 @@ fn encode_malformed_refusal(query: &[u8]) -> Vec<u8> {
 pub fn serve_dns_blocking(
     mut guest: std::fs::File,
     gate: &EgressGate,
+    recorder: Option<&Recorder>,
     timeout: Duration,
 ) -> std::io::Result<()> {
     use std::io::{Read, Write};
@@ -154,6 +165,14 @@ pub fn serve_dns_blocking(
             let verdict = gate.dns_verdict(&question.name, question.qtype, |name| {
                 raw_egress::resolve_hostname_ips_pure(name, timeout)
             });
+            if let Some(recorder) = recorder {
+                dns_audit::emit_dns_query_blocking(
+                    recorder,
+                    &question.name,
+                    question.qtype,
+                    &verdict,
+                );
+            }
             encode_verdict(&question, verdict)
         }
         Err(_) => encode_malformed_refusal(&query),
@@ -168,7 +187,10 @@ pub fn serve_dns_blocking(
 mod tests {
     use super::*;
     use std::net::IpAddr;
+    use std::sync::Arc;
 
+    use crate::supervisor::audit::CapturingAuditSigner;
+    use mvm_core::plan::TenantId;
     use mvm_runtime::vmm::egress_gate::EgressGate;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -207,7 +229,9 @@ mod tests {
         let gate = EgressGate::default_deny();
         let (mut client, server) = tokio::io::duplex(4096);
         let handler =
-            tokio::spawn(async move { serve_dns(server, &gate, Duration::from_secs(1)).await });
+            tokio::spawn(
+                async move { serve_dns(server, &gate, None, Duration::from_secs(1)).await },
+            );
 
         let response = exchange_query(&mut client, &build_query("blocked.test", 1, 0x2222)).await;
         assert_eq!(&response[..2], &[0x22, 0x22]);
@@ -217,16 +241,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audits_one_policy_decision_for_a_valid_query() {
+        let gate = EgressGate::default_deny();
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let recorder = Arc::new(Recorder::new(signer.clone(), TenantId("local".to_string())));
+        let (mut client, server) = tokio::io::duplex(4096);
+        let handler_recorder = Arc::clone(&recorder);
+        let handler = tokio::spawn(async move {
+            serve_dns(
+                server,
+                &gate,
+                Some(&handler_recorder),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        let response = exchange_query(&mut client, &build_query("blocked.test", 1, 0x2222)).await;
+        assert_eq!(response[3] & 0x0f, 5);
+        handler.await.unwrap().unwrap();
+
+        let entries = signer.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "dns.refused");
+        assert_eq!(
+            entries[0].labels.get("qname").map(String::as_str),
+            Some("blocked.test")
+        );
+    }
+
+    #[tokio::test]
     async fn unrestricted_lookup_returns_filtered_answer() {
         let gate = EgressGate::new(mvm_core::policy::projection::CanonicalEgress::Unrestricted);
         let (mut client, server) = tokio::io::duplex(4096);
         let handler = tokio::spawn(async move {
-            serve_dns_with_resolver(server, &gate, Duration::from_secs(1), |_name, _timeout| {
-                Ok(vec![
-                    "93.184.216.34".parse::<IpAddr>().unwrap(),
-                    "10.0.0.8".parse::<IpAddr>().unwrap(),
-                ])
-            })
+            serve_dns_with_resolver(
+                server,
+                &gate,
+                None,
+                Duration::from_secs(1),
+                |_name, _timeout| {
+                    Ok(vec![
+                        "93.184.216.34".parse::<IpAddr>().unwrap(),
+                        "10.0.0.8".parse::<IpAddr>().unwrap(),
+                    ])
+                },
+            )
             .await
         });
 
@@ -242,7 +302,9 @@ mod tests {
         let gate = EgressGate::default_deny();
         let (mut client, server) = tokio::io::duplex(16);
         let handler =
-            tokio::spawn(async move { serve_dns(server, &gate, Duration::from_secs(1)).await });
+            tokio::spawn(
+                async move { serve_dns(server, &gate, None, Duration::from_secs(1)).await },
+            );
         client.write_all(&4097_u16.to_be_bytes()).await.unwrap();
 
         let error = handler.await.unwrap().unwrap_err();

@@ -246,7 +246,7 @@ pub fn assemble(
 /// isn't present (the endpoint then serves un-audited, matching the prior
 /// optional-recorder posture). The audit dir + the key are inside the
 /// endpoint's Landlock grants (see `ConfinementSpec::substitution_endpoint`).
-fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_recorder::Recorder> {
+pub fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_recorder::Recorder> {
     use crate::supervisor::audit_file::FileAuditSigner;
     use crate::supervisor::audit_recorder::Recorder;
     use ed25519_dalek::SigningKey;

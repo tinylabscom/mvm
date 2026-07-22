@@ -18,6 +18,7 @@ pub const ALLOWED_CATEGORIES: &[&str] = &[
     "key",
     "host",
     "audit",
+    "dns",
     // Workload-emitted via `host.audit.v1` in `mvm-broker`.
     "workload_audit",
 ];
@@ -38,7 +39,19 @@ mod tests {
 
     #[test]
     fn allowed_categories_include_system_set() {
-        for c in ["cmd", "lifecycle", "plan", "flow", "audit", "host"] {
+        for c in [
+            "cmd",
+            "lifecycle",
+            "secret",
+            "flow",
+            "plan",
+            "policy",
+            "key",
+            "host",
+            "audit",
+            "dns",
+            "workload_audit",
+        ] {
             assert!(is_allowed(c), "{c} should be allowed");
         }
     }

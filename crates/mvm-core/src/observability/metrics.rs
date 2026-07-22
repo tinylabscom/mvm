@@ -65,7 +65,7 @@ pub struct Metrics {
 
     // ── Per-category audit counters ─────────────────────────────────
     // Incremented by `mvm_hostd::supervisor::Recorder` on every successful
-    // emit. The 9 categories match `EventCategory::as_str()`; the
+    // emit. The categories match `EventCategory::as_str()`; the
     // metric name is `mvm_audit_<category>_total`. Downstream
     // dashboards graph these to spot category-level anomalies (a
     // spike in `flow.egress.denied` events without a corresponding
@@ -80,6 +80,7 @@ pub struct Metrics {
     pub audit_key_total: AtomicU64,
     pub audit_host_total: AtomicU64,
     pub audit_audit_total: AtomicU64,
+    pub audit_dns_total: AtomicU64,
     pub audit_workload_audit_total: AtomicU64,
 }
 
@@ -137,6 +138,7 @@ impl Metrics {
             audit_key_total: AtomicU64::new(0),
             audit_host_total: AtomicU64::new(0),
             audit_audit_total: AtomicU64::new(0),
+            audit_dns_total: AtomicU64::new(0),
             audit_workload_audit_total: AtomicU64::new(0),
         }
     }
@@ -189,6 +191,7 @@ impl Metrics {
             audit_key_total: self.audit_key_total.load(Ordering::Relaxed),
             audit_host_total: self.audit_host_total.load(Ordering::Relaxed),
             audit_audit_total: self.audit_audit_total.load(Ordering::Relaxed),
+            audit_dns_total: self.audit_dns_total.load(Ordering::Relaxed),
             audit_workload_audit_total: self.audit_workload_audit_total.load(Ordering::Relaxed),
         }
     }
@@ -455,6 +458,12 @@ impl Metrics {
         );
         write_metric(
             &mut out,
+            "mvm_audit_dns_total",
+            s.audit_dns_total,
+            "Audit events in the `dns` category (policy-gated DNS decisions)",
+        );
+        write_metric(
+            &mut out,
             "mvm_audit_workload_audit_total",
             s.audit_workload_audit_total,
             "Audit events in the `workload_audit` category (workload-emitted via `host.audit.v1`)",
@@ -543,6 +552,8 @@ pub struct MetricsSnapshot {
     pub audit_host_total: u64,
     #[serde(default)]
     pub audit_audit_total: u64,
+    #[serde(default)]
+    pub audit_dns_total: u64,
     #[serde(default)]
     pub audit_workload_audit_total: u64,
 }

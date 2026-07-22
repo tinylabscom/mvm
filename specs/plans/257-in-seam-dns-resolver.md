@@ -423,7 +423,7 @@ pub async fn emit_dns_query(recorder: &Recorder, name: &str, qtype: DnsRecordTyp
 `EventCategory::Dns` → `as_str()=="dns"`, `requires_plan_context()==false`; events `dns.resolved` / `dns.refused`.
 
 **TDD steps**
-- [ ] **Step 1: Failing test in `dns_audit.rs` using `CapturingAuditSigner`.**
+- [x] **Step 1: Failing test in `dns_audit.rs` using `CapturingAuditSigner`.**
 ```rust
 #[tokio::test]
 async fn emits_dns_refused_with_metadata_only() {
@@ -445,11 +445,11 @@ async fn emits_dns_resolved_with_ip_list() {
     /* Resolved(vec![93.184.216.34]) -> event "dns.resolved", labels qtype=a, ips=93.184.216.34 */
 }
 ```
-- [ ] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-hostd dns_audit`
-- [ ] **Step 3: Add `EventCategory::Dns`** (+ metrics field + exhaustive `bump_metric` arm + update the enumerating tests); implement `emit_dns_query` via `recorder.record_unbound(EventCategory::Dns, event, extras)` with `event = if Refused {"dns.refused"} else {"dns.resolved"}` and `extras = [("qname",name),("qtype",qtype_str),("verdict",..),("ips",joined)]`.
-- [ ] **Step 4: Thread `recorder: Option<&Recorder>` through `serve_dns`** and call `emit_dns_query` after computing the verdict; thread `Option<Arc<Recorder>>` through `serve_raw_egress*`/`handle_raw_conn*` (the existing HTTP-forward/raw branches ignore it for now); in `serve_raw` build it from `build_audit_recorder(&cfg.tenant_id)` and pass through.
-- [ ] **Step 5: Run — expect PASS.** `cargo nextest run -p mvm-core -p mvm-hostd`.
-- [ ] **Step 6: Commit.** `feat(hostd): chain-signed per-query DNS audit via EventCategory::Dns`.
+- [x] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-hostd dns_audit`
+- [x] **Step 3: Add `EventCategory::Dns`** (+ metrics field + exhaustive `bump_metric` arm + update the enumerating tests); implement `emit_dns_query` via `recorder.record_unbound(EventCategory::Dns, event, extras)` with `event = if Refused {"dns.refused"} else {"dns.resolved"}` and `extras = [("qname",name),("qtype",qtype_str),("verdict",..),("ips",joined)]`.
+- [x] **Step 4: Thread `recorder: Option<&Recorder>` through `serve_dns`** and call `emit_dns_query` after computing the verdict; thread `Option<Arc<Recorder>>` through `serve_raw_egress*`/`handle_raw_conn*` (the existing HTTP-forward/raw branches ignore it for now); in `serve_raw` build it from `build_audit_recorder(&cfg.tenant_id)` and pass through.
+- [x] **Step 5: Run — expect PASS.** `cargo nextest run -p mvm-core -p mvm-hostd`.
+- [x] **Step 6: Commit.** `feat(hostd): chain-signed per-query DNS audit via EventCategory::Dns`.
 
 ---
 

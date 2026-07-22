@@ -31,7 +31,8 @@ use tracing::info;
 
 use mvm_hostd::keyholder::secret_placeholder_env;
 use mvm_hostd::supervisor::substitution_endpoint::{
-    EgressMode, EndpointConfig, EndpointTransport, assemble, build_egress_gate, parse,
+    EgressMode, EndpointConfig, EndpointTransport, assemble, build_audit_recorder,
+    build_egress_gate, parse,
 };
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
@@ -314,15 +315,16 @@ async fn serve_raw(
 ) -> Result<()> {
     use mvm_hostd::supervisor::raw_egress;
     let gate = std::sync::Arc::new(raw_egress_gate(cfg));
+    let recorder = build_audit_recorder(&cfg.tenant_id).map(std::sync::Arc::new);
     match bound {
         Bound::Uds(std_listener) => {
             let listener = tokio::net::UnixListener::from_std(std_listener)
                 .context("adopting UDS listener into the tokio runtime")?;
-            raw_egress::serve_raw_egress(listener, gate, forward_timeout).await;
+            raw_egress::serve_raw_egress(listener, gate, recorder, forward_timeout).await;
         }
         #[cfg(target_os = "linux")]
         Bound::Vsock(listener) => {
-            raw_egress::serve_raw_egress_vsock(listener, gate, forward_timeout).await;
+            raw_egress::serve_raw_egress_vsock(listener, gate, recorder, forward_timeout).await;
         }
     }
     Ok(())
