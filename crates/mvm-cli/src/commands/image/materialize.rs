@@ -344,6 +344,18 @@ pub(super) fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Whether booting an `--image` OCI run will cross-compile the mvm guest
+/// runtime from source first: this build carries no embedded guest binaries
+/// and the source-checkout guest cache is cold. Announcing this before the
+/// pull keeps the slow, output-silent `cargo zigbuild` from looking like a hang.
+pub(in crate::commands) fn oci_guest_runtime_compile_pending(cache_root: &Path) -> bool {
+    embedded_guest_binaries().is_none()
+        && mvm_build::guest_agent_build::source_build_pending(
+            cache_root,
+            mvm_core::arch::GuestArch::host(),
+        )
+}
+
 /// The guest-agent binaries embedded in this mvmctl at build time (build.rs).
 /// `None` only if a required embedded binary is unexpectedly missing.
 pub(super) fn embedded_guest_binaries()

@@ -474,6 +474,26 @@ pub fn cached_guest_binaries(
     layout.is_complete().then(|| layout.binaries())
 }
 
+/// Whether resolving the guest runtime for `(cache_root, arch)` would trigger a
+/// source-checkout cross-compile: a source workspace is detected and its
+/// content-keyed cache is cold. Mirrors [`resolve_or_build_guest_binaries`]'s
+/// build/no-build decision so a caller can announce the slow, output-silent
+/// `cargo zigbuild` before it runs. A caller holding embedded guest binaries
+/// installs those instead and must not consult this.
+pub fn source_build_pending(cache_root: &Path, arch: GuestArch) -> bool {
+    match detect_source_workspace() {
+        Some(ws) => source_build_pending_for(cache_root, arch, &ws),
+        None => false,
+    }
+}
+
+fn source_build_pending_for(cache_root: &Path, arch: GuestArch, workspace_root: &Path) -> bool {
+    match source_cache_key(workspace_root) {
+        Ok(cache_key) => cached_guest_binaries(cache_root, &cache_key, arch).is_none(),
+        Err(_) => false,
+    }
+}
+
 /// Resolve the full runtime-overlay guest-binary set for `(version, arch)`,
 /// building + caching it from `workspace_root` on a cache miss.
 pub fn resolve_or_build_runtime_overlay_guest_binaries(
@@ -629,23 +649,28 @@ fn run_zigbuild(
     args: &[String],
 ) -> Result<(), GuestAgentBuildError> {
     let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
+    tracing::info!(
+        ?args,
+        workspace = %spec.workspace_root.display(),
+        "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
+    );
     let mut cmd = std::process::Command::new(cargo);
     cmd.args(args).current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec)?;
-    let out = cmd
-        .output()
+    // Inherit stdio so cargo's own "Compiling …" progress streams to the user: a
+    // multi-minute guest cross-compile must look alive, not like a silent hang.
+    let status = cmd
+        .status()
         .map_err(|e| GuestAgentBuildError::BuildFailed {
             reason: format!("spawn `{}`: {e}", PathBuf::from(cargo).display()),
         })?;
-    if out.status.success() {
+    if status.success() {
         return Ok(());
     }
     Err(GuestAgentBuildError::BuildFailed {
         reason: format!(
-            "args {:?} exited {:?}; stderr={}",
-            args,
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr)
+            "`cargo zigbuild` args {args:?} exited {:?} (see the streamed build output above)",
+            status.code()
         ),
     })
 }
@@ -684,20 +709,26 @@ pub fn build_guest_binaries(
 ) -> Result<BuiltGuestBinaries, GuestAgentBuildError> {
     let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
     let argv = spec.argv();
+    tracing::info!(
+        bins = ?&argv[1..],
+        workspace = %spec.workspace_root.display(),
+        "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
+    );
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec)?;
-    let out = cmd
-        .output()
+    // Inherit stdio so cargo's own "Compiling …" progress streams to the user: a
+    // multi-minute guest cross-compile must look alive, not like a silent hang.
+    let status = cmd
+        .status()
         .map_err(|e| GuestAgentBuildError::BuildFailed {
             reason: format!("spawn `{}`: {e}", argv[0]),
         })?;
-    if !out.status.success() {
+    if !status.success() {
         return Err(GuestAgentBuildError::BuildFailed {
             reason: format!(
-                "exit {:?}; stderr={}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr)
+                "`cargo zigbuild` exited {:?} (see the streamed build output above)",
+                status.code()
             ),
         });
     }
@@ -853,6 +884,40 @@ fn set_exec(_path: &Path) -> Result<(), GuestAgentBuildError> {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn source_build_pending_flips_when_the_source_keyed_cache_is_seeded() {
+        // A deterministic workspace root: this crate's manifest dir has the
+        // workspace root as an ancestor, independent of the test's CWD.
+        let ws = source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+            .expect("workspace root resolves from the crate manifest dir");
+        let cache = tempfile::tempdir().expect("tempdir");
+        let arch = GuestArch::Aarch64;
+
+        // Cold cache: resolving the guest runtime would cross-compile.
+        assert!(source_build_pending_for(cache.path(), arch, &ws));
+
+        // Seed the exact content-keyed slot the resolver would fill.
+        let key = source_cache_key(&ws).expect("source cache key");
+        install_prebuilt_guest_binaries(
+            GuestRuntimeBinaryBytes {
+                oci_init: b"x",
+                agent: b"x",
+                netinit: b"x",
+                netd: b"x",
+                egress_client: b"x",
+                entrypoint_runner: b"x",
+                verity_init: b"x",
+            },
+            cache.path(),
+            &key,
+            arch,
+        )
+        .expect("seed the source-keyed guest cache");
+
+        // Warm cache: no cross-compile pending.
+        assert!(!source_build_pending_for(cache.path(), arch, &ws));
+    }
 
     #[test]
     fn install_prebuilt_then_cached_round_trips() {
