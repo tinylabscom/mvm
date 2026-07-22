@@ -203,7 +203,7 @@ pub fn dns_answer_forbidden(ip: IpAddr) -> bool;
 ```
 
 **TDD steps**
-- [ ] **Step 1: Failing matrix (real).**
+- [x] **Step 1: Failing matrix (real).**
 ```rust
 fn ip(s: &str) -> IpAddr { s.parse().unwrap() }
 
@@ -228,8 +228,8 @@ fn private_link_local_loopback_ula_metadata_are_forbidden() {
     }
 }
 ```
-- [ ] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-core dns_guard`
-- [ ] **Step 3: Minimal impl using std predicates + explicit ULA/link-local checks.**
+- [x] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-core dns_guard`
+- [x] **Step 3: Minimal impl using std predicates + explicit ULA/link-local checks.**
 ```rust
 pub fn dns_answer_forbidden(ip: IpAddr) -> bool {
     match ip {
@@ -245,8 +245,8 @@ pub fn dns_answer_forbidden(ip: IpAddr) -> bool {
     }
 }
 ```
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: Commit.** `feat(core): DNS-answer SSRF/rebinding classifier (RFC1918+ULA strict)`.
+- [x] **Step 4: Run — expect PASS.**
+- [x] **Step 5: Commit.** `feat(core): DNS-answer SSRF/rebinding classifier (RFC1918+ULA strict)`.
 
 ---
 
