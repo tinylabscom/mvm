@@ -92,7 +92,7 @@ pub fn encode_response(q: &DnsQuestion, rcode: DnsRcode, ips: &[IpAddr]) -> Vec<
 
 **TDD steps**
 
-- [ ] **Step 1: Write failing tests (real).**
+- [x] **Step 1: Write failing tests (real).**
 ```rust
 #[test]
 fn decode_rejects_oversized_and_short() {
@@ -146,10 +146,10 @@ fn decode_never_panics_on_arbitrary_bytes() {
     }
 }
 ```
-- [ ] **Step 2: Run — expect FAIL (module missing).** `cargo nextest run -p mvm-protocol dns::`
-- [ ] **Step 3: Minimal impl in `dns.rs`.** 12-byte header parse (reject `TooShort` < 12, `TooLong` > `MAX_DNS_MESSAGE`); require `qr==0` else `NotAQuery`; `qdcount==1` else `MultiQuestion`; read labels (len-prefixed, reject 0xC0 compression pointers in questions, cap total 253, reject label > 63) into a lowercased dotted name; map QTYPE 1→`A`, 28→`Aaaa`, else `UnsupportedQType`; require QCLASS IN(1); reject trailing bytes → `TrailingGarbage`. `encode_response`: header with `qr=1, rd copied, ra=1, rcode`, echo the question section verbatim, append `ips.len()` RRs (NAME `0xC0 0x0C`, TYPE per qtype, CLASS `0x00 0x01`, TTL `0x00000078`, RDLENGTH 4/16, RDATA). All arithmetic bounded; `#![forbid(unsafe_code)]` inherited from crate.
-- [ ] **Step 4: Run — expect PASS.** Also `cargo build -p mvm-protocol --target wasm32-unknown-unknown` (no_std clean).
-- [ ] **Step 5: Commit.** `feat(protocol): in-house forbid(unsafe) DNS question/A/AAAA codec`.
+- [x] **Step 2: Run — expect FAIL (module missing).** `cargo nextest run -p mvm-protocol dns::`
+- [x] **Step 3: Minimal impl in `dns.rs`.** 12-byte header parse (reject `TooShort` < 12, `TooLong` > `MAX_DNS_MESSAGE`); require `qr==0` else `NotAQuery`; `qdcount==1` else `MultiQuestion`; read labels (len-prefixed, reject 0xC0 compression pointers in questions, cap total 253, reject label > 63) into a lowercased dotted name; map QTYPE 1→`A`, 28→`Aaaa`, else `UnsupportedQType`; require QCLASS IN(1); reject trailing bytes → `TrailingGarbage`. `encode_response`: header with `qr=1, rd copied, ra=1, rcode`, echo the question section verbatim, append `ips.len()` RRs (NAME `0xC0 0x0C`, TYPE per qtype, CLASS `0x00 0x01`, TTL `0x00000078`, RDLENGTH 4/16, RDATA). All arithmetic bounded; `#![forbid(unsafe_code)]` inherited from crate.
+- [x] **Step 4: Run — expect PASS.** Also `cargo build -p mvm-protocol --target wasm32-unknown-unknown` (no_std clean).
+- [x] **Step 5: Commit.** `feat(protocol): in-house forbid(unsafe) DNS question/A/AAAA codec`.
 
 ---
 

@@ -14,8 +14,8 @@ pub mod vm_backend;
 // host_cost,host_signer,host_time,network_tunnel,routing,signing}::X`
 // path keeps resolving unchanged.
 pub use mvm_protocol::protocol::{
-    audit_signer, broker, host_audit, host_cost, host_signer, host_time, network_tunnel, routing,
-    signing,
+    audit_signer, broker, dns, host_audit, host_cost, host_signer, host_time, network_tunnel,
+    routing, signing,
 };
 
 // Flatten protocol.rs contents up to `mvm_core::protocol::*`.
