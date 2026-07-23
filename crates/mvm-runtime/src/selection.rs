@@ -7,8 +7,7 @@
 
 use mvm_core::vm_backend::{RequiredCapabilities, VmCapabilities};
 
-use crate::backend::{AnyBackend, fc_runner, libkrun_runner};
-use crate::hvf_backend::HvfBackend;
+use crate::backend::{AnyBackend, fc_runner, hvf_runner, libkrun_runner};
 use crate::qemu::QemuBackend;
 
 /// No backend could be selected: every candidate lacked a required capability.
@@ -64,7 +63,7 @@ impl AnyBackend {
     fn capability_candidates() -> [AnyBackend; 4] {
         [
             AnyBackend::Firecracker(fc_runner()),
-            AnyBackend::Hvf(HvfBackend),
+            AnyBackend::Hvf(hvf_runner()),
             AnyBackend::Libkrun(libkrun_runner()),
             AnyBackend::Qemu(QemuBackend),
         ]

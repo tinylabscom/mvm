@@ -12,7 +12,6 @@ use mvm_core::vm_backend::{
 use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
 use crate::driver::{FcDriver, HvfDriver, LibkrunDriver};
-use crate::hvf_backend::HvfBackend;
 use crate::image::RuntimeVolume;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 #[cfg(feature = "test-support")]
@@ -22,10 +21,23 @@ use crate::wasm_backend::WasmBackend;
 use crate::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
 
-/// The hvf VMM driven through the unified workload-runner role over the
-/// driver seam. One alias keeps the long generic instantiation readable at the
-/// enum variant and its construction site.
+/// The hvf VMM driven through the unified workload-runner role over the driver
+/// seam — hvf's sole workload launch path (`--hypervisor hvf` and the macOS-26
+/// `auto_select` default). NIC-less: egress routes to the per-VM gating endpoint
+/// over vsock only; the raw [`HvfBackend`](crate::hvf_backend::HvfBackend) shim
+/// stays behind the driver as its identity delegate and for the
+/// `examples/hvf-backend-*.rs` witnesses, unreached via this enum. One alias
+/// keeps the long generic instantiation readable at the enum variant and its
+/// construction site.
 type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+
+/// Construct the hvf VMM's workload runner. Like [`libkrun_runner`] and
+/// [`fc_runner`] the runner is not const-constructible, so this helper is the
+/// one construction site the enum variant, `auto_select`, the descriptor
+/// catalog, and the capability selector all call.
+pub(crate) fn hvf_runner() -> HvfRunner {
+    WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
+}
 
 /// libkrun driven through the same unified workload-runner role — libkrun's
 /// sole production launch path (both `--hypervisor libkrun` and `auto_select`).
@@ -543,20 +555,16 @@ pub enum AnyBackend {
     /// a production `mvmctl` binary.
     #[cfg(feature = "test-support")]
     Mock(MockBackend),
-    /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
-    /// driven by the unified `vmm::run` loop via the detached
-    /// `mvm-hvf-supervisor`. Selectable via `--hypervisor hvf` / `MVM_BACKEND=hvf`,
-    /// and the macOS-26 auto-detect default. Its `start()` spawns the per-VM
-    /// gating endpoint that is the sole claim-10 egress gate over vsock — no
-    /// legacy userspace gateway sidecar. The destination macOS backend.
-    Hvf(HvfBackend),
-    /// The hvf VMM driven through the unified `WorkloadRunner` over the
-    /// driver seam — the role-runner that will replace the per-backend
-    /// Hvf/Libkrun/FC `start()` copies. Opt-in via `--hypervisor hvf`.
-    /// Same hvf VMM, tier, and security profile as `Hvf` — just reached via
-    /// the runner role. `auto_select` picks the raw [`Self::Hvf`] variant on the
-    /// macOS-26 tier today, not this one.
-    HvfRunner(HvfRunner),
+    /// HVF (Hypervisor.framework on macOS / Apple silicon), driven through the
+    /// unified `WorkloadRunner` over the driver seam — hvf's sole workload path,
+    /// selected by `--hypervisor hvf` / `MVM_BACKEND=hvf` and the macOS-26
+    /// auto-detect default. NIC-less: egress routes to the per-VM gating endpoint
+    /// over vsock only (claim-10 + claims 12/13 at the endpoint); no routable
+    /// guest NIC. The raw [`HvfBackend`](crate::hvf_backend::HvfBackend) stays
+    /// behind the driver as its identity delegate and for the
+    /// `examples/hvf-backend-*.rs` witnesses, unreached via this enum. The
+    /// destination macOS backend.
+    Hvf(HvfRunner),
     /// Host-`wasmtime` claim-free portability tier — see
     /// [`crate::wasm_backend`]. Selectable only via explicit
     /// `--hypervisor wasm` / `MVM_BACKEND=wasm`; `auto_select` never falls
@@ -595,16 +603,6 @@ impl AnyBackend {
     /// [`Self::require_hypervisor_selectable`] first at a user-facing
     /// `--hypervisor` boundary to refuse it loudly instead.
     pub fn from_hypervisor(name: &str) -> Self {
-        // The runner isn't const-constructible, so it can't live in the catalog
-        // table; special-case its opt-in selector before the descriptor lookup.
-        // Every other selector — `hvf` included — stays byte-identical.
-        if matches!(name, "hvf-runner") {
-            return Self::HvfRunner(WorkloadRunner::new(
-                HvfDriver::new(),
-                RealEndpointSpawner,
-                RealBrokerRegistrar,
-            ));
-        }
         catalog::descriptor_for_selector(name)
             .map(|descriptor| descriptor.instantiate())
             .unwrap_or_else(Self::default_backend)
@@ -658,7 +656,7 @@ impl AnyBackend {
         //    claim-10 and claims 12/13 are enforced — no guest-NIC helper
         //    sidecar.
         if plat.is_hvf_default_tier() {
-            return Self::Hvf(HvfBackend);
+            return Self::Hvf(hvf_runner());
         }
 
         // 3. libkrun installed → the libkrun workload runner (vsock-only egress).
@@ -709,9 +707,9 @@ impl AnyBackend {
 
     /// The typed discriminant for this backend. Lets callers branch on
     /// `BackendKind::Hvf` etc. instead of string-matching `name()`. Delegates
-    /// to the wrapped backend's own `VmBackend::kind()` — the runner-role
-    /// variant reports the same hvf VMM kind as the raw `Hvf` variant because
-    /// `WorkloadRunner<HvfDriver, _>` reports `BackendKind::Hvf` too.
+    /// to the wrapped backend's own `VmBackend::kind()` — the HVF variant holds
+    /// the runner, and `WorkloadRunner<HvfDriver, _>` reports `BackendKind::Hvf`,
+    /// so the discriminant is unchanged by the runner convergence.
     pub fn kind(&self) -> catalog::BackendKind {
         self.inner().kind()
     }
@@ -724,7 +722,6 @@ impl AnyBackend {
             #[cfg(feature = "test-support")]
             Self::Mock(backend) => backend,
             Self::Hvf(backend) => backend,
-            Self::HvfRunner(backend) => backend,
             Self::Wasm(backend) => backend,
         }
     }
@@ -741,9 +738,6 @@ impl AnyBackend {
             #[cfg(feature = "test-support")]
             Self::Mock(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
-            Self::HvfRunner(backend) => {
-                std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
-            }
             Self::Wasm(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
         }
     }
@@ -794,13 +788,10 @@ impl AnyBackend {
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(b) => Some(b),
             AnyBackend::Qemu(_) => None,
-            // HVF carries untrusted workloads: a real mkGuest workload boot, a
-            // host-reachable guest agent, and an egress relay to the per-VM
-            // endpoint that owns claim-10 and claims 12/13.
+            // HVF carries untrusted workloads through the runner role: a real
+            // mkGuest workload boot, a host-reachable guest agent, and an egress
+            // relay to the per-VM endpoint that owns claim-10 and claims 12/13.
             AnyBackend::Hvf(b) => Some(b),
-            // Same hvf VMM as Hvf, reached via the runner role: claim-10 at
-            // the endpoint, claims 12/13 at the per-VM substitution endpoint.
-            AnyBackend::HvfRunner(b) => Some(b),
             // Wasm has no egress substitution channel yet — it mediates no
             // networking at all (a later phase wires the governed WASI
             // egress seam). Barred from the admitted launch funnel until
@@ -1167,7 +1158,9 @@ mod tests {
 
     #[test]
     fn test_any_backend_from_hypervisor_hvf() {
-        // `--hypervisor hvf` (and the `hypervisor` alias) resolve to HvfBackend.
+        // `--hypervisor hvf` (and the `hypervisor` alias) resolve to the HVF
+        // workload runner (the sole `Hvf` variant), whose name delegates to the
+        // hvf driver ("hvf") and whose kind is `BackendKind::Hvf`.
         for sel in ["hvf", "hypervisor"] {
             let backend = AnyBackend::from_hypervisor(sel);
             assert!(matches!(backend, AnyBackend::Hvf(_)), "selector {sel}");
@@ -1181,26 +1174,27 @@ mod tests {
 
     #[test]
     fn from_hypervisor_hvf_selects_the_workload_runner() {
-        // The opt-in `hvf-runner` selector constructs the runner-role backend.
-        // Its VmBackend name delegates to the hvf driver ("hvf"), and it is a
-        // workload backend (carries untrusted workloads).
-        let backend = AnyBackend::from_hypervisor("hvf-runner");
-        assert!(matches!(backend, AnyBackend::HvfRunner(_)));
+        // The `Hvf` variant now IS the runner (no separate raw-HVF / runner
+        // selectors): `hvf` resolves through the catalog to the workload runner.
+        // It is a workload backend and advertises the fail-closed egress posture
+        // — no routable guest NIC, egress only via the per-VM vsock endpoint.
+        let backend = AnyBackend::from_hypervisor("hvf");
+        assert!(matches!(backend, AnyBackend::Hvf(_)));
         assert_eq!(backend.as_vm_backend().name(), "hvf");
+        assert_eq!(backend.kind(), catalog::BackendKind::Hvf);
         assert!(
             backend.as_workload_backend().is_some(),
             "runner must be a workload backend"
         );
-        assert_eq!(backend.kind(), catalog::BackendKind::Hvf);
-    }
-
-    #[test]
-    fn from_hypervisor_hvf_still_selects_hvf_backend() {
-        // The new selector is purely additive: `hvf` must still resolve to the
-        // raw HvfBackend, unchanged by the runner opt-in.
-        let backend = AnyBackend::from_hypervisor("hvf");
-        assert!(matches!(backend, AnyBackend::Hvf(_)));
-        assert_eq!(backend.name(), "hvf");
+        let caps = backend.capabilities();
+        assert!(
+            caps.no_routable_guest_nic,
+            "HVF must advertise no guest NIC"
+        );
+        assert!(
+            caps.host_vsock_proxy,
+            "HVF egress must ride the vsock proxy"
+        );
     }
 
     #[test]
@@ -1262,7 +1256,7 @@ mod tests {
         let name = backend.name();
         assert!(
             // The full set of legitimate auto_select returns is:
-            //   firecracker (KVM), hvf (macOS 26+ hvf VMM, via the HvfRunner
+            //   firecracker (KVM), hvf (macOS 26+ hvf VMM, via the HVF workload
             //   runner whose name() delegates to the hvf driver), libkrun
             //   (macOS 13-25 / Linux non-KVM fallback).
             matches!(name, "firecracker" | "hvf" | "libkrun"),
@@ -1666,21 +1660,12 @@ mod tests {
     fn no_backend_advertises_production_ssh() {
         // The capability layer encodes the SSH ban: no backend may advertise an
         // in-guest SSH server. A future backend that flips this trips here.
-        // Covers every `AnyBackend` variant, including both hvf entry points
-        // (the raw backend and the WorkloadRunner-driven role-runner path).
+        // Covers every `AnyBackend` variant, including the HVF workload-runner path.
         let mut backends: Vec<(&str, AnyBackend)> = vec![
             ("firecracker", AnyBackend::Firecracker(fc_runner())),
             ("libkrun", AnyBackend::Libkrun(libkrun_runner())),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
-            ("hvf", AnyBackend::Hvf(HvfBackend)),
-            (
-                "hvf_runner",
-                AnyBackend::HvfRunner(WorkloadRunner::new(
-                    HvfDriver::new(),
-                    RealEndpointSpawner,
-                    RealBrokerRegistrar,
-                )),
-            ),
+            ("hvf", AnyBackend::Hvf(hvf_runner())),
         ];
         backends.extend(mock_variant_for_ssh_check());
         for (name, backend) in backends {

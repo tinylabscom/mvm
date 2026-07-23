@@ -1,7 +1,7 @@
 //! `xtask check-uniform-vsock-egress`
 //!
-//! Uniform vsock egress: the Firecracker and libkrun CLI workload backends are
-//! converged onto **one** launch seam — `WorkloadRunner<Driver,
+//! Uniform vsock egress: the Firecracker, libkrun, and HVF CLI workload backends
+//! are converged onto **one** launch seam — `WorkloadRunner<Driver,
 //! RealEndpointSpawner, RealBrokerRegistrar>`. The per-VM substitution endpoint
 //! (the sole claim-10 egress gate) is spawned in exactly one place,
 //! `RealEndpointSpawner::spawn` (`workload_runner/runner.rs`), over vsock/uds; a
@@ -17,19 +17,20 @@
 //!   `WorkloadRunner<Driver, RealEndpointSpawner, RealBrokerRegistrar>` shape
 //!   (matching the `RealEndpointSpawner, RealBrokerRegistrar` tail, so a spawner
 //!   swap trips the gate), and `pub enum AnyBackend` binds the runner arms
-//!   `Firecracker(FcRunner)` + `Libkrun(LibkrunRunner)` — never a raw
-//!   `Firecracker(FirecrackerBackend)` / `Libkrun(LibkrunBackend)`.
+//!   `Firecracker(FcRunner)` + `Libkrun(LibkrunRunner)` + `Hvf(HvfRunner)` —
+//!   never a raw `Firecracker(FirecrackerBackend)` / `Libkrun(LibkrunBackend)` /
+//!   `Hvf(HvfBackend)`.
 //! - **B — no egress-endpoint wiring on the converged driver surface.** The
 //!   `driver/*.rs` files carry none of the raw egress-spawn tokens; the one legal
 //!   spawn site (`workload_runner/runner.rs`) is out of the guarded set.
 //!
-//! Scope — this gate is **incremental by design**. It cannot assert "every
-//! workload backend is a runner": raw `AnyBackend::Hvf` is still the macOS-26
-//! auto-select default (`HvfRunner` is opt-in), and `Wasm` is a workload but
-//! raw. Those two are **explicitly exempt** — the exemption list is the
-//! remaining-convergence ledger, and it shrinks to nothing once the HVF backend
-//! also converges onto the runner seam. Until then this gate locks Firecracker +
-//! libkrun and leaves raw Hvf + Wasm alone.
+//! Scope — this gate is **incremental by design**. It cannot yet assert "every
+//! workload backend is a runner": `Wasm` is a workload but still raw — it
+//! mediates no networking, so it carries no egress seam to converge. That one
+//! variant is the **sole remaining exemption** — the exemption list is the
+//! remaining-convergence ledger, and it shrinks to nothing once the wasm
+//! portability tier grows a governed WASI egress seam. Until then this gate locks
+//! Firecracker + libkrun + HVF and leaves raw Wasm alone.
 
 use anyhow::{Result, bail};
 use regex::Regex;
@@ -62,12 +63,19 @@ const REQUIRED_ALIASES: &[RunnerAlias] = &[
 ];
 
 /// Enum arms `pub enum AnyBackend` MUST bind — the converged runner variants.
-const REQUIRED_ENUM_ARMS: &[&str] = &["Firecracker(FcRunner)", "Libkrun(LibkrunRunner)"];
+const REQUIRED_ENUM_ARMS: &[&str] = &[
+    "Firecracker(FcRunner)",
+    "Libkrun(LibkrunRunner)",
+    "Hvf(HvfRunner)",
+];
 
 /// Enum arms a regression would introduce — a converged variant reverted to its
 /// raw backend. Their presence as a variant construction fails the gate.
-const FORBIDDEN_ENUM_ARMS: &[&str] =
-    &["Firecracker(FirecrackerBackend)", "Libkrun(LibkrunBackend)"];
+const FORBIDDEN_ENUM_ARMS: &[&str] = &[
+    "Firecracker(FirecrackerBackend)",
+    "Libkrun(LibkrunBackend)",
+    "Hvf(HvfBackend)",
+];
 
 /// The converged driver surface Assertion B guards: a `VmmDriver` only wires the
 /// guest port through, so no per-VM egress endpoint may be spawned here.
@@ -96,9 +104,9 @@ pub fn run(workspace: &Path) -> Result<()> {
     check_converged_runner_shape(workspace)?;
     let scanned = check_no_driver_egress_spawn(workspace)?;
     eprintln!(
-        "check-uniform-vsock-egress: clean (Firecracker + libkrun bind WorkloadRunner \
-         runners; {scanned} driver file(s) spawn no egress endpoint — raw Hvf + Wasm \
-         exempt until HVF converges)"
+        "check-uniform-vsock-egress: clean (Firecracker + libkrun + HVF bind WorkloadRunner \
+         runners; {scanned} driver file(s) spawn no egress endpoint — only raw Wasm \
+         remains exempt)"
     );
     Ok(())
 }
@@ -119,8 +127,8 @@ fn check_converged_runner_shape(workspace: &Path) -> Result<()> {
                 "check-uniform-vsock-egress: {alias} lost its converged runner shape. \
                  Expected `type {alias} = WorkloadRunner<{driver}, RealEndpointSpawner, \
                  RealBrokerRegistrar>`. Swapping the endpoint spawner or broker registrar \
-                 off this seam breaks the uniform vsock-egress convergence. (Raw Hvf + \
-                 Wasm remain exempt until HVF converges — see the module doc.)",
+                 off this seam breaks the uniform vsock-egress convergence. (Raw Wasm \
+                 remains exempt — see the module doc.)",
                 alias = alias.alias,
                 driver = alias.driver
             );
@@ -136,7 +144,7 @@ fn check_converged_runner_shape(workspace: &Path) -> Result<()> {
                 bail!(
                     "check-uniform-vsock-egress: {BACKEND_RS}:{n}: `{arm}` reverts a \
                      converged CLI workload variant to a raw backend. Firecracker + \
-                     libkrun must stay `WorkloadRunner` arms.\n    {}",
+                     libkrun + HVF must stay `WorkloadRunner` arms.\n    {}",
                     line.trim()
                 );
             }
@@ -146,7 +154,7 @@ fn check_converged_runner_shape(workspace: &Path) -> Result<()> {
         if !code.iter().any(|(_, line)| line.contains(arm)) {
             bail!(
                 "check-uniform-vsock-egress: `pub enum AnyBackend` no longer binds the \
-                 `{arm}` runner arm. Firecracker + libkrun must dispatch through \
+                 `{arm}` runner arm. Firecracker + libkrun + HVF must dispatch through \
                  `WorkloadRunner`, not a raw backend."
             );
         }
@@ -335,5 +343,28 @@ mod tests {
             err.to_string().contains("Firecracker(FirecrackerBackend)"),
             "got {err}"
         );
+    }
+
+    #[test]
+    fn reverting_hvf_to_a_raw_backend_fails() {
+        // HVF is now a converged runner arm, so a revert to the raw `HvfBackend`
+        // must fail the gate exactly like the Firecracker/libkrun reverts. The
+        // fixture keeps the aliases and the other two runner arms intact so the
+        // failure is unambiguously the HVF revert.
+        let root = tempfile::tempdir().expect("tempdir");
+        let backend = root.path().join(BACKEND_RS);
+        std::fs::create_dir_all(backend.parent().expect("parent")).expect("create dirs");
+        std::fs::write(
+            &backend,
+            "type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
+             type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
+             type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;\n\
+             pub enum AnyBackend {\n    Firecracker(FcRunner),\n    Libkrun(LibkrunRunner),\n    Hvf(HvfBackend),\n}\n",
+        )
+        .expect("write backend fixture");
+
+        let err = check_converged_runner_shape(root.path())
+            .expect_err("a raw Hvf arm must fail the gate");
+        assert!(err.to_string().contains("Hvf(HvfBackend)"), "got {err}");
     }
 }
