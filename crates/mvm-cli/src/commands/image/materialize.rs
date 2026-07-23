@@ -554,6 +554,60 @@ mod tests {
     }
 
     #[test]
+    fn guest_source_edit_invalidates_cached_oci_rootfs() {
+        // End-to-end regression: editing a guest source file must
+        // change the OCI prepared-roots/rootfs cache key so a previously
+        // materialized rootfs is treated as stale, rather than reusing an
+        // injected runtime that no longer matches the source tree.
+        let tmp = tempfile::tempdir().unwrap();
+        let crate_dir = tmp.path().join("crates").join("mvm-agentd");
+        let bin_dir = crate_dir.join("src").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = 'mvm-agentd'\n",
+        )
+        .unwrap();
+        let init_src = bin_dir.join("mvm-oci-init.rs");
+        std::fs::write(&init_src, "fn main() { let _x = 1; }\n").unwrap();
+
+        let fp_v1 = mvm_build::guest_agent_build::guest_source_fingerprint(tmp.path()).unwrap();
+        let tag_v1 = oci_runtime_tag_with(Some(&fp_v1));
+
+        std::fs::write(&init_src, "fn main() { let _x = 2; }\n").unwrap();
+
+        let fp_v2 = mvm_build::guest_agent_build::guest_source_fingerprint(tmp.path()).unwrap();
+        let tag_v2 = oci_runtime_tag_with(Some(&fp_v2));
+
+        assert_ne!(
+            fp_v1, fp_v2,
+            "guest source edit must change source fingerprint"
+        );
+        assert_ne!(
+            tag_v1, tag_v2,
+            "changed fingerprint must change OCI runtime tag"
+        );
+
+        // A cached image carrying the old tag must be considered stale.
+        let mut cached = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
+        cached.rootfs_path = Some(format!("rootfs/{tag_v1}/rootfs.ext4"));
+        cached.runtime_tag = Some(tag_v1.clone());
+        assert!(
+            !cached_rootfs_is_current(&cached, &tag_v2),
+            "cached rootfs with old guest-source tag must be rematerialized"
+        );
+
+        // Sanity: identical source reproduces the same tag (cache hits remain
+        // possible when the source is unchanged).
+        assert_eq!(
+            oci_runtime_tag_with(Some(&fp_v1)),
+            tag_v1,
+            "fingerprint-to-tag mapping must be stable"
+        );
+    }
+
+    #[test]
     fn stale_runtime_tag_marks_rootfs_not_current() {
         let mut image = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
         image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
