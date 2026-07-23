@@ -1,6 +1,7 @@
 //! Shared state cucumber threads through the steps of one scenario.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::process::Output;
 
 use mvm_core::kernel_format::KernelFormat;
@@ -9,7 +10,7 @@ use mvm_core::kernel_format::KernelFormat;
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
 /// workload identities parsed from successful `build address` runs, keyed by
 /// fixture name.
-#[derive(Debug, Default, cucumber::World)]
+#[derive(cucumber::World)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
     /// `semantic_address` per fixture name, populated on a zero-exit
@@ -21,6 +22,38 @@ pub struct CliWorld {
     pub workload_cmdline: Option<String>,
     /// Kernel format mapped by the libkrun supervisor-config seam.
     pub libkrun_kernel_format: Option<KernelFormat>,
+    /// An isolated `MVM_HOME` created by a `Given` step and reused by later
+    /// steps that need to inspect the filesystem after a run.
+    pub isolated_home: Option<tempfile::TempDir>,
+}
+
+impl Default for CliWorld {
+    fn default() -> Self {
+        Self {
+            last_run: None,
+            addresses: HashMap::new(),
+            ir_hashes: HashMap::new(),
+            workload_cmdline: None,
+            libkrun_kernel_format: None,
+            isolated_home: None,
+        }
+    }
+}
+
+impl fmt::Debug for CliWorld {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CliWorld")
+            .field("last_run", &self.last_run)
+            .field("addresses", &self.addresses)
+            .field("ir_hashes", &self.ir_hashes)
+            .field("workload_cmdline", &self.workload_cmdline)
+            .field("libkrun_kernel_format", &self.libkrun_kernel_format)
+            .field(
+                "isolated_home",
+                &self.isolated_home.as_ref().map(|t| t.path().to_path_buf()),
+            )
+            .finish()
+    }
 }
 
 impl CliWorld {

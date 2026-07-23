@@ -2,12 +2,50 @@
 //! its exit code / stdout. Covers the CLI-surface suite; scenarios that need
 //! a running microVM call through `mvm-client` instead as those suites land.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::cargo::CommandCargoExt;
-use cucumber::{then, when};
+use cucumber::{given, then, when};
 
 use crate::world::CliWorld;
+
+/// Build an `mvmctl` subprocess with the same binary discovery the rest of
+/// the conformance suite uses, plus the target directory on `PATH` so helper
+/// binaries built alongside `mvmctl` are visible during live boots.
+fn mvmctl_command() -> Command {
+    #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
+    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
+        panic!(
+            "mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`"
+        )
+    });
+
+    let bin_path = PathBuf::from(cmd.get_program());
+    if let Some(bin_dir) = bin_path.parent() {
+        let mut path = bin_dir.as_os_str().to_os_string();
+        path.push(":");
+        if let Some(existing) = std::env::var_os("PATH") {
+            path.push(existing);
+        }
+        cmd.env("PATH", path);
+    }
+
+    cmd
+}
+
+/// The repository root, resolved from this crate's manifest directory.
+///
+/// Steps that reference workspace files (e.g. `examples/exit_code`) run `mvmctl`
+/// with this as the working directory so relative flake paths resolve the same
+/// way they do from a manual invocation at the project root.
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("workspace root must exist")
+}
 
 #[when(expr = "I run mvmctl with {string}")]
 fn run_mvmctl(world: &mut CliWorld, args: String) {
@@ -40,6 +78,47 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
         .output()
         .expect("failed to spawn mvmctl");
     world.last_run = Some(output);
+}
+
+#[given(expr = "an isolated mvm home")]
+fn isolated_mvm_home(world: &mut CliWorld) {
+    world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+}
+
+#[when(expr = "I run mvmctl in an isolated live home with {string}")]
+fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
+    // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
+    // microVM. The working directory is the workspace root so relative flake
+    // paths (e.g. `examples/exit_code`) resolve the same way as a manual run
+    // from the repo root, and the target directory is prepended to `PATH` so
+    // helper binaries built alongside `mvmctl` are found.
+    if world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home is set above");
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(args.split_whitespace())
+        .env("MVM_HOME", home.path())
+        .output()
+        .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
+#[then(expr = "the isolated mvm home does not contain directory {string}")]
+fn isolated_home_no_dir(world: &mut CliWorld, rel: String) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home must be created before checking it");
+    let path = home.path().join(rel.as_str());
+    assert!(
+        !path.exists(),
+        "expected {path:?} to be removed after teardown, but it still exists"
+    );
 }
 
 #[then(expr = "the command exits with code {int}")]
