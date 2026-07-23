@@ -559,17 +559,22 @@ mod tests {
     }
 
     #[test]
-    fn warm_claim_plan_json_is_optional_for_firecracker_only() {
+    fn warm_claim_plan_json_passes_supplied_plan_and_none_when_absent() {
+        // Every CLI-selectable backend now routes through the workload runner,
+        // which takes the admitted plan in-process (no `needs_plan_json`), so a
+        // missing plan yields None for all of them and a supplied plan passes
+        // through verbatim.
         let mut cfg = eligible_cfg();
         cfg.plan_json = None;
         let fc = AnyBackend::from_hypervisor("firecracker");
         let libkrun = AnyBackend::from_hypervisor("libkrun");
-        assert_eq!(
-            warm_claim_plan_json(fc.as_vm_backend(), &cfg),
-            Some(String::new())
-        );
+        assert_eq!(warm_claim_plan_json(fc.as_vm_backend(), &cfg), None);
         assert_eq!(warm_claim_plan_json(libkrun.as_vm_backend(), &cfg), None);
         cfg.plan_json = Some("{\"signed\":\"plan\"}".into());
+        assert_eq!(
+            warm_claim_plan_json(fc.as_vm_backend(), &cfg),
+            Some("{\"signed\":\"plan\"}".into())
+        );
         assert_eq!(
             warm_claim_plan_json(libkrun.as_vm_backend(), &cfg),
             Some("{\"signed\":\"plan\"}".into())

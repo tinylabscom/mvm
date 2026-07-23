@@ -2037,16 +2037,36 @@ mod tests {
     }
 
     #[test]
-    fn drop_l3_tunnel_for_host_vsock_proxy_keeps_it_on_firecracker() {
+    fn drop_l3_tunnel_for_host_vsock_proxy_drops_it_on_firecracker() {
         let mut config = VmStartConfig {
             network_tunnel: Some(fixture_network_tunnel()),
             ..Default::default()
         };
+        // The converged Firecracker CLI path routes through the workload runner:
+        // NIC-less, egress over the per-VM vsock endpoint (a host-vsock proxy).
+        // The L3 tunnel is then a redundant second data plane and is dropped,
+        // exactly like libkrun.
         let backend = AnyBackend::from_hypervisor("firecracker");
         drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
         assert!(
+            config.network_tunnel.is_none(),
+            "the converged firecracker path carries egress over its host-vsock proxy; the L3 tunnel is a redundant second data plane"
+        );
+    }
+
+    #[test]
+    fn drop_l3_tunnel_for_host_vsock_proxy_keeps_it_on_qemu() {
+        let mut config = VmStartConfig {
+            network_tunnel: Some(fixture_network_tunnel()),
+            ..Default::default()
+        };
+        // qemu advertises no host-vsock proxy, so the capability gate leaves the
+        // L3 tunnel in place — covering the keep branch of the decision.
+        let backend = AnyBackend::from_hypervisor("qemu");
+        drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
+        assert!(
             config.network_tunnel.is_some(),
-            "firecracker has no host-vsock proxy; the L3 tunnel is its only vsock-only egress path"
+            "qemu has no host-vsock proxy; a workload given the L3 tunnel keeps it"
         );
     }
 
