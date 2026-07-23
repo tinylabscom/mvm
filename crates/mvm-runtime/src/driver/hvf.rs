@@ -154,7 +154,11 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         pid_file: paths.pid_file.clone(),
         workload_exit: paths.workload_exit.clone(),
         timeout_secs: paths.timeout_secs,
-        agent_socket: spec.host_socket_for_port(GUEST_AGENT_PORT),
+        // Re-derive the agent bridge from the state dir rather than trusting the
+        // spec's backend-neutral agent hint (`agent.sock`): the detached
+        // supervisor binds this exact path, and the host resolver probes the same
+        // `hvf-agent.sock`, so binder and resolver can't drift.
+        agent_socket: Some(hvf_agent_socket(&paths.state_dir)),
         substitution_socket: None,
         egress_relay_socket,
         // An admitted workload carries a BROKER_PORT relay socket; the supervisor
@@ -259,11 +263,10 @@ impl VmmDriver for HvfDriver {
         drop(child);
 
         // The agent RPC socket the supervisor binds for this VM (host→guest agent
-        // bridge on GUEST_AGENT_PORT). Prefer the spec's own port; fall back to the
-        // standing convention so a later `attach` re-derives the same path.
-        let agent_socket = spec
-            .host_socket_for_port(GUEST_AGENT_PORT)
-            .unwrap_or_else(|| hvf_agent_socket(&paths.state_dir));
+        // bridge on GUEST_AGENT_PORT). Re-derived from the state dir so it matches
+        // the value handed to the supervisor above and the path a later `attach`
+        // and the host resolver both probe.
+        let agent_socket = hvf_agent_socket(&paths.state_dir);
         Ok(Box::new(HvfRunningVm {
             id: VmId(spec.name.clone()),
             state_dir: paths.state_dir,
@@ -294,11 +297,15 @@ impl VmmDriver for HvfDriver {
     }
 }
 
-/// The per-VM agent RPC socket path (host→guest agent bridge). Matches the
-/// standing socket a `WorkloadRunner` binds so `attach` re-derives it — via
-/// the single source of truth shared with the host-side resolver.
+/// The per-VM agent-RPC socket the detached `mvm-hvf-supervisor` binds
+/// (host→guest agent bridge). The driver re-derives this from the state dir
+/// rather than trusting the spec's generic agent hint — the same way the FC and
+/// libkrun drivers ignore the spec's agent host_uds — so the value it hands the
+/// supervisor is exactly the one the host resolver (`DevConsoleTransport` /
+/// `for_vm` → `vm_hvf_agent_socket`) probes. A drift here silently makes the
+/// guest agent unreachable and every RPC time out.
 fn hvf_agent_socket(state_dir: &std::path::Path) -> PathBuf {
-    mvm_core::config::vm_inhouse_agent_socket_at(state_dir)
+    mvm_core::config::vm_hvf_agent_socket_at(state_dir)
 }
 
 /// Resolve the host UDS for a console data port via the shared HVF-style socket
@@ -486,7 +493,8 @@ mod tests {
             ],
             vec![],
         );
-        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        let paths = sample_paths();
+        let cfg = relay_supervisor_config(&spec, &paths).unwrap();
 
         assert_eq!(cfg.kernel, PathBuf::from("/img/Image"));
         assert_eq!(cfg.initramfs, Some(PathBuf::from("/img/initrd.cpio")));
@@ -494,7 +502,11 @@ mod tests {
             cfg.egress_relay_socket,
             Some(PathBuf::from("/run/egress.sock"))
         );
-        assert_eq!(cfg.agent_socket, Some(PathBuf::from("/run/agent.sock")));
+        // The driver re-derives the agent bridge from the state dir (hvf-agent.sock)
+        // and ignores the spec's backend-neutral agent hint (/run/agent.sock), so
+        // the supervisor binds the exact path the host resolver probes.
+        assert_eq!(cfg.agent_socket, Some(hvf_agent_socket(&paths.state_dir)));
+        assert_ne!(cfg.agent_socket, Some(PathBuf::from("/run/agent.sock")));
         assert_eq!(cfg.substitution_socket, None);
         // No BROKER_PORT in this spec ⇒ no broker relay (unadmitted / builder).
         assert_eq!(cfg.broker_socket, None);
@@ -503,6 +515,50 @@ mod tests {
         assert!(cfg.disks.is_empty());
         // Empty spec cmdline ⇒ None (supervisor uses its workload default).
         assert_eq!(cfg.cmdline, None);
+    }
+
+    #[test]
+    fn driver_agent_bind_path_equals_the_host_resolver_probe() {
+        // The live regression this pins closed: the detached mvm-hvf-supervisor
+        // binds the `agent_socket` the driver hands it, while the host reaches the
+        // guest agent through DevConsoleTransport::for_vm / vm_hvf_agent_socket. If
+        // those two ever name different sockets the guest agent is unreachable and
+        // every RPC times out (the witness that caught the agent.sock/hvf-agent.sock
+        // drift). Assert the exact bind path == the exact probe path for the same
+        // VM so neither side can drift independently again.
+        let name = "hvf-agent-socket-drift-guard-vm";
+        let paths = SupervisorPaths::resolve(vm_state_dir(name), 0);
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+            ],
+            vec![],
+        );
+
+        // What the supervisor binds: the agent socket the driver puts on the config.
+        let cfg = relay_supervisor_config(&spec, &paths).unwrap();
+        let binder = cfg
+            .agent_socket
+            .expect("hvf relay config must carry an agent socket");
+
+        // What the host reaches the guest agent through.
+        let resolver = mvm_core::config::vm_hvf_agent_socket(name);
+        let transport =
+            crate::vsock_transport::DevConsoleTransport::for_vm(name).socket_path(GUEST_AGENT_PORT);
+
+        assert_eq!(
+            binder, resolver,
+            "supervisor bind path must equal the resolver"
+        );
+        assert_eq!(
+            binder, transport,
+            "supervisor bind path must equal the transport probe"
+        );
+        // The running-vm / attach handle re-derives via the same driver helper, so
+        // vsock_connect(GUEST_AGENT_PORT) reaches the identical socket.
+        assert_eq!(hvf_agent_socket(&paths.state_dir), resolver);
     }
 
     #[test]
@@ -632,7 +688,7 @@ mod tests {
         use std::io::{Read, Write};
 
         let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("agent.sock");
+        let sock = dir.path().join("hvf-agent.sock");
         // Stand-in for the supervisor's agent bridge: echo one byte back.
         let Some(listener) = bind_unix_listener(&sock) else {
             return;
@@ -717,7 +773,7 @@ mod tests {
             id: VmId("console-vm".into()),
             state_dir: dir.path().to_path_buf(),
             pid_file: dir.path().join(PID_FILE_NAME),
-            agent_socket: dir.path().join("agent.sock"),
+            agent_socket: dir.path().join("hvf-agent.sock"),
         };
 
         // Port 20001 (first console data port) connects via the vsock subdir.
