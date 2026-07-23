@@ -231,10 +231,26 @@ pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Resul
 
     let bin = resolve_substitution_endpoint_path()?;
 
+    // Capture endpoint diagnostics to /tmp so hangs/refusals are observable.
+    // The file is per-VM and truncated each run; stderr was previously /dev/null.
+    let stderr_log =
+        std::path::PathBuf::from("/tmp").join(format!("mvm-substitution-endpoint-{vm_name}.log"));
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&stderr_log)
+        .map_err(|e| {
+            anyhow!(
+                "open substitution endpoint stderr log {}: {e}",
+                stderr_log.display()
+            )
+        })?;
+
     let mut cmd = Command::new(&bin);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stderr(log_file);
     // Detach into its own session so it survives this `mvmctl` process.
     unsafe {
         use std::os::unix::process::CommandExt;

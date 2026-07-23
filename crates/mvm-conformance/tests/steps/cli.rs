@@ -4,9 +4,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use assert_cmd::cargo::CommandCargoExt;
 use cucumber::{given, then, when};
+use tokio::task::spawn_blocking;
+use tokio::time::timeout;
 
 use crate::world::CliWorld;
 
@@ -55,6 +58,25 @@ fn run_mvmctl(world: &mut CliWorld, args: String) {
         .args(args.split_whitespace())
         .output()
         .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
+#[when(expr = "I run mvmctl with {string} with a {int} second timeout")]
+async fn run_mvmctl_with_timeout(world: &mut CliWorld, args: String, seconds: i64) {
+    let duration =
+        Duration::from_secs(u64::try_from(seconds).expect("timeout must be non-negative"));
+
+    let handle = spawn_blocking(move || {
+        mvmctl_command()
+            .args(args.split_whitespace())
+            .output()
+            .expect("failed to spawn mvmctl")
+    });
+
+    let output = timeout(duration, handle)
+        .await
+        .unwrap_or_else(|_| panic!("mvmctl did not exit within {seconds}s"))
+        .expect("spawn_blocking task panicked");
     world.last_run = Some(output);
 }
 
@@ -151,6 +173,22 @@ fn output_contains(world: &mut CliWorld, needle: String) {
         stdout.contains(needle.as_str()),
         "expected stdout to contain {needle:?}; stdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[then(expr = "the file {string} exists")]
+fn file_exists(world: &mut CliWorld, path: String) {
+    let _ = world.last_output();
+    assert!(Path::new(&path).exists(), "expected file {path:?} to exist");
+}
+
+#[then(expr = "the file {string} contains {string}")]
+fn file_contains(world: &mut CliWorld, path: String, needle: String) {
+    let _ = world.last_output();
+    let contents = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    assert!(
+        contents.contains(needle.as_str()),
+        "expected {path:?} to contain {needle:?}; contents:\n{contents}"
     );
 }
 

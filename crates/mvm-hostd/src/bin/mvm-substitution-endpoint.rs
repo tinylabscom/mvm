@@ -50,6 +50,12 @@ fn main() -> Result<()> {
     // is gone (macOS / SIGKILL gap the spawn-side attach misses).
     mvm_hostd::parent_death::exit_when_orphaned();
 
+    // reqwest is built with rustls-no-provider; install the ring crypto provider
+    // before any tokio task creates a reqwest Client (e.g. HTTP forward/DNS-over-HTTPS).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("ring rustls crypto provider should install once");
+
     tracing_subscriber::fmt()
         .with_target(true)
         .with_level(true)
