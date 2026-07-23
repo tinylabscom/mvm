@@ -310,7 +310,6 @@ mod linux {
             );
             return None;
         }
-        best_effort_raise_loopback();
         if is_qemu() {
             best_effort_load_qemu_vsock_modules();
         }
@@ -446,24 +445,20 @@ mod linux {
         } else {
             setup_nix_store()?;
         }
+        if should_enable_vsock_egress(qemu, &cmdline) {
+            best_effort_raise_loopback();
+            mvm_agentd::guest_net::seed_loopback_resolver()
+                .map_err(|e| format!("seed loopback DNS resolver: {e}"))?;
+        }
         let mut egress_child = fork_vsock_egress_client_if_requested(&cmdline);
         wait_for_vsock_egress_proxy_if_requested(&cmdline, egress_child.as_mut());
         configure_nix_runtime()?;
         Ok(())
     }
 
-    /// Nix store state the seed rootfs doesn't ship. With
-    /// `mvm.vsock_egress=1`, hostname resolution for outbound fetches is
-    /// delegated to the host-side SOCKS5H proxy, so `/etc/resolv.conf` is no
-    /// longer part of the builder-network contract. Seed the local store dirs
-    /// so nix runs single-user.
+    /// Seed the local Nix store directories the bootstrap rootfs doesn't ship.
     fn configure_nix_runtime() -> Result<(), String> {
         std::fs::create_dir_all("/etc").map_err(|e| format!("create /etc: {e}"))?;
-        std::fs::write(
-            "/etc/resolv.conf",
-            b"# outbound hostname resolution is delegated to the host egress proxy\n",
-        )
-        .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
         for d in ["/nix/var", "/nix/var/nix", "/nix/var/log/nix"] {
             std::fs::create_dir_all(d).map_err(|e| format!("create {d}: {e}"))?;
         }

@@ -202,6 +202,14 @@ pub fn render_resolv_conf(nameservers: &[std::net::IpAddr]) -> Vec<u8> {
         .into_bytes()
 }
 
+/// Resolver address exposed by the in-guest vsock DNS stub.
+pub const LOOPBACK_STUB_RESOLVER: std::net::Ipv4Addr = std::net::Ipv4Addr::LOCALHOST;
+
+#[cfg(any(target_os = "linux", test))]
+fn loopback_stub_resolver_body() -> Vec<u8> {
+    render_resolv_conf(&[LOOPBACK_STUB_RESOLVER.into()])
+}
+
 /// Convert an IPv4 prefix length into a dotted-decimal netmask.
 pub fn ipv4_netmask_from_prefix_len(prefix_len: u8) -> Option<std::net::Ipv4Addr> {
     if prefix_len > 32 {
@@ -435,6 +443,12 @@ pub fn seed_resolv_conf_bytes(seed: &[u8]) -> Result<(), String> {
     }
     std::fs::write("/etc/resolv.conf", seed).map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
     Ok(())
+}
+
+/// Point guest name resolution at the loopback stub served by the egress client.
+#[cfg(target_os = "linux")]
+pub fn seed_loopback_resolver() -> Result<(), String> {
+    seed_resolv_conf_bytes(&loopback_stub_resolver_body())
 }
 
 /// Apply `SIOCSIFMTU` directly so tunnel-backed guests do not depend on `ip(8)`.
@@ -676,6 +690,14 @@ nameserver 10.0.0.3
         assert_eq!(
             String::from_utf8(rendered).expect("utf8"),
             "nameserver 1.1.1.1\nnameserver 2606:4700:4700::1111\n"
+        );
+    }
+
+    #[test]
+    fn loopback_stub_resolver_body_points_at_localhost() {
+        assert_eq!(
+            loopback_stub_resolver_body(),
+            b"nameserver 127.0.0.1\n".to_vec()
         );
     }
 

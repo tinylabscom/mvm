@@ -539,6 +539,7 @@ async fn stub_frames_marker_len_query_and_reads_len_response() {
 - Modify `crates/mvm-agentd/src/guest_net.rs` (add `pub const LOOPBACK_STUB_RESOLVER` + a thin `seed_loopback_resolver()` wrapping `seed_resolv_conf_bytes(&render_resolv_conf(&[Ipv4Addr::LOCALHOST.into()]))`; unit-test the rendered body)
 - Modify `crates/mvm-agentd/src/bin/mvm-oci-init.rs` (in the `mvm.vsock_egress=1` branch, ~lines 33-48, call `seed_loopback_resolver()` right after `bring_loopback_up()` and before spawning the egress client)
 - Modify the nix busybox `/init` path equivalent if it spawns the egress client (grep `mvm.vsock_egress` in the guest-agent boot path; apply the same seed there)
+- Modify `crates/mvm-build/src/bin/stage0-init.rs` (the NIC-less Nix bootstrap uses the same egress client; seed the loopback resolver after raising loopback and stop replacing it with an empty resolver file)
 
 **Interfaces**
 ```rust
@@ -548,11 +549,11 @@ pub fn seed_loopback_resolver() -> Result<(), String>; // writes "nameserver 127
 ```
 
 **TDD steps**
-- [ ] **Step 1: Failing test (hermetic, pure render).** `render_resolv_conf(&["127.0.0.1".parse().unwrap()])` yields `b"nameserver 127.0.0.1\n"` — already covered by `render_resolv_conf` tests; add one asserting `seed`-body equals that for the loopback stub input. (The `std::fs`/bind-mount body stays `#[cfg(target_os="linux")]` and is exercised by the existing `seed_resolv_conf_bytes` fallback path.)
-- [ ] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-agentd guest_net`
-- [ ] **Step 3: Impl `seed_loopback_resolver`;** wire the oci-init call in the vsock-egress branch.
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: Commit.** `feat(agentd): point NIC-less guest resolv.conf at the loopback DNS stub`.
+- [x] **Step 1: Failing test (hermetic, pure render).** `render_resolv_conf(&["127.0.0.1".parse().unwrap()])` yields `b"nameserver 127.0.0.1\n"` — already covered by `render_resolv_conf` tests; add one asserting `seed`-body equals that for the loopback stub input. (The `std::fs`/bind-mount body stays `#[cfg(target_os="linux")]` and is exercised by the existing `seed_resolv_conf_bytes` fallback path.)
+- [x] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-agentd guest_net`
+- [x] **Step 3: Impl `seed_loopback_resolver`;** wire the OCI init, Nix busybox init, and Stage 0 bootstrap paths; preserve only `CAP_NET_BIND_SERVICE` when the Nix init drops the egress client to the agent uid.
+- [x] **Step 4: Run — expect PASS.**
+- [x] **Step 5: Commit.** `feat(agentd): point NIC-less guest resolv.conf at the loopback DNS stub`.
 
 ---
 
