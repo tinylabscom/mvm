@@ -136,7 +136,30 @@ pub fn mandatory_deny_ranges() -> Vec<ipnet::IpNet> {
 /// justify cached parsing. A perf-sensitive consumer can hoist
 /// [`mandatory_deny_ranges`] outside its loop.
 pub fn is_mandatory_deny(ip: std::net::IpAddr) -> bool {
+    let ip = unmap_v4_mapped(ip);
     mandatory_deny_ranges().iter().any(|net| net.contains(&ip))
+}
+
+/// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its embedded
+/// IPv4 address, leaving every other address unchanged.
+///
+/// A dual-stack socket (the Linux default, without `IPV6_V6ONLY`) connecting
+/// to the mapped form is routed by the kernel to the embedded IPv4
+/// destination, so an egress range check that inspects the IPv6 form sees an
+/// opaque address and misses IPv4-only deny ranges — a `::ffff:169.254.169.254`
+/// would otherwise slip past the metadata deny. Normalizing here forces the
+/// check onto the address the kernel will actually reach. `::1`, `::`,
+/// `fe80::/10` and `fc00::/7` are not mapped forms, so they stay IPv6 and are
+/// classified by the IPv6 rules.
+#[must_use]
+pub fn unmap_v4_mapped(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(v6),
+        },
+        std::net::IpAddr::V4(_) => ip,
+    }
 }
 
 /// Emit the iptables shell fragment that drops outbound from
@@ -386,6 +409,26 @@ mod tests {
         // Anywhere inside 127.0.0.0/8 must be denied too.
         let nested: std::net::IpAddr = "127.42.99.7".parse().unwrap();
         assert!(is_mandatory_deny(nested), "127.42.99.7 must be denied");
+    }
+
+    #[test]
+    fn ipv4_mapped_forms_do_not_bypass_mandatory_deny() {
+        // The IPv4-only deny ranges must still catch the IPv4-mapped IPv6
+        // spelling — a dual-stack connect to `::ffff:a.b.c.d` reaches `a.b.c.d`.
+        for addr in [
+            "::ffff:169.254.169.254", // metadata
+            "::ffff:127.0.0.1",       // loopback
+            "::ffff:100.64.0.1",      // CGNAT
+        ] {
+            let ip: std::net::IpAddr = addr.parse().unwrap();
+            assert!(is_mandatory_deny(ip), "mapped {addr} must be denied");
+        }
+        // A mapped *public* address is not mandatory-deny.
+        let public: std::net::IpAddr = "::ffff:93.184.216.34".parse().unwrap();
+        assert!(
+            !is_mandatory_deny(public),
+            "mapped public must not be denied"
+        );
     }
 
     /// Legitimate public IPs must pass through cleanly so a
