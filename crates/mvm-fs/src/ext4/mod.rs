@@ -712,8 +712,12 @@ where
             }
             Kind::File => p.size.div_ceil(BLOCK_SIZE as u64) as u32,
             Kind::Symlink => {
-                // Fast symlink: target ≤ 60 bytes lives in i_block, no data block.
-                if p.size <= 60 {
+                // Fast symlink: a target that fits strictly inside the 60-byte
+                // i_block lives there with no data block. The boundary is `< 60`,
+                // not `<= 60`: a 60-byte target fills i_block exactly, and readers
+                // treat `i_size >= 60` as a slow symlink read from a data block —
+                // so an inline 60-byte target reads back truncated.
+                if p.size < 60 {
                     0
                 } else {
                     p.size.div_ceil(BLOCK_SIZE as u64) as u32
