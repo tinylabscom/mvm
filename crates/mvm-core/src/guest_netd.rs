@@ -19,6 +19,45 @@ pub const DEFAULT_EGRESS_PROXY_LISTEN: &str = "127.0.0.1:1080";
 /// `ALL_PROXY` / `HTTP_PROXY` must carry a scheme.
 pub const DEFAULT_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
 
+/// The host's connect-result acknowledgement on the raw-egress stream.
+///
+/// The in-guest proxy dials the host, writes the `"host:port\n"` target line,
+/// then waits for this one byte before answering its own client. The host emits
+/// it only after the outbound `connect` resolves — `Ok` once the tunnel is live,
+/// `Fail` when the target was refused or unreachable — so the guest reply
+/// (`200` / SOCKS success on `Ok`, `502` / SOCKS failure on `Fail`) is truthful
+/// instead of assuming success the moment the stream opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectAck {
+    /// The host connected to the admitted destination; tunnel bytes follow.
+    Ok,
+    /// The host refused or could not reach the destination; nothing follows.
+    Fail,
+}
+
+impl ConnectAck {
+    /// The single byte written on the wire.
+    pub fn as_byte(self) -> u8 {
+        match self {
+            ConnectAck::Ok => 0x01,
+            ConnectAck::Fail => 0x00,
+        }
+    }
+
+    /// Parse a wire byte back into an ack. Any byte outside the two defined
+    /// codes is rejected so a desynchronised stream never reads a tunnel data
+    /// byte as a spurious `Ok`.
+    pub fn from_byte(byte: u8) -> Option<ConnectAck> {
+        if byte == ConnectAck::Ok.as_byte() {
+            Some(ConnectAck::Ok)
+        } else if byte == ConnectAck::Fail.as_byte() {
+            Some(ConnectAck::Fail)
+        } else {
+            None
+        }
+    }
+}
+
 /// Build the standard proxy environment for a cooperative app, pointing it at
 /// the in-guest `mvm-netd` proxy at `proxy_addr` (e.g. `127.0.0.1:3128`). Both
 /// upper- and lower-case variants are emitted because tooling is inconsistent
@@ -79,5 +118,28 @@ mod tests {
         for key in ["http_proxy", "https_proxy", "all_proxy", "no_proxy"] {
             assert!(env.contains_key(key), "missing {key}");
         }
+    }
+
+    #[test]
+    fn connect_ack_roundtrips_through_its_wire_byte() {
+        assert_eq!(
+            ConnectAck::from_byte(ConnectAck::Ok.as_byte()),
+            Some(ConnectAck::Ok)
+        );
+        assert_eq!(
+            ConnectAck::from_byte(ConnectAck::Fail.as_byte()),
+            Some(ConnectAck::Fail)
+        );
+    }
+
+    #[test]
+    fn connect_ack_ok_and_fail_are_distinct_bytes() {
+        assert_ne!(ConnectAck::Ok.as_byte(), ConnectAck::Fail.as_byte());
+    }
+
+    #[test]
+    fn connect_ack_rejects_unknown_bytes_fail_closed() {
+        assert_eq!(ConnectAck::from_byte(0x02), None);
+        assert_eq!(ConnectAck::from_byte(0xff), None);
     }
 }
