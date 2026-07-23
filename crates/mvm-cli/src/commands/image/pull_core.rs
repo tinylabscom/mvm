@@ -30,6 +30,24 @@ use super::trust_policy::trust_decision_for_cached_image;
 use super::trust_policy::{enforce_oci_trust_policy_with, enforce_registry_allowlist};
 use super::trust_policy::{ensure_signature_policy_is_configured, load_oci_registry_policy};
 
+/// Refuse a mutable (non-digest-pinned) registry reference under `--prod`
+/// before any network fetch or local resource resolution. Local sources
+/// (OCI archive / stdin / rootfs dir) carry their own provenance and are
+/// exempt. A pure reference-string check with no I/O, so it also gates the
+/// run path ahead of workload-kernel resolution — not only the pull itself.
+pub(in crate::commands) fn ensure_prod_digest_pin(reference: &str, prod: bool) -> Result<()> {
+    if !prod {
+        return Ok(());
+    }
+    if let source::ImageSource::Registry(_) = source::ImageSource::classify(reference)? {
+        let image_ref: ImageReference = reference.parse()?;
+        if !image_ref.is_digest_pinned() {
+            bail!("mvmctl run --image --prod requires a digest-pinned reference");
+        }
+    }
+    Ok(())
+}
+
 pub(in crate::commands) fn resolve_or_pull_run_image(
     cache_root: &Path,
     reference: &str,
@@ -69,10 +87,8 @@ pub(super) fn resolve_or_pull_run_image_with(
         }
         source::ImageSource::Registry(_) => {}
     }
+    ensure_prod_digest_pin(reference, prod)?;
     let image_ref: ImageReference = reference.parse()?;
-    if prod && !image_ref.is_digest_pinned() {
-        bail!("mvmctl run --image --prod requires a digest-pinned reference");
-    }
     let canonical = image_ref.canonical();
     let runtime_tag = oci_runtime_tag();
     let (image, pulled, trust_from_pull, auth_source_from_pull) = match load_index(cache_root)

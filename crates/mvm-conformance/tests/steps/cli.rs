@@ -22,6 +22,26 @@ fn run_mvmctl(world: &mut CliWorld, args: String) {
     world.last_run = Some(output);
 }
 
+#[when(expr = "I run mvmctl with {string} and an isolated mvm home")]
+fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
+    // A fresh, empty MVM_HOME makes cache-precondition scenarios hermetic: every
+    // cache (workload kernel, OCI, guest runtime) is cold, so the run exercises
+    // the missing-prerequisite path without depending on — or mutating — the
+    // dev's real `~/.mvm`. The run is synchronous (`output()` blocks to exit)
+    // and the fail-fast path spawns no VM, so the temp dir can drop right after.
+    let home = tempfile::tempdir().expect("create isolated MVM_HOME");
+    #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
+    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
+        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
+    });
+    let output = cmd
+        .args(args.split_whitespace())
+        .env("MVM_HOME", home.path())
+        .output()
+        .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
 #[then(expr = "the command exits with code {int}")]
 fn exits_with_code(world: &mut CliWorld, code: i64) {
     let output = world.last_output();
