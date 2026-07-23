@@ -147,22 +147,20 @@ impl EgressGate {
     }
 }
 
-/// Filter `candidates` to the addresses the policy admits on `port`, ordered so
-/// IPv4 is tried before IPv6. Preferring IPv4 avoids stalling a connect on an
-/// AAAA address when the host has no working IPv6 egress; the caller still falls
-/// back to every admitted address, so a v4-only or v6-only destination is
-/// unaffected. Stable within each family, so resolver order is otherwise kept.
 fn admitted_ips(egress: &CanonicalEgress, candidates: &[IpAddr], port: u16) -> Vec<IpAddr> {
-    let mut admitted: Vec<IpAddr> = candidates
-        .iter()
-        .copied()
-        .filter(|ip| egress.permits(&Proto::Tcp, *ip, port))
-        .collect();
-    admitted.sort_by_key(|ip| match ip {
-        IpAddr::V4(_) => 0u8,
-        IpAddr::V6(_) => 1u8,
-    });
-    admitted
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for ip in candidates.iter().copied() {
+        if !egress.permits(&Proto::Tcp, ip, port) {
+            continue;
+        }
+        match ip {
+            IpAddr::V4(_) => v4.push(ip),
+            IpAddr::V6(_) => v6.push(ip),
+        }
+    }
+    v4.extend(v6);
+    v4
 }
 
 fn resolve_hostname_ips(host: &str) -> std::io::Result<Vec<IpAddr>> {
