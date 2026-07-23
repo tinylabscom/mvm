@@ -6,7 +6,22 @@ Feature: Admitted egress completes end-to-end over the vsock seam
   pin never strands the request.
 
   @live
-  Scenario: An admitted https destination returns its page body
+  Scenario: An admitted name resolves and connects through the in-seam resolver
     When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://example.com"
     Then the command exits with code 0
     And the output contains "Example Domain"
+
+  @live
+  Scenario: A non-admitted name is refused, not resolved
+    When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://not-admitted.test"
+    Then the command exits with code 1
+
+  @live
+  Scenario: DNS queries land in the chain-signed audit log
+    When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://example.com"
+    Then the command exits with code 0
+    When I run mvmctl with "trust audit verify"
+    Then the command exits with code 0
+    When I run mvmctl with "trust audit tail --chain --lines 50"
+    Then the command exits with code 0
+    And the output contains "dns.resolved"

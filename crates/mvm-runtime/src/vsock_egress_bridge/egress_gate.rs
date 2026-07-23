@@ -13,8 +13,10 @@
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
+use mvm_core::policy::dns_guard::dns_answer_forbidden;
 use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
+use mvm_core::protocol::dns::DnsRecordType;
 
 /// Outcome of an egress request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +29,16 @@ pub enum EgressVerdict {
     Deny,
     /// The guest's connect request was malformed (not `<ip>:<port>` or `<hostname>:<port>`).
     Malformed,
+}
+
+/// Policy result for a guest DNS question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnsVerdict {
+    /// The name was admitted and these answers survived family and rebinding
+    /// filtering. An empty vector is a successful NODATA result.
+    Resolved(Vec<IpAddr>),
+    /// Policy refused the name, or its admitted upstream lookup failed.
+    Refused,
 }
 
 /// The host-side egress decision for one VM, wrapping its resolved
@@ -144,6 +156,38 @@ impl EgressGate {
         } else {
             EgressVerdict::Allow { ips, port }
         }
+    }
+
+    /// Resolve an admitted DNS name through the same policy seam as TCP egress.
+    ///
+    /// Admission pins always win and preserve explicitly admitted private
+    /// addresses. Only an unrestricted gate may perform a live lookup; those
+    /// answers are filtered for private, loopback, link-local, and unique-local
+    /// rebinding targets before the guest sees them. Every other name is refused
+    /// without invoking `resolve`.
+    pub fn dns_verdict<F>(&self, name: &str, qtype: DnsRecordType, resolve: F) -> DnsVerdict
+    where
+        F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+    {
+        let (candidates, explicitly_pinned) = if let Some(pin) = self.pins.lookup(name) {
+            (pin.ips.clone(), true)
+        } else if matches!(self.egress, CanonicalEgress::Unrestricted) {
+            match resolve(name) {
+                Ok(ips) => (ips, false),
+                Err(_) => return DnsVerdict::Refused,
+            }
+        } else {
+            return DnsVerdict::Refused;
+        };
+
+        let want_ipv4 = matches!(qtype, DnsRecordType::A);
+        DnsVerdict::Resolved(
+            candidates
+                .into_iter()
+                .filter(|ip| ip.is_ipv4() == want_ipv4)
+                .filter(|ip| explicitly_pinned || !dns_answer_forbidden(*ip))
+                .collect(),
+        )
     }
 }
 
@@ -454,5 +498,113 @@ mod tests {
             EgressVerdict::Deny | EgressVerdict::Malformed => panic!("expected allow"),
         }
         assert_eq!(gate.decide_request("example.com:80"), EgressVerdict::Deny);
+    }
+
+    #[test]
+    fn dns_verdict_uses_pin_without_upstream_lookup() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+        use mvm_core::protocol::dns::DnsRecordType;
+
+        let v4: IpAddr = "93.184.216.34".parse().unwrap();
+        let v6: IpAddr = "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec![v6, v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let gate = EgressGate::from_network_policy(
+            &NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]),
+            &pins,
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(
+            gate.dns_verdict("example.com", DnsRecordType::A, |_| {
+                panic!("pinned names must not reach upstream DNS")
+            }),
+            DnsVerdict::Resolved(vec![v4])
+        );
+        assert_eq!(
+            gate.dns_verdict("example.com", DnsRecordType::Aaaa, |_| {
+                panic!("pinned names must not reach upstream DNS")
+            }),
+            DnsVerdict::Resolved(vec![v6])
+        );
+    }
+
+    #[test]
+    fn dns_verdict_refuses_unadmitted_name_without_lookup() {
+        use mvm_core::protocol::dns::DnsRecordType;
+
+        let gate = EgressGate::default_deny();
+        assert_eq!(
+            gate.dns_verdict("evil.test", DnsRecordType::A, |_| {
+                panic!("unadmitted names must not reach upstream DNS")
+            }),
+            DnsVerdict::Refused
+        );
+    }
+
+    #[test]
+    fn dns_verdict_filters_unrestricted_rebinding_answers() {
+        use mvm_core::protocol::dns::DnsRecordType;
+
+        let gate = EgressGate::new(CanonicalEgress::Unrestricted);
+        assert_eq!(
+            gate.dns_verdict("host.test", DnsRecordType::A, |_| {
+                Ok(vec![
+                    "93.184.216.34".parse().unwrap(),
+                    "10.1.2.3".parse().unwrap(),
+                ])
+            }),
+            DnsVerdict::Resolved(vec!["93.184.216.34".parse().unwrap()])
+        );
+    }
+
+    #[test]
+    fn dns_verdict_keeps_explicit_private_pin() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+        use mvm_core::protocol::dns::DnsRecordType;
+
+        let private: IpAddr = "192.168.4.23".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "192.168.4.23",
+            vec![private],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let gate = EgressGate::from_network_policy(
+            &NetworkPolicy::allow_list(vec![HostPort::new("192.168.4.23", 19099)]),
+            &pins,
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(
+            gate.dns_verdict("192.168.4.23", DnsRecordType::A, |_| {
+                panic!("explicit pins must not reach upstream DNS")
+            }),
+            DnsVerdict::Resolved(vec![private])
+        );
+    }
+
+    #[test]
+    fn dns_verdict_refuses_upstream_failure() {
+        use mvm_core::protocol::dns::DnsRecordType;
+
+        let gate = EgressGate::new(CanonicalEgress::Unrestricted);
+        assert_eq!(
+            gate.dns_verdict("missing.test", DnsRecordType::A, |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no records",
+                ))
+            }),
+            DnsVerdict::Refused
+        );
     }
 }

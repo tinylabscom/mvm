@@ -29,7 +29,8 @@ use hickory_proto::rr::{Name, RData, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::supervisor::http_forward;
+use crate::supervisor::audit_recorder::Recorder;
+use crate::supervisor::{dns_handler, http_forward};
 use mvm_core::guest_netd::ConnectAck;
 use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 
@@ -50,14 +51,20 @@ const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 pub async fn serve_raw_egress(
     listener: tokio::net::UnixListener,
     gate: Arc<EgressGate>,
+    recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) {
+    let rate_guard = Arc::new(dns_handler::DnsRateGuard::default());
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let gate = Arc::clone(&gate);
+                let recorder = recorder.clone();
+                let rate_guard = Arc::clone(&rate_guard);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_raw_conn(stream, &gate, timeout).await {
+                    if let Err(e) =
+                        handle_raw_conn(stream, &gate, recorder, rate_guard, timeout).await
+                    {
                         tracing::warn!(error = %e, "raw egress connection failed");
                     }
                 });
@@ -76,6 +83,8 @@ pub async fn serve_raw_egress(
 async fn handle_raw_conn<S>(
     mut guest: S,
     gate: &EgressGate,
+    recorder: Option<Arc<Recorder>>,
+    rate_guard: Arc<dns_handler::DnsRateGuard>,
     timeout: Duration,
 ) -> std::io::Result<()>
 where
@@ -87,6 +96,10 @@ where
     };
     if target == http_forward::FRAME_LINE {
         return http_forward::serve_http_forward(guest, gate, timeout).await;
+    }
+    if target == dns_handler::FRAME_LINE {
+        return dns_handler::serve_dns(guest, gate, recorder.as_deref(), &rate_guard, timeout)
+            .await;
     }
     match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
         EgressVerdict::Allow { ips, port } => {
@@ -221,9 +234,11 @@ where
 pub async fn serve_raw_egress_vsock(
     listener: crate::supervisor::substitution_proxy::vsock::VsockListener,
     gate: Arc<EgressGate>,
+    recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) {
     use crate::supervisor::substitution_proxy::vsock;
+    let rate_guard = Arc::new(dns_handler::DnsRateGuard::default());
     loop {
         let listen_fd = listener.raw_fd();
         let conn_fd = match vsock::accept(listen_fd) {
@@ -233,7 +248,13 @@ pub async fn serve_raw_egress_vsock(
                 return;
             }
         };
-        if let Err(e) = handle_raw_conn_blocking(conn_fd, &gate, timeout) {
+        if let Err(e) = handle_raw_conn_blocking(
+            conn_fd,
+            &gate,
+            recorder.clone(),
+            Arc::clone(&rate_guard),
+            timeout,
+        ) {
             tracing::warn!(error = %e, "raw egress vsock connection failed");
         }
     }
@@ -243,6 +264,8 @@ pub async fn serve_raw_egress_vsock(
 fn handle_raw_conn_blocking(
     conn_fd: std::os::fd::RawFd,
     gate: &EgressGate,
+    recorder: Option<Arc<Recorder>>,
+    rate_guard: Arc<dns_handler::DnsRateGuard>,
     timeout: Duration,
 ) -> std::io::Result<()> {
     let owned = unsafe { OwnedFd::from_raw_fd(conn_fd) };
@@ -253,6 +276,15 @@ fn handle_raw_conn_blocking(
     };
     if target == http_forward::FRAME_LINE {
         return http_forward::serve_http_forward_blocking(guest, gate, timeout);
+    }
+    if target == dns_handler::FRAME_LINE {
+        return dns_handler::serve_dns_blocking(
+            guest,
+            gate,
+            recorder.as_deref(),
+            &rate_guard,
+            timeout,
+        );
     }
     let (ips, port) =
         match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
@@ -518,7 +550,10 @@ fn shutdown_write(fd: libc::c_int) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_hostname_ips_pure(host: &str, timeout: Duration) -> std::io::Result<Vec<IpAddr>> {
+pub(super) fn resolve_hostname_ips_pure(
+    host: &str,
+    timeout: Duration,
+) -> std::io::Result<Vec<IpAddr>> {
     let upstreams = load_upstreams_from_resolv_conf(RESOLV_CONF_PATH)?;
     if upstreams.is_empty() {
         return Err(std::io::Error::new(
@@ -545,7 +580,10 @@ fn resolve_hostname_ips_pure(host: &str, timeout: Duration) -> std::io::Result<V
 }
 
 #[cfg(not(target_os = "linux"))]
-fn resolve_hostname_ips_pure(host: &str, _timeout: Duration) -> std::io::Result<Vec<IpAddr>> {
+pub(super) fn resolve_hostname_ips_pure(
+    host: &str,
+    _timeout: Duration,
+) -> std::io::Result<Vec<IpAddr>> {
     use std::net::ToSocketAddrs;
 
     Ok((host, 0u16)
@@ -696,10 +734,16 @@ mod tests {
     async fn denied_target_sends_fail_ack_then_closes() {
         let gate = EgressGate::default_deny();
         let (mut client, server) = tokio::io::duplex(1024);
-        let h =
-            tokio::spawn(
-                async move { handle_raw_conn(server, &gate, Duration::from_secs(1)).await },
-            );
+        let h = tokio::spawn(async move {
+            handle_raw_conn(
+                server,
+                &gate,
+                None,
+                Arc::new(dns_handler::DnsRateGuard::default()),
+                Duration::from_secs(1),
+            )
+            .await
+        });
         client.write_all(b"93.184.216.34:80\n").await.unwrap();
 
         let mut ack = [0u8; 1];
@@ -724,10 +768,16 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         let (mut client, server) = tokio::io::duplex(4096);
-        let h =
-            tokio::spawn(
-                async move { handle_raw_conn(server, &gate, Duration::from_secs(1)).await },
-            );
+        let h = tokio::spawn(async move {
+            handle_raw_conn(
+                server,
+                &gate,
+                None,
+                Arc::new(dns_handler::DnsRateGuard::default()),
+                Duration::from_secs(1),
+            )
+            .await
+        });
         // Over-long line with no newline → read_target_line returns None → close.
         let junk = vec![b'x'; MAX_TARGET_LINE + 10];
         client.write_all(&junk).await.unwrap();
@@ -744,10 +794,16 @@ mod tests {
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
             "2026-01-01T00:00:00Z",
         );
-        let h2 =
-            tokio::spawn(
-                async move { handle_raw_conn(server2, &gate2, Duration::from_secs(1)).await },
-            );
+        let h2 = tokio::spawn(async move {
+            handle_raw_conn(
+                server2,
+                &gate2,
+                None,
+                Arc::new(dns_handler::DnsRateGuard::default()),
+                Duration::from_secs(1),
+            )
+            .await
+        });
         client2.write_all(b"not-an-address\n").await.unwrap();
         let mut ack2 = [0u8; 1];
         client2.read_exact(&mut ack2).await.unwrap();
@@ -756,6 +812,47 @@ mod tests {
         let n2 = client2.read_to_end(&mut sink2).await.unwrap();
         assert_eq!(n2, 0, "malformed target must not splice");
         h2.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn dns_marker_dispatches_to_policy_gated_handler() {
+        let gate = EgressGate::default_deny();
+        let (mut client, server) = tokio::io::duplex(4096);
+        let handler = tokio::spawn(async move {
+            handle_raw_conn(
+                server,
+                &gate,
+                None,
+                Arc::new(dns_handler::DnsRateGuard::default()),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+        let query = [
+            0x22, 0x22, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0x07, b'b', b'l', b'o', b'c',
+            b'k', b'e', b'd', 0x04, b't', b'e', b's', b't', 0, 0, 1, 0, 1,
+        ];
+        client
+            .write_all(format!("{}\n", dns_handler::FRAME_LINE).as_bytes())
+            .await
+            .unwrap();
+        client
+            .write_all(
+                &u16::try_from(query.len())
+                    .expect("test query length fits in u16")
+                    .to_be_bytes(),
+            )
+            .await
+            .unwrap();
+        client.write_all(&query).await.unwrap();
+
+        let mut length = [0_u8; 2];
+        client.read_exact(&mut length).await.unwrap();
+        let mut response = vec![0_u8; usize::from(u16::from_be_bytes(length))];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response[..2], &[0x22, 0x22]);
+        assert_eq!(response[3] & 0x0f, 5);
+        handler.await.unwrap().unwrap();
     }
 
     /// Drive the `splice` helper directly (bypassing the gate, which mandatory-

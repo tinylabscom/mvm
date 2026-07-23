@@ -718,6 +718,40 @@ fn mk_guest_installs_netinit_at_boot() {
 }
 
 #[test]
+fn mk_guest_seeds_vsock_egress_dns_before_privilege_drop() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    let egress_start = content
+        .find("# Stage 2.6 — vsock egress shim")
+        .expect("vsock egress init block starts");
+    let agent_start = content[egress_start..]
+        .find("# Stage 2.5 — guest agent supervisor")
+        .map(|offset| egress_start + offset)
+        .expect("guest agent init block follows egress");
+    let egress_block = &content[egress_start..agent_start];
+
+    let loopback_up = egress_block
+        .find("ip link set lo up")
+        .expect("egress init raises loopback");
+    let resolver_seed = egress_block
+        .find("printf 'nameserver 127.0.0.1\\n' > /run/mvm/resolv.conf")
+        .expect("egress init seeds the loopback DNS stub");
+    let spawn = egress_block
+        .find("-- \"$MVM_EGRESS_CLIENT_BIN\" &")
+        .expect("egress init spawns the client");
+
+    assert!(
+        loopback_up < resolver_seed && resolver_seed < spawn,
+        "loopback must be raised and resolv.conf seeded before the egress client starts"
+    );
+    assert!(
+        egress_block.contains("--inh-caps=+net_bind_service --ambient-caps=+net_bind_service"),
+        "the unprivileged egress client must retain only the capability needed to bind DNS :53"
+    );
+}
+
+#[test]
 fn shared_kernel_base_forces_hvc0_console_support() {
     let path = nix_dir().join("images").join("kernel").join("base.nix");
     let content = fs::read_to_string(&path)

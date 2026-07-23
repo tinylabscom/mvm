@@ -745,9 +745,19 @@ let
     fi
     if [ -n "''${MVM_VSOCK_EGRESS:-}" ] && [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
       /bin/busybox ip link set lo up 2>/dev/null || true
+      /bin/busybox mkdir -p /run/mvm
+      printf 'nameserver 127.0.0.1\n' > /run/mvm/resolv.conf
+      /bin/busybox chmod 0644 /run/mvm/resolv.conf
+      if [ -e /etc/resolv.conf ]; then
+        /bin/busybox mount --bind /run/mvm/resolv.conf /etc/resolv.conf \
+          || /bin/busybox cp /run/mvm/resolv.conf /etc/resolv.conf
+      else
+        /bin/busybox cp /run/mvm/resolv.conf /etc/resolv.conf
+      fi
       /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
         --reuid=${toString agentUid} --regid=${toString agentUid} \
         --clear-groups --no-new-privs \
+        --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
         -- "$MVM_EGRESS_CLIENT_BIN" &
       export ALL_PROXY="socks5h://127.0.0.1:1080"
       export HTTP_PROXY="$ALL_PROXY"

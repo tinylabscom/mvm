@@ -18,6 +18,10 @@ pub const DEFAULT_EGRESS_PROXY_LISTEN: &str = "127.0.0.1:1080";
 /// SOCKS5h URL form of [`DEFAULT_EGRESS_PROXY_LISTEN`], used where a workload's
 /// `ALL_PROXY` / `HTTP_PROXY` must carry a scheme.
 pub const DEFAULT_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
+/// Loopback listen address of the in-guest DNS stub.
+pub const DEFAULT_DNS_STUB_LISTEN: &str = "127.0.0.1:53";
+/// First-line marker selecting DNS on the shared host egress stream.
+pub const DNS_FRAME_LINE: &str = "MVM_DNS/1";
 
 /// The host's connect-result acknowledgement on the raw-egress stream.
 ///
@@ -110,6 +114,12 @@ mod tests {
             DEFAULT_EGRESS_PROXY_URL,
             format!("socks5h://{DEFAULT_EGRESS_PROXY_LISTEN}")
         );
+    }
+
+    #[test]
+    fn dns_stub_constants_are_stable() {
+        assert_eq!(DEFAULT_DNS_STUB_LISTEN, "127.0.0.1:53");
+        assert_eq!(DNS_FRAME_LINE, "MVM_DNS/1");
     }
 
     #[test]

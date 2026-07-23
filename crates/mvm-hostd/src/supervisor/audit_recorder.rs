@@ -22,7 +22,7 @@
 //! shouldn't pollute the plan chain), but the **emit surface** is
 //! one type, one trait, one place to grep.
 //!
-//! ## Categories (9)
+//! ## Categories (11)
 //!
 //! The comprehensive audit catalog (the `mvmctl audit tail` `cat`
 //! filter):
@@ -38,6 +38,8 @@
 //! | [`EventCategory::Key`] | `key.rotated`, `key.released` | partial |
 //! | [`EventCategory::Host`] | `host.started`, `host.shutdown` | no |
 //! | [`EventCategory::Audit`] | `audit.chain.verified`, `audit.chain.broken` | meta |
+//! | [`EventCategory::Dns`] | `dns.resolved`, `dns.refused` | no |
+//! | [`EventCategory::WorkloadAudit`] | `workload_audit.emitted` | no |
 //!
 //! "Plan-bound" categories MUST carry a `plan_id`/`plan_version`;
 //! [`Recorder::record_plan_bound`] enforces this. Plan-less
@@ -84,6 +86,8 @@ pub enum EventCategory {
     /// Used by `mvmctl audit verify` results, chain-rotation
     /// announcements, etc.
     Audit,
+    /// Policy-gated DNS decisions. `dns.<verdict>`.
+    Dns,
     /// Workload-emitted audit entries via `host.audit.v1`. Distinct
     /// from system-emitted categories so the chain verifier can
     /// compute workload-asserted
@@ -107,6 +111,7 @@ impl EventCategory {
             Self::Key => "key",
             Self::Host => "host",
             Self::Audit => "audit",
+            Self::Dns => "dns",
             Self::WorkloadAudit => "workload_audit",
         }
     }
@@ -267,6 +272,7 @@ impl Recorder {
             EventCategory::Key => &m.audit_key_total,
             EventCategory::Host => &m.audit_host_total,
             EventCategory::Audit => &m.audit_audit_total,
+            EventCategory::Dns => &m.audit_dns_total,
             EventCategory::WorkloadAudit => &m.audit_workload_audit_total,
         };
         counter.fetch_add(1, Ordering::Relaxed);
@@ -365,6 +371,8 @@ mod tests {
             EventCategory::Key,
             EventCategory::Host,
             EventCategory::Audit,
+            EventCategory::Dns,
+            EventCategory::WorkloadAudit,
         ];
         let mut prefixes: Vec<&'static str> = all.iter().map(|c| c.as_str()).collect();
         prefixes.sort();
@@ -391,6 +399,8 @@ mod tests {
         assert_eq!(EventCategory::Key.as_str(), "key");
         assert_eq!(EventCategory::Host.as_str(), "host");
         assert_eq!(EventCategory::Audit.as_str(), "audit");
+        assert_eq!(EventCategory::Dns.as_str(), "dns");
+        assert_eq!(EventCategory::WorkloadAudit.as_str(), "workload_audit");
     }
 
     #[test]
@@ -400,6 +410,7 @@ mod tests {
         assert!(!EventCategory::Cmd.requires_plan_context());
         assert!(!EventCategory::Host.requires_plan_context());
         assert!(!EventCategory::Secret.requires_plan_context());
+        assert!(!EventCategory::Dns.requires_plan_context());
     }
 
     #[test]
@@ -692,9 +703,9 @@ mod tests {
     }
 
     #[test]
-    fn prometheus_exposition_carries_all_nine_audit_counters() {
+    fn prometheus_exposition_carries_all_audit_counters() {
         // Every category has a stable metric name in the prometheus
-        // exposition. Pin all 9 here so a
+        // exposition. Pin all categories here so a
         // refactor of write_metric calls can't silently drop one.
         let metrics = Metrics::new();
         let prom = metrics.prometheus_exposition();
@@ -708,6 +719,8 @@ mod tests {
             "key",
             "host",
             "audit",
+            "dns",
+            "workload_audit",
         ] {
             let metric_name = format!("mvm_audit_{category}_total");
             assert!(

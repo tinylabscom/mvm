@@ -37,6 +37,10 @@ pub mod balloon;
 pub mod balloon_runtime;
 pub mod circuit_breaker;
 pub mod destination;
+/// Chain-signed metadata audit for policy-gated DNS questions.
+pub mod dns_audit;
+/// Policy-gated DNS service for NIC-less guests.
+pub mod dns_handler;
 pub mod egress;
 pub mod entropy_scanner;
 pub mod event_bus;

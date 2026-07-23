@@ -32,6 +32,12 @@ mod linux {
         run_one(resolve_exec([NETINIT_OVERLAY, NETINIT_FALLBACK]), "netinit");
         if cmdline_has_flag("mvm.vsock_egress=1") {
             bring_loopback_up();
+            if let Err(error) = mvm_agentd::guest_net::seed_loopback_resolver() {
+                eprintln!(
+                    "mvm-oci-init: failed to point resolv.conf at the loopback DNS stub: {error}"
+                );
+                std::process::exit(1);
+            }
             // Egress is required when this flag is set; the client is the only guest
             // path to the admitted network. Resolve overlay-first (respecting the
             // runtime-source policy) and fail closed rather than boot a workload that

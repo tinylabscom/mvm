@@ -29,6 +29,9 @@ path = ".."
 [dependencies.mvm-core]
 path = "../../mvm-core"
 
+[dependencies.mvm-protocol]
+path = "../../mvm-protocol"
+
 # `fuzz_builder_request` covers the
 # `HostVmRequest`/`HostVmResponse` payloads in
 # `mvm-build::builder_protocol`. mvm-build depends on mvm-agentd, so
@@ -71,6 +74,13 @@ bench = false
 [[bin]]
 name = "fuzz_builder_request"
 path = "fuzz_targets/fuzz_builder_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dns_codec"
+path = "fuzz_targets/fuzz_dns_codec.rs"
 test = false
 doc = false
 bench = false

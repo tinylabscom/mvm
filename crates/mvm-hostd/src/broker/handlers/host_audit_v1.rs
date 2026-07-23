@@ -30,7 +30,7 @@
 //!   with the typed audit-signer code embedded for forensics.
 
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use mvm_core::policy::security::AgentProfile;
 use mvm_core::protocol::audit_signer::{AppendEntryRequest, AppendEntryResponse};
@@ -43,6 +43,7 @@ use mvm_core::protocol::host_audit::{
     BROKER_AUDIT_TOKENS_PER_SEC, EmitBatchEntryStatus, EmitBatchRequest, EmitBatchResponse,
     EmitErrorCode, EmitRequest, EmitResponse,
 };
+use mvm_core::rate_limit::TokenBucket;
 use tokio::sync::Mutex;
 
 use crate::broker::audit_client::{AuditClient, AuditClientError};
@@ -51,55 +52,6 @@ use crate::broker::audit_client::{AuditClient, AuditClientError};
 /// from the system categories so the chain verifier can compute
 /// workload-asserted vs system-asserted entry rates separately.
 const WORKLOAD_AUDIT_CATEGORY: &str = "workload_audit";
-
-/// Per-workload token bucket. Cheap (couple of words) so per-call lock
-/// acquisition isn't a hot path.
-// allow(secret-debug): rate-limit state (token count + refill rate +
-// capacity + last-refill instant) is not secret material. Debug
-// printing is helpful for diagnosing rate-limit behaviour in logs.
-#[derive(Debug)]
-struct TokenBucket {
-    /// Current token count (floating-point so a partial refill at the
-    /// sub-millisecond level doesn't quantise away).
-    tokens: f64,
-    /// Capacity (max burst) — equals `tokens_per_sec` in this v1
-    /// implementation (one-second burst).
-    capacity: f64,
-    /// Refill rate, tokens per second.
-    refill_per_sec: f64,
-    /// Last instant we refilled. Refills happen lazily on `try_take`.
-    last_refill: Instant,
-}
-
-impl TokenBucket {
-    fn new(tokens_per_sec: u32) -> Self {
-        let cap = tokens_per_sec as f64;
-        Self {
-            tokens: cap,
-            capacity: cap,
-            refill_per_sec: cap,
-            last_refill: Instant::now(),
-        }
-    }
-
-    /// Try to consume one token. Returns `true` if there was a token to
-    /// take, `false` otherwise.
-    fn try_take(&mut self) -> bool {
-        let now = Instant::now();
-        let elapsed = now.saturating_duration_since(self.last_refill);
-        let refill = elapsed.as_secs_f64() * self.refill_per_sec;
-        if refill > 0.0 {
-            self.tokens = (self.tokens + refill).min(self.capacity);
-            self.last_refill = now;
-        }
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
-}
 
 /// The handler itself.
 ///
@@ -735,16 +687,6 @@ mod tests {
         });
         let err = handler.dispatch(&ctx(), "emit", payload).await.unwrap_err();
         assert_eq!(err.code, ServiceErrorCode::Unavailable);
-    }
-
-    #[test]
-    fn token_bucket_starts_at_capacity() {
-        let mut b = TokenBucket::new(5);
-        assert_eq!(b.tokens, 5.0);
-        for _ in 0..5 {
-            assert!(b.try_take());
-        }
-        assert!(!b.try_take());
     }
 
     #[test]
