@@ -1062,6 +1062,10 @@ struct MachineListEntry<'a> {
     #[serde(flatten)]
     spec: &'a MachineSpec,
     status: &'static str,
+    /// `"dev"` / `"prod"`, resolved the same way as the boot-time SDK
+    /// envelope. Read by `Sandbox.connect(id)` to inherit the dev-only exec
+    /// guard when attaching to a running machine from a fresh process.
+    build_mode: &'static str,
 }
 
 /// Live status label for a persisted machine, resolved through the backend.

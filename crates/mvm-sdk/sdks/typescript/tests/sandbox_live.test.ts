@@ -25,6 +25,8 @@ interface FixtureOptions {
   cpExit?: number;
   forwardSleep?: number;
   downExit?: number;
+  lsOut?: string;
+  lsExit?: number;
 }
 
 function writeFixtureMvmctl(opts: FixtureOptions): string {
@@ -41,6 +43,8 @@ function writeFixtureMvmctl(opts: FixtureOptions): string {
   const cpExit = opts.cpExit ?? 0;
   const forwardSleep = opts.forwardSleep ?? 0;
   const downExit = opts.downExit ?? 0;
+  const lsOut = opts.lsOut ?? "[]";
+  const lsExit = opts.lsExit ?? 0;
 
   const script = path.join(tmpDir, "fake-mvmctl");
   fs.writeFileSync(
@@ -80,6 +84,10 @@ case "$verb" in
       cat > ${JSON.stringify(path.join(stdinDir, "fs-write-stdin.bin"))}
     fi
     exit ${fsExit}
+    ;;
+  ls)
+    echo '${lsOut}'
+    exit ${lsExit}
     ;;
   cp)
     exit ${cpExit}
@@ -165,6 +173,109 @@ describe("parseUpEnvelope", () => {
     expect(() => mvm.parseUpEnvelope("not json", ["mvmctl", "up"])).toThrow(
       /not valid JSON/,
     );
+  });
+});
+
+// ── deriveAttachedBuildMode + connect ────────────────────────────────
+
+describe("deriveAttachedBuildMode", () => {
+  const argv = ["mvmctl", "machine", "ls", "--json"];
+
+  it("matches on name and returns the entry build_mode", () => {
+    const stdout = JSON.stringify([
+      { name: "a", build_mode: "prod", status: "running" },
+      { name: "b", build_mode: "dev", status: "running" },
+    ]);
+    expect(mvm.deriveAttachedBuildMode(stdout, "b", argv)).toBe("dev");
+    expect(mvm.deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
+  });
+
+  it("fails closed on a missing build_mode", () => {
+    const stdout = JSON.stringify([{ name: "a", status: "running" }]);
+    expect(mvm.deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
+  });
+
+  it("fails closed on an unknown build_mode", () => {
+    const stdout = JSON.stringify([{ name: "a", build_mode: "staging" }]);
+    expect(mvm.deriveAttachedBuildMode(stdout, "a", argv)).toBe("prod");
+  });
+
+  it("throws when the machine is absent", () => {
+    const stdout = JSON.stringify([{ name: "other", build_mode: "dev" }]);
+    expect(() => mvm.deriveAttachedBuildMode(stdout, "ghost", argv)).toThrow(
+      /no machine named/,
+    );
+  });
+});
+
+describe("Sandbox.connect (attach; inherits dev-only guard)", () => {
+  it("attaches to a dev machine and allows exec", () => {
+    const lsOut = JSON.stringify([
+      { name: "web-1", build_mode: "dev", status: "running" },
+      { name: "other", build_mode: "prod", status: "running" },
+    ]);
+    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut, procWaitStdout: "4" });
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.connect("web-1");
+    expect(sb._live).not.toBeNull();
+    expect(sb._live!.vmId).toBe("web-1");
+    expect(sb._live!.buildMode).toBe("dev");
+
+    const r = sb.exec(["python", "-c", "print(2 + 2)"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("4");
+
+    const calls = readFixtureLog();
+    expect(calls[0]).toMatch(/^machine ls --json/);
+    expect(calls.some((c) => c.startsWith("machine proc start web-1"))).toBe(true);
+  });
+
+  it("refuses exec on a prod machine (fail-closed, no proc traffic)", () => {
+    const lsOut = JSON.stringify([{ name: "sealed", build_mode: "prod", status: "running" }]);
+    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut });
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.connect("sealed");
+    expect(sb._live!.buildMode).toBe("prod");
+    expect(() => sb.exec(["python", "-c", "x"])).toThrow(mvm.SandboxDevOnly);
+    expect(() => sb.commands.start(["python", "run.py"])).toThrow(mvm.SandboxDevOnly);
+    expect(readFixtureLog().some((c) => c.startsWith("machine proc"))).toBe(false);
+  });
+
+  it("treats a missing build_mode as non-dev (fail-closed)", () => {
+    const lsOut = JSON.stringify([{ name: "m", status: "running" }]);
+    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut });
+    process.env.MVM_CLI_BIN = script;
+
+    const sb = mvm.Sandbox.connect("m");
+    expect(sb._live!.buildMode).toBe("prod");
+    expect(() => sb.exec(["echo", "hi"])).toThrow(mvm.SandboxDevOnly);
+  });
+
+  it("throws when the machine is not listed", () => {
+    const lsOut = JSON.stringify([{ name: "other", build_mode: "dev", status: "running" }]);
+    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut });
+    process.env.MVM_CLI_BIN = script;
+    expect(() => mvm.Sandbox.connect("ghost")).toThrow(/no machine named/);
+  });
+
+  it("propagates a machine ls failure", () => {
+    const script = writeFixtureMvmctl({ upEnvelope: null, lsExit: 5 });
+    process.env.MVM_CLI_BIN = script;
+    expect(() => mvm.Sandbox.connect("web-1")).toThrow(/exit code 5/);
+  });
+
+  it("refuses a second concurrent session", () => {
+    const lsOut = JSON.stringify([{ name: "a", build_mode: "dev", status: "running" }]);
+    const script = writeFixtureMvmctl({ upEnvelope: null, lsOut });
+    process.env.MVM_CLI_BIN = script;
+    mvm.Sandbox.connect("a");
+    expect(() => mvm.Sandbox.connect("a")).toThrow(/already active/);
+  });
+
+  it("rejects an empty id", () => {
+    expect(() => mvm.Sandbox.connect("")).toThrow(/non-empty machine id/);
   });
 });
 

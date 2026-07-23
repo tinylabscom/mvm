@@ -69,6 +69,7 @@ export {
   SandboxLiveError,
   SandboxModeError,
   currentRecording,
+  deriveAttachedBuildMode,
   emitRecordingJson,
   flushRecordingToOutPath,
   parseUpEnvelope,

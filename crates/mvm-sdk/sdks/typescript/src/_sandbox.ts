@@ -457,6 +457,54 @@ export class LiveTransport {
     });
   }
 
+  /** Attach to an already-running machine by name. Shells
+   *  `mvmctl machine ls --json` and re-derives `build_mode` from the
+   *  listing entry (the attach path never boots, so there is no
+   *  `--up-json` envelope). Fails closed: only an explicit
+   *  `build_mode === "dev"` unlocks the dev-only exec path — a prod /
+   *  missing / unknown value resolves to `"prod"`. */
+  static forExisting(vmId: string): LiveTransport {
+    let mvmCliBin: string;
+    try {
+      mvmCliBin = resolveCliBin("Sandbox.connect");
+    } catch (err) {
+      throw new SandboxModeError(String(err instanceof Error ? err.message : err));
+    }
+    const argv = ["machine", "ls", "--json"];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const child = require("node:child_process") as typeof import("node:child_process");
+    let result;
+    try {
+      result = child.spawnSync(mvmCliBin, argv, { encoding: "utf-8" });
+    } catch (err) {
+      throw new SandboxLiveError(
+        `\`${mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
+        { argv: [mvmCliBin, ...argv] },
+      );
+    }
+    if (result.error) {
+      throw new SandboxLiveError(
+        `failed to spawn \`${mvmCliBin}\`: ${result.error.message}`,
+        { argv: [mvmCliBin, ...argv] },
+      );
+    }
+    if (result.status !== 0) {
+      throw new SandboxLiveError(
+        `\`mvmctl machine ls --json\` failed with exit code ${result.status}`,
+        {
+          argv: [mvmCliBin, ...argv],
+          exitCode: result.status,
+          stderr: result.stderr ?? "",
+        },
+      );
+    }
+    const buildMode = deriveAttachedBuildMode(result.stdout ?? "", vmId, [
+      mvmCliBin,
+      ...argv,
+    ]);
+    return new LiveTransport({ mvmCliBin, vmId, buildMode });
+  }
+
   commandsStart(argv: string[], env: Record<string, EnvValue | string> | undefined): void {
     if (this.buildMode !== "dev") {
       throw new SandboxDevOnly(
@@ -796,6 +844,54 @@ export function parseUpEnvelope(
   return { vm_id: obj.vm_id, build_mode: obj.build_mode };
 }
 
+/** Re-derive `build_mode` for an attached machine from
+ *  `mvmctl machine ls --json` output. The listing is a JSON array of
+ *  machine entries matched on `name`. Fails closed: only an explicit
+ *  `"dev"` returns `"dev"`; a `"prod"` / missing / unknown value
+ *  returns `"prod"`, so a stale or hostile listing can never *open*
+ *  the dev-only exec path. Throws `SandboxLiveError` when `vmId` is
+ *  absent from the listing. Exported for tests. */
+export function deriveAttachedBuildMode(
+  stdout: string,
+  vmId: string,
+  argv: string[],
+): "dev" | "prod" {
+  const line = stdout.trim();
+  if (!line) {
+    throw new SandboxLiveError(
+      `\`mvmctl machine ls --json\` produced no output; cannot attach to ${JSON.stringify(vmId)}.`,
+      { argv },
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch (err) {
+    throw new SandboxLiveError(
+      `\`mvmctl machine ls --json\` stdout is not valid JSON: ${String(err)}`,
+      { argv, stderr: line },
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new SandboxLiveError("`mvmctl machine ls --json` must be a JSON array.", {
+      argv,
+    });
+  }
+  for (const entry of parsed) {
+    if (
+      typeof entry === "object" &&
+      entry !== null &&
+      (entry as { name?: unknown }).name === vmId
+    ) {
+      return (entry as { build_mode?: unknown }).build_mode === "dev" ? "dev" : "prod";
+    }
+  }
+  throw new SandboxLiveError(
+    `no machine named ${JSON.stringify(vmId)} in \`mvmctl machine ls\`; is it running?`,
+    { argv },
+  );
+}
+
 function randomHex(byteCount: number): string {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const crypto = require("node:crypto") as typeof import("node:crypto");
@@ -892,6 +988,37 @@ export class Sandbox {
       ops: [],
     };
     return new Sandbox(wid, null);
+  }
+
+  /** Attach to an already-running machine by name, from a fresh
+   *  process. Unlike {@link Sandbox.create}, `connect` never boots a
+   *  VM — so it re-derives the machine's `build_mode` from
+   *  `mvmctl machine ls --json` (see {@link LiveTransport.forExisting})
+   *  rather than an `--up-json` envelope.
+   *
+   *  The dev-only exec guard is inherited unchanged: the derived
+   *  `build_mode` is never defaulted to `"dev"` — a prod / missing /
+   *  unknown value resolves to `"prod"`, so `connect(...).exec(...)` /
+   *  `.commands.start(...)` on a sealed prod machine throws
+   *  {@link SandboxDevOnly} exactly like the create path (security
+   *  claim 4).
+   *
+   *  Always a live operation: resolves the mvm CLI regardless of
+   *  `MVM_SDK_MODE`. Throws {@link SandboxLiveError} when no machine of
+   *  that name is listed. */
+  static connect(id: string): Sandbox {
+    if (typeof id !== "string" || id.length === 0) {
+      throw new TypeError("Sandbox.connect requires a non-empty machine id");
+    }
+    if (recording !== null || isLiveActive()) {
+      throw new Error(
+        "a Sandbox session is already active — call Sandbox.kill() before attaching to another machine.",
+      );
+    }
+    const live = LiveTransport.forExisting(id);
+    const sb = new Sandbox(id, live);
+    liveSandbox = sb;
+    return sb;
   }
 
   /** One-shot: run `argv` inside the sandbox, capturing stdout / stderr /

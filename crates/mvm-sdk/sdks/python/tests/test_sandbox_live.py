@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 
 import mvm
-from mvm._sandbox import _parse_up_envelope
+from mvm._sandbox import _derive_attached_build_mode, _parse_up_envelope
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +57,8 @@ def _write_fixture_mvmctl(
     cp_exit: int = 0,
     forward_sleep: int = 0,
     down_exit: int = 0,
+    ls_out: str = "[]",
+    ls_exit: int = 0,
 ) -> Path:
     """Write a shell script that pretends to be `mvmctl`. It
     records each invocation's argv + stdin to sidecar files so
@@ -107,6 +109,12 @@ case "$verb" in
       cat > {stdin_dir!s}/fs-write-stdin.bin
     fi
     exit {fs_exit}
+    ;;
+  ls)
+    # `mvmctl machine ls --json` — Sandbox.connect() reads this to
+    # re-derive an attached machine's build_mode.
+    echo '{ls_out}'
+    exit {ls_exit}
     ;;
   cp)
     exit {cp_exit}
@@ -726,3 +734,128 @@ def test_browser_sandbox_custom_host_port(tmp_path: Path) -> None:
 def test_browser_sandbox_unknown_browser_raises() -> None:
     with pytest.raises(ValueError, match="browser"):
         mvm.BrowserSandbox("safari")
+
+
+# ── connect (attach to a running machine; inherits dev-only guard) ────
+
+
+def _connect_fixture(tmp_path: Path, ls_out: str, **kw: object) -> Path:
+    """A fixture mvmctl that boots nothing — only serves `machine ls
+    --json`. `connect()` never boots, so `up_envelope` is None."""
+    return _write_fixture_mvmctl(tmp_path, up_envelope=None, ls_out=ls_out, **kw)
+
+
+def test_derive_attached_build_mode_matches_by_name() -> None:
+    stdout = json.dumps(
+        [
+            {"name": "a", "build_mode": "prod", "status": "running"},
+            {"name": "b", "build_mode": "dev", "status": "running"},
+        ]
+    )
+    assert _derive_attached_build_mode(stdout, vm_id="b", argv=["mvmctl"]) == "dev"
+    assert _derive_attached_build_mode(stdout, vm_id="a", argv=["mvmctl"]) == "prod"
+
+
+def test_derive_attached_build_mode_fail_closed_on_missing_field() -> None:
+    stdout = json.dumps([{"name": "a", "status": "running"}])
+    assert _derive_attached_build_mode(stdout, vm_id="a", argv=["mvmctl"]) == "prod"
+
+
+def test_derive_attached_build_mode_fail_closed_on_unknown_value() -> None:
+    stdout = json.dumps([{"name": "a", "build_mode": "staging"}])
+    assert _derive_attached_build_mode(stdout, vm_id="a", argv=["mvmctl"]) == "prod"
+
+
+def test_derive_attached_build_mode_raises_when_absent() -> None:
+    stdout = json.dumps([{"name": "other", "build_mode": "dev"}])
+    with pytest.raises(mvm.SandboxLiveError, match="no machine named"):
+        _derive_attached_build_mode(stdout, vm_id="ghost", argv=["mvmctl"])
+
+
+def test_connect_dev_machine_allows_exec(tmp_path: Path) -> None:
+    ls_out = json.dumps(
+        [
+            {"name": "web-1", "build_mode": "dev", "status": "running"},
+            {"name": "other", "build_mode": "prod", "status": "running"},
+        ]
+    )
+    script = _connect_fixture(tmp_path, ls_out, proc_wait_stdout="4")
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    sb = mvm.Sandbox.connect("web-1")
+    assert sb._live is not None
+    assert sb._live.vm_id == "web-1"
+    assert sb._live.build_mode == "dev"
+
+    result = sb.exec("python", "-c", "print(2 + 2)")
+    assert result.exit_code == 0
+    assert result.stdout == "4"
+
+    calls = _read_fixture_log(tmp_path)
+    assert calls[0].startswith("machine ls --json")
+    assert any(c.startswith("machine proc start web-1") for c in calls)
+
+
+def test_connect_prod_machine_refuses_exec_fail_closed(tmp_path: Path) -> None:
+    """Mirror of the create-path prod refusal: connect() to a sealed
+    prod machine must refuse exec/commands.start client-side before any
+    vsock traffic (security claim 4)."""
+    ls_out = json.dumps([{"name": "sealed", "build_mode": "prod", "status": "running"}])
+    script = _connect_fixture(tmp_path, ls_out)
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    sb = mvm.Sandbox.connect("sealed")
+    assert sb._live.build_mode == "prod"
+
+    with pytest.raises(mvm.SandboxDevOnly, match="dev-mode template"):
+        sb.exec("python", "-c", "x")
+    with pytest.raises(mvm.SandboxDevOnly):
+        sb.commands.start(["python", "run.py"])
+
+    # The SDK must NOT have shelled to `mvmctl machine proc *`.
+    calls = _read_fixture_log(tmp_path)
+    assert not any(c.startswith("machine proc") for c in calls), calls
+
+
+def test_connect_missing_build_mode_refuses_exec(tmp_path: Path) -> None:
+    """A listing entry that omits build_mode must be treated as
+    non-dev — never defaulted to dev."""
+    ls_out = json.dumps([{"name": "m", "status": "running"}])
+    script = _connect_fixture(tmp_path, ls_out)
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    sb = mvm.Sandbox.connect("m")
+    assert sb._live.build_mode == "prod"
+    with pytest.raises(mvm.SandboxDevOnly):
+        sb.exec("echo", "hi")
+
+
+def test_connect_machine_not_listed_raises(tmp_path: Path) -> None:
+    ls_out = json.dumps([{"name": "other", "build_mode": "dev", "status": "running"}])
+    script = _connect_fixture(tmp_path, ls_out)
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    with pytest.raises(mvm.SandboxLiveError, match="no machine named"):
+        mvm.Sandbox.connect("ghost")
+
+
+def test_connect_propagates_ls_failure(tmp_path: Path) -> None:
+    script = _connect_fixture(tmp_path, "[]", ls_exit=5)
+    os.environ["MVM_CLI_BIN"] = str(script)
+    with pytest.raises(mvm.SandboxLiveError, match="exit code 5"):
+        mvm.Sandbox.connect("web-1")
+
+
+def test_connect_refuses_second_session(tmp_path: Path) -> None:
+    ls_out = json.dumps([{"name": "a", "build_mode": "dev", "status": "running"}])
+    script = _connect_fixture(tmp_path, ls_out)
+    os.environ["MVM_CLI_BIN"] = str(script)
+
+    mvm.Sandbox.connect("a")
+    with pytest.raises(RuntimeError, match="already active"):
+        mvm.Sandbox.connect("a")
+
+
+def test_connect_rejects_empty_id() -> None:
+    with pytest.raises(ValueError, match="non-empty machine id"):
+        mvm.Sandbox.connect("")

@@ -26,6 +26,10 @@ pub(super) fn list_machines(args: MachineListArgs) -> Result<()> {
             .map(|spec| MachineListEntry {
                 spec,
                 status: machine_status_label(&spec.name),
+                build_mode: runtime::resolve_machine_build_mode(
+                    spec.manifest.as_deref(),
+                    &spec.name,
+                ),
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&entries)?);
