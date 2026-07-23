@@ -33,10 +33,14 @@ mod linux {
         if cmdline_has_flag("mvm.vsock_egress=1") {
             bring_loopback_up();
             if let Err(error) = mvm_agentd::guest_net::seed_loopback_resolver() {
+                // Non-fatal: a read-only image rootfs may have no writable
+                // /etc/resolv.conf to repoint, but the workload still reaches its
+                // admitted egress through the loopback proxy. Log and continue —
+                // panicking PID 1 here would fail an otherwise-bootable VM.
                 eprintln!(
-                    "mvm-oci-init: failed to point resolv.conf at the loopback DNS stub: {error}"
+                    "mvm-oci-init: could not point resolv.conf at the loopback DNS stub \
+                     (continuing; proxy egress is unaffected): {error}"
                 );
-                std::process::exit(1);
             }
             // Egress is required when this flag is set; the client is the only guest
             // path to the admitted network. Resolve overlay-first (respecting the
