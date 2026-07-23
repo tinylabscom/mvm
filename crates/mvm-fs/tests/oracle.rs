@@ -68,6 +68,32 @@ fn read_file(fs: &Filesystem, ino: u32) -> Vec<u8> {
     file_io::read_all(fs, &inode).expect("read file data")
 }
 
+/// Read a symlink target back exactly as the independent reader's `readlink`
+/// does: a target strictly shorter than the 60-byte `i_block` is a *fast*
+/// symlink stored inline; a target of 60 bytes or more is a *slow* symlink read
+/// from a data block. The writer must pick the same boundary or the reader
+/// resolves the wrong bytes. Asserts the fast/slow flag matches the length so a
+/// misclassified symlink fails here rather than silently truncating.
+fn read_symlink_target(fs: &Filesystem, ino: u32) -> Vec<u8> {
+    let (inode, _) = fs.read_inode_verified(ino).expect("read symlink inode");
+    assert!(inode.is_symlink(), "inode {ino} must be a symlink");
+    if inode.size < 60 {
+        assert!(
+            !inode.has_extents(),
+            "fast symlink (size {}) must store its target inline, not in extents",
+            inode.size
+        );
+        inode.block[..inode.size as usize].to_vec()
+    } else {
+        assert!(
+            inode.has_extents(),
+            "slow symlink (size {}) must be extent-backed, not inline",
+            inode.size
+        );
+        file_io::read_all(fs, &inode).expect("read slow symlink target")
+    }
+}
+
 #[test]
 fn empty_tree_mounts_with_root_dir() {
     let fs = mount(build_image(&[]).unwrap());
@@ -127,6 +153,62 @@ fn tree_round_trips_through_real_reader() {
     let (link_inode, _) = fs.read_inode_verified(link_ino).unwrap();
     assert!(link_inode.is_symlink());
     assert_eq!(link_inode.size, "hosts".len() as u64);
+}
+
+/// Symlink targets must round-trip byte-for-byte across the fast/slow boundary.
+/// The inode's `i_block` area is exactly 60 bytes, so a fast (inline) symlink
+/// can hold a target of at most 59 bytes; a 60-byte target is a *slow* symlink
+/// backed by a data block. A 60-byte target previously stored inline lost its
+/// final byte on readback (an independent reader treats `i_size >= 60` as slow
+/// and reads the — absent — data block). Boundary-checked around the transition
+/// and out to a multi-block target.
+#[test]
+fn symlink_targets_round_trip_across_fast_slow_boundary() {
+    // A real 60-byte target: `/usr/local/bin/claude` after `npm i -g` points at
+    // `../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`.
+    let real_60 = "../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe";
+    assert_eq!(real_60.len(), 60, "fixture must be exactly 60 bytes");
+
+    // Distinct generated targets straddling the boundary plus a multi-block
+    // long target. Each byte is a printable ASCII letter, so the target is
+    // valid UTF-8 and every position is individually distinguishable.
+    let make_target =
+        |len: usize| -> String { (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect() };
+    let mut cases: Vec<(String, String)> = [58usize, 59, 60, 61, 62, 200]
+        .into_iter()
+        .map(|len| (format!("/links/gen{len}"), make_target(len)))
+        .collect();
+    cases.push(("/links/real60".to_string(), real_60.to_string()));
+
+    let mut nodes = vec![Node::Dir {
+        path: "/links".into(),
+        mode: 0o755,
+        xattrs: Vec::new(),
+    }];
+    for (path, target) in &cases {
+        nodes.push(Node::Symlink {
+            path: path.clone(),
+            target: target.clone(),
+        });
+    }
+
+    let fs = mount(build_image(&nodes).unwrap());
+    let (links_ino, links_ft) = find(&list_dir(&fs, 2), "links").expect("/links present");
+    assert_eq!(links_ft, DirEntryType::Directory);
+    let entries = list_dir(&fs, links_ino);
+
+    for (path, target) in &cases {
+        let name = path.rsplit('/').next().unwrap();
+        let (ino, ft) = find(&entries, name).unwrap_or_else(|| panic!("{path} present"));
+        assert_eq!(ft, DirEntryType::Symlink, "{path} must be a symlink");
+        let got = read_symlink_target(&fs, ino);
+        assert_eq!(
+            got,
+            target.as_bytes(),
+            "symlink {path} (target {} bytes) must round-trip intact",
+            target.len()
+        );
+    }
 }
 
 /// The empty-growable `mkfs` path (a writable Stage 0 store, not a sealed
