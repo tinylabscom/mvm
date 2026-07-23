@@ -49,14 +49,17 @@ surface, so "no routable guest NIC" is a property of the type, not a habit.
   live on the Hetzner box (nonsense backend names produced identical output;
   `--hypervisor libkrun` ran Firecracker).
 
-- [ ] **F2 — OCI+overlay+verity `/dev/vdb` device-ordering panic (raw libkrun
-  path).** Raw `LibkrunBackend::start`'s verity disk layout points
-  `mvm.data=/dev/vdb` at the verity *hash* sidecar, so `mvm-verity-init` panics
-  (`ext4 superblock magic mismatch: expected 0xef53, got 0x0000`) before the
-  agent. Pre-existing on `main`; the runner path already maps `/dev/vda`=rootfs
-  correctly (proven live). Either fix the raw path's slot ordering or confirm
-  raw `start` is unreachable once the enum no longer routes through it (a live
-  benchmark still calls it — see F4).
+- [x] **F2 — OCI+overlay+verity `/dev/vdb` device-ordering panic (raw libkrun
+  path) — DORMANT, folds into F4.** Raw `LibkrunBackend::start`'s verity disk
+  layout points `mvm.data=/dev/vdb` at the verity *hash* sidecar, so
+  `mvm-verity-init` panicked (`ext4 superblock magic mismatch`) before the agent
+  on pre-flip `main`. Post-flip this branch is **unreachable**: no production
+  path constructs raw `LibkrunBackend` (the `AnyBackend::Libkrun` enum is the
+  runner, which maps `/dev/vda`=rootfs correctly — proven live); the sole
+  remaining caller of raw `start` is the `bench_probe` benchmark, whose
+  `VmStartConfig` sets no `verity_path`/`roothash`, so `libkrun_verity_enabled`
+  is false and it never takes the verity branch. No fix warranted — the buggy
+  branch is removed with raw `start` in F4.
 
 - [ ] **F3 — `FcDriver`.** Converge Firecracker onto the runner, same pattern as
   `LibkrunDriver`: a `VmmSpec` → Firecracker driver, no guest NIC, egress via
