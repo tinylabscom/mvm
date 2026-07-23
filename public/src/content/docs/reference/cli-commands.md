@@ -610,6 +610,7 @@ host registry records.
 | `mvmctl machine checkpoint fork <checkpoint> [--new-id <name>] [--boot] [--json]` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). `vm_full` forks auto-boot; `fs_quick` forks boot only with `--boot`. |
 | `mvmctl machine checkpoint ls [--json]` | List checkpoints. |
 | `mvmctl machine checkpoint diff <a> <b> [--json]` | Compare two checkpoint metadata/content manifests. |
+| `mvmctl machine checkpoint verify <checkpoint> [--json]` | Verify a checkpoint's full lineage against the signed audit chain (recomputed content-address must match both the stored `meta_digest` and the digest signed at creation, at every hop). Exits nonzero on any drift, chain mismatch, missing signed entry, or broken lineage. |
 | `mvmctl machine checkpoint rm <checkpoint> [--json]` | Delete a checkpoint and its blobs. |
 | `mvmctl machine snapshot ls [--json]` | List sealed Firecracker instance snapshots. |
 | `mvmctl machine snapshot rm <name> [--json]` | Delete a sealed Firecracker instance snapshot. |

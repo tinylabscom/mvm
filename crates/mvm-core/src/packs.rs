@@ -103,13 +103,17 @@ pub struct OciDigest(String);
 
 impl OciDigest {
     pub fn new(value: impl Into<String>) -> Result<Self, PackManifestError> {
+        use crate::digest_shape::Sha256PrefixedShape;
         let value = value.into();
-        if let Some(hex) = value.strip_prefix("sha256:")
-            && is_sha256_hex(hex)
-        {
-            return Ok(Self(value));
+        // Shares the `sha256:<64 lowercase hex>` shape check with the other
+        // prefixed content-address newtypes; this type keeps its single flat
+        // error, so every non-Ok shape maps to `InvalidOciDigest`.
+        match crate::digest_shape::validate_sha256_prefixed(&value) {
+            Sha256PrefixedShape::Ok => Ok(Self(value)),
+            Sha256PrefixedShape::MissingPrefix
+            | Sha256PrefixedShape::WrongLength { .. }
+            | Sha256PrefixedShape::NonHex { .. } => Err(PackManifestError::InvalidOciDigest(value)),
         }
-        Err(PackManifestError::InvalidOciDigest(value))
     }
 
     pub fn as_str(&self) -> &str {

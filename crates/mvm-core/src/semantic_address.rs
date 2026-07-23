@@ -60,23 +60,22 @@ impl SemanticAddress {
     pub const PREFIX: &'static str = "sha256:";
 
     /// Validates and wraps a `sha256:<64 lowercase hex>` string. Rejects any
-    /// other prefix, wrong length, or non-lowercase-hex content.
+    /// other prefix, wrong length, or non-lowercase-hex content. Shares the
+    /// shape check with every other prefixed content-address newtype so none
+    /// can drift.
     pub fn parse(value: impl Into<String>) -> Result<Self, SemanticAddressParseError> {
+        use crate::digest_shape::Sha256PrefixedShape;
         let value = value.into();
-        let hex_part = value
-            .strip_prefix(Self::PREFIX)
-            .ok_or_else(|| SemanticAddressParseError::MissingPrefix(value.clone()))?;
-        if hex_part.len() != 64 {
-            return Err(SemanticAddressParseError::WrongLength {
-                len: hex_part.len(),
-            });
-        }
-        for ch in hex_part.chars() {
-            if !matches!(ch, '0'..='9' | 'a'..='f') {
-                return Err(SemanticAddressParseError::NonHex { ch });
+        match crate::digest_shape::validate_sha256_prefixed(&value) {
+            Sha256PrefixedShape::Ok => Ok(Self(value)),
+            Sha256PrefixedShape::MissingPrefix => {
+                Err(SemanticAddressParseError::MissingPrefix(value))
             }
+            Sha256PrefixedShape::WrongLength { len } => {
+                Err(SemanticAddressParseError::WrongLength { len })
+            }
+            Sha256PrefixedShape::NonHex { ch } => Err(SemanticAddressParseError::NonHex { ch }),
         }
-        Ok(Self(value))
     }
 
     /// The `sha256:<64-hex>` string view.

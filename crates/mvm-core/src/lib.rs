@@ -13,6 +13,9 @@ pub mod checkpoint;
 pub mod client;
 pub mod config;
 pub mod dev_network;
+/// The single `sha256:<64 lowercase hex>` shape check every prefixed
+/// content-address newtype in this crate shares (crate-private).
+pub(crate) mod digest_shape;
 /// Host egress-broker decision logic (closed-by-default allow/deny per request).
 pub mod egress_broker;
 /// Egress-broker handler: compose decision + trace into an audit record.
