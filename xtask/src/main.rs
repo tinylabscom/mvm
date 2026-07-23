@@ -39,6 +39,7 @@ mod check_runtime_overlay_version;
 mod check_single_home;
 mod check_trust_gradient;
 mod check_two_surfaces;
+mod check_uniform_vsock_egress;
 mod check_vsock_only_egress;
 mod gen_stubs;
 mod ir_parity;
@@ -164,6 +165,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_vsock_only_egress::run(&workspace)
         }
+        Some("check-uniform-vsock-egress") => {
+            let workspace = workspace_root();
+            check_uniform_vsock_egress::run(&workspace)
+        }
         Some("check-require-grant-token-allowlist") => {
             let workspace = workspace_root();
             check_require_grant_token_allowlist::run(&workspace)
@@ -208,7 +213,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {

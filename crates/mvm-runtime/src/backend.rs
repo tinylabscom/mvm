@@ -853,26 +853,6 @@ impl AnyBackend {
         self.inner().start(config)
     }
 
-    /// Start a VM using a pre-built `FirecrackerConfig`.
-    ///
-    /// This is a convenience method for callers that already have a
-    /// `FlakeRunConfig` (e.g., template snapshot restore). Prefer
-    /// [`start`](Self::start) for new VMs.
-    pub fn start_firecracker(&self, config: &FirecrackerConfig) -> Result<VmId> {
-        match self {
-            Self::Firecracker(_) => {
-                microvm::run_from_build(&config.run_config)?;
-                Ok(VmId(config.run_config.name.clone()))
-            }
-            _ => {
-                anyhow::bail!(
-                    "Cannot start Firecracker config with {} backend",
-                    self.name()
-                )
-            }
-        }
-    }
-
     pub fn stop(&self, id: &VmId) -> Result<()> {
         self.inner().stop(id)
     }
