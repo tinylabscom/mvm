@@ -125,7 +125,16 @@ where
                 encode_response(&question, DnsRcode::Refused, &[])
             }
         },
-        Err(_) => encode_malformed_refusal(&query),
+        Err(_) => {
+            // Count the malformed frame against the same limiter and audit it,
+            // so a malformed-frame flood is throttled like valid queries and no
+            // query escapes the chain-signed log.
+            let _ = rate_guard.admit().await;
+            if let Some(recorder) = recorder {
+                dns_audit::emit_dns_malformed(recorder).await;
+            }
+            encode_malformed_refusal(&query)
+        }
     };
     write_frame_async(&mut guest, &response, timeout).await
 }
@@ -251,7 +260,15 @@ pub fn serve_dns_blocking(
                 encode_response(&question, DnsRcode::Refused, &[])
             }
         },
-        Err(_) => encode_malformed_refusal(&query),
+        Err(_) => {
+            // Count the malformed frame against the limiter and audit it — every
+            // query leaves a trace, malformed floods are throttled.
+            let _ = rate_guard.try_admit();
+            if let Some(recorder) = recorder {
+                dns_audit::emit_dns_malformed_blocking(recorder);
+            }
+            encode_malformed_refusal(&query)
+        }
     };
     let length = u16::try_from(response.len()).map_err(|_| invalid_frame_length())?;
     guest.write_all(&length.to_be_bytes())?;
@@ -351,6 +368,39 @@ mod tests {
         assert_eq!(
             entries[0].labels.get("qname").map(String::as_str),
             Some("blocked.test")
+        );
+    }
+
+    #[tokio::test]
+    async fn audits_a_malformed_query_without_a_lookup() {
+        let gate = EgressGate::default_deny();
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let recorder = Arc::new(Recorder::new(signer.clone(), TenantId("local".to_string())));
+        let (mut client, server) = tokio::io::duplex(4096);
+        let handler_recorder = Arc::clone(&recorder);
+        let handler = tokio::spawn(async move {
+            serve_dns(
+                server,
+                &gate,
+                Some(&handler_recorder),
+                &DnsRateGuard::default(),
+                Duration::from_secs(1),
+            )
+            .await
+        });
+
+        // A compression-pointer label byte (0xc0 > 63) makes decode_query fail.
+        let malformed = vec![0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0xc0, 0x0c, 0, 1, 0, 1];
+        let response = exchange_query(&mut client, &malformed).await;
+        assert_eq!(response[3] & 0x0f, 5, "malformed query is refused");
+        handler.await.unwrap().unwrap();
+
+        let entries = signer.entries();
+        assert_eq!(entries.len(), 1, "a malformed query is still audited");
+        assert_eq!(entries[0].event, "dns.refused");
+        assert_eq!(
+            entries[0].labels.get("verdict").map(String::as_str),
+            Some("malformed")
         );
     }
 

@@ -42,6 +42,19 @@ pub async fn emit_dns_rate_limited(recorder: &Recorder, name: &str, qtype: DnsRe
     .await;
 }
 
+/// Record a DNS query refused because it failed to decode. No qname/qtype is
+/// recoverable, so the entry carries the `malformed` verdict with empty
+/// name/type — every query, valid or not, leaves a trace in the chain.
+pub async fn emit_dns_malformed(recorder: &Recorder) {
+    record_dns(recorder, "dns.refused", "", "", "malformed", String::new()).await;
+}
+
+/// Record a malformed DNS query from the blocking vsock transport.
+#[cfg(target_os = "linux")]
+pub fn emit_dns_malformed_blocking(recorder: &Recorder) {
+    emit_blocking("", emit_dns_malformed(recorder));
+}
+
 async fn emit_dns_event(
     recorder: &Recorder,
     name: &str,
@@ -54,17 +67,28 @@ async fn emit_dns_event(
         DnsRecordType::A => "a",
         DnsRecordType::Aaaa => "aaaa",
     };
+    record_dns(recorder, event, name, qtype, verdict_label, ips).await;
+}
+
+async fn record_dns(
+    recorder: &Recorder,
+    event: &'static str,
+    qname: &str,
+    qtype: &str,
+    verdict: &str,
+    ips: String,
+) {
     let labels = [
-        ("qname".to_string(), name.to_string()),
+        ("qname".to_string(), qname.to_string()),
         ("qtype".to_string(), qtype.to_string()),
-        ("verdict".to_string(), verdict_label.to_string()),
+        ("verdict".to_string(), verdict.to_string()),
         ("ips".to_string(), ips),
     ];
     if let Err(error) = recorder
         .record_unbound(EventCategory::Dns, event, labels)
         .await
     {
-        tracing::warn!(%error, qname = %name, "DNS audit emit failed");
+        tracing::warn!(%error, qname = %qname, "DNS audit emit failed");
     }
 }
 
@@ -193,6 +217,28 @@ mod tests {
             Some("rate_limited")
         );
         assert_eq!(entries[0].labels.get("ips").map(String::as_str), Some(""));
+        assert_eq!(metrics.snapshot().audit_dns_total, 1);
+    }
+
+    #[tokio::test]
+    async fn emits_malformed_query_as_a_distinct_refusal() {
+        let (recorder, signer, metrics) = fixture();
+        emit_dns_malformed(&recorder).await;
+
+        let entries = signer.entries();
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.event, "dns.refused");
+        assert_eq!(
+            entry.labels.get("verdict").map(String::as_str),
+            Some("malformed")
+        );
+        assert_eq!(entry.labels.get("qname").map(String::as_str), Some(""));
+        assert_eq!(
+            entry.labels.len(),
+            5,
+            "malformed keeps the fixed DNS schema"
+        );
         assert_eq!(metrics.snapshot().audit_dns_total, 1);
     }
 }
