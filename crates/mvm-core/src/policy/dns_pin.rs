@@ -53,7 +53,7 @@ pub fn resolve_network_policy_pins(
         return reg; // unrestricted: no host rules to pin
     };
     for hp in rules {
-        let ips: Vec<IpAddr> = if let Ok(ip) = hp.host.parse::<IpAddr>() {
+        let mut ips: Vec<IpAddr> = if let Ok(ip) = hp.host.parse::<IpAddr>() {
             vec![ip]
         } else {
             (hp.host.as_str(), 0u16)
@@ -61,9 +61,18 @@ pub fn resolve_network_policy_pins(
                 .map(|addrs| addrs.map(|sa| sa.ip()).collect())
                 .unwrap_or_default()
         };
+        sort_ipv4_first(&mut ips);
         reg.add(new_pin(hp.host, ips, Duration::hours(24)));
     }
     reg
+}
+
+/// Order an address set IPv4-first, stable within each family. Host resolvers
+/// commonly return IPv6 first (macOS `getaddrinfo` does), which strands an
+/// admitted connect when the host has no IPv6 egress. Pinning IPv4-first makes
+/// the downstream happy-eyeballs connect prefer the routable IPv4 address.
+pub fn sort_ipv4_first(ips: &mut [IpAddr]) {
+    ips.sort_by_key(|ip| ip.is_ipv6());
 }
 
 #[cfg(test)]
@@ -107,6 +116,29 @@ mod tests {
         assert_eq!(
             reg.lookup("1.1.1.1").unwrap().ips,
             vec!["1.1.1.1".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn sort_ipv4_first_orders_v4_before_v6_stably() {
+        // Mirrors the macOS getaddrinfo order for a dual-stack host: IPv6 first.
+        // After sorting, both IPv4 addresses lead and within-family order is
+        // preserved so the connect prefers the routable IPv4 pin.
+        let mut ips = vec![
+            ip("2606:4700:10::6814:179a"),
+            ip("2606:4700:10::ac42:93f3"),
+            ip("172.66.147.243"),
+            ip("104.20.23.154"),
+        ];
+        sort_ipv4_first(&mut ips);
+        assert_eq!(
+            ips,
+            vec![
+                ip("172.66.147.243"),
+                ip("104.20.23.154"),
+                ip("2606:4700:10::6814:179a"),
+                ip("2606:4700:10::ac42:93f3"),
+            ]
         );
     }
 
