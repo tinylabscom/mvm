@@ -1017,7 +1017,6 @@ fn run_inner(
         backend: &backend,
         start_config: &start_config,
         resolved: &resolved,
-        staging_dir: &staging_dir,
     };
     let vm_name = boot_transient_vm(vm_name, use_snapshot, &boot_attempt)?;
     let t_backend_started = timing.then(std::time::Instant::now);
@@ -1337,7 +1336,6 @@ struct BootAttempt<'a> {
     backend: &'a AnyBackend,
     start_config: &'a VmStartConfig,
     resolved: &'a ResolvedImage,
-    staging_dir: &'a str,
 }
 
 /// Boot the transient VM: try to claim a warm standby first, then a
@@ -1426,7 +1424,7 @@ fn boot_transient_vm(
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if let Err(e) = attempt.backend.start(attempt.start_config) {
-            remove_transient_state_dir(attempt.staging_dir);
+            remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
             return Err(e).context("starting transient microVM");
         }
     }
@@ -1456,7 +1454,9 @@ fn install_ctrlc_teardown(
 
 /// Tear down the transient VM after the guest command finishes (or fails to
 /// dispatch): stop the backend VM, top up the warm pool toward its target,
-/// sync back any writable `--add-dir` mounts, and remove the staging dir.
+/// sync back any writable `--add-dir` mounts, and remove the host VM state
+/// directory (`~/.mvm/vms/<name>`), which includes the `extras` staging
+/// subdirectory and any backend files such as `hvf.pid` / `console.log`.
 ///
 /// The caller invokes this unconditionally after capturing the guest
 /// command's `Result` in a local — there is no `?` between the backend
@@ -1497,7 +1497,7 @@ fn teardown_transient_vm(
         }
     }
 
-    remove_transient_state_dir(staging_dir);
+    remove_transient_state_dir(&mvm_core::config::vm_state_dir(vm_name).to_string_lossy());
 }
 
 /// Restore a transient microVM from a template snapshot instead of cold-booting.
