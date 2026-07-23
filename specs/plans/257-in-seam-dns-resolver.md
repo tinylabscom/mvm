@@ -567,7 +567,7 @@ pub fn seed_loopback_resolver() -> Result<(), String>; // writes "nameserver 127
 **Interfaces**: none (BDD text + existing steps).
 
 **TDD steps** (live lane; run on a host with a working backend, `MVM_BDD_LIVE=1`)
-- [ ] **Step 1: Add scenarios** (guest commands need no extra tooling — resolution is proven through a proxied fetch of an allow-listed name, and refusal through a non-admitted name; avoid `nslookup`/`getent`, absent in bare alpine).
+- [x] **Step 1: Add scenarios** (guest commands need no extra tooling — resolution is proven through a proxied fetch of an allow-listed name, and refusal through a non-admitted name; avoid `nslookup`/`getent`, absent in bare alpine).
 ```gherkin
   @live
   Scenario: An admitted name resolves and connects through the in-seam resolver
@@ -583,14 +583,17 @@ pub fn seed_loopback_resolver() -> Result<(), String>; // writes "nameserver 127
   @live
   Scenario: DNS queries land in the chain-signed audit log
     When I run mvmctl with "machine run --image alpine --allow-host example.com -- wget -q -O - https://example.com"
-    And I run mvmctl with "trust audit verify"
+    Then the command exits with code 0
+    When I run mvmctl with "trust audit verify"
+    Then the command exits with code 0
+    When I run mvmctl with "trust audit tail --chain --lines 50"
     Then the command exits with code 0
     And the output contains "dns.resolved"
 ```
-- [ ] **Step 2: Run hermetic lane first (must not regress).** `cargo nextest run -p mvm-conformance` (the `@live` scenarios skip without `MVM_BDD_LIVE`).
-- [ ] **Step 3: Run live on a backend host.** `MVM_BDD_LIVE=1 cargo nextest run -p mvm-conformance` — expect PASS. (Defer to the KVM/HVF box per the live-witness policy; CI gates the hermetic path.)
-- [ ] **Step 4: Update `xtask check-claim-catalog` witness rows;** run `cargo run -p xtask -- check-claim-catalog`.
-- [ ] **Step 5: Commit.** `test(bdd): in-seam DNS live scenarios + claim-10 witness wiring`.
+- [x] **Step 2: Run hermetic lane first (must not regress).** `cargo test -p mvm-conformance --test conformance --features bdd` passed 2 features / 9 scenarios / 46 steps; the crate's `harness = false` cucumber target is not discovered by nextest, and the `@live` scenarios skip without `MVM_BDD_LIVE`.
+- [x] **Step 3: Assign live execution to the backend witness lane.** `MVM_BDD_LIVE=1 cargo test -p mvm-conformance --test conformance --features bdd` remains deferred to the KVM/HVF box per the live-witness policy; it was not run on this host.
+- [x] **Step 4: Update `xtask check-claim-catalog` witness rows;** `cargo run -p xtask -- check-claim-catalog` passed with 16 claims / 41 witnesses verified.
+- [x] **Step 5: Commit.** `test(bdd): in-seam DNS live scenarios + claim-10 witness wiring`.
 
 ---
 
