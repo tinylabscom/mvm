@@ -162,6 +162,74 @@ fn resolve_effective_initrd(config: &FlakeRunConfig) -> Result<Option<String>> {
     Ok(effective_initrd)
 }
 
+// ── Firecracker per-device API PUT body builders ─────────────────────────────
+//
+// One scalar-parameterized builder per device body, shared by the raw flake
+// path (the `configure_*` functions below) and the converged NIC-less driver.
+// A field change to any body now lands in exactly one place instead of drifting
+// between two copies. The `api_put_socket` call stays per-caller; only the
+// body-string construction is shared.
+
+/// Firecracker `/logger` PUT body. `log_dir` is the per-VM directory whose
+/// `firecracker.log` the VMM writes.
+pub fn logger_body(log_dir: &str) -> String {
+    format!(
+        r#"{{"log_path": "{log_dir}/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true}}"#,
+    )
+}
+
+/// Firecracker `/machine-config` PUT body: vCPU count and memory size.
+pub fn machine_config_body(vcpus: u32, mem_mib: u32) -> String {
+    format!(r#"{{"vcpu_count": {vcpus}, "mem_size_mib": {mem_mib}}}"#)
+}
+
+/// Firecracker `/boot-source` PUT body. The `initrd_path` field is emitted only
+/// when an initramfs is present, matching the two shapes the API accepts (an
+/// initramfs boot owns root mounting; a plain boot lets the kernel mount vda).
+pub fn boot_source_body(
+    kernel_image_path: &str,
+    boot_args: &str,
+    initrd_path: Option<&str>,
+) -> String {
+    match initrd_path {
+        Some(initrd) => format!(
+            r#"{{"kernel_image_path": "{kernel_image_path}", "boot_args": "{boot_args}", "initrd_path": "{initrd}"}}"#,
+        ),
+        None => {
+            format!(r#"{{"kernel_image_path": "{kernel_image_path}", "boot_args": "{boot_args}"}}"#,)
+        }
+    }
+}
+
+/// Firecracker `/drives/<id>` PUT body. Firecracker assigns guest device letters
+/// in API-call order, so the caller owns the ordering; this only shapes one
+/// drive's JSON.
+pub fn drive_body(
+    drive_id: &str,
+    path_on_host: &str,
+    is_root_device: bool,
+    is_read_only: bool,
+) -> String {
+    format!(
+        r#"{{"drive_id": "{drive_id}", "path_on_host": "{path_on_host}", "is_root_device": {is_root_device}, "is_read_only": {is_read_only}}}"#,
+    )
+}
+
+/// Firecracker `/vsock` PUT body: the single vsock device (`vsock0`) with the
+/// guest CID and the host-side UDS the mux binds.
+pub fn vsock_body(guest_cid: u32, uds_path: &str) -> String {
+    format!(r#"{{"vsock_id": "vsock0", "guest_cid": {guest_cid}, "uds_path": "{uds_path}"}}"#)
+}
+
+/// Firecracker `/balloon` PUT body. `deflate_on_oom` is always on so the device
+/// yields pages back under guest memory pressure instead of letting the guest
+/// OOM-kill the workload while the host still has memory to give.
+pub fn balloon_body(amount_mib: u32) -> String {
+    format!(
+        r#"{{"amount_mib": {amount_mib}, "deflate_on_oom": true, "stats_polling_interval_s": 1}}"#
+    )
+}
+
 /// Configure a flake-built microVM via the Firecracker API (multi-VM).
 #[instrument(skip_all, fields(name = %config.name))]
 pub fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str) -> Result<()> {
@@ -198,14 +266,7 @@ pub fn configure_flake_microvm_with_drives_dir(
 /// Configure the Firecracker logger sink (`/logger`).
 fn configure_logger(socket: &str, abs_dir: &str) -> Result<()> {
     ui::info("Configuring logger...");
-    api_put_socket(
-        socket,
-        "/logger",
-        &format!(
-            r#"{{"log_path": "{dir}/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true}}"#,
-            dir = abs_dir,
-        ),
-    )
+    api_put_socket(socket, "/logger", &logger_body(abs_dir))
 }
 
 /// Configure the Firecracker boot source (`/boot-source`): kernel image
@@ -310,27 +371,13 @@ fn configure_boot_source(
             .with_context(|| {
                 format!("preparing FC-loadable kernel from {}", config.vmlinux_path)
             })?;
-    let kernel_for_boot = kernel_for_boot.display();
+    let kernel_for_boot = kernel_for_boot.display().to_string();
 
     ui::info(&format!("Setting boot source: {kernel_for_boot}"));
-    let boot_source = match &effective_initrd {
-        Some(initrd) => {
-            ui::info(&format!("Using initrd: {}", initrd));
-            format!(
-                r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}", "initrd_path": "{initrd}"}}"#,
-                kernel = kernel_for_boot,
-                args = boot_args,
-                initrd = initrd,
-            )
-        }
-        None => {
-            format!(
-                r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}"}}"#,
-                kernel = kernel_for_boot,
-                args = boot_args,
-            )
-        }
-    };
+    if let Some(initrd) = &effective_initrd {
+        ui::info(&format!("Using initrd: {}", initrd));
+    }
+    let boot_source = boot_source_body(&kernel_for_boot, &boot_args, effective_initrd.as_deref());
     api_put_socket(socket, "/boot-source", &boot_source)
 }
 
@@ -344,11 +391,7 @@ fn configure_machine(socket: &str, config: &FlakeRunConfig) -> Result<()> {
     api_put_socket(
         socket,
         "/machine-config",
-        &format!(
-            r#"{{"vcpu_count": {cpus}, "mem_size_mib": {mem}}}"#,
-            cpus = config.cpus,
-            mem = config.memory,
-        ),
+        &machine_config_body(config.cpus, config.memory),
     )
 }
 
@@ -372,11 +415,7 @@ fn configure_drives(
     api_put_socket(
         socket,
         "/drives/rootfs",
-        &format!(
-            r#"{{"drive_id": "rootfs", "path_on_host": "{rootfs}", "is_root_device": true, "is_read_only": {ro}}}"#,
-            rootfs = config.rootfs_path,
-            ro = rootfs_read_only,
-        ),
+        &drive_body("rootfs", &config.rootfs_path, true, rootfs_read_only),
     )?;
 
     // dm-verity Merkle tree → /dev/vdb. Firecracker assigns drive
@@ -388,10 +427,7 @@ fn configure_drives(
         api_put_socket(
             socket,
             "/drives/verity",
-            &format!(
-                r#"{{"drive_id": "verity", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-                path = verity_path,
-            ),
+            &drive_body("verity", verity_path, false, true),
         )?;
     }
 
@@ -406,10 +442,7 @@ fn configure_drives(
         api_put_socket(
             socket,
             "/drives/runtime_overlay",
-            &format!(
-                r#"{{"drive_id": "runtime_overlay", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-                path = overlay_path,
-            ),
+            &drive_body("runtime_overlay", overlay_path, false, true),
         )?;
         if config.roothash.is_some() {
             ui::info(&format!(
@@ -419,10 +452,7 @@ fn configure_drives(
             api_put_socket(
                 socket,
                 "/drives/runtime_verity",
-                &format!(
-                    r#"{{"drive_id": "runtime_verity", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-                    path = overlay_verity_path,
-                ),
+                &drive_body("runtime_verity", overlay_verity_path, false, true),
             )?;
         }
     }
@@ -433,10 +463,7 @@ fn configure_drives(
     api_put_socket(
         socket,
         "/drives/config",
-        &format!(
-            r#"{{"drive_id": "config", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-            path = config_drive,
-        ),
+        &drive_body("config", &config_drive, false, true),
     )?;
 
     // Attach the mvm-secrets drive ONLY when there is something to put on it.
@@ -453,10 +480,7 @@ fn configure_drives(
         api_put_socket(
             socket,
             "/drives/secrets",
-            &format!(
-                r#"{{"drive_id": "secrets", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-                path = secrets_drive,
-            ),
+            &drive_body("secrets", &secrets_drive, false, true),
         )?;
     }
 
@@ -470,12 +494,7 @@ fn configure_drives(
         api_put_socket(
             socket,
             &format!("/drives/{}", drive_id),
-            &format!(
-                r#"{{"drive_id": "{id}", "path_on_host": "{host}", "is_root_device": false, "is_read_only": {ro}}}"#,
-                id = drive_id,
-                host = vol.host,
-                ro = vol.read_only,
-            ),
+            &drive_body(&drive_id, &vol.host, false, vol.read_only),
         )?;
     }
 
@@ -508,11 +527,7 @@ fn configure_vsock(socket: &str, drives_dir: &str) -> Result<()> {
     api_put_socket(
         socket,
         "/vsock",
-        &format!(
-            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{vsock}"}}"#,
-            cid = mvm_agentd::vsock::GUEST_CID,
-            vsock = vsock,
-        ),
+        &vsock_body(mvm_agentd::vsock::GUEST_CID, &vsock),
     )
 }
 
@@ -533,14 +548,7 @@ fn configure_balloon(socket: &str, config: &FlakeRunConfig) -> Result<()> {
             "Attaching virtio-balloon (cap {} MiB, initial commit {} MiB, balloon {} MiB)",
             config.memory, initial, amount_mib
         ));
-        api_put_socket(
-            socket,
-            "/balloon",
-            &format!(
-                r#"{{"amount_mib": {amount}, "deflate_on_oom": true, "stats_polling_interval_s": 1}}"#,
-                amount = amount_mib,
-            ),
-        )?;
+        api_put_socket(socket, "/balloon", &balloon_body(amount_mib))?;
     }
     Ok(())
 }
@@ -576,6 +584,130 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::default(),
             network_tunnel: None,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Firecracker API body builders — byte-identical pins
+    //
+    // These lock each shared body builder to the exact JSON the raw flake path
+    // emitted inline before the extraction, so the driver and the raw path can
+    // never silently diverge and the raw (Linux production default) path stays
+    // byte-for-byte unchanged.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn logger_body_pins_the_exact_json() {
+        let legacy = format!(
+            r#"{{"log_path": "{dir}/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true}}"#,
+            dir = "/vms/w",
+        );
+        assert_eq!(logger_body("/vms/w"), legacy);
+        assert_eq!(
+            logger_body("/vms/w"),
+            r#"{"log_path": "/vms/w/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true}"#,
+        );
+    }
+
+    #[test]
+    fn machine_config_body_pins_the_exact_json() {
+        let legacy = format!(
+            r#"{{"vcpu_count": {cpus}, "mem_size_mib": {mem}}}"#,
+            cpus = 2,
+            mem = 1024,
+        );
+        assert_eq!(machine_config_body(2, 1024), legacy);
+        assert_eq!(
+            machine_config_body(2, 1024),
+            r#"{"vcpu_count": 2, "mem_size_mib": 1024}"#,
+        );
+    }
+
+    #[test]
+    fn boot_source_body_pins_both_shapes() {
+        // No initramfs: kernel + boot_args only.
+        let legacy_plain = format!(
+            r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}"}}"#,
+            kernel = "/img/vmlinux",
+            args = "console=ttyS0",
+        );
+        assert_eq!(
+            boot_source_body("/img/vmlinux", "console=ttyS0", None),
+            legacy_plain,
+        );
+        assert_eq!(
+            boot_source_body("/img/vmlinux", "console=ttyS0", None),
+            r#"{"kernel_image_path": "/img/vmlinux", "boot_args": "console=ttyS0"}"#,
+        );
+
+        // With initramfs: the initrd_path field is appended.
+        let legacy_initrd = format!(
+            r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}", "initrd_path": "{initrd}"}}"#,
+            kernel = "/img/vmlinux",
+            args = "console=ttyS0",
+            initrd = "/img/initrd.cpio",
+        );
+        assert_eq!(
+            boot_source_body("/img/vmlinux", "console=ttyS0", Some("/img/initrd.cpio")),
+            legacy_initrd,
+        );
+        assert_eq!(
+            boot_source_body("/img/vmlinux", "console=ttyS0", Some("/img/initrd.cpio")),
+            r#"{"kernel_image_path": "/img/vmlinux", "boot_args": "console=ttyS0", "initrd_path": "/img/initrd.cpio"}"#,
+        );
+    }
+
+    #[test]
+    fn drive_body_pins_root_and_non_root_shapes() {
+        // Root device, read-write (the plain-rootfs unverified boot).
+        let legacy_root = format!(
+            r#"{{"drive_id": "rootfs", "path_on_host": "{rootfs}", "is_root_device": true, "is_read_only": {ro}}}"#,
+            rootfs = "/k/rootfs.ext4",
+            ro = false,
+        );
+        assert_eq!(
+            drive_body("rootfs", "/k/rootfs.ext4", true, false),
+            legacy_root,
+        );
+        assert_eq!(
+            drive_body("rootfs", "/k/rootfs.ext4", true, false),
+            r#"{"drive_id": "rootfs", "path_on_host": "/k/rootfs.ext4", "is_root_device": true, "is_read_only": false}"#,
+        );
+
+        // Non-root read-only sidecar (verity/overlay/config/secrets shape).
+        let legacy_sidecar = format!(
+            r#"{{"drive_id": "verity", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
+            path = "/k/rootfs.verity",
+        );
+        assert_eq!(
+            drive_body("verity", "/k/rootfs.verity", false, true),
+            legacy_sidecar,
+        );
+    }
+
+    #[test]
+    fn vsock_body_pins_the_exact_json() {
+        let legacy = format!(
+            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{vsock}"}}"#,
+            cid = mvm_agentd::vsock::GUEST_CID,
+            vsock = "/vms/w/runtime/v.sock",
+        );
+        assert_eq!(
+            vsock_body(mvm_agentd::vsock::GUEST_CID, "/vms/w/runtime/v.sock"),
+            legacy,
+        );
+    }
+
+    #[test]
+    fn balloon_body_pins_the_exact_json() {
+        let legacy = format!(
+            r#"{{"amount_mib": {amount}, "deflate_on_oom": true, "stats_polling_interval_s": 1}}"#,
+            amount = 384,
+        );
+        assert_eq!(balloon_body(384), legacy);
+        assert_eq!(
+            balloon_body(384),
+            r#"{"amount_mib": 384, "deflate_on_oom": true, "stats_polling_interval_s": 1}"#,
+        );
     }
 
     // ------------------------------------------------------------------

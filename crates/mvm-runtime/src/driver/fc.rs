@@ -28,11 +28,10 @@ use mvm_core::vm_backend::{
 use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
 use crate::driver::{BlockDev, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection};
-use crate::microvm::{api_put_socket, firecracker_vsock_uds_path, start_vm_firecracker};
-
-/// File name of Firecracker's PID marker under the VM state dir. Written by
-/// `start_vm_firecracker` and read back by the running-VM handle for kill/status.
-const FC_PID_FILE: &str = "fc.pid";
+use crate::microvm::{
+    api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
+    firecracker_vsock_uds_path, logger_body, machine_config_body, start_vm_firecracker, vsock_body,
+};
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
 /// `connect_to_port` retries the CONNECT handshake internally within this bound.
@@ -120,14 +119,17 @@ fn fc_drive_puts(blocks: &[BlockDev]) -> Vec<FcApiPut> {
         .enumerate()
         .map(|(index, block)| {
             let drive_id = format!("blk{}", block.slot);
+            // The lowest-slot block (first PUT) is the root device; each block
+            // keeps its own read-only policy. Body shape shared with the raw path.
+            let body = drive_body(
+                &drive_id,
+                &block.source.to_string_lossy(),
+                index == 0,
+                block.read_only,
+            );
             FcApiPut {
                 path: format!("/drives/{drive_id}"),
-                body: format!(
-                    r#"{{"drive_id": "{drive_id}", "path_on_host": "{path}", "is_root_device": {root}, "is_read_only": {ro}}}"#,
-                    path = block.source.to_string_lossy(),
-                    root = index == 0,
-                    ro = block.read_only,
-                ),
+                body,
             }
         })
         .collect()
@@ -149,9 +151,7 @@ fn fc_config_api_puts(
 
     puts.push(FcApiPut {
         path: "/logger".to_string(),
-        body: format!(
-            r#"{{"log_path": "{log_dir}/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true}}"#,
-        ),
+        body: logger_body(log_dir),
     });
 
     // An empty spec cmdline means "the driver supplies its own default base";
@@ -164,37 +164,25 @@ fn fc_config_api_puts(
     } else {
         trimmed.to_string()
     };
-    let boot_source = match &spec.initramfs {
-        Some(initramfs) => format!(
-            r#"{{"kernel_image_path": "{kernel_for_boot}", "boot_args": "{cmdline}", "initrd_path": "{initrd}"}}"#,
-            initrd = initramfs.to_string_lossy(),
-        ),
-        None => {
-            format!(r#"{{"kernel_image_path": "{kernel_for_boot}", "boot_args": "{cmdline}"}}"#,)
-        }
-    };
+    let initrd = spec
+        .initramfs
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
     puts.push(FcApiPut {
         path: "/boot-source".to_string(),
-        body: boot_source,
+        body: boot_source_body(kernel_for_boot, &cmdline, initrd.as_deref()),
     });
 
     puts.push(FcApiPut {
         path: "/machine-config".to_string(),
-        body: format!(
-            r#"{{"vcpu_count": {cpus}, "mem_size_mib": {mem}}}"#,
-            cpus = spec.vcpus,
-            mem = spec.memory_mib,
-        ),
+        body: machine_config_body(spec.vcpus, spec.memory_mib),
     });
 
     puts.extend(fc_drive_puts(&spec.blocks));
 
     puts.push(FcApiPut {
         path: "/vsock".to_string(),
-        body: format!(
-            r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{vsock_uds}"}}"#,
-            cid = GUEST_CID,
-        ),
+        body: vsock_body(GUEST_CID, vsock_uds),
     });
 
     // Balloon only when the workload opted into elasticity: the device boots
@@ -204,9 +192,7 @@ fn fc_config_api_puts(
         let amount_mib = spec.memory_mib.saturating_sub(initial);
         puts.push(FcApiPut {
             path: "/balloon".to_string(),
-            body: format!(
-                r#"{{"amount_mib": {amount_mib}, "deflate_on_oom": true, "stats_polling_interval_s": 1}}"#,
-            ),
+            body: balloon_body(amount_mib),
         });
     }
 
@@ -281,6 +267,86 @@ fn spawn_workload_exit_capture(runtime_dir: &Path, state_dir: &Path) {
     }
 }
 
+/// The stop signal to deliver to the Firecracker process during teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FcStopSignal {
+    /// Graceful termination — gives Firecracker a chance to close its
+    /// virtio-blk file descriptors.
+    Terminate,
+    /// Force kill after the grace window lapses.
+    ForceKill,
+}
+
+/// Where the kill escalation ended up, so the caller can fail closed rather
+/// than report a stop that never happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillOutcome {
+    /// The process was already gone before we signalled.
+    AlreadyStopped,
+    /// The process exited after SIGTERM or SIGKILL.
+    Stopped,
+    /// The process was still alive after both signals — the signal could not be
+    /// delivered.
+    StillRunning,
+}
+
+/// Deliver `signal` to the sudo-launched Firecracker process recorded in
+/// `pid_file`. Firecracker is started under `sudo` and runs as **root**, so a
+/// non-root `mvmctl` cannot signal it directly — a plain `libc::kill` returns
+/// `EPERM` and silently no-ops. The signal therefore goes through `sudo kill`,
+/// the same mechanism the raw stop path uses. Best-effort: a delivery failure
+/// is logged, and the caller's liveness probe is the authority on whether the
+/// process actually stopped (so a lost race with a self-exiting process is not
+/// mistaken for a failure).
+fn fc_sudo_signal(pid_file: &str, signal: FcStopSignal) {
+    let flag = match signal {
+        FcStopSignal::Terminate => "",
+        FcStopSignal::ForceKill => " -9",
+    };
+    let q_pid = crate::base::shell::shell_quote(pid_file);
+    let script = format!(r#"[ -f {q_pid} ] && sudo kill{flag} "$(cat {q_pid})""#);
+    match crate::base::shell::run_in_vm(&script) {
+        Ok(out) if out.status.success() => {}
+        Ok(_) | Err(_) => tracing::warn!(
+            "Firecracker stop signal {signal:?} to pid in {pid_file} did not report success \
+             (the process may have already exited)"
+        ),
+    }
+}
+
+/// SIGTERM → grace → SIGKILL escalation against a Firecracker process, mirroring
+/// the raw stop path's shutdown escalation. The liveness probe, signal
+/// delivery, clock, and sleep are injected so the decision — "did the process
+/// stop, and if not did the signal even land?" — is unit-testable without a live
+/// VM or wall-clock waits.
+fn escalate_kill(
+    grace: Duration,
+    poll: Duration,
+    mut is_running: impl FnMut() -> Result<bool>,
+    mut signal: impl FnMut(FcStopSignal),
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> Result<KillOutcome> {
+    if !is_running()? {
+        return Ok(KillOutcome::AlreadyStopped);
+    }
+    signal(FcStopSignal::Terminate);
+    let deadline = now() + grace;
+    while now() < deadline {
+        if !is_running()? {
+            return Ok(KillOutcome::Stopped);
+        }
+        sleep(poll);
+    }
+    // Grace lapsed; force-kill and re-probe to decide whether the signal landed.
+    signal(FcStopSignal::ForceKill);
+    if is_running()? {
+        Ok(KillOutcome::StillRunning)
+    } else {
+        Ok(KillOutcome::Stopped)
+    }
+}
+
 impl VmmDriver for FcDriver {
     fn name(&self) -> &str {
         self.backend.name()
@@ -339,7 +405,8 @@ impl VmmDriver for FcDriver {
             .map_err(|e| anyhow!("create runtime dir {}: {e}", runtime_dir.display()))?;
 
         let abs_dir = state_dir.to_string_lossy().into_owned();
-        let pid_file = state_dir.join(FC_PID_FILE);
+        let pid_file = fc_pid_path(&spec.name)
+            .ok_or_else(|| anyhow!("resolve Firecracker pid path for '{}'", spec.name))?;
         // Clear any prior run's captured exit code and stale pid marker so `wait`
         // and the readiness poll observe only this launch's.
         let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
@@ -386,8 +453,20 @@ impl VmmDriver for FcDriver {
         // Confirm the guest is up: a successful agent CONNECT over the vsock mux
         // means userspace booted and the agent is listening. Bounded so a guest
         // that never comes up fails closed rather than hanging forever.
+        let pid_file_str = pid_file.to_string_lossy().into_owned();
         let deadline = Instant::now() + AGENT_READY_TIMEOUT;
         loop {
+            // Fail fast if Firecracker itself died on boot (kernel panic,
+            // rejected config) rather than waiting out the full agent deadline.
+            // The console log carries the actionable detail. Probed ownership-
+            // independently since a sudo-launched FC runs as root.
+            if !crate::firecracker::is_vm_running(&pid_file_str)? {
+                bail!(
+                    "Firecracker process for '{}' exited before its guest agent came up; see {}/console.log",
+                    spec.name,
+                    abs_dir
+                );
+            }
             if connect_to_port(&vsock_uds, GUEST_AGENT_PORT, VSOCK_CONNECT_TIMEOUT_SECS).is_ok() {
                 break;
             }
@@ -414,8 +493,10 @@ impl VmmDriver for FcDriver {
         // re-deriving those paths — no live boot state to recover.
         let state_dir = vm_state_dir(&id.0);
         let vsock_uds = firecracker_vsock_uds_path(&state_dir.to_string_lossy());
+        let pid_file = fc_pid_path(&id.0)
+            .ok_or_else(|| anyhow!("resolve Firecracker pid path for '{}'", id.0))?;
         Ok(Box::new(FcRunningVm {
-            pid_file: state_dir.join(FC_PID_FILE),
+            pid_file,
             state_dir,
             vsock_uds,
             id: id.clone(),
@@ -439,6 +520,36 @@ struct FcRunningVm {
     vsock_uds: String,
 }
 
+impl FcRunningVm {
+    /// The kill escalation with the grace timeout, liveness probe, signal
+    /// delivery, and clock injected, so the fail-closed pid-retention decision
+    /// is unit-testable without a live VM or a wall-clock grace wait. `kill`
+    /// wires the real FC `/proc` probe + sudo signal here.
+    fn kill_with(
+        &self,
+        grace: Duration,
+        poll: Duration,
+        is_running: impl FnMut() -> Result<bool>,
+        signal: impl FnMut(FcStopSignal),
+        now: impl FnMut() -> Instant,
+        sleep: impl FnMut(Duration),
+    ) -> Result<()> {
+        match escalate_kill(grace, poll, is_running, signal, now, sleep)? {
+            KillOutcome::AlreadyStopped | KillOutcome::Stopped => {
+                let _ = std::fs::remove_file(&self.pid_file);
+                Ok(())
+            }
+            // Fail closed: do NOT remove the pid file or report success when the
+            // signal never landed — that would orphan a live root VM silently.
+            KillOutcome::StillRunning => bail!(
+                "Firecracker VM '{}' is still running after SIGTERM and SIGKILL; \
+                 the stop signal could not be delivered",
+                self.id.0
+            ),
+        }
+    }
+}
+
 impl RunningVm for FcRunningVm {
     fn id(&self) -> &VmId {
         &self.id
@@ -451,23 +562,21 @@ impl RunningVm for FcRunningVm {
     }
 
     fn kill(&self) -> Result<()> {
-        // SIGTERM → grace → SIGKILL, the same escalation the libkrun running-VM
-        // uses: SIGTERM gives Firecracker a chance to close its virtio-blk fds,
-        // then SIGKILL if it ignores us within the grace window.
-        if let Some(pid) = crate::libkrun::read_pid(&self.pid_file)
-            && crate::libkrun::pid_alive(pid)
-        {
-            crate::libkrun::send_signal(pid, libc::SIGTERM);
-            let deadline = Instant::now() + crate::libkrun::STOP_TIMEOUT;
-            while Instant::now() < deadline && crate::libkrun::pid_alive(pid) {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if crate::libkrun::pid_alive(pid) {
-                crate::libkrun::send_signal(pid, libc::SIGKILL);
-            }
-        }
-        let _ = std::fs::remove_file(&self.pid_file);
-        Ok(())
+        // Firecracker is sudo-launched and runs as root, so the libkrun
+        // running-VM's plain `libc::kill` would return EPERM from a non-root
+        // mvmctl — neither stopping the VM nor reporting the failure. Signal
+        // through sudo (reaching the root process) and probe liveness
+        // ownership-independently via /proc/<pid>/comm; the escalation is
+        // SIGTERM → grace → SIGKILL, mirroring the raw stop path.
+        let pid_file = self.pid_file.to_string_lossy().into_owned();
+        self.kill_with(
+            crate::libkrun::STOP_TIMEOUT,
+            Duration::from_millis(100),
+            || crate::firecracker::is_vm_running(&pid_file),
+            |signal| fc_sudo_signal(&pid_file, signal),
+            Instant::now,
+            std::thread::sleep,
+        )
     }
 
     fn pause(&self) -> Result<()> {
@@ -481,10 +590,15 @@ impl RunningVm for FcRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        Ok(match crate::libkrun::read_pid(&self.pid_file) {
-            Some(pid) if crate::libkrun::pid_alive(pid) => VmStatus::Running,
-            _ => VmStatus::Stopped,
-        })
+        // Firecracker is sudo-launched and runs as root, so the libkrun
+        // running-VM's `libc::kill(pid, 0)` probe returns EPERM from a non-root
+        // mvmctl and would misreport a live VM as Stopped. Probe ownership-
+        // independently via /proc/<pid>/comm, reusing FC's own liveness helper.
+        if crate::firecracker::is_vm_running(&self.pid_file.to_string_lossy())? {
+            Ok(VmStatus::Running)
+        } else {
+            Ok(VmStatus::Stopped)
+        }
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -849,11 +963,209 @@ mod tests {
 
     #[test]
     fn attach_builds_a_disk_backed_handle_that_reports_stopped_for_a_missing_vm() {
+        // status probes /proc/<pid>/comm through the Linux shell env; mock it so
+        // the probe is deterministic on every host (a missing VM ⇒ "no").
+        let _guard = crate::base::shell_mock::install_handler(|_| {
+            crate::base::shell_mock::MockResponse::ok("no")
+        });
         let vm = FcDriver::new()
             .attach(&VmId("fc-nonexistent-attach-test-vm".into()))
             .unwrap();
         assert_eq!(vm.id().0, "fc-nonexistent-attach-test-vm");
         assert_eq!(vm.status().unwrap(), VmStatus::Stopped);
+    }
+
+    #[test]
+    fn status_uses_the_ownership_independent_probe_not_libc_kill() {
+        // A sudo-launched Firecracker runs as root, so libc::kill(pid, 0) from a
+        // non-root mvmctl returns EPERM and would misreport a live VM as Stopped.
+        // status must instead honour the /proc/<pid>/comm probe: "yes" ⇒ Running.
+        let vm = FcRunningVm {
+            id: VmId("root-vm".into()),
+            state_dir: PathBuf::from("/state/root-vm"),
+            pid_file: PathBuf::from("/state/root-vm/fc.pid"),
+            vsock_uds: "/state/root-vm/runtime/v.sock".into(),
+        };
+        let running = crate::base::shell_mock::install_handler(|_| {
+            crate::base::shell_mock::MockResponse::ok("yes")
+        });
+        assert_eq!(vm.status().unwrap(), VmStatus::Running);
+        drop(running);
+
+        let stopped = crate::base::shell_mock::install_handler(|_| {
+            crate::base::shell_mock::MockResponse::ok("no")
+        });
+        assert_eq!(vm.status().unwrap(), VmStatus::Stopped);
+        drop(stopped);
+    }
+
+    #[test]
+    fn kill_removes_the_pid_file_when_the_vm_is_already_gone() {
+        // A "no" liveness probe short-circuits the escalation: no signals sent,
+        // the pid marker cleaned up, Ok returned.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("fc.pid");
+        std::fs::write(&pid_file, "4242").unwrap();
+        let vm = FcRunningVm {
+            id: VmId("gone-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: pid_file.clone(),
+            vsock_uds: "/state/gone-vm/runtime/v.sock".into(),
+        };
+        let _guard = crate::base::shell_mock::install_handler(|_| {
+            crate::base::shell_mock::MockResponse::ok("no")
+        });
+        vm.kill().unwrap();
+        assert!(!pid_file.exists(), "pid marker must be removed on kill");
+    }
+
+    #[test]
+    fn escalate_kill_returns_already_stopped_without_signalling() {
+        let mut signals = Vec::new();
+        let outcome = escalate_kill(
+            Duration::from_secs(2),
+            Duration::from_millis(10),
+            || Ok(false),
+            |s| signals.push(s),
+            Instant::now,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome, KillOutcome::AlreadyStopped);
+        assert!(signals.is_empty(), "a dead process must not be signalled");
+    }
+
+    #[test]
+    fn escalate_kill_stops_after_sigterm_within_the_grace_window() {
+        use std::cell::Cell;
+        // Alive on the pre-check, gone on the first grace-loop probe.
+        let probes = Cell::new(0u32);
+        let is_running = || {
+            let n = probes.get();
+            probes.set(n + 1);
+            Ok(n < 1)
+        };
+        let mut signals = Vec::new();
+        // A large grace + fixed clock so the loop runs (and sees the exit) rather
+        // than the deadline being the reason it ends.
+        let base = Instant::now();
+        let outcome = escalate_kill(
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+            is_running,
+            |s| signals.push(s),
+            || base,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome, KillOutcome::Stopped);
+        assert_eq!(
+            signals,
+            vec![FcStopSignal::Terminate],
+            "a graceful exit must not escalate to SIGKILL"
+        );
+    }
+
+    #[test]
+    fn escalate_kill_fails_closed_when_the_signal_never_lands() {
+        // The process ignores both signals (a non-root kill of a root process
+        // that never reaches it): SIGTERM, then SIGKILL, then StillRunning.
+        let mut signals = Vec::new();
+        let base = Instant::now();
+        let tick = std::cell::Cell::new(0u64);
+        let now = || {
+            let n = tick.get();
+            tick.set(n + 1);
+            base + Duration::from_millis(n)
+        };
+        let outcome = escalate_kill(
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+            || Ok(true),
+            |s| signals.push(s),
+            now,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome, KillOutcome::StillRunning);
+        assert_eq!(
+            signals,
+            vec![FcStopSignal::Terminate, FcStopSignal::ForceKill],
+            "an unresponsive process must be escalated to SIGKILL"
+        );
+    }
+
+    #[test]
+    fn kill_fails_closed_and_keeps_the_pid_file_when_the_signal_cannot_land() {
+        // A liveness probe that always reports alive models a root VM a non-root
+        // mvmctl can't signal. kill_with (the injectable seam kill delegates to)
+        // must surface the failure and NOT remove the pid file — removing it
+        // would orphan a live root VM silently. Injected clock so no 2s wait.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("fc.pid");
+        std::fs::write(&pid_file, "4242").unwrap();
+        let vm = FcRunningVm {
+            id: VmId("wedged-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: pid_file.clone(),
+            vsock_uds: "/state/wedged-vm/runtime/v.sock".into(),
+        };
+        let base = Instant::now();
+        let tick = std::cell::Cell::new(0u64);
+        let now = || {
+            let n = tick.get();
+            tick.set(n + 1);
+            base + Duration::from_millis(n)
+        };
+        let err = vm
+            .kill_with(
+                Duration::from_millis(1),
+                Duration::from_millis(10),
+                || Ok(true),
+                |_| {},
+                now,
+                |_| {},
+            )
+            .expect_err("kill must fail closed when the signal can't land");
+        assert!(
+            err.to_string().contains("still running"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            pid_file.exists(),
+            "pid marker must survive a failed kill so the live VM isn't orphaned silently"
+        );
+    }
+
+    #[test]
+    fn fc_sudo_signal_routes_terminate_and_forcekill_through_sudo() {
+        use std::sync::{Arc, Mutex};
+        // Capture the emitted shell script to prove SIGTERM omits -9 and the
+        // force kill adds it — and that both go through sudo (root reach).
+        let scripts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = scripts.clone();
+        let _guard = crate::base::shell_mock::install_handler(move |s: &str| {
+            sink.lock().unwrap().push(s.to_string());
+            crate::base::shell_mock::MockResponse::empty()
+        });
+        fc_sudo_signal("/state/vm/fc.pid", FcStopSignal::Terminate);
+        fc_sudo_signal("/state/vm/fc.pid", FcStopSignal::ForceKill);
+        let captured = scripts.lock().unwrap();
+        assert!(
+            captured[0].contains("sudo kill "),
+            "SIGTERM: {}",
+            captured[0]
+        );
+        assert!(
+            !captured[0].contains("kill -9"),
+            "SIGTERM must not force: {}",
+            captured[0]
+        );
+        assert!(
+            captured[1].contains("sudo kill -9"),
+            "ForceKill: {}",
+            captured[1]
+        );
     }
 
     #[test]
@@ -889,7 +1201,7 @@ mod tests {
         let vm = FcRunningVm {
             id: VmId("agent-vm".into()),
             state_dir: dir.path().to_path_buf(),
-            pid_file: dir.path().join(FC_PID_FILE),
+            pid_file: dir.path().join("fc.pid"),
             vsock_uds: vsock.to_string_lossy().into_owned(),
         };
 
