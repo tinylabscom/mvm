@@ -509,7 +509,7 @@ async fn forward_query_over_vsock(query: &[u8]) -> std::io::Result<Vec<u8>>; // 
 ```
 
 **TDD steps**
-- [ ] **Step 1: Failing hermetic test for the framing seam** (in-memory duplex standing in for the host vsock stream): assert the stub writes `MVM_DNS/1\n`, then `len_be(query)`, then `query`, and returns the response payload after the host writes `len_be(resp)+resp`.
+- [x] **Step 1: Failing hermetic test for the framing seam** (in-memory duplex standing in for the host vsock stream): assert the stub writes `MVM_DNS/1\n`, then `len_be(query)`, then `query`, and returns the response payload after the host writes `len_be(resp)+resp`.
 ```rust
 #[tokio::test]
 async fn stub_frames_marker_len_query_and_reads_len_response() {
@@ -526,10 +526,10 @@ async fn stub_frames_marker_len_query_and_reads_len_response() {
 }
 ```
 (Refactor `forward_query_over_vsock` to a generic `forward_query_over_session<U: AsyncRead+AsyncWrite>` so it unit-tests without AF_VSOCK.)
-- [ ] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-agentd egress_client::dns_stub`
-- [ ] **Step 3: Impl `dns_stub`.** `UdpSocket::bind(listen)` loop (recv datagram → `forward_query_over_session(HostVsockSession::connect(port), datagram)` → send_to reply); `TcpListener::bind(listen)` loop (read 2-byte len + query per RFC 7766 → forward → write 2-byte len + resp). Spawn both from `run` (non-fatal if `:53` bind fails, logged — the proxy still serves). Bind requires privilege; `mvm-oci-init` spawns the egress client as uid 0 (Task 8 keeps that).
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: Commit.** `feat(agentd): guest DNS stub (UDP+TCP :53) forwarding over the vsock seam`.
+- [x] **Step 2: Run — expect FAIL.** `cargo nextest run -p mvm-agentd egress_client::dns_stub`
+- [x] **Step 3: Impl `dns_stub`.** `UdpSocket::bind(listen)` loop (recv datagram → `forward_query_over_session(HostVsockSession::connect(port), datagram)` → send_to reply); `TcpListener::bind(listen)` loop (read 2-byte len + query per RFC 7766 → forward → write 2-byte len + resp). Spawn both from `run` (non-fatal if `:53` bind fails, logged — the proxy still serves). Bind requires privilege; `mvm-oci-init` spawns the egress client as uid 0 (Task 8 keeps that).
+- [x] **Step 4: Run — expect PASS.**
+- [x] **Step 5: Commit.** `feat(agentd): guest DNS stub (UDP+TCP :53) forwarding over the vsock seam`.
 
 ---
 

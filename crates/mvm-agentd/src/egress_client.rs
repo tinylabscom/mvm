@@ -519,9 +519,205 @@ fn invalid_http(message: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
+/// Loopback DNS stub forwarding queries over the host-vsock egress seam.
+pub mod dns_stub {
+    use std::sync::Arc;
+
+    use mvm_core::guest_netd::DNS_FRAME_LINE;
+    use mvm_core::protocol::dns::MAX_DNS_MESSAGE;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream, UdpSocket};
+
+    use crate::guest_vsock_session::HostVsockSession;
+
+    use super::configured_egress_vsock_port;
+
+    /// Bind UDP and TCP DNS listeners and forward each query over host vsock.
+    pub async fn run_dns_stub(listen: std::net::SocketAddr) -> std::io::Result<()> {
+        if !listen.ip().is_loopback() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "DNS stub listen address must be loopback",
+            ));
+        }
+        let udp = UdpSocket::bind(listen).await?;
+        let tcp = TcpListener::bind(listen).await?;
+        tracing::info!(%listen, "guest DNS stub started");
+        tokio::try_join!(serve_udp(udp), serve_tcp(tcp)).map(|_| ())
+    }
+
+    async fn serve_udp(socket: UdpSocket) -> std::io::Result<()> {
+        let socket = Arc::new(socket);
+        let mut buffer = vec![0_u8; MAX_DNS_MESSAGE + 1];
+        loop {
+            let (length, peer) = socket.recv_from(&mut buffer).await?;
+            if length > MAX_DNS_MESSAGE {
+                tracing::warn!(%peer, length, "dropping oversized UDP DNS query");
+                continue;
+            }
+            let query = buffer[..length].to_vec();
+            let socket = Arc::clone(&socket);
+            tokio::spawn(async move {
+                match forward_query_over_vsock(&query).await {
+                    Ok(response) => {
+                        if let Err(error) = socket.send_to(&response, peer).await {
+                            tracing::warn!(%error, %peer, "sending UDP DNS response failed");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, %peer, "forwarding UDP DNS query failed");
+                    }
+                }
+            });
+        }
+    }
+
+    async fn serve_tcp(listener: TcpListener) -> std::io::Result<()> {
+        loop {
+            let (stream, peer) = listener.accept().await?;
+            tokio::spawn(async move {
+                if let Err(error) = serve_tcp_connection(stream).await {
+                    tracing::warn!(%error, %peer, "serving TCP DNS connection failed");
+                }
+            });
+        }
+    }
+
+    async fn serve_tcp_connection(mut stream: TcpStream) -> std::io::Result<()> {
+        loop {
+            let mut length = [0_u8; 2];
+            if stream.read(&mut length[..1]).await? == 0 {
+                return Ok(());
+            }
+            stream.read_exact(&mut length[1..]).await?;
+            let length = usize::from(u16::from_be_bytes(length));
+            validate_dns_length(length)?;
+            let mut query = vec![0_u8; length];
+            stream.read_exact(&mut query).await?;
+            let response = forward_query_over_vsock(&query).await?;
+            let response_length =
+                u16::try_from(response.len()).map_err(|_| invalid_dns_length())?;
+            stream.write_all(&response_length.to_be_bytes()).await?;
+            stream.write_all(&response).await?;
+            stream.flush().await?;
+        }
+    }
+
+    async fn forward_query_over_vsock(query: &[u8]) -> std::io::Result<Vec<u8>> {
+        let session = HostVsockSession::connect(configured_egress_vsock_port()).await?;
+        forward_query_over_session(session, query).await
+    }
+
+    async fn forward_query_over_session<U>(
+        session: HostVsockSession<U>,
+        query: &[u8],
+    ) -> std::io::Result<Vec<u8>>
+    where
+        U: AsyncRead + AsyncWrite + Unpin,
+    {
+        validate_dns_length(query.len())?;
+        let query_length = u16::try_from(query.len()).map_err(|_| invalid_dns_length())?;
+        let mut upstream = session.into_inner();
+        upstream.write_all(DNS_FRAME_LINE.as_bytes()).await?;
+        upstream.write_all(b"\n").await?;
+        upstream.write_all(&query_length.to_be_bytes()).await?;
+        upstream.write_all(query).await?;
+        upstream.flush().await?;
+
+        let mut response_length = [0_u8; 2];
+        upstream.read_exact(&mut response_length).await?;
+        let response_length = usize::from(u16::from_be_bytes(response_length));
+        validate_dns_length(response_length)?;
+        let mut response = vec![0_u8; response_length];
+        upstream.read_exact(&mut response).await?;
+        Ok(response)
+    }
+
+    fn validate_dns_length(length: usize) -> std::io::Result<()> {
+        if length > MAX_DNS_MESSAGE {
+            Err(invalid_dns_length())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn invalid_dns_length() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "DNS frame exceeds the configured message limit",
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        #[tokio::test]
+        async fn stub_frames_marker_length_and_query_then_reads_response() {
+            let (mut host, stub) = tokio::io::duplex(4096);
+            let session = HostVsockSession::new(stub);
+            let task = tokio::spawn(forward_query_over_session(session, b"QUERYBYTES"));
+
+            let mut line = Vec::new();
+            loop {
+                let mut byte = [0_u8; 1];
+                host.read_exact(&mut byte).await.unwrap();
+                line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            assert_eq!(line, b"MVM_DNS/1\n");
+
+            let mut length = [0_u8; 2];
+            host.read_exact(&mut length).await.unwrap();
+            assert_eq!(usize::from(u16::from_be_bytes(length)), 10);
+            let mut query = [0_u8; 10];
+            host.read_exact(&mut query).await.unwrap();
+            assert_eq!(&query, b"QUERYBYTES");
+
+            host.write_all(&4_u16.to_be_bytes()).await.unwrap();
+            host.write_all(b"RESP").await.unwrap();
+            assert_eq!(task.await.unwrap().unwrap(), b"RESP");
+        }
+
+        #[test]
+        fn dns_frames_are_bounded_at_the_shared_codec_limit() {
+            assert!(validate_dns_length(MAX_DNS_MESSAGE).is_ok());
+            let error = validate_dns_length(MAX_DNS_MESSAGE + 1).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
+
+        #[tokio::test]
+        async fn dns_stub_rejects_a_non_loopback_listener() {
+            let error = run_dns_stub("0.0.0.0:0".parse().unwrap())
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+}
+
+fn spawn_default_dns_stub() -> Option<tokio::task::JoinHandle<()>> {
+    let listen = match mvm_core::guest_netd::DEFAULT_DNS_STUB_LISTEN.parse() {
+        Ok(listen) => listen,
+        Err(error) => {
+            tracing::warn!(%error, "default DNS stub address is invalid");
+            return None;
+        }
+    };
+    Some(tokio::spawn(async move {
+        if let Err(error) = dns_stub::run_dns_stub(listen).await {
+            tracing::warn!(%error, %listen, "guest DNS stub unavailable; proxy remains active");
+        }
+    }))
+}
+
 /// Bind the loopback SOCKS5 listener at `listen` and serve egress indefinitely.
 pub async fn run(listen: std::net::SocketAddr) -> std::io::Result<()> {
     let listener = TcpListener::bind(listen).await?;
+    let _dns_task = spawn_default_dns_stub();
     tracing::info!(
         %listen,
         vsock_port = configured_egress_vsock_port(),
@@ -549,6 +745,7 @@ pub async fn run_until_shutdown(
     mut shutdown: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(listen).await?;
+    let dns_task = spawn_default_dns_stub();
     tracing::info!(
         %listen,
         vsock_port = EGRESS_VSOCK_PORT,
@@ -558,9 +755,9 @@ pub async fn run_until_shutdown(
         tokio::select! {
             changed = shutdown.changed() => {
                 match changed {
-                    Ok(()) if *shutdown.borrow() => return Ok(()),
+                    Ok(()) if *shutdown.borrow() => break,
                     Ok(()) => continue,
-                    Err(_) => return Ok(()),
+                    Err(_) => break,
                 }
             }
             accepted = listener.accept() => {
@@ -578,6 +775,10 @@ pub async fn run_until_shutdown(
             }
         }
     }
+    if let Some(dns_task) = dns_task {
+        dns_task.abort();
+    }
+    Ok(())
 }
 
 #[cfg(test)]

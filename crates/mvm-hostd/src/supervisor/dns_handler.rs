@@ -17,7 +17,7 @@ use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::{dns_audit, raw_egress};
 
 /// First-line marker that selects DNS framing on the shared egress stream.
-pub const FRAME_LINE: &str = "MVM_DNS/1";
+pub const FRAME_LINE: &str = mvm_core::guest_netd::DNS_FRAME_LINE;
 /// Default DNS query rate for one workload endpoint.
 pub const DEFAULT_DNS_QUERIES_PER_SEC: u32 = 100;
 /// Default number of simultaneous DNS queries for one workload endpoint.
