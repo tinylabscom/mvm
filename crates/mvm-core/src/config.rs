@@ -494,19 +494,14 @@ pub fn inhouse_agent_socket_filename() -> &'static str {
     "agent.sock"
 }
 
-/// The in-house (`WorkloadRunner` / HVF) runner's standing guest-agent RPC
-/// bridge under an explicit per-VM state dir. The supervisor / in-process VMM
-/// binds it at boot and forwards to the guest's `GUEST_AGENT_PORT` vsock.
-/// Single source of truth so **both** in-house execution models — the
-/// in-process `WorkloadRunner`/`InHouseDriver` (the `--hypervisor inhouse`
-/// auto-default) and the detached `HvfBackend` supervisor — and the host-side
-/// resolvers (`DevConsoleTransport`, the `for_vm` agent ladder) cannot drift.
-/// A mismatch here silently makes the guest agent unreachable and every RPC
-/// time out.
-///
-/// The `MVM_HVF_AGENT_SOCKET` dev hook overrides this for live drivers; it is
-/// honored on the backend side only, so the override path must set the same
-/// value both sides use.
+/// The `WorkloadRunner`'s generic standing guest-agent RPC hint under an
+/// explicit per-VM state dir: `<socket-dir>/agent.sock`. It is a backend-neutral
+/// placeholder the runner threads onto the spec's `GUEST_AGENT_PORT` channel; a
+/// concrete driver re-derives its own agent-bridge path and ignores this value,
+/// exactly as the FC and libkrun drivers ignore the spec's agent host_uds. The
+/// detached-supervisor HVF path binds and probes [`vm_hvf_agent_socket_at`]
+/// (`hvf-agent.sock`) instead — that is the socket that must not drift between
+/// binder and host resolver.
 pub fn vm_inhouse_agent_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     vm_socket_dir_at(state_dir).join(inhouse_agent_socket_filename())
 }
@@ -587,14 +582,31 @@ pub fn vm_substitution_endpoint_socket(name: &str) -> std::path::PathBuf {
     vm_socket_dir(name).join("substitution-endpoint.sock")
 }
 
-/// The hvf (HVF / `WorkloadRunner`) VMM's host→guest agent-RPC socket:
-/// `<socket-dir>/hvf-agent.sock`. The device's `AgentBridge` binds it and
-/// bridges every host connection to the guest agent on `GUEST_AGENT_PORT`.
-/// Single source of truth so the backend (which binds it) and the host-side
-/// agent-RPC transport (which connects to it) cannot drift — the drift that
-/// silently broke non-interactive `machine run` on the hvf VMM.
+/// Filename of the hvf VMM's host→guest agent-RPC bridge socket:
+/// `hvf-agent.sock`. Single source of truth for the name; callers that hold the
+/// per-VM state dir join it via [`vm_hvf_agent_socket_at`], callers that hold
+/// the VM name use [`vm_hvf_agent_socket`].
+pub fn hvf_agent_socket_filename() -> &'static str {
+    "hvf-agent.sock"
+}
+
+/// The hvf VMM's host→guest agent-RPC socket under an explicit per-VM state dir:
+/// `<socket-dir>/hvf-agent.sock`. The detached `mvm-hvf-supervisor`'s
+/// `AgentBridge` binds it and bridges every host connection to the guest agent
+/// on `GUEST_AGENT_PORT`. Single source of truth so all three sides that name it
+/// — the detached supervisor (which binds it), the `HvfDriver` / `HvfBackend`
+/// (which derive the value they hand the supervisor), and the host-side
+/// agent-RPC resolvers (`DevConsoleTransport`, the `for_vm` ladder, which
+/// connect to it) — cannot drift. A mismatch here silently makes the guest
+/// agent unreachable and every non-interactive `machine run` RPC time out.
+pub fn vm_hvf_agent_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join(hvf_agent_socket_filename())
+}
+
+/// The hvf VMM's host→guest agent-RPC socket for a VM by name:
+/// `<socket-dir>/hvf-agent.sock`. See [`vm_hvf_agent_socket_at`].
 pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
-    vm_socket_dir(name).join("hvf-agent.sock")
+    vm_hvf_agent_socket_at(&vm_state_dir(name))
 }
 
 /// The hvf VMM's per-VM `BROKER_PORT` listener socket the host-agent daemon
@@ -1066,6 +1078,17 @@ mod tests {
         assert_eq!(
             vm_hvf_broker_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/hvf-broker.sock")
+        );
+        // The hvf agent-RPC bridge: the detached supervisor binds it and the host
+        // resolver probes it, so the name-based and state-dir-based accessors must
+        // resolve to ONE socket or the guest agent goes unreachable.
+        assert_eq!(
+            vm_hvf_agent_socket("foo"),
+            std::path::PathBuf::from("/custom/data/vms/foo/hvf-agent.sock")
+        );
+        assert_eq!(
+            vm_hvf_agent_socket_at(&vm_state_dir("foo")),
+            vm_hvf_agent_socket("foo")
         );
 
         env.remove("MVM_HOME");

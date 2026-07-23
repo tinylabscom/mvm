@@ -2187,11 +2187,13 @@ mod tests {
         unsafe {
             std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
         }
+        // HVF always advertises the NIC-less host-vsock-proxy egress caps (they
+        // are unconditional — the fail-closed posture), so the capability
+        // shortfall is empty and the refusal comes from the availability probe:
+        // a host whose supervisor can't launch is unavailable, not egress-capable.
         let msg = err.to_string();
         assert!(msg.contains("NIC-less host-vsock-proxy backend"));
-        assert!(msg.contains("backend hvf lacks ["));
-        assert!(msg.contains("host_vsock_proxy"));
-        assert!(msg.contains("no_routable_guest_nic"));
+        assert!(msg.contains("backend hvf is unavailable on this host"));
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

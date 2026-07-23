@@ -345,15 +345,18 @@ impl VmBackend for HvfBackend {
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
             vsock: true,
-            // The hvf VMM is vsock-only by design: no guest NIC, and egress
-            // rides the host vsock proxy (the gating endpoint), not a guest NIC.
-            // Advertise those workload-path capabilities only when the detached
-            // supervisor path is actually launchable on this host.
-            no_routable_guest_nic: proxy_path_ready,
-            host_vsock_proxy: proxy_path_ready,
+            // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
+            // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.
+            // Both are unconditional so the backend fails closed: a degraded host
+            // (the detached supervisor can't launch) loses egress entirely — it
+            // never falls back to a routable guest NIC. HVF never advertises a NIC
+            // and always routes egress through the per-VM endpoint over vsock.
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
             // The hvf VMM can serve the unpacked OCI tree as a read-only
             // virtiofs root (dev tier); the run-path tier gate selects it only for
-            // non-prod, non-sealed workloads.
+            // non-prod, non-sealed workloads. This stays gated on the launchable
+            // supervisor path — it is a dev-tier boot capability, not egress.
             virtiofs_root: proxy_path_ready,
             // pause/snapshot/cow/remap land as they are wired onto the primitive.
             ..Default::default()
@@ -796,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_supervisor_override_hides_proxy_capabilities() {
+    fn degraded_host_still_advertises_failclosed_egress_caps() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -809,14 +812,18 @@ mod tests {
         unsafe {
             std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
         }
-        assert!(!caps.no_routable_guest_nic);
-        assert!(!caps.host_vsock_proxy);
+        // Fail-closed: even a degraded host (unlaunchable supervisor) advertises
+        // no routable NIC and the host vsock proxy, so egress can only ride the
+        // per-VM endpoint — it never falls back to a guest NIC. Only the dev-tier
+        // virtiofs-root boot capability drops when the supervisor path is dead.
+        assert!(caps.no_routable_guest_nic);
+        assert!(caps.host_vsock_proxy);
         assert!(!caps.virtiofs_root);
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
-    fn valid_supervisor_override_advertises_proxy_capabilities() {
+    fn launchable_supervisor_enables_virtiofs_root_dev_boot() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -835,6 +842,8 @@ mod tests {
             std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
         }
         assert!(available);
+        // The egress caps are unconditional (fail-closed); a launchable
+        // supervisor additionally enables the dev-tier virtiofs-root boot.
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(caps.virtiofs_root);
