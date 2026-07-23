@@ -1,15 +1,15 @@
 # Research — UOR Framework integration exploration
 
-**Status:** Research note; no implementation commitment
-**Date:** 2026-07-22
+**Status:** Research note; host-side UOR-ADDR conformance baseline implemented
+**Date:** 2026-07-22 (updated)
 **Owner:** mvm
 **Source:** [UOR Framework](https://github.com/UOR-Foundation/UOR-Framework), [UOR-ADDR](https://github.com/UOR-Foundation/uor-addr), [Prism](https://github.com/UOR-Foundation/prism), and related UOR Foundation repositories, reviewed against the mvm tree.
 
 ## TL;DR
 
-The UOR Foundation has several projects, but only one is a strong fit for mvm today: **UOR-ADDR** as a cross-implementation semantic content-addressing primitive. mvm has already implemented a host-side, zero-new-dep UOR-ADDR-compatible `SemanticAddress` over the Workload IR (`crates/mvm-core/src/semantic_address.rs`).
+The UOR Foundation has several projects, but only one is a strong fit for mvm today: **UOR-ADDR** as a cross-implementation semantic content-addressing primitive. mvm has implemented a host-side UOR-ADDR-compatible `SemanticAddress` over the Workload IR (`crates/mvm-core/src/semantic_address.rs`).
 
-The broader UOR Framework ontology, Prism substrate, and PrimeShield crypto are not good fits for mvm's current architecture or threat model. The next productive step is to close the conformance loop between mvm's existing implementation and UOR-ADDR's published vectors, and to defer any actual `uor-addr` crate dependency to the wasm/browser layer (WS11 P4) where cross-language equality is load-bearing.
+The broader UOR Framework ontology, Prism substrate, and PrimeShield crypto are not good fits for mvm's current architecture or threat model. The host-side conformance loop is now closed against UOR-ADDR's published vectors; any actual `uor-addr` crate dependency remains deferred to the wasm/browser layer (WS11 P4) where cross-language equality is load-bearing.
 
 ## What mvm already has
 
@@ -17,11 +17,11 @@ The broader UOR Framework ontology, Prism substrate, and PrimeShield crypto are 
 
 | Type / primitive | Location | What it does |
 |---|---|---|
-| `SemanticAddress` | `crates/mvm-core/src/semantic_address.rs` | `sha256(JCS(Workload))` rendered as `sha256:<64-hex>`. A distinct newtype with validating parse, serde round-trips, and a pinned golden test vector. |
-| `semantic_address()` | same | Validates IR schema version first, then `serde_jcs::to_vec` + `sha2::Sha256`. |
+| `SemanticAddress` | `crates/mvm-core/src/semantic_address.rs` | `sha256(JCS(Workload))` rendered as `sha256:<64-hex>`, with Unicode NFC normalization. A distinct newtype with validating parse, serde round-trips, a pinned golden test vector, and the published UOR-ADDR JSON fixture set. |
+| `semantic_address()` | same | Validates IR schema version first, normalizes JSON strings/object keys to NFC, then `serde_jcs::to_vec` + `sha2::Sha256`. |
 | `ir_hash()` | `crates/mvm-protocol/src/ir/hash.rs` | Same JCS + SHA-256, rendered as bare 64-hex (no `sha256:` prefix). Used inside launch plans and audit records. |
 | `canonicalize()` | `crates/mvm-protocol/src/ir/canonicalize.rs` | Hand-rolled `no_std` JCS writer. A drift-lock test (`canonicalizer_equivalence.rs`) proves it matches `serde_jcs` byte-for-byte. |
-| `mvmctl build address` | `crates/mvm-cli/src/commands/build/address.rs` | CLI surface that prints both `SemanticAddress` and `ir_hash` and asserts they agree. |
+| `mvmctl build address` | `crates/mvm-cli/src/commands/build/address.rs` | CLI surface that prints the independent `SemanticAddress` and `ir_hash` identities. |
 
 Key boundary property: `SemanticAddress` is explicitly **not** interchangeable with `Sha256Hex`, `OciDigest`, `KeyId`, or `Nonce`. There are no `From`/`Into`/`Deref` impls between them, and tests enforce that separation.
 
@@ -84,7 +84,7 @@ A standard-library façade over the UOR substrate:
 
 ## Concrete integration opportunities
 
-### 1. Close the UOR-ADDR conformance loop (immediate)
+### 1. Close the UOR-ADDR conformance loop (completed 2026-07-22)
 
 The existing `SemanticAddress` golden test pins:
 
@@ -92,7 +92,17 @@ The existing `SemanticAddress` golden test pins:
 sha256:bf6f9f61571d7c5080144d83b681eb6718d76ab30ab80f61a715c50ac85b6ab3
 ```
 
-The next step is to prove mvm's output matches UOR-ADDR's published conformance vectors for the same IR fixture, and ideally to compare Rust output with the TypeScript and Python SDK paths. This makes interop a tested property rather than a design claim.
+The 12 published UOR-ADDR JSON byte-identity fixtures are now pinned in
+`crates/mvm-core/src/semantic_address.rs`. The test covers key ordering, empty
+containers, nested values, arrays, numbers, mixed scalar types, and composed /
+decomposed Unicode. NFC normalization was added at the JSON boundary so both
+café forms produce the upstream label. The existing astral-plane key-ordering
+caveat remains documented because the `serde_jcs` implementation still differs
+from RFC 8785's UTF-16 ordering for that unrepresented class.
+
+The separate Python and TypeScript SDK parity witness is also green; the
+published UOR vectors are the independent implementation check that closes the
+conformance loop.
 
 ### 2. Semantic address for `BuildProvenance` (short term)
 
@@ -156,11 +166,11 @@ VM IDs, operation IDs, session IDs, capability tokens, and plan nonces need uniq
 
 ## Recommendations
 
-### Do now (host-side, zero deps)
+### Do now (host-side)
 
-1. Add a conformance test comparing the existing `SemanticAddress` golden vector with UOR-ADDR's published JSON conformance vectors.
+1. Keep the 12-fixture UOR-ADDR JSON conformance test synchronized with the upstream published vectors.
 2. ~~If cross-language identity is a goal, compare Rust output with the TypeScript and Python SDK paths over a shared IR fixture.~~ **Completed 2026-07-22:** the checked-in `hello-parity` fixture now runs through both SDKs and the native Rust IR; all three resolve to the pinned `sha256:b7106af4133c7d678744adb3b617e7289bc3f4c131b2df03a8e9cc49aac90037` semantic address, with `xtask check-ir-parity` enforcing drift in CI.
-3. Add a semantic address for `BuildProvenance`, computed with the existing `serde_jcs` + `sha2` stack, as an optional field.
+3. Consider a semantic address for `BuildProvenance`, computed with the existing `serde_jcs` + `sha2` stack, as a separate optional follow-up.
 
 ### Do later (wasm/browser layer, WS11 P4)
 

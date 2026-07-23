@@ -1,17 +1,19 @@
 //! Drift-lock between the two RFC 8785 realizations this workspace carries.
 //!
 //! `mvm_protocol::ir::canonicalize` (the load-bearing hand-rolled `no_std`
-//! JCS writer that feeds `ir_hash`) and `serde_jcs` (the crate
-//! [`crate::semantic_address::semantic_address`] hashes) are independent
+//! JCS writer that feeds `ir_hash`) and `serde_jcs` (the canonicalizer used by
+//! [`crate::semantic_address::semantic_address`]) are independent
 //! implementations of the same canonical form. Nothing else proves they emit
 //! byte-identical output, so a change to either one could silently make an
-//! `ir_hash` disagree with a `SemanticAddress` for the same workload — which
-//! would break the CLI self-check that ties the two together.
+//! `ir_hash` disagree with the unnormalized JCS bytes used to derive a
+//! `SemanticAddress` for the same workload.
 //!
 //! These tests assert byte-for-byte agreement over a corpus of divergence-prone
 //! `Workload` shapes (astral-plane map keys, escaped string values, large
-//! integers, nested/empty containers), plus the full digest chain
-//! `ir_hash == hex(sha256(serde_jcs)) == semantic_address` minus the prefix.
+//! integers, nested/empty containers), plus the digest chain
+//! `ir_hash == hex(sha256(serde_jcs))`. `SemanticAddress` applies the UOR-ADDR
+//! Unicode NFC normalization boundary before hashing, so it is intentionally
+//! a separate identity for non-NFC input.
 //!
 //! The two realizations already agree on every shape, including astral-plane
 //! keys: both order object keys by Unicode scalar value. The hand-rolled writer
@@ -196,18 +198,28 @@ mod tests {
     }
 
     #[test]
-    fn digest_chain_agrees_end_to_end() {
+    fn ir_hash_digest_chain_agrees_end_to_end() {
         for (label, w) in corpus() {
             let jcs = serde_jcs::to_vec(&w).expect("serde_jcs");
             let ih = ir_hash(&w).expect("ir_hash");
             assert_eq!(ih, hex_sha256(&jcs), "ir_hash vs sha256(jcs) for {label:?}");
-
-            let addr = semantic_address(&w).expect("semantic_address");
-            assert_eq!(
-                addr.as_str().strip_prefix("sha256:"),
-                Some(ih.as_str()),
-                "semantic_address vs ir_hash for {label:?}",
-            );
         }
+    }
+
+    #[test]
+    fn semantic_address_normalizes_unicode_before_hashing() {
+        let mut composed = base_workload();
+        composed.id = "café".to_string();
+        let mut decomposed = base_workload();
+        decomposed.id = "cafe\u{301}".to_string();
+
+        let composed_address = semantic_address(&composed).expect("semantic address");
+        let decomposed_address = semantic_address(&decomposed).expect("semantic address");
+        assert_eq!(composed_address, decomposed_address);
+        assert_ne!(
+            ir_hash(&composed).expect("ir hash"),
+            ir_hash(&decomposed).expect("ir hash"),
+            "the internal IR fingerprint remains byte-oriented"
+        );
     }
 }
