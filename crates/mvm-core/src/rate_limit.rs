@@ -3,7 +3,6 @@
 use std::time::Instant;
 
 /// Lazily refilled token bucket with a one-second burst capacity.
-#[derive(Debug)]
 pub struct TokenBucket {
     tokens: f64,
     capacity: f64,

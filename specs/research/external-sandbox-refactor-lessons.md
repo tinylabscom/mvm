@@ -31,7 +31,7 @@ The offering describes itself as production infrastructure for AI agents that ho
 | Concern | External offering | Nearest mvm equivalent |
 |---|---|---|
 | Isolation boundary | KVM microVM, per-guest kernel, minimal virtio set | ADR-001 L1/L2; Firecracker (Tier 1), HVF/libkrun (Tier 2) |
-| VMM provenance | Self-developed on `rust-vmm` + KVM | In-house HVF VMM (ADR-098 / Plan 214); Firecracker on Linux |
+| VMM provenance | Self-developed on `rust-vmm` + KVM | In-house HVF VMM (Plan 214); Firecracker on Linux |
 | Warm start | Pre-warmed pool + CoW clone from template | Warm-snapshot direction (ADR-025); `vm/` checkpoints |
 | Snapshot/fork | `FICLONE` O(1) clone + dirty-page memory delta | `vm/` templates + checkpoints; not yet an agent-fork DX |
 | Egress control | eBPF SNAT/DNAT + L7 MITM proxy, domain allowlist | Claim 10 default-deny; nftables (FC) / gateway-bridge `PlanFlowPolicy` (libkrun) / vsock gate (HVF) |
@@ -51,7 +51,7 @@ The offering describes itself as production infrastructure for AI agents that ho
 
 4. **Publish warm-start and density SLOs.** They lead with measured numbers (cold start, per-instance overhead, concurrent density, P95/P99). mvm already measures boot/perf internally; as the snapshot path matures, turning those into stated, doc-level SLOs makes performance a claimed, regression-gated property rather than folklore — consistent with how mvm already treats security properties as CI-gated claims.
 
-5. **Convergent validation of the in-house-VMM bet (reassurance, not an action).** An independent team, optimizing for the same agent workload, also chose a self-developed minimal-device VMM on `rust-vmm`, a trimmed guest kernel, and pre-snapshot restore over an off-the-shelf VMM. That is exactly the mvm refactor's HVF direction (ADR-098 / Plan 214) and the minimal L2 device set. Worth citing when the in-house-VMM cost is questioned. The shared `rust-vmm` crate base (a community crate set, not a competitor product) is also a candidate to share rather than reimplement, subject to ADR-002 dependency review.
+5. **Convergent validation of the in-house-VMM bet (reassurance, not an action).** An independent team, optimizing for the same agent workload, also chose a self-developed minimal-device VMM on `rust-vmm`, a trimmed guest kernel, and pre-snapshot restore over an off-the-shelf VMM. That is exactly the mvm refactor's HVF direction (Plan 214) and the minimal L2 device set. Worth citing when the in-house-VMM cost is questioned. The shared `rust-vmm` crate base (a community crate set, not a competitor product) is also a candidate to share rather than reimplement, subject to ADR-002 dependency review.
 
 ## (b) Where mvm already does something equivalent or stronger
 
