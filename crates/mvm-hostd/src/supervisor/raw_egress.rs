@@ -582,14 +582,32 @@ pub(super) fn resolve_hostname_ips_pure(
 #[cfg(not(target_os = "linux"))]
 pub(super) fn resolve_hostname_ips_pure(
     host: &str,
-    _timeout: Duration,
+    timeout: Duration,
 ) -> std::io::Result<Vec<IpAddr>> {
     use std::net::ToSocketAddrs;
+    use std::sync::mpsc;
+    use std::thread;
 
-    Ok((host, 0u16)
-        .to_socket_addrs()?
-        .map(|addr| addr.ip())
-        .collect())
+    let host = host.to_string();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = (host.as_str(), 0u16)
+            .to_socket_addrs()
+            .map(|iter| iter.map(|addr| addr.ip()).collect());
+        let _ = tx.send(result);
+    });
+
+    let dns_timeout = timeout.min(Duration::from_secs(3));
+    match rx.recv_timeout(dns_timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "DNS resolution timed out",
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(std::io::Error::other("DNS resolution thread disconnected"))
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
