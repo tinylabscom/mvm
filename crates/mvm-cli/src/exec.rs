@@ -373,13 +373,21 @@ pub struct ExecRequest {
     /// Recorded liveness declaration (phase A: presence only). Persisted with a
     /// persistent machine so it survives + is inspectable; not yet probed.
     pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
+    /// Requested workload hypervisor (from `--hypervisor`), or `None` to
+    /// auto-detect. Kept here so `run_inner`'s backend selection agrees with the
+    /// admit/build sites that read it off `RunArgs`.
+    pub hypervisor: Option<String>,
 }
 
 pub(crate) fn select_exec_backend(
     image_requested: bool,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
+    requested: Option<&str>,
 ) -> Result<AnyBackend> {
-    let backend_override = explicit_hypervisor_override();
+    // CLI `--hypervisor` wins over the MVM_HYPERVISOR/MVM_BACKEND env override.
+    let backend_override = requested
+        .and_then(normalize_backend_override)
+        .or_else(explicit_hypervisor_override);
     let backend_name = select_backend_name_for_egress(
         backend_override.as_deref(),
         image_requested,
@@ -919,7 +927,11 @@ fn run_inner(
     posture: Option<&PostureSink>,
     runtime_source_policy_sink: Option<&RuntimeSourcePolicySink>,
 ) -> Result<Either<i32, ExecOutput>> {
-    let backend = select_exec_backend(request_uses_vsock_proxy_backend(&req), &req.network_policy)?;
+    let backend = select_exec_backend(
+        request_uses_vsock_proxy_backend(&req),
+        &req.network_policy,
+        req.hypervisor.as_deref(),
+    )?;
 
     // Phase timing (off unless `MVM_PHASE_TIMING` is set): capture a
     // host-monotonic mark at each run seam, then emit a one-line breakdown
@@ -1896,6 +1908,7 @@ pub fn dispatch_in_session(
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         stdin: Vec::new(),
         healthcheck: None,
+        hypervisor: None,
     };
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
@@ -2006,6 +2019,77 @@ mod tests {
         );
         assert_eq!(hc.interval_secs, 10);
         assert_eq!(build_healthcheck(None, 30, 5, 3, 0), None);
+    }
+
+    #[test]
+    fn select_exec_backend_requested_flag_selects_backend() {
+        let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
+        let backend = select_exec_backend(false, &deny_all, Some("libkrun"))
+            .expect("libkrun resolves without probing availability (image not requested)");
+        assert_eq!(backend.name(), "libkrun");
+
+        let backend = select_exec_backend(false, &deny_all, Some("hvf"))
+            .expect("hvf resolves without probing availability (image not requested)");
+        assert_eq!(backend.name(), "hvf");
+    }
+
+    #[test]
+    fn select_exec_backend_none_with_no_env_falls_to_auto_detect() {
+        let saved_hv = std::env::var_os("MVM_HYPERVISOR");
+        let saved_be = std::env::var_os("MVM_BACKEND");
+        // SAFETY: test-local env mutation, restored before returning.
+        unsafe {
+            std::env::remove_var("MVM_HYPERVISOR");
+            std::env::remove_var("MVM_BACKEND");
+        }
+        let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
+        let backend =
+            select_exec_backend(false, &deny_all, None).expect("auto-detect always resolves");
+        assert_eq!(backend.name(), AnyBackend::auto_select().name());
+        // SAFETY: restore prior values.
+        unsafe {
+            match saved_hv {
+                Some(v) => std::env::set_var("MVM_HYPERVISOR", v),
+                None => std::env::remove_var("MVM_HYPERVISOR"),
+            }
+            match saved_be {
+                Some(v) => std::env::set_var("MVM_BACKEND", v),
+                None => std::env::remove_var("MVM_BACKEND"),
+            }
+        }
+    }
+
+    /// The CLI `--hypervisor` flag (the `requested` param) wins over a
+    /// conflicting `MVM_HYPERVISOR` env override — the admit/build/boot call
+    /// sites must all resolve to the same backend as what was requested.
+    #[test]
+    fn select_exec_backend_requested_flag_beats_conflicting_env() {
+        let saved_hv = std::env::var_os("MVM_HYPERVISOR");
+        let saved_be = std::env::var_os("MVM_BACKEND");
+        // SAFETY: test-local env mutation, restored before returning.
+        unsafe {
+            std::env::remove_var("MVM_BACKEND");
+            std::env::set_var("MVM_HYPERVISOR", "qemu");
+        }
+        let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
+        let backend = select_exec_backend(false, &deny_all, Some("libkrun"))
+            .expect("libkrun resolves without probing availability (image not requested)");
+        assert_eq!(
+            backend.name(),
+            "libkrun",
+            "the requested flag must win over MVM_HYPERVISOR=qemu"
+        );
+        // SAFETY: restore prior values.
+        unsafe {
+            match saved_hv {
+                Some(v) => std::env::set_var("MVM_HYPERVISOR", v),
+                None => std::env::remove_var("MVM_HYPERVISOR"),
+            }
+            match saved_be {
+                Some(v) => std::env::set_var("MVM_BACKEND", v),
+                None => std::env::remove_var("MVM_BACKEND"),
+            }
+        }
     }
 
     fn fixture_network_tunnel() -> mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
@@ -2223,6 +2307,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
     }
@@ -2246,6 +2331,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(script.starts_with("set -e\n"));
@@ -2277,6 +2363,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         assert!(script.contains("mkdir -p '/g'"));
@@ -2308,6 +2395,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         // RW mount is unqualified — no `-o ro`.
@@ -2337,6 +2425,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
 
         let pty = pty_console_request(&req, &[], "set -e\nexec '/bin/sh'\n".to_string());
@@ -2368,6 +2457,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         let wrapper = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
 
@@ -2396,6 +2486,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         let wrapper = build_guest_wrapper(&req, &[]);
 
@@ -2631,6 +2722,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
     }
@@ -2661,6 +2753,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         // Env from entrypoint exported.
@@ -2702,6 +2795,7 @@ mod tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));

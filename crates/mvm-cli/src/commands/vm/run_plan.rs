@@ -554,6 +554,7 @@ mod tests {
             ack_divergence: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         }
     }
 
