@@ -163,3 +163,18 @@ outbound attempt. Host tests do not boot a guest — this witness is mandatory, 
 - F4 gate + retire libkrun `spawn_libkrun_egress_endpoint` / FC `egress_bridge` raw wiring on the
   CLI path; delete raw `LibkrunBackend::start` after migrating `bench_probe`.
 - F5: delete the smoltcp-L3 stack; HVF fail-closed on the endpoint.
+
+### Post-F3 review follow-ups (from the final whole-branch review; non-blocking)
+
+- Delete or route `AnyBackend::start_firecracker` — it still drives the raw `microvm::run_from_build`
+  (NIC/TAP) path for the Firecracker arm. Zero callers today, but now that the variant is the
+  NIC-less runner it reads as a raw-boot bypass; fold into F4's raw-path retirement.
+- Detached-VM exit capture asymmetry: `FcDriver`'s workload-exit listener lives in the ephemeral
+  `mvmctl` process, so a `-d`/`--name` FC VM never gets `workload.exit` written (mvmctl exits after
+  boot). Transient (the default lifecycle) captures it and was live-witnessed; the persistent path
+  needs a supervisor-like owner (mirror libkrun's per-VM supervisor) if detached FC exit codes matter.
+- Investigate the tail `Failed to read frame length (EAGAIN)` on a transient run whose exec'd
+  command outlives the expected response (trailing `sleep`); no-sleep runs are clean, and the review
+  read it as a benign long-open-exec-stream artifact, but confirm it is not a transient-teardown race.
+- Correct the stale `doctor/warm_start.rs` prose that still says the substrate backs "Firecracker's
+  live-memory path" — true only for the raw hostd path now, not the CLI path.
