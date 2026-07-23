@@ -169,13 +169,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collect_balloon_support_advertises_firecracker() {
+    fn collect_balloon_support_omits_runner_backends() {
         let support = collect_balloon_support();
-        // The backend catalog must include Firecracker in the balloon
-        // support matrix. If a future refactor drops it, this fails
-        // loudly.
-        assert_eq!(support.get("firecracker"), Some(&true));
-        // And honestly-`false` backends should not be silently dropped.
+        // Firecracker and libkrun route through the workload runner, which takes
+        // no balloon elasticity, so both drop off the balloon matrix. qemu is
+        // the one remaining descriptor and its honest `false` is not dropped.
+        assert!(!support.contains_key("firecracker"));
+        assert!(!support.contains_key("libkrun"));
         assert_eq!(support.get("qemu"), Some(&false));
     }
 
@@ -183,13 +183,7 @@ mod tests {
     fn collect_balloon_support_keeps_catalog_backends_in_stable_order() {
         let support = collect_balloon_support();
         let ordered: Vec<_> = support.into_iter().collect();
-        assert_eq!(
-            ordered,
-            vec![
-                ("firecracker".to_string(), true),
-                ("qemu".to_string(), false),
-            ]
-        );
+        assert_eq!(ordered, vec![("qemu".to_string(), false)]);
     }
 
     #[test]

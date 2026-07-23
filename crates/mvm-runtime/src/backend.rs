@@ -11,7 +11,7 @@ use mvm_core::vm_backend::{
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
-use crate::driver::{HvfDriver, LibkrunDriver};
+use crate::driver::{FcDriver, HvfDriver, LibkrunDriver};
 use crate::hvf_backend::HvfBackend;
 use crate::image::RuntimeVolume;
 use crate::microvm::{DriveFile, FlakeRunConfig};
@@ -44,6 +44,23 @@ pub(crate) fn libkrun_runner() -> LibkrunRunner {
         RealEndpointSpawner,
         RealBrokerRegistrar,
     )
+}
+
+/// Firecracker (Linux KVM) driven through the same unified workload-runner role
+/// — Firecracker's sole mvmctl-CLI workload launch path (`--hypervisor
+/// firecracker`, `default_backend`, and `auto_select`). NIC-less: egress routes
+/// to the per-VM gating endpoint over vsock only; the raw
+/// [`FirecrackerBackend`] shim stays behind the driver as its identity delegate
+/// and for the out-of-scope hostd-supervisor / warm-start / standby callers,
+/// unreached via this enum.
+type FcRunner = WorkloadRunner<FcDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+
+/// Construct Firecracker's workload runner. Like [`libkrun_runner`] the runner
+/// is not const-constructible, so this helper is the one construction site the
+/// enum variant, `auto_select`, the descriptor catalog, and the capability
+/// selector all call.
+pub(crate) fn fc_runner() -> FcRunner {
+    WorkloadRunner::new(FcDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
 }
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
@@ -495,7 +512,15 @@ impl BackendTier {
 /// Wraps concrete backends so CLI commands don't need to know which
 /// backend is active. Each variant delegates to its inner implementation.
 pub enum AnyBackend {
-    Firecracker(FirecrackerBackend),
+    /// Firecracker (Linux KVM), driven through the unified `WorkloadRunner` over
+    /// the driver seam — Firecracker's sole mvmctl-CLI workload path, selected
+    /// by `--hypervisor firecracker`, `default_backend`, and `auto_select`.
+    /// NIC-less: egress routes to the per-VM gating endpoint over vsock only
+    /// (claim-10 + claims 12/13 at the endpoint); no routable guest NIC and no
+    /// transparent `:80/:443` terminator. The raw [`FirecrackerBackend`] stays
+    /// behind the driver as its identity delegate and for the out-of-scope
+    /// hostd-supervisor / warm-start / standby callers, unreached via this enum.
+    Firecracker(FcRunner),
     /// libkrun (Linux KVM / macOS Apple Silicon HVF), driven through the unified
     /// `WorkloadRunner` over the driver seam — libkrun's sole production path,
     /// selected by `--hypervisor libkrun` and `auto_select`. Egress routes to
@@ -545,7 +570,7 @@ pub enum AnyBackend {
 impl AnyBackend {
     /// Create the default backend (Firecracker).
     pub fn default_backend() -> Self {
-        Self::Firecracker(FirecrackerBackend)
+        Self::Firecracker(fc_runner())
     }
 
     /// Select backend based on whether the build output is a non-KVM
@@ -555,7 +580,7 @@ impl AnyBackend {
         if has_runner {
             Self::Qemu(QemuBackend)
         } else {
-            Self::Firecracker(FirecrackerBackend)
+            Self::Firecracker(fc_runner())
         }
     }
 
@@ -621,10 +646,11 @@ impl AnyBackend {
     pub fn auto_select() -> Self {
         let plat = mvm_core::platform::current();
 
-        // 1. Native Linux KVM → Firecracker directly (fastest — dev & production).
-        //    WSL2 nested KVM is future/experimental and is not auto-selected today.
+        // 1. Native Linux KVM → the Firecracker workload runner (vsock-only
+        //    egress; fastest — dev & production). WSL2 nested KVM is
+        //    future/experimental and is not auto-selected today.
         if plat.supports_native_runner() {
-            return Self::Firecracker(FirecrackerBackend);
+            return Self::Firecracker(fc_runner());
         }
 
         // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`); the hvf path
@@ -643,7 +669,7 @@ impl AnyBackend {
         // Final default. Reachable when no tier is available; start()
         // then fails with the production-path error message rather than
         // silently picking a backend the caller didn't ask for.
-        Self::Firecracker(FirecrackerBackend)
+        Self::Firecracker(fc_runner())
     }
 
     /// Resolve the backend that owns an already-started VM by its per-VM
@@ -1205,10 +1231,15 @@ mod tests {
 
     #[test]
     fn test_any_backend_capabilities() {
+        // The default backend is the converged Firecracker runner: NIC-less,
+        // vsock-only egress. It advertises the vsock control channel and no
+        // routable guest NIC, not the raw TAP the entangled Firecracker path
+        // used to carry.
         let backend = AnyBackend::default_backend();
         let caps = backend.capabilities();
         assert!(caps.vsock);
-        assert!(caps.tap_networking);
+        assert!(!caps.tap_networking);
+        assert!(caps.no_routable_guest_nic);
     }
 
     #[test]
@@ -1302,8 +1333,8 @@ mod tests {
                     Some("fc.pid"),
                     Some(3),
                     true,
-                    true,
-                    true,
+                    false,
+                    false,
                 ),
                 (
                     "libkrun",
@@ -1416,10 +1447,15 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_capability_live_memory_on_firecracker() {
+    fn snapshot_capability_disk_only_on_firecracker() {
+        // The CLI Firecracker path routes through the workload runner, which is
+        // honest about disk-only warm-start (no live-memory snapshot). The raw
+        // `FirecrackerBackend` still advertises the live-memory tier for the
+        // out-of-scope hostd path — see
+        // `warm_start_on_firecracker_admits_the_live_memory_tier`.
         assert_eq!(
             AnyBackend::from_hypervisor("firecracker").snapshot_capability(),
-            SnapshotCapability::LiveMemory
+            SnapshotCapability::DiskOnly
         );
     }
 
@@ -1653,7 +1689,7 @@ mod tests {
         // Covers every `AnyBackend` variant, including both hvf entry points
         // (the raw backend and the WorkloadRunner-driven role-runner path).
         let mut backends: Vec<(&str, AnyBackend)> = vec![
-            ("firecracker", AnyBackend::Firecracker(FirecrackerBackend)),
+            ("firecracker", AnyBackend::Firecracker(fc_runner())),
             ("libkrun", AnyBackend::Libkrun(libkrun_runner())),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
             ("hvf", AnyBackend::Hvf(HvfBackend)),

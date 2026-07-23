@@ -211,7 +211,9 @@ fn doctor_report_serializes_warm_start() {
     })
     .unwrap();
     assert!(json.contains("\"warm_start\""), "{json}");
-    assert!(json.contains("\"live-memory\""), "{json}");
+    // The CLI workload runners are disk-only, so the warm-start section serializes
+    // the disk-only tier (qemu is the one remaining warm-start row).
+    assert!(json.contains("\"disk-only\""), "{json}");
 }
 
 #[test]

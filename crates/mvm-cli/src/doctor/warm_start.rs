@@ -20,8 +20,8 @@ pub(super) struct WarmStartReport {
     substrate: Option<WarmStartSubstrate>,
     /// Backend name → `supports_standby_pool()`. The standby pool
     /// (pre-pay spawn/codesign latency) is a *different* axis from the snapshot tier above;
-    /// Firecracker implements it today; backends without warm-start support
-    /// are omitted with the rest of their warm-start row.
+    /// backends without warm-start support are omitted with the rest of their
+    /// warm-start row.
     standby_pool: BTreeMap<String, bool>,
     /// Live count of idle standbys recorded under `~/.mvm/pool/` (best-effort; `None` if
     /// the pool dir can't be read).
@@ -232,8 +232,10 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_per_backend_tier() {
         let r = collect_warm_start_support();
-        // The honest per-backend warm-start matrix.
-        assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
+        // The honest per-backend warm-start matrix. Firecracker and libkrun
+        // route through the workload runner (trait-default no-warm-start), so
+        // both are omitted; qemu is the one remaining disk-only row.
+        assert_eq!(r.backends.get("firecracker"), None);
         assert_eq!(r.backends.get("libkrun"), None);
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
     }
@@ -244,28 +246,17 @@ mod tests {
         let ordered_backends: Vec<_> = r.backends.into_iter().collect();
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
 
-        assert_eq!(
-            ordered_backends,
-            vec![
-                ("firecracker".to_string(), "live-memory"),
-                ("qemu".to_string(), "disk-only"),
-            ]
-        );
-        assert_eq!(
-            ordered_standby_pool,
-            vec![
-                ("firecracker".to_string(), true),
-                ("qemu".to_string(), false),
-            ]
-        );
+        assert_eq!(ordered_backends, vec![("qemu".to_string(), "disk-only")]);
+        assert_eq!(ordered_standby_pool, vec![("qemu".to_string(), false)]);
     }
 
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        // Firecracker implements the standby pool; QEMU does not. The runner
-        // seam does not expose libkrun's legacy standby implementation.
-        assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
+        // The runner seam exposes neither Firecracker's nor libkrun's legacy
+        // standby implementation, so both are omitted; QEMU stays and reports
+        // no standby pool.
+        assert_eq!(r.standby_pool.get("firecracker"), None);
         assert_eq!(r.standby_pool.get("libkrun"), None);
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
@@ -277,19 +268,12 @@ mod tests {
 
         // The Tier 3 `mock` test double and backends without warm-start
         // support are excluded; the remaining rows use stable name order.
+        // Firecracker and libkrun both route through the workload runner, so
+        // neither carries a warm-start row — only qemu's disk-only row remains.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
-        assert_eq!(names, vec!["firecracker", "qemu"]);
+        assert_eq!(names, vec!["qemu"]);
 
-        let fc = by("firecracker").unwrap();
-        assert_eq!(fc.snapshot_tier, "live-memory");
-        assert!(fc.tap_networking, "firecracker uses a host TAP device");
-        assert!(fc.vsock);
-        assert!(fc.balloon);
-        assert!(
-            fc.standby_pool,
-            "Firecracker implements live standby warm-spawn"
-        );
-
+        assert!(by("firecracker").is_none());
         assert!(by("libkrun").is_none());
 
         let qemu = by("qemu").unwrap();

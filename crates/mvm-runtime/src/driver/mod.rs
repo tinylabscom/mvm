@@ -2,12 +2,14 @@
 //! (workload admission/egress/audit, builder orchestration) living in the role
 //! runners above it.
 
+pub mod fc;
 pub mod hvf;
 pub mod libkrun;
 pub mod mock;
 pub mod spec;
 pub mod traits;
 
+pub use fc::FcDriver;
 pub use hvf::HvfDriver;
 pub use libkrun::LibkrunDriver;
 pub use mock::{MockDriver, MockRunningVm};

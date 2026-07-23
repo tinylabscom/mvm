@@ -12,7 +12,7 @@
 //! constructor wiring; `VmBackend` owns runtime behavior; `AnyBackend` remains
 //! the closed enum for the few intentionally backend-specific operations.
 
-use crate::backend::{AnyBackend, BackendTier, FirecrackerBackend};
+use crate::backend::{AnyBackend, BackendTier};
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
@@ -44,7 +44,8 @@ pub struct BackendDescriptor {
     pub bundled_kernel: bool,
     /// This backend needs the admitted plan JSON stashed to disk for its
     /// external-VMM bridge to read at spawn time, rather than taking it
-    /// in-process. True only for Firecracker today.
+    /// in-process. False for every runner-driven backend — the runner takes the
+    /// plan in-process — so no CLI-selectable backend sets it today.
     pub needs_plan_json: bool,
     /// This backend runs real (non-mock, non-dev-substrate) workloads —
     /// the admitted plan is stashed for its gateway/bridge audit path.
@@ -146,15 +147,19 @@ backend_catalog![
         kind: Firecracker,
         selector: "firecracker",
         aliases: [],
-        constructor: AnyBackend::Firecracker(FirecrackerBackend),
+        constructor: AnyBackend::Firecracker(crate::backend::fc_runner()),
         tier: Tier1,
         marker_file: Some("fc.pid"),
         started_vm_probe_order: Some(3),
         list_all: true,
-        balloon_support: true,
-        warm_start_support: true,
+        // The runner takes the trait-default warm-start/standby (no live-memory
+        // snapshot, no standby pool) and takes the admitted plan in-process, so
+        // Firecracker drops off the balloon + warm-start doctor surfaces and
+        // needs no disk-stashed plan for an external bridge.
+        balloon_support: false,
+        warm_start_support: false,
         bundled_kernel: false,
-        needs_plan_json: true,
+        needs_plan_json: false,
         is_workload: true
     },
     {
@@ -349,14 +354,8 @@ mod tests {
     /// reshuffle can't silently change what users see or the probe priority.
     #[test]
     fn descriptor_surface_ordering_is_frozen() {
-        assert_eq!(
-            selectors(balloon_support_descriptors()),
-            ["firecracker", "qemu"]
-        );
-        assert_eq!(
-            selectors(warm_start_support_descriptors()),
-            ["firecracker", "qemu"]
-        );
+        assert_eq!(selectors(balloon_support_descriptors()), ["qemu"]);
+        assert_eq!(selectors(warm_start_support_descriptors()), ["qemu"]);
         assert_eq!(
             selectors(list_all_descriptors()),
             ["firecracker", "libkrun", "qemu", "hvf", "wasm"]
