@@ -32,6 +32,7 @@ use crate::network_tunnel_spawn::{
     NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
     spawn_network_tunnel_worker_if_configured,
 };
+use crate::workload_runner::cmdline;
 
 /// PID file the supervisor writes inside `vm_state_dir`. Distinct from the other
 /// backends' markers so HVF VMs coexist under the same `~/.mvm/vms/` root.
@@ -191,57 +192,12 @@ fn spawn_hvf_gating_endpoint_if_needed(
     Ok((EndpointGuard::new(vm_name), Some(socket)))
 }
 
-/// Kernel cmdline token that turns on the in-guest vsock egress client.
-/// Emitted only when the run actually allows outbound egress and the workload
-/// carries no bound secrets, so the raw SOCKS path never contends with the
-/// substitution endpoint for the shared egress port.
-fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
-    (config.network_policy.allows_egress()
-        && !crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
-    .then(|| "mvm.vsock_egress=1".to_string())
-}
-
-fn hvf_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .verity_path
-        .as_deref()
-        .zip(config.roothash.as_deref())
-        .and_then(|_| {
-            Path::new(&config.rootfs_path)
-                .parent()
-                .map(|p| p.join("rootfs.initrd"))
-        })
-        .filter(|p| p.exists())
-}
-
-fn hvf_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
-    config
-        .initrd_path
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| hvf_verity_initrd_path(config))
-}
-
-fn hvf_verity_enabled(config: &VmStartConfig) -> bool {
-    config.verity_path.is_some()
-        && config.roothash.is_some()
-        && hvf_effective_initrd(config).is_some()
-}
-
-fn hvf_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
-    Some((
-        config.runtime_overlay_path.as_deref()?,
-        config.runtime_overlay_verity_path.as_deref()?,
-        config.runtime_overlay_roothash.as_deref()?,
-    ))
-}
-
 fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
     if config.virtiofs_root.is_some() {
         return Vec::new();
     }
 
-    if hvf_verity_enabled(config) {
+    if cmdline::verity_enabled(config) {
         let mut disks = vec![
             HvfDisk {
                 path: PathBuf::from(&config.rootfs_path),
@@ -259,7 +215,7 @@ fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
                 ephemeral: false,
             },
         ];
-        if let Some((overlay_path, overlay_verity_path, _)) = hvf_runtime_overlay(config) {
+        if let Some((overlay_path, overlay_verity_path, _)) = cmdline::runtime_overlay(config) {
             disks.push(HvfDisk {
                 path: PathBuf::from(overlay_path),
                 read_only: true,
@@ -316,13 +272,13 @@ fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
     // read-only overlay from `/dev/vdb` in its guest `/init`.
     let verity_intended = config.roothash.is_some() || config.verity_path.is_some();
     if verity_intended {
-        if !hvf_verity_enabled(config) {
+        if !cmdline::verity_enabled(config) {
             bail!(
                 "required-overlay hvf boot requires verity metadata plus an initrd \
                  (`--initrd` or sibling rootfs.initrd)"
             );
         }
-        if hvf_runtime_overlay(config).is_none() {
+        if cmdline::runtime_overlay(config).is_none() {
             bail!("required-overlay hvf boot requires the runtime overlay artifact triple");
         }
     } else if crate::microvm::non_verity_overlay_ext4(config).is_none() {
@@ -332,67 +288,6 @@ fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
-    let egress = vsock_egress_cmdline_token(config, state_dir);
-    // The userspace L3 egress tunnel: tell the guest (via mvm-guest-netinit →
-    // mvm-guest-netd) to stand up its TUN and pump packets to the host worker over
-    // vsock. Present only for an admitted allow-list run.
-    let tunnel = config
-        .network_tunnel
-        .as_ref()
-        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline);
-    let grants = crate::hvf_bootargs::grant_tokens(&config.name);
-    let virtiofs_root = config.virtiofs_root.is_some();
-    let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
-    let verity_enabled = hvf_verity_enabled(config);
-    if egress.is_none()
-        && tunnel.is_none()
-        && grants.is_empty()
-        && !verity_enabled
-        && config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
-    {
-        return None;
-    }
-    let mut cmdline = if verity_enabled {
-        crate::hvf_bootargs::default_verity_bootargs()
-    } else {
-        crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
-    };
-    if let Some(verity_args) = crate::microvm::build_verity_cmdline_args(
-        config.roothash.as_deref(),
-        if verity_enabled {
-            hvf_runtime_overlay(config).map(|(_, _, roothash)| roothash)
-        } else {
-            None
-        },
-    ) {
-        cmdline.push(' ');
-        cmdline.push_str(&verity_args);
-    }
-    // Non-verity boots carry the runtime overlay as a plain read-only
-    // `/dev/vdb` (attached by `hvf_workload_disks`); emit the token its `/init`
-    // mounts from. Verity boots already emitted the dm-verity variant above.
-    if !verity_enabled
-        && has_disk
-        && let Some(overlay_args) = crate::microvm::build_runtime_overlay_cmdline_args(
-            None,
-            crate::microvm::non_verity_overlay_ext4(config).is_some(),
-        )
-    {
-        cmdline.push(' ');
-        cmdline.push_str(&overlay_args);
-    }
-    cmdline.push(' ');
-    cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
-        config.runtime_source_policy,
-    ));
-    for token in egress.into_iter().chain(tunnel).chain(grants) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    Some(cmdline)
 }
 
 fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
@@ -595,9 +490,13 @@ impl VmBackend for HvfBackend {
             kernel: PathBuf::from(kernel),
             // Thread a full cmdline only when we need extra workload tokens;
             // otherwise keep the supervisor default (`init=/init`).
-            cmdline: hvf_workload_cmdline(config, &state_dir),
+            cmdline: cmdline::workload_cmdline(
+                config,
+                &state_dir,
+                crate::hvf_bootargs::workload_bootargs,
+            ),
             memory_mib: config.memory_mib,
-            initramfs: hvf_effective_initrd(config),
+            initramfs: cmdline::effective_initrd(config),
             disks,
             virtiofs_root,
             vsock: true,
@@ -1050,110 +949,6 @@ mod tests {
     }
 
     #[test]
-    fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {
-        let dir = tempfile::tempdir().unwrap();
-        let deny_all = VmStartConfig::default();
-        assert_eq!(vsock_egress_cmdline_token(&deny_all, dir.path()), None);
-
-        let allow_egress = VmStartConfig {
-            network_policy: mvm_core::network_policy::NetworkPolicy::preset(
-                mvm_core::network_policy::NetworkPreset::Dev,
-            ),
-            ..Default::default()
-        };
-        assert_eq!(
-            vsock_egress_cmdline_token(&allow_egress, dir.path()).as_deref(),
-            Some("mvm.vsock_egress=1")
-        );
-    }
-
-    #[test]
-    fn hvf_workload_cmdline_appends_vsock_egress_token_for_virtiofs_root() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let config = VmStartConfig {
-            virtiofs_root: Some("/tmp/root".to_string()),
-            network_policy: mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-                mvm_core::network_policy::HostPort::new("example.com", 443),
-            ]),
-            ..Default::default()
-        };
-        let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
-        assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
-        assert!(cmdline.contains("init=/init"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=rootfs_only"));
-        assert!(cmdline.contains("mvm.vsock_egress=1"));
-    }
-
-    #[test]
-    fn hvf_workload_cmdline_appends_network_tunnel_token_for_admitted_allowlist() {
-        let dir = tempfile::tempdir().unwrap();
-        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-            mvm_core::network_policy::HostPort::new("93.184.216.34", 443),
-        ]);
-        let tunnel = crate::network_tunnel_spawn::network_tunnel_for_launch(
-            &policy,
-            crate::network_tunnel_spawn::TunnelLaunchIdentity {
-                tenant_id: "acme".to_string(),
-                vm_id: "vm-1".to_string(),
-                boot_id: "boot-1".to_string(),
-                session_nonce: "nonce-1".to_string(),
-            },
-        )
-        .expect("an allow-list launch carries a forwarding tunnel");
-        let expected = mvm_core::vm_backend::encode_network_tunnel_cmdline(&tunnel)
-            .expect("the tunnel encodes to a cmdline token");
-
-        let config = VmStartConfig {
-            virtiofs_root: Some("/tmp/root".to_string()),
-            network_policy: policy,
-            network_tunnel: Some(tunnel),
-            ..Default::default()
-        };
-        let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
-        assert!(
-            cmdline.contains(&expected),
-            "cmdline missing the tunnel token: {cmdline}"
-        );
-        assert!(cmdline.contains("mvm.network_tunnel="));
-        // An allow-list run carrying no bound secrets also turns on the raw vsock
-        // egress client, so both tokens coexist on one cmdline (mirrors libkrun).
-        assert!(cmdline.contains("mvm.vsock_egress=1"));
-    }
-
-    #[test]
-    fn hvf_workload_cmdline_uses_verity_shape_and_runtime_overlay_tokens() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        let verity = dir.path().join("rootfs.verity");
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-
-        let config = VmStartConfig {
-            rootfs_path: rootfs.display().to_string(),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some("a".repeat(64)),
-            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
-            runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            ..Default::default()
-        };
-        let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
-        assert!(!cmdline.contains("root=/dev/vda"));
-        assert!(!cmdline.contains("init=/init"));
-        assert!(cmdline.contains("mvm.roothash="));
-        assert!(cmdline.contains("mvm.data=/dev/vda"));
-        assert!(cmdline.contains("mvm.hash=/dev/vdb"));
-        assert!(cmdline.contains("mvm.runtime_roothash="));
-        assert!(cmdline.contains("mvm.runtime_data=/dev/vdc"));
-        assert!(cmdline.contains("mvm.runtime_hash=/dev/vdd"));
-        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
-    }
-
-    #[test]
     fn hvf_workload_disks_use_read_only_verity_layout_with_overlay() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
@@ -1205,12 +1000,14 @@ mod tests {
         assert!(!disks[1].ephemeral);
 
         let dir = tempfile::tempdir().unwrap();
-        let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
+        let assembled =
+            cmdline::workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+                .expect("cmdline");
         assert!(
-            cmdline.contains("mvm.runtime_data=/dev/vdb"),
-            "got: {cmdline}"
+            assembled.contains("mvm.runtime_data=/dev/vdb"),
+            "got: {assembled}"
         );
-        assert!(!cmdline.contains("mvm.runtime_hash="), "got: {cmdline}");
+        assert!(!assembled.contains("mvm.runtime_hash="), "got: {assembled}");
     }
 
     #[test]

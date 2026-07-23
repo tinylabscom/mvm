@@ -227,7 +227,7 @@
       ]
     },
     "EntrypointEvent": {
-      "description": "One event in the streaming response of a `RunEntrypoint` call.\n\n`Stdout` / `Stderr` carry bytes from the wrapper's respective streams. `Exit` and `Error` are terminal — they end the response stream for one call. The agent emits exactly one terminal event per call.\n\nv1 buffers each stream fully before sending one `Stdout` and one `Stderr` event (sizes bounded by agent caps). v2 may chunk progressively without changing the type or the protocol shape: the host already reads frames in a loop until terminal.",
+      "description": "One event in the streaming response of a `RunEntrypoint` call.\n\n`Stdout` / `Stderr` carry bytes from the wrapper's respective streams. `Exit` and `Error` are terminal — they end the response stream for one call. The agent emits exactly one terminal event per call.\n\nBuffered output is split into bounded `Stdout` and `Stderr` events without changing the protocol shape: the host reads frames until terminal.",
       "oneOf": [
         {
           "description": "Bytes from the wrapper's stdout.",
@@ -1110,7 +1110,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Run the image's baked entrypoint program with the given stdin piped in and stdout/stderr captured.\n\nThis is the production-safe call surface. The agent reads the entrypoint path from `/etc/mvm/entrypoint` at boot, validates it (verity-partition, mode, ownership), and that resolved path is the only program `RunEntrypoint` will spawn. There is no argv override, no shell, no env injection beyond what the wrapper template defines at image build time.\n\nThe response is a stream of `EntrypointEvent` frames terminated by `EntrypointEvent::Exit` or `EntrypointEvent::Error`. v1 emits one `Stdout` chunk + one `Stderr` chunk + a terminal event (buffered up to caps); v2 may chunk progressively without changing the wire shape.\n\nCaps and timeouts are enforced agent-side. The wire frame size is bounded by `MAX_FRAME_SIZE`.",
+          "description": "Run the image's baked entrypoint program with the given stdin piped in and stdout/stderr captured.\n\nThis is the production-safe call surface. The agent reads the entrypoint path from `/etc/mvm/entrypoint` at boot, validates it (verity-partition, mode, ownership), and that resolved path is the only program `RunEntrypoint` will spawn. There is no argv override, no shell, no env injection beyond what the wrapper template defines at image build time.\n\nThe response is a stream of `EntrypointEvent` frames terminated by `EntrypointEvent::Exit` or `EntrypointEvent::Error`. Output events carry bounded chunks; callers consume frames until the terminal event.\n\nCaps and timeouts are enforced agent-side. The wire frame size is bounded by `MAX_FRAME_SIZE`.",
           "type": "object",
           "required": [
             "RunEntrypoint"
@@ -1455,7 +1455,7 @@
           ]
         },
         {
-          "description": "Read up to `length` bytes from `path`, optionally starting at `offset`. The agent enforces `length` ≤ a hard cap (default 16 MiB); callers wanting larger reads must use the streaming surface (lands in W2).",
+          "description": "Read one bounded chunk from `path`, optionally starting at `offset`. Callers transfer larger files through repeated offset-addressed calls.",
           "type": "object",
           "required": [
             "FsRead"
@@ -1496,7 +1496,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Write `content` to `path`. Small-content path; large writes must use the streaming surface (W2).",
+          "description": "Write one bounded chunk to `path`. Callers transfer larger files through repeated offset-addressed calls; only the first chunk truncates.",
           "type": "object",
           "required": [
             "FsWrite"
@@ -1534,8 +1534,23 @@
                   "format": "uint32",
                   "minimum": 0.0
                 },
+                "offset": {
+                  "description": "Byte offset at which this chunk is written. Defaults to the start.",
+                  "default": null,
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
                 "path": {
                   "type": "string"
+                },
+                "truncate": {
+                  "description": "Truncate before writing. Defaults to the original one-shot behavior.",
+                  "default": true,
+                  "type": "boolean"
                 }
               },
               "additionalProperties": false
@@ -1949,7 +1964,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Run user-supplied source code in the wrapper's native interpreter. Dev-only — gated behind the agent's `interactive` feature flag, same fence as `Exec`. The host (`mvmctl session run-code`) provides additional gating: the session must be `mode=Dev`.\n\nThe interpreter is selected by reading `/etc/mvm/wrapper.json` at dispatch time: - `language = \"python\"` → `python3 -c <code>` - `language = \"node\"`   → `node -e <code>`\n\nOther values, or a missing/unparseable wrapper.json, refuse with a wire-stable error message.\n\n**v1 is stateless** — each call spawns a fresh interpreter process, so `from foo import bar` in call 1 isn't visible in call 2. A future v2 routes through the warm-process pool's wrapper for stateful eval across calls; the wire shape stays identical, the dispatch flips inside the agent.",
+          "description": "Run user-supplied source code in the wrapper's native interpreter. Dev-only — gated behind the agent's `interactive` feature flag, same fence as `Exec`. The host (`mvmctl session run-code`) provides additional gating: the session must be `mode=Dev`.\n\nThe interpreter is selected by reading `/etc/mvm/wrapper.json` at dispatch time: - `language = \"python\"` → `python3 -c <code>` - `language = \"node\"`   → `node -e <code>`\n\nOther values, or a missing/unparseable wrapper.json, refuse with a wire-stable error message.\n\nThis call is stateless: each request spawns a fresh interpreter process, so `from foo import bar` in call 1 isn't visible in call 2.",
           "type": "object",
           "required": [
             "RunCode"
@@ -3374,7 +3389,7 @@
           ]
         },
         "volumes": {
-          "description": "Volume-mount state — wire-stable placeholder. `Disabled` in v1 (mount/unmount are on-demand verbs, not boot state).",
+          "description": "Volume-mount state — wire-stable placeholder. `Disabled` because mount/unmount are on-demand verbs, not boot state.",
           "allOf": [
             {
               "$ref": "#/definitions/ComponentState"

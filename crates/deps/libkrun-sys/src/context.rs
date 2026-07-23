@@ -56,6 +56,21 @@ pub struct KrunVirtioFs {
     pub host_path: String,
 }
 
+/// A per-port override for the host-side unix socket a host-listen
+/// vsock port pairs with, replacing the dir-derived
+/// `vsock-<port>.sock` path for that one port. See
+/// [`KrunContext::host_listen_socket_path`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HostListenOverride {
+    /// The host-listen port this override applies to. Must also
+    /// appear in [`KrunContext::host_listen_ports`] for libkrun to
+    /// register it.
+    pub port: u32,
+    /// Host unix socket path libkrun should proxy guest connects on
+    /// `port` to, instead of the derived `vsock_socket_path(port)`.
+    pub socket_path: String,
+}
+
 /// Configuration for a libkrun guest VM.
 ///
 /// Pure data — no I/O until [`start`](crate::start) /
@@ -106,6 +121,13 @@ pub struct KrunContext {
     /// Disjoint from [`Self::vsock_ports`].
     #[serde(default)]
     pub host_listen_ports: Vec<u32>,
+    /// Per-port overrides of the host-listen socket path, for ports
+    /// that should proxy to an explicit UDS instead of the
+    /// dir-derived `vsock-<port>.sock` path. Empty by default — no
+    /// current construction site populates this; see
+    /// [`Self::host_listen_socket_path`].
+    #[serde(default)]
+    pub host_listen_port_overrides: Vec<HostListenOverride>,
     /// Additional virtio-blk devices, appearing as `/dev/vdb`,
     /// `/dev/vdc`, … in the order listed. Empty by default; the
     /// dev-VM builder VM uses one entry for the Nix-store overlay
@@ -258,6 +280,7 @@ impl KrunContext {
             kernel_cmdline: None,
             vsock_ports: Vec::new(),
             host_listen_ports: Vec::new(),
+            host_listen_port_overrides: Vec::new(),
             extra_disks: Vec::new(),
             virtio_fs_mounts: Vec::new(),
             console_output_path: None,
@@ -287,6 +310,7 @@ impl KrunContext {
             kernel_cmdline: None,
             vsock_ports: Vec::new(),
             host_listen_ports: Vec::new(),
+            host_listen_port_overrides: Vec::new(),
             extra_disks: Vec::new(),
             virtio_fs_mounts: Vec::new(),
             console_output_path: None,
@@ -325,6 +349,7 @@ impl KrunContext {
             kernel_cmdline: None,
             vsock_ports: Vec::new(),
             host_listen_ports: Vec::new(),
+            host_listen_port_overrides: Vec::new(),
             extra_disks: Vec::new(),
             virtio_fs_mounts: Vec::new(),
             console_output_path: None,
@@ -452,6 +477,46 @@ impl KrunContext {
     pub fn add_host_listen_port(mut self, port: u32) -> Self {
         self.host_listen_ports.push(port);
         self
+    }
+
+    /// Append a control vsock port the HOST listens on, AND pin its
+    /// host-side socket to an explicit `uds` path instead of the
+    /// dir-derived one. Equivalent to calling
+    /// [`Self::add_host_listen_port`] followed by
+    /// [`Self::set_host_listen_socket_override`].
+    pub fn add_host_listen_port_at(mut self, port: u32, uds: impl Into<String>) -> Self {
+        self.host_listen_ports.push(port);
+        self.set_host_listen_socket_override(port, uds);
+        self
+    }
+
+    /// Pin the host-side socket for an already-registered (or
+    /// about-to-be-registered) host-listen `port` to an explicit
+    /// `uds` path, overriding the dir-derived default. See
+    /// [`Self::host_listen_socket_path`] for the resolution order.
+    pub fn set_host_listen_socket_override(&mut self, port: u32, uds: impl Into<String>) {
+        self.host_listen_port_overrides.push(HostListenOverride {
+            port,
+            socket_path: uds.into(),
+        });
+    }
+
+    /// Resolve the host-side unix socket path for a host-listen
+    /// `port`: the last-registered [`HostListenOverride`] entry for
+    /// `port` if one exists, else the dir-derived
+    /// [`Self::vsock_socket_path`]. `None` overrides (the common
+    /// case today) make this byte-identical to calling
+    /// `vsock_socket_path` directly.
+    pub fn host_listen_socket_path(&self, port: u32) -> std::path::PathBuf {
+        match self
+            .host_listen_port_overrides
+            .iter()
+            .rev()
+            .find(|o| o.port == port)
+        {
+            Some(o) => std::path::PathBuf::from(&o.socket_path),
+            None => self.vsock_socket_path(port),
+        }
     }
 
     /// Attach an additional virtio-blk device. The first call appears
@@ -636,6 +701,7 @@ mod tests {
         let ctx: KrunContext = serde_json::from_str(json).unwrap();
         assert!(ctx.virtio_fs_mounts.is_empty());
         assert_eq!(ctx.kernel_format, KernelFormat::Raw);
+        assert!(ctx.host_listen_port_overrides.is_empty());
     }
 
     /// Roundtrip with virtio-fs entries populated — the JSON shape
@@ -669,5 +735,73 @@ mod tests {
     fn with_vsock_direct_switches_networking_mode() {
         let ctx = KrunContext::new("vm", "/k", "/r").with_vsock_direct();
         assert!(matches!(ctx.networking, NetworkingMode::VsockDirect));
+    }
+
+    /// Non-regression: a context with no overrides resolves
+    /// `host_listen_socket_path` to exactly the same path
+    /// `vsock_socket_path` returns today — byte-identical, not just
+    /// equal in shape.
+    #[test]
+    fn host_listen_socket_path_matches_derived_path_when_no_override() {
+        let ctx = KrunContext::new("vm-1", "/k", "/r")
+            .with_vsock_socket_dir("/home/user/mvm-home/vms/vm-1")
+            .add_host_listen_port(5253);
+        assert!(ctx.host_listen_port_overrides.is_empty());
+        assert_eq!(
+            ctx.host_listen_socket_path(5253),
+            ctx.vsock_socket_path(5253)
+        );
+    }
+
+    /// `add_host_listen_port_at` registers the port AND pins its
+    /// socket path; a different, non-overridden port keeps resolving
+    /// to the derived path.
+    #[test]
+    fn add_host_listen_port_at_registers_port_and_override() {
+        let ctx = KrunContext::new("vm-1", "/k", "/r")
+            .with_vsock_socket_dir("/d")
+            .add_host_listen_port_at(5253, "/run/mvm/egress-endpoint.sock")
+            .add_host_listen_port(5251);
+        assert!(ctx.host_listen_ports.contains(&5253));
+        assert_eq!(
+            ctx.host_listen_socket_path(5253),
+            std::path::PathBuf::from("/run/mvm/egress-endpoint.sock")
+        );
+        // The non-overridden port still resolves to the dir-derived path.
+        assert_eq!(
+            ctx.host_listen_socket_path(5251),
+            ctx.vsock_socket_path(5251)
+        );
+    }
+
+    /// `set_host_listen_socket_override` can be applied to a port
+    /// already registered via `add_host_listen_port` — the resolver
+    /// picks it up regardless of registration order.
+    #[test]
+    fn set_host_listen_socket_override_applies_to_registered_port() {
+        let mut ctx = KrunContext::new("vm-1", "/k", "/r")
+            .with_vsock_socket_dir("/d")
+            .add_host_listen_port(5253);
+        ctx.set_host_listen_socket_override(5253, "/run/mvm/egress-endpoint.sock");
+        assert_eq!(
+            ctx.host_listen_socket_path(5253),
+            std::path::PathBuf::from("/run/mvm/egress-endpoint.sock")
+        );
+    }
+
+    /// `KrunContext` serde roundtrip with `host_listen_port_overrides`
+    /// populated.
+    #[test]
+    fn host_listen_port_overrides_roundtrip_through_json() {
+        let ctx = KrunContext::new("vm-1", "/k", "/r")
+            .add_host_listen_port_at(5253, "/run/mvm/egress-endpoint.sock");
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(json.contains("\"host_listen_port_overrides\""));
+        let back: KrunContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.host_listen_port_overrides.len(), 1);
+        assert_eq!(
+            back.host_listen_socket_path(5253),
+            std::path::PathBuf::from("/run/mvm/egress-endpoint.sock")
+        );
     }
 }

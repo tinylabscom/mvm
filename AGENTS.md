@@ -148,6 +148,7 @@ No task is complete without tests. Every feature, bug fix, or refactor must incl
 
 ## Test Expectations
 
+- Broad product coverage: cover as much of the product as practical with behavior-driven development (BDD) tests that exercise user-visible workflows end to end. Add or update BDD scenarios whenever behavior changes, while retaining focused unit and integration tests for lower-level logic and failure paths.
 - New types: serde roundtrip tests, default value tests where applicable.
 - New protocol/wire code: roundtrip through mock I/O (e.g. `UnixStream::pair()`), error path tests (invalid input, wrong keys, malformed data).
 - New CLI flags/commands: integration tests in `tests/cli.rs` verifying help text and argument parsing.

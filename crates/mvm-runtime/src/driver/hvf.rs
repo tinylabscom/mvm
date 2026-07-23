@@ -13,7 +13,9 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_agentd::vsock::{CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_agentd::vsock::{
+    BROKER_PORT, CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports,
+};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::vm_backend::{
@@ -77,14 +79,6 @@ impl SupervisorPaths {
     }
 }
 
-/// Find the host socket for a standing vsock port by its guest-port number.
-fn vsock_socket(spec: &VmmSpec, guest_port: u32) -> Option<PathBuf> {
-    spec.vsock
-        .iter()
-        .find(|p| p.guest_port == guest_port)
-        .map(|p| p.host_uds.clone())
-}
-
 /// Map a policy-free `VmmSpec` to a relay `HvfSupervisorConfig`: the supervisor
 /// wires the guest's `EGRESS_PORT` straight to the host-side endpoint bound at
 /// `egress_relay_socket`, which owns the claim-10 gate and substitution. The
@@ -117,7 +111,7 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
     // Guests that need host egress carry an explicit EGRESS_PORT relay socket in
     // the spec. Workloads must provide one; trusted builders now provide the same
     // vsock relay so every backend uses one egress path.
-    let egress_relay_socket = match vsock_socket(spec, EGRESS_PORT) {
+    let egress_relay_socket = match spec.host_socket_for_port(EGRESS_PORT) {
         Some(socket) => Some(socket),
         None if spec.trusted_builder => None,
         None => {
@@ -160,11 +154,14 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         pid_file: paths.pid_file.clone(),
         workload_exit: paths.workload_exit.clone(),
         timeout_secs: paths.timeout_secs,
-        agent_socket: vsock_socket(spec, GUEST_AGENT_PORT),
+        agent_socket: spec.host_socket_for_port(GUEST_AGENT_PORT),
         substitution_socket: None,
         egress_relay_socket,
-        // Builder/dev VMs run no admitted workload, so no host-services broker.
-        broker_socket: None,
+        // An admitted workload carries a BROKER_PORT relay socket; the supervisor
+        // splices the guest's BROKER_PORT dial to it so host.audit.v1 /
+        // host.secrets.v1 reach the per-VM broker (or the per-tenant host-agent
+        // daemon). Absent for a builder/dev VM, which runs no admitted workload.
+        broker_socket: spec.host_socket_for_port(BROKER_PORT),
         // Builder/dev VMs carry no admitted egress tunnel.
         network_tunnel_socket: None,
         console_data_sockets,
@@ -264,7 +261,8 @@ impl VmmDriver for HvfDriver {
         // The agent RPC socket the supervisor binds for this VM (host→guest agent
         // bridge on GUEST_AGENT_PORT). Prefer the spec's own port; fall back to the
         // standing convention so a later `attach` re-derives the same path.
-        let agent_socket = vsock_socket(spec, GUEST_AGENT_PORT)
+        let agent_socket = spec
+            .host_socket_for_port(GUEST_AGENT_PORT)
             .unwrap_or_else(|| hvf_agent_socket(&paths.state_dir));
         Ok(Box::new(HvfRunningVm {
             id: VmId(spec.name.clone()),
@@ -289,6 +287,10 @@ impl VmmDriver for HvfDriver {
 
     fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
         self.backend.guest_channel_info(id)
+    }
+
+    fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
+        crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
     }
 }
 
@@ -396,6 +398,14 @@ mod tests {
         }
     }
 
+    fn broker_port(uds: &str) -> VsockPort {
+        VsockPort {
+            guest_port: BROKER_PORT,
+            host_uds: uds.into(),
+            direction: VsockDirection::GuestDials,
+        }
+    }
+
     fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
         VmmSpec {
             name: "w".into(),
@@ -428,6 +438,19 @@ mod tests {
         assert_eq!(
             d.security_profile().tier,
             HvfBackend.security_profile().tier
+        );
+    }
+
+    #[test]
+    fn workload_base_bootargs_delegates_to_hvf_bootargs() {
+        let d = HvfDriver::new();
+        assert_eq!(
+            d.workload_base_bootargs(false, true),
+            crate::hvf_bootargs::workload_bootargs(false, true)
+        );
+        assert_eq!(
+            d.workload_base_bootargs(true, false),
+            crate::hvf_bootargs::workload_bootargs(true, false)
         );
     }
 
@@ -473,11 +496,31 @@ mod tests {
         );
         assert_eq!(cfg.agent_socket, Some(PathBuf::from("/run/agent.sock")));
         assert_eq!(cfg.substitution_socket, None);
+        // No BROKER_PORT in this spec ⇒ no broker relay (unadmitted / builder).
+        assert_eq!(cfg.broker_socket, None);
         assert!(cfg.vsock);
         // No blocks → no disks.
         assert!(cfg.disks.is_empty());
         // Empty spec cmdline ⇒ None (supervisor uses its workload default).
         assert_eq!(cfg.cmdline, None);
+    }
+
+    #[test]
+    fn relay_config_wires_the_broker_relay_when_the_spec_carries_broker_port() {
+        // An admitted workload's spec carries a BROKER_PORT channel; the
+        // supervisor config must relay it so host.audit.v1 / host.secrets.v1
+        // reach the broker. Absence ⇒ None (asserted above).
+        let spec = spec_with(
+            KernelImage::Path("/img/Image".into()),
+            vec![
+                egress_port("/run/egress.sock"),
+                agent_port("/run/agent.sock"),
+                broker_port("/run/broker.sock"),
+            ],
+            vec![],
+        );
+        let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        assert_eq!(cfg.broker_socket, Some(PathBuf::from("/run/broker.sock")));
     }
 
     #[test]

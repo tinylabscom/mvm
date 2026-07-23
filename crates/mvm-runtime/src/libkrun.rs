@@ -130,14 +130,16 @@ fn validate_libkrun_network_policy(
 }
 
 /// How long [`LibkrunBackend::start`] waits for the supervisor to
-/// write its PID file before giving up and killing the child.
-const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+/// write its PID file before giving up and killing the child. Shared with
+/// the libkrun driver, which spawns the same supervisor binary.
+pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 /// After the PID file appears the supervisor still has to bind the
 /// per-port vsock listener socket; callers (the console attach,
 /// `shell_exec` via `connect_with_auto_start`) race that window and
 /// wrongly see the VM as "not running". `start` waits for the
-/// agent socket before returning so "ready" actually means reachable.
-const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
+/// agent socket before returning so "ready" actually means reachable. Shared
+/// with the libkrun driver's boot path.
+pub(crate) const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long [`LibkrunBackend::stop`] waits after `SIGTERM` before
 /// escalating to `SIGKILL`. Tight because libkrun's signal handling
@@ -148,8 +150,9 @@ const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 /// (see `libkrun_sys::install_shutdown_handler`) still helps the
 /// shell-stop case where SIGTERM is delivered cleanly (~200 ms); in
 /// the always-escalate cargo-spawn / launchd path a shorter timeout
-/// means `mvmctl stop` returns in 2 s instead of 5 s.
-const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+/// means `mvmctl stop` returns in 2 s instead of 5 s. Shared with the libkrun
+/// driver's `kill` escalation.
+pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Open the per-VM guest-console capture sink. OUTPUT-ONLY by
 /// construction (write-only, create+truncate): the guest console
@@ -170,8 +173,8 @@ pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<st
 /// `console=hvc0` matches libkrun's virtio-console wiring;
 /// `root=/dev/vda rw init=/init` matches Apple Container's
 /// boot for the same Nix-built rootfs layout.
-const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
-const VERITY_CMDLINE: &str = "console=hvc0";
+pub(crate) const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
+pub(crate) const VERITY_CMDLINE: &str = "console=hvc0";
 
 /// Build the supervisor config for one VM, lifting
 /// the audit-substrate resolution into the shared `audit_substrate`
@@ -290,7 +293,7 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
+pub(crate) fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
     let path = Path::new(kernel);
     if cfg!(target_arch = "x86_64") && path.exists() {
         let loadable = mvm_build::fc_kernel::ensure_fc_loadable_kernel(path)
@@ -666,6 +669,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         transparent_terminator_port: Some(crate::egress_redirect::terminator_port_for_vm_name(
             &config.name,
         )),
+        egress_relay_socket: None,
     })
 }
 
@@ -1458,18 +1462,18 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
     })
 }
 
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
+pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     let s = std::fs::read_to_string(path).ok()?;
     s.trim().parse::<libc::pid_t>().ok()
 }
 
-fn pid_alive(pid: libc::pid_t) -> bool {
+pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
     // `kill(pid, 0)` returns 0 if the process exists (and the caller
     // has permission to signal it), -1 with errno=ESRCH if not.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
+pub(crate) fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     unsafe { libc::kill(pid, sig) };
 }
 
@@ -2184,6 +2188,7 @@ mod tests {
             network_policy: None,
             bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
         };
         let json = serde_json::to_string(&cfg).expect("serialize");
         persist_supervisor_config_dump(dir.path(), &json).expect("persist supervisor config");

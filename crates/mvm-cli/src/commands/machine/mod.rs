@@ -331,6 +331,7 @@ impl MachineRunArgs {
                 self.health_retries,
                 self.health_start_period,
             ),
+            hypervisor: self.hypervisor,
         }
     }
 

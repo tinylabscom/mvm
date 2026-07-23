@@ -65,15 +65,15 @@ known schema version; an unknown/rejected schema version fails closed *before*
 addressing. If the realization or hash axis ever changes, that is a new address
 version, surfaced explicitly — never a silent reinterpretation.
 
-## Where it lives — and the zero-new-dep host pilot
+## Where it lives — and the host pilot
 
-**Host-side first (the pilot), zero new dependencies.** mvm already has both
-inputs: `serde_jcs = "0.1"` (RFC 8785 JCS — the same canonicalizer that signs
-`ControlRequest`) is a `mvm-core` dep, and `sha2` is ubiquitous. So the pilot is
-a small `mvm-core` (or `mvm-sdk`, wherever IR authoring is owned host-side)
-module: `semantic_address(&Workload) -> SemanticAddress = sha256(serde_jcs::to_vec(ir))`,
-formatted `sha256:<hex>`. No `uor-addr` crate, no Prism/UOR-Foundation
-transitive closure — which respects mvm's hard dependency-aversion (ADR-002).
+**Host-side first (the pilot).** mvm uses `serde_jcs = "0.1"` (RFC 8785 JCS —
+the same canonicalizer that signs `ControlRequest`), `sha2`, and the small
+`unicode-normalization` dependency to apply UOR-ADDR's Unicode NFC boundary.
+The `mvm-core` module computes `semantic_address(&Workload) -> SemanticAddress`
+as `sha256(NFC(JSON value) → serde_jcs::to_vec(value))`, formatted
+`sha256:<hex>`. No `uor-addr` crate or Prism/UOR-Foundation transitive closure
+is adopted, which preserves mvm's hard dependency-aversion (ADR-002).
 Interop with the UOR ecosystem becomes a **conformance-vector test** (assert our
 label equals UOR-ADDR's published vectors for the same input), not a dep.
 
@@ -147,8 +147,10 @@ equality is where the `uor-addr` dependency, if any, is evaluated).
 
 ## Decision
 
-Additive host-side pilot, zero new dependencies, `SemanticAddress` over the
-Workload IR, matching the UOR-ADDR JSON realization as a conformance property.
+Additive host-side pilot, `SemanticAddress` over the Workload IR, matching the
+UOR-ADDR JSON realization (including Unicode NFC normalization) as a conformance
+property. The published 12-fixture UOR-ADDR baseline is pinned in the
+`mvm-core` tests.
 The `uor-addr` crate itself is a deferred, verification-gated WS11-P4/browser
 decision — that is where its cross-implementation guarantee actually earns its
 keep. The pilot changes no exact-byte, trust, or replay mechanism, and proves it.

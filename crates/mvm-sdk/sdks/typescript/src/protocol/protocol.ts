@@ -127,7 +127,15 @@ follow_symlinks?: boolean
  * File mode for newly-created files (e.g. `0o644`). Ignored when overwriting an existing file (existing perms kept).
  */
 mode: number
+/**
+ * Byte offset at which this chunk is written. Defaults to the start.
+ */
+offset?: (number | null)
 path: string
+/**
+ * Truncate before writing. Defaults to the original one-shot behavior.
+ */
+truncate?: boolean
 }
 } | {
 FsList: {
@@ -406,7 +414,7 @@ error: string
  * 
  * `Stdout` / `Stderr` carry bytes from the wrapper's respective streams. `Exit` and `Error` are terminal — they end the response stream for one call. The agent emits exactly one terminal event per call.
  * 
- * v1 buffers each stream fully before sending one `Stdout` and one `Stderr` event (sizes bounded by agent caps). v2 may chunk progressively without changing the type or the protocol shape: the host already reads frames in a loop until terminal.
+ * Buffered output is split into bounded `Stdout` and `Stderr` events without changing the protocol shape: the host reads frames until terminal.
  */
 export type EntrypointEvent = ({
 Stdout: {
@@ -779,7 +787,7 @@ probes: ComponentState
  */
 profile: AgentProfile
 /**
- * Volume-mount state — wire-stable placeholder. `Disabled` in v1 (mount/unmount are on-demand verbs, not boot state).
+ * Volume-mount state — wire-stable placeholder. `Disabled` because mount/unmount are on-demand verbs, not boot state.
  */
 volumes: ComponentState
 /**

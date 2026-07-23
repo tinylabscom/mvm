@@ -246,6 +246,34 @@ fn run_parses_image_and_trailing_argv() {
 }
 
 #[test]
+fn run_parses_hypervisor_flag_and_forwards_to_run_args() {
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine",
+        "--hypervisor",
+        "libkrun",
+        "--",
+        "echo",
+        "hello",
+    ])
+    .expect("parse");
+    assert_eq!(args.hypervisor.as_deref(), Some("libkrun"));
+
+    let run = args.into_run_args();
+    assert_eq!(run.hypervisor.as_deref(), Some("libkrun"));
+}
+
+#[test]
+fn run_without_hypervisor_flag_forwards_none() {
+    let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
+    assert!(args.hypervisor.is_none());
+
+    let run = args.into_run_args();
+    assert!(run.hypervisor.is_none());
+}
+
+#[test]
 fn run_parses_runtime_pack_flag_and_forwards_to_run_args() {
     let args = parse_run(&["run", "--runtime-pack", "--", "true"]).expect("parse");
     assert!(args.runtime_pack);

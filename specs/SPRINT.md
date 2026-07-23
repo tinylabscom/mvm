@@ -14,24 +14,25 @@
 
 AI-driven development left the tree far larger and more tangled than the product warrants. Measured on `main` @ `6632527a8`:
 
-| Symptom | Measured today | Target |
-|---|---|---|
-| Workspace crates | 19 members (+xtask, +root) | **~11**, named by domain area |
-| Cargo.lock packages | **490** (~72 direct) | material cut (dedupe TLS/net/ext4/compression stacks; drop dead deps) |
-| Cargo features | **28 names, 396 `#[cfg(feature)]` sites** | **2** (`user`, `host`) + the prod/dev guest-agent build split |
-| Production binaries | **~29** (15 host, 13 guest, 1 CLI) | **1 host + 1 guest + 1 CLI** |
-| Base directories | **6 roots** + stray `~/microvm/vms` | **1** (`~/.mvm`) |
-| Files > 1500 lines | **39** (worst 7,997) | **0** non-test |
-| Egress through the auditable vsock seam | **2 of 4 backends** (libkrun/HVF only) | **100%** of workload backends |
-| specs/ | 512 files / 156k lines | ADRs only (consolidated) |
-| Top-level directories | ~30 | **~8** (`crates` `features` `nix` `specs` `xtask` `examples` `public` `scripts`) |
-| Open worktrees | 77 | the working set |
+| Symptom                                 | Measured today                            | Target                                                                           |
+| --------------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------- |
+| Workspace crates                        | 19 members (+xtask, +root)                | **~11**, named by domain area                                                    |
+| Cargo.lock packages                     | **490** (~72 direct)                      | material cut (dedupe TLS/net/ext4/compression stacks; drop dead deps)            |
+| Cargo features                          | **28 names, 396 `#[cfg(feature)]` sites** | **2** (`user`, `host`) + the prod/dev guest-agent build split                    |
+| Production binaries                     | **~29** (15 host, 13 guest, 1 CLI)        | **1 host + 1 guest + 1 CLI**                                                     |
+| Base directories                        | **6 roots** + stray `~/microvm/vms`       | **1** (`~/.mvm`)                                                                 |
+| Files > 1500 lines                      | **39** (worst 7,997)                      | **0** non-test                                                                   |
+| Egress through the auditable vsock seam | **2 of 4 backends** (libkrun/HVF only)    | **100%** of workload backends                                                    |
+| specs/                                  | 512 files / 156k lines                    | ADRs only (consolidated)                                                         |
+| Top-level directories                   | ~30                                       | **~8** (`crates` `features` `nix` `specs` `xtask` `examples` `public` `scripts`) |
+| Open worktrees                          | 77                                        | the working set                                                                  |
 
 The bar: a codebase an **expert human can read and navigate**, fully tested, following the Rust guidelines in the referenced gist. **Non-negotiable:** security, auditability, attestation-via-nix, and data governance are preserved or strengthened, never traded away.
 
 **Core goal — wasm containers from the same architecture.** The `VmBackend` seam + `Workload` IR + one host egress/audit boundary must also run a workload as a **wasm container** (a `WasmBackend`, WASI wasm module), not only a microVM — supporting more backends from one model and reaching hosts without KVM/HVF (CI, edge, the browser). This is enabled by, and makes non-optional, a **`no_std` core**: `mvm-protocol` builds `#![no_std] + alloc` on `wasm32` with tests, CI-gated. Full design in `specs/refactor/02-architecture.md` §Wasm-container; workstream is WS11 (promoted to core).
 
 ### Reference models (studied, not copied)
+
 - **supermachine** (single crate, 4 bins, ~20 deps, **one** feature, bundled kernel, HVF via `applevisor-sys`, KVM via `kvm-ioctls`, `mio` event loop instead of a full async runtime, `mimalloc`, sub-100ms snapshot restore). North star for lean deps + low memory + external API shape (`Image`/`Vm`/`Pool`/`ExecBuilder`, warmup/snapshot/streaming-exec/`expose_tcp`/live host mounts).
 - **microsandbox** crate naming: `agentd`, `cli`, `filesystem`, `image`, `network`, `protocol`, `runtime`, `utils`. Adopted (with `mvm-` prefix).
 - **holospaces**: `default-features = false` no_std core with `std` as an opt-in feature; `unsafe_code = "forbid"` at the workspace; no_std OCI layer decoders → the wasm/browser path.
@@ -43,19 +44,19 @@ The bar: a codebase an **expert human can read and navigate**, fully tested, fol
 
 ### 2.1 Crate map (~19 → ~11, named by domain area)
 
-| New crate | Absorbs | Role | `no_std`? |
-|---|---|---|---|
-| **mvm-protocol** | `mvm-sdk::ir` + protocol wire types + policy types + `mvm-verify` | Workload IR, wire protocol, policy/audit types, audit-log verifier. The wasm/browser-capable core. | **yes** (`no_std` + `alloc`) |
-| **mvm-core** | `mvm-core` (std parts) | Single-dir config/paths, crypto (keystore/attestation/signing), catalog. | no (std) |
-| **mvm-fs** | `mvm-ext4` + `mvm-oci` + build's rootfs/overlay/unpack | Turn any image (OCI **or** nix) into a mountable rootfs + `vmlinux`; ext4 writer/reader; runtime overlay; mount ordering/policy; OCI registry fetch + unpack. | no |
-| **mvm-net** | `mvm-network` + hostd tunnel/smoltcp/gateway/dns + guest net/tun/netinit | vsock/UDS transport, smoltcp egress tunnel, DNS, network-policy enforcement, secret-substitution + PII-redaction seam. | no |
-| **mvm-runtime** | `mvm` + `mvm-backend` | `VmBackend` trait + libkrun/hvf/firecracker impls (mock behind `test-support`); VM lifecycle, templates, pool, warm-start. | no |
-| **mvm-build** | `mvm-build` | Nix builder-VM pipeline (the nix-execution engine). | no |
-| **mvm-hostd** | `mvm-hostd` + `mvm-vm-host` + host-side builder bins | **The single host binary.** Resident single-process daemon; all host roles as in-process tasks. | no |
-| **mvm-agentd** | `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi` | **The single guest binary.** Shipped in the runtime-overlay volume. | no |
-| **mvm-sdk** | `mvm-sdk` (minus `ir`) | Decorator + runtime authoring + the **tree-sitter → Workload IR → nix template** pipeline. | no |
-| **mvm-client** | `mvm-client` | Facade (`MvmClient`). **Every CLI command routes through it.** The stable surface mvmd consumes. | no |
-| **mvm-cli** | `mvm-cli` | `mvmctl`. Thin; delegates to `mvm-client`. | no |
+| New crate        | Absorbs                                                                  | Role                                                                                                                                                          | `no_std`?                    |
+| ---------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| **mvm-protocol** | `mvm-sdk::ir` + protocol wire types + policy types + `mvm-verify`        | Workload IR, wire protocol, policy/audit types, audit-log verifier. The wasm/browser-capable core.                                                            | **yes** (`no_std` + `alloc`) |
+| **mvm-core**     | `mvm-core` (std parts)                                                   | Single-dir config/paths, crypto (keystore/attestation/signing), catalog.                                                                                      | no (std)                     |
+| **mvm-fs**       | `mvm-ext4` + `mvm-oci` + build's rootfs/overlay/unpack                   | Turn any image (OCI **or** nix) into a mountable rootfs + `vmlinux`; ext4 writer/reader; runtime overlay; mount ordering/policy; OCI registry fetch + unpack. | no                           |
+| **mvm-net**      | `mvm-network` + hostd tunnel/smoltcp/gateway/dns + guest net/tun/netinit | vsock/UDS transport, smoltcp egress tunnel, DNS, network-policy enforcement, secret-substitution + PII-redaction seam.                                        | no                           |
+| **mvm-runtime**  | `mvm` + `mvm-backend`                                                    | `VmBackend` trait + libkrun/hvf/firecracker impls (mock behind `test-support`); VM lifecycle, templates, pool, warm-start.                                    | no                           |
+| **mvm-build**    | `mvm-build`                                                              | Nix builder-VM pipeline (the nix-execution engine).                                                                                                           | no                           |
+| **mvm-hostd**    | `mvm-hostd` + `mvm-vm-host` + host-side builder bins                     | **The single host binary.** Resident single-process daemon; all host roles as in-process tasks.                                                               | no                           |
+| **mvm-agentd**   | `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi`              | **The single guest binary.** Shipped in the runtime-overlay volume.                                                                                           | no                           |
+| **mvm-sdk**      | `mvm-sdk` (minus `ir`)                                                   | Decorator + runtime authoring + the **tree-sitter → Workload IR → nix template** pipeline.                                                                    | no                           |
+| **mvm-client**   | `mvm-client`                                                             | Facade (`MvmClient`). **Every CLI command routes through it.** The stable surface mvmd consumes.                                                              | no                           |
+| **mvm-cli**      | `mvm-cli`                                                                | `mvmctl`. Thin; delegates to `mvm-client`.                                                                                                                    | no                           |
 
 Kept as-is: `crates/deps/libkrun-sys` (FFI), `xtask`. **Dropped/folded:** `mvm-ext4`, `mvm-network`, `mvm-verify`, `mvm-guest-helpers`, `mvm-vm-host`, `mvm-host-services-ffi`, `mvm-mcp` (folded into `mvmctl serve` behind an `AgentProtocol` trait — MCP now, ACP later, no per-protocol crate; see WS7), orphan Swift `mvm-vz-supervisor`, `qemu` backend, dead deps (`colored`, `names`, `hickory-server`, stale `mvm-egress-proxy` path).
 
@@ -68,15 +69,16 @@ Logging is **`mvm-core::log`** (a module, not a crate): structured `tracing` for
 
 - `mvm-hostd` and `mvm-agentd` are each **one process**. Roles (supervisor, broker, signer, audit, substitution, tunnel, DNS; and in the guest: agent, runner, netinit, netd, oci-init, verity-init) are **in-process async tasks / threads**, never fork-`exec`'d helpers.
 - **No `std::process::Command` / `tokio::process::Command` anywhere** in the host, runtime, or guest-agent paths. All former shell-outs become native Rust: ext4 (pure-Rust writer/reader), packet filtering (in userspace at the smoltcp seam / netlink where required), tar/gzip/zstd (Rust crates). CI lint enforces zero `Command` in these crates.
-- **Two carved exemptions** (the process *is* the workload, not a helper we spawn for our own logic): (1) launching the **Firecracker** VMM process; (2) the **builder VM** invoking `nix` — the builder VM is a nix-execution engine and that is its sole purpose. Both are allow-listed explicitly in the lint.
-- **Secrets isolation (Option A):** keys/secrets live in a dedicated module — `mlock`ed, `zeroize`-on-drop, constant-time compare (`subtle`), never logged; the whole daemon runs under seccomp + landlock; the vsock parsers stay fuzzed. This trades the previous address-space process-moat for in-process isolation + memory hygiene; the primary guarantee (*secrets never enter the guest*) is untouched.
+- **Two carved exemptions** (the process _is_ the workload, not a helper we spawn for our own logic): (1) launching the **Firecracker** VMM process; (2) the **builder VM** invoking `nix` — the builder VM is a nix-execution engine and that is its sole purpose. Both are allow-listed explicitly in the lint.
+- **Secrets isolation (Option A):** keys/secrets live in a dedicated module — `mlock`ed, `zeroize`-on-drop, constant-time compare (`subtle`), never logged; the whole daemon runs under seccomp + landlock; the vsock parsers stay fuzzed. This trades the previous address-space process-moat for in-process isolation + memory hygiene; the primary guarantee (_secrets never enter the guest_) is untouched.
 - **Multi-role dispatch** is by subcommand/argv0 within the single binary (no fork). PID-1 variants (verity-init, oci-init) are selected by the overlay's init symlink.
-- The **builder VM runs the same single guest binary** (`mvm-agentd` in a "builder" role: drive the nix build, report status/outcome, emit the artifact location) — one guest binary across workload *and* builder VMs, not a separate builder-VM binary set.
+- The **builder VM runs the same single guest binary** (`mvm-agentd` in a "builder" role: drive the nix build, report status/outcome, emit the artifact location) — one guest binary across workload _and_ builder VMs, not a separate builder-VM binary set.
 - **Host daemon state store = append-only, signed `jsonl`** (the tamper-evident shape the audit chain already uses), never an embedded SQL / `libSQL` database — fewer deps, smaller attack surface, and it doubles as an audit artifact.
 
 ### 2.3 Feature model — exactly two
 
 Two workspace surfaces, enforced by `xtask check-two-surfaces`:
+
 - **`user`** (default): CLI + SDK + build + run microVMs locally.
 - **`host`**: library subset — everything to build and run a microVM, no authoring niceties.
 
@@ -105,9 +107,9 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 
 ### 2.6 Security & data-governance model (preserved/strengthened)
 
-- **Guest sees no secrets, emits no PII** becomes a *universal* invariant once all egress crosses the host seam: bidirectional secret **substitution** (user-named `${NAME}` placeholders in the guest, real secret injected host-side on egress only for the secret's bound destination) + bidirectional **PII redaction/masking**, both written to the chain-signed audit log. Backed by a CI witness across all workload backends. (Architecture guarantees the host inspects every byte; ruleset completeness is a policy concern.)
+- **Guest sees no secrets, emits no PII** becomes a _universal_ invariant once all egress crosses the host seam: bidirectional secret **substitution** (user-named `${NAME}` placeholders in the guest, real secret injected host-side on egress only for the secret's bound destination) + bidirectional **PII redaction/masking**, both written to the chain-signed audit log. Backed by a CI witness across all workload backends. (Architecture guarantees the host inspects every byte; ruleset completeness is a policy concern.)
 - Verified boot (dm-verity rootfs + sealed runtime overlay), signed `ExecutionPlan` admission, content-addressed bundles, and the chain-signed audit log are all retained. Attestation via nix templates and the machine-checked claims catalog stay.
-- **Auditable logging everywhere:** `mvm-core::log` emits operational logs *and* chain-signed audit entries for every security-relevant action; secrets/PII redacted at the boundary; the audit chain stays verifiable via `mvmctl trust audit verify`.
+- **Auditable logging everywhere:** `mvm-core::log` emits operational logs _and_ chain-signed audit entries for every security-relevant action; secrets/PII redacted at the boundary; the audit chain stays verifiable via `mvmctl trust audit verify`.
 - The guest binary ships **only** as the read-only, dm-verity-sealed **runtime-overlay volume** every microVM mounts — updating the overlay updates every microVM; it is never baked per-rootfs.
 
 ### 2.7 Testing model — BDD-first
@@ -115,7 +117,7 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 Every user-facing behavior and every security claim begins as a Gherkin `.feature` scenario, becomes a green cucumber-rs test, then a parametric implementation. **Nothing is "done" until its scenario is green and CI-gated.**
 
 - Top-level `features/suites/sN_<name>/*.feature`, numbered by area — e.g. `s0_cli`, `s1_build_run`, `s2_egress_vsock`, `s3_secrets_pii`, `s4_verified_boot`, `s5_lifecycle`, `s6_admission_audit`.
-- A dev-only **cucumber-rs runner** (`crates/mvm-conformance`, *not* one of the ~11 product crates) wires step definitions to `mvm-client`, so scenarios drive the real facade rather than mocks.
+- A dev-only **cucumber-rs runner** (`crates/mvm-conformance`, _not_ one of the ~11 product crates) wires step definitions to `mvm-client`, so scenarios drive the real facade rather than mocks.
 - The **claims catalog becomes executable**: each numbered security claim maps to a scenario, complementing (not replacing) the existing machine-checked witnesses.
 - `just bdd` runs the suite; folded into `just ci` / the full local gate.
 
@@ -131,17 +133,21 @@ examples/  example workloads
 public/    the website (stray docs/ + web/ fold in); kept current
 scripts/   the few remaining dev/CI shell scripts
 ```
+
 Root files kept: `Cargo.*`, `Justfile`, `README`/`LICENSE`/`SECURITY`/`CHANGELOG`, `AGENTS.md`, `CLAUDE.md`, `deny.toml`, `rust-toolchain.toml`, `treefmt.toml`, `cliff.toml`, `install.sh`, `.github/`, `.githooks/`. Everything else is moved or deleted (WS0.3).
 
 ### 2.9 Consolidated vsock networking (one standardized protocol)
 
 ALL guest ingress/egress rides vsock through a single authenticated, default-deny, auditable boundary — no NIC, no TAP, no bridge, ever. Data path:
+
 ```
 guest app → guest Linux stack → guest TUN (mvm-net0) → mvm-agentd [net role]
   → framed vsock protocol → per-VM host UDS (~/.mvm/run) → mvm-hostd [net worker]
   → identity check + default-deny policy + DNS + audit → smoltcp userspace stack → approved endpoints
 ```
+
 Two capabilities over that one seam:
+
 - **Generic transparent L3 tunnel** — carries no secrets; guest uses ordinary sockets (no proxy-awareness); all protocols (TCP/UDP/DNS/ICMP) as raw IP over vsock; host terminates in **userspace smoltcp** (no host TUN/NAT, no shell-out, cross-platform).
 - **Typed connectors** — secret-bearing requests; the host holds the credential and performs the request; secrets never enter the guest. Reuses the existing broker; replaces the global `HTTP_PROXY=:1080`.
 
@@ -158,27 +164,42 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 **Done so far:** `specs/` sweep (`72a4214a7`) · claims/compliance/threat-models consolidated into their topic ADRs (`985225f4e`; `check-claim-catalog` verifies 16 claims / 38 witnesses from ADR-002) · dead workspace deps dropped (`dfc70f6a7`) · worktrees swept to the 2-tree working set.
 
 **WS0.2 — ADR consolidation + renumber (~92 → ~15)**
+
 - [ ] Merge the 13 clusters (Appendix A) into ~15 canonical ADRs; **renumber to a clean `0001..NN` sequence** (updating every cross-reference, the claim witnesses, and CLAUDE.md/AGENTS.md); delete merged files (no decision lost); fix the dup 008/010 titles + the 012 mismatch. Keep ADR-002's content as the security SoT; no mega-ADRs.
 - Gate: ADR set ~15 files, cleanly numbered; `check-claim-catalog` + `check-adr-coverage` green.
 
 **WS0.3 — top-level directory compression** (target layout in §2.8)
-- [ ] `sdks/` — the SDK *layout* is **deferred to WS1g** (which creates `crates/mvm-sdk/languages/`, co-locates the Python/TS/… surfaces, and moves the `.argv` machine-fixtures → `tests/`). This WS does only the non-SDK moves below.
+
+- [ ] `sdks/` — the SDK _layout_ is **deferred to WS1g** (which creates `crates/mvm-sdk/languages/`, co-locates the Python/TS/… surfaces, and moves the `.argv` machine-fixtures → `tests/`). This WS does only the non-SDK moves below.
 - [ ] Fold `ops/` + `packaging/` into `nix/` (+ `scripts/` for the shell bits); move `resources/` into the owning crate's `assets/` (or a shared top-level `assets/`); merge stray `docs/` + `web/` into `public/`.
 - [ ] Delete `spikes/`, `web/audit-verify/` (superseded by wasm `mvm-protocol`), `schema/` (regenerated by xtask), `bin/`, `out/`, `.mvm-test/`, `.DS_Store` — each after confirming no CI gate depends on it.
 - Gate: root matches §2.8; CI green; nothing a gate needs is lost.
 
 **WS0.4 — dep-hygiene CI** (dead deps already dropped)
+
 - [ ] Add a `cargo machete` (unused-dep) gate to CI so dead deps can't creep back.
 - Gate: `cargo machete` clean in CI.
 
 **WS0.6 — BDD conformance harness (cucumber-rs)** (see §2.7)
+
 - [ ] Add `features/suites/sN_<name>/` + the `crates/mvm-conformance` cucumber-rs runner + a `just bdd` recipe (folded into `just ci`); seed scenarios for the current security claims and the top-level CLI verbs, wired through `mvm-client`.
+  - [x] Gate every software-publication path on a reusable GitHub Actions workflow that runs `just bdd`: runtime releases, kernel release assets, SDK registry releases, and crates.io publication. Keep emergency revocation-list publication independent of the product suite.
 - [ ] Standing rule for every later WS: land its Gherkin scenarios in the same change (feature-first — the scenario is written and red before the implementation).
 - Gate: `just bdd` green in CI; each security claim has a scenario.
 
 ### Phase 1 — Foundations
 
+- [x] **Cross-cutting guest protocol hardening (Plan 254):** made the logical
+      control/data-plane split executable with exhaustive verb classification,
+      64 total / 48 data request admission, symmetric 256 KiB frame limits,
+      48 KiB filesystem/process chunks, offset-addressed `fs`/`cp` transfers, and
+      host-CID-only console data admission. Guest protocol v2 is a hard cutover;
+      schemas and Python/TypeScript bindings are regenerated. Host workspace tests
+      and checks plus affected-crate clippy are green; Linux workspace-wide clippy
+      remains the required merge-CI gate.
+
 **WS1 — crate restructure** (the spine; each sub-step keeps tests green)
+
 - [ ] 1a `mvm-protocol`: extract `mvm-sdk::ir` + wire + policy + `mvm-verify`; make it `#![no_std]` + `alloc`; add a `wasm32-unknown-unknown` CI build; `unsafe_code = "forbid"`.
 - [ ] 1b `mvm-core`: rebuild on `mvm-protocol`; own single-dir config, crypto, keystore, attestation, catalog, `log`.
 - [x] 1c `mvm-fs`: fold `mvm-ext4` + `mvm-oci` + rootfs/overlay/unpack; one ext4 writer + one reader; "image → rootfs + vmlinux" is its public surface. _(`mvm-ext4`+`mvm-oci` merged into `mvm-fs` with `ext4`/`oci` submodules;_ **`oci_to_rootfs` moved mvm-build→mvm-fs `67e492f87`** _— the OCI-image→ext4-rootfs materializer (unpack/path-validation/ext4-materialize/verity-seal, ~2000 LOC + its integration tests) now lives in `mvm_fs::oci_to_rootfs`, using `crate::ext4`; mvm-fs stays a zero-mvm-dep leaf (+uuid). The builder-VM-orchestrated `rootfs.rs` (builder_backend_select/builder_vm) + `runtime_overlay.rs` (guest_agent_build) STAY in mvm-build — correctly a build concern, not fs. **1c.1 walker/materializer unification landed `a28f583b2`** (subagent-driven, spec ✅ + quality Approved): the two duplicate mid-layer tree-walk+materialize implementations (`mvm_build::rootfs::{collect_nodes,UnsupportedNodePolicy,materialize_ext4_pure*}` and `oci_to_rootfs::ext4`'s private `collect_nodes`) are now ONE `mvm_fs::rootfs` module (unconditional; xattr-aware walker + pure materializer + options); `oci_to_rootfs::ext4` = thin adapter (keeps `StagedRootfs` entry, `OciUnpackError` mapping, mke2fs escape hatch); `mvm_build::rootfs` = builder-VM dispatcher only; mvm-runtime `image.rs` rewired to the source. One disclosed behavior change: the OCI in-process arm inherits widen+restore read of owner-unreadable files (error→success only; emitted bytes unchanged, xattr policy pinned `Ignore`). 7518/7518 nextest (+10 net moved/new tests), all gates + Linux zigbuild cross-check green. Review Minor (follow-up): the widen/restore chmod-read-chmod has a narrow pre-existing TOCTOU window — consider open-then-fstat hardening. **1c.2 landed `c944a5bc2`** (subagent-driven, spec ✅ + quality Approved): the runtime-overlay cache-RESOLVE half (`RuntimeOverlayLayout`/`Artifact`/`ArtifactNames`/`Resolver`, `read_overlay_artifact_from_dir`) moved to a new **`mvm_fs::overlay`** module — a pure local probe (seed-from-default-cache deliberately relocated to build-side `resolve_or_seed_from_default_cache`; reviewer traced every in-repo caller still seeds); arch crosses as the dir-name string so **mvm-fs stays a zero-mvm-dep leaf** (`cargo tree` verified); new `OverlayError` with `#[error(transparent)]` mapping keeps messages byte-identical; build/nix-build/download/install/orchestrator stay in `mvm_build::runtime_overlay`; consumers (up.rs, both runtime_overlay commands, xtask version-check) rewired to the source. 7522/7522 (+4 tests), all gates + zigbuild green. **1c is now COMPLETE** — deferred: virtiofs-root-for-OCI (Phase 2), ext4-read facade, the fleet-repo one-line `resolve` switch, the pre-existing-broken Linux+nix `build_produces_resolver_compatible_artifact` test (stages no checksums manifest). `oci_verity_sealing.rs` test stayed in mvm-build (uses mvm-build-only `run_image::seal_run_rootfs_with_verity`). DEFERRED to the pre-PR CI-YAML sweep: `.github/workflows/{ci-full,security}.yml` OCI path-filters/comments are stale across BOTH the old `mvm-oci`→`mvm-fs` merge AND this move (+ nix flake comments) — fix all at once, not piecemeal.)_ Prefer **virtiofs-root for OCI** (boot directly off the unpacked OCI dir, skipping ext4 materialize) where the backend supports it; keep materialize as the fallback.
@@ -188,12 +209,13 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [ ] 1g `mvm-sdk`: authoring + the tree-sitter → Workload IR → **nix-template** pipeline (IR from `mvm-protocol`); user-specified **base OCI image** as the template base.
   - **`PackageType` trait** under `crates/mvm-sdk/languages/` (moved off the root): each language detects its manifest and surfaces a **locked** dependency set — prefer `uv.lock`/`poetry.lock` over `requirements.txt`, the lockfile over `package.json`, `Cargo.lock`, `Package.resolved`; fall back to the loose manifest and flag it. Built-ins: Python / TypeScript / Rust / Swift; **users register their own**.
   - Custom package types run in the user's trust domain, but the deps they produce still flow through the sealed app-deps audit (claim 11) — extensibility never bypasses the hash-lock/CVE/SBOM seal. Polyglot repos use explicit or ordered detection (no silent first-wins). Co-locate `sdks/python` + fixtures here.
-  - **Runtime SDK + decorator are first-class / enabled** (control a live microVM via `mvm-client`). Security boundary = **no shell in prod**: lifecycle + the declared entrypoint + audited output / `expose_tcp` / snapshot / fork are allowed; arbitrary interactive `exec` or console into a *sealed prod* VM stays dev-only (`dev-shell`; claims 4 + 15).
+  - **Runtime SDK + decorator are first-class / enabled** (control a live microVM via `mvm-client`). Security boundary = **no shell in prod**: lifecycle + the declared entrypoint + audited output / `expose_tcp` / snapshot / fork are allowed; arbitrary interactive `exec` or console into a _sealed prod_ VM stays dev-only (`dev-shell`; claims 4 + 15).
 - [ ] 1h `mvm-client`: facade covering every runtime operation the CLI needs.
 - [ ] 1i `mvm-cli`: delete direct reaches into runtime internals; route through `mvm-client`.
 - Gate: `cargo build --workspace` for both `user` and `host` surfaces; full suite green; dependency graph acyclic and matches §2.1.
 
 **WS1 execution progress (structure-first, single green branch — `cargo check --workspace --all-targets` green after each; crate count 20→15):**
+
 - [x] `mvm-network`→`mvm-net` rename — `6ae57b438`
 - [x] `mvm-ext4`+`mvm-oci`→`mvm-fs` (`ext4`/`oci` submodules) — `10977e915`
 - [x] `mvm-vm-host`→`mvm-hostd` (flat; 3 supervisor bins) — `3fc1dae6d`
@@ -230,6 +252,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [ ] **Follow-up (WS2↔WS10):** `check-guest-agent-runtime-free` now FAILS — merging the tokio addon bins (`addon-dns`/`vsock-bridge`/`egress-client`) into the single guest binary drags tokio into the guest closure, against the tokio-free/~8 MB goal. Single guest binary requires de-tokio'ing the addons (WS10) or a per-binary check scope.
 
 **WS4 — single `~/.mvm`** (can land alongside 1b)
+
 - [x] Reparent cache/state/share/runtime/config under `~/.mvm`; `MVM_HOME` override; delete the `~/microvm/vms` const; move per-VM UDS under `~/.mvm/run` (#1654). _(**WS4.1 landed `1b62d8212`** + review-fix `31d793bd0`, subagent-driven, spec ✅ + quality Approved: one root resolver pair `mvm_home()`/`mvm_home_strict()` (`MVM_HOME` | `$HOME/.mvm`; lenient keeps the documented `/tmp` fallback, strict errors — security-sensitive callers verified on strict), children `cache/ config/ run/ state/ share/ vms/`, data at root; SIX per-dir env vars + ALL XDG consultation DELETED with no fallback reads (138 files, +831/−1044; ~220 test refs swept via `TestEnv`); `VMS_DIR` tilde const deleted, `vms_dir()`/`vm_state_dir()` absolute; doctor/cache/prune + Justfile/dev-env/CI YAML on `MVM_HOME`; no migration (first-version). 7517/7517 (−5 = obsolete XDG-order tests consolidated). Review caught the root-`tests/` boot-bench hand-built FC path (outside the grep scope) → fixed by deriving both bench arms from `vm_state_dir`. Grep survivors, both justified: in-guest XDG exports in the builder-VM runtime (guest env, not host resolution) + 2 stale comments in untouched `mvm-protocol` (→ WS4.2).)_
 - [x] Route the remaining bypass sites through `mvm-core::config`; add the anti-bypass CI lint. _(**WS4.2 landed `2b85a8ff6` + `cc16c511d`**, subagent-driven, spec ✅ + quality Approved with NO findings: the new `xtask check-single-home` lint (4 rule classes — literal home-relative mvm paths, deleted env vars + XDG reads, raw `HOME` reads, re-rolled `mvm_home+"vms"` joins; 12 self-tests; CI Lint step) baselined at **117 hits → all FIXED, not allowlisted** (49 files; only 7 narrow rule-scoped allowlist entries incl. the resolver itself). The sweep surfaced real bypass BUGS beyond the review's 10: observer allowlist, tenant policy root, metrics scrape, attestation key dir, tenant config.toml all read raw `$HOME` and ignored `MVM_HOME` — now resolver-routed with per-site fail-closed posture REVIEW-VERIFIED preserved (strict-guard table in the review), and one prior gap closed: the volume-mount `denied_host_roots` used to be EMPTY when `$HOME` was unset, now unconditionally denies keys/audit roots. secret_store's cwd last-resort fallback renamed `./.mvm/secrets`→`./.mvm-secrets` (stops mimicking the home layout). Dead in-VM `echo` tilde-expansion round-trip in `microvm.rs::resolve_vm_dir` deleted (5 callers inlined). 7529/7529 (+12 lint self-tests), all gates green.)_
 - [x] Gate: fresh run creates exactly one root; lint green. _(check-single-home clean on the tree; reviewer re-ran it independently.)_
@@ -237,6 +260,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 **WS4 is COMPLETE.**
 
 **WS5 — two features** _(root collapse DONE earlier; member-feature audit done — remaining items are maintainer-ratification calls, not mechanical work)_
+
 - [x] Root surfaces collapsed to exactly `host`/`user` (+ `dev` union + a 7-entry internal allowlist); `check-two-surfaces` enforces it. The per-crate member features are the composition units the surfaces aggregate — correct Cargo layering, NOT sprawl to delete.
 - [x] **mcp composed into `user`** (`e77c90230`): the implemented+tested MCP server was gated by no surface → shipped in no build; folded into `user` (zero extra deps). Builds clean; two-surfaces stays green.
 - [~] **Member-feature decision matrix (audited; the below need a maintainer call, so NOT executed blindly):**
@@ -247,6 +271,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - Gate: `xtask check-two-surfaces` green (2 surfaces, 7 internal). **WS5 substantially COMPLETE**; only the attestation-stub deletion awaits ratification.
 
 **WS6 — trait dispatch + zero hardcoding**
+
 - [x] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete dead `"vz"` arms. `VmBackend::kind()` is now a required trait method (every backend implements it); `xtask check-no-string-backend-dispatch` guards the regression.
 - [x] Remove baked network literals (`172.16.x`, `127.0.0.1:1080`, `/tmp/firecracker.socket`); inject via config; name `DEFAULT_MEM_MIB`/`DEFAULT_CPUS`; add a CI lint for hardcoded IPs/ports. _(**WS6.2 landed `3d098ecb0` (sweep) + `30a531141` (lint)**, subagent-driven, spec ✅ + quality Approved, value-preservation reviewer-verified byte-for-byte per const: dev subnet `172.16.x` → `mvm_core::dev_network` consts (`DEFAULT_SUBNET_CIDR`/`DEFAULT_GATEWAY_IP`/`DEFAULT_GUEST_IP`/`DEFAULT_GATEWAY_CIDR` + `default_guest_ip_for_index`); `127.0.0.1:1080` → `mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN`/`_URL` (5 sites); `DEFAULT_MEM_MIB=2048`/`DEFAULT_CPUS=2` named at the image-manifest defaults (other differently-valued mem/cpu defaults deliberately left); the `API_SOCKET="/tmp/firecracker.socket"` process-global DELETED → per-VM `firecracker_api_socket_path(dir)="{dir}/fc.socket"` (start/stop resolve the same socket; matches the per-VM start path + `FirecrackerGuard` cleanup that already expected it). New `xtask check-no-network-literals` (3 rule classes: subnet/egress-port/fixed-tmp-socket; skips test code incl. whole-file `#![cfg(test)]`; per-instance `{…}` sockets allowed; narrow rule-scoped exemptions for the 2 definition sites + 1 dev smoke example; CI-wired). Controller-takeover (implementer wedged): I ran all gates + FIXED 2 real lint bugs — a whole-file `#![cfg(test)]` skip gap and a line-continuation newline-counting desync that under-counted hit line numbers (both now regression-tested). 7543/7543 nextest, workspace clippy, fmt, wasm32 all green. Zero mvm-protocol diff.)_
 - Gate: hardcoding lint green; no string-typed backend dispatch remains. **WS6 COMPLETE.**
@@ -254,6 +279,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 ### Phase 2 — Binaries, egress invariant, lifecycle
 
 **WS2 — single host + single guest binary, no forks**
+
 - [ ] `mvm-agentd`: merge `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi` **and the builder-VM guest bins** (`mvm-host-vm-init`/`mvm-builderd`/`stage0-init`/`mvm-rootfs-patcher` → a "builder" role); one binary, subcommand/argv0 dispatch; ship via the runtime-overlay volume.
 - [ ] `mvm-hostd`: fold `mvm-vm-host` + host-side builder bins; single-process resident daemon; roles as tasks; state in append-only signed `jsonl` (§2.2).
 - [ ] Remove every `Command` shell-out (host/runtime/agent); native Rust replacements; the two carved exemptions (FC launch, builder-VM nix) allow-listed.
@@ -263,6 +289,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 
 **WS-NET — consolidated vsock networking + standardized protocol** (absorbs the old WS3; see §2.9) — the core auditability seam
 First vertical slice (build in this order):
+
 - [ ] `mvm-protocol`: versioned frame codec (encode + incremental decoder) + handshake types; fuzz target for the decoder (never panic / OOM / OOB).
 - [ ] `VmDuplexTransport` trait + an in-memory / process-UDS test backend (so CI needs no VMM).
 - [ ] guest TUN pump (`mvm-agentd` net role): create `mvm-net0`, static IPv4, MTU, default route, DNS → controlled resolver; TUN↔frames.
@@ -270,6 +297,7 @@ First vertical slice (build in this order):
 - [ ] one control stream + one packet stream; hard frame/queue limits + credit backpressure.
 
 Then unify + retire the old paths:
+
 - [ ] Route Firecracker off TAP+iptables onto this tunnel (#1717, #1701); HVF host-vsock-proxy (#1601); fail-closed on `--network-allow` where the host can't mediate.
 - [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution via user-defined **`${NAME}`** named placeholders (guest holds the placeholder, host injects the value only for the secret's bound destination — ADR-023) + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
 - [ ] Delete the dead rvproxy / native-gateway subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`. Enforce the mount no-shadow rule (`/mvm` in deny prefixes).
@@ -278,6 +306,7 @@ Then unify + retire the old paths:
 - Gate: protocol unit + fuzz green; process-level integration proves allow-passes / deny-drops / **stale-session-rejected**; `check_vsock_only_egress` passes on all workload backends; `machine run --image busybox --allow-host google.com` resolves DNS + connects (fixes `ping: bad address`); live smoke Mac (HVF) + Linux (libkrun + FC); no NIC bypass.
 
 **WS9 — lifecycle correctness**
+
 - [ ] Confirm transient teardown (entrypoint exit + no healthcheck → VM stops) — already centralized; add tests.
 - [ ] **Capture workload stdout/stderr + exit code over vsock** (reuse the `BuilderStatus`/`BuilderOutcome` pattern the builder VM already uses) so all workload output crosses the auditable seam and the transient exit code is sourced from it.
 - [ ] Implement the missing **host-side healthcheck reaper** for persistent machines (probe the stored `health_check`; restart/mark-unhealthy on failure). Today it's persisted but never executed.
@@ -286,16 +315,18 @@ Then unify + retire the old paths:
 ### Phase 3 — Quality: size, dead code, CLI, kernel/memory
 
 **WS8 — file/function size + dead-code removal**
+
 - [ ] Extract inline `#[cfg(test)]` modules from the 39 oversized files (cheap; drops many under 1500).
 - [ ] Module-decompose the genuinely large bodies: `libkrun_builder`, `microvm`, `mvm-guest-agent`, `host-vm-init`, `doctor`, `unpack`, `image`, `vsock`.
 - [ ] Split giant functions: `handle_client` (734 → per-verb handlers via a verb-handler trait), `run_inner`, `configure_flake_microvm_*`, `build_supervisor_config`, `unpack_layer` (per entry-type). Builders for multi-field config structs.
 - [~] Delete dead/stub code: removed `crates/mvm-runtime/src/vm/egress_proxy.rs` (dead L7 stub), the `MVM_HVF_DUMP_DTB` debug gate, and the `HttpRegistry` SDK stub. **`storage/{pool,thin}.rs` dm-thin substrate is NOT dead** — it backs the live `mvmctl storage info`/`gc` verbs (`ThinPoolImpl`/`DeviceMapperBackend`), so it was kept. Still pending: gate `mock` backends behind `test-support`.
 - [ ] Security fix: broker config currently parsed **unsigned** — verify signature before parse.
 - [x] **Remove ssh-agent forwarding entirely — no SSH anywhere (core promise; ADR-001).** The tree carried a dev-tier ssh-agent-forwarding feature (host `$SSH_AUTH_SOCK` → vsock port 5301 → guest `/run/mvm/ssh-agent.sock`) that contradicted the "no SSH in microVMs, ever" promise and handed the guest the host's whole ssh-agent (bypassing bound-destination secret substitution). Deleted the whole surface: the `ssh_agent` spec field, manifest `[auth] ssh_agent`, `AuthMode::SshAgentSocket` + `AuthPolicy` (dropped the enum/struct entirely — `None` was the only variant left), the proxy (`mvm-cli::commands::ssh_agent_proxy`, `SSH_AGENT_PORT`, `run_ssh_agent_proxy_*`), the guest `SSH_AUTH_SOCK`/`/run/mvm/ssh-agent.sock` injection, tests, and CLI docs. **Strengthened ADR-001 to absolute** — deleted the "SSH-agent forwarding, when offered…" carve-out. Added `scripts/check-no-ssh.sh` (CI: `no-ssh-forwarding` in `security.yml`, beside `prod-agent-no-console`). The one dev interactive surface stays the builder-VM shell — nothing SSH.
-- [x] **Eradicate the remaining SSH surface — no SSH in any guest, on any backend (ADR-001 follow-up).** A security audit found a full in-guest SSH server was still pervasive despite the ssh-agent-forwarding removal above: `image.rs`'s legacy Ubuntu-squashfs builder installed `openssh-server`, set `PermitRootLogin yes`/`PubkeyAuthentication yes`, generated an `*.id_rsa` keypair, and ordered workload units `After=… ssh.service`; `MvmState` (`base/config.rs`) carried a required `ssh_key` field that `microvm.rs`/`firecracker.rs` discovered/persisted as a boot-gate asset; the `refresh_builder_rootfs`/`download_builder_artifacts` builder-VM templates carried a dormant `inject_ssh` code path (always `"no"` in production, but live capability); five fully dead `*.tera` scripts (`builder_keygen`, `sync_local_flake`, `extract_artifacts_ssh`, `launch_firecracker_ssh`, `run_nix_build_ssh`) shelled real `ssh-keygen`/`scp`/`ssh`; the orchestrator accepted a legacy `"ssh"` alias for `BuilderMode::Vsock`; and a dead `tenant_ssh_key_path` helper lived in `mvm-core`. All removed — comms stays vsock-only on every backend (libkrun/HVF/Firecracker/qemu/mock), all confirmed SSH-token-free by source scan. Broadened `scripts/check-no-ssh.sh` from the ssh-agent-only pattern to every SSH-capability token (`sshd`/`openssh`/`ssh-keygen`/`authorized_keys`/`id_rsa`/`PermitRootLogin`/`sshd_config`/…), with an explicit, commented `ALLOWED_FILES` list for the pre-existing SSH *deny/detect* code (`command_gate.rs`, `threat_classifier.rs`, the inbound SSH-banner network deny-scan, mkGuest's own build-time SSH-token ban) and no-SSH-assertion docs — verified the broadened gate fails on a planted `openssh-server`/`id_rsa` probe and passes clean on the real tree. Strengthened `no_backend_advertises_production_ssh` (`backend.rs`) to cover all 6 `AnyBackend` variants (was missing `Hvf`/`HvfRunner`).
+- [x] **Eradicate the remaining SSH surface — no SSH in any guest, on any backend (ADR-001 follow-up).** A security audit found a full in-guest SSH server was still pervasive despite the ssh-agent-forwarding removal above: `image.rs`'s legacy Ubuntu-squashfs builder installed `openssh-server`, set `PermitRootLogin yes`/`PubkeyAuthentication yes`, generated an `*.id_rsa` keypair, and ordered workload units `After=… ssh.service`; `MvmState` (`base/config.rs`) carried a required `ssh_key` field that `microvm.rs`/`firecracker.rs` discovered/persisted as a boot-gate asset; the `refresh_builder_rootfs`/`download_builder_artifacts` builder-VM templates carried a dormant `inject_ssh` code path (always `"no"` in production, but live capability); five fully dead `*.tera` scripts (`builder_keygen`, `sync_local_flake`, `extract_artifacts_ssh`, `launch_firecracker_ssh`, `run_nix_build_ssh`) shelled real `ssh-keygen`/`scp`/`ssh`; the orchestrator accepted a legacy `"ssh"` alias for `BuilderMode::Vsock`; and a dead `tenant_ssh_key_path` helper lived in `mvm-core`. All removed — comms stays vsock-only on every backend (libkrun/HVF/Firecracker/qemu/mock), all confirmed SSH-token-free by source scan. Broadened `scripts/check-no-ssh.sh` from the ssh-agent-only pattern to every SSH-capability token (`sshd`/`openssh`/`ssh-keygen`/`authorized_keys`/`id_rsa`/`PermitRootLogin`/`sshd_config`/…), with an explicit, commented `ALLOWED_FILES` list for the pre-existing SSH _deny/detect_ code (`command_gate.rs`, `threat_classifier.rs`, the inbound SSH-banner network deny-scan, mkGuest's own build-time SSH-token ban) and no-SSH-assertion docs — verified the broadened gate fails on a planted `openssh-server`/`id_rsa` probe and passes clean on the real tree. Strengthened `no_backend_advertises_production_ssh` (`backend.rs`) to cover all 6 `AnyBackend` variants (was missing `Hvf`/`HvfRunner`).
 - Gate: **0 non-test files > 1500 lines**; no `todo!`/`unimplemented!` on a production path; dead modules gone.
 
 **WS7 — simple CLI**
+
 - [ ] Redesign to a small, discoverable verb set; `env` shown in `--help`.
 - [ ] Merge `setup`/`bootstrap` into one first-run `bootstrap`. Add the lifecycle verbs: **`upgrade`** (self-update `mvmctl`); **`uninstall`** (remove everything — the binary, `~/.mvm`, and installed host/guest artifacts); **`env cleanup`** (reclaim `~/.mvm` — caches + transient VM/build state, keeping config + keys); **`env reset`** (wipe `~/.mvm` back to a clean slate). These replace the fragmented `cache prune` / `pack prune` / `storage gc`. `env` becomes a visible top-level subcommand (today `hide = true`).
 - [ ] Replace the 31-arm dispatch `match` with a `Command` trait (`fn run(&self, ctx: &Cli) -> Result<()>`); one module per command; every command calls `mvm-client`.
@@ -305,6 +336,7 @@ Then unify + retire the old paths:
 - Gate: `mvmctl --help` lists the real surface; `tests/cli.rs` covers it; no command reaches past `mvm-client`; `just --list` is short.
 
 **WS10 — tiny kernel + low memory + density**
+
 - [ ] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264).
 - [ ] Guest agent ≈ **8 MB**: de-`tokio` the guest (mio / raw epoll+kqueue), strip deps, measure RSS.
 - [ ] Host daemon ≈ **64 MB**: minimal runtime, evaluate `mimalloc`, strip deps.
@@ -315,6 +347,7 @@ Then unify + retire the old paths:
 - Gate: guest RSS ≤ ~8 MB, host RSS ≤ ~64 MB idle; an idle guest configured at 512 MB resident-costs ~its working set (demand-fault proven); lockfile materially smaller.
 
 **WS-DX — developer experience & performance** (the story #1637 promises)
+
 - [ ] **Sub-second launch**, verified: a timed `mvmctl up` → PTY shell → `mvmctl down` e2e on Mac (HVF) and Linux (libkrun + FC), asserting sub-second boot + clean teardown.
 - [ ] **Warm start / warm pool** (pre-warmed standby VMs), **snapshot / fork / restore** (bake once, fork many via CoW, fast restore), **streaming exec**, **`expose_tcp`** (host↔guest port forward), **live host-directory mount** — the supermachine/microsandbox-shaped capabilities, exposed through `mvm-client` + the SDK.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
@@ -324,19 +357,22 @@ Then unify + retire the old paths:
 ### Phase 4 — Docs, close-out, stretch
 
 **WS12 — ADRs alive + website docs**
+
 - [ ] Keep the consolidated ADRs authoritative; update `CLAUDE.md`/`AGENTS.md` to the new crate/binary/dir/feature/backend reality.
 - [ ] Update the website docs (`public/src/content/docs/**`) — CLI reference, architecture diagram, backend list (drop QEMU/Vz), single-dir, install/upgrade/clean.
 - [ ] Sweep stale `specs/{claims,compliance,threat-models,references,contracts,runbooks}` path references out of `SECURITY.md`, `README.md`, `ops/`, other ADRs, and `public/src/content/docs/**` (flagged by WS0.2a — they now live in ADR-002/050/067/090).
 - Gate: docs match the shipped CLI + architecture; no dangling `specs/` paths; `#1637` (one-command microVM) becomes accurate.
 
 **WS13 — issue/PR close-out** (all but #1637 — see Appendix B)
+
 - [ ] Fold each still-relevant intent into its WS; close the 8 issues + 4 PRs with a pointer to the superseding WS. Keep **#1637** open.
 - Gate: only #1637 remains open.
 
 **WS11 — wasm-container backend + `no_std` core (CORE goal; DESIGN LANDED — see `specs/refactor/11-wasm-backend.md` + §2.5)**
+
 - [x] **DESIGN + scope decided** (`specs/refactor/11-wasm-backend.md`; ADR-024 → Accepted): `WasmBackend` = the **claim-free portability/demo/browser tier** (host `wasmtime`, opt-in, honest capability matrix, zero numbered claims — ADR-024's 3 constraints); **workload = user-supplied WASI module**; production-untrusted-wasm (engine-in-guest per ADR-024) DEFERRED. Open Qs resolved: no in-guest agent (agent responsibilities → host WASI-imports), browser slice = `no_std` OCI decoders only. `no_std` FOUNDATION already done (Increment 3 — mvm-protocol builds on wasm32).
 - [x] `mvm-protocol` is `#![no_std] + alloc`, `unsafe_code = "forbid"`, `wasm32-unknown-unknown` CI build (Increment 1–3). _GAP → P1:_ tests running UNDER wasm (lib-build only today) + explicit no_std-boundary lint.
-- [x] **P1 DONE** (`5b01e0f6b`): `wasm-no-std-boundary` CI job in `ci.yml` — builds `mvm-protocol` on `wasm32-unknown-unknown` (the no_std boundary, was a LOCAL-only check, now CI-enforced) AND runs its tests under real wasm (`wasm32-wasip1` via `wasmtime`) — **339 tests pass under wasm**. Crate attr → `#![cfg_attr(all(not(feature="schema"), not(test)), no_std)]` (std-during-test so libtest links; wasm lib build stays no_std). chrono `clock` re-declared dev-only (kept off the wasm lib build → gate stays chrono-clock-free). The wasm32 *build itself* IS the no_std lint (fails on any std/OS leak). Independently re-confirmed wasm build clean + nextest 6567/0.
+- [x] **P1 DONE** (`5b01e0f6b`): `wasm-no-std-boundary` CI job in `ci.yml` — builds `mvm-protocol` on `wasm32-unknown-unknown` (the no_std boundary, was a LOCAL-only check, now CI-enforced) AND runs its tests under real wasm (`wasm32-wasip1` via `wasmtime`) — **339 tests pass under wasm**. Crate attr → `#![cfg_attr(all(not(feature="schema"), not(test)), no_std)]` (std-during-test so libtest links; wasm lib build stays no_std). chrono `clock` re-declared dev-only (kept off the wasm lib build → gate stays chrono-clock-free). The wasm32 _build itself_ IS the no_std lint (fails on any std/OS leak). Independently re-confirmed wasm build clean + nextest 6567/0.
 - [x] **P2 DONE** (`0ecb04486`): `BackendKind::Wasm` (unconditional, no_std-safe) + `WasmBackend: VmBackend` in `mvm-runtime/src/wasm_backend.rs` runs a user-supplied WASI Preview 1 module under host `wasmtime`/`wasmtime-wasi` (pinned 46) behind opt-in `wasm-backend` feature (default tree = 0 wasmtime; 42 with feature). Honest: `capabilities()` reports no HW-virt/kernel/TAP/vsock/snapshot; `security_profile()` = every numbered claim `DoesNotHold` (claim-free, tested). Fail-closed typed `WasmBackendError` (KernelBoot/VerifiedBoot/Networking/Console/PauseResume-NotSupported + NotCompiledIn) — NO prod panic/unimplemented. Real exit-code tests (`.wat` fixtures: exit 0 + `proc_exit(7)`). Deviation (sound): type/AnyBackend/catalog wiring UNCONDITIONAL (side-effect-free ctor), only wasmtime internals cfg-gated in a private `engine` submod → zero CLI changes (--hypervisor is a String), NotCompiledIn error at first real use (mirrors existing "recognized-but-unavailable" pattern). Green: check/clippy (default + feature), nextest 6567/6567 + mvm-runtime 925/925(feature), wasm32 protocol still clean, check-no-string-backend-dispatch clean.
 - [x] **P3 COMPLETE** (P3a + P3b.1 + P3b.2) — the governed egress seam, POC gate met. Design SIMPLIFIED (`bf3eac389`, doc 11): NO new transport — wasm egress is just a `WireRequest` client (`mvm_core::substitution_wire`) over the existing `Uds` to the SAME substitution endpoint the microVM backends use (faithful by construction). Reachability recon (`127b22e44`) flagged that governance lives in mvm-hostd, unreachable in-process from WasmBackend in mvm-runtime — **resolved** by homing the witness in mvm-hostd's own tests (it deps mvm-runtime for `WasmBackend` and owns `SubstitutionService`, so it drives the REAL governance in-process with no dependency inversion — cleaner than the recon's anticipated subprocess route).
   - [x] **P3a** (`5d834b606` + gate-fix `d84912885`): the `mvm:egress` wasmtime host-import on WasmBackend — reads a `WireRequest` from guest memory, relays via REUSED `mvm_agentd::substitution_client::relay` (no 2nd frame codec), writes `WireResponse` back; 10 typed fail-closed error codes (never traps host on guest input); endpoint UDS path = host state (`with_egress_endpoint`, default None). Proven by a stub-UDS + `.wat`-fixture round-trip test (`${API_KEY}` placeholder → `WireResponse::Ok{200,"pong"}`) + 2 fail-closed tests. Default build wasmtime-free; claim-free unchanged. (Also fixed a pre-existing P2 `check-no-spec-refs` fail: ADR-002 in a wasm_backend comment/test-string.)
@@ -345,11 +381,14 @@ Then unify + retire the old paths:
 - [ ] **P4**: browser POC — `mvm-protocol` + `no_std` OCI decoders run in the browser (image inspect/verify).
 - Gate: `mvm-protocol` wasm build+tests green; no_std-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
 
-**Semantic address (UOR-ADDR) pilot — QUEUED, decision-ready (orthogonal to WS11; do NOT weave into P3)**
-- [x] **DESIGN** (`specs/refactor/12-semantic-address-pilot.md`; builds on the research note `specs/research/uor-addr-integration-assessment.md`): an additive **`SemanticAddress`** (`sha256(JCS(ir))` = UOR-ADDR JSON realization) for the **Workload IR** — cross-language "same meaning → same label". **Host-side pilot = ZERO new deps** (`serde_jcs` already in mvm-core + `sha2`); distinct newtype (never interchangeable w/ `Sha256Hex`/`OciDigest`/`KeyId`/`Nonce`). HARD BOUNDARY (ADR-002): never in OCI/`.mvm`/verity/signature/nonce/ephemeral-ID paths — pilot proves those tests stay green. The `uor-addr` **crate** itself is a DEFERRED, verification-gated **WS11-P4/browser** decision (where its no_std+wasm cross-impl-equality guarantee earns the dep) — not adopted now.
-- [x] **EXECUTED** (`2f75f268b`): `mvm-core/src/semantic_address.rs` — `SemanticAddress(String)` newtype (`sha256:<64-hex>`, validating parse, NO `From`/`Into`/`Deref` to `Sha256Hex`/`OciDigest`/`KeyId`/`Nonce` — type-distinctness tested) + `semantic_address(&Workload)` = `sha256(serde_jcs::to_vec(ir))` with `validate_schema_version` fail-closed FIRST. **Zero new deps** (serde_jcs+sha2+hex already in mvm-core; no Cargo.toml/lock change). Golden test pins `sha256:bf6f9f61571d7c5080144d83b681eb6718d76ab30ab80f61a715c50ac85b6ab3` (doc-noted: cross-check vs UOR conformance vectors + TS/Python SDK later — owner has UOR access). Additive (no wire/cache change); mvm-core tests 1366/1366 (incl. replay/signing boundary), clippy clean, mvm-protocol wasm unaffected, core-runtime-free clean. Impl wedged on Monitor pre-commit → controller ran gate + committed. FOLLOW-UP: the UOR conformance-vector + cross-language-SDK interop check (needs UOR vectors); the `uor-addr` crate + no_std/browser version stay the deferred WS11-P4 decision.
+**Semantic address (UOR-ADDR) pilot — IMPLEMENTED (orthogonal to WS11; do NOT weave into P3)**
+
+- [x] **DESIGN** (`specs/refactor/12-semantic-address-pilot.md`): additive `SemanticAddress` (`sha256(JCS(ir))` = UOR-ADDR JSON realization) for Workload IR, with a distinct newtype and no use in exact-byte, signature, nonce, or ephemeral-ID paths. The `uor-addr` crate remains deferred to the verification-gated WS11-P4/browser decision.
+- [x] **EXECUTED** (`2f75f268b`, extended by this follow-up): `mvm-core/src/semantic_address.rs` validates schema first, NFC-normalizes JSON strings/object keys, then computes the UOR-ADDR label. The 12 published UOR-ADDR JSON fixtures pass; the Python/TypeScript SDK parity witness remains green. `ir_hash` is intentionally reported as a separate internal fingerprint because it does not perform UOR Unicode normalization.
+- [x] **UOR FRAMEWORK EXPLORATION** (`specs/research/uor-framework-integration-exploration.md`, 2026-07-22): broader UOR Framework, Prism, and PrimeShield adoption is not recommended. The host-side UOR-ADDR conformance baseline is complete; `BuildProvenance` addressing and `uor-addr` crate adoption remain separate follow-ups.
 
 **WS14 — mvmd contract (secondary)**
+
 - [ ] Freeze the mvmd-facing surface (`mvm-protocol` + `mvm-client` + `BuildEnvironment`/`ShellEnvironment` traits); document it; file the coordinated rename for the mvmd repo.
 - Gate: the public surface is documented and stable; mvmd rename tracked as a follow-up.
 
@@ -383,38 +422,38 @@ WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net`
 
 ## Appendix A — ADR consolidation clusters (~91 → ~15)
 
-| Canonical ADR (theme) | Merge these |
-|---|---|
-| Security posture & trust boundary (SoT) | 002, 032, 063, 070, 083, 088, 104, 108, 109, 111 + claims + compliance + threat-models |
-| Networking / egress / vsock | 004, 006, 055, 064, 067, 078, 082, 085, 100, 101, 110 |
-| Backends / hypervisor abstraction | 014, 046, 056, 072, 076, 093, 094, 095, 098, 099, 102 |
-| Builder VM / Stage 0 / seed | 005, 013, 054, 057, 065, 068, 071, 096, 106, 107 |
-| Host services broker / daemon | 059, 061, 062, 084, 089, 090 |
-| Signed/audited execution + claims substrate | 041, 044, 047, 048, 058, 079, 103 |
-| OCI / image / registry / verity | 050, 052, 074, 097 |
-| Secrets substitution | 049, 067 |
-| Machine / CLI surface | 077, 091, 092, 105 |
-| Function entrypoints / factories | 007, 008, 010, 011, 039 |
-| Encryption | 027, 042 |
-| WASM path | 069, 080, 081 |
+| Canonical ADR (theme)                       | Merge these                                                                            |
+| ------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Security posture & trust boundary (SoT)     | 002, 032, 063, 070, 083, 088, 104, 108, 109, 111 + claims + compliance + threat-models |
+| Networking / egress / vsock                 | 004, 006, 055, 064, 067, 078, 082, 085, 100, 101, 110                                  |
+| Backends / hypervisor abstraction           | 014, 046, 056, 072, 076, 093, 094, 095, 098, 099, 102                                  |
+| Builder VM / Stage 0 / seed                 | 005, 013, 054, 057, 065, 068, 071, 096, 106, 107                                       |
+| Host services broker / daemon               | 059, 061, 062, 084, 089, 090                                                           |
+| Signed/audited execution + claims substrate | 041, 044, 047, 048, 058, 079, 103                                                      |
+| OCI / image / registry / verity             | 050, 052, 074, 097                                                                     |
+| Secrets substitution                        | 049, 067                                                                               |
+| Machine / CLI surface                       | 077, 091, 092, 105                                                                     |
+| Function entrypoints / factories            | 007, 008, 010, 011, 039                                                                |
+| Encryption                                  | 027, 042                                                                               |
+| WASM path                                   | 069, 080, 081                                                                          |
 
 ## Appendix B — issue / PR close-out
 
-| # | Kind | Disposition |
-|---|---|---|
+| #        | Kind       | Disposition                                                       |
+| -------- | ---------- | ----------------------------------------------------------------- |
 | **1637** | PR (draft) | **KEEP OPEN** — one-command microVM docs/blog; WS12 makes it true |
-| 1701 | issue | Fold → WS3 (finish vsock tunnel), then close |
-| 1717 | PR | Fold → WS3 (FC transparent net over vsock), then close |
-| 1601 | issue | Fold → WS3 (HVF host-vsock-proxy), then close |
-| 1674 | issue | Fold → WS1c / WS8 (OCI unpack O_EXCL), then close |
-| 1654 | issue | Fold → WS4 (runtime sockets under `~/.mvm/run`), then close |
-| 1462 | issue | Fold → WS2 (verb-grant delivery), then close |
-| 1366 | issue | Fold → WS7 (Sandbox.connect dev-only exec guard), then close |
-| 1283 | issue | Fold → WS10 (kernel boot-probe strip), then close |
-| 1264 | issue | Fold → WS10 (kernel pin bump), then close |
-| 1716 | PR | Superseded by this sprint — close |
-| 1718 | PR | Folded (dev_vz→builder_vm rename subsumed by WS1) — close |
-| 1713 | PR | Contradicts consolidation (splits SDK) — close |
+| 1701     | issue      | Fold → WS3 (finish vsock tunnel), then close                      |
+| 1717     | PR         | Fold → WS3 (FC transparent net over vsock), then close            |
+| 1601     | issue      | Fold → WS3 (HVF host-vsock-proxy), then close                     |
+| 1674     | issue      | Fold → WS1c / WS8 (OCI unpack O_EXCL), then close                 |
+| 1654     | issue      | Fold → WS4 (runtime sockets under `~/.mvm/run`), then close       |
+| 1462     | issue      | Fold → WS2 (verb-grant delivery), then close                      |
+| 1366     | issue      | Fold → WS7 (Sandbox.connect dev-only exec guard), then close      |
+| 1283     | issue      | Fold → WS10 (kernel boot-probe strip), then close                 |
+| 1264     | issue      | Fold → WS10 (kernel pin bump), then close                         |
+| 1716     | PR         | Superseded by this sprint — close                                 |
+| 1718     | PR         | Folded (dev_vz→builder_vm rename subsumed by WS1) — close         |
+| 1713     | PR         | Contradicts consolidation (splits SDK) — close                    |
 
 ## Appendix C — biggest confirmed removals
 

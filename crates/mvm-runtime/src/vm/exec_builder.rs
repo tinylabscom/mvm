@@ -166,6 +166,8 @@ fn stage_files(stream: &mut UnixStream, stages: &[StagedFile]) -> Result<()> {
                 mode: s.mode,
                 create_parents: true,
                 follow_symlinks: false,
+                offset: None,
+                truncate: true,
             },
         )
         .with_context(|| format!("staging {}", s.path))?;

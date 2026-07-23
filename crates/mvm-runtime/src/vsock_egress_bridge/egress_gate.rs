@@ -19,11 +19,13 @@ use mvm_core::policy::projection::{CanonicalEgress, Proto};
 /// Outcome of an egress request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressVerdict {
-    /// The plan permits a TCP connection to this destination.
-    Allow { ip: IpAddr, port: u16 },
+    /// The plan permits a TCP connection to this destination. `ips` are every
+    /// admitted address (a pinned host can carry both an A and an AAAA record),
+    /// IPv4 first; the caller connects to them in order, first success wins.
+    Allow { ips: Vec<IpAddr>, port: u16 },
     /// Refused — policy did not admit it (claim-10 default-deny / mandatory-deny).
     Deny,
-    /// The guest's connect request was malformed (not `ip:port`).
+    /// The guest's connect request was malformed (not `<ip>:<port>` or `<hostname>:<port>`).
     Malformed,
 }
 
@@ -81,7 +83,10 @@ impl EgressGate {
     /// Decide a TCP connect to an already-resolved address.
     pub fn decide_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
         if self.egress.permits(&Proto::Tcp, ip, port) {
-            EgressVerdict::Allow { ip, port }
+            EgressVerdict::Allow {
+                ips: vec![ip],
+                port,
+            }
         } else {
             EgressVerdict::Deny
         }
@@ -123,32 +128,39 @@ impl EgressGate {
     where
         F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
     {
-        if let Some(pin) = self.pins.lookup(host) {
-            return pin
-                .ips
-                .iter()
-                .find_map(|ip| match self.decide_addr(*ip, port) {
-                    EgressVerdict::Allow { ip, port } => Some(EgressVerdict::Allow { ip, port }),
-                    _ => None,
-                })
-                .unwrap_or(EgressVerdict::Deny);
-        }
-
-        if !matches!(self.egress, CanonicalEgress::Unrestricted) {
+        let candidates = if let Some(pin) = self.pins.lookup(host) {
+            pin.ips.clone()
+        } else if matches!(self.egress, CanonicalEgress::Unrestricted) {
+            match resolve(host) {
+                Ok(ips) => ips,
+                Err(_) => return EgressVerdict::Deny,
+            }
+        } else {
             return EgressVerdict::Deny;
-        }
-
-        match resolve(host) {
-            Ok(ips) => ips
-                .into_iter()
-                .find_map(|ip| match self.decide_addr(ip, port) {
-                    EgressVerdict::Allow { ip, port } => Some(EgressVerdict::Allow { ip, port }),
-                    _ => None,
-                })
-                .unwrap_or(EgressVerdict::Deny),
-            Err(_) => EgressVerdict::Deny,
+        };
+        let ips = admitted_ips(&self.egress, &candidates, port);
+        if ips.is_empty() {
+            EgressVerdict::Deny
+        } else {
+            EgressVerdict::Allow { ips, port }
         }
     }
+}
+
+fn admitted_ips(egress: &CanonicalEgress, candidates: &[IpAddr], port: u16) -> Vec<IpAddr> {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for ip in candidates.iter().copied() {
+        if !egress.permits(&Proto::Tcp, ip, port) {
+            continue;
+        }
+        match ip {
+            IpAddr::V4(_) => v4.push(ip),
+            IpAddr::V6(_) => v6.push(ip),
+        }
+    }
+    v4.extend(v6);
+    v4
 }
 
 fn resolve_hostname_ips(host: &str) -> std::io::Result<Vec<IpAddr>> {
@@ -185,7 +197,7 @@ mod tests {
         assert_eq!(
             gate.decide_request("1.1.1.1:443"),
             EgressVerdict::Allow {
-                ip: "1.1.1.1".parse().unwrap(),
+                ips: vec!["1.1.1.1".parse().unwrap()],
                 port: 443
             }
         );
@@ -214,7 +226,7 @@ mod tests {
         assert_eq!(
             gate.decide_request("93.184.216.34:80"),
             EgressVerdict::Allow {
-                ip: "93.184.216.34".parse().unwrap(),
+                ips: vec!["93.184.216.34".parse().unwrap()],
                 port: 80
             }
         );
@@ -229,7 +241,7 @@ mod tests {
         assert_eq!(
             verdict,
             EgressVerdict::Allow {
-                ip: "151.101.1.91".parse().unwrap(),
+                ips: vec!["151.101.1.91".parse().unwrap()],
                 port: 443
             }
         );
@@ -268,7 +280,7 @@ mod tests {
         assert_eq!(
             EgressGate::new(open).decide_request("93.184.216.34:80"),
             EgressVerdict::Allow {
-                ip: "93.184.216.34".parse().unwrap(),
+                ips: vec!["93.184.216.34".parse().unwrap()],
                 port: 80
             }
         );
@@ -291,7 +303,7 @@ mod tests {
         assert_eq!(
             open.decide_request("93.184.216.34:80"),
             EgressVerdict::Allow {
-                ip: "93.184.216.34".parse().unwrap(),
+                ips: vec!["93.184.216.34".parse().unwrap()],
                 port: 80
             }
         );
@@ -333,7 +345,7 @@ mod tests {
         assert_eq!(
             gate.decide_request("192.168.4.23:19099"),
             EgressVerdict::Allow {
-                ip: "192.168.4.23".parse().unwrap(),
+                ips: vec!["192.168.4.23".parse().unwrap()],
                 port: 19099
             }
         );
@@ -369,7 +381,7 @@ mod tests {
         assert_eq!(
             gate.decide_request("api.example.test:443"),
             EgressVerdict::Allow {
-                ip: pinned,
+                ips: vec![pinned],
                 port: 443
             }
         );
@@ -392,9 +404,55 @@ mod tests {
         assert_eq!(
             gate.decide_request("93.184.216.34:443"),
             EgressVerdict::Allow {
-                ip: pinned,
+                ips: vec![pinned],
                 port: 443
             }
         );
+    }
+
+    #[test]
+    fn admitted_ips_keeps_only_permitted_and_orders_ipv4_first() {
+        let egress = CanonicalEgress::Rules(vec![
+            allow_rule("93.184.216.34/32", 443),
+            allow_rule("2606:2800:220:1:248:1893:25c8:1946/128", 443),
+        ]);
+        let v4: IpAddr = "93.184.216.34".parse().unwrap();
+        let v6: IpAddr = "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap();
+        let unlisted: IpAddr = "8.8.8.8".parse().unwrap();
+
+        // Resolver order is v6-first (as a dual-stack host often returns); the
+        // unlisted address is dropped and the admitted set is reordered v4-first.
+        let got = admitted_ips(&egress, &[v6, unlisted, v4], 443);
+        assert_eq!(got, vec![v4, v6]);
+
+        // Wrong port admits nothing.
+        assert!(admitted_ips(&egress, &[v4, v6], 80).is_empty());
+    }
+
+    #[test]
+    fn hostname_request_returns_all_admitted_ips_ipv4_first() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let v6: IpAddr = "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap();
+        let v4: IpAddr = "93.184.216.34".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec![v6, v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        match gate.decide_request("example.com:443") {
+            EgressVerdict::Allow { ips, port } => {
+                assert_eq!(ips, vec![v4, v6]);
+                assert_eq!(port, 443);
+            }
+            EgressVerdict::Deny | EgressVerdict::Malformed => panic!("expected allow"),
+        }
+        assert_eq!(gate.decide_request("example.com:80"), EgressVerdict::Deny);
     }
 }

@@ -439,6 +439,8 @@ mod tests {
             mode: 0o644,
             create_parents: false,
             follow_symlinks: false,
+            offset: None,
+            truncate: true,
         };
         let result = send_fs_request(&dir.path().to_string_lossy(), req).expect("send_fs_request");
         match result {
@@ -586,6 +588,8 @@ mod tests {
                 mode: 0o644,
                 create_parents: false,
                 follow_symlinks: false,
+                offset: None,
+                truncate: true,
             },
         )
         .expect("write a");
@@ -597,6 +601,8 @@ mod tests {
                 mode: 0o644,
                 create_parents: false,
                 follow_symlinks: false,
+                offset: None,
+                truncate: true,
             },
         )
         .expect("write b");

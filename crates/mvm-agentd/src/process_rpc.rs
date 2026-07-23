@@ -23,7 +23,9 @@ use std::os::unix::process::CommandExt;
 use mvm_core::crypto::policy::{OsCanonicalizer, PathOp, PathPolicy};
 use mvm_core::domain::instance::BackpressureReason;
 
-use crate::vsock::{ProcErrorKind, ProcInfo, ProcResult, ProcState, ProcWaitEvent};
+use crate::vsock::{
+    MAX_DATA_CHUNK_SIZE, ProcErrorKind, ProcInfo, ProcResult, ProcState, ProcWaitEvent,
+};
 
 // ============================================================================
 // Caps
@@ -49,7 +51,7 @@ impl Caps {
     pub const fn production() -> Self {
         Self {
             max_concurrent: 32,
-            max_stdin_per_call: 1024 * 1024,
+            max_stdin_per_call: MAX_DATA_CHUNK_SIZE,
             max_output_buffer: 16 * 1024 * 1024,
             reap_grace: Duration::from_secs(60),
             wait_poll_interval: Duration::from_millis(50),
@@ -459,16 +461,26 @@ fn drain_into_events(record: &ProcessRecord) -> Vec<ProcWaitEvent> {
     let mut events = Vec::new();
     let mut out = record.stdout_buf.lock().expect("stdout mutex");
     if !out.is_empty() {
-        events.push(ProcWaitEvent::Stdout {
-            chunk: std::mem::take(&mut *out),
-        });
+        let drained = std::mem::take(&mut *out);
+        events.extend(
+            drained
+                .chunks(crate::vsock::MAX_DATA_CHUNK_SIZE)
+                .map(|chunk| ProcWaitEvent::Stdout {
+                    chunk: chunk.to_vec(),
+                }),
+        );
     }
     drop(out);
     let mut err = record.stderr_buf.lock().expect("stderr mutex");
     if !err.is_empty() {
-        events.push(ProcWaitEvent::Stderr {
-            chunk: std::mem::take(&mut *err),
-        });
+        let drained = std::mem::take(&mut *err);
+        events.extend(
+            drained
+                .chunks(crate::vsock::MAX_DATA_CHUNK_SIZE)
+                .map(|chunk| ProcWaitEvent::Stderr {
+                    chunk: chunk.to_vec(),
+                }),
+        );
     }
     events
 }
@@ -657,6 +669,11 @@ mod tests {
             reap_grace: Duration::from_millis(100),
             wait_poll_interval: Duration::from_millis(10),
         }
+    }
+
+    #[test]
+    fn production_stdin_cap_fits_a_data_plane_chunk() {
+        assert_eq!(Caps::production().max_stdin_per_call, MAX_DATA_CHUNK_SIZE);
     }
 
     #[test]

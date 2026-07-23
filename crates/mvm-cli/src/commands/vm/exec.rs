@@ -87,6 +87,10 @@ pub(in crate::commands) struct Args {
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
     pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
+    /// Internal (not a CLI flag): requested workload hypervisor, forwarded from
+    /// `RunArgs::hypervisor` via `into_exec_args`.
+    #[arg(skip)]
+    pub hypervisor: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -231,6 +235,11 @@ pub(in crate::commands) struct RunArgs {
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
     pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
+    /// Requested workload hypervisor from `machine run --hypervisor <x>`. Set
+    /// programmatically by `MachineRunArgs::into_run_args`; the transient backend
+    /// selection reads it (taking precedence over the `MVM_HYPERVISOR` env var).
+    #[arg(skip)]
+    pub hypervisor: Option<String>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -287,6 +296,7 @@ impl RunArgs {
             argv: self.argv,
             stdin: self.stdin,
             healthcheck: self.healthcheck,
+            hypervisor: self.hypervisor,
         }
     }
 }
@@ -344,9 +354,13 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
-    let admit_backend = crate::exec::select_exec_backend(args.image.is_some(), &network_policy)?
-        .name()
-        .to_string();
+    let admit_backend = crate::exec::select_exec_backend(
+        args.image.is_some(),
+        &network_policy,
+        args.hypervisor.as_deref(),
+    )?
+    .name()
+    .to_string();
     // The closure below moves `admit_backend`; keep a copy for the receipt's
     // honest per-backend enforcement tier.
     let receipt_backend = admit_backend.clone();
@@ -683,7 +697,11 @@ fn build_exec_request(
     for kv in &args.env {
         env_pairs.push(parse_env_pair(kv)?);
     }
-    let selected_backend = crate::exec::select_exec_backend(image_ref.is_some(), &network_policy)?;
+    let selected_backend = crate::exec::select_exec_backend(
+        image_ref.is_some(),
+        &network_policy,
+        args.hypervisor.as_deref(),
+    )?;
     let mut effective_env =
         oci_vsock_proxy_env_for_backend(&selected_backend, image_ref.is_some(), &network_policy);
     effective_env.extend(env_pairs);
@@ -710,34 +728,8 @@ fn build_exec_request(
                 crate::exec::ImageSource::Template(resolved)
             }
             (None, Some(reference)) => {
-                let oci_cache_root = super::super::image::oci_cache_root();
-                // Resolve the workload kernel BEFORE the pull. An `--image` run
-                // boots the materialized OCI rootfs (with its injected agent), so
-                // it needs only a workload kernel — a cached workload/default-image
-                // kernel, a local build (source checkout), or the published
-                // download — rather than building/downloading a whole default image
-                // whose rootfs we'd discard. Resolving it first makes a missing or
-                // cold-cache kernel fail fast with an actionable error instead of
-                // surfacing only after a full pull + rootfs materialization. The
-                // rootfs boots verity-sealed, so the kernel must carry dm-verity;
-                // the builder kernel (which drops it) is never a stand-in.
-                let kernel_path = ensure_workload_kernel(prod)?;
-                // Enforce that invariant host-side: a kernel with no dm-verity
-                // support would panic the guest in early init opening
-                // /dev/mapper/control, with no host signal. Fail fast instead.
-                assert_workload_kernel_supports_verity(&kernel_path)?;
-                // A source-checkout run with no embedded guest runtime cross-compiles
-                // the mvm guest binaries inside materialization — a slow,
-                // output-silent host `cargo zigbuild`. Announce it so the run does
-                // not look wedged after the OCI pull logs.
-                if super::super::image::oci_guest_runtime_compile_pending(&oci_cache_root) {
-                    ui::info(
-                        "Compiling the mvm guest runtime from your source checkout \
-                         (first build for these sources; cached afterward)…",
-                    );
-                }
                 let cached = super::super::image::resolve_or_pull_run_image(
-                    &oci_cache_root,
+                    &super::super::image::oci_cache_root(),
                     &reference,
                     prod,
                 )?;
@@ -766,6 +758,18 @@ fn build_exec_request(
                         auth_source
                     );
                 }
+                // An `--image` run boots the materialized OCI rootfs (with its
+                // injected agent), so we need only a workload kernel — a cached
+                // workload/default-image kernel, a local build (source checkout),
+                // or the published download — rather than building/downloading a
+                // whole default image whose rootfs we'd discard. The rootfs boots
+                // verity-sealed, so the kernel must carry dm-verity; the builder
+                // kernel (which drops it) is never a stand-in.
+                let kernel_path = ensure_workload_kernel(prod)?;
+                // Enforce that invariant host-side: a kernel with no dm-verity
+                // support would panic the guest in early init opening
+                // /dev/mapper/control, with no host signal. Fail fast instead.
+                assert_workload_kernel_supports_verity(&kernel_path)?;
                 crate::exec::ImageSource::Prebuilt {
                     kernel_path,
                     rootfs_path: cached.rootfs_path.display().to_string(),
@@ -834,6 +838,7 @@ fn build_exec_request(
         warm_pool_size: args.warm_pool_size,
         stdin: args.stdin,
         healthcheck: args.healthcheck,
+        hypervisor: args.hypervisor,
     })
 }
 
@@ -1089,9 +1094,13 @@ impl RunPreflightSummary {
         let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
         let backend = match backend_override {
             Some(backend) => backend.to_string(),
-            None => crate::exec::select_exec_backend(args.image.is_some(), &policy)?
-                .name()
-                .to_string(),
+            None => crate::exec::select_exec_backend(
+                args.image.is_some(),
+                &policy,
+                args.hypervisor.as_deref(),
+            )?
+            .name()
+            .to_string(),
         };
         let receipt_input = ReceiptInput::from_run_args(args, &backend)?;
 
@@ -1544,6 +1553,21 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_preflight_honors_requested_hypervisor() {
+        // A `RunArgs` carrying `--hypervisor libkrun` (as `machine run` threads
+        // it via `into_run_args`) must make the dry-run receipt's resolved
+        // backend agree — the same `select_exec_backend` call the admit/build/
+        // boot sites use. Deny-all policy reports a uniform "flow-drop" label
+        // regardless of backend, so use an allow-list posture (which is
+        // `<backend>:l4-host-port`) to make the resolved backend observable.
+        let mut args = run_args(RunProfile::Standard);
+        args.allow_host = vec!["a.com".into()];
+        args.hypervisor = Some("libkrun".to_string());
+        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        assert_eq!(s.invocation.egress_enforcement, "libkrun:l4-host-port");
+    }
+
+    #[test]
     fn receipt_records_resolved_posture() {
         let mut args = run_args(RunProfile::Standard);
         args.allow_host = vec!["api.example.com".into()];
@@ -1702,6 +1726,7 @@ mod tests {
             ack_divergence: Vec::new(),
             stdin: Vec::new(),
             healthcheck: None,
+            hypervisor: None,
         }
     }
 

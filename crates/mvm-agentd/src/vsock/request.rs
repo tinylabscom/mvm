@@ -78,9 +78,8 @@ pub enum GuestRequest {
     ///
     /// The response is a stream of `EntrypointEvent` frames
     /// terminated by `EntrypointEvent::Exit` or
-    /// `EntrypointEvent::Error`. v1 emits one `Stdout` chunk + one
-    /// `Stderr` chunk + a terminal event (buffered up to caps); v2
-    /// may chunk progressively without changing the wire shape.
+    /// `EntrypointEvent::Error`. Output events carry bounded chunks;
+    /// callers consume frames until the terminal event.
     ///
     /// Caps and timeouts are enforced agent-side. The wire
     /// frame size is bounded by `MAX_FRAME_SIZE`.
@@ -198,10 +197,8 @@ pub enum GuestRequest {
     // `prod-agent-runentry-contract` CI lane to assert handler
     // symbols PRESENT in prod builds is part of the per-verb landing.
     // ========================================================================
-    /// Read up to `length` bytes from `path`, optionally starting at
-    /// `offset`. The agent enforces `length` ≤ a hard cap (default
-    /// 16 MiB); callers wanting larger reads must use the streaming
-    /// surface (lands in W2).
+    /// Read one bounded chunk from `path`, optionally starting at `offset`.
+    /// Callers transfer larger files through repeated offset-addressed calls.
     FsRead {
         path: String,
         offset: Option<u64>,
@@ -212,8 +209,8 @@ pub enum GuestRequest {
         #[serde(default = "default_true")]
         follow_symlinks: bool,
     },
-    /// Write `content` to `path`. Small-content path; large writes
-    /// must use the streaming surface (W2).
+    /// Write one bounded chunk to `path`. Callers transfer larger files through
+    /// repeated offset-addressed calls; only the first chunk truncates.
     FsWrite {
         path: String,
         content: Vec<u8>,
@@ -227,6 +224,12 @@ pub enum GuestRequest {
         /// a malicious symlink could redirect the write.
         #[serde(default)]
         follow_symlinks: bool,
+        /// Byte offset at which this chunk is written. Defaults to the start.
+        #[serde(default)]
+        offset: Option<u64>,
+        /// Truncate before writing. Defaults to the original one-shot behavior.
+        #[serde(default = "default_true")]
+        truncate: bool,
     },
     /// List entries in `path`. Cap: 4096 entries; truncated flag set
     /// in the response when exceeded.
@@ -408,12 +411,9 @@ pub enum GuestRequest {
     /// Other values, or a missing/unparseable wrapper.json, refuse
     /// with a wire-stable error message.
     ///
-    /// **v1 is stateless** — each call spawns a fresh interpreter
+    /// This call is stateless: each request spawns a fresh interpreter
     /// process, so `from foo import bar` in call 1 isn't visible in
-    /// call 2. A future v2 routes
-    /// through the warm-process pool's wrapper for stateful eval
-    /// across calls; the wire shape stays identical, the dispatch
-    /// flips inside the agent.
+    /// call 2.
     RunCode {
         code: String,
         timeout_secs: Option<u64>,
@@ -556,6 +556,8 @@ mod tests {
                 mode: 0o644,
                 create_parents: true,
                 follow_symlinks: false,
+                offset: None,
+                truncate: true,
             },
             GuestRequest::FsList {
                 path: "/work".to_string(),
@@ -802,6 +804,8 @@ mod tests {
             GuestRequest::FsWrite {
                 follow_symlinks,
                 create_parents,
+                offset,
+                truncate,
                 ..
             } => {
                 assert!(
@@ -809,6 +813,8 @@ mod tests {
                     "FsWrite must NOT follow symlinks by default"
                 );
                 assert!(!create_parents, "create_parents defaults to false");
+                assert_eq!(offset, None, "offset defaults to the beginning of the file");
+                assert!(truncate, "legacy one-shot writes truncate by default");
             }
             _ => panic!("expected FsWrite"),
         }
@@ -1158,6 +1164,8 @@ mod tests {
                     mode: 0,
                     create_parents: false,
                     follow_symlinks: false,
+                    offset: None,
+                    truncate: true,
                 },
                 "fs-write",
             ),

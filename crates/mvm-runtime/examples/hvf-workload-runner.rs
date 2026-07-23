@@ -48,7 +48,7 @@ fn main() {
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmStatus};
     use mvm_runtime::driver::HvfDriver;
-    use mvm_runtime::workload_runner::{RealEndpointSpawner, WorkloadRunner};
+    use mvm_runtime::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
 
     let lan = discover_lan_ipv4().expect(
         "no private non-loopback IPv4 interface — this proof needs a routable LAN address \
@@ -106,7 +106,7 @@ fn main() {
         ..Default::default()
     };
 
-    let backend = WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner);
+    let backend = WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner, RealBrokerRegistrar);
     let id = backend
         .start(&config)
         .expect("WorkloadRunner starts the hvf VM");

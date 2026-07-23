@@ -30,6 +30,7 @@ use cucumber::gherkin::{Feature, Rule, Scenario};
 use world::CliWorld;
 
 const PENDING_TAG: &str = "wip";
+
 /// Scenarios that boot a real microVM and reach the network; opt in with
 /// `MVM_BDD_LIVE=1` (skipped in the default hermetic lane).
 const LIVE_TAG: &str = "live";

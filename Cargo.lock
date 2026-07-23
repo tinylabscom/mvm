@@ -2793,6 +2793,9 @@ version = "0.18.0"
 dependencies = [
  "assert_cmd",
  "cucumber",
+ "mvm-core",
+ "mvm-runtime",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -2835,6 +2838,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "uuid",
  "x509-parser",
  "zeroize",

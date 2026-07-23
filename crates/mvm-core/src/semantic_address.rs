@@ -1,8 +1,8 @@
 //! Semantic content identity for the Workload IR.
 //!
-//! A [`SemanticAddress`] is `sha256(JCS(workload_ir))` rendered as
+//! A [`SemanticAddress`] is `sha256(JCS(NFC(workload_ir)))` rendered as
 //! `sha256:<64-hex>` — the UOR-ADDR JSON realization (RFC 8785 JSON
-//! Canonicalization Scheme + SHA-256). Two [`mvm_protocol::ir::Workload`]
+//! Canonicalization Scheme + Unicode NFC + SHA-256). Two [`mvm_protocol::ir::Workload`]
 //! documents that mean the same thing get the same address regardless of
 //! JSON key order, whitespace, or which SDK language emitted them.
 //!
@@ -12,8 +12,18 @@
 //! in-crate, `no_std`-only JSON writer documented to sidestep full JCS number
 //! handling; it exists to fingerprint IR for launch plans and audit records,
 //! an internal use that has never needed cross-implementation conformance.
-//! `SemanticAddress` exists specifically to match the external UOR-ADDR
-//! realization byte-for-byte, so it goes through the dedicated JCS crate.
+//! `SemanticAddress` exists specifically to match the external UOR-ADDR JSON
+//! realization byte-for-byte, so it normalizes JSON strings and object keys to
+//! Unicode NFC before sending the value through the dedicated JCS crate.
+//!
+//! Caveat on the canonical form: `serde_jcs` 0.1.0 orders object keys by their
+//! UTF-8 byte value, not the UTF-16 code-unit order true RFC 8785 mandates. The
+//! two coincide for every code point up to U+FFFF but diverge for astral-plane
+//! (>U+FFFF) keys, so an address computed here can differ from one a strictly
+//! conformant implementation would produce for a workload carrying such keys.
+//! The `canonicalizer_equivalence` test module documents and pins this
+//! divergence class. The published UOR-ADDR JSON baseline is pinned separately
+//! by the 12-fixture conformance test below.
 //!
 //! # What this is not
 //!
@@ -31,10 +41,12 @@
 
 use mvm_protocol::ir::{VersionError, Workload, validate_schema_version};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 /// Semantic content identity of a [`Workload`] IR document:
-/// `sha256(JCS(ir))` rendered `sha256:<64 lowercase hex>`.
+/// `sha256(JCS(NFC(ir)))` rendered `sha256:<64 lowercase hex>`.
 ///
 /// This is a **semantic** identity — it says two workload declarations mean
 /// the same thing. It is not an exact-byte digest, not a signature, and not
@@ -51,23 +63,22 @@ impl SemanticAddress {
     pub const PREFIX: &'static str = "sha256:";
 
     /// Validates and wraps a `sha256:<64 lowercase hex>` string. Rejects any
-    /// other prefix, wrong length, or non-lowercase-hex content.
+    /// other prefix, wrong length, or non-lowercase-hex content. Shares the
+    /// shape check with every other prefixed content-address newtype so none
+    /// can drift.
     pub fn parse(value: impl Into<String>) -> Result<Self, SemanticAddressParseError> {
+        use crate::digest_shape::Sha256PrefixedShape;
         let value = value.into();
-        let hex_part = value
-            .strip_prefix(Self::PREFIX)
-            .ok_or_else(|| SemanticAddressParseError::MissingPrefix(value.clone()))?;
-        if hex_part.len() != 64 {
-            return Err(SemanticAddressParseError::WrongLength {
-                len: hex_part.len(),
-            });
-        }
-        for ch in hex_part.chars() {
-            if !matches!(ch, '0'..='9' | 'a'..='f') {
-                return Err(SemanticAddressParseError::NonHex { ch });
+        match crate::digest_shape::validate_sha256_prefixed(&value) {
+            Sha256PrefixedShape::Ok => Ok(Self(value)),
+            Sha256PrefixedShape::MissingPrefix => {
+                Err(SemanticAddressParseError::MissingPrefix(value))
             }
+            Sha256PrefixedShape::WrongLength { len } => {
+                Err(SemanticAddressParseError::WrongLength { len })
+            }
+            Sha256PrefixedShape::NonHex { ch } => Err(SemanticAddressParseError::NonHex { ch }),
         }
-        Ok(Self(value))
     }
 
     /// The `sha256:<64-hex>` string view.
@@ -131,21 +142,41 @@ pub enum SemanticAddressError {
 }
 
 /// Computes the [`SemanticAddress`] of `workload`: validates its declared
-/// schema version (failing closed on anything unrecognized), then hashes
-/// its RFC 8785 JSON-canonical form with SHA-256.
+/// schema version (failing closed on anything unrecognized), normalizes JSON
+/// strings and object keys to Unicode NFC, then hashes its RFC 8785
+/// JSON-canonical form with SHA-256.
 ///
 /// Pure and side-effect-free — the same `workload` value always produces the
 /// same address, independent of how it was originally deserialized
 /// (whitespace, key order).
 pub fn semantic_address(workload: &Workload) -> Result<SemanticAddress, SemanticAddressError> {
     validate_schema_version(&workload.schema_version)?;
-    let bytes = serde_jcs::to_vec(workload)?;
+    semantic_address_json(serde_json::to_value(workload)?)
+}
+
+fn semantic_address_json(value: Value) -> Result<SemanticAddress, SemanticAddressError> {
+    let normalized = normalize_json(value);
+    let bytes = serde_jcs::to_vec(&normalized)?;
     let digest = Sha256::digest(&bytes);
     Ok(SemanticAddress(format!(
         "{}{}",
         SemanticAddress::PREFIX,
         hex::encode(digest)
     )))
+}
+
+fn normalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(normalize_json).collect()),
+        Value::Object(entries) => Value::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.nfc().collect(), normalize_json(value)))
+                .collect(),
+        ),
+        Value::String(value) => Value::String(value.nfc().collect()),
+        scalar => scalar,
+    }
 }
 
 #[cfg(test)]
@@ -333,16 +364,110 @@ mod tests {
     }
 
     /// Golden/pinned value for a fixed IR fixture. The realization is JCS
-    /// (RFC 8785) + SHA-256, matching the UOR-ADDR JSON realization; this
-    /// pin should be cross-checked against UOR-ADDR's published conformance
-    /// vectors and the TS/Python SDK output once that access is available —
-    /// that interop check is a follow-up, not part of this pilot.
+    /// (RFC 8785) + Unicode NFC normalization + SHA-256, matching the
+    /// UOR-ADDR JSON realization. The independent published UOR-ADDR vectors
+    /// are covered by [`matches_published_uor_addr_json_fixtures`].
     #[test]
     fn golden_address_for_fixed_ir_fixture() {
         let addr = semantic_address(&sample_workload()).expect("valid IR");
         assert_eq!(
             addr.as_str(),
             "sha256:bf6f9f61571d7c5080144d83b681eb6718d76ab30ab80f61a715c50ac85b6ab3"
+        );
+    }
+
+    struct UorFixture {
+        name: &'static str,
+        raw_json: &'static str,
+        expected_address: &'static str,
+    }
+
+    // These are the 12 JSON byte-identity fixtures published by UOR-ADDR's
+    // conformance test at commit 165b51e3e2113ee5d032730cde709335d4fe9b60.
+    const UOR_ADDR_FIXTURES: &[UorFixture] = &[
+        UorFixture {
+            name: "simple_object",
+            raw_json: r#"{"foo": "bar"}"#,
+            expected_address: "sha256:7a38bf81f383f69433ad6e900d35b3e2385593f76a7b7ab5d4355b8ba41ee24b",
+        },
+        UorFixture {
+            name: "empty_object",
+            raw_json: "{}",
+            expected_address: "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        },
+        UorFixture {
+            name: "empty_array",
+            raw_json: "[]",
+            expected_address: "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        },
+        UorFixture {
+            name: "key_sort_test",
+            raw_json: r#"{"b": 1, "a": 2}"#,
+            expected_address: "sha256:d3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772",
+        },
+        UorFixture {
+            name: "unicode_muller",
+            raw_json: r#"{"name": "Müller"}"#,
+            expected_address: "sha256:5e92260d138e28f7118a40c3c44be922d4569a39f9f1de676ca334cf19c3a37c",
+        },
+        UorFixture {
+            name: "unicode_sao_paulo",
+            raw_json: r#"{"city": "São Paulo"}"#,
+            expected_address: "sha256:0906524dcbec3bdb6aa4d7c22ed65d671ba32177b10823b6f256546280aa526b",
+        },
+        UorFixture {
+            name: "unicode_cafe_composed",
+            raw_json: r#"{"name": "café"}"#,
+            expected_address: "sha256:645fa443126a8954fc6d871912b8fc67bc2ee8feae417efe55546251962ca74d",
+        },
+        UorFixture {
+            name: "unicode_cafe_decomposed",
+            raw_json: "{\"name\": \"cafe\u{0301}\"}",
+            expected_address: "sha256:645fa443126a8954fc6d871912b8fc67bc2ee8feae417efe55546251962ca74d",
+        },
+        UorFixture {
+            name: "mixed_types",
+            raw_json: r#"{"int": 42, "bool": true, "null_val": null}"#,
+            expected_address: "sha256:0966918f3851b97071b0e04d2576a2a86a197e71072b07061c8bfdaa6b6a5d2c",
+        },
+        UorFixture {
+            name: "nested",
+            raw_json: r#"{"nested": {"deep": {"value": "found"}}}"#,
+            expected_address: "sha256:b18dce7d3cbf2ac3b908ad75c8420c4a42077192df69dffdbf786755724eff1d",
+        },
+        UorFixture {
+            name: "string_array",
+            raw_json: r#"["a", "b", "c"]"#,
+            expected_address: "sha256:fa1844c2988ad15ab7b49e0ece09684500fad94df916859fb9a43ff85f5bb477",
+        },
+        UorFixture {
+            name: "number_array",
+            raw_json: "[1, 2, 3]",
+            expected_address: "sha256:a615eeaee21de5179de080de8c3052c8da901138406ba71c38c032845f7d54f4",
+        },
+    ];
+
+    #[test]
+    fn matches_published_uor_addr_json_fixtures() {
+        let mut failures = Vec::new();
+        for fixture in UOR_ADDR_FIXTURES {
+            let value: Value = serde_json::from_str(fixture.raw_json)
+                .unwrap_or_else(|error| panic!("{} is invalid JSON: {error}", fixture.name));
+            let actual = semantic_address_json(value)
+                .unwrap_or_else(|error| panic!("{} could not be addressed: {error}", fixture.name));
+            if actual.as_str() != fixture.expected_address {
+                failures.push(format!(
+                    "{}: expected {}, got {}",
+                    fixture.name,
+                    fixture.expected_address,
+                    actual.as_str()
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "UOR-ADDR vector mismatches:\n{}",
+            failures.join("\n")
         );
     }
 }

@@ -1,9 +1,16 @@
 //! Canonicalization of IR documents.
 //!
-//! Output conforms to RFC 8785 (JSON Canonicalization Scheme). v0 IR uses
-//! only integer numeric types, which sidesteps the main JCS complexity
-//! (ECMA-262 number serialization). If floats are ever admitted to the IR,
-//! this module must be extended to perform JCS number canonicalization.
+//! Output tracks RFC 8785 (JSON Canonicalization Scheme). v0 IR uses only
+//! integer numeric types, which sidesteps the main JCS complexity (ECMA-262
+//! number serialization). If floats are ever admitted to the IR, this module
+//! must be extended to perform JCS number canonicalization.
+//!
+//! Object keys are ordered by Unicode scalar value (a `str` sort). This matches
+//! the `serde_jcs` realization mvm-core hashes for its semantic address — which
+//! also orders by byte/scalar value — but diverges from the UTF-16 code-unit
+//! order true RFC 8785 mandates for astral-plane (>U+FFFF) keys. The two agree
+//! for every code point up to U+FFFF; the divergence class is documented and
+//! pinned by mvm-core's `canonicalizer_equivalence` test module.
 
 use alloc::format;
 use alloc::string::{String, ToString};

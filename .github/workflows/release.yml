@@ -27,6 +27,9 @@ env:
   MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap
 
 jobs:
+  bdd:
+    uses: ./.github/workflows/bdd.yml
+
   build:
     strategy:
       # Each target publishes independently — one target's failure must not
@@ -618,7 +621,7 @@ jobs:
             staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
 
   release:
-    needs: [build, builder-vm-image, runtime-overlay-image, default-microvm]
+    needs: [bdd, build, builder-vm-image, runtime-overlay-image, default-microvm]
     # Gate the published release on the mvmctl binary build ONLY. The Nix
     # image jobs still run and their artifacts are attached when present,
     # but an image-build failure must not block the binary download
@@ -628,7 +631,7 @@ jobs:
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.build.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.build.result == 'success' && (github.event_name == 'push' || github.event.inputs.dry_run == 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

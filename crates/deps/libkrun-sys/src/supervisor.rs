@@ -151,6 +151,14 @@ pub struct SupervisorConfig {
     /// `:443` flows and forward them here.
     #[serde(default)]
     pub transparent_terminator_port: Option<u16>,
+    /// When set, the supervisor pins the guest egress port's host-side
+    /// socket to this explicit UDS instead of the dir-derived
+    /// `vsock-<port>.sock` path — see
+    /// `libkrun_sys::KrunContext::set_host_listen_socket_override`.
+    /// `None` (the default at every construction site today) leaves
+    /// the derived path unchanged; no current caller populates this.
+    #[serde(default)]
+    pub egress_relay_socket: Option<std::path::PathBuf>,
 }
 
 impl SupervisorConfig {
@@ -378,6 +386,7 @@ impl SupervisorConfig {
             network_policy: attach.network_policy,
             bridge_restart_policy: base.bridge_restart_policy,
             transparent_terminator_port: attach.transparent_terminator_port,
+            egress_relay_socket: None,
         })
     }
 }
@@ -633,6 +642,7 @@ mod tests {
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
         }
     }
 
@@ -756,6 +766,7 @@ mod tests {
             network_policy: None,
             bridge_restart_policy: BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
         };
         let json = serde_json::to_string(&cfg_pre_w6a).unwrap();
         let parsed: SupervisorConfig =
@@ -766,6 +777,7 @@ mod tests {
         assert!(parsed.signing_key_path.is_none());
         assert!(parsed.plan.is_none());
         assert!(parsed.bundle.is_none());
+        assert!(parsed.egress_relay_socket.is_none());
         // But validate_audit_substrate must refuse it.
         assert!(parsed.validate_audit_substrate().is_err());
     }
@@ -799,6 +811,22 @@ mod tests {
             serde_json::from_str(json).expect("pre-W6.A.5 JSON must still parse");
         assert!(parsed.plan.is_none());
         assert!(parsed.bundle.is_none());
+        assert!(parsed.egress_relay_socket.is_none());
+    }
+
+    /// `SupervisorConfig` serde roundtrip with `egress_relay_socket`
+    /// populated — the JSON shape a future `LibkrunDriver` producer
+    /// will emit.
+    #[test]
+    fn supervisor_config_roundtrips_with_egress_relay_socket_populated() {
+        let mut cfg = well_formed_supervisor_config();
+        cfg.egress_relay_socket = Some(std::path::PathBuf::from(
+            "/run/mvm/vm-a/substitution-endpoint.sock",
+        ));
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(json.contains("\"egress_relay_socket\""));
+        let parsed: SupervisorConfig = serde_json::from_str(&json).expect("roundtrip");
+        assert_eq!(parsed.egress_relay_socket, cfg.egress_relay_socket);
     }
 
     #[test]

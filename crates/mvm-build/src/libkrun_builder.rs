@@ -957,6 +957,7 @@ impl LibkrunBuilderVm {
             // they move onto the bridge.
             network_policy: None,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -1138,6 +1139,7 @@ impl LibkrunBuilderVm {
             // they move onto the bridge.
             network_policy: None,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -1649,6 +1651,7 @@ impl BuilderVm for LibkrunBuilderVm {
             // they move onto the bridge.
             network_policy: None,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -1885,6 +1888,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // they move onto the bridge.
             network_policy: None,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.
@@ -4329,6 +4333,7 @@ impl LibkrunPersistentHostVm {
             // they move onto the bridge.
             network_policy: None,
             transparent_terminator_port: None,
+            egress_relay_socket: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
             // apply.

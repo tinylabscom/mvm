@@ -16,22 +16,19 @@ pub fn class_str(class: CheckpointClass) -> &'static str {
     }
 }
 
-/// Emit `checkpoint.created` for a freshly captured checkpoint.
+/// Emit `checkpoint.created` for a freshly captured checkpoint. The bound
+/// content-address is the record's `meta_digest` — it covers the whole manifest
+/// and the parent hash-link, not just the first blob's sha.
 pub fn bind_checkpoint_created(
     emitter: &AuditEmitter,
     plan: &ExecutionPlan,
     meta: &CheckpointMeta,
 ) -> Result<()> {
-    let content_sha = meta
-        .content
-        .first()
-        .map(|b| b.sha256.as_str())
-        .unwrap_or("");
     emitter.emit_checkpoint_created(
         plan,
         meta.id.as_str(),
         class_str(meta.class),
-        content_sha,
+        meta.meta_digest.as_str(),
         &meta.vm_name,
     )
 }
@@ -42,10 +39,17 @@ pub fn bind_checkpoint_restored(
     plan: &ExecutionPlan,
     meta: &CheckpointMeta,
 ) -> Result<()> {
-    emitter.emit_checkpoint_restored(plan, meta.id.as_str(), &meta.vm_name)
+    emitter.emit_checkpoint_restored(
+        plan,
+        meta.id.as_str(),
+        meta.meta_digest.as_str(),
+        &meta.vm_name,
+    )
 }
 
-/// Emit `checkpoint.forked` recording the parent→child lineage.
+/// Emit `checkpoint.forked` recording the parent→child lineage. The bound
+/// `parent_digest` is the child's own hash-link (`child.parent`), so the
+/// audited lineage is the content-address chain the fork actually recorded.
 pub fn bind_checkpoint_forked(
     emitter: &AuditEmitter,
     plan: &ExecutionPlan,
@@ -53,7 +57,21 @@ pub fn bind_checkpoint_forked(
     child: &CheckpointMeta,
     child_vm_name: &str,
 ) -> Result<()> {
-    emitter.emit_checkpoint_forked(plan, parent.as_str(), child.id.as_str(), child_vm_name)
+    // A forked child is built by the fork path, which always hash-links it to
+    // its parent's content-address. A genesis-shaped child (no parent) must not
+    // silently chain-sign an empty parent_digest — fail loud instead.
+    let parent_digest = child
+        .parent
+        .as_ref()
+        .expect("a forked child always carries a parent hash-link");
+    emitter.emit_checkpoint_forked(
+        plan,
+        parent.as_str(),
+        child.id.as_str(),
+        child_vm_name,
+        parent_digest.as_str(),
+        child.meta_digest.as_str(),
+    )
 }
 
 #[cfg(test)]
@@ -99,7 +117,9 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("checkpoint.created"));
         assert!(content.contains("vm_full")); // class derived from meta
-        assert!(content.contains("abcd")); // content hash from meta.content.first()
+        assert!(content.contains("meta_digest"));
+        // The record's content-address, sourced from meta.meta_digest.
+        assert!(content.contains(meta.meta_digest.as_str()));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 
@@ -107,5 +127,54 @@ mod tests {
     fn class_str_maps_both_variants() {
         assert_eq!(class_str(CheckpointClass::FsQuick), "fs_quick");
         assert_eq!(class_str(CheckpointClass::VmFull), "vm_full");
+    }
+
+    #[test]
+    fn bind_forked_emits_parent_and_child_content_addresses() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-F");
+
+        // A real parent + a child hash-linked to the parent's content-address.
+        let parent = CheckpointMeta::builder(
+            CheckpointId::new("ckpt-parent"),
+            CheckpointClass::FsQuick,
+            "parentvm",
+        )
+        .content(vec![ContentBlob {
+            name: "rootfs.ext4".into(),
+            sha256: "aa".into(),
+        }])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        let child = CheckpointMeta::builder(
+            CheckpointId::new("ckpt-child"),
+            CheckpointClass::FsQuick,
+            "childvm",
+        )
+        .parent(Some(parent.meta_digest.clone()))
+        .content(parent.content.clone())
+        .supervisor_config_digest("d")
+        .created_unix(2)
+        .build();
+
+        bind_checkpoint_forked(&emitter, &plan, &parent.id, &child, &child.vm_name).unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        // The emitted parent_digest is the child's own hash-link; child_digest
+        // is the child's content-address.
+        assert!(content.contains("parent_digest"));
+        assert!(content.contains("child_digest"));
+        assert!(content.contains(parent.meta_digest.as_str()));
+        assert!(content.contains(child.meta_digest.as_str()));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 }

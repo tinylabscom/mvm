@@ -3,12 +3,16 @@
 //! The `image` catalog lives in the top-level `catalog` module; `flake`
 //! validation is the `validate` subcommand.
 
+pub(super) mod address;
 #[allow(clippy::module_inception)]
 pub(in crate::commands) mod build;
 pub(super) mod compile;
 pub(super) mod group;
 #[cfg(feature = "builder-vm")]
 pub mod hvf_builder_image;
+/// Shared IR-JSON input loading (`--from-ir` / positional / `-` stdin) for the
+/// build-time verbs that read a Workload document.
+pub(super) mod ir_input;
 pub(super) mod kernel;
 /// `mvmctl persistent-builder` user-facing verb. Wires the
 /// host-side `LibkrunPersistentHostVm` and

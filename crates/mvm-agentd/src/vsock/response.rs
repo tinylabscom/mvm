@@ -116,8 +116,8 @@ pub struct ReadinessReport {
     /// Drop-in probe scan + probe loop. `Disabled` if no
     /// `/etc/mvm/probes.d/*.json` files present.
     pub probes: ComponentState,
-    /// Volume-mount state — wire-stable placeholder. `Disabled` in
-    /// v1 (mount/unmount are on-demand verbs, not boot state).
+    /// Volume-mount state — wire-stable placeholder. `Disabled` because
+    /// mount/unmount are on-demand verbs, not boot state.
     pub volumes: ComponentState,
     /// Active agent profile. Same value the dispatcher uses for the
     /// `allowed_in` gate.
@@ -369,6 +369,15 @@ pub enum ResponseKind {
     Stream,
 }
 
+/// Whether a verb carries bounded orchestration metadata or user-controlled
+/// payload bytes. The distinction drives dispatch capacity and audit handling;
+/// it is independent of the prod/dev profile gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrafficPlane {
+    Control,
+    Data,
+}
+
 /// The declared response contract for a request verb: which `GuestResponse`
 /// variant(s) answer it, and whether the answer is a single frame or a
 /// terminal-terminated stream. The universal responses (`Error`,
@@ -382,6 +391,52 @@ pub struct ResponseContract {
 }
 
 impl Verb {
+    /// Exhaustive control/data-plane classification for this wire verb.
+    pub fn traffic_plane(self) -> TrafficPlane {
+        use TrafficPlane::{Control, Data};
+        match self {
+            Self::Exec
+            | Self::ExecBatch
+            | Self::RunEntrypoint
+            | Self::FsDiff
+            | Self::FsRead
+            | Self::FsWrite
+            | Self::FsList
+            | Self::ProcSendInput
+            | Self::ProcWait
+            | Self::RunCode => Data,
+            Self::ProtocolHello
+            | Self::WorkerStatus
+            | Self::SleepPrep
+            | Self::Wake
+            | Self::Ping
+            | Self::IntegrationStatus
+            | Self::CheckpointIntegrations
+            | Self::ProbeStatus
+            | Self::PrimedStatus
+            | Self::RunDetached
+            | Self::PostRestore
+            | Self::StartPortForward
+            | Self::StartUnixSocketForward
+            | Self::ConsoleOpen
+            | Self::ConsoleClose
+            | Self::ConsoleResize
+            | Self::EntrypointStatus
+            | Self::ReadinessStatus
+            | Self::FsStat
+            | Self::FsMkdir
+            | Self::FsRemove
+            | Self::FsMove
+            | Self::ProcStart
+            | Self::ProcList
+            | Self::ProcSignal
+            | Self::ProcKill
+            | Self::MountVolume
+            | Self::UnmountVolume
+            | Self::UpdateIdleTimeout => Control,
+        }
+    }
+
     /// The declared host↔guest response contract for this verb — the
     /// machine-readable pairing previously implicit in the agent dispatch.
     pub fn response_contract(self) -> ResponseContract {
@@ -1404,6 +1459,24 @@ mod tests {
             streaming,
             BTreeSet::from(["Exec", "ProcWait", "RunCode", "RunEntrypoint"])
         );
+    }
+
+    #[test]
+    fn every_streaming_verb_is_data_plane() {
+        for verb in Verb::ALL {
+            if verb.response_contract().kind == ResponseKind::Stream {
+                assert_eq!(verb.traffic_plane(), TrafficPlane::Data, "{}", verb.name());
+            }
+        }
+    }
+
+    #[test]
+    fn representative_verbs_have_expected_traffic_planes() {
+        assert_eq!(Verb::Ping.traffic_plane(), TrafficPlane::Control);
+        assert_eq!(Verb::ReadinessStatus.traffic_plane(), TrafficPlane::Control);
+        assert_eq!(Verb::RunEntrypoint.traffic_plane(), TrafficPlane::Data);
+        assert_eq!(Verb::FsRead.traffic_plane(), TrafficPlane::Data);
+        assert_eq!(Verb::ConsoleOpen.traffic_plane(), TrafficPlane::Control);
     }
 
     // Drift guard: every GuestResponse variant must be answered by some

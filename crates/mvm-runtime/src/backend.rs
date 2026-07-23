@@ -11,22 +11,40 @@ use mvm_core::vm_backend::{
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
-use crate::driver::HvfDriver;
+use crate::driver::{HvfDriver, LibkrunDriver};
 use crate::hvf_backend::HvfBackend;
 use crate::image::RuntimeVolume;
-use crate::libkrun::LibkrunBackend;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
 use crate::wasm_backend::WasmBackend;
-use crate::workload_runner::{RealEndpointSpawner, WorkloadRunner};
+use crate::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
 
 /// The hvf VMM driven through the unified workload-runner role over the
 /// driver seam. One alias keeps the long generic instantiation readable at the
 /// enum variant and its construction site.
-type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner>;
+type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+
+/// libkrun driven through the same unified workload-runner role — libkrun's
+/// sole production launch path (both `--hypervisor libkrun` and `auto_select`).
+/// Egress routes to the per-VM gating endpoint over vsock only; the raw
+/// [`LibkrunBackend`](crate::libkrun::LibkrunBackend) shim stays behind the
+/// driver as its identity delegate and for the live benchmark, unreached via
+/// this enum.
+type LibkrunRunner = WorkloadRunner<LibkrunDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+
+/// Construct libkrun's workload runner. The runner is not const-constructible,
+/// so this helper is the one construction site the enum variant, `auto_select`,
+/// the descriptor catalog, and the capability selector all call.
+pub(crate) fn libkrun_runner() -> LibkrunRunner {
+    WorkloadRunner::new(
+        LibkrunDriver::new(),
+        RealEndpointSpawner,
+        RealBrokerRegistrar,
+    )
+}
 
 /// Firecracker VM configuration for the [`VmBackend`] trait.
 ///
@@ -478,8 +496,12 @@ impl BackendTier {
 /// backend is active. Each variant delegates to its inner implementation.
 pub enum AnyBackend {
     Firecracker(FirecrackerBackend),
-    /// libkrun — Linux KVM / macOS Apple Silicon HVF.
-    Libkrun(LibkrunBackend),
+    /// libkrun (Linux KVM / macOS Apple Silicon HVF), driven through the unified
+    /// `WorkloadRunner` over the driver seam — libkrun's sole production path,
+    /// selected by `--hypervisor libkrun` and `auto_select`. Egress routes to
+    /// the per-VM gating endpoint over vsock only (claim-10 + claims 12/13 at
+    /// the endpoint); no transparent `:80/:443` terminator.
+    Libkrun(LibkrunRunner),
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
     /// `MVM_BACKEND=qemu`; `auto_select` never picks it (Firecracker
@@ -552,7 +574,11 @@ impl AnyBackend {
         // table; special-case its opt-in selector before the descriptor lookup.
         // Every other selector — `hvf` included — stays byte-identical.
         if matches!(name, "hvf-runner") {
-            return Self::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner));
+            return Self::HvfRunner(WorkloadRunner::new(
+                HvfDriver::new(),
+                RealEndpointSpawner,
+                RealBrokerRegistrar,
+            ));
         }
         catalog::descriptor_for_selector(name)
             .map(|descriptor| descriptor.instantiate())
@@ -609,9 +635,9 @@ impl AnyBackend {
             return Self::Hvf(HvfBackend);
         }
 
-        // 3. libkrun installed → use the raw libkrun shim.
+        // 3. libkrun installed → the libkrun workload runner (vsock-only egress).
         if plat.has_libkrun() {
-            return Self::Libkrun(LibkrunBackend);
+            return Self::Libkrun(libkrun_runner());
         }
 
         // Final default. Reachable when no tier is available; start()
@@ -1286,8 +1312,8 @@ mod tests {
                     Some("libkrun.pid"),
                     Some(2),
                     true,
-                    true,
-                    true,
+                    false,
+                    false,
                 ),
                 (
                     "qemu",
@@ -1420,7 +1446,8 @@ mod tests {
         // A live-memory warm-start asked of libkrun's disk-only tier must
         // fail closed (no cold-boot fallback) and name a recovery action.
         // The Unsupported branch returns before any boot, so this needs
-        // no VM/KVM.
+        // no VM/KVM. Post-runner-flip libkrun takes the trait-default warm_start,
+        // whose hint points at a cold boot rather than naming a sibling backend.
         use mvm_core::vm_backend::WarmStartError;
         let cfg = VmStartConfig {
             name: "warm-gate-test".into(),
@@ -1437,7 +1464,7 @@ mod tests {
             }) => {
                 assert_eq!(requested, SnapshotCapability::LiveMemory);
                 assert_eq!(available, SnapshotCapability::DiskOnly);
-                assert!(hint.contains("Firecracker"), "{hint}");
+                assert!(hint.contains("cold boot"), "{hint}");
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
@@ -1627,12 +1654,16 @@ mod tests {
         // (the raw backend and the WorkloadRunner-driven role-runner path).
         let mut backends: Vec<(&str, AnyBackend)> = vec![
             ("firecracker", AnyBackend::Firecracker(FirecrackerBackend)),
-            ("libkrun", AnyBackend::Libkrun(LibkrunBackend)),
+            ("libkrun", AnyBackend::Libkrun(libkrun_runner())),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
             ("hvf", AnyBackend::Hvf(HvfBackend)),
             (
                 "hvf_runner",
-                AnyBackend::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner)),
+                AnyBackend::HvfRunner(WorkloadRunner::new(
+                    HvfDriver::new(),
+                    RealEndpointSpawner,
+                    RealBrokerRegistrar,
+                )),
             ),
         ];
         backends.extend(mock_variant_for_ssh_check());

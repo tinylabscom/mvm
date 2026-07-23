@@ -26,7 +26,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  bdd:
+    uses: ./.github/workflows/bdd.yml
+
   publish:
+    needs: [bdd]
     runs-on: ubuntu-latest
     permissions:
       contents: read

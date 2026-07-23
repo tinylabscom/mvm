@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
-use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
@@ -26,6 +26,9 @@ use mvm_runtime::checkpoint::{
 use super::Cli;
 use super::shared::clap_vm_name;
 use crate::ui;
+
+mod lineage;
+pub(super) use lineage::SignedChainAnchor;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct CheckpointArgs {
@@ -147,6 +150,19 @@ pub(in crate::commands) enum CheckpointCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Verify a checkpoint's full lineage against the signed audit chain.
+    ///
+    /// Walks from the checkpoint up to its genesis root; at every hop the
+    /// record's content-address must match both its stored `meta_digest` and the
+    /// digest the host signed into the audit chain at creation. Exits nonzero on
+    /// any drift, chain mismatch, missing signed entry, or broken lineage.
+    Verify {
+        /// Checkpoint id to verify.
+        id: String,
+        /// Output the verification result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> Result<()> {
@@ -181,6 +197,7 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             json,
         ),
         CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
+        CheckpointCmd::Verify { id, json } => lineage::verify(&id, json),
     }
 }
 
@@ -531,22 +548,48 @@ fn ls(json: bool) -> Result<()> {
         ui::info("(no checkpoints)");
         return Ok(());
     }
+    // The parent hash-link is a content-address on disk; resolve it back to the
+    // human checkpoint id the operator recognizes. Build the digest->id lookup
+    // once from the metas already listed rather than re-scanning per row.
+    let id_by_digest: std::collections::HashMap<&CheckpointDigest, &str> = metas
+        .iter()
+        .map(|m| (&m.meta_digest, m.id.as_str()))
+        .collect();
     println!(
         "{:<32} {:<10} {:<20} {:<8} PARENT",
         "ID", "CLASS", "VM", "TAG"
     );
     for m in &metas {
-        let class = class_str(m.class);
+        let parent_display = match &m.parent {
+            None => "-".to_string(),
+            // Unknown parent (pruned/dangling): fall back to the short digest so
+            // the link stays visible instead of silently blank.
+            Some(digest) => id_by_digest
+                .get(digest)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| short_digest(digest)),
+        };
         println!(
             "{:<32} {:<10} {:<20} {:<8} {}",
             m.id.as_str(),
-            class,
+            class_str(m.class),
             m.vm_name,
             m.tag.as_deref().unwrap_or("-"),
-            m.parent.as_ref().map(|p| p.as_str()).unwrap_or("-"),
+            parent_display,
         );
     }
     Ok(())
+}
+
+/// Compact display form of a checkpoint content-address (`sha256:` + first 12
+/// hex), for the `ls` PARENT column when the human id behind a link isn't in
+/// view.
+fn short_digest(digest: &CheckpointDigest) -> String {
+    let hex = digest
+        .as_str()
+        .strip_prefix(CheckpointDigest::PREFIX)
+        .unwrap_or_else(|| digest.as_str());
+    format!("{}{}", CheckpointDigest::PREFIX, &hex[..hex.len().min(12)])
 }
 
 fn diff(a: &str, b: &str, json: bool) -> Result<()> {
@@ -687,6 +730,11 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
     let dest_dir = vm_state_dir(&child_vm_name);
     let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
 
+    // Verify the parent against the signed audit chain before any bytes are
+    // cloned — a fork must never build on a checkpoint edited after it was
+    // audited.
+    let anchor = SignedChainAnchor::load()
+        .context("loading the signed audit chain to verify the fork parent")?;
     let meta = fork_checkpoint(
         p.store,
         ForkParams {
@@ -698,6 +746,7 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
             child_plan_json: None,
             child_tenant_id: None,
         },
+        &anchor,
     )
     .with_context(|| format!("forking checkpoint {:?}", p.checkpoint.as_str()))?;
 
@@ -948,6 +997,9 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
     }
 
+    // Verify the parent against the signed audit chain before cloning/restoring.
+    let anchor = SignedChainAnchor::load()
+        .context("loading the signed audit chain to verify the fork parent")?;
     let restorer = mvm_runtime::firecracker::FcForkRestorer;
     let fork_result = fork_vm_full_fc(
         p.store,
@@ -961,6 +1013,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
             child_tenant_id,
         },
         &restorer,
+        &anchor,
     );
     if let Err(ref e) = fork_result {
         super::up::emit_failed_if(&admission, "fork-vm-full-fc", e);
@@ -1309,6 +1362,7 @@ pub(crate) fn bind_checkpoint_forked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_runtime::checkpoint::{CheckpointChainAnchor, verify_lineage};
 
     #[test]
     fn validated_checkpoint_id_accepts_normal() {
@@ -2029,6 +2083,98 @@ mod tests {
         assert!(
             !SnapshotCapability::Unsupported.satisfies(SnapshotCapability::SaveRestore),
             "Unsupported must not satisfy SaveRestore"
+        );
+    }
+
+    // ── SignedChainAnchor: real signed-chain linkage ─────────────────────────
+
+    use mvm_core::checkpoint::{CheckpointClass, ContentBlob};
+
+    /// Capture a checkpoint record and emit its `checkpoint.created` entry into
+    /// the host-signed audit chain under the active `MVM_HOME`, exactly as the
+    /// capture path does. Returns the persisted meta.
+    fn seed_audited_checkpoint(
+        store: &CheckpointStore,
+        id: &str,
+        rootfs_sha: &str,
+    ) -> CheckpointMeta {
+        let meta = CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, "vm")
+            .content(vec![ContentBlob {
+                name: "rootfs.ext4".into(),
+                sha256: rootfs_sha.into(),
+            }])
+            .supervisor_config_digest("d")
+            .created_unix(1)
+            .build();
+        store.write_meta(&meta).unwrap();
+
+        let signer = super::super::host_signer::load_or_init().unwrap();
+        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-verify")
+            .build();
+        mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &plan, &meta).unwrap();
+        meta
+    }
+
+    #[test]
+    fn signed_chain_anchor_indexes_a_real_created_entry_and_verify_passes() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let store = CheckpointStore::open();
+        let meta = seed_audited_checkpoint(&store, "ckpt-anchor-1", "aa");
+
+        let anchor = SignedChainAnchor::load().unwrap();
+        // The anchor recovers the checkpoint's content-address from the signed
+        // chain, and the full lineage verifies against it.
+        assert_eq!(
+            anchor.recorded_creation_digest(&meta).unwrap(),
+            Some(meta.meta_digest.clone())
+        );
+        verify_lineage(&store, &meta.id, &anchor).unwrap();
+    }
+
+    /// The point of chain-anchoring: a fully self-consistent local re-forge — an
+    /// attacker rewrites the record's content AND recomputes its `meta_digest` so
+    /// the two agree on disk — passes local recompute but is caught by the signed
+    /// chain, which recorded the original content-address and cannot be re-signed.
+    #[test]
+    fn chain_anchor_catches_a_fully_consistent_local_reforge() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let store = CheckpointStore::open();
+        // The audited original: the chain records ITS content-address.
+        seed_audited_checkpoint(&store, "ckpt-anchor-2", "aa");
+
+        // Attacker overwrites meta.json with a different-content record whose own
+        // meta_digest is recomputed to match (locally consistent).
+        let reforged = CheckpointMeta::builder(
+            CheckpointId::new("ckpt-anchor-2"),
+            CheckpointClass::FsQuick,
+            "vm",
+        )
+        .content(vec![ContentBlob {
+            name: "rootfs.ext4".into(),
+            sha256: "zz".into(),
+        }])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&reforged).unwrap();
+        // Local recompute alone would accept this — it is self-consistent.
+        assert_eq!(reforged.meta_digest, reforged.compute_meta_digest());
+
+        let anchor = SignedChainAnchor::load().unwrap();
+        let err = verify_lineage(&store, &reforged.id, &anchor).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the signed audit chain"),
+            "the signed chain must catch a consistent local re-forge, got: {err}"
         );
     }
 }

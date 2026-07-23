@@ -64,34 +64,30 @@ Request types: `ping`, `status`, `sleep-prep`, `wake`, and more.
 
 ## Control plane and data plane
 
-Plan 74 / ADR-019 §4 splits the agent's wire surface into a
-**control plane** (small, single-frame, bounded requests/responses)
-and a **data plane** (streaming or chunked operations where the
-payload size is dominated by user content, not metadata). The
-distinction is load-bearing for the redaction invariant: data-plane
-payload bytes never appear in audit records, readiness messages,
-progress events, backpressure events, or receipts. The control
-plane is fully tracked in those surfaces; the data plane carries
-hashes and counts only.
+The agent has separate logical **control** and **data** planes. They share the
+authenticated guest-protocol listener, but classification is exhaustive and
+drives admission: at most 64 requests run concurrently, data-plane work is
+limited to 48, and the remaining 16 slots stay available for health,
+readiness, lifecycle, and cancellation requests. A saturated transfer cannot
+consume all control capacity.
 
-Every verb in the table below is also gated by an agent profile
-(see "Profile gate" below) — but the control-plane / data-plane
-split is **orthogonal**. `Exec` (dev-only) is a data-plane verb;
-`Ping` (always available) is control-plane.
+Every encoded request and response is capped symmetrically at 256 KiB before
+any bytes are written. User-content chunks are at most 48 KiB, leaving enough
+headroom for worst-case JSON encoding and the response envelope. The split is
+orthogonal to the agent profile gate: `Exec` is dev-only and data-plane;
+`Ping` is always available and control-plane.
 
 ### Control-plane verbs
 
-Small bounded JSON in / small bounded JSON out. Maximum response
-frame size is `MAX_FRAME_SIZE = 256 KiB` (`crates/mvm-agentd/src/vsock/mod.rs`).
-No streaming. No payload bytes from user processes.
+Small bounded JSON in and out, with no user process or file payload bytes.
 
 | Verb | Response shape | Notes |
 |---|---|---|
-| `ProtocolHello` | `ProtocolHelloAck` / `ProtocolMismatch` | Required first request in every session (ADR-019 §1, hard cutover). |
+| `ProtocolHello` | `ProtocolHelloAck` / `ProtocolMismatch` | Required first request in every session; protocol v2 is a hard cutover. |
 | `Ping` | `Pong` | Reachability probe. Requires `Ping` capability. |
 | `WorkerStatus` | `WorkerStatus { status, last_busy_at }` | Idle/busy sampled from `/proc/loadavg`. |
 | `ReadinessStatus` | `ReadinessStatusReport` | Component-level readiness (see "Readiness model" below). |
-| `IntegrationStatus` | `IntegrationStatusReport { integrations: Vec<…> }` | One per declared integration. Used by `mvmctl ls --json` readiness column (plan 74 W2). |
+| `IntegrationStatus` | `IntegrationStatusReport { integrations: Vec<…> }` | One per declared integration. |
 | `EntrypointStatus` | `EntrypointStatusReport` | Validation result + warm-pool state. |
 | `ProbeStatus` | `ProbeStatusReport { probes: Vec<ProbeResult> }` | One per declared probe. |
 | `SleepPrep` / `Wake` / `PostRestore` / `CheckpointIntegrations` | Ack | Snapshot lifecycle handshakes. |
@@ -99,26 +95,24 @@ No streaming. No payload bytes from user processes.
 | `MountVolume` / `UnmountVolume` | `MountVolumeResult` (closed enum) | Volume metadata only — no file contents. |
 | `StartPortForward` | `PortForwardStarted { vsock_port, … }` | Sets up a vsock→TCP forwarder. The data plane on that forwarder is byte-for-byte; the *control* plane that asks for it is one frame. |
 | `ProcStart` / `ProcSignal` / `ProcKill` / `ProcList` | `ProcResult` (closed enum) | Process control. `ProcStart` accepts an `argv` up to capped length but does not echo it back. |
-| `FsStat` / `FsList` / `FsMkdir` / `FsRemove` / `FsMove` | `FsResult` (closed enum) | Filesystem metadata. `FsList` truncates at `max_entries` and reports `truncated: true`. |
+| `FsStat` / `FsMkdir` / `FsRemove` / `FsMove` | `FsResult` (closed enum) | Bounded filesystem metadata and mutations. |
 | `ConsoleOpen` / `ConsoleClose` / `ConsoleResize` | Ack with vsock port | Allocates a PTY forwarder. The PTY itself runs on a different vsock port — that's the data plane. |
 
 ### Data-plane verbs
 
-Streaming, chunked, or potentially-large bounded transfers. Each
-data-plane verb names its frame cap, chunk size, terminal event,
-and backpressure behavior below.
+Streaming, chunked, or potentially large bounded transfers. These requests
+share the 48-request data admission budget.
 
 | Verb | Flow | Frame cap | Chunk size | Terminal | Backpressure | Payload in audit? |
 |---|---|---|---|---|---|---|
-| `RunEntrypoint` | Single request → stream of `EntrypointEvent`s | `MAX_FRAME_SIZE` per event | Stdout/stderr drained per agent tick | `Exit { code }` / `Killed { signal }` / `TimedOut` / `Error` | None today (W4 wires the next slice). | No. Hash of stdout/stderr appears in receipts (plan 74 W6); raw bytes do not. |
-| `ProcWait` | Single request → stream of `ProcWaitEvent`s | `MAX_FRAME_SIZE` per event | Stdout/stderr drained per ~50 ms agent tick | `Exit` / `Killed` / `TimedOut` / `Error` | **`Backpressure { reason: OutputConsumerSlow, detail }`** — rising-edge at 75 % of `Caps::max_output_buffer` (16 MiB prod, plan 74 W4). Non-terminal; wait continues. | No. Output streams to the host live; nothing about chunk content goes to audit. |
-| `ProcSendInput` | Bounded request → ack | Request body capped at `Caps::max_stdin_per_call` (1 MiB prod) | Single-frame | `ProcResult::InputAccepted { bytes_accepted }` | Caller-driven — request body fails closed if it exceeds the cap (no implicit truncation). | No. `bytes_accepted` count only; never stdin bytes. |
-| `FsRead` | Single request → `FsResult::Read { content, total_size }` | `MAX_FRAME_SIZE` per response | The agent caps reads at `max_read_bytes` and reports `total_size` so callers detect short reads. Bigger files require multiple requests with offset/length. | Response itself is the terminal | None — bounded by frame cap. | No. `total_size` and offset/length appear in audit; `content` bytes do not. |
-| `FsWrite` | Bounded request → `FsResult::Write { bytes_written }` | Request body capped at the agent's write cap | Single-frame | Response itself is the terminal | Caller-driven — too-large bodies fail closed. | No. Byte count only. |
-| `Exec` / `RunCode` (dev-only) | Single request → `ExecResult { exit_code, stdout, stderr }` | Each captured stream capped by the dev caps; total response bounded by `MAX_FRAME_SIZE` | One-shot capture; no streaming | Response itself is the terminal | None — dev-only, not exercised in prod. | No. Hash of stdout/stderr can be receipted; raw bytes are not audited. |
-| Console PTY traffic | Bidirectional bytes over a dedicated vsock port (`ConsoleOpen` allocates it) | Per-frame cap defined by the console transport, not `MAX_FRAME_SIZE` | TTY-shaped reads | Caller closes (`ConsoleClose`) or PTY exits | None — interactive, not buffered. | No. Console bytes never enter audit. |
+| `RunEntrypoint` | Request → `EntrypointEvent` stream | 256 KiB per event | 48 KiB stdout/stderr | `Exit` / `Killed` / `TimedOut` / `Error` | Bounded process buffers. | No. |
+| `ProcWait` | Request → `ProcWaitEvent` stream | 256 KiB per event | 48 KiB stdout/stderr | `Exit` / `Killed` / `TimedOut` / `Error` | Typed non-terminal backpressure events. | No. |
+| `ProcSendInput` | Bounded request → ack | 256 KiB | At most 48 KiB per protocol frame | `InputAccepted` | Caller retries subsequent chunks. | No; byte count only. |
+| `FsRead` / `FsWrite` | Repeated offset requests → bounded responses | 256 KiB | 48 KiB | Each chunk response | Caller advances the offset; the first write truncates and later chunks do not. | No; offsets, sizes, and counts only. |
+| `FsList` / `FsDiff` | Request → bounded metadata response | 256 KiB | Protocol-bounded result | Response itself | Result caps and frame cap fail closed. | No file contents. |
+| `Exec` / `ExecBatch` / `RunCode` (dev-only) | One-shot request and capture | 256 KiB | Protocol-bounded result | Response itself | Oversized encoded responses fail closed. | No. |
+| Console PTY traffic | Raw bytes on a dedicated vsock port | Raw transport | TTY-shaped reads | Close or PTY exit | Kernel/socket backpressure; only the host CID may connect. | No. |
 | Port-forward TCP traffic | Bidirectional bytes over the vsock port returned by `StartPortForward` | None — raw TCP | TCP-shaped reads | TCP teardown | None — kernel TCP. | No. Forwarded bytes never enter audit. |
-| Builder output (builder VM only) | Streamed during `mvm-host-vm-init` builds | Frame cap on the builder vsock channel | Lines / records | Builder's terminal status | None today; builder egress events (plan 74 W8) will surface backpressure. | No. Build logs are stored next to the receipt; raw bytes never get into audit detail strings. |
 
 ### Redaction invariant
 
@@ -135,30 +129,19 @@ payload bytes. The list is the authoritative one:
   declared integration `name` field). Health-check command output
   never appears.
 - `ProcWaitEvent::Backpressure { reason, detail }` — the `detail`
-  string is metadata only: byte counts, threshold, cap. Plan 74 W4
-  unit tests pin this.
+  string is metadata only: byte counts, threshold, and cap.
 - `BackpressureReason::ServiceHealthPending { pending }` — service
   names only.
 - Receipts written by `mvmctl run` / `mvmctl machine run` / `mvmctl build`
-  (plan 74 W6) store hashes and metadata. Raw stdout / stderr /
+  store hashes and metadata. Raw stdout / stderr /
   stdin / env / argv values are never written.
 - `mvmctl ls --json` rows — the `readiness` and
   `last_readiness_change_at` fields render directly from the
   registry; the registry only stores the closed enum + RFC 3339
   timestamps.
 
-### Exit checks
-
-Plan 74 W3 calls out two contract checks that this section
-underwrites:
-
-1. **No code path advertises an unbounded single-frame response.**
-   Every entry above either names a frame cap or routes through a
-   streaming surface (`ProcWaitEvent` / `EntrypointEvent` / PTY /
-   raw TCP).
-2. **Docs explicitly state that payload bytes are not included in
-   audit or readiness messages.** The "Redaction invariant"
-   subsection is that statement.
+The classification is encoded by `Verb::traffic_plane()`. Because its match is
+exhaustive, adding a verb requires choosing a plane at compile time.
 
 ## Profile gate
 
