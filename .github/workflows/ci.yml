@@ -367,9 +367,19 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-wasm-
 
       - name: Install wasmtime (wasm32-wasip1 test runner)
+        env:
+          # Pinned to match the wasmtime crate version in Cargo.lock.
+          # Bump intentionally when the wasmtime dependency is updated.
+          WASMTIME_VERSION: "46.0.1"
         run: |
           set -euo pipefail
-          curl https://wasmtime.dev/install.sh -sSf | bash
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          base="wasmtime-v${WASMTIME_VERSION}-x86_64-linux"
+          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/${base}.tar.xz" \
+            | tar -xJf - -C "$tmpdir"
+          mkdir -p "$HOME/.wasmtime/bin"
+          mv "$tmpdir/${base}/wasmtime" "$HOME/.wasmtime/bin/wasmtime"
           echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
 
       - name: mvm-protocol builds no_std + alloc on wasm32-unknown-unknown
