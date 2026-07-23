@@ -181,7 +181,17 @@ fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
 }
 
 fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'static str {
-    if let Some(manifest) = args.manifest.as_deref() {
+    resolve_machine_build_mode(args.manifest.as_deref(), name)
+}
+
+/// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) from its manifest
+/// slot's template revision, falling back to the runtime accessibility flag.
+/// Shared by the boot-time SDK envelope and the `machine ls --json` listing so
+/// an attach-from-a-fresh-process client reads the same value the boot path
+/// stamps. Fails closed on `"prod"` — only an explicitly dev-built template or
+/// an accessible (dev) runtime resolves to `"dev"`.
+pub(super) fn resolve_machine_build_mode(manifest: Option<&str>, name: &str) -> &'static str {
+    if let Some(manifest) = manifest {
         let slot_name = manifest
             .trim_end_matches('/')
             .split('/')

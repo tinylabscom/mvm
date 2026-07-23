@@ -791,6 +791,49 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
 }
 
 #[test]
+fn resolve_machine_build_mode_is_fail_closed_and_reads_accessible() {
+    let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut env = TestEnv::new();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    env.set("HOME", tmp.path());
+    env.set("MVM_HOME", tmp.path());
+
+    // No manifest, no runtime meta → fail-closed to prod. This is the value
+    // `Sandbox.connect(id)` inherits its dev-only exec guard from, so a machine
+    // the CLI cannot positively classify must never resolve to dev.
+    assert_eq!(
+        super::runtime::resolve_machine_build_mode(None, "ghost"),
+        "prod"
+    );
+
+    let write_meta = |name: &str, accessible: bool| {
+        mvm_runtime::vm::runtime_meta::write(
+            name,
+            &mvm_runtime::vm::runtime_meta::VmRuntimeMeta {
+                mode: mvm_runtime::vm::runtime_meta::StartModeKind::Detached,
+                accessible,
+                rootfs_path: None,
+                runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+                runtime_overlay_version: None,
+            },
+        )
+        .expect("write runtime meta");
+    };
+    write_meta("dev-machine", true);
+    write_meta("sealed-machine", false);
+    assert_eq!(
+        super::runtime::resolve_machine_build_mode(None, "dev-machine"),
+        "dev"
+    );
+    assert_eq!(
+        super::runtime::resolve_machine_build_mode(None, "sealed-machine"),
+        "prod"
+    );
+}
+
+#[test]
 fn translation_is_an_image_backed_transient_run() {
     let args = parse_run(&[
         "run",
@@ -1717,12 +1760,16 @@ fn machine_list_entry_flattens_spec_and_adds_status() {
     let entry = MachineListEntry {
         spec: &spec,
         status: "running",
+        build_mode: "prod",
     };
     let v: serde_json::Value = serde_json::to_value(&entry).expect("serialize");
     // Spec fields are flattened to the top level (not nested under `spec`),
-    // and the live `status` label rides alongside — the shape SDK facades read.
+    // and the live `status` label + `build_mode` ride alongside — the shape SDK
+    // facades read. `build_mode` is what `Sandbox.connect(id)` inherits the
+    // dev-only exec guard from.
     assert_eq!(v["name"], "web");
     assert_eq!(v["status"], "running");
+    assert_eq!(v["build_mode"], "prod");
     assert!(v.get("spec").is_none());
 }
 

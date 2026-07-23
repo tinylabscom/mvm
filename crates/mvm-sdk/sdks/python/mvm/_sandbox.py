@@ -605,6 +605,49 @@ class _LiveTransport:
             build_mode=envelope["build_mode"],
         )
 
+    @classmethod
+    def for_existing(cls, *, vm_id: str) -> "_LiveTransport":
+        """Attach to an already-running machine by name.
+
+        Shells ``mvmctl machine ls --json`` and re-derives the
+        machine's ``build_mode`` from its listing entry — the attach
+        path never boots, so there is no ``--up-json`` envelope to
+        read it from. Fails closed: only an explicit
+        ``build_mode == "dev"`` unlocks the dev-only exec path; a
+        prod / missing / unknown value resolves to ``"prod"`` so the
+        same guard that protects :meth:`for_template` also protects
+        the attach path (security claim 4). Raises
+        :class:`SandboxLiveError` when no machine of that name is
+        listed (there is nothing to attach to)."""
+        try:
+            mvm_cli_bin = resolve_cli_bin(purpose="Sandbox.connect")
+        except RuntimeError as exc:
+            raise SandboxModeError(str(exc)) from exc
+        argv = [mvm_cli_bin, "machine", "ls", "--json"]
+        try:
+            result = subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise SandboxLiveError(
+                f"`{mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
+                argv=argv,
+            ) from exc
+        if result.returncode != 0:
+            raise SandboxLiveError(
+                f"`mvmctl machine ls --json` failed with exit code {result.returncode}",
+                argv=argv,
+                exit_code=result.returncode,
+                stderr=result.stderr,
+            )
+        build_mode = _derive_attached_build_mode(
+            result.stdout, vm_id=vm_id, argv=argv
+        )
+        return cls(mvm_cli_bin=mvm_cli_bin, vm_id=vm_id, build_mode=build_mode)
+
     def commands_start(
         self, argv: list[str], env: dict[str, Any] | None
     ) -> None:
@@ -932,6 +975,48 @@ def _parse_up_envelope(stdout: str, *, argv: list[str]) -> dict[str, str]:
     return {"vm_id": vm_id, "build_mode": build_mode}
 
 
+def _derive_attached_build_mode(
+    stdout: str, *, vm_id: str, argv: list[str]
+) -> str:
+    """Re-derive ``build_mode`` for an attached machine from
+    ``mvmctl machine ls --json`` output.
+
+    The listing is a JSON array of machine entries; we match on the
+    ``name`` field. Fail-closed by construction: only an explicit
+    ``"dev"`` returns ``"dev"``; a ``"prod"`` / missing / unknown
+    value returns ``"prod"``, so a stale or hostile listing can never
+    *open* the dev-only exec path — it can only keep it shut. Raises
+    :class:`SandboxLiveError` when ``vm_id`` is absent from the
+    listing (there is nothing to attach to)."""
+    line = stdout.strip()
+    if not line:
+        raise SandboxLiveError(
+            f"`mvmctl machine ls --json` produced no output; cannot attach to {vm_id!r}.",
+            argv=argv,
+        )
+    try:
+        parsed = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise SandboxLiveError(
+            f"`mvmctl machine ls --json` stdout is not valid JSON: {exc.msg}",
+            argv=argv,
+            stderr=line,
+        ) from exc
+    if not isinstance(parsed, list):
+        raise SandboxLiveError(
+            f"`mvmctl machine ls --json` must be a JSON array; got "
+            f"{type(parsed).__name__}",
+            argv=argv,
+        )
+    for entry in parsed:
+        if isinstance(entry, dict) and entry.get("name") == vm_id:
+            return "dev" if entry.get("build_mode") == "dev" else "prod"
+    raise SandboxLiveError(
+        f"no machine named {vm_id!r} in `mvmctl machine ls`; is it running?",
+        argv=argv,
+    )
+
+
 class Sandbox:
     """A recordable / live handle for an imperative ``Sandbox``
     script.
@@ -1046,6 +1131,42 @@ class Sandbox:
             "ops": [],
         }
         return cls(wid)
+
+    @classmethod
+    def connect(cls, id: str) -> "Sandbox":
+        """Attach to an already-running machine by name, from a fresh
+        process.
+
+        Unlike :meth:`create`, ``connect`` never boots a VM — it binds
+        to a machine that is already up. Because it does not boot, it
+        has no ``--up-json`` envelope to read the machine's
+        ``build_mode`` from, so it re-derives it from
+        ``mvmctl machine ls --json`` (see
+        :meth:`_LiveTransport.for_existing`).
+
+        The dev-only exec guard is inherited unchanged: the derived
+        ``build_mode`` is never defaulted to ``"dev"`` — a prod /
+        missing / unknown value resolves to ``"prod"``, so
+        ``connect(...).exec(...)`` / ``.commands.start(...)`` on a
+        sealed prod machine raises :class:`SandboxDevOnly` exactly like
+        the ``create`` path (security claim 4).
+
+        Always a live operation: it resolves the mvm CLI regardless of
+        ``MVM_SDK_MODE`` (attaching to a running VM has no record-mode
+        meaning). Raises :class:`SandboxLiveError` when no machine of
+        that name is listed."""
+        if not isinstance(id, str) or not id:
+            raise ValueError("Sandbox.connect requires a non-empty machine id")
+        if _recording is not None or _live_sandbox_active():
+            raise RuntimeError(
+                "a Sandbox session is already active — call "
+                "Sandbox.kill() or exit the `with` block before "
+                "attaching to another machine."
+            )
+        live = _LiveTransport.for_existing(vm_id=id)
+        sb = cls(id, live=live)
+        _register_live(sb)
+        return sb
 
     @property
     def workload_id(self) -> str:
