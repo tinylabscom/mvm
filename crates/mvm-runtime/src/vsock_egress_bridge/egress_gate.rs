@@ -25,7 +25,7 @@ pub enum EgressVerdict {
     Allow { ips: Vec<IpAddr>, port: u16 },
     /// Refused — policy did not admit it (claim-10 default-deny / mandatory-deny).
     Deny,
-    /// The guest's connect request was malformed (not `ip:port`).
+    /// The guest's connect request was malformed (not `<ip>:<port>` or `<hostname>:<port>`).
     Malformed,
 }
 
