@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 //! Filesystem + image materialization for mvm.
 //!
 //! - [`oci`]: OCI distribution client — registry resolution, manifest/layer
@@ -11,7 +11,17 @@
 //!   verity-sealed ext4 rootfs image.
 //! - [`overlay`]: runtime-overlay cache resolution — pick and validate the
 //!   verity-sealed overlay artifact set for one `(version, arch)`.
+//! - [`clone`]: reflink (copy-on-write) file/directory cloning primitives
+//!   used by the runtime to materialize per-instance rootfs copies.
+//! - [`snapshot_store`]: content-addressed snapshot persistence used by the
+//!   warm-parent pool.
+//!
+//! The crate-level lint is `deny(unsafe_code)` rather than `forbid` so that
+//! the [`clone`] module can use the small, platform-specific unsafe blocks
+//! required to invoke `clonefile(2)` and `FICLONE`. Everywhere else in this
+//! crate remains unsafe-free.
 
+pub mod clone;
 pub mod ext4;
 pub mod oci;
 /// OCI layer unpack to a staging rootfs directory. Handles whiteouts,
@@ -22,3 +32,4 @@ pub mod oci;
 pub mod oci_to_rootfs;
 pub mod overlay;
 pub mod rootfs;
+pub mod snapshot_store;
