@@ -93,15 +93,27 @@ impl EgressGate {
     }
 
     /// Decide a TCP connect to an already-resolved address.
+    ///
+    /// When the address belongs to a pinned host, the verdict carries that
+    /// host's whole admitted address set (IPv4 first), not just the single
+    /// address requested. A guest that resolved a dual-stack host locally and
+    /// dialed the numeric IPv6 (macOS `getaddrinfo` returns IPv6 first) then
+    /// falls over to the pinned IPv4 sibling when the IPv6 route is unreachable
+    /// instead of stranding the connect — the same happy-eyeballs behaviour the
+    /// hostname path already gets. Every offered address is independently
+    /// policy-checked, so widening the set never admits an unpinned target.
     pub fn decide_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
-        if self.egress.permits(&Proto::Tcp, ip, port) {
-            EgressVerdict::Allow {
-                ips: vec![ip],
-                port,
-            }
-        } else {
-            EgressVerdict::Deny
+        if !self.egress.permits(&Proto::Tcp, ip, port) {
+            return EgressVerdict::Deny;
         }
+        let ips = match self.pins.pin_containing(&ip) {
+            Some(pin) => admitted_ips(&self.egress, &pin.ips, port),
+            None => Vec::new(),
+        };
+        // No pin (or a pin that admitted nothing for this port) ⇒ keep just the
+        // requested address, which the guard above already confirmed admitted.
+        let ips = if ips.is_empty() { vec![ip] } else { ips };
+        EgressVerdict::Allow { ips, port }
     }
 
     /// Decide a guest connect request — either a numeric `"<ip>:<port>"` or a
@@ -498,6 +510,47 @@ mod tests {
             EgressVerdict::Deny | EgressVerdict::Malformed => panic!("expected allow"),
         }
         assert_eq!(gate.decide_request("example.com:80"), EgressVerdict::Deny);
+    }
+
+    /// A guest that resolved a dual-stack pinned host locally (macOS getaddrinfo
+    /// returns IPv6 first, so the guest picks it) and connects to the *numeric*
+    /// IPv6 target must still be handed the pinned IPv4 sibling — IPv4 first — so
+    /// the host connect falls over to IPv4 when the IPv6 route is unreachable
+    /// instead of stranding on the lone IPv6.
+    #[test]
+    fn numeric_pinned_ipv6_target_offers_ipv4_sibling_for_fallover() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let v6: IpAddr = "2606:4700:10::6814:179a".parse().unwrap();
+        let v4: IpAddr = "104.20.23.154".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec![v6, v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let gate = EgressGate::from_network_policy(
+            &NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]),
+            &pins,
+            "2026-01-01T00:00:00Z",
+        );
+
+        // The guest connects to the numeric IPv6 address it resolved.
+        match gate.decide_request("[2606:4700:10::6814:179a]:443") {
+            EgressVerdict::Allow { ips, port } => {
+                assert_eq!(port, 443);
+                assert_eq!(
+                    ips,
+                    vec![v4, v6],
+                    "numeric IPv6 connect must offer the pinned IPv4 sibling first"
+                );
+            }
+            EgressVerdict::Deny | EgressVerdict::Malformed => {
+                panic!("expected Allow with fallover candidates")
+            }
+        }
     }
 
     #[test]

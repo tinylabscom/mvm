@@ -173,6 +173,15 @@ impl DnsPinRegistry {
         self.pins.get(dest)
     }
 
+    /// The first pin whose address set contains `ip`. Lets a numeric-IP
+    /// egress decision recover the destination the guest resolved so the
+    /// connect can fall over across the destination's full admitted address
+    /// set (e.g. an unreachable IPv6 to the pinned IPv4 sibling) instead of
+    /// stranding on the single address the guest happened to pick.
+    pub fn pin_containing(&self, ip: &IpAddr) -> Option<&DnsPin> {
+        self.pins.values().find(|pin| pin.matches(ip))
+    }
+
     /// Number of pins currently in the registry.
     pub fn len(&self) -> usize {
         self.pins.len()
@@ -292,6 +301,34 @@ mod tests {
         let pin = fixed_pin("example.com", &["93.184.216.34"]);
         // 12:00:00 → 13:00:00 = 3600s.
         assert_eq!(pin.ttl_secs(), 3600);
+    }
+
+    #[test]
+    fn registry_pin_containing_finds_pin_by_member_ip() {
+        // A dual-stack pin (IPv6 + IPv4) is recovered by either member address,
+        // and an address in no pin returns None — this is what widens a
+        // numeric-IP egress decision to the destination's full admitted set.
+        let mut reg = DnsPinRegistry::new();
+        reg.add(fixed_pin(
+            "example.com",
+            &["2606:4700:10::6814:179a", "104.20.23.154"],
+        ));
+        reg.add(fixed_pin("other.test", &["203.0.113.5"]));
+        assert_eq!(
+            reg.pin_containing(&ip("2606:4700:10::6814:179a"))
+                .unwrap()
+                .dest,
+            "example.com"
+        );
+        assert_eq!(
+            reg.pin_containing(&ip("104.20.23.154")).unwrap().dest,
+            "example.com"
+        );
+        assert_eq!(
+            reg.pin_containing(&ip("203.0.113.5")).unwrap().dest,
+            "other.test"
+        );
+        assert!(reg.pin_containing(&ip("198.51.100.9")).is_none());
     }
 
     #[test]

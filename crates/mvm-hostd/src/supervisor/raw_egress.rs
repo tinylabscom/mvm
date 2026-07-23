@@ -981,6 +981,33 @@ mod tests {
         accept.await.unwrap();
     }
 
+    /// The issue's shape exactly: the first admitted address is an unreachable
+    /// IPv6 (the guest resolved a dual-stack host to its AAAA and the host has
+    /// no IPv6 egress) and the connect must fall over to the pinned IPv4.
+    #[tokio::test]
+    async fn connect_first_admitted_falls_over_from_unreachable_ipv6_to_ipv4() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        // 2001:db8::/32 (RFC 3849) is the documentation range — never routed,
+        // so the connect consumes its per-IP budget (or errors immediately)
+        // before the IPv4 fallover, mirroring an admitted-but-unreachable AAAA.
+        let unreachable_v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let loopback_v4: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let stream =
+            connect_first_admitted(&[unreachable_v6, loopback_v4], port, Duration::from_secs(5))
+                .await;
+        assert!(
+            stream.is_some(),
+            "must fall over from the unreachable IPv6 to the IPv4 pin"
+        );
+        accept.await.unwrap();
+    }
+
     /// When every admitted address is unreachable, `splice` nacks the guest and
     /// closes without ever tunneling bytes.
     #[tokio::test]
