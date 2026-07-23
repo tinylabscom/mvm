@@ -16,9 +16,7 @@ use crate::world::CliWorld;
 fn mvmctl_command() -> Command {
     #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
     let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
-        panic!(
-            "mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`"
-        )
+        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
     });
 
     let bin_path = PathBuf::from(cmd.get_program());

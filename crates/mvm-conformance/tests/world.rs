@@ -10,7 +10,7 @@ use mvm_core::kernel_format::KernelFormat;
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
 /// workload identities parsed from successful `build address` runs, keyed by
 /// fixture name.
-#[derive(cucumber::World)]
+#[derive(cucumber::World, Default)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
     /// `semantic_address` per fixture name, populated on a zero-exit
@@ -25,19 +25,6 @@ pub struct CliWorld {
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
     /// steps that need to inspect the filesystem after a run.
     pub isolated_home: Option<tempfile::TempDir>,
-}
-
-impl Default for CliWorld {
-    fn default() -> Self {
-        Self {
-            last_run: None,
-            addresses: HashMap::new(),
-            ir_hashes: HashMap::new(),
-            workload_cmdline: None,
-            libkrun_kernel_format: None,
-            isolated_home: None,
-        }
-    }
 }
 
 impl fmt::Debug for CliWorld {

@@ -1424,9 +1424,7 @@ fn boot_transient_vm(
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if let Err(e) = attempt.backend.start(attempt.start_config) {
-            remove_transient_state_dir(
-                &mvm_core::config::vm_state_dir(&vm_name).to_string_lossy(),
-            );
+            remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
             return Err(e).context("starting transient microVM");
         }
     }
