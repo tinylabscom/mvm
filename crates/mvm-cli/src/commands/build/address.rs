@@ -1,16 +1,15 @@
 //! `mvmctl build address` — print a Workload IR's semantic identities.
 //!
 //! Reads a Workload IR JSON (the cross-language interop shape the SDKs emit)
-//! and prints its content identity: the `sha256(JCS(ir))` semantic address and
-//! the matching `ir_hash`. Two IR documents that mean the same thing hash the
-//! same regardless of key order or whitespace, so this is the boundary where a
-//! host and an SDK can agree on a workload's identity. Computing both and
-//! asserting they line up makes this verb a conformance check on the two
-//! canonical-form realizations, not just a printer.
+//! and prints its two content identities: the UOR-ADDR-compatible
+//! `sha256(JCS(ir))` semantic address and mvm's internal `ir_hash`. Both are
+//! stable across key order and whitespace. The semantic address additionally
+//! normalizes Unicode to match the external UOR-ADDR contract; the two values
+//! are therefore reported independently rather than treated as interchangeable.
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
@@ -37,7 +36,7 @@ pub(in crate::commands) struct Args {
     pub json: bool,
 }
 
-/// The two content identities of a workload, already self-checked to agree.
+/// The two independent content identities of a workload.
 #[derive(Debug)]
 struct Identities {
     semantic_address: String,
@@ -57,17 +56,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     Ok(())
 }
 
-/// Compute both identities and prove they agree. The agreement is what makes
-/// the semantic address and the `ir_hash` interchangeable identifiers for the
-/// same workload; a mismatch means the two canonical-form realizations drifted,
-/// so fail loud rather than print two identities that disagree.
+/// Compute both identities. The semantic address is the cross-language UOR-ADDR
+/// label; `ir_hash` remains mvm's internal fingerprint for launch plans and
+/// audit records. They intentionally use separate normalization boundaries.
 fn compute_identities(workload: &Workload) -> Result<Identities> {
     let addr = semantic_address(workload).context("computing semantic address")?;
     let ih = ir_hash(workload).context("computing ir_hash")?;
     let addr = addr.as_str().to_string();
-    if addr.strip_prefix("sha256:") != Some(ih.as_str()) {
-        bail!("semantic address {addr} does not match ir_hash {ih} — canonicalizer drift");
-    }
     Ok(Identities {
         semantic_address: addr,
         ir_hash: ih,
@@ -163,12 +158,27 @@ mod tests {
     }
 
     #[test]
-    fn identities_self_check_agrees() {
+    fn identities_have_distinct_valid_shapes() {
         let ids = compute_identities(&sample_workload()).unwrap();
+        assert!(ids.semantic_address.starts_with("sha256:"));
+        assert_eq!(ids.semantic_address.len(), "sha256:".len() + 64);
+        assert_eq!(ids.ir_hash.len(), 64);
+    }
+
+    #[test]
+    fn unicode_normalization_does_not_fail_address_reporting() {
+        let mut composed = sample_workload();
+        composed.id = "café".to_string();
+        let mut decomposed = sample_workload();
+        decomposed.id = "cafe\u{301}".to_string();
+
+        let composed_ids = compute_identities(&composed).unwrap();
+        let decomposed_ids = compute_identities(&decomposed).unwrap();
         assert_eq!(
-            ids.semantic_address.strip_prefix("sha256:"),
-            Some(ids.ir_hash.as_str())
+            composed_ids.semantic_address,
+            decomposed_ids.semantic_address
         );
+        assert_ne!(composed_ids.ir_hash, decomposed_ids.ir_hash);
     }
 
     #[test]

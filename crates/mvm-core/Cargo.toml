@@ -12,6 +12,7 @@ authors.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 serde_jcs = "0.1"
+unicode-normalization = "0.1"
 chrono.workspace = true
 # The no_std + alloc foundation crate. `plan::validity` re-exports its
 # `FreshnessClaims`; `plan::{types,verb,verb_trust}` are module aliases
