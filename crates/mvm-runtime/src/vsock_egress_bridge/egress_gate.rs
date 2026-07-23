@@ -93,15 +93,38 @@ impl EgressGate {
     }
 
     /// Decide a TCP connect to an already-resolved address.
+    ///
+    /// When the literal belongs to a pinned host, the whole pin's admitted set
+    /// is returned (IPv4 first), not just the single dialed address. A guest
+    /// that resolved a name in-guest and dialed a literal IPv6 would otherwise
+    /// strand the request on an unreachable IPv6 with no IPv4 sibling to fail
+    /// over to; expanding to the pin restores happy-eyeballs on that path, the
+    /// same [`EgressVerdict::Allow`] contract `decide_hostname_request` honors.
+    /// Every returned address is policy-permitted.
     pub fn decide_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
-        if self.egress.permits(&Proto::Tcp, ip, port) {
-            EgressVerdict::Allow {
-                ips: vec![ip],
-                port,
-            }
-        } else {
-            EgressVerdict::Deny
+        if !self.egress.permits(&Proto::Tcp, ip, port) {
+            return EgressVerdict::Deny;
         }
+        EgressVerdict::Allow {
+            ips: self.admitted_family_siblings(ip, port),
+            port,
+        }
+    }
+
+    /// The admitted, IPv4-first address set to try for a literal `ip` target.
+    /// If `ip` belongs to a pinned host, expand to that pin's other admitted
+    /// addresses (its dual-family happy-eyeballs set); otherwise just `[ip]`.
+    /// The dialed `ip` is always present and every address is policy-permitted.
+    fn admitted_family_siblings(&self, ip: IpAddr, port: u16) -> Vec<IpAddr> {
+        let Some(pin) = self.pins.find_by_ip(&ip) else {
+            return vec![ip];
+        };
+        let ips = admitted_ips(&self.egress, &pin.ips, port);
+        // `pin` contains `ip` and `decide_addr` already confirmed policy permits
+        // it at this port, so `admitted_ips` always retains `ip`; the returned
+        // set is non-empty and IPv4-first.
+        debug_assert!(ips.contains(&ip));
+        ips
     }
 
     /// Decide a guest connect request — either a numeric `"<ip>:<port>"` or a
@@ -498,6 +521,128 @@ mod tests {
             EgressVerdict::Deny | EgressVerdict::Malformed => panic!("expected allow"),
         }
         assert_eq!(gate.decide_request("example.com:80"), EgressVerdict::Deny);
+    }
+
+    /// A guest that resolved a name in-guest to an IPv6-only answer and dialed
+    /// the **literal IPv6** must still fail over to the pinned IPv4 sibling:
+    /// `decide_addr` re-expands a pinned literal to the whole admitted set,
+    /// IPv4 first, so an unreachable IPv6 does not strand an admitted request.
+    #[test]
+    fn literal_ipv6_dial_expands_to_pinned_ipv4_sibling() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let v6: IpAddr = "2606:4700:10::6814:179a".parse().unwrap();
+        let v4: IpAddr = "104.20.23.154".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec![v6, v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        // The guest dials the bracketed IPv6 literal it resolved in-guest.
+        match gate.decide_request("[2606:4700:10::6814:179a]:443") {
+            EgressVerdict::Allow { ips, port } => {
+                assert_eq!(ips, vec![v4, v6], "must expand to the pin, IPv4 first");
+                assert_eq!(port, 443);
+            }
+            other => panic!("expected allow with the pinned dual-family set, got {other:?}"),
+        }
+        // The wrong port is still denied — expansion never widens the port gate.
+        assert_eq!(
+            gate.decide_request("[2606:4700:10::6814:179a]:80"),
+            EgressVerdict::Deny
+        );
+    }
+
+    /// A literal dial to an IP that belongs to no pin keeps the single-address
+    /// behaviour (no spurious expansion, no cross-pin bleed).
+    #[test]
+    fn literal_dial_without_a_matching_pin_stays_single() {
+        let gate = EgressGate::new(CanonicalEgress::Unrestricted);
+        assert_eq!(
+            gate.decide_request("93.184.216.34:443"),
+            EgressVerdict::Allow {
+                ips: vec!["93.184.216.34".parse().unwrap()],
+                port: 443,
+            }
+        );
+    }
+
+    /// The symmetric direction: a guest that dialed the literal IPv4 still gets
+    /// the pinned IPv6 sibling in the admitted set (IPv4 first).
+    #[test]
+    fn literal_ipv4_dial_expands_to_pinned_ipv6_sibling() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let v6: IpAddr = "2606:4700:10::6814:179a".parse().unwrap();
+        let v4: IpAddr = "104.20.23.154".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec![v6, v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        match gate.decide_request("104.20.23.154:443") {
+            EgressVerdict::Allow { ips, port } => {
+                assert_eq!(ips, vec![v4, v6]);
+                assert_eq!(port, 443);
+            }
+            other => panic!("expected allow, got {other:?}"),
+        }
+    }
+
+    /// When two allow-listed hosts share an anycast address, a literal dial to
+    /// that shared IP expands deterministically to the lowest-`dest` pin's set.
+    /// This is an availability contract, not a policy widening: every returned
+    /// address is independently policy-permitted (both hosts are allow-listed).
+    #[test]
+    fn literal_dial_on_a_shared_ip_expands_to_the_lowest_dest_pin() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let shared_v6: IpAddr = "2606:4700:10::6814:179a".parse().unwrap();
+        let alpha_v4: IpAddr = "104.20.0.1".parse().unwrap();
+        let zebra_v4: IpAddr = "104.20.0.2".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "zebra.example",
+            vec![shared_v6, zebra_v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        pins.add(DnsPin::at(
+            "alpha.example",
+            vec![shared_v6, alpha_v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![
+            HostPort::new("alpha.example", 443),
+            HostPort::new("zebra.example", 443),
+        ]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        match gate.decide_request("[2606:4700:10::6814:179a]:443") {
+            EgressVerdict::Allow { ips, port } => {
+                assert_eq!(
+                    ips,
+                    vec![alpha_v4, shared_v6],
+                    "lowest dest wins, IPv4 first"
+                );
+                assert_eq!(port, 443);
+            }
+            other => panic!("expected allow, got {other:?}"),
+        }
     }
 
     #[test]

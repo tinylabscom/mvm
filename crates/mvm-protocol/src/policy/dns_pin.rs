@@ -173,6 +173,16 @@ impl DnsPinRegistry {
         self.pins.get(dest)
     }
 
+    /// The first pin (in `dest` sort order) whose admitted set contains `ip`,
+    /// or `None` — the reverse of [`lookup`], which keys on the destination
+    /// string. Used to recover a host's full dual-family address set when a
+    /// guest dialed one of its addresses as a literal. When several pinned
+    /// hosts share an address (CDN / anycast fronting), the lowest `dest` wins
+    /// deterministically (`pins` iterates in sorted key order).
+    pub fn find_by_ip(&self, ip: &IpAddr) -> Option<&DnsPin> {
+        self.pins.values().find(|pin| pin.matches(ip))
+    }
+
     /// Number of pins currently in the registry.
     pub fn len(&self) -> usize {
         self.pins.len()
@@ -354,6 +364,41 @@ mod tests {
         reg.add(pin_v2.clone());
         assert_eq!(reg.lookup("example.com"), Some(&pin_v2));
         assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn registry_find_by_ip_returns_the_owning_pin() {
+        let mut reg = DnsPinRegistry::new();
+        reg.add(fixed_pin(
+            "example.com",
+            &["93.184.216.34", "2606:2800:220::1"],
+        ));
+        // A member of the set (either family) resolves back to the pin…
+        assert_eq!(
+            reg.find_by_ip(&ip("2606:2800:220::1"))
+                .map(|p| p.dest.as_str()),
+            Some("example.com")
+        );
+        assert_eq!(
+            reg.find_by_ip(&ip("93.184.216.34"))
+                .map(|p| p.dest.as_str()),
+            Some("example.com")
+        );
+        // …a non-member matches nothing.
+        assert!(reg.find_by_ip(&ip("8.8.8.8")).is_none());
+    }
+
+    #[test]
+    fn registry_find_by_ip_picks_lowest_dest_on_a_shared_ip() {
+        // Two hosts sharing an anycast edge address: the lookup is
+        // deterministic — the lexicographically lowest `dest` wins.
+        let mut reg = DnsPinRegistry::new();
+        reg.add(fixed_pin("zebra.example", &["203.0.113.7"]));
+        reg.add(fixed_pin("alpha.example", &["203.0.113.7"]));
+        assert_eq!(
+            reg.find_by_ip(&ip("203.0.113.7")).map(|p| p.dest.as_str()),
+            Some("alpha.example")
+        );
     }
 
     #[test]
