@@ -37,6 +37,12 @@ assert_cmd.workspace = true
 # Parses the `build address --json` report in the workload-identity steps.
 # Dev-only: `cargo tree -p mvm-conformance -e no-dev` must not gain it.
 serde_json.workspace = true
+# Drives the real VMM-driver bootargs and libkrun kernel-mapping seams without
+# starting a VM. `test-support` keeps the conformance-only inspection helpers
+# out of production builds.
+mvm-runtime = { workspace = true, features = ["test-support"] }
+mvm-core = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

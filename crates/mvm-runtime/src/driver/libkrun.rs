@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use libkrun_sys::{BridgeRestartPolicy, KrunContext, SupervisorConfig};
-use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_agentd::vsock::{CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_libkrun_pid, vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
@@ -82,12 +82,17 @@ fn attach_block(krun: KrunContext, block: &BlockDev) -> KrunContext {
 /// runner above this driver, so `relay` never sets an admission field — the
 /// supervisor takes its legacy run path and enforces nothing here.
 fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<SupervisorConfig> {
-    let kernel = match &spec.kernel {
+    let kernel_path = match &spec.kernel {
         KernelImage::Path(p) => p.to_string_lossy().into_owned(),
         KernelImage::Bundled => {
             bail!("the libkrun driver requires an explicit kernel Image; VmmSpec.kernel is Bundled")
         }
     };
+    // Prepare the kernel exactly as the raw libkrun path does, reusing the same
+    // shared helper rather than forking it: on x86_64 this converts the workload
+    // kernel to a libkrun-loadable ELF and reports the format; on aarch64 it is a
+    // passthrough at Raw. The driver must not diverge from the host kernel-prep.
+    let (kernel, kernel_format) = crate::libkrun::libkrun_kernel_for_host(&kernel_path)?;
 
     let vcpus = u8::try_from(spec.vcpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
     let state_dir_str = state_dir.to_string_lossy().into_owned();
@@ -97,6 +102,7 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
     // below owns the rootfs/extra-disk decision from spec.blocks.
     let mut krun = KrunContext::new(&spec.name, kernel, "")
         .with_resources(vcpus, spec.memory_mib)
+        .with_kernel_format(kernel_format)
         .with_vsock_socket_dir(state_dir_str.clone())
         .with_console_output(console_log.to_string_lossy().into_owned())
         // A libkrun workload has no guest NIC: an explicit virtio-vsock device
@@ -170,12 +176,28 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
         bundle: None,
         network_policy: None,
         bridge_restart_policy: BridgeRestartPolicy::HardFail,
-        // Pointing libkrun's egress proxy at the spawner's endpoint socket is a
-        // follow-up before this dormant driver is wired; egress is not exercised
-        // yet, so both the transparent terminator and the egress relay stay unset.
+        // No transparent :80/:443 terminator: the runner routes egress through
+        // the per-VM gating endpoint over vsock only. The runner puts that
+        // endpoint's host UDS on the spec's EGRESS_PORT channel, so pinning the
+        // guest egress port's host-listen socket to it makes the endpoint the
+        // sole path off the box — the claim-10 gate and secret substitution live
+        // there. A spec without an EGRESS_PORT channel (none of the workload
+        // paths) leaves this unset and the derived socket unchanged.
         transparent_terminator_port: None,
-        egress_relay_socket: None,
+        egress_relay_socket: spec.host_socket_for_port(EGRESS_PORT),
     })
+}
+
+/// Return the kernel path and format produced by the real libkrun relay
+/// mapping, without spawning a supervisor. Available only to the conformance
+/// harness so it can verify the host-specific kernel preparation contract.
+#[cfg(feature = "test-support")]
+pub fn map_kernel_for_test(
+    spec: &VmmSpec,
+    state_dir: &Path,
+) -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> {
+    let config = relay_libkrun_supervisor_config(spec, state_dir)?;
+    Ok((config.krun.kernel_path, config.krun.kernel_format))
 }
 
 impl VmmDriver for LibkrunDriver {
@@ -218,16 +240,7 @@ impl VmmDriver for LibkrunDriver {
         let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
         let _ = crate::libkrun::open_console_capture(&console_log);
 
-        let mut cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
-
-        // Host-side kernel prep: on x86_64 libkrun needs an ELF vmlinux, so
-        // extract it and mark the format. A no-op on aarch64 (raw Image
-        // passthrough). Reuses the raw backend's single kernel resolver.
-        if let Some(kpath) = cfg.krun.kernel_path.clone() {
-            let (resolved, format) = crate::libkrun::libkrun_kernel_for_host(&kpath)?;
-            cfg.krun.kernel_path = Some(resolved);
-            cfg.krun.kernel_format = format;
-        }
+        let cfg = relay_libkrun_supervisor_config(spec, &state_dir)?;
 
         let pid_file = vm_libkrun_pid(&spec.name);
         // Remove any stale PID file so the poll below detects this launch's.
@@ -380,11 +393,15 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn pause(&self) -> Result<()> {
-        bail!("libkrun does not support pause/resume")
+        bail!(
+            "pause is not supported by the libkrun backend (upstream C API does not expose vCPU pause)"
+        )
     }
 
     fn resume(&self) -> Result<()> {
-        bail!("libkrun does not support pause/resume")
+        bail!(
+            "resume is not supported by the libkrun backend (upstream C API does not expose vCPU pause)"
+        )
     }
 
     fn status(&self) -> Result<VmStatus> {
@@ -395,6 +412,13 @@ impl RunningVm for LibkrunRunningVm {
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
+        // Console-port asymmetry, intentional: the runner's spec_map computes
+        // console data-socket paths under HVF's nested `vsock/` convention, but
+        // libkrun binds every per-port UDS FLAT (`<state_dir>/vsock-<port>.sock`)
+        // and its host-side resolver probes flat-first, so the driver ignores the
+        // spec's console `host_uds` and re-derives the flat path here. The nested
+        // spec path is therefore inert for libkrun by design — a future refactor
+        // must not "fix" it into the flat driver.
         // libkrun's per-port UDS convention: `<state_dir>/vsock-<port>.sock`
         // (flat), resolved through the single source of truth shared with the
         // host-side resolver — NOT HVF's nested `vsock/` convention. Restricted
@@ -420,7 +444,7 @@ impl RunningVm for LibkrunRunningVm {
 mod tests {
     use super::*;
     use crate::driver::{ConsoleCapture, VsockPort};
-    use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT, WORKLOAD_EXIT_PORT};
+    use mvm_agentd::vsock::{BROKER_PORT, WORKLOAD_EXIT_PORT};
 
     fn host_dials(guest_port: u32, uds: &str) -> VsockPort {
         VsockPort {
@@ -530,12 +554,41 @@ mod tests {
         assert_eq!(cfg.gateway_events_socket, None);
         assert_eq!(cfg.signing_key_path, None);
         assert_eq!(cfg.transparent_terminator_port, None);
+        // Egress is not a role field: the spec's EGRESS_PORT channel names the
+        // per-VM gating endpoint UDS, and the relay pins the guest egress port's
+        // host-listen socket to it so the endpoint is the sole path off the box.
+        assert_eq!(
+            cfg.egress_relay_socket,
+            Some(std::path::PathBuf::from("/run/egress.sock"))
+        );
         // Physical recipe carried through.
         assert_eq!(cfg.krun.vcpus, 2);
         assert_eq!(cfg.krun.ram_mib, 512);
         assert_eq!(cfg.krun.kernel_path.as_deref(), Some("/img/Image"));
         assert_eq!(cfg.vm_state_dir, "/state/w");
         assert_eq!(cfg.pid_file_name, None);
+    }
+
+    #[test]
+    fn relay_config_prepares_the_kernel_for_the_host_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("vmlinux");
+        std::fs::write(&kernel, b"\x7fELFconformance-kernel").unwrap();
+        let spec = spec_with(KernelImage::Path(kernel.clone()), vec![], vec![]);
+
+        let cfg = relay_libkrun_supervisor_config(&spec, dir.path()).unwrap();
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(
+                cfg.krun.kernel_format,
+                mvm_core::kernel_format::KernelFormat::Elf
+            );
+        } else {
+            assert_eq!(
+                cfg.krun.kernel_format,
+                mvm_core::kernel_format::KernelFormat::Raw
+            );
+        }
+        assert_eq!(cfg.krun.kernel_path.as_deref(), kernel.to_str());
     }
 
     #[test]

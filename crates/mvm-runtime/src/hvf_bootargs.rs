@@ -26,13 +26,6 @@ pub(crate) fn default_virtiofs_bootargs() -> String {
     )
 }
 
-/// Cmdline used for verity+initramfs workload boots. The initramfs PID 1 owns
-/// the root-device selection and switch-root flow, so no `root=` or `init=`
-/// token is emitted here.
-pub(crate) fn default_verity_bootargs() -> String {
-    default_bootargs(false)
-}
-
 /// Default workload kernel cmdline for the chosen root strategy.
 pub fn workload_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
     if virtiofs_root {

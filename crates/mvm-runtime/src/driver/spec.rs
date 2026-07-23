@@ -91,6 +91,19 @@ pub struct VmmSpec {
     pub trusted_builder: bool,
 }
 
+impl VmmSpec {
+    /// The host unix socket a standing vsock port binds to, found by its
+    /// guest-port number. `None` when the spec carries no channel for that
+    /// port. Both drivers resolve the egress/agent/broker sockets through this
+    /// one lookup instead of each re-scanning `vsock`.
+    pub fn host_socket_for_port(&self, guest_port: u32) -> Option<PathBuf> {
+        self.vsock
+            .iter()
+            .find(|p| p.guest_port == guest_port)
+            .map(|p| p.host_uds.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

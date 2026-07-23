@@ -13,7 +13,6 @@
 //! the closed enum for the few intentionally backend-specific operations.
 
 use crate::backend::{AnyBackend, BackendTier, FirecrackerBackend};
-use crate::libkrun::LibkrunBackend;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
@@ -162,13 +161,16 @@ backend_catalog![
         kind: Libkrun,
         selector: "libkrun",
         aliases: ["krun"],
-        constructor: AnyBackend::Libkrun(LibkrunBackend),
+        constructor: AnyBackend::Libkrun(crate::backend::libkrun_runner()),
         tier: Tier2,
         marker_file: Some("libkrun.pid"),
         started_vm_probe_order: Some(2),
         list_all: true,
-        balloon_support: true,
-        warm_start_support: true,
+        // The runner takes the trait-default warm-start/standby (no live-memory
+        // snapshot, no standby pool) and reports no balloon elasticity, so
+        // libkrun drops off the balloon + warm-start doctor surfaces.
+        balloon_support: false,
+        warm_start_support: false,
         bundled_kernel: true,
         needs_plan_json: false,
         is_workload: true
@@ -349,11 +351,11 @@ mod tests {
     fn descriptor_surface_ordering_is_frozen() {
         assert_eq!(
             selectors(balloon_support_descriptors()),
-            ["firecracker", "libkrun", "qemu"]
+            ["firecracker", "qemu"]
         );
         assert_eq!(
             selectors(warm_start_support_descriptors()),
-            ["firecracker", "libkrun", "qemu"]
+            ["firecracker", "qemu"]
         );
         assert_eq!(
             selectors(list_all_descriptors()),

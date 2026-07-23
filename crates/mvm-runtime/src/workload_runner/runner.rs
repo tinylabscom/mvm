@@ -15,8 +15,8 @@ use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StartMode,
+    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::driver::{RunningVm, VmmDriver};
@@ -355,6 +355,26 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
 
+        // Admission gate — refuse a rootfs whose parent dir carries no
+        // overlay-aware sidecar (no `/mvm/runtime` mount point). Runs before any
+        // endpoint/broker spawn or boot, so a refusal leaves no live process
+        // behind. The raw per-backend `start` paths run this; the runner is the
+        // sole path for the drivers behind it, so the gate lives here once.
+        let rootfs = Path::new(&config.rootfs_path);
+        let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
+        mvm_build::builder_vm::admit_runtime_overlay_contract(
+            rootfs_dir,
+            config.runtime_source_policy,
+        )?;
+        // Record per-VM runtime metadata (the sidecar accessibility bit + the
+        // boot contract) so the `mvmctl console` accessible/sealed gate holds on
+        // every runner-launched VM, matching the raw backend start paths.
+        crate::base::runtime_meta::record_from_start_config(
+            &config.name,
+            StartMode::Detached,
+            config,
+        )?;
+
         // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
         // below, so bind them here rather than inline.
         let default_redaction = RedactionPolicy::default();
@@ -568,6 +588,23 @@ mod tests {
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
         }
+    }
+
+    /// Seed an overlay-aware `mvm-meta.json` sidecar next to a rootfs file in a
+    /// fresh tempdir and return `(dir, rootfs_path)`. `VmBackend::start`'s
+    /// admission gate refuses a rootfs whose parent dir carries no overlay-aware
+    /// sidecar, so every test that drives the full trait method provides one.
+    /// The returned `TempDir` must stay in scope for the rootfs to exist.
+    fn overlay_aware_rootfs(name: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        // sealed=false (accessible dev image), runtime_lean=true so the sidecar
+        // clears the gate under every runtime-source policy, not just the default.
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(name, false, true)
+            .write_to_dir(dir.path())
+            .unwrap();
+        (dir, rootfs.display().to_string())
     }
 
     fn keystore_secret() -> SecretBinding {
@@ -833,6 +870,13 @@ mod tests {
 
     #[test]
     fn vmbackend_start_then_status_wait_stop_via_the_driver() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
         let exit = VmExitStatus {
             code: Some(0),
             success: true,
@@ -843,7 +887,13 @@ mod tests {
             RecordingBrokerRegistrar::new(),
         );
 
-        let id = runner.start(&config("w")).expect("start succeeds");
+        let (_rootfs_dir, rootfs) = overlay_aware_rootfs("w");
+        let cfg = VmStartConfig {
+            name: "w".into(),
+            rootfs_path: rootfs,
+            ..Default::default()
+        };
+        let id = runner.start(&cfg).expect("start succeeds");
         assert_eq!(id.0, "w");
 
         // attach hands back a MockRunningVm, so the lifecycle works with no real VM.
@@ -905,6 +955,15 @@ mod tests {
         std::fs::write(&rootfs, b"rootfs").unwrap();
         std::fs::write(&verity, b"verity").unwrap();
         std::fs::write(&initrd, b"initrd").unwrap();
+        // Overlay-aware sidecar next to the rootfs so `start`'s admission gate
+        // (refuses a rootfs with no `/mvm/runtime` mount point) admits this boot.
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(
+            "runner-security-cmdline-tokens",
+            false,
+            true,
+        )
+        .write_to_dir(rootfs_dir.path())
+        .unwrap();
 
         let vm_name = "runner-security-cmdline-tokens";
         seed_grant_sidecar_and_key(vm_name);
@@ -962,9 +1021,10 @@ mod tests {
         env.set("MVM_HOME", home.path());
 
         let driver = MockDriver::default();
+        let (_rootfs_dir, rootfs) = overlay_aware_rootfs("runner-driver-base-bootargs");
         let cfg = VmStartConfig {
             name: "runner-driver-base-bootargs".into(),
-            rootfs_path: "/img/rootfs.ext4".into(),
+            rootfs_path: rootfs,
             network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
             ..Default::default()
         };
@@ -1020,15 +1080,25 @@ mod tests {
     /// what they are for.
     #[test]
     fn start_carries_a_disk_volume_into_both_blocks_and_the_uvols_token() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
         let runner = WorkloadRunner::new(
             MockDriver::default(),
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
 
+        let (_rootfs_dir, rootfs) = overlay_aware_rootfs("w-uvol");
         let cfg = VmStartConfig {
+            name: "w-uvol".into(),
+            rootfs_path: rootfs,
             volumes: vec![disk_volume("/vol/data.img", "/data", true)],
-            ..config("w-uvol")
+            ..Default::default()
         };
         runner.start(&cfg).expect("start succeeds");
 
@@ -1056,19 +1126,93 @@ mod tests {
 
     #[test]
     fn start_emits_no_uvols_token_when_there_are_no_volumes() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
         let runner = WorkloadRunner::new(
             MockDriver::default(),
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
 
-        runner.start(&config("w-no-uvol")).expect("start succeeds");
+        let (_rootfs_dir, rootfs) = overlay_aware_rootfs("w-no-uvol");
+        let cfg = VmStartConfig {
+            name: "w-no-uvol".into(),
+            rootfs_path: rootfs,
+            ..Default::default()
+        };
+        runner.start(&cfg).expect("start succeeds");
 
         let specs = runner.driver.booted_specs();
         assert!(
             !specs[0].cmdline.contains("mvm.uvols="),
             "cmdline must carry no uvols token with no volumes: {}",
             specs[0].cmdline
+        );
+    }
+
+    /// The lifted admission gate: `VmBackend::start` refuses a rootfs whose
+    /// parent dir carries no overlay-aware sidecar (no `/mvm/runtime` mount
+    /// point) before any endpoint spawn or boot, and on an admitted boot it
+    /// records the per-VM runtime metadata the console accessible/sealed gate
+    /// reads. Drives the whole trait method through a `MockDriver`.
+    #[test]
+    fn start_refuses_a_rootfs_without_the_overlay_sidecar_and_records_runtime_meta() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        // A rootfs whose parent dir carries no sidecar is refused before boot.
+        let bare = tempfile::tempdir().unwrap();
+        let bare_rootfs = bare.path().join("rootfs.ext4");
+        std::fs::write(&bare_rootfs, b"rootfs").unwrap();
+        let refused = VmStartConfig {
+            name: "runner-gate-refused".into(),
+            rootfs_path: bare_rootfs.display().to_string(),
+            ..Default::default()
+        };
+        let err = runner
+            .start(&refused)
+            .expect_err("a rootfs with no overlay-aware sidecar must be refused");
+        assert!(
+            err.to_string().contains("mvm-meta.json"),
+            "refusal must name the missing sidecar: {err}"
+        );
+        assert!(
+            runner.driver.booted_specs().is_empty(),
+            "the gate must fire before any boot"
+        );
+
+        // An overlay-aware rootfs is admitted, and start records runtime_meta so
+        // the console accessible/sealed gate has a per-VM record to read.
+        let (_rootfs_dir, rootfs) = overlay_aware_rootfs("runner-gate-admitted");
+        let admitted = VmStartConfig {
+            name: "runner-gate-admitted".into(),
+            rootfs_path: rootfs,
+            ..Default::default()
+        };
+        runner
+            .start(&admitted)
+            .expect("an overlay-aware rootfs is admitted");
+        let meta = crate::base::runtime_meta::read("runner-gate-admitted")
+            .expect("runtime_meta read")
+            .expect("start records runtime_meta");
+        assert_eq!(
+            meta.rootfs_path.as_deref(),
+            Some(admitted.rootfs_path.as_str())
         );
     }
 

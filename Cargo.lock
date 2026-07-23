@@ -2793,7 +2793,10 @@ version = "0.18.0"
 dependencies = [
  "assert_cmd",
  "cucumber",
+ "mvm-core",
+ "mvm-runtime",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

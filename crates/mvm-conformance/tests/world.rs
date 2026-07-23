@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::process::Output;
 
+use mvm_core::kernel_format::KernelFormat;
+
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
 /// workload identities parsed from successful `build address` runs, keyed by
@@ -15,6 +17,10 @@ pub struct CliWorld {
     pub addresses: HashMap<String, String>,
     /// `ir_hash` per fixture name, from the same run as `addresses`.
     pub ir_hashes: HashMap<String, String>,
+    /// Full sealed-workload cmdline assembled through a real VMM driver.
+    pub workload_cmdline: Option<String>,
+    /// Kernel format mapped by the libkrun supervisor-config seam.
+    pub libkrun_kernel_format: Option<KernelFormat>,
 }
 
 impl CliWorld {
