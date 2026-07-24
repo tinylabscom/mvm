@@ -29,7 +29,7 @@ use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
 use crate::driver::{BlockDev, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection};
 use crate::microvm::{
-    api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
+    FirecrackerGuard, api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
     firecracker_vsock_uds_path, logger_body, machine_config_body, start_vm_firecracker, vsock_body,
 };
 
@@ -361,7 +361,7 @@ impl VmmDriver for FcDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        // The flipped, NIC-less profile — NOT the raw FirecrackerBackend caps
+        // The runner-backed, NIC-less profile.
         // (which advertise a routable TAP). The converged Firecracker driver
         // carries no guest NIC and routes egress solely over the vsock proxy,
         // matching libkrun and hvf. Pause/resume and balloon stay true (both are
@@ -425,6 +425,7 @@ impl VmmDriver for FcDriver {
 
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = format!("{abs_dir}/fc.socket");
+        let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
         start_vm_firecracker(&abs_dir, &socket)?;
 
         // Drive the NIC-less API config sequence.
@@ -479,12 +480,14 @@ impl VmmDriver for FcDriver {
             std::thread::sleep(Duration::from_millis(200));
         }
 
-        Ok(Box::new(FcRunningVm {
+        let vm = Box::new(FcRunningVm {
             id: VmId(spec.name.clone()),
             state_dir,
             pid_file,
             vsock_uds,
-        }))
+        });
+        firecracker_guard.defuse();
+        Ok(vm)
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -693,15 +696,11 @@ mod tests {
         assert_eq!(d.kind(), BackendKind::Firecracker);
         let caps = d.capabilities();
         assert!(caps.vsock);
-        // Flipped: no routable NIC + host vsock proxy, TAP off — the raw
-        // FirecrackerBackend advertises the inverse (TAP on).
+        // No routable NIC + host vsock proxy, TAP off.
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(!caps.tap_networking);
-        assert!(
-            FirecrackerBackend.capabilities().tap_networking,
-            "sanity: the raw backend still advertises TAP, so caps are not delegated"
-        );
+        assert!(!FirecrackerBackend.capabilities().tap_networking);
         assert_eq!(d.snapshot_capability(), SnapshotCapability::DiskOnly);
         // Security tier still delegates to the raw backend (same claims).
         assert_eq!(
@@ -830,17 +829,15 @@ mod tests {
         );
         assert!(vsock.contains("/state/w/runtime/v.sock"), "{vsock}");
 
-        // No NIC anywhere: no /network-interfaces PUT and no NIC JSON fields.
-        assert!(
-            puts.iter()
-                .all(|p| !p.path.starts_with("/network-interfaces")),
-            "a NIC device was configured: {:?}",
-            puts.iter().map(|p| &p.path).collect::<Vec<_>>()
-        );
-        assert!(
-            puts.iter()
-                .all(|p| !p.body.contains("iface_id") && !p.body.contains("host_dev_name")),
-            "a NIC JSON field leaked into the config"
+        assert_eq!(
+            puts.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(),
+            vec![
+                "/logger",
+                "/boot-source",
+                "/machine-config",
+                "/drives/blk0",
+                "/vsock"
+            ]
         );
     }
 

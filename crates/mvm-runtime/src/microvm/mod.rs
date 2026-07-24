@@ -1,5 +1,4 @@
-//! Firecracker backend lifecycle: start/stop/configure/snapshot/restore/
-//! pause/resume/balloon/diagnose/slots.
+//! Firecracker backend control, artifact, snapshot, and observation helpers.
 //!
 //! Submodules split by concern; every item keeps its original visibility so
 //! `crate::microvm::<name>` (and `mvm_runtime::microvm::<name>` for external
@@ -29,9 +28,6 @@ pub use snapshot::*;
 
 use anyhow::Result;
 
-use crate::base::config::MICROVM_DIR;
-use crate::base::shell::run_in_vm_stdout;
-
 /// Ensure we have a Linux execution environment.
 ///
 /// Today this is always a no-op: native Linux runs Firecracker directly,
@@ -40,11 +36,6 @@ use crate::base::shell::run_in_vm_stdout;
 /// callsite is audited and the call itself can be dropped.
 fn require_linux_env() -> Result<()> {
     Ok(())
-}
-
-/// Resolve MICROVM_DIR (~) to an absolute path on the Linux host.
-fn resolve_microvm_dir() -> Result<String> {
-    run_in_vm_stdout(&format!("echo {}", MICROVM_DIR))
 }
 
 /// Absolute root of the per-VM directories (`<mvm_home>/vms`) as a `String`
@@ -132,11 +123,6 @@ mod tests {
             // The real pattern: if let Err(e) = operation() { warn!(...) }
             if let Err(e) = crate::base::shell::run_in_vm("kill -9 12345 2>/dev/null || true") {
                 tracing::warn!("failed to kill process: {e}");
-            }
-            if let Err(e) =
-                crate::base::shell::run_in_vm("sudo ip link del tap0 2>/dev/null || true")
-            {
-                tracing::warn!("failed to destroy TAP: {e}");
             }
             if let Err(e) = crate::base::shell::run_in_vm("rm -rf /tmp/test-dir") {
                 tracing::warn!("failed to remove directory: {e}");

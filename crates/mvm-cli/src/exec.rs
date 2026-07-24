@@ -975,11 +975,9 @@ fn run_inner(
     let mut start_config = build_start_config(&req, &vm_name, &resolved, &boot, &volumes);
 
     // Admit the transient run as a locally-signed workload. Setting
-    // tenant_id + plan_json makes the libkrun/HVF supervisor spawn the gateway
-    // bridge (so it enforces `network_policy` + chain-audits the run) instead
-    // of the legacy unfiltered path; on Firecracker the policy already enforces
-    // via the FlakeRunConfig firewall. Force cold boot when admitted — the
-    // bridge spawn is on the cold-boot path, not snapshot-restore.
+    // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
+    // `network_policy` and chain-audit the run. Force cold boot when admitted —
+    // snapshot restore is unavailable for workload admission.
     if let Some(admit_fn) = admit
         && let Some(sub) = admit_fn(std::path::Path::new(&resolved.rootfs), &vm_name)?
     {
@@ -1511,9 +1509,6 @@ fn restore_via_snapshot(
         config_files: Vec::new(),
         secret_files: Vec::new(),
         ports: Vec::new(),
-        // Inherit the resolved egress policy so a restored transient VM
-        // enforces the same posture as a cold-boot one.
-        network_policy: start_config.network_policy.clone(),
     };
     let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
         mvm_runtime::vm::template::lifecycle::current_revision_id_for_slot(template_id)?

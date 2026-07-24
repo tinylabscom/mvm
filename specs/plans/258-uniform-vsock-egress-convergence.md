@@ -83,6 +83,12 @@ surface, so "no routable guest NIC" is a property of the type, not a habit.
 
 ## Tracked follow-ups
 
+- **Firecracker raw-launch cleanup:** the old direct flake, lifecycle, standby,
+  and snapshot entry points were still able to describe or restore TAP-backed
+  guests even though normal workload selection had moved to the runner. They
+  now fail closed, and the runtime bridge/TAP provider, NIC configuration,
+  network image setup, and raw Firecracker workload claim are removed. The
+  runner-backed path is the only Firecracker workload launch path.
 - **NIC-less OCI loopback / forward-proxy gap:** `mvm-oci-init` currently brings
   up guest `lo` only when `mvm.vsock_egress=1`. A default-deny OCI boot can
   therefore leave `127.0.0.1:18080` unavailable to the substitution forward

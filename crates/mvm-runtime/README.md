@@ -34,17 +34,15 @@ Shell execution, VM lifecycle management, and platform-aware operations. Impleme
 
 Detection happens automatically via `mvm_core::platform::current()` and `AnyBackend::auto_select()`.
 
-## Dev Network Layout
+## Workload Communication Layout
 
 ```
-MicroVM (172.16.0.2, eth0)
-    | TAP interface
-Builder VM (172.16.0.1, tap0) -- iptables NAT -- internet
-    | libkrun (macOS 13-25) / HVF (macOS 26+) / direct (Linux KVM)
-macOS / Linux Host
+MicroVM (no guest NIC)
+    | vsock
+Host egress endpoint (claim-10 gate + secret substitution)
+    | admitted host connection
+Host OS / builder VM
 ```
-
-Multi-VM mode uses bridge `br-mvm` at `172.16.0.1/24` with per-VM TAP devices.
 
 ## Dependencies
 

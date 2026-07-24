@@ -1,9 +1,8 @@
 use crate::catalog;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StandbyClaim,
-    StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend, VmCapabilities,
-    VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
+    BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
+    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
 };
 
 // Every backend variant + the FC support modules live in this crate.
@@ -75,26 +74,24 @@ pub(crate) fn fc_runner() -> FcRunner {
     WorkloadRunner::new(FcDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
 }
 
-/// Firecracker VM configuration for the [`VmBackend`] trait.
+/// Compatibility wrapper for the retired raw Firecracker configuration.
 ///
-/// Wraps `FlakeRunConfig` which contains all
-/// data needed for starting a Firecracker VM from Nix-built artifacts.
+/// Normal workloads use the runner-backed [`AnyBackend::Firecracker`] variant;
+/// this wrapper remains only for callers that still inspect the legacy artifact
+/// shape before migrating.
 pub struct FirecrackerConfig {
     pub run_config: microvm::FlakeRunConfig,
 }
 
 impl FirecrackerConfig {
-    /// Convert a backend-agnostic `VmStartConfig` into a Firecracker-specific
-    /// `FlakeRunConfig`, allocating a network slot automatically.
+    /// Convert a backend-agnostic config into the legacy artifact shape.
     pub fn from_start_config(config: &VmStartConfig) -> Result<Self> {
         validate_firecracker_start_config(config)?;
         let slot = microvm::allocate_slot(&config.name)?;
         Self::from_start_config_with_slot(config, slot)
     }
 
-    /// Convert a launch config using a slot that has already been reserved.
-    /// Firecracker standbys reserve their slot when the daemon is warmed, then
-    /// reuse that same slot when the standby is claimed.
+    /// Convert a config using a slot that has already been reserved.
     pub fn from_start_config_with_slot(config: &VmStartConfig, slot: VmSlot) -> Result<Self> {
         validate_firecracker_start_config(config)?;
         let run_config = FlakeRunConfig {
@@ -153,7 +150,6 @@ impl FirecrackerConfig {
                     guest: p.guest,
                 })
                 .collect(),
-            network_policy: config.network_policy.clone(),
         };
         Ok(Self { run_config })
     }
@@ -182,69 +178,6 @@ fn validate_firecracker_start_config(config: &VmStartConfig) -> Result<()> {
 /// work is delegated to the existing implementation.
 pub struct FirecrackerBackend;
 
-fn firecracker_spawn_standby(spec: &StandbySpec) -> Result<StandbyHandle> {
-    #[cfg(target_os = "linux")]
-    if !crate::qemu::kvm_available() {
-        anyhow::bail!("Firecracker standby requires /dev/kvm, which is not available on this host");
-    }
-
-    let slot = microvm::allocate_slot(&spec.id)
-        .with_context(|| format!("reserve Firecracker slot for standby '{}'", spec.id))?;
-    let mut slot_reservation = microvm::SlotReservationGuard::new(&slot);
-    let abs_dir = slot.vm_dir.clone();
-    let abs_socket = format!("{}/fc.socket", abs_dir);
-    microvm::start_vm_firecracker(&abs_dir, &abs_socket)
-        .with_context(|| format!("prestart Firecracker daemon for standby '{}'", spec.id))?;
-    let pid = microvm::read_firecracker_pid(&abs_dir)
-        .with_context(|| format!("read Firecracker pid for standby '{}'", spec.id))?;
-    slot_reservation.defuse();
-    Ok(StandbyHandle {
-        id: spec.id.clone(),
-        control_socket: abs_socket,
-        pid,
-        kernel_sha256: spec.kernel_sha256.clone(),
-        vcpus: spec.vcpus,
-        mem_mib: spec.mem_mib,
-        binding_nonce: spec.binding_nonce.clone(),
-        spawned_unix_secs: crate::standby_pool::now_unix_secs(),
-        state: StandbyState::Idle,
-        image_sha256: spec.image_sha256.clone(),
-    })
-}
-
-fn firecracker_claim_standby(handle: &StandbyHandle, claim: &StandbyClaim) -> Result<VmId> {
-    let mut start_config = claim
-        .start_config
-        .clone()
-        .context("Firecracker standby claim requires the original VmStartConfig")?;
-    start_config.name = handle.id.clone();
-    start_config.rootfs_path = claim.rootfs_path.clone();
-    start_config.tenant_id = Some(claim.tenant_id.clone());
-    start_config.plan_json = (!claim.plan_json.is_empty()).then(|| claim.plan_json.clone());
-    start_config.bundle_json = claim.bundle_json.clone();
-    start_config.network_policy = claim.network_policy.clone();
-
-    let slot = microvm::read_reserved_slot(&handle.id)
-        .with_context(|| format!("read reserved Firecracker slot for '{}'", handle.id))?;
-    let mut slot_reservation = microvm::SlotReservationGuard::new(&slot);
-    let fc_config = FirecrackerConfig::from_start_config_with_slot(&start_config, slot)?;
-    let abs_dir = fc_config.run_config.slot.vm_dir.clone();
-    let resolved_socket = format!("{}/fc.socket", abs_dir);
-    if resolved_socket != handle.control_socket {
-        anyhow::bail!(
-            "Firecracker standby '{}' socket mismatch: handle {}, slot {}",
-            handle.id,
-            handle.control_socket,
-            resolved_socket
-        );
-    }
-
-    microvm::run_from_prestarted_build(&fc_config.run_config, &abs_dir, &resolved_socket)
-        .with_context(|| format!("claim Firecracker standby '{}'", handle.id))?;
-    slot_reservation.defuse();
-    Ok(VmId(handle.id.clone()))
-}
-
 impl VmBackend for FirecrackerBackend {
     fn name(&self) -> &str {
         "firecracker"
@@ -262,9 +195,11 @@ impl VmBackend for FirecrackerBackend {
         // discover support before deciding to plumb a workload.
         VmCapabilities {
             pause_resume: true,
-            snapshots: true,
+            snapshots: false,
             vsock: true,
-            tap_networking: true,
+            tap_networking: false,
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
             balloon: true,
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
@@ -272,106 +207,13 @@ impl VmBackend for FirecrackerBackend {
     }
 
     fn snapshot_capability(&self) -> SnapshotCapability {
-        // Firecracker is the live-memory fast-resume backend (UFFD / NBD /
-        // hugepages).
-        SnapshotCapability::LiveMemory
-    }
-
-    fn warm_start(
-        &self,
-        config: &VmStartConfig,
-        requested: SnapshotCapability,
-    ) -> std::result::Result<WarmStartOutcome, mvm_core::vm_backend::WarmStartError> {
-        use mvm_core::vm_backend::WarmStartError;
-        // Fail closed on an over-request rather than silently degrading — the
-        // same gate the trait default applies (C4).
-        let available = self.snapshot_capability();
-        if !available.satisfies(requested) {
-            return Err(WarmStartError::Unsupported {
-                requested,
-                available,
-                hint: format!(
-                    "this backend warm-starts at the '{}' tier; re-run with that tier \
-                     or `mvmctl up` for a cold boot",
-                    available.label()
-                ),
-            });
-        }
-        // Mint a fresh generation token so two clones of one snapshot reseed to
-        // distinct CSPRNG state, then load + resume + deliver it. The returned
-        // `ReseedStatus` is surfaced verbatim so the verb is honest about
-        // whether the guest actually rotated.
-        let token = mvm_core::crypto::vmgenid::fresh_generation_token(&config.name).token;
-        let reseed = microvm::warm_restore_instance(&config.name, token)
-            .map_err(|e| WarmStartError::Failed(format!("{e:#}")))?;
-        Ok(WarmStartOutcome {
-            id: VmId(config.name.clone()),
-            reseed,
-        })
+        // The runner's Firecracker path is cold-boot only. The legacy live-memory
+        // restore path provisions a TAP and is deliberately unavailable here.
+        SnapshotCapability::Unsupported
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        // Fail closed when KVM is absent rather than letting the
-        // Firecracker boot fault deep in the API handshake. Firecracker
-        // is the production runtime and *requires* `/dev/kvm`; a no-KVM
-        // host should use `--hypervisor qemu` for local dev/test
-        // (Tier-3 TCG), never a silent Firecracker fallback. On macOS
-        // the runtime path nests through libkrun/HVF, so this probe is
-        // Linux-only.
-        #[cfg(target_os = "linux")]
-        if !crate::qemu::kvm_available() {
-            anyhow::bail!(
-                "Firecracker requires /dev/kvm, which is not available on this host. \
-                 Firecracker is the production runtime; for local dev/test on a no-KVM \
-                 host run with `--hypervisor qemu` (Tier-3 TCG software emulation, \
-                 ADR-014). To run Firecracker, use a host with KVM enabled."
-            );
-        }
-        let fc_config = FirecrackerConfig::from_start_config(config)?;
-        // Thread the sidecar into per-VM runtime metadata so
-        // `mvmctl console` can enforce the accessible/sealed gate.
-        // Best-effort: a malformed sidecar surfaces an error here
-        // (build pipeline bug); a missing sidecar defaults to
-        // accessible=true.
-        let rootfs = std::path::Path::new(&config.rootfs_path);
-        // Admission gate — refuse older rootfs that lack the
-        // `/mvm/runtime` mount point. Runs before
-        // `microvm::run_from_build` so a refusal exits clean — no FC
-        // API socket, no VM dir half-populated.
-        let rootfs_dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
-        mvm_build::builder_vm::admit_runtime_overlay_contract(
-            rootfs_dir,
-            config.runtime_source_policy,
-        )?;
-        crate::base::runtime_meta::record_from_start_config(
-            &config.name,
-            StartMode::Detached,
-            config,
-        )?;
-        let mut slot_reservation = microvm::SlotReservationGuard::new(&fc_config.run_config.slot);
-        microvm::run_from_build(&fc_config.run_config)?;
-        slot_reservation.defuse();
-        Ok(VmId(fc_config.run_config.name.clone()))
-    }
-
-    fn supports_standby_pool(&self) -> bool {
-        true
-    }
-
-    fn spawn_standby(
-        &self,
-        spec: &StandbySpec,
-    ) -> std::result::Result<StandbyHandle, StandbyError> {
-        firecracker_spawn_standby(spec).map_err(|e| StandbyError::SpawnFailed(e.to_string()))
-    }
-
-    fn claim_standby(
-        &self,
-        handle: &StandbyHandle,
-        claim: &StandbyClaim,
-    ) -> std::result::Result<VmId, StandbyError> {
-        firecracker_claim_standby(handle, claim)
-            .map_err(|e| StandbyError::ClaimFailed(e.to_string()))
+        fc_runner().start(config)
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
@@ -927,15 +769,17 @@ mod tests {
         let backend = FirecrackerBackend;
         let caps = backend.capabilities();
         assert!(caps.pause_resume);
-        assert!(caps.snapshots);
+        assert!(!caps.snapshots);
         assert!(caps.vsock);
-        assert!(caps.tap_networking);
+        assert!(!caps.tap_networking);
+        assert!(caps.no_routable_guest_nic);
+        assert!(caps.host_vsock_proxy);
     }
 
     #[test]
-    fn firecracker_reports_standby_pool_support() {
+    fn firecracker_does_not_report_standby_pool_support() {
         let backend = FirecrackerBackend;
-        assert!(backend.supports_standby_pool());
+        assert!(!backend.supports_standby_pool());
     }
 
     #[test]
@@ -986,40 +830,6 @@ mod tests {
         };
 
         assert!(err.to_string().contains("Firecracker has no virtio-fs"));
-    }
-
-    #[test]
-    fn firecracker_claim_requires_start_config() {
-        let handle = StandbyHandle {
-            id: "standby-a".into(),
-            control_socket: "/tmp/fc.socket".into(),
-            pid: 123,
-            kernel_sha256: "a".repeat(64),
-            vcpus: 2,
-            mem_mib: 1024,
-            binding_nonce: "ab".repeat(32),
-            spawned_unix_secs: 1,
-            state: StandbyState::Idle,
-            image_sha256: None,
-        };
-        let claim = StandbyClaim {
-            start_config: None,
-            rootfs_path: "/images/rootfs.ext4".into(),
-            tenant_id: "tenant-a".into(),
-            audit_dir: "/audit".into(),
-            gateway_audit_socket: "/audit/gateway.sock".into(),
-            gateway_events_socket: None,
-            plan_json: "{}".into(),
-            bundle_json: None,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-        };
-
-        let err = firecracker_claim_standby(&handle, &claim).expect_err("missing config fails");
-
-        assert!(
-            err.to_string()
-                .contains("requires the original VmStartConfig")
-        );
     }
 
     #[test]
@@ -1421,11 +1231,8 @@ mod tests {
 
     #[test]
     fn snapshot_capability_disk_only_on_firecracker() {
-        // The CLI Firecracker path routes through the workload runner, which is
-        // honest about disk-only warm-start (no live-memory snapshot). The raw
-        // `FirecrackerBackend` still advertises the live-memory tier for the
-        // out-of-scope hostd path — see
-        // `warm_start_on_firecracker_admits_the_live_memory_tier`.
+        // The runner-backed Firecracker path is honest about disk-only
+        // warm-start; the raw compatibility shim is stricter and unsupported.
         assert_eq!(
             AnyBackend::from_hypervisor("firecracker").snapshot_capability(),
             SnapshotCapability::DiskOnly
@@ -1629,16 +1436,12 @@ mod tests {
     }
 
     #[test]
-    fn warm_start_on_firecracker_admits_the_live_memory_tier() {
+    fn warm_start_on_firecracker_refuses_the_legacy_live_memory_tier() {
         use mvm_core::vm_backend::SnapshotCapability;
-        // Firecracker advertises the live-memory tier, so the C4 gate admits a
-        // live-memory request (the restore itself needs a live KVM VM and is
-        // exercised on the gated lane, not here).
+        // The raw Firecracker live-memory restore path could restore a captured
+        // NIC, so the vsock-only backend refuses that legacy tier.
         let fc = FirecrackerBackend;
-        assert!(
-            fc.snapshot_capability()
-                .satisfies(SnapshotCapability::LiveMemory)
-        );
+        assert_eq!(fc.snapshot_capability(), SnapshotCapability::Unsupported);
     }
 
     /// Isolates the `AnyBackend::Mock` construction (unavailable outside

@@ -9,15 +9,15 @@
 // Concrete `VmBackend` implementations:
 //
 // - **Firecracker** (`backend::FirecrackerBackend`) + the `AnyBackend`
-//   dispatch enum + `FirecrackerConfig` — the production Tier 1 path.
+//   dispatch enum — the production Tier 1 path.
 // - **HVF** (`hvf_backend::HvfBackend`) — the in-house Hypervisor.framework
 //   VMM; the macOS-26 workload default.
 // - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
 //   (Linux KVM / macOS HVF).
 //
 // Plus the FC support modules: `firecracker` (installer helpers),
-// `microvm` (lifecycle), `image` (Mvmfile.toml), `network` (TAP/
-// bridge wiring); and the Machine product abstraction (`machine`) — the
+// `microvm` (control/lifecycle), and `image` (Mvmfile.toml); and the
+// Machine product abstraction (`machine`) — the
 // construction + capability-gate seam the CLI, mvmd, and the SDKs share.
 
 pub mod build_env;
@@ -46,9 +46,7 @@ pub mod checkpoint;
 pub mod codesign;
 pub mod compat;
 pub mod driver;
-/// Per-VM transparent egress redirect (nft prerouting REDIRECT scoped
-/// to the guest TAP) steering guest:80 to the host-side substitution
-/// terminator. Linux-only mechanism; consumed by the FC path.
+/// Per-VM transparent egress redirect used by the legacy libkrun gateway path.
 pub mod egress_redirect;
 /// Cfg-free decode of the admitted plan's egress secret bindings, shared by
 /// the libkrun + Firecracker substitution-endpoint spawn paths.
@@ -84,9 +82,6 @@ pub mod mock;
 #[cfg(feature = "test-support")]
 pub mod mock_guest_agent;
 pub mod netinit_audit;
-pub mod network;
-/// `NetworkProvider` impl over the bridge+TAP path.
-pub mod network_provider;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;
 /// Capability-aware backend selection (fail-closed, no silent downgrade).
