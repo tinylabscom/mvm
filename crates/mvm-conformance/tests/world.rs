@@ -25,6 +25,8 @@ pub struct CliWorld {
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
     /// steps that need to inspect the filesystem after a run.
     pub isolated_home: Option<tempfile::TempDir>,
+    /// Whether live CLI steps should keep one warm standby for the next run.
+    pub warm_residency: bool,
 }
 
 impl fmt::Debug for CliWorld {
@@ -39,6 +41,7 @@ impl fmt::Debug for CliWorld {
                 "isolated_home",
                 &self.isolated_home.as_ref().map(|t| t.path().to_path_buf()),
             )
+            .field("warm_residency", &self.warm_residency)
             .finish()
     }
 }
