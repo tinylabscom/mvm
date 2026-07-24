@@ -42,6 +42,8 @@ serde_json.workspace = true
 # out of production builds.
 mvm-runtime = { workspace = true, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }
+mvm-fs = { workspace = true }
+tar.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -2760,8 +2760,10 @@ dependencies = [
  "assert_cmd",
  "cucumber",
  "mvm-core",
+ "mvm-fs",
  "mvm-runtime",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio",
 ]
