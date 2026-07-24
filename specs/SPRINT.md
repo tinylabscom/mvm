@@ -337,7 +337,7 @@ Then unify + retire the old paths:
 
 **WS10 — tiny kernel + low memory + density**
 
-- [ ] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264).
+- [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
 - [ ] Guest agent ≈ **8 MB**: de-`tokio` the guest (mio / raw epoll+kqueue), strip deps, measure RSS.
 - [ ] Host daemon ≈ **64 MB**: minimal runtime, evaluate `mimalloc`, strip deps.
 - [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
@@ -439,21 +439,21 @@ WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net`
 
 ## Appendix B — issue / PR close-out
 
-| #        | Kind       | Disposition                                                       |
-| -------- | ---------- | ----------------------------------------------------------------- |
-| **1637** | PR (draft) | **KEEP OPEN** — one-command microVM docs/blog; WS12 makes it true |
-| 1701     | issue      | Fold → WS3 (finish vsock tunnel), then close                      |
-| 1717     | PR         | Fold → WS3 (FC transparent net over vsock), then close            |
-| 1601     | issue      | Fold → WS3 (HVF host-vsock-proxy), then close                     |
-| 1674     | issue      | Fold → WS1c / WS8 (OCI unpack O_EXCL), then close                 |
-| 1654     | issue      | Fold → WS4 (runtime sockets under `~/.mvm/run`), then close       |
-| 1462     | issue      | Fold → WS2 (verb-grant delivery), then close                      |
-| 1366     | issue      | Fold → WS7 (Sandbox.connect dev-only exec guard), then close      |
-| 1283     | issue      | Fold → WS10 (kernel boot-probe strip), then close                 |
-| 1264     | issue      | Fold → WS10 (kernel pin bump), then close                         |
-| 1716     | PR         | Superseded by this sprint — close                                 |
-| 1718     | PR         | Folded (dev_vz→builder_vm rename subsumed by WS1) — close         |
-| 1713     | PR         | Contradicts consolidation (splits SDK) — close                    |
+| #        | Kind       | Disposition                                                         |
+| -------- | ---------- | ------------------------------------------------------------------- |
+| **1637** | PR (draft) | **KEEP OPEN** — one-command microVM docs/blog; WS12 makes it true   |
+| 1701     | issue      | Fold → WS3 (finish vsock tunnel), then close                        |
+| 1717     | PR         | Fold → WS3 (FC transparent net over vsock), then close              |
+| 1601     | issue      | Fold → WS3 (HVF host-vsock-proxy), then close                       |
+| 1674     | issue      | Fold → WS1c / WS8 (OCI unpack O_EXCL), then close                   |
+| 1654     | issue      | Fold → WS4 (runtime sockets under `~/.mvm/run`), then close         |
+| 1462     | issue      | Fold → WS2 (verb-grant delivery), then close                        |
+| 1366     | issue      | **Closed** — landed via #1791 (Sandbox.connect dev-only exec guard) |
+| 1283     | issue      | **Closed** — landed via #1786 (boot-probe strip done)               |
+| 1264     | issue      | **Closed** — #1786 documents upstream-blocked pin bump; no action   |
+| 1716     | PR         | Superseded by this sprint — close                                   |
+| 1718     | PR         | Folded (dev_vz→builder_vm rename subsumed by WS1) — close           |
+| 1713     | PR         | Contradicts consolidation (splits SDK) — close                      |
 
 ## Appendix C — biggest confirmed removals
 
