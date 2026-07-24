@@ -537,10 +537,16 @@ mod tests {
         let stub = dir.join("stub-endpoint.sh");
         let stopped = dir.join("stopped");
         let pid_capture = dir.join("endpoint.pid");
+        // Arm the TERM trap BEFORE announcing readiness. The spawner only
+        // proceeds to the rollback SIGTERM once it reads this handshake line, so
+        // if the stub announced "ready" first, the SIGTERM could land in the gap
+        // before `trap` runs — default-terminating the stub with no `stopped`
+        // sentinel. Arming first makes the sentinel write deterministic instead
+        // of racing the trap install under load. Do not reorder these two lines.
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\ncat >/dev/null\necho $$ > {}\necho 'ready handshake'\ntrap 'echo stopped > {}; exit 0' TERM\nwhile :; do sleep 1; done\n",
+                "#!/bin/sh\ncat >/dev/null\necho $$ > {}\ntrap 'echo stopped > {}; exit 0' TERM\necho 'ready handshake'\nwhile :; do sleep 1; done\n",
                 pid_capture.display(),
                 stopped.display()
             ),
