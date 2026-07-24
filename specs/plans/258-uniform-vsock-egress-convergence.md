@@ -92,6 +92,10 @@ surface, so "no routable guest NIC" is a property of the type, not a habit.
   `LibkrunBackend::start`, then delete that raw entry point and
   `spawn_libkrun_egress_endpoint_if_needed`.
 
+The F5.2 light default-deny witness passed on 2026-07-24 UTC for local HVF
+and native-KVM Firecracker/libkrun. Each guest exposed only `lo`, failed DNS
+resolution for `example.com`, and printed `EXIT=1`.
+
 ## Validation
 
 A live-KVM egress witness per backend gates each merge — host tests do not boot

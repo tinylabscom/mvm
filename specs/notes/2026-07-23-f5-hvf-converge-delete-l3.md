@@ -85,3 +85,23 @@ After F5.1 (nothing populates a live `network_tunnel`), remove the dead second e
   path.
 - Tracked separately: unconditional OCI loopback setup for the NIC-less
   substitution forward proxy, and F4.2's raw `bench_probe` libkrun cleanup.
+
+## F5.2 light-witness record
+
+- **2026-07-24 UTC — HVF, local macOS 26:** `mvmctl machine run --image alpine`
+  booted with no `--allow-host`; the guest reported only `lo` (down),
+  `wget http://example.com` returned `bad address 'example.com'`, and the
+  command printed `EXIT=1`.
+- **2026-07-24 UTC — Firecracker, native x86_64 KVM:** after rebuilding the
+  guest-agent cache from the six-binary manifest, the guest reported only
+  `lo` (down), `wget` returned `bad address 'example.com'`, and the command
+  printed `EXIT=1`.
+- **2026-07-24 UTC — libkrun, native x86_64 KVM:** the guest reported only
+  `lo` (down), `wget` returned `bad address 'example.com'`, and the command
+  printed `EXIT=1`.
+
+These are light default-deny regressions: all three backends booted and
+blocked the outbound attempt without a routable guest NIC after the Model-A
+deletion. The KVM checkout initially exposed a stale pre-deletion build
+artifact; a clean rebuild removed that environmental false start before the
+passing witnesses.
