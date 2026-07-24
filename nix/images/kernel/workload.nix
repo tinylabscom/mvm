@@ -62,6 +62,25 @@ base.mkKernel {
   #                 symbol in Linux 6.12, so the syscall-facing interface goes
   #                 away here but the interpreter stays built-in until the
   #                 workload networking contract changes.
+  #
+  # The next four are boot-probe eliminations: each is compiled in by the
+  # defconfig base and *initialises at boot* on a single-workload OCI microVM
+  # that can never use it. They barely move the built-in symbol count, so the
+  # size budget alone never surfaced them — the win is deleted init work and
+  # registration threads on the cold-boot path, not bytes.
+  #   NET_9P      — the 9P2000 (9pnet) resource-sharing transport. A sealed
+  #                 workload shares host directories over virtio-fs, never 9p,
+  #                 so the "9pnet: Installing 9P2000 support" init is pure
+  #                 boot-probe cost with no reachable transport behind it.
+  #   BTRFS_FS    — the workload rootfs is ext4-on-virtio-blk, dm-verity sealed
+  #                 (Claim 3); no guest mounts btrfs. Dropping it deletes the
+  #                 "Btrfs loaded" registration and its background workers.
+  #   GNSS        — GPS/GNSS receiver core. No microVM exposes a GNSS device;
+  #                 "gnss: GNSS driver registered" registers a major number for
+  #                 hardware that can never appear behind virtio.
+  #   VLAN_8021Q  — 802.1Q VLAN tagging. Guest egress is host-mediated (egress
+  #                 proxy over vsock), never in-guest VLAN interfaces, so the
+  #                 "8021q: 802.1Q VLAN Support" init is dead weight.
   #   CC_OPTIMIZE_FOR_PERFORMANCE — flipped off only for the size experiment
   #                 output; the default workload kernel keeps the current mode
   #                 until measured results prove the size-oriented mode is worth
@@ -77,6 +96,10 @@ base.mkKernel {
       "IKCONFIG"
       "IKCONFIG_PROC"
       "CHECKPOINT_RESTORE"
+      "NET_9P"
+      "BTRFS_FS"
+      "GNSS"
+      "VLAN_8021Q"
     ]
     ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_PERFORMANCE" ];
 }
