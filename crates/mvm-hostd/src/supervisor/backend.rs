@@ -203,7 +203,6 @@ mod tests {
             secret_files: Vec::new(),
             ports: Vec::new(),
             network_policy: mvm_core::network_policy::NetworkPolicy::default(),
-            network_tunnel: None,
         }
     }
 

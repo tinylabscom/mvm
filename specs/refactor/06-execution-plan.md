@@ -36,7 +36,7 @@ Note: by the time of writing, this WS has run further than "~15" — the ADR set
 - [ ] 1a `mvm-protocol`: extract `mvm-sdk::ir` + wire + policy + `mvm-verify`; make it `#![no_std]` + `alloc`; add a `wasm32-unknown-unknown` CI build; `unsafe_code = "forbid"`.
 - [ ] 1b `mvm-core`: rebuild on `mvm-protocol`; own single-dir config, crypto, keystore, attestation, catalog, `log`.
 - [x] 1c `mvm-fs`: fold `mvm-ext4` + `mvm-oci` + rootfs/overlay/unpack; one ext4 writer + one reader; "image → rootfs + vmlinux" is its public surface. _(Landed across four moves: `mvm-ext4`+`mvm-oci` merged (`ext4`/`oci` submodules); `oci_to_rootfs` moved `67e492f87`; **1c.1** walker/materializer unification `a28f583b2` (one `mvm_fs::rootfs` mid-layer, `oci_to_rootfs::ext4` thinned to an adapter, `mvm_build::rootfs` = builder-VM dispatcher only); **1c.2** overlay-resolve half → `mvm_fs::overlay` `c944a5bc2` (Layout/Artifact/ArtifactNames/Resolver as a pure local probe, arch as dir-name string keeping mvm-fs a zero-mvm-dep leaf; seeding/build/download/install stay in `mvm_build::runtime_overlay`, seed-path equivalence review-traced). DEFERRED, explicitly: the virtiofs-root-for-OCI boot preference (an enhancement, not absorption — revisit with the Phase 2 backend work); ext4 READING still goes through the external `ext4-view` dep at its consumers rather than an mvm-fs facade.)_ Prefer **virtiofs-root for OCI** (boot directly off the unpacked OCI dir, skipping ext4 materialize) where the backend supports it; keep materialize as the fallback.
-- [ ] 1d `mvm-net`: fold `mvm-network` + host tunnel/gateway/dns + guest net; vsock/UDS transport + egress seam. _(crate rename `mvm-network`→`mvm-net` landed; tunnel/dns/guest-net absorption pending)_
+- [x] 1d `mvm-net`: fold `mvm-network` + guest/host network helpers; vsock transport + egress seam. The former L3 tunnel and guest-netd path is deleted; Model B owns workload egress.
 - [x] 1e `mvm-runtime`: fold `mvm` + `mvm-backend`; `VmBackend` trait + libkrun/hvf/firecracker. _(merged flat, workspace green; `qemu.rs` KEPT as the opt-in Linux dev substrate — drop **ratified against**: QEMU stays a Tier-2 dev/test backend, never workload-bearing)_
 - [ ] 1f `mvm-build`: slim the builder pipeline.
 - [ ] 1g `mvm-sdk`: authoring + the tree-sitter → Workload IR → **nix-template** pipeline (IR from `mvm-protocol`); user-specified **base OCI image** as the template base.
@@ -84,22 +84,20 @@ Full narrative on this progress, including why `mvm-protocol` needs to be a desi
 - [ ] CI lints: "exactly two shipped binaries + CLI", "no `Command` outside the allow-list".
 - Gate: `ls` of the build outputs shows 1 host + 1 guest + `mvmctl`; lints green; secrets/seccomp tests pass.
 
-**WS-NET — consolidated vsock networking + standardized protocol** (absorbs the old WS3; see [03-networking.md](03-networking.md)) — the core auditability seam
+**WS-NET — uniform vsock workload egress** (complete; see
+[03-networking.md](03-networking.md))
 
-First vertical slice (build in this order):
-- [ ] `mvm-protocol`: versioned frame codec (encode + incremental decoder) + handshake types; fuzz target for the decoder (never panic / OOM / OOB).
-- [ ] `VmDuplexTransport` trait + an in-memory / process-UDS test backend (so CI needs no VMM).
-- [ ] guest TUN pump (`mvm-agentd` net role): create `mvm-net0`, static IPv4, MTU, default route, DNS → controlled resolver; TUN↔frames.
-- [ ] host net worker (`mvm-hostd` role): accept per-VM UDS, validate the identity handshake, default-deny policy engine + one allow rule, smoltcp forward, structured allow/deny audit.
-- [ ] one control stream + one packet stream; hard frame/queue limits + credit backpressure.
+The live implementation uses one typed `WorkloadRunner` seam for Firecracker,
+libkrun, and HVF. `RealEndpointSpawner` handles admitted raw host/port flows;
+the broker, substitution endpoint, and supervisor L4 gate handle typed
+connectors and secret substitution. Default-deny admission and fail-closed
+backend capabilities are tested structurally and by backend dry-run/live
+witnesses.
 
-Then unify + retire the old paths:
-- [ ] Route Firecracker off TAP+iptables onto this tunnel (#1717, #1701); HVF host-vsock-proxy (#1601); fail-closed on `--network-allow` where the host can't mediate.
-- [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution via user-defined **`${NAME}`** named placeholders (guest holds the placeholder, host injects the value only for the secret's bound destination — ADR-023) + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
-- [ ] Retire every userspace network gateway the vsock seam replaces — passt, gvproxy, and the opt-in native/rvproxy `native_gateway` subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`. Enforce the mount no-shadow rule (`/mvm` in deny prefixes).
-- [ ] Snapshot/restore/warm-start: fresh boot_id + nonce + handshake; stale flows closed; no live-vsock-survives-restore assumption.
-- [ ] A networking ADR (networking cluster): why vsock-mandatory, guest-TUN, L3-over-smoltcp, typed-connectors-separate; threat/trust/privilege boundaries; snapshot behavior; transport abstraction.
-- Gate: protocol unit + fuzz green; process-level integration proves allow-passes / deny-drops / **stale-session-rejected**; `check_vsock_only_egress` passes on all workload backends; `machine run --image busybox --allow-host google.com` resolves DNS + connects (fixes `ping: bad address`); live smoke Mac (HVF) + Linux (libkrun + FC); no NIC bypass.
+The former guest-TUN, raw-packet protocol, smoltcp forwarder, network-tunnel
+worker, and `mvm-guest-netd` binary were deleted. No follow-on implementation
+task should recreate that Model-A path. The remaining networking work is
+limited to tracked follow-ups in Plan 258 and the F5 design note.
 
 **WS9 — lifecycle correctness**
 - [ ] Confirm transient teardown (entrypoint exit + no healthcheck → VM stops) — already centralized; add tests.

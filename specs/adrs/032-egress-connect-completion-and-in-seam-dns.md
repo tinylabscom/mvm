@@ -91,7 +91,7 @@ owns the gate, not added next to it.
 
 **Architecture.**
 
-- *Guest:* `mvm-netd` gains a DNS stub listener on `127.0.0.1:53` (UDP + TCP);
+- *Guest:* the guest egress client provides the DNS stub listener on `127.0.0.1:53` (UDP + TCP);
   the guest's `/etc/resolv.conf` becomes `nameserver 127.0.0.1`. Queries are
   forwarded over the *same* vsock plane already used for the proxy — no new
   transport, no NIC.
@@ -161,9 +161,9 @@ design.
 **Alternatives rejected.**
 - *A plain forwarding resolver* (forward all guest DNS to the host): reopens the
   covert-egress hole — DNS would bypass the TCP allow-list. Rejected.
-- *Full L3 transparency* (guest TUN + L3 tunnel over vsock): makes arbitrary
-  TCP/UDP and `ping` work transparently, but is a much larger change and is the
-  currently-unstable area. Deferred; not this ADR.
+- *Full L3 transparency* (guest TUN + L3 tunnel over vsock) was rejected as a
+  second egress model. The workload runner's typed endpoint seam is the sole
+  production path; arbitrary raw packet forwarding is out of scope.
 - *UX-only error* (replace `bad address` with a helpful message, no DNS
   behavior change): doesn't fix the actual DNS need. Rejected.
 

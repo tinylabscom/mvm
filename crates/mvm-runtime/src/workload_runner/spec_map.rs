@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use mvm_agentd::vsock::{
     BROKER_PORT, EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports,
 };
-use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_vsock_port_socket_at};
+use mvm_core::config::vm_hvf_vsock_port_socket_at;
 use mvm_core::vm_backend::{VmStartConfig, VmVolumeKind};
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
@@ -125,9 +125,6 @@ pub struct WorkloadSockets<'a> {
     /// unadmitted VM carries no broker port, so a stray guest dial stays
     /// `ECONNREFUSED` (fail-closed).
     pub broker: Option<&'a Path>,
-    /// Optional packet-tunnel host socket for the future guest-TUN ↔ host-worker
-    /// data path. Present only when the launch config explicitly enables it.
-    pub network_tunnel: Option<(u32, PathBuf)>,
     /// Dev-only interactive console data ports: one host UDS per port in
     /// `dev_console_data_ports()`, pre-opened so a PTY can attach. Empty for
     /// sealed prod boots (`dev_console = false` in `VmStartConfig`).
@@ -165,13 +162,6 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
             direction: VsockDirection::GuestDials,
         });
     }
-    if let Some((guest_port, host_uds)) = &socks.network_tunnel {
-        ports.push(VsockPort {
-            guest_port: *guest_port,
-            host_uds: host_uds.clone(),
-            direction: VsockDirection::GuestDials,
-        });
-    }
     // The guest agent allocates `CONSOLE_PORT_BASE + session_id` per ConsoleOpen
     // and listens there; the host dials in to fetch the PTY stream. Pre-open only
     // when `dev_console` is true — a sealed prod boot carries none (claim 15).
@@ -196,17 +186,6 @@ pub fn console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<(u32, Pa
     dev_console_data_ports()
         .map(|port| (port, vm_hvf_vsock_port_socket_at(state_dir, port)))
         .collect()
-}
-
-/// Optional packet-tunnel host socket rooted under the same per-VM state dir as
-/// the other standing vsock channels.
-pub fn network_tunnel_socket(state_dir: &Path, config: &VmStartConfig) -> Option<(u32, PathBuf)> {
-    config.network_tunnel.as_ref().map(|tunnel| {
-        (
-            tunnel.guest_port,
-            vm_vsock_port_socket_at(state_dir, tunnel.guest_port),
-        )
-    })
 }
 
 /// Everything the workload role resolves before it can build a `VmmSpec`: the
@@ -457,7 +436,6 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_tunnel: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -485,29 +463,8 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_tunnel: None,
             console_data: Vec::new(),
         }
-    }
-
-    #[test]
-    fn workload_vsock_ports_include_optional_network_tunnel_socket() {
-        let socks = WorkloadSockets {
-            agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
-            exit: Path::new("/run/workload.exit"),
-            broker: None,
-            network_tunnel: Some((5302, PathBuf::from("/run/tunnel.sock"))),
-            console_data: Vec::new(),
-        };
-
-        let ports = workload_vsock_ports(&socks);
-        let tunnel = ports
-            .iter()
-            .find(|port| port.guest_port == 5302)
-            .expect("tunnel port present");
-        assert_eq!(tunnel.direction, VsockDirection::GuestDials);
-        assert_eq!(tunnel.host_uds, PathBuf::from("/run/tunnel.sock"));
     }
 
     #[test]
@@ -518,7 +475,6 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: Some(Path::new("/run/broker.sock")),
-            network_tunnel: None,
             console_data: Vec::new(),
         };
         let broker = workload_vsock_ports(&admitted)
@@ -539,31 +495,6 @@ mod tests {
                 .iter()
                 .all(|p| p.guest_port != BROKER_PORT),
             "unadmitted VM must carry no broker port"
-        );
-    }
-
-    #[test]
-    fn network_tunnel_socket_tracks_launch_config_port() {
-        let state_dir = Path::new("/state/vm-1");
-        let cfg = VmStartConfig {
-            network_tunnel: Some(mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
-                guest_port: 5302,
-                session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
-                    tenant_id: "tenant-a".into(),
-                    vm_id: "vm-1".into(),
-                    boot_id: "boot-1".into(),
-                    session_nonce: "nonce-1".into(),
-                    requested_features: mvm_core::protocol::network_tunnel::TunnelFeatures::default(
-                    ),
-                    maximum_frame_size: 4096,
-                },
-            }),
-            ..base()
-        };
-
-        assert_eq!(
-            network_tunnel_socket(state_dir, &cfg),
-            Some((5302, PathBuf::from("/state/vm-1/vsock-5302.sock")))
         );
     }
 
@@ -683,7 +614,6 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_tunnel: None,
             console_data,
         };
         let ports = workload_vsock_ports(&socks);
@@ -712,7 +642,6 @@ mod tests {
             egress_gateway: Path::new("/run/egress.sock"),
             exit: Path::new("/run/workload.exit"),
             broker: None,
-            network_tunnel: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
@@ -734,7 +663,6 @@ mod tests {
                 egress_gateway: Path::new("/run/egress.sock"),
                 exit: Path::new("/run/workload.exit"),
                 broker: None,
-                network_tunnel: None,
                 console_data,
             },
             cmdline: String::new(),

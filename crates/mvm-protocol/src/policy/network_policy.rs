@@ -378,26 +378,6 @@ impl NetworkPolicy {
             }
         }
     }
-
-    /// The kernel-firewall policy to apply to a routable guest NIC (the
-    /// Firecracker TAP) given whether a userspace egress tunnel is carrying
-    /// this workload's traffic.
-    ///
-    /// A userspace L3 tunnel is the auditable egress seam: it terminates the
-    /// guest's outbound flows over vsock and enforces the allow-list there.
-    /// A routable NIC standing alongside the tunnel must not carry a second,
-    /// competing allow-list — a guest that brings that NIC up itself could
-    /// then egress straight to the allow-listed hosts and bypass the tunnel's
-    /// audit/substitution gate. So when a tunnel is present the NIC policy
-    /// collapses to deny-all (the tunnel owns egress); with no tunnel the NIC
-    /// keeps this policy verbatim (the direct-NIC / broad-egress case).
-    pub fn nic_policy_behind_tunnel(&self, has_tunnel: bool) -> NetworkPolicy {
-        if has_tunnel {
-            NetworkPolicy::deny_all()
-        } else {
-            self.clone()
-        }
-    }
 }
 
 impl Default for NetworkPolicy {
@@ -815,36 +795,6 @@ mod tests {
         let json = serde_json::to_string(&policy).unwrap();
         let parsed: NetworkPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, policy);
-    }
-
-    #[test]
-    fn nic_policy_behind_tunnel_collapses_allow_list_to_deny_all() {
-        // A tunnel-carried workload must not leave a competing allow-list on
-        // its routable NIC: the NIC policy collapses to deny-all so the only
-        // egress seam is the audited tunnel.
-        let allow = NetworkPolicy::allow_list(vec![HostPort::new("1.1.1.1", 443)]);
-        let behind = allow.nic_policy_behind_tunnel(true);
-        assert_eq!(
-            behind,
-            NetworkPolicy::deny_all(),
-            "tunnel-present NIC policy is deny-all"
-        );
-        assert!(
-            !behind.allows_egress(),
-            "no direct egress may leak past the tunnel gate"
-        );
-        // The original allow-list is untouched — the tunnel worker still gets
-        // the real policy to enforce; only the NIC copy is denied.
-        assert!(allow.allows_egress());
-    }
-
-    #[test]
-    fn nic_policy_behind_tunnel_passes_policy_through_without_a_tunnel() {
-        // No tunnel → the NIC is the egress path and keeps the run's policy.
-        let allow = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
-        assert_eq!(allow.nic_policy_behind_tunnel(false), allow);
-        let deny = NetworkPolicy::deny_all();
-        assert_eq!(deny.nic_policy_behind_tunnel(false), deny);
     }
 
     // --- egress_mode enrichment ---

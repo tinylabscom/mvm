@@ -132,14 +132,13 @@ it drives the real governance in-process with no dependency inversion. See
   port }` / `Uds { path }`), the per-backend way a workload reaches the per-VM
   **substitution endpoint** (`mvm-substitution-endpoint`, an `mvm-hostd` bin):
   the backend-agnostic governance seam that does secret substitution + egress
-  policy + audit (libkrun/FC/qemu all spawn it). That layer is **separate from
-  the actively-churning smoltcp-vsock *tunnel/forwarder* layer** (`smoltcp_egress`
-  / `network_tunnel`, Plan 236 `#1681`). A wasm container has no vsock/TUN, so it
-  **bypasses the tunnel entirely** — P3 adds an `EndpointTransport::Wasi` variant
+  policy + audit (libkrun/FC/qemu all spawn it). That layer is separate from
+  the retired raw-packet L3 path. A wasm container has no vsock, so it uses the
+  endpoint seam directly — P3 adds an `EndpointTransport::Wasi` variant
   and routes the WASI module's outbound host-calls (intercepted by the host
   `wasmtime` embedding) straight into the substitution endpoint. So P3 touches
-  the *stable* governance layer, not the WS-NET flux — it need not wait for
-  WS-NET. Real work: (a) the `EndpointTransport::Wasi` variant (enum-variant
+  the *stable* governance layer, not deleted Model-A work. Real work: (a) the
+  `EndpointTransport::Wasi` variant (enum-variant
   churn like `BackendKind::Wasm`); (b) the WASI host-call → substitution-endpoint
   routing in the `wasmtime` embedding; (c) the POC's **data-governance witness**
   — referenced across the specs (04/06) as a planned CI witness but not yet a
@@ -217,8 +216,8 @@ no touching the 2972-line proxy.
 egress-CA intermediate the guest trusts) is heavier than the UDS-framed
 request/response the POC needs; a first cut proves policy + audit + `${NAME}`
 over the UDS and defers TLS termination. **Sequencing:** the subprocess is the
-*stable* substitution/audit layer, so P3 does not block on the in-flux
-smoltcp-tunnel WS-NET work — but it does touch the endpoint's input protocol
+*stable* substitution/audit layer, so P3 does not block on deleted Model-A
+work — but it does touch the endpoint's input protocol
 (adding the Wasi transport), so it wants a careful, focused build, not a
 tail-of-session cram.
 

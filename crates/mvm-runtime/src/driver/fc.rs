@@ -211,8 +211,8 @@ fn fc_guest_dial_socket(runtime_dir: &Path, port: u32) -> PathBuf {
 /// to. Firecracker connects out to `<runtime_dir>/v.sock_<port>`, so a symlink
 /// from that path to the entry's `host_uds` makes the guest's dial follow
 /// straight through to the endpoint the runner already bound — the egress
-/// gateway (the claim-critical one), the host-services broker, and any packet
-/// tunnel. `HostDials` ports (agent, dev-console) are not bridged here: the host
+/// endpoint (the claim-critical one), and the host-services broker.
+/// `HostDials` ports (agent, dev-console) are not bridged here: the host
 /// dials those inbound through the CONNECT handshake on the mux socket.
 fn wire_guest_dial_bridges(spec: &VmmSpec, runtime_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
     let mut created = Vec::new();
@@ -440,7 +440,7 @@ impl VmmDriver for FcDriver {
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;
         }
 
-        // Wire the guest-dial egress/broker/tunnel bridges, then bind the
+        // Wire the guest-dial egress/broker bridges, then bind the
         // workload-exit capture — both must be in place before the guest boots
         // and dials out.
         wire_guest_dial_bridges(spec, &runtime_dir)?;

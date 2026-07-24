@@ -838,32 +838,6 @@ fn runtime_overlay_flake_stages_netinit_binary() {
     );
 }
 
-/// The userspace L3 egress pump `mvm-guest-netd` rides the runtime
-/// overlay at `/netd` (never baked into a per-image rootfs). `netinit`
-/// spawns it under the `mvm.network_tunnel=` cmdline token, resolving
-/// `/mvm/runtime/netd` first; the resolver's required-payload check
-/// (`REQUIRED_OVERLAY_GUEST_PATHS`) refuses an overlay missing it, so
-/// the published flake must stage it or every overlay-only boot fails
-/// closed.
-#[test]
-fn runtime_overlay_flake_stages_netd_binary() {
-    let path = nix_dir()
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
-
-    assert!(
-        content.contains("cp ${guest}/bin/mvm-guest-netd       \"$staging/netd\""),
-        "runtime-overlay flake must stage `mvm-guest-netd` at \
-         `/netd` inside the overlay ext4. The tunnel egress pump is \
-         overlay-only (no per-image bake); the resolver rejects an \
-         overlay missing `/netd`, so dropping this line fails every \
-         overlay-only boot closed."
-    );
-}
-
 #[test]
 fn runtime_overlay_flake_stages_egress_client_binary() {
     let path = nix_dir()

@@ -25,7 +25,6 @@ pub struct PrebuiltGuestBinaries<'a> {
     pub oci_init: &'a [u8],
     pub agent: &'a [u8],
     pub netinit: &'a [u8],
-    pub netd: &'a [u8],
     pub egress_client: &'a [u8],
     pub entrypoint_runner: &'a [u8],
     pub verity_init: &'a [u8],
@@ -370,7 +369,6 @@ pub fn resolve_guest_binaries(
                 oci_init: p.oci_init,
                 agent: p.agent,
                 netinit: p.netinit,
-                netd: p.netd,
                 egress_client: p.egress_client,
                 entrypoint_runner: p.entrypoint_runner,
                 verity_init: p.verity_init,
@@ -559,7 +557,6 @@ mod tests {
                 oci_init: b"stale-init",
                 agent: b"stale-agent",
                 netinit: b"stale-netinit",
-                netd: b"stale-netd",
                 egress_client: b"stale-egress",
                 entrypoint_runner: b"stale-entrypoint",
                 verity_init: b"stale-verity-init",
@@ -576,7 +573,6 @@ mod tests {
                 oci_init: b"fresh-init",
                 agent: b"fresh-agent",
                 netinit: b"fresh-netinit",
-                netd: b"fresh-netd",
                 egress_client: b"fresh-egress",
                 entrypoint_runner: b"fresh-entrypoint",
                 verity_init: b"fresh-verity-init",
@@ -587,7 +583,6 @@ mod tests {
         assert_eq!(std::fs::read(bins.oci_init).unwrap(), b"fresh-init");
         assert_eq!(std::fs::read(bins.agent).unwrap(), b"fresh-agent");
         assert_eq!(std::fs::read(bins.netinit).unwrap(), b"fresh-netinit");
-        assert_eq!(std::fs::read(bins.netd).unwrap(), b"fresh-netd");
         assert_eq!(std::fs::read(bins.egress_client).unwrap(), b"fresh-egress");
         assert_eq!(
             std::fs::read(bins.entrypoint_runner).unwrap(),

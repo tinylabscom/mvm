@@ -11,12 +11,13 @@
 // ============================================================================
 
 #[cfg(target_os = "linux")]
+use super::flake_run::FlakeRunConfig;
+#[cfg(target_os = "linux")]
 use anyhow::{Context, Result};
 #[cfg(target_os = "linux")]
 use tracing::warn;
 
 #[cfg(any(target_os = "linux", test))]
-use super::flake_run::FlakeRunConfig;
 #[cfg(target_os = "linux")]
 use super::guards::EndpointGuard;
 
@@ -210,14 +211,6 @@ pub(super) fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
     let redirect = EgressRedirect::install(name, &config.slot.tap_dev, term_port)?;
     redirect.persist();
     Ok(())
-}
-
-#[cfg(test)]
-fn network_tunnel_cmdline_token(config: &FlakeRunConfig) -> Option<String> {
-    config
-        .network_tunnel
-        .as_ref()
-        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline)
 }
 
 /// The `mvm.egress_ca=<hex>` kernel-cmdline token for `vm_name`,
@@ -613,62 +606,6 @@ pub(super) fn detach_and_spawn_bridge_watchdog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::config::VmSlot;
-
-    fn baseline_run_config(mem_initial: Option<u32>) -> FlakeRunConfig {
-        FlakeRunConfig {
-            name: "v".to_string(),
-            slot: VmSlot::new("v", 0),
-            vmlinux_path: "/k/vmlinux".to_string(),
-            initrd_path: None,
-            rootfs_path: "/k/rootfs.ext4".to_string(),
-            verity_path: None,
-            roothash: None,
-            runtime_overlay_path: None,
-            runtime_overlay_verity_path: None,
-            runtime_overlay_roothash: None,
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-            revision_hash: "abc".to_string(),
-            flake_ref: "/p".to_string(),
-            profile: None,
-            cpus: 2,
-            memory: 1024,
-            mem_initial,
-            volumes: Vec::new(),
-            config_files: Vec::new(),
-            secret_files: Vec::new(),
-            ports: Vec::new(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::default(),
-            network_tunnel: None,
-        }
-    }
-
-    #[test]
-    fn network_tunnel_cmdline_token_round_trips_shared_config() {
-        let mut config = baseline_run_config(None);
-        config.network_tunnel = Some(mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
-            guest_port: 5302,
-            session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
-                tenant_id: "tenant-a".to_string(),
-                vm_id: "vm-1".to_string(),
-                boot_id: "boot-1".to_string(),
-                session_nonce: "nonce-1".to_string(),
-                requested_features: mvm_core::protocol::network_tunnel::TunnelFeatures {
-                    ipv4: true,
-                    ..mvm_core::protocol::network_tunnel::TunnelFeatures::default()
-                },
-                maximum_frame_size: 4096,
-            },
-        });
-
-        let token = network_tunnel_cmdline_token(&config).expect("valid tunnel config encodes");
-        let hex = token
-            .strip_prefix("mvm.network_tunnel=")
-            .expect("cmdline token prefix");
-        let decoded = mvm_core::vm_backend::decode_network_tunnel_cmdline(hex).unwrap();
-        assert_eq!(decoded, config.network_tunnel.unwrap());
-    }
-
     // ───────────────────────────────────────────────────────────────
     // mvm-bridge spawn helpers
     // ───────────────────────────────────────────────────────────────

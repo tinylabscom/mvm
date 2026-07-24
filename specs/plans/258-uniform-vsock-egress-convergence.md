@@ -1,6 +1,7 @@
 # Plan 258 — Uniform vsock-egress convergence: remaining followups
 
-**Status:** libkrun converged + live-witnessed; Firecracker and the machine-checked gate remain.
+**Status:** COMPLETE for the microVM workload backends; F5.2 removed the dead Model-A
+smoltcp-L3 stack after Firecracker, libkrun, and HVF converged on the runner seam.
 
 **Goal:** every workload backend runs through the one
 `WorkloadRunner<VmmDriver, EndpointSpawner, BrokerRegistrar>` seam, so claim-10
@@ -18,7 +19,7 @@ surface, so "no routable guest NIC" is a property of the type, not a habit.
   `substitution-endpoint.sock`), the broker (`RealBrokerRegistrar`, claims
   12/13), the shared kernel cmdline, and the admission gates (overlay contract +
   runtime_meta) lifted so every driver behind it inherits them.
-- Drivers: `HvfDriver`, `LibkrunDriver`. `FcDriver` is the gap.
+- Drivers: `HvfDriver`, `LibkrunDriver`, and `FcDriver`.
 
 ## Done
 
@@ -35,7 +36,7 @@ surface, so "no routable guest NIC" is a property of the type, not a habit.
     routable NIC (`SIOCGIFFLAGS eth0: No such device`), egress endpoint spawned
     with the guest egress port pinned to `substitution-endpoint.sock` (not the
     derived path), and default-deny blocks a guest outbound fetch.
-- **HVF** already routes via `HvfDriver` (opt-in runner selector).
+- **HVF** routes via `HvfDriver`.
 - Runner enrichment landed ahead of the flip: backend-metadata dispatch, shared
   cmdline, broker/claims-12/13 lift, user volumes.
 
@@ -61,13 +62,13 @@ surface, so "no routable guest NIC" is a property of the type, not a habit.
   is false and it never takes the verity branch. No fix warranted — the buggy
   branch is removed with raw `start` in F4.
 
-- [ ] **F3 — `FcDriver`.** Converge Firecracker onto the runner, same pattern as
+- [x] **F3 — `FcDriver`.** Converge Firecracker onto the runner, same pattern as
   `LibkrunDriver`: a `VmmSpec` → Firecracker driver, no guest NIC, egress via
   the endpoint. Retype `AnyBackend::Firecracker`. Reuse the vsock transport +
   no-NIC/token cmdline work already validated for the Firecracker Model-B egress
   path. Larger piece — suited to parallel subagents.
 
-- [ ] **F4 — `check-uniform-vsock-egress` gate.** xtask lint asserting every
+- [x] **F4 — `check-uniform-vsock-egress` gate.** xtask lint asserting every
   workload backend IS a `WorkloadRunner<_, RealEndpointSpawner, _>` and no
   egress wiring exists outside `RealEndpointSpawner` (the gate is the claim; it
   fails until convergence completes). Land it green once F3 is in; add
@@ -75,10 +76,25 @@ surface, so "no routable guest NIC" is a property of the type, not a habit.
   wiring (libkrun `spawn_libkrun_egress_endpoint`, FC `egress_bridge`) and the
   raw `start` paths once nothing else calls them.
 
-- [ ] **F5 — WS-NET endgame.** Once Firecracker egresses through the endpoint
+- [x] **F5 — WS-NET endgame.** Once Firecracker egresses through the endpoint
   (Model B), delete the smoltcp-L3 stack (guest-netd + network-tunnel worker),
   and make HVF fail closed on the endpoint. This removes the second egress model
   entirely — one path off the guest, machine-checked by F4.
+
+## Tracked follow-ups
+
+- **NIC-less OCI loopback / forward-proxy gap:** `mvm-oci-init` currently brings
+  up guest `lo` only when `mvm.vsock_egress=1`. A default-deny OCI boot can
+  therefore leave `127.0.0.1:18080` unavailable to the substitution forward
+  proxy. Make OCI init bring up loopback unconditionally; this is backend-
+  agnostic and outside F5.2.
+- **F4.2 raw libkrun cleanup:** migrate `bench_probe` off raw
+  `LibkrunBackend::start`, then delete that raw entry point and
+  `spawn_libkrun_egress_endpoint_if_needed`.
+
+The F5.2 light default-deny witness passed on 2026-07-24 UTC for local HVF
+and native-KVM Firecracker/libkrun. Each guest exposed only `lo`, failed DNS
+resolution for `example.com`, and printed `EXIT=1`.
 
 ## Validation
 

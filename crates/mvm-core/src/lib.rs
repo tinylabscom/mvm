@@ -25,7 +25,7 @@ pub mod egress_handler;
 /// guest.
 pub mod egress_substitution;
 pub mod exit_capture;
-/// Guest `mvm-netd` helpers (proxy env-var injection for cooperative apps).
+/// Shared guest loopback-egress helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;
 /// Pure health-state reducer: fold probe results into a health state and
 /// decide restart/give-up actions. No I/O.

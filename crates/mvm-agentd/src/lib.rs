@@ -42,8 +42,6 @@ pub mod genid;
 /// Shared in-guest network bring-up (eth0 up + DHCP + static fallback), used by
 /// both the builder VM init and the workload guest netinit.
 pub mod guest_net;
-/// Guest-side `/dev/net/tun` helper for the shared packet-tunnel data plane.
-pub mod guest_tun;
 /// Shared in-guest vsock session helper for the addon/egress helper bins.
 #[cfg(feature = "addons")]
 mod guest_vsock_session;
@@ -65,8 +63,6 @@ pub mod lifecycle_hooks;
 /// `RawNetlinkInstaller` (a synchronous `AF_NETLINK` socket via libc)
 /// is Linux-only and gated inside the module.
 pub mod netinit;
-/// Guest-side blocking session helper for the shared vsock/UDS packet tunnel.
-pub mod network_tunnel;
 pub mod probes;
 /// In-guest entrypoint runtime for function-call workloads. The
 /// `mvm-runner` binary (`src/bin/mvm-runner.rs`) is the thin entry over

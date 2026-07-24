@@ -111,7 +111,8 @@ Snapshot graph (flat, content-addressed):
 
 ### Egress model
 
-- The generic L3 tunnel and typed connectors from WS-NET remain unchanged.
+- The uniform vsock endpoint seam and typed connectors remain unchanged; the
+  former generic L3 tunnel was deleted as a dead second egress model.
 - The typed-connector policy DTOs in `mvm-protocol` gain:
   - `scheme`: `http` | `https`;
   - `host` / `sni`: exact or `*.example.com` subdomain;

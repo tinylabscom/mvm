@@ -140,12 +140,6 @@ tracing-subscriber.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
-# Userspace TCP/IP egress: terminate guest tunnel flows in an in-process stack
-# and bridge each admitted flow to an ordinary host socket. One forwarder on
-# every host — no unprivileged kernel NAT required anywhere. Optional + behind
-# `packet-forwarder` so consumers that only spawn the worker bin (the CLI) do
-# not link the stack.
-smoltcp = { workspace = true, optional = true }
 
 # mvm-jailer-lite confinement: seccomp + landlock are Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -171,13 +165,8 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"
 ctor = "0.2"
 
 [features]
-default = ["packet-forwarder"]
+default = []
 custom-dns = ["dep:hickory-resolver"]
-# The in-process userspace egress forwarder (smoltcp) that the
-# mvm-network-tunnel-worker bin runs. Default-on so the worker builds in a
-# normal workspace build; a consumer that only spawns the worker (mvm-cli) sets
-# default-features = false to keep the stack out of its closure.
-packet-forwarder = ["dep:smoltcp"]
 # Enable the wasm-container backend in the depended-on runtime crate, so the
 # data-governance witness (tests/wasm_egress_witness.rs) can drive a real
 # WasmBackend through this crate's real SubstitutionService/audit chain. Test-only

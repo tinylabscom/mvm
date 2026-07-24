@@ -46,7 +46,6 @@ pub struct GuestAgentLayout {
     pub oci_init: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
-    pub netd: PathBuf,
     pub egress_client: PathBuf,
     pub entrypoint_runner: PathBuf,
     pub verity_init: PathBuf,
@@ -58,7 +57,6 @@ pub struct GuestRuntimeBinaryPaths<'a> {
     pub oci_init: &'a Path,
     pub agent: &'a Path,
     pub netinit: &'a Path,
-    pub netd: &'a Path,
     pub egress_client: &'a Path,
     pub entrypoint_runner: &'a Path,
     pub verity_init: &'a Path,
@@ -70,7 +68,6 @@ pub struct GuestRuntimeBinaryBytes<'a> {
     pub oci_init: &'a [u8],
     pub agent: &'a [u8],
     pub netinit: &'a [u8],
-    pub netd: &'a [u8],
     pub egress_client: &'a [u8],
     pub entrypoint_runner: &'a [u8],
     pub verity_init: &'a [u8],
@@ -99,7 +96,6 @@ impl GuestAgentLayout {
             oci_init: dir.join("mvm-oci-init"),
             agent: dir.join("mvm-guest-agent"),
             netinit: dir.join("mvm-guest-netinit"),
-            netd: dir.join("mvm-guest-netd"),
             egress_client: dir.join("mvm-egress-client"),
             entrypoint_runner: dir.join("mvm-oci-entrypoint"),
             verity_init: dir.join("mvm-verity-init"),
@@ -111,7 +107,6 @@ impl GuestAgentLayout {
         self.oci_init.is_file()
             && self.agent.is_file()
             && self.netinit.is_file()
-            && self.netd.is_file()
             && self.egress_client.is_file()
             && self.entrypoint_runner.is_file()
             && self.verity_init.is_file()
@@ -122,7 +117,6 @@ impl GuestAgentLayout {
             oci_init: self.oci_init.clone(),
             agent: self.agent.clone(),
             netinit: self.netinit.clone(),
-            netd: self.netd.clone(),
             egress_client: self.egress_client.clone(),
             entrypoint_runner: self.entrypoint_runner.clone(),
             verity_init: self.verity_init.clone(),
@@ -136,7 +130,6 @@ pub struct RuntimeOverlayGuestBinaries {
     pub agent: PathBuf,
     pub agent_interactive: PathBuf,
     pub netinit: PathBuf,
-    pub netd: PathBuf,
     pub seccomp_apply: PathBuf,
     pub verity_init: PathBuf,
     pub runner: PathBuf,
@@ -151,7 +144,6 @@ pub struct RuntimeOverlayGuestLayout {
     pub agent: PathBuf,
     pub agent_interactive: PathBuf,
     pub netinit: PathBuf,
-    pub netd: PathBuf,
     pub seccomp_apply: PathBuf,
     pub verity_init: PathBuf,
     pub runner: PathBuf,
@@ -171,7 +163,6 @@ impl RuntimeOverlayGuestLayout {
             agent: dir.join("agent"),
             agent_interactive: dir.join("agent-interactive"),
             netinit: dir.join("netinit"),
-            netd: dir.join("netd"),
             seccomp_apply: dir.join("seccomp-apply"),
             verity_init: dir.join("verity-init"),
             runner: dir.join("runner"),
@@ -186,7 +177,6 @@ impl RuntimeOverlayGuestLayout {
         self.agent.is_file()
             && self.agent_interactive.is_file()
             && self.netinit.is_file()
-            && self.netd.is_file()
             && self.seccomp_apply.is_file()
             && self.verity_init.is_file()
             && self.runner.is_file()
@@ -200,7 +190,6 @@ impl RuntimeOverlayGuestLayout {
             agent: self.agent.clone(),
             agent_interactive: self.agent_interactive.clone(),
             netinit: self.netinit.clone(),
-            netd: self.netd.clone(),
             seccomp_apply: self.seccomp_apply.clone(),
             verity_init: self.verity_init.clone(),
             runner: self.runner.clone(),
@@ -273,8 +262,6 @@ impl GuestAgentBuildSpec {
             "mvm-guest-agent".to_string(),
             "--bin".to_string(),
             "mvm-guest-netinit".to_string(),
-            "--bin".to_string(),
-            "mvm-guest-netd".to_string(),
             "--bin".to_string(),
             "mvm-oci-init".to_string(),
             "--bin".to_string(),
@@ -431,10 +418,9 @@ pub fn resolve_or_build_guest_binaries(
             oci_init: &built.0,
             agent: &built.1,
             netinit: &built.2,
-            netd: &built.3,
-            egress_client: &built.4,
-            entrypoint_runner: &built.5,
-            verity_init: &built.6,
+            egress_client: &built.3,
+            entrypoint_runner: &built.4,
+            verity_init: &built.5,
         },
         cache_root,
         cache_key,
@@ -456,7 +442,6 @@ pub fn install_into_cache(
     install_one(src.oci_init, &layout.oci_init)?;
     install_one(src.agent, &layout.agent)?;
     install_one(src.netinit, &layout.netinit)?;
-    install_one(src.netd, &layout.netd)?;
     install_one(src.egress_client, &layout.egress_client)?;
     install_one(src.entrypoint_runner, &layout.entrypoint_runner)?;
     install_one(src.verity_init, &layout.verity_init)?;
@@ -557,7 +542,6 @@ pub fn install_prebuilt_guest_binaries(
     write_exec(&layout.oci_init, bytes.oci_init)?;
     write_exec(&layout.agent, bytes.agent)?;
     write_exec(&layout.netinit, bytes.netinit)?;
-    write_exec(&layout.netd, bytes.netd)?;
     write_exec(&layout.egress_client, bytes.egress_client)?;
     write_exec(&layout.entrypoint_runner, bytes.entrypoint_runner)?;
     write_exec(&layout.verity_init, bytes.verity_init)?;
@@ -591,8 +575,6 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--bin".to_string(),
         "mvm-guest-netinit".to_string(),
         "--bin".to_string(),
-        "mvm-guest-netd".to_string(),
-        "--bin".to_string(),
         "mvm-seccomp-apply".to_string(),
         "--bin".to_string(),
         "mvm-verity-init".to_string(),
@@ -614,7 +596,6 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     let output_dir = spec.output_dir();
     install_one(&output_dir.join("mvm-guest-agent"), &layout.agent)?;
     install_one(&output_dir.join("mvm-guest-netinit"), &layout.netinit)?;
-    install_one(&output_dir.join("mvm-guest-netd"), &layout.netd)?;
     install_one(&output_dir.join("mvm-seccomp-apply"), &layout.seccomp_apply)?;
     install_one(&output_dir.join("mvm-verity-init"), &layout.verity_init)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
@@ -691,17 +672,9 @@ fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
     Ok(())
 }
 
-/// The seven built guest binary paths, in the order `oci_init, agent, netinit,
-/// netd, egress_client, entrypoint_runner, verity_init`.
-type BuiltGuestBinaries = (
-    PathBuf,
-    PathBuf,
-    PathBuf,
-    PathBuf,
-    PathBuf,
-    PathBuf,
-    PathBuf,
-);
+/// The six built guest binary paths, in the order `oci_init, agent, netinit,
+/// egress_client, entrypoint_runner, verity_init`.
+type BuiltGuestBinaries = (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf);
 
 /// Run `cargo zigbuild` for the spec, returning the built binary paths.
 pub fn build_guest_binaries(
@@ -736,7 +709,6 @@ pub fn build_guest_binaries(
     let oci_init = dir.join("mvm-oci-init");
     let agent = dir.join("mvm-guest-agent");
     let netinit = dir.join("mvm-guest-netinit");
-    let netd = dir.join("mvm-guest-netd");
     let egress_client = dir.join("mvm-egress-client");
     let entrypoint_runner = dir.join("mvm-oci-entrypoint");
     let verity_init = dir.join("mvm-verity-init");
@@ -744,7 +716,6 @@ pub fn build_guest_binaries(
         &oci_init,
         &agent,
         &netinit,
-        &netd,
         &egress_client,
         &entrypoint_runner,
         &verity_init,
@@ -757,7 +728,6 @@ pub fn build_guest_binaries(
         oci_init,
         agent,
         netinit,
-        netd,
         egress_client,
         entrypoint_runner,
         verity_init,
@@ -904,7 +874,6 @@ mod tests {
                 oci_init: b"x",
                 agent: b"x",
                 netinit: b"x",
-                netd: b"x",
                 egress_client: b"x",
                 entrypoint_runner: b"x",
                 verity_init: b"x",
@@ -934,7 +903,6 @@ mod tests {
                 oci_init: b"fake-oci-init-elf",
                 agent: b"fake-agent-elf",
                 netinit: b"fake-netinit-elf",
-                netd: b"fake-netd-elf",
                 egress_client: b"fake-egress-client-elf",
                 entrypoint_runner: b"fake-entrypoint-runner-elf",
                 verity_init: b"fake-verity-init-elf",
@@ -946,7 +914,6 @@ mod tests {
         .expect("install prebuilt");
         assert!(bins.agent.is_file());
         assert!(bins.netinit.is_file());
-        assert!(bins.netd.is_file());
         assert!(bins.egress_client.is_file());
         let layout = GuestAgentLayout::under(cache.path(), version, arch);
         assert!(layout.oci_init.is_file());
@@ -1006,14 +973,13 @@ mod tests {
         assert_eq!(l.oci_init, l.dir.join("mvm-oci-init"));
         assert_eq!(l.agent, l.dir.join("mvm-guest-agent"));
         assert_eq!(l.netinit, l.dir.join("mvm-guest-netinit"));
-        assert_eq!(l.netd, l.dir.join("mvm-guest-netd"));
         assert_eq!(l.egress_client, l.dir.join("mvm-egress-client"));
         assert_eq!(l.entrypoint_runner, l.dir.join("mvm-oci-entrypoint"));
         assert_eq!(l.verity_init, l.dir.join("mvm-verity-init"));
     }
 
     #[test]
-    fn build_argv_targets_musl_with_interactive_and_both_bins() {
+    fn build_argv_targets_musl_with_interactive_and_guest_bins() {
         let spec = GuestAgentBuildSpec::new(
             PathBuf::from("/ws"),
             GuestArch::Aarch64,
@@ -1023,13 +989,21 @@ mod tests {
         assert_eq!(argv[0], "cargo");
         assert_eq!(argv[1], "zigbuild");
         assert!(argv.contains(&"aarch64-unknown-linux-musl".to_string()));
-        assert!(argv.contains(&"mvm-guest-agent".to_string()));
-        assert!(argv.contains(&"mvm-guest-netinit".to_string()));
-        assert!(argv.contains(&"mvm-guest-netd".to_string()));
-        assert!(argv.contains(&"mvm-oci-init".to_string()));
-        assert!(argv.contains(&"mvm-oci-entrypoint".to_string()));
-        assert!(argv.contains(&"mvm-verity-init".to_string()));
-        assert!(argv.contains(&"mvm-egress-client".to_string()));
+        let binaries: Vec<&str> = argv
+            .windows(2)
+            .filter_map(|pair| (pair[0] == "--bin").then_some(pair[1].as_str()))
+            .collect();
+        assert_eq!(
+            binaries,
+            vec![
+                "mvm-guest-agent",
+                "mvm-guest-netinit",
+                "mvm-oci-init",
+                "mvm-oci-entrypoint",
+                "mvm-verity-init",
+                "mvm-egress-client",
+            ]
+        );
         assert!(argv.contains(&"mvm-agentd".to_string()));
         assert!(argv.contains(&"mvm-agentd/interactive".to_string()));
     }
@@ -1118,14 +1092,12 @@ mod tests {
         let oci_init_src = tmp.path().join("i");
         let agent_src = tmp.path().join("a");
         let netinit_src = tmp.path().join("n");
-        let netd_src = tmp.path().join("d");
         let egress_client_src = tmp.path().join("e");
         let entrypoint_runner_src = tmp.path().join("r");
         let verity_init_src = tmp.path().join("v");
         std::fs::write(&oci_init_src, b"INIT").unwrap();
         std::fs::write(&agent_src, b"AGENT").unwrap();
         std::fs::write(&netinit_src, b"NETINIT").unwrap();
-        std::fs::write(&netd_src, b"NETD").unwrap();
         std::fs::write(&egress_client_src, b"EGRESS").unwrap();
         std::fs::write(&entrypoint_runner_src, b"RUNNER").unwrap();
         std::fs::write(&verity_init_src, b"VERITY").unwrap();
@@ -1136,7 +1108,6 @@ mod tests {
                 oci_init: &oci_init_src,
                 agent: &agent_src,
                 netinit: &netinit_src,
-                netd: &netd_src,
                 egress_client: &egress_client_src,
                 entrypoint_runner: &entrypoint_runner_src,
                 verity_init: &verity_init_src,
@@ -1147,7 +1118,6 @@ mod tests {
         )
         .expect("install");
         assert_eq!(std::fs::read(&installed.agent).unwrap(), b"AGENT");
-        assert_eq!(std::fs::read(&installed.netd).unwrap(), b"NETD");
         assert_eq!(std::fs::read(&installed.egress_client).unwrap(), b"EGRESS");
         let layout = GuestAgentLayout::under(&cache, version, GuestArch::Aarch64);
         assert_eq!(std::fs::read(&layout.oci_init).unwrap(), b"INIT");
@@ -1174,7 +1144,6 @@ mod tests {
                 oci_init: &tmp.path().join("missing-oci-init"),
                 agent: &tmp.path().join("missing-agent"),
                 netinit: &tmp.path().join("missing-netinit"),
-                netd: &tmp.path().join("missing-netd"),
                 egress_client: &tmp.path().join("missing-egress-client"),
                 entrypoint_runner: &tmp.path().join("missing-entrypoint-runner"),
                 verity_init: &tmp.path().join("missing-verity-init"),
@@ -1278,7 +1247,6 @@ mod tests {
                 oci_init: b"STALE",
                 agent: b"STALE",
                 netinit: b"STALE",
-                netd: b"STALE",
                 egress_client: b"STALE",
                 entrypoint_runner: b"STALE",
                 verity_init: b"STALE",
@@ -1325,7 +1293,6 @@ mod tests {
             layout.dir.join("agent-interactive")
         );
         assert_eq!(layout.netinit, layout.dir.join("netinit"));
-        assert_eq!(layout.netd, layout.dir.join("netd"));
         assert_eq!(layout.seccomp_apply, layout.dir.join("seccomp-apply"));
         assert_eq!(layout.runner, layout.dir.join("runner"));
         assert_eq!(layout.egress_client, layout.dir.join("egress-client"));

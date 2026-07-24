@@ -60,8 +60,6 @@ pub struct ArtifactDigests {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mvm_init: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mvm_netd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_base: Option<String>,
 }
 

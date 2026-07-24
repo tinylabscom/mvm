@@ -42,15 +42,3 @@ path = "fuzz_targets/fuzz_packet_parse.rs"
 test = false
 doc = false
 bench = false
-
-# Fuzz the raw-L3 egress gate's guest-packet parser + decision.
-# `parse_ipv4_dst_and_l4` is the first parse on the vsock-tunnel egress path
-# (untrusted guest bytes, claim 5); `decide_packet` runs the full gate
-# decision over the admission allow-set. Harness goal: never panic on any
-# input; the parser fails closed to `None` on garbage.
-[[bin]]
-name = "fuzz_l3_gate"
-path = "fuzz_targets/fuzz_l3_gate.rs"
-test = false
-doc = false
-bench = false

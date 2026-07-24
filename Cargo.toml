@@ -269,11 +269,6 @@ ipnet = { version = "2", features = ["serde"] }
 # deps, fuzzed upstream. Lands on the untrusted-guest-bytes path (claim 5),
 # so a mature parser beats a hand-rolled one.
 etherparse = "0.20"
-# Userspace TCP/IP stack. macOS has no unprivileged kernel NAT, so the host
-# terminates guest tunnel flows in this in-process stack and bridges each
-# admitted flow to an ordinary host socket. Pure-Rust, no_std/heapless,
-# upstream-fuzzed; std + IPv4 + TCP only. Consumed only under cfg(macos).
-smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-udp"] }
 # Plan 74 W2 — mvm-guest-netinit installs kernel blackhole routes
 # for `MANDATORY_DENY_RANGES` inside every microVM. rtnetlink wraps
 # the AF_NETLINK socket and the RTM_NEWROUTE message construction;
@@ -347,9 +342,6 @@ mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-feature
 mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
 mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
-# default-features = false drops `packet-forwarder` (the smoltcp egress stack) for
-# library consumers — only the mvm-network-tunnel-worker bin (mvm-hostd's own
-# target) needs it, so it stays out of every consumer's closure (notably mvmctl).
 mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.0", default-features = false }
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.

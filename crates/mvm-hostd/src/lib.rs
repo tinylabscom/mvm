@@ -47,12 +47,6 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
-/// Raw-L3 egress decision gate for the host-forwarded packet tunnel: parse a
-/// guest IPv4 packet and decide allow/drop against the admitted policy + DNS
-/// pins. Decision-only today; forwarding lands in a later slice.
-pub mod net_l3;
-/// Host-side session validation helpers for the shared network tunnel contract.
-pub mod network_tunnel;
 /// Child-side parent-death watchdog: each subprocess-moat bin exits the
 /// instant its supervisor dies, closing the macOS / abnormal-death gap the
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.
@@ -62,9 +56,4 @@ pub mod plan_admission;
 /// `start_enter`) so the rejection ladder is unit-testable.
 pub mod prelaunch;
 pub mod run;
-/// Userspace TCP/IP egress for the packet tunnel: terminate admitted guest
-/// flows in an in-process `smoltcp` stack and bridge each to an ordinary host
-/// socket. One forwarder on every host — no unprivileged kernel NAT required.
-#[cfg(all(unix, feature = "packet-forwarder"))]
-pub mod smoltcp_egress;
 pub mod supervisor;

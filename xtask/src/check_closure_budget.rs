@@ -31,10 +31,9 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// larger audited default closure. Lower it freely as deps drop; raising it
 /// must be justified in the change that does.
 ///
-/// 270 (was 271): the userspace egress forwarder (smoltcp) is scoped behind the
-/// mvm-hostd `packet-forwarder` feature that the CLI does not link, and retiring
-/// the host-TUN + kernel-NAT path net-dropped one crate from the default closure.
-const CLOSURE_BUDGET: usize = 270;
+/// 263 (was 270): deleting the obsolete L3 egress stack removed seven crates
+/// from the default closure.
+const CLOSURE_BUDGET: usize = 263;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

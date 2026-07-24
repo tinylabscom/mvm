@@ -47,10 +47,6 @@ use std::time::{Duration, Instant, SystemTime};
 /// libkrun backend (Linux KVM / macOS Hypervisor.framework).
 pub struct LibkrunBackend;
 
-use crate::network_tunnel_spawn::{
-    NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
-    spawn_network_tunnel_worker_if_configured,
-};
 use crate::substitution_spawn::EndpointGuard;
 
 /// Spawn the per-VM egress endpoint for libkrun workloads. Secret-bound runs
@@ -110,23 +106,6 @@ fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Optio
     (config.network_policy.allows_egress()
         && !crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
     .then(|| "mvm.vsock_egress=1".to_string())
-}
-
-fn validate_libkrun_network_policy(
-    policy: &mvm_core::network_policy::NetworkPolicy,
-    has_tunnel: bool,
-) -> Result<()> {
-    // Egress is served by the userspace L3 tunnel (a bounded allow-list). Deny-all
-    // needs no tunnel; a bounded allow-list gets one. The only unserved case is
-    // unrestricted allow-all, which has no finite gate to hand the forwarder.
-    if !policy.allows_egress() || has_tunnel {
-        return Ok(());
-    }
-    bail!(
-        "libkrun serves outbound egress only through the bounded userspace L3 tunnel (an explicit \
-         allow-list); unrestricted allow-all egress has no finite gate on this backend. \
-         Name destinations with --allow-host, boot deny-all networking, or choose another backend"
-    );
 }
 
 /// How long [`LibkrunBackend::start`] waits for the supervisor to
@@ -434,15 +413,6 @@ fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    // The userspace L3 egress tunnel: tell the guest (via mvm-guest-netinit →
-    // mvm-guest-netd) to stand up its TUN and pump packets to the host worker
-    // over vsock. Present only for an admitted allow-list run.
-    if let Some(tunnel) = config.network_tunnel.as_ref()
-        && let Some(token) = mvm_core::vm_backend::encode_network_tunnel_cmdline(tunnel)
-    {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
     cmdline
 }
 
@@ -524,9 +494,9 @@ fn attach_user_volumes(mut krun: KrunContext, config: &VmStartConfig) -> Result<
 }
 
 /// Assemble the per-workload [`KrunContext`]: the workload-independent base
-/// (kernel + resources + vsock + gateway), shared verbatim with the standby
+/// (kernel + resources + vsock + endpoint), shared verbatim with the standby
 /// spawn so the two paths can't drift, plus the cold-path additions —
-/// console capture, the tunnel host-listen port, the workload rootfs, the
+/// console capture, the workload rootfs, the
 /// dev-console data ports, and any user-supplied volumes.
 fn build_workload_krun_context(
     config: &VmStartConfig,
@@ -547,14 +517,6 @@ fn build_workload_krun_context(
     krun = krun
         .with_kernel_format(kernel_format)
         .with_console_output(vm_console_log(&config.name).display().to_string());
-    // A tunnel run adds the guest→worker vsock port: libkrun proxies the guest's
-    // connect to the UDS the tunnel worker bound (before start_enter) at
-    // `<state_dir>/vsock-<port>.sock`. Conditional so non-tunnel launches and the
-    // warm-standby base don't register an inert port.
-    if config.network_tunnel.is_some() {
-        krun = krun
-            .add_host_listen_port(mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT);
-    }
     krun = attach_workload_rootfs(krun, config);
 
     // A dev-accessible managed machine (`machine run -t` / `machine shell` /
@@ -882,7 +844,6 @@ impl VmBackend for LibkrunBackend {
                 libkrun_sys::install_hint()
             );
         }
-        validate_libkrun_network_policy(&config.network_policy, config.network_tunnel.is_some())?;
         ensure_libkrun_runtime_source_supported(config)?;
 
         // Early kernel-path check. `build_supervisor_config`
@@ -925,18 +886,6 @@ impl VmBackend for LibkrunBackend {
             config.tenant_id.as_deref().unwrap_or("local"),
             &config.network_policy,
         )?;
-        let mut tunnel_guard =
-            spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
-                state_dir: &state_dir,
-                runtime_config: config.network_tunnel.as_ref(),
-                listener: config.network_tunnel.as_ref().map(|tunnel| {
-                    NetworkTunnelListener::Uds(mvm_core::config::vm_vsock_port_socket_at(
-                        &state_dir,
-                        tunnel.guest_port,
-                    ))
-                }),
-                network_policy: Some(&config.network_policy),
-            })?;
         let pid_file = cfg.pid_file();
         // Remove any stale PID file from a previous crashed supervisor
         // so the wait-loop below can detect the new one unambiguously.
@@ -1089,7 +1038,6 @@ impl VmBackend for LibkrunBackend {
             pid_file.display()
         ));
         endpoint_guard.defuse();
-        tunnel_guard.defuse();
         broker_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
@@ -1100,7 +1048,6 @@ impl VmBackend for LibkrunBackend {
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
-        reap_network_tunnel_worker(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer too (no-op when none spawned),
         // so they can't outlive the guest.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
@@ -1305,11 +1252,6 @@ impl VmBackend for LibkrunBackend {
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<VmId, StandbyError> {
-        // A warm standby was booted without a tunnel; an egress run forces cold
-        // boot (`use_snapshot = false` when a tunnel is configured) so it never
-        // lands here, and a stray egress claim fails closed → fails open to cold.
-        validate_libkrun_network_policy(&claim.network_policy, false)
-            .map_err(|e| StandbyError::ClaimFailed(e.to_string()))?;
         let attach = standby_attach_config(claim, handle.binding_nonce.clone())?;
         let mut stream = UnixStream::connect(&handle.control_socket).map_err(|e| {
             StandbyError::ClaimFailed(format!(
@@ -2353,74 +2295,5 @@ mod tests {
             cmdline.contains("mvm.host_signer_pub="),
             "host_signer_pub trust anchor missing: {cmdline}"
         );
-    }
-
-    #[test]
-    fn validate_libkrun_network_policy_accepts_deny_all() {
-        validate_libkrun_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::deny_all(),
-            false,
-        )
-        .expect("deny-all must remain valid for libkrun");
-    }
-
-    #[test]
-    fn validate_libkrun_network_policy_refuses_egress_without_a_tunnel() {
-        let err = validate_libkrun_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::preset(
-                mvm_core::network_policy::NetworkPreset::Dev,
-            ),
-            false,
-        )
-        .expect_err("libkrun outbound egress with no tunnel must fail closed");
-        assert!(
-            err.to_string().contains("bounded userspace L3 tunnel"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    fn validate_libkrun_network_policy_accepts_egress_served_by_a_tunnel() {
-        // An admitted allow-list run gets a network tunnel; egress is then served
-        // by the userspace L3 forwarder, so validation must pass.
-        validate_libkrun_network_policy(
-            &mvm_core::network_policy::NetworkPolicy::preset(
-                mvm_core::network_policy::NetworkPreset::Dev,
-            ),
-            true,
-        )
-        .expect("egress served by a tunnel must be accepted");
-    }
-
-    #[test]
-    fn libkrun_claim_standby_refuses_outbound_egress() {
-        let handle = StandbyHandle {
-            id: "standby-x".into(),
-            control_socket: "/tmp/does-not-matter.sock".to_string(),
-            pid: 1,
-            kernel_sha256: "a".repeat(64),
-            vcpus: 2,
-            mem_mib: 1024,
-            binding_nonce: "ab".repeat(32),
-            spawned_unix_secs: 0,
-            state: StandbyState::Idle,
-            image_sha256: None,
-        };
-        let mut claim = sample_standby_claim();
-        claim.network_policy = mvm_core::network_policy::NetworkPolicy::preset(
-            mvm_core::network_policy::NetworkPreset::Dev,
-        );
-        let err = LibkrunBackend
-            .claim_standby(&handle, &claim)
-            .expect_err("egress-enabled standby claim must fail closed");
-        match err {
-            StandbyError::ClaimFailed(msg) => {
-                assert!(
-                    msg.contains("bounded userspace L3 tunnel"),
-                    "unexpected error: {msg}"
-                );
-            }
-            other => panic!("expected ClaimFailed, got {other:?}"),
-        }
     }
 }

@@ -439,19 +439,6 @@ jobs:
         # path, not a panic).
         run: cargo fuzz run fuzz_packet_parse -- -max_total_time="$DURATION"
 
-      - name: Fuzz raw-L3 egress gate packet parse (host-side)
-        working-directory: crates/mvm-hostd
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # The raw-L3 egress gate parses every guest IPv4 packet before any
-        # host forwarding decision — the first parse on the vsock-tunnel
-        # egress path, on attacker-influenced bytes (claim 5). "Never panic on
-        # any input": the parser fails closed to None on malformed/short/
-        # non-IPv4 bytes, and the gate decision never panics for any accepted
-        # or rejected packet.
-        run: cargo fuzz run fuzz_l3_gate -- -max_total_time="$DURATION"
-
       - name: Fuzz runtime recording (SDK trace)
         working-directory: crates/mvm-sdk
         env:

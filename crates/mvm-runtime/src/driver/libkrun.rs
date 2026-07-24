@@ -150,7 +150,7 @@ fn relay_libkrun_supervisor_config(spec: &VmmSpec, state_dir: &Path) -> Result<S
 
     // Wire every standing vsock port by direction: the host dials the guest's
     // listeners (agent + dev-console data ports), and the guest dials the
-    // host-bound listeners (egress + exit + broker + tunnel). libkrun derives
+    // host-bound listeners (egress + exit + broker). libkrun derives
     // each unix socket from vsock_socket_dir, so the spec's host_uds is not
     // re-bound here.
     for port in &spec.vsock {

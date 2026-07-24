@@ -21,10 +21,6 @@ use mvm_core::vm_backend::{
 
 use crate::driver::{RunningVm, VmmDriver};
 use crate::egress_shared::decode_plan_secrets_from_state;
-use crate::network_tunnel_spawn::{
-    NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
-    spawn_network_tunnel_worker_if_configured,
-};
 use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
     spawn_substitution_endpoint,
@@ -33,7 +29,7 @@ use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_no_dir_share_volumes,
-    network_tunnel_socket, workload_spec,
+    workload_spec,
 };
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
@@ -198,7 +194,6 @@ struct StandingSockets {
     /// broker channel at all. The one path threaded into both the spec and the
     /// `BrokerRegistrar::register` call so the relay target and bind path match.
     broker: Option<PathBuf>,
-    network_tunnel: Option<(u32, PathBuf)>,
     console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
@@ -217,7 +212,6 @@ fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets
             .tenant_id
             .is_some()
             .then(|| mvm_core::config::vm_vsock_port_socket_at(state_dir, BROKER_PORT)),
-        network_tunnel: network_tunnel_socket(state_dir, config),
         console_log: state_dir.join("console.log"),
         console_data: console_data_sockets(state_dir, config.dev_console),
     }
@@ -244,7 +238,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     /// ALWAYS spawned — it is the sole egress gate now, even for the no-secret
     /// raw path.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
-        // Fail closed before any side effect (endpoint/tunnel spawn) runs: a
+        // Fail closed before any side effect (endpoint spawn) runs: a
         // `DirShare` volume has no `VmmSpec` representation on this driver
         // seam, so refuse it here rather than silently dropping it later in
         // `workload_blocks`.
@@ -257,19 +251,6 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // A secret-free workload speaks raw TCP; a secret-bearing one speaks the
         // WireRequest substitution protocol so the real secret never enters the guest.
         let raw_egress = inputs.secrets.is_empty();
-        let mut tunnel_guard =
-            spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
-                state_dir: &state_dir,
-                runtime_config: inputs.config.network_tunnel.as_ref(),
-                listener: inputs.config.network_tunnel.as_ref().map(|tunnel| {
-                    NetworkTunnelListener::Uds(mvm_core::config::vm_vsock_port_socket_at(
-                        &state_dir,
-                        tunnel.guest_port,
-                    ))
-                }),
-                network_policy: Some(&inputs.config.network_policy),
-            })?;
-
         let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {
             vm_name: &inputs.config.name,
             state_dir: &state_dir,
@@ -288,7 +269,6 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
                 egress_gateway: &egress_uds,
                 exit: &socks.exit,
                 broker: socks.broker.as_deref(),
-                network_tunnel: socks.network_tunnel,
                 console_data: socks.console_data,
             },
             cmdline: inputs.cmdline.clone(),
@@ -296,7 +276,6 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         });
 
         let vm = self.driver.boot(&spec)?;
-        tunnel_guard.defuse();
 
         // Register the per-VM host-services broker (host.audit.v1 /
         // host.secrets.v1) for an admitted workload — the same registration the
@@ -414,7 +393,6 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // decrypted-secret process can't outlive the guest. Idempotent + a no-op
         // when the VM spawned none.
         reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
-        reap_network_tunnel_worker(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer (fork path) and deregister from
         // the per-tenant host-agent daemon (daemon path), so neither can outlive
         // the guest. Each is an idempotent no-op for the other path and for a VM

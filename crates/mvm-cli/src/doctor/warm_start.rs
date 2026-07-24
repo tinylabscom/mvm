@@ -15,8 +15,8 @@ pub(super) struct WarmStartReport {
     /// `BTreeMap` for deterministic JSON ordering, like `balloon_support`.
     backends: BTreeMap<String, &'static str>,
     /// The Linux-only fast-resume substrate (NBD module, HugeTLB reservation).
-    /// `null` off Linux — the substrate backs Firecracker's live-memory path,
-    /// which only runs on KVM; macOS reports per-backend tiers but N/A here.
+    /// `null` off Linux — the substrate backs the KVM Firecracker fast-resume
+    /// path; macOS reports per-backend tiers but N/A here.
     substrate: Option<WarmStartSubstrate>,
     /// Backend name → `supports_standby_pool()`. The standby pool
     /// (pre-pay spawn/codesign latency) is a *different* axis from the snapshot tier above;

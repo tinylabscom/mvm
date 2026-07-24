@@ -79,7 +79,6 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
         // The rootfs-inject helper VM runs no workload, so no host-services broker.
         broker_socket: None,
         // The rootfs-inject helper VM has no egress tunnel.
-        network_tunnel_socket: None,
         console_data_sockets: vec![],
     };
     let json = serde_json::to_string(&cfg).context("serialize inject supervisor config")?;
