@@ -29,7 +29,7 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
         "x86_64"
     };
     let fallback = format!(
-        "{}/builder-vm/{arch}/vmlinux",
+        "{}/builder-vm/{arch}/kernels/workload/vmlinux",
         mvm_core::config::mvm_cache_dir()
     );
     if std::path::Path::new(&fallback).exists() {
@@ -38,7 +38,7 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
     anyhow::bail!(
         "image has no kernel ({vmlinux_path} missing) and the {hypervisor} backend \
          needs one; the builder-VM kernel fallback at {fallback} is also absent — \
-         run `mvmctl bootstrap` once to populate it"
+         run `mvmctl kernel build --which workload` once to populate it"
     )
 }
 
@@ -171,7 +171,13 @@ mod resolve_workload_kernel_tests {
         } else {
             "x86_64"
         };
-        let fallback_dir = tmp.path().join("cache").join("builder-vm").join(arch);
+        let fallback_dir = tmp
+            .path()
+            .join("cache")
+            .join("builder-vm")
+            .join(arch)
+            .join("kernels")
+            .join("workload");
         std::fs::create_dir_all(&fallback_dir).unwrap();
         let fallback = fallback_dir.join("vmlinux");
         std::fs::write(&fallback, b"builder-kernel").unwrap();
@@ -193,7 +199,13 @@ mod resolve_workload_kernel_tests {
         } else {
             "x86_64"
         };
-        let fallback_dir = tmp.path().join("cache").join("builder-vm").join(arch);
+        let fallback_dir = tmp
+            .path()
+            .join("cache")
+            .join("builder-vm")
+            .join(arch)
+            .join("kernels")
+            .join("workload");
         std::fs::create_dir_all(&fallback_dir).unwrap();
         let fallback = fallback_dir.join("vmlinux");
         std::fs::write(&fallback, b"builder-kernel").unwrap();
@@ -210,8 +222,8 @@ mod resolve_workload_kernel_tests {
         let err = resolve_workload_kernel("/nonexistent/vmlinux", "hvf").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("mvmctl bootstrap"),
-            "expected 'mvmctl bootstrap' in: {msg}"
+            msg.contains("mvmctl kernel build --which workload"),
+            "expected 'mvmctl kernel build --which workload' in: {msg}"
         );
         assert!(msg.contains("hvf"), "expected hypervisor name in: {msg}");
     }

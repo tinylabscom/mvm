@@ -947,6 +947,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         .iter()
         .find(|b| b.name == "rootfs.ext4")
         .map(|b| b.sha256.clone());
+    let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
     let tenant = super::tenant_resolution::resolve_tenant(None);
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
@@ -970,13 +971,14 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-        agent_verb_override: vec![],
-        restrict_agent_verbs: super::agent_verbs::grant_eligible(
-            false,
-            false,
-            false,
-            super::agent_verbs::image_is_sealed(&rootfs_blob),
-        ),
+        agent_verb_override: parent_agent_verbs.clone(),
+        restrict_agent_verbs: !parent_agent_verbs.is_empty()
+            || super::agent_verbs::grant_eligible(
+                false,
+                false,
+                false,
+                super::agent_verbs::image_is_sealed(&rootfs_blob),
+            ),
     })?;
 
     let child_plan_json = admission.as_ref().map(|ctx| {
@@ -1132,6 +1134,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     use mvm_runtime::backend::AnyBackend;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
+    let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
 
     // Resource shape: flag > parent plan > global defaults.
@@ -1182,15 +1185,16 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-        agent_verb_override: vec![],
+        agent_verb_override: parent_agent_verbs.clone(),
         // A sealed baked-entrypoint child qualifies for an attenuated grant.
         // Forks never carry trailing argv and are always prod-profile.
-        restrict_agent_verbs: super::agent_verbs::grant_eligible(
-            false,
-            false,
-            false,
-            super::agent_verbs::image_is_sealed(p.instance_rootfs),
-        ),
+        restrict_agent_verbs: !parent_agent_verbs.is_empty()
+            || super::agent_verbs::grant_eligible(
+                false,
+                false,
+                false,
+                super::agent_verbs::image_is_sealed(p.instance_rootfs),
+            ),
     })?;
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig {
@@ -1213,6 +1217,8 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         &effective_hypervisor,
         parent_meta.runtime_overlay_version.as_deref(),
     )?;
+
+    populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;
 
     if let Some(ctx) = admission.as_ref() {
         mvm_hostd::plan_admission::populate_audit_substrate(
@@ -1304,6 +1310,55 @@ fn grant_predecessor_from_vm_name(vm_name: &str) -> Option<(String, mvm_core::pl
 /// Read the parent checkpoint's source VM plan and return (cpus, mem_mib).
 /// Returns (None, None) when the plan is absent — the caller falls back to
 /// global defaults. The parent checkpoint's `vm_name` field names the source VM.
+/// If the child rootfs directory carries dm-verity sidecars, populate the
+/// start config so the backend attaches the hash tree and emits the roothash
+/// on the kernel cmdline. Without this the child skips `mvm-verity-init` and
+/// cannot mount the runtime overlay, leading to a guest panic.
+fn populate_fork_rootfs_verity(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    rootfs: &std::path::Path,
+) -> anyhow::Result<()> {
+    let rootfs_dir = rootfs.parent().unwrap_or(std::path::Path::new("."));
+    let verity = rootfs_dir.join("rootfs.verity");
+    let roothash = rootfs_dir.join("rootfs.roothash");
+    if verity.exists() && roothash.exists() {
+        start_config.verity_path = Some(
+            verity
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("rootfs.verity path is not UTF-8"))?
+                .to_string(),
+        );
+        start_config.roothash = Some(
+            std::fs::read_to_string(&roothash)
+                .with_context(|| format!("reading {}", roothash.display()))?
+                .trim()
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Read the parent checkpoint's source VM plan and return the agent-verb
+/// override it was admitted with. Forks inherit the parent's explicit
+/// `--agent-verb` list so that a child of an unsealed image can still be
+/// grant-bearing when the parent was.
+fn parent_agent_verb_override(
+    parent_checkpoint: &CheckpointId,
+    store: &CheckpointStore,
+) -> Vec<String> {
+    let Ok(parent_meta) = store.read_meta(parent_checkpoint) else {
+        return Vec::new();
+    };
+    let Ok(plan) = super::plan_persist::read_plan(&parent_meta.vm_name) else {
+        return Vec::new();
+    };
+    plan.agent_verbs
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| v.as_str().to_string())
+        .collect()
+}
+
 fn parent_plan_resources(
     parent_checkpoint: &CheckpointId,
     store: &CheckpointStore,
@@ -1378,6 +1433,65 @@ mod tests {
         assert!(validated_checkpoint_id("").is_err());
         assert!(validated_checkpoint_id("a\0b").is_err());
         assert!(validated_checkpoint_id("a\nb").is_err());
+    }
+
+    #[test]
+    fn parent_agent_verb_override_inherits_parent_verbs() {
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+        use mvm_core::plan::test_support::PlanFixture;
+        use mvm_protocol::plan::VerbId;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let mut plan = PlanFixture::new()
+            .tenant("local")
+            .plan_id("parent-plan")
+            .build();
+        plan.agent_verbs = Some(vec![
+            VerbId::new("ping").unwrap(),
+            VerbId::new("run-entrypoint").unwrap(),
+        ]);
+        mvm_hostd::audit::plan_persist::write_plan("parent-vm", &plan).unwrap();
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-parent"),
+            CheckpointClass::FsQuick,
+            "parent-vm",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        let verbs = parent_agent_verb_override(&meta.id, &store);
+        assert_eq!(verbs, vec!["ping", "run-entrypoint"]);
+    }
+
+    #[test]
+    fn parent_agent_verb_override_returns_empty_when_plan_missing() {
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointId};
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let store = mvm_runtime::checkpoint::CheckpointStore::open();
+        let meta = mvm_core::checkpoint::CheckpointMeta::builder(
+            CheckpointId::new("ckpt-no-plan"),
+            CheckpointClass::FsQuick,
+            "orphan-vm",
+        )
+        .content(vec![])
+        .supervisor_config_digest("d")
+        .created_unix(1)
+        .build();
+        store.write_meta(&meta).unwrap();
+
+        assert!(parent_agent_verb_override(&meta.id, &store).is_empty());
     }
 
     // ── FC vm_full fork gate ─────────────────────────────────────────────
