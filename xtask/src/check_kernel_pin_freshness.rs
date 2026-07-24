@@ -44,7 +44,7 @@ pub fn run(workspace: &Path, args: &[String]) -> Result<()> {
 }
 
 /// Read every kernel pin mvm carries. The libkrunfw pin is a deterministic
-/// file read; the nixpkgs `linux_6_12` version needs a Nix eval and is
+/// file read; the nix-built kernel's pinned version needs a Nix eval and is
 /// best-effort (skipped, not failed, when Nix is unavailable).
 fn read_local_pins(workspace: &Path) -> Vec<KernelPin> {
     let mut pins = Vec::new();
@@ -57,9 +57,9 @@ fn read_local_pins(workspace: &Path) -> Vec<KernelPin> {
             version,
         });
     }
-    if let Some(version) = eval_nixpkgs_linux_version(workspace) {
+    if let Some(version) = eval_nix_kernel_version(workspace) {
         pins.push(KernelPin {
-            name: "nixpkgs-linux_6_12".into(),
+            name: "nix-kernel".into(),
             version,
         });
     }
@@ -73,10 +73,11 @@ fn parse_libkrunfw_pin(content: &str) -> Option<String> {
     re.captures(content).map(|c| c[1].to_string())
 }
 
-/// Best-effort: the kernel package inherits `version` from `pkgs.linux_6_12`,
-/// so eval it from the standalone kernel flake. Returns `None` (skip the pin)
-/// on any Nix/eval failure rather than erroring.
-fn eval_nixpkgs_linux_version(workspace: &Path) -> Option<String> {
+/// Best-effort: the nix-built kernel pins an exact point release (decoupled
+/// from nixpkgs' channel-gated `linux_6_12`), exposed as the kernel flake's
+/// `workload-vmlinux.version`. Eval it from the standalone kernel flake.
+/// Returns `None` (skip the pin) on any Nix/eval failure rather than erroring.
+fn eval_nix_kernel_version(workspace: &Path) -> Option<String> {
     let arch = if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {

@@ -20,8 +20,8 @@ assert lib.elem variant [
 
 let
   kernelSrc = fetchurl {
-    url = "mirror://kernel/linux/kernel/v6.x/linux-6.12.91.tar.xz";
-    hash = "sha256-D/KrnhafnxlIVXRx+7RQ0wGPjFt3yvKI4aOYJYJZeWk=";
+    url = "mirror://kernel/linux/kernel/v6.x/linux-6.12.97.tar.xz";
+    hash = "sha256-bL3fo7vSIpAm98xeSPa31rRtOXQt45qSV6L0kKD0XG8=";
   };
 in
 stdenv.mkDerivation (finalAttrs: {

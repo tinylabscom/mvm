@@ -41,6 +41,20 @@ let
   kernelArch =
     if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x86_64";
 
+  # Pin the exact upstream point release rather than inheriting nixpkgs'
+  # `linux_6_12`, which is gated by the release channel's cadence and lags
+  # kernel.org's LTS point releases (where the CVE backports land). We already
+  # build from the vanilla tarball and apply no distro kernel patches, so
+  # fetching the source directly — the same way libkrunfw pins its bundled
+  # kernel — lets both of mvm's kernels track the latest point release exactly
+  # and keeps the two pins from drifting apart. Bump `kernelVersion` + `hash`
+  # together (the tarball's own sha256, e.g. via `nix store prefetch-file`).
+  kernelVersion = "6.12.97";
+  kernelSrc = pkgs.fetchurl {
+    url = "mirror://kernel/linux/kernel/v6.x/linux-${kernelVersion}.tar.xz";
+    hash = "sha256-bL3fo7vSIpAm98xeSPa31rRtOXQt45qSV6L0kKD0XG8=";
+  };
+
   # ── Base: minimal feature set common to every mvm microVM kernel ──
   #
   # Each entry becomes a `scripts/config --enable CONFIG_<name>`.
@@ -280,7 +294,7 @@ let
       set -euo pipefail
 
       mkdir -p linux
-      tar -xf ${pkgs.linux_6_12.src} -C linux --strip-components=1
+      tar -xf ${kernelSrc} -C linux --strip-components=1
       cd linux
       chmod -R u+w .
 
@@ -349,17 +363,20 @@ let
   # false` keeps `nix flake check --no-build` (CI "Nix flake check"
   # lane) working: --no-build won't realize the configfile derivation,
   # and IFD from linuxManualConfig would then fail with
-  # `path '…-kernel-config.drv' is not valid`. We pass
-  # version/modDirVersion/src explicitly from pkgs.linux_6_12, so the
-  # configfile content is needed only at build time, not eval time.
+  # `path '…-kernel-config.drv' is not valid`. We pass the pinned
+  # version/modDirVersion/src explicitly, so the configfile content is
+  # needed only at build time, not eval time. `modDirVersion` matches the
+  # pinned version even though CONFIG_MODULES=n leaves the module tree empty.
   mkKernel = { extraEnables ? [ ], extraDisables ? [ ] }:
     pkgs.linuxManualConfig {
-      inherit (pkgs.linux_6_12) src version modDirVersion;
+      src = kernelSrc;
+      version = kernelVersion;
+      modDirVersion = kernelVersion;
       configfile = mkConfigfile { inherit extraEnables extraDisables; };
       allowImportFromDerivation = false;
     };
 
 in
 {
-  inherit kernelArch baseEnables baseDisables mkConfigfile mkKernel;
+  inherit kernelArch kernelVersion baseEnables baseDisables mkConfigfile mkKernel;
 }

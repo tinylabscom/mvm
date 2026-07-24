@@ -111,7 +111,11 @@ When the kernel needs a change:
    `enables`. `make olddefconfig` handles transitive deps.
 2. **Remove a feature.** Append to `disables`. If `olddefconfig`
    pulls it back in, the parent also needs to come off.
-3. **Bump the kernel version.** Edit the `pkgs.linux_6_12`
-   reference (or follow nixpkgs' rename if the LTS pin moves).
-   `make olddefconfig` reconciles dropped / renamed / added
-   symbols automatically.
+3. **Bump the kernel version.** Edit `kernelVersion` in `base.nix` and
+   the matching tarball `hash` (its own sha256 — `nix store
+   prefetch-file mirror://kernel/linux/kernel/v6.x/linux-<ver>.tar.xz`),
+   then bump the libkrunfw pin in `nix/packages/libkrunfw.nix` to the
+   same point release. The pin is deliberately decoupled from nixpkgs'
+   `linux_6_12` (which lags kernel.org's LTS point releases where CVE
+   backports land). `make olddefconfig` reconciles dropped / renamed /
+   added symbols automatically.
