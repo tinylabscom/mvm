@@ -1,13 +1,12 @@
 //! Shared per-VM substitution-endpoint spawn/reap helpers.
 //!
-//! One implementation behind the two workload backends that need it (QEMU
-//! slirp + Firecracker TAP), so the moat-spawn logic can't drift between
-//! copies. The endpoint is `mvm-substitution-endpoint` (an `mvm-hostd` bin):
+//! One implementation behind the workload backends that need it, so the
+//! endpoint-spawn logic cannot drift between copies. The endpoint is
+//! `mvm-substitution-endpoint` (an `mvm-hostd` bin):
 //! when the admitted plan carries secret bindings it runs as a per-VM host
 //! process that resolves placeholders for the guest's egress so the real
-//! secret never enters the guest. The QEMU caller passes `terminator_listen:
-//! None` (slirp has no TAP to redirect); the FC caller passes `Some(addr)` to
-//! turn on the transparent HTTP terminator that the nft TAP REDIRECT feeds.
+//! secret never enters the guest. The converged Firecracker, libkrun, and HVF
+//! workload paths use the authenticated vsock/UDS endpoint transport.
 
 use crate::microvm::DriveFile;
 use anyhow::{Result, anyhow, bail};
@@ -93,26 +92,6 @@ pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<
         endpoint_cert_pem: cert_pem,
         endpoint_key_pem: key_pem,
     })
-}
-
-/// Read the per-VM egress intermediate (`cert_pem` + `key_pem`) persisted under
-/// `<state_dir>/egress-intermediate.json`. Returns `None` when absent.
-#[cfg(target_os = "linux")]
-pub(crate) fn read_egress_intermediate(state_dir: &Path) -> Result<Option<(String, String)>> {
-    let path = state_dir.join("egress-intermediate.json");
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(anyhow!("read {}: {e}", path.display())),
-    };
-    let v: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|e| anyhow!("parse {}: {e}", path.display()))?;
-    let cert = v["cert_pem"].as_str();
-    let key = v["key_pem"].as_str();
-    match (cert, key) {
-        (Some(c), Some(k)) => Ok(Some((c.to_string(), k.to_string()))),
-        _ => Err(anyhow!("{} missing cert_pem/key_pem", path.display())),
-    }
 }
 
 /// PID of the per-VM `mvm-substitution-endpoint` moat, and the JSON
@@ -218,8 +197,8 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 /// file for the invoke path to inject (`HTTP_PROXY` + placeholder vars). The
 /// endpoint serves the guest→host substitution channel over `transport`; when
 /// `terminator_listen` is `Some`, it *also* runs the transparent HTTP
-/// terminator on that host TCP addr — the FC nft TAP REDIRECT steers guest :80
-/// there. Detached via `setsid` so it outlives `mvmctl up`; the stop path reaps
+/// terminator on that host TCP addr. Detached via `setsid` so it outlives
+/// `mvmctl up`; the stop path reaps
 /// it via [`SUBST_PID_FILE`]. The real secret values never leave the endpoint's
 /// address space — only the opaque placeholders are persisted/handed out.
 pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Result<()> {
@@ -260,9 +239,12 @@ pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Resul
             Ok(())
         });
     }
+    let pid_file = state_dir.join(SUBST_PID_FILE);
+    let env_path = mvm_core::config::vm_substitution_env_path(vm_name);
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("spawn substitution endpoint ({}): {e}", bin.display()))?;
+    let mut process_guard = SpawnedEndpointGuard::new(child.id(), &pid_file, &env_path);
 
     child
         .stdin
@@ -278,15 +260,69 @@ pub fn spawn_substitution_endpoint(params: SubstitutionSpawnParams<'_>) -> Resul
         .ok_or_else(|| anyhow!("substitution endpoint stdout was not piped"))?;
     let handshake = read_handshake_line(stdout, child.id(), SUBST_HANDSHAKE_TIMEOUT)?;
 
-    let pid_file = state_dir.join(SUBST_PID_FILE);
     std::fs::write(&pid_file, child.id().to_string())
         .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
-    let env_path = mvm_core::config::vm_substitution_env_path(vm_name);
+    process_guard.mark_pid_written();
+    if let Some(parent) = env_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| anyhow!("create {}: {e}", parent.display()))?;
+    }
     std::fs::write(&env_path, handshake.trim().as_bytes())
         .map_err(|e| anyhow!("write {}: {e}", env_path.display()))?;
+    process_guard.mark_env_written();
+    process_guard.defuse();
     // Detach: drop the child handle without killing. The endpoint runs
     // daemonized (setsid) and is reaped by the stop path via SUBST_PID_FILE.
     Ok(())
+}
+
+struct SpawnedEndpointGuard {
+    pid: libc::pid_t,
+    pid_file: PathBuf,
+    env_path: PathBuf,
+    pid_written: bool,
+    env_written: bool,
+    armed: bool,
+}
+
+impl SpawnedEndpointGuard {
+    fn new(pid: u32, pid_file: &Path, env_path: &Path) -> Self {
+        Self {
+            pid: pid as libc::pid_t,
+            pid_file: pid_file.to_path_buf(),
+            env_path: env_path.to_path_buf(),
+            pid_written: false,
+            env_written: false,
+            armed: true,
+        }
+    }
+
+    fn mark_pid_written(&mut self) {
+        self.pid_written = true;
+    }
+
+    fn mark_env_written(&mut self) {
+        self.env_written = true;
+    }
+
+    fn defuse(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpawnedEndpointGuard {
+    fn drop(&mut self) {
+        if self.armed && pid_alive(self.pid) {
+            kill(self.pid, libc::SIGTERM);
+        }
+        if self.armed {
+            if self.pid_written {
+                let _ = std::fs::remove_file(&self.pid_file);
+            }
+            if self.env_written {
+                let _ = std::fs::remove_file(&self.env_path);
+            }
+        }
+    }
 }
 
 /// Read the endpoint's one-line ready handshake from its stdout within
@@ -481,6 +517,92 @@ mod tests {
         assert_eq!(v["transport"]["kind"], "uds");
         assert_eq!(v["transport"]["path"], sock.to_string_lossy().as_ref());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn spawn_failure_after_pid_write_rolls_back_the_endpoint_sidecar() {
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("mvm-subst-rollback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let saved_mvm_home = std::env::var_os("MVM_HOME");
+        let saved_bin = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH");
+        let invalid_home = dir.join("mvm-home-file");
+        std::fs::write(&invalid_home, b"not a directory").unwrap();
+        let stub = dir.join("stub-endpoint.sh");
+        let stopped = dir.join("stopped");
+        let pid_capture = dir.join("endpoint.pid");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\necho $$ > {}\necho 'ready handshake'\ntrap 'echo stopped > {}; exit 0' TERM\nwhile :; do sleep 1; done\n",
+                pid_capture.display(),
+                stopped.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SAFETY: serialised by HOME_TEST_LOCK; restored before the test exits.
+        unsafe {
+            std::env::set_var("MVM_HOME", &invalid_home);
+            std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
+        }
+
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        let result = spawn_substitution_endpoint(SubstitutionSpawnParams {
+            vm_name: "rollback-vm",
+            state_dir: &state_dir,
+            tenant: "tenant-x",
+            secrets: &[],
+            redaction: &redaction,
+            transport: EndpointTransport::Uds {
+                path: dir.join("vsock-5253.sock"),
+            },
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: None,
+            raw_egress: false,
+        });
+
+        unsafe {
+            match saved_bin {
+                Some(value) => std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", value),
+                None => std::env::remove_var("MVM_SUBSTITUTION_ENDPOINT_PATH"),
+            }
+            match saved_mvm_home {
+                Some(value) => std::env::set_var("MVM_HOME", value),
+                None => std::env::remove_var("MVM_HOME"),
+            }
+        }
+
+        assert!(result.is_err(), "invalid MVM_HOME must fail sidecar setup");
+        assert!(!state_dir.join(SUBST_PID_FILE).exists());
+        for _ in 0..100 {
+            if stopped.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !stopped.exists()
+            && let Ok(pid) = std::fs::read_to_string(&pid_capture)
+            && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
+        {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(
+            stopped.exists(),
+            "rollback must terminate the endpoint process"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

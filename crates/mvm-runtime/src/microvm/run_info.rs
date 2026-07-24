@@ -78,17 +78,6 @@ pub(super) fn read_vm_run_info_from(abs_dir: &str) -> Option<RunInfo> {
     serde_json::from_value(migrated).ok()
 }
 
-/// Read the slot_index from a VM's run-info.json.
-pub(super) fn read_slot_index(abs_dir: &str) -> Option<u8> {
-    let json = run_in_vm_stdout(&format!(
-        "cat {dir}/run-info.json 2>/dev/null || echo 'null'",
-        dir = abs_dir,
-    ))
-    .ok()?;
-    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
-    value.get("slot_index")?.as_u64().map(|v| v as u8)
-}
-
 /// Check whether a PID is alive on the current OS.
 ///
 /// On Linux: checks for `/proc/<pid>` existence (no signal needed).

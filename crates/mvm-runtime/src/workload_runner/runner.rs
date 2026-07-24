@@ -260,6 +260,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             network_policy: inputs.network_policy,
             raw_egress,
         })?;
+        let mut endpoint_guard = crate::substitution_spawn::EndpointGuard::new(&inputs.config.name);
 
         let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
@@ -289,6 +290,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             tenant: inputs.config.tenant_id.as_deref(),
             broker_listen_socket: socks.broker.as_deref(),
         })?;
+        endpoint_guard.defuse();
         broker_guard.defuse();
         Ok(vm)
     }

@@ -2,7 +2,7 @@
 //! workload. Only backends that go through the full enforcement funnel
 //! implement it; the admitted launch path accepts `&dyn WorkloadBackend`
 //! only, so a non-workload backend cannot reach it.
-use crate::backend::{AnyBackend, FirecrackerBackend};
+use crate::backend::AnyBackend;
 use crate::hvf_backend::HvfBackend;
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
@@ -14,10 +14,6 @@ use mvm_core::vm_backend::VmBackend;
 /// substitution endpoint; the backend only declares the mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressSubstitutionTransport {
-    /// Linux Firecracker: the guest's :80/:443 is steered to a host TCP
-    /// terminator via an nft PREROUTING REDIRECT; the funnel computes the
-    /// per-slot terminator address and installs the redirect post-boot.
-    NftTerminator,
     /// macOS rvproxy-native path: the guest still has a proxy-aware vsock/UDS
     /// channel, and ordinary `:80/:443` TCP is intercepted by the native gateway
     /// and forwarded to the same host terminator.
@@ -38,10 +34,7 @@ impl EgressSubstitutionTransport {
     /// Whether this transport can transparently intercept ordinary guest
     /// `:80`/`:443` egress and deliver it to the host terminator.
     pub fn supports_transparent_terminator(self) -> bool {
-        matches!(
-            self,
-            Self::NftTerminator | Self::RvproxyTransparentTerminator
-        )
+        matches!(self, Self::RvproxyTransparentTerminator)
     }
 }
 
@@ -52,11 +45,6 @@ pub trait WorkloadBackend: VmBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport;
 }
 
-impl WorkloadBackend for FirecrackerBackend {
-    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        EgressSubstitutionTransport::NftTerminator
-    }
-}
 impl WorkloadBackend for HvfBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         // Proxy-aware substitution over the vsock gateway: the guest dials the
@@ -91,23 +79,6 @@ pub fn require_workload_backend(backend: &AnyBackend) -> Result<&dyn WorkloadBac
     })
 }
 
-/// Require the backend's substitution transport to include the transparent
-/// `:80`/`:443` terminator leg. Proxy-aware substitution alone is not enough
-/// for deleting the in-line gateway splice because non-proxy-aware workloads
-/// would otherwise lose SDK-free egress substitution.
-pub fn require_transparent_egress_terminator(backend: &dyn WorkloadBackend) -> Result<()> {
-    if backend
-        .egress_substitution_transport()
-        .supports_transparent_terminator()
-    {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "backend `{}` does not provide a transparent :80/:443 egress terminator",
-        backend.name()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,8 +89,9 @@ mod tests {
 
     #[test]
     fn workload_backends_implement_marker() {
-        assert_is_workload_backend::<FirecrackerBackend>();
         assert_is_workload_backend::<HvfBackend>();
+        let firecracker = crate::backend::fc_runner();
+        let _: &dyn WorkloadBackend = &firecracker;
         #[cfg(feature = "test-support")]
         assert_is_workload_backend::<MockBackend>();
         // libkrun is now a workload backend via the runner's blanket impl, not a
@@ -133,14 +105,6 @@ mod tests {
         assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
         assert!(transport.supports_proxy_aware_substitution());
         assert!(!transport.supports_transparent_terminator());
-    }
-
-    #[test]
-    fn firecracker_declares_nft_terminator() {
-        let transport = FirecrackerBackend.egress_substitution_transport();
-        assert_eq!(transport, EgressSubstitutionTransport::NftTerminator);
-        assert!(transport.supports_proxy_aware_substitution());
-        assert!(transport.supports_transparent_terminator());
     }
 
     #[test]
@@ -185,42 +149,5 @@ mod tests {
             err.to_string().contains("not a workload backend"),
             "refusal must explain the bar, got: {err}"
         );
-    }
-
-    #[test]
-    fn transparent_egress_terminator_requirement_accepts_firecracker() {
-        require_transparent_egress_terminator(&FirecrackerBackend)
-            .expect("firecracker declares the nft terminator leg");
-    }
-
-    #[test]
-    fn transparent_egress_terminator_requirement_refuses_proxy_only_backends() {
-        // libkrun is now proxy-only (vsock UDS channel) like HVF, so it joins the
-        // refuses bucket. Coercing `libkrun_runner()` here also proves the runner
-        // implements `WorkloadBackend`.
-        let libkrun = crate::backend::libkrun_runner();
-        #[cfg(feature = "test-support")]
-        let mock = MockBackend::new();
-        #[cfg(feature = "test-support")]
-        let backends: Vec<&dyn WorkloadBackend> = vec![
-            &HvfBackend as &dyn WorkloadBackend,
-            &libkrun as &dyn WorkloadBackend,
-            &mock as &dyn WorkloadBackend,
-        ];
-        #[cfg(not(feature = "test-support"))]
-        let backends: Vec<&dyn WorkloadBackend> = vec![
-            &HvfBackend as &dyn WorkloadBackend,
-            &libkrun as &dyn WorkloadBackend,
-        ];
-        for backend in backends {
-            let err = match require_transparent_egress_terminator(backend) {
-                Ok(()) => panic!("{} should not satisfy the terminator gate", backend.name()),
-                Err(e) => e,
-            };
-            assert!(
-                err.to_string().contains("transparent :80/:443"),
-                "refusal must name the missing terminator leg, got: {err}"
-            );
-        }
     }
 }

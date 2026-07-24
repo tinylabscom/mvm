@@ -1,20 +1,9 @@
-//! dm-verity/runtime-overlay cmdline helpers and the Firecracker API
-//! sequence that configures a flake-built microVM's boot source, machine
-//! config, drives, network, vsock, and balloon.
+//! dm-verity/runtime-overlay helpers and Firecracker API body builders.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::instrument;
 
-use crate::base::config::BRIDGE_IP;
-use crate::base::ui;
-
-use super::daemon::{api_put_socket, prepare_vsock_runtime_dir};
-use super::egress_bridge::{
-    egress_ca_cmdline_token, require_grant_cmdline_token, secret_env_cmdline_token,
-    verb_grant_cmdline_token,
-};
-use super::firecracker_vsock_uds_path;
-use super::flake_run::{FlakeRunConfig, create_dev_config_drive, create_dev_secrets_drive};
+use super::flake_run::FlakeRunConfig;
 
 /// Probe the directory containing `rootfs_path` for the dm-verity sidecar
 /// files emitted by mkGuest when `verifiedBoot = true`. The rootfs and its
@@ -129,39 +118,6 @@ pub fn resolved_runtime_overlay(config: &FlakeRunConfig) -> Option<(&str, &str, 
     ))
 }
 
-/// Resolve the initrd to attach for a flake boot, enforcing the dm-verity
-/// fail-closed invariant.
-///
-/// A caller-supplied stage-1 initrd wins over the verity initramfs at
-/// `<rootfs_dir>/rootfs.initrd` (the two never co-exist in practice). When
-/// verity is requested — a `roothash` is set — but neither an initrd is
-/// available, refuse to boot: without the verity initramfs the kernel would
-/// silently mount `/dev/vda` directly, dropping dm-verity and booting an
-/// unsealed root. That must fail closed, not fall through to an unverified
-/// boot.
-fn resolve_effective_initrd(config: &FlakeRunConfig) -> Result<Option<String>> {
-    // Convention from the flake: the verity initrd lives at
-    // `<rev_dir>/rootfs.initrd`, alongside `rootfs.{ext4,verity,roothash}`.
-    // Only derived when both the verity sidecar and roothash are present.
-    let verity_initrd_path = config
-        .verity_path
-        .as_deref()
-        .zip(config.roothash.as_deref())
-        .and_then(|_| {
-            std::path::Path::new(&config.rootfs_path)
-                .parent()
-                .map(|p| format!("{}/rootfs.initrd", p.display()))
-        })
-        .filter(|p| std::path::Path::new(p).exists());
-
-    let effective_initrd = config.initrd_path.clone().or(verity_initrd_path);
-
-    if config.roothash.is_some() && effective_initrd.is_none() {
-        anyhow::bail!("verity roothash present but no verity initramfs; refusing to boot unsealed");
-    }
-    Ok(effective_initrd)
-}
-
 // ── Firecracker per-device API PUT body builders ─────────────────────────────
 //
 // One scalar-parameterized builder per device body, shared by the raw flake
@@ -233,7 +189,8 @@ pub fn balloon_body(amount_mib: u32) -> String {
 /// Configure a flake-built microVM via the Firecracker API (multi-VM).
 #[instrument(skip_all, fields(name = %config.name))]
 pub fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str) -> Result<()> {
-    configure_flake_microvm_with_drives_dir(config, abs_dir, socket, abs_dir)
+    let _ = (config, abs_dir, socket);
+    anyhow::bail!("raw Firecracker flake configuration is disabled; use the vsock workload runner")
 }
 
 /// Configure a flake-built microVM with custom config/secrets drive location.
@@ -246,311 +203,8 @@ pub fn configure_flake_microvm_with_drives_dir(
     socket: &str,
     drives_dir: &str,
 ) -> Result<()> {
-    configure_logger(socket, abs_dir)?;
-    // Verity-root workloads rely on `mvm-verity-init` to mount the runtime
-    // overlay. Injected OCI `/init` is different: it can mount a plain
-    // read-only overlay ext4 itself even when the rootfs is not verity-backed.
-    // Resolve the overlay unconditionally so both boot shapes keep the same
-    // attach contract. Shared by the boot-source cmdline tokens and the
-    // drives block below — resolved once, since it's the same triple.
-    let overlay = resolved_runtime_overlay(config);
-    configure_boot_source(socket, config, overlay)?;
-    configure_machine(socket, config)?;
-    configure_drives(socket, config, drives_dir, overlay)?;
-    configure_network(socket, config)?;
-    configure_vsock(socket, drives_dir)?;
-    configure_balloon(socket, config)?;
-    Ok(())
-}
-
-/// Configure the Firecracker logger sink (`/logger`).
-fn configure_logger(socket: &str, abs_dir: &str) -> Result<()> {
-    ui::info("Configuring logger...");
-    api_put_socket(socket, "/logger", &logger_body(abs_dir))
-}
-
-/// Configure the Firecracker boot source (`/boot-source`): kernel image
-/// path, initrd, and the full kernel cmdline — guest IP/gateway, dm-verity
-/// roothash, runtime-overlay tokens, egress CA, secret placeholders, and
-/// verb-grant sidecars.
-fn configure_boot_source(
-    socket: &str,
-    config: &FlakeRunConfig,
-    overlay: Option<(&str, &str, &str)>,
-) -> Result<()> {
-    let slot = &config.slot;
-
-    // Boot args: pass guest IP and gateway via kernel cmdline.
-    // When initrd is present (NixOS guest or verity initrd), the initrd
-    // handles root mounting. When absent (minimal guest, no verity),
-    // the kernel mounts /dev/vda directly.
-    let base_args = format!(
-        "console=ttyS0 reboot=k panic=1 net.ifnames=0 mvm.ip={ip}/24 mvm.gw={gw}",
-        ip = slot.guest_ip,
-        gw = BRIDGE_IP,
-    );
-
-    // dm-verity boot path: when verity is on, the kernel
-    // mounts the verity initramfs first, which is `mvm-verity-init`
-    // (PID 1) — that binary reads `mvm.roothash=…` from the cmdline,
-    // builds the verity device-mapper target via raw ioctls, mounts
-    // /dev/mapper/root, and switch_root's to /sysroot/init.
-    //
-    // We deliberately do NOT add `root=/dev/dm-0` here: Firecracker on
-    // aarch64 unconditionally appends `root=/dev/vda ro` after our
-    // boot_args, and the kernel uses last-wins for `root=`. By owning
-    // the pivot in userspace via the initramfs, the kernel's `root=`
-    // setting becomes irrelevant — `mvm-verity-init` chooses the real
-    // root explicitly via `mount` + `switch_root`.
-    // Resolve the initrd, enforcing the fail-closed verity invariant: a
-    // roothash-requested boot with no verity initramfs must error rather than
-    // silently mount /dev/vda unsealed.
-    let effective_initrd = resolve_effective_initrd(config)?;
-    let verity_args: Option<String> =
-        build_verity_cmdline_args(config.roothash.as_deref(), overlay.map(|(_, _, h)| h));
-    let runtime_overlay_args =
-        if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly {
-            build_runtime_overlay_cmdline_args(config.roothash.as_deref(), overlay.is_some())
-        } else {
-            None
-        };
-
-    let boot_args = if effective_initrd.is_some() {
-        // initrd owns root mounting. Verity adds the cmdline knobs the
-        // initramfs reads to construct /dev/mapper/root.
-        match &verity_args {
-            Some(extra) => format!("{base_args} {extra}"),
-            None => base_args,
-        }
-    } else {
-        format!("root=/dev/vda rw rootwait init=/init {base_args}")
-    };
-
-    // A fresh FC boot attaches no secrets drive, so the per-VM
-    // egress intermediate cert reaches the sealed guest via the kernel cmdline.
-    // `mvmctl up` staged it in `egress-intermediate.json`; `/init` decodes the
-    // `mvm.egress_ca=` token into the guest trust bundle (cert only — the key
-    // stays host-side in the terminator endpoint).
-    let boot_args = match egress_ca_cmdline_token(&config.slot.name) {
-        Some(token) => format!("{boot_args} {token}"),
-        None => boot_args,
-    };
-    // The substitution endpoint spawned pre-boot minted the
-    // workload's placeholders and wrote them to
-    // `vm_substitution_env_path`. Carry them on the cmdline (`mvm.secret_env=`)
-    // so `/init` exports `$VAR=placeholder` into a sealed entrypoint (placeholders
-    // only, never values). Absent ⇒ no secrets / no endpoint.
-    let boot_args = match secret_env_cmdline_token(&config.slot.name) {
-        Some(token) => format!("{boot_args} {token}"),
-        None => boot_args,
-    };
-    let boot_args = match verb_grant_cmdline_token(&config.slot.name) {
-        Some(token) => format!("{boot_args} {token}"),
-        None => boot_args,
-    };
-    let boot_args = match require_grant_cmdline_token(&config.slot.name) {
-        Some(token) => format!("{boot_args} {token}"),
-        None => boot_args,
-    };
-    let boot_args = match runtime_overlay_args {
-        Some(token) => format!("{boot_args} {token}"),
-        None => boot_args,
-    };
-    let boot_args = format!(
-        "{boot_args} {}",
-        mvm_core::vm_backend::encode_runtime_source_policy_cmdline(config.runtime_source_policy)
-    );
-
-    // FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
-    // published default-microvm x86_64 kernel is a bzImage (named `vmlinux`),
-    // which FC rejects with "Invalid Elf magic number". Extract the embedded ELF
-    // to a cached sibling once and boot from that. No-op for an already-ELF
-    // kernel (aarch64 `Image`, or a fixed image).
-    let kernel_for_boot =
-        mvm_build::fc_kernel::ensure_fc_loadable_kernel(std::path::Path::new(&config.vmlinux_path))
-            .with_context(|| {
-                format!("preparing FC-loadable kernel from {}", config.vmlinux_path)
-            })?;
-    let kernel_for_boot = kernel_for_boot.display().to_string();
-
-    ui::info(&format!("Setting boot source: {kernel_for_boot}"));
-    if let Some(initrd) = &effective_initrd {
-        ui::info(&format!("Using initrd: {}", initrd));
-    }
-    let boot_source = boot_source_body(&kernel_for_boot, &boot_args, effective_initrd.as_deref());
-    api_put_socket(socket, "/boot-source", &boot_source)
-}
-
-/// Configure the Firecracker machine (`/machine-config`): vCPU count and
-/// memory size.
-fn configure_machine(socket: &str, config: &FlakeRunConfig) -> Result<()> {
-    ui::info(&format!(
-        "Setting machine config: {} vCPUs, {} MiB",
-        config.cpus, config.memory
-    ));
-    api_put_socket(
-        socket,
-        "/machine-config",
-        &machine_config_body(config.cpus, config.memory),
-    )
-}
-
-/// Configure every Firecracker block device: rootfs, the dm-verity
-/// sidecars, the runtime overlay pair, the config/secrets drives, and any
-/// extra `--volume` mounts. Firecracker assigns drive letters in API-call
-/// order, so this sequence — and each drive's conditional inclusion — is
-/// load-bearing for dm-verity correctness and must not be reordered.
-fn configure_drives(
-    socket: &str,
-    config: &FlakeRunConfig,
-    drives_dir: &str,
-    overlay: Option<(&str, &str, &str)>,
-) -> Result<()> {
-    // Verity-on means the rootfs is read-only and re-mounted via
-    // /dev/dm-0; opening a writable handle would let any host process
-    // mutate the bytes the Merkle tree was built against and silently
-    // break the integrity check.
-    let rootfs_read_only = config.verity_path.is_some();
-    ui::info(&format!("Setting rootfs: {}", config.rootfs_path));
-    api_put_socket(
-        socket,
-        "/drives/rootfs",
-        &drive_body("rootfs", &config.rootfs_path, true, rootfs_read_only),
-    )?;
-
-    // dm-verity Merkle tree → /dev/vdb. Firecracker assigns drive
-    // letters in API-call order, so this PUT must precede the config /
-    // secrets drives below. Always mounted read-only — modifying the
-    // hash tree would break verity at the next read.
-    if let Some(verity_path) = &config.verity_path {
-        ui::info(&format!("Attaching dm-verity sidecar: {}", verity_path));
-        api_put_socket(
-            socket,
-            "/drives/verity",
-            &drive_body("verity", verity_path, false, true),
-        )?;
-    }
-
-    // Runtime overlay:
-    // - verity-root workloads attach ext4 + verity sidecar as `/dev/vdc` +
-    //   `/dev/vdd` for `mvm-verity-init`.
-    // - injected OCI non-verity boots attach only the ext4 as `/dev/vdb`; the
-    //   injected `/init` mounts it read-only from `mvm.runtime_data=/dev/vdb`.
-    // The data drive is always read-only.
-    if let Some((overlay_path, overlay_verity_path, _)) = overlay {
-        ui::info(&format!("Attaching runtime overlay ext4: {}", overlay_path));
-        api_put_socket(
-            socket,
-            "/drives/runtime_overlay",
-            &drive_body("runtime_overlay", overlay_path, false, true),
-        )?;
-        if config.roothash.is_some() {
-            ui::info(&format!(
-                "Attaching runtime overlay verity sidecar: {}",
-                overlay_verity_path
-            ));
-            api_put_socket(
-                socket,
-                "/drives/runtime_verity",
-                &drive_body("runtime_verity", overlay_verity_path, false, true),
-            )?;
-        }
-    }
-
-    // Create and attach mvm-config drive (config.json + role.toml)
-    ui::info("Creating config drive...");
-    let config_drive = create_dev_config_drive(drives_dir, config)?;
-    api_put_socket(
-        socket,
-        "/drives/config",
-        &drive_body("config", &config_drive, false, true),
-    )?;
-
-    // Attach the mvm-secrets drive ONLY when there is something to put on it.
-    // The workload guest never mounts this drive — `/init` reads the egress CA
-    // cert and the secret PLACEHOLDERS from the kernel cmdline (`mvm.egress_ca=`
-    // / `mvm.secret_env=`), and raw secrets never enter the guest (they are
-    // substituted at egress, claim 13). So for the common no-secret-binding
-    // workload the drive carries only a stub `{}` and is dead weight; skip the
-    // `mkfs` + attach entirely. It is still built when `secret_files` is
-    // non-empty (an explicit `--volume <host>:/mnt/secrets` share).
-    if !config.secret_files.is_empty() {
-        ui::info("Creating secrets drive...");
-        let secrets_drive = create_dev_secrets_drive(drives_dir, &config.secret_files)?;
-        api_put_socket(
-            socket,
-            "/drives/secrets",
-            &drive_body("secrets", &secrets_drive, false, true),
-        )?;
-    }
-
-    for (idx, vol) in config.volumes.iter().enumerate() {
-        let drive_id = format!("vol{}", idx);
-        let mode = if vol.read_only { "ro" } else { "rw" };
-        ui::info(&format!(
-            "Attaching volume {} -> {} (size {}, {mode})",
-            vol.host, vol.guest, vol.size
-        ));
-        api_put_socket(
-            socket,
-            &format!("/drives/{}", drive_id),
-            &drive_body(&drive_id, &vol.host, false, vol.read_only),
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Configure the Firecracker network interface (`/network-interfaces/net1`).
-fn configure_network(socket: &str, config: &FlakeRunConfig) -> Result<()> {
-    let slot = &config.slot;
-    ui::info(&format!(
-        "Setting network interface: {} (MAC {})",
-        slot.tap_dev, slot.mac
-    ));
-    api_put_socket(
-        socket,
-        "/network-interfaces/net1",
-        &format!(
-            r#"{{"iface_id": "net1", "guest_mac": "{mac}", "host_dev_name": "{tap}"}}"#,
-            mac = slot.mac,
-            tap = slot.tap_dev,
-        ),
-    )
-}
-
-/// Configure the Firecracker vsock device (`/vsock`).
-fn configure_vsock(socket: &str, drives_dir: &str) -> Result<()> {
-    ui::info("Setting vsock device...");
-    prepare_vsock_runtime_dir(drives_dir);
-    let vsock = firecracker_vsock_uds_path(drives_dir);
-    api_put_socket(
-        socket,
-        "/vsock",
-        &vsock_body(mvm_agentd::vsock::GUEST_CID, &vsock),
-    )
-}
-
-/// Configure the Firecracker virtio-balloon device (`/balloon`), only when
-/// the workload opted in via `mem_initial`. The device boots pre-inflated to
-/// `memory - mem_initial` MiB so the host commits only `mem_initial` MiB
-/// until the reclaim controller deflates the balloon.
-///
-/// `deflate_on_oom = true` is mandatory: under guest memory pressure the
-/// device must yield pages back, otherwise the guest OOM-kills the workload
-/// while the host still has memory it could give back.
-/// `stats_polling_interval_s = 1` lets the host controller poll real guest
-/// commitment without driving the guest's stat refresh too aggressively.
-fn configure_balloon(socket: &str, config: &FlakeRunConfig) -> Result<()> {
-    if let Some(initial) = config.mem_initial {
-        let amount_mib = config.memory.saturating_sub(initial);
-        ui::info(&format!(
-            "Attaching virtio-balloon (cap {} MiB, initial commit {} MiB, balloon {} MiB)",
-            config.memory, initial, amount_mib
-        ));
-        api_put_socket(socket, "/balloon", &balloon_body(amount_mib))?;
-    }
-    Ok(())
+    let _ = (config, abs_dir, socket, drives_dir);
+    anyhow::bail!("raw Firecracker flake configuration is disabled; use the vsock workload runner")
 }
 
 #[cfg(test)]
@@ -581,7 +235,6 @@ mod tests {
             config_files: Vec::new(),
             secret_files: Vec::new(),
             ports: Vec::new(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::default(),
         }
     }
 
@@ -870,87 +523,6 @@ mod tests {
         std::fs::write(dir.path().join("rootfs.verity"), b"hash-tree").unwrap();
         std::fs::write(dir.path().join("rootfs.roothash"), b"not-a-hex-roothash").unwrap();
         assert_eq!(probe_verity_sidecar(rootfs.to_str().unwrap()), (None, None));
-    }
-
-    #[test]
-    fn resolve_effective_initrd_fails_closed_when_verity_requested_without_initramfs() {
-        // A roothash means dm-verity was requested. With no verity
-        // initramfs present (and no caller-supplied stage-1), booting would
-        // silently mount /dev/vda unsealed — the claim-3 hole. Refuse.
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"data").unwrap();
-        std::fs::write(dir.path().join("rootfs.verity"), b"hash-tree").unwrap();
-        // Deliberately do NOT write rootfs.initrd.
-
-        let mut cfg = baseline_run_config(None);
-        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
-        cfg.verity_path = Some(
-            dir.path()
-                .join("rootfs.verity")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        cfg.roothash = Some(ROOTFS_HASH.into());
-
-        let err = resolve_effective_initrd(&cfg).expect_err("must fail closed");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("refusing to boot unsealed"),
-            "unexpected error message: {msg}"
-        );
-    }
-
-    #[test]
-    fn resolve_effective_initrd_proceeds_when_verity_initramfs_present() {
-        // Roothash + the sibling rootfs.initrd present ⇒ the verity boot
-        // path is complete, so resolution yields that initrd.
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"data").unwrap();
-        std::fs::write(dir.path().join("rootfs.verity"), b"hash-tree").unwrap();
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&initrd, b"initramfs").unwrap();
-
-        let mut cfg = baseline_run_config(None);
-        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
-        cfg.verity_path = Some(
-            dir.path()
-                .join("rootfs.verity")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        cfg.roothash = Some(ROOTFS_HASH.into());
-
-        let got = resolve_effective_initrd(&cfg).expect("verity boot path is complete");
-        assert_eq!(got.as_deref(), Some(initrd.to_str().unwrap()));
-    }
-
-    #[test]
-    fn resolve_effective_initrd_proceeds_with_caller_supplied_initrd() {
-        // A caller-supplied stage-1 initrd satisfies the invariant even when
-        // no sibling rootfs.initrd exists, and takes precedence.
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"data").unwrap();
-
-        let mut cfg = baseline_run_config(None);
-        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
-        cfg.roothash = Some(ROOTFS_HASH.into());
-        cfg.initrd_path = Some("/k/stage1.initrd".into());
-
-        let got = resolve_effective_initrd(&cfg).expect("caller initrd satisfies the guard");
-        assert_eq!(got.as_deref(), Some("/k/stage1.initrd"));
-    }
-
-    #[test]
-    fn resolve_effective_initrd_unsealed_boot_unaffected() {
-        // No roothash ⇒ verity is not requested. The guard must not fire;
-        // a plain unsealed rootfs boots with no initrd (kernel mounts vda).
-        let cfg = baseline_run_config(None);
-        assert!(cfg.roothash.is_none());
-        let got = resolve_effective_initrd(&cfg).expect("plain unsealed boot proceeds");
-        assert_eq!(got, None);
     }
 
     #[test]
