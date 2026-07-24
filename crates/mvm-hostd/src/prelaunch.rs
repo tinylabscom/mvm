@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use libkrun_sys::{SupervisorAttachConfig, SupervisorBaseConfig, SupervisorConfig};
-use mvm_core::plan::{NonceStore, SignedExecutionPlan, check_window, verify_plan};
+use mvm_core::plan::{NonceStore, SignedExecutionPlan, check_window, verify_plan, verify_plan_id};
 
 /// Why an attach was refused. Every variant means the caller must NOT
 /// `start_enter` — the standby exits non-zero.
@@ -72,6 +72,11 @@ pub fn verify_and_merge_attach(
         .map_err(|e| AttachVerifyError::Envelope(e.to_string()))?;
     let plan = verify_plan(&signed, &[(signer_id.as_str(), &vk)])
         .map_err(|e| AttachVerifyError::PlanVerify(e.to_string()))?;
+
+    // The plan_id must be the content-address of the plan body. A
+    // signature-valid plan whose id doesn't address its content is refused
+    // before the caller may `start_enter`.
+    verify_plan_id(&plan).map_err(|e| AttachVerifyError::PlanVerify(e.to_string()))?;
 
     // G4 validity window + per-signer nonce-replay.
     check_window(&plan, now).map_err(|e| AttachVerifyError::Validity(e.to_string()))?;
@@ -223,5 +228,35 @@ mod tests {
         let err =
             verify_and_merge_attach(base(kp, "host:test"), &bytes, now, &mut store).unwrap_err();
         assert!(matches!(err, AttachVerifyError::Validity(_)));
+    }
+
+    #[test]
+    fn rejects_plan_id_not_content_address() {
+        use ed25519_dalek::Signer;
+        use mvm_core::plan::PlanId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (kp, key) = write_key(dir.path());
+        let now = Utc.with_ymd_and_hms(2026, 6, 9, 12, 0, 0).unwrap();
+        let plan = plan_around(now);
+
+        // A signature-valid envelope whose inner plan_id is NOT the
+        // content-address: sign_plan stamps, so mint the mismatch by hand —
+        // sign wrong-id bytes into the envelope shell with the on-disk key.
+        let mut signed = sign_plan(&plan, &key, "host:test");
+        let mut tampered = plan.clone();
+        tampered.plan_id = PlanId("sha256:not-the-content-address".into());
+        let payload = serde_json::to_vec(&tampered).unwrap();
+        signed.0.signature = key.sign(&payload).to_bytes().to_vec();
+        signed.0.payload = payload;
+
+        let bytes = attach_bytes(NONCE, serde_json::to_value(&signed).unwrap());
+        let mut store = NonceStore::new();
+        let err =
+            verify_and_merge_attach(base(kp, "host:test"), &bytes, now, &mut store).unwrap_err();
+        assert!(
+            matches!(err, AttachVerifyError::PlanVerify(_)),
+            "got {err:?}"
+        );
     }
 }

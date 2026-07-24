@@ -1,6 +1,13 @@
 //! Content-addressing for [`ExecutionPlan`]: a plan's `plan_id` is the SHA-256
 //! of its load-bearing content, rendered `sha256:<64 lowercase hex>`.
 //!
+//! This is a **per-execution** identity, not a workload identity: because the
+//! id commits to the full content — including the per-synthesis nonce and the
+//! validity window — it changes on every synthesis and every revision. The
+//! *stable* identity of a workload across executions is `(tenant, workload)`
+//! (the [`ExecutionPlan::tenant`] + [`ExecutionPlan::workload`] fields);
+//! `plan_id` addresses one concrete run of it.
+//!
 //! The id commits to every load-bearing field of the plan *except* the id
 //! itself — so a run is addressable and hash-linkable by digest, and two plans
 //! with identical content share an id. The per-synthesis nonce is part of that

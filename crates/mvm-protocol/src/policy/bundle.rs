@@ -17,9 +17,11 @@ use crate::policy::policies::{
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Stable identifier for a `PolicyBundle`. Audit entries reference
-/// `(bundle_id, bundle_version)` alongside the plan's
-/// `(plan_id, plan_version)` so a runbook can answer "which policy
-/// was in force when this audit entry was written?" in O(1).
+/// `(bundle_id, bundle_version)` alongside the plan's `plan_id` and its
+/// stable `(tenant, workload)` identity so a runbook can answer "which
+/// policy was in force when this audit entry was written?" in O(1).
+/// Correlate across a workload's revisions by `(tenant, workload)`; pin
+/// one concrete execution by the per-execution `plan_id` content-address.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PolicyId(pub String);

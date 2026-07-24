@@ -382,7 +382,10 @@ mod tests {
     fn signs_plan_envelope_verifiable_via_pubkey() {
         let dir = fresh_keys_dir();
         let signer = load_or_init_at(dir.path()).expect("init");
-        let plan = fixture_plan();
+        // sign_plan stamps the content-address; give the fixture that id so the
+        // recovered plan matches.
+        let mut plan = fixture_plan();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
 
         let signer_id = "host:test";
         let signed = sign_plan(&plan, &signer.signing, signer_id);

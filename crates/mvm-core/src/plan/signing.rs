@@ -49,14 +49,21 @@ pub enum PlanVerifyError {
 
 /// Sign an `ExecutionPlan` with the given key.
 ///
-/// The plan is serialised to canonical JSON via `serde_json` (the
-/// same encoding `verify_plan` round-trips through), signed, and
-/// wrapped in a `SignedExecutionPlan` envelope. The `signer_id` is
-/// the human-readable name of the key inside the envelope — used
-/// by the verifier to look the corresponding `VerifyingKey` up in
-/// the trusted-keys set.
+/// The `plan_id` is (re-)derived as the content-address of the plan body
+/// immediately before signing, so a signed plan whose id does not address its
+/// content is unrepresentable through this API — the sole way to mint a valid
+/// envelope. A caller who already content-addressed the plan (e.g.
+/// [`crate::plan::synthesize_plan`]) gets the same id back; one who hands a
+/// stale or bogus id gets it corrected. The stamped plan is then serialised to
+/// canonical JSON via `serde_json` (the same encoding `verify_plan` round-trips
+/// through), signed, and wrapped in a `SignedExecutionPlan` envelope. The
+/// `signer_id` is the human-readable name of the key inside the envelope — used
+/// by the verifier to look the corresponding `VerifyingKey` up in the
+/// trusted-keys set.
 pub fn sign_plan(plan: &ExecutionPlan, key: &SigningKey, signer_id: &str) -> SignedExecutionPlan {
-    let payload = serde_json::to_vec(plan).expect("ExecutionPlan must serialise to JSON");
+    let mut plan = plan.clone();
+    plan.plan_id = crate::plan::compute_plan_id(&plan);
+    let payload = serde_json::to_vec(&plan).expect("ExecutionPlan must serialise to JSON");
     let signature: Signature = key.sign(&payload);
     SignedExecutionPlan(SignedPayload {
         payload,
@@ -299,11 +306,28 @@ mod tests {
 
     #[test]
     fn signed_plan_roundtrip() {
-        let plan = sample_plan();
+        // sign_plan stamps the content-address; give the fixture that id up
+        // front so the round-trip recovers a byte-identical plan.
+        let mut plan = sample_plan();
+        plan.plan_id = crate::plan::compute_plan_id(&plan);
         let (sk, vk) = fresh_key();
         let signed = sign_plan(&plan, &sk, "test-signer");
         let recovered = verify_plan(&signed, &[("test-signer", &vk)]).unwrap();
         assert_eq!(recovered, plan);
+    }
+
+    #[test]
+    fn sign_plan_stamps_content_address_over_a_bogus_id() {
+        // Handing sign_plan a plan carrying a wrong id yields an envelope whose
+        // inner plan is content-addressed — a mismatched signed plan cannot be
+        // produced through this API.
+        let mut plan = sample_plan();
+        plan.plan_id = PlanId("sha256:not-the-real-address".to_string());
+        let (sk, vk) = fresh_key();
+        let signed = sign_plan(&plan, &sk, "test-signer");
+        let recovered = verify_plan(&signed, &[("test-signer", &vk)]).unwrap();
+        assert_ne!(recovered.plan_id.0, "sha256:not-the-real-address");
+        assert!(crate::plan::verify_plan_id(&recovered).is_ok());
     }
 
     #[test]
@@ -350,6 +374,8 @@ mod tests {
                 address: "echo-key".into(),
             },
         }];
+        // Content-address after the last body edit so the decoded plan matches.
+        plan.plan_id = crate::plan::compute_plan_id(&plan);
         let (sk, _vk) = fresh_key();
         let signed = sign_plan(&plan, &sk, "test-signer");
         let json = serde_json::to_string(&signed).unwrap();
@@ -576,6 +602,7 @@ mod tests {
             crate::plan::DepsVolumeBinding::new("a".repeat(64), "b".repeat(64))
                 .expect("valid binding"),
         );
+        plan.plan_id = crate::plan::compute_plan_id(&plan);
         let (sk, vk) = fresh_key();
         let signed_a = sign_plan(&plan, &sk, "test-signer");
         let signed_b = sign_plan(&plan, &sk, "test-signer");

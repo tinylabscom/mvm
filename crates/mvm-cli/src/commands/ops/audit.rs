@@ -49,7 +49,7 @@ pub(in crate::commands) enum AuditAction {
     },
     /// Show every audit chain entry bound to a specific plan_id.
     Show {
-        /// The plan_id (UUIDv4) to filter by.
+        /// The plan_id (`sha256:<hex>` content-address) to filter by.
         plan_id: String,
         /// Tenant whose chain to search. Defaults to `"local"`.
         #[arg(long, default_value = "local")]

@@ -142,6 +142,9 @@ jobs:
       - name: mvm-core default build is runtime-free
         run: cargo run -p xtask -- check-core-runtime-free
 
+      - name: content-address digests stay deterministic
+        run: cargo run -p xtask -- check-content-address-determinism
+
       - name: mvmctl default closure within budget
         run: cargo run -p xtask -- check-closure-budget
 

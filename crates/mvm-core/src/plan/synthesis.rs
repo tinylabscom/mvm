@@ -30,7 +30,7 @@
 //! | Plan field | Where it comes from |
 //! |---|---|
 //! | `plan_id` | content-address of the finished plan (all load-bearing fields except the id itself) |
-//! | `plan_version` | always 1 for synthesized plans (mvmd revisions get higher numbers) |
+//! | `plan_version` | always 1 for synthesized plans; the revision counter under the stable `(tenant, workload)` identity (mvmd revisions get higher numbers) |
 //! | `tenant` | `--tenant` flag or default `"local"` |
 //! | `workload` | derived from `--name` or flake ref leaf |
 //! | `runtime_profile` | hypervisor flag mapped to a profile name |
