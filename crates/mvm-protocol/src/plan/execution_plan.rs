@@ -41,11 +41,15 @@ pub struct ExecutionPlan {
     /// Stable plan identifier. Audit entries reference this verbatim.
     pub plan_id: PlanId,
 
-    /// Monotonic per-`plan_id` revision counter. Bumped each time
-    /// mvmd publishes a revised plan with the same id (eg. policy
-    /// changes). The supervisor logs both id+version on every
-    /// audit entry so "which version of the plan was running" is
-    /// answerable from audit alone.
+    /// Monotonic revision counter under the stable workload identity
+    /// `(tenant, workload)`. `plan_id` is a per-execution content-address
+    /// that changes on every synthesis/revision, so it does not stay
+    /// constant across revisions — `plan_version` is what increments as
+    /// mvmd publishes revised plans for the same workload (eg. policy
+    /// changes). The supervisor logs `plan_id` + `plan_version` +
+    /// `(tenant, workload)` on every audit entry, so both "which exact
+    /// run" (`plan_id`) and "which revision of the workload"
+    /// (`plan_version`) are answerable from audit alone.
     pub plan_version: u32,
 
     pub tenant: TenantId,

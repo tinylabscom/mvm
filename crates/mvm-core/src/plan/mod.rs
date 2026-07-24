@@ -25,6 +25,7 @@
 //!   valid plan now".
 
 pub mod bundle;
+pub mod content_id;
 pub mod signing;
 pub mod synthesis;
 #[cfg(any(test, feature = "test-support"))]
@@ -45,6 +46,7 @@ pub use bundle::{
     TrustStore, VerifiedBundle, VerityInfo, bundle_sha256, read_and_verify_bundle, sha256_hex,
     signature_from_base64, signature_to_base64, verify_plan_bundle, write_bundle,
 };
+pub use content_id::{PlanIdMismatch, compute_plan_id, verify_plan_id};
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 pub use signing::{
     PlanVerifyError, SignedExecutionPlan, plan_from_admitted_json, redaction_from_signed_json,

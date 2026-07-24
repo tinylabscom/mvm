@@ -312,6 +312,19 @@ impl Supervisor {
             }
         };
 
+        // Step 1.1: the plan_id must be the content-address of the plan body.
+        // A signature-valid plan whose id does not address its content is
+        // refused before any resource-allocating work, so a run is only ever
+        // launched under an id that genuinely addresses what ran. The plan is
+        // signature-verified here, so its plan_id is trusted enough to bind a
+        // chain-signed rejection entry to — unlike the Step 1 signature failure
+        // above, which has no trusted plan to audit.
+        if let Err(e) = mvm_core::plan::verify_plan_id(&plan) {
+            self.emit_audit_then_fail(&plan, "plan.rejected.plan_id_mismatch", &e.to_string())
+                .await?;
+            return Err(SupervisorError::PlanVerify(e.to_string()));
+        }
+
         // Step 1.5: time-window + nonce-replay
         // check. Without this, a captured signed plan is replayable
         // indefinitely. Both checks must pass before the backend is
@@ -1147,12 +1160,15 @@ mod tests {
     }
 
     fn sample_plan() -> ExecutionPlan {
-        ExecutionPlan {
+        let mut plan = ExecutionPlan {
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
             schema_version: SCHEMA_VERSION,
-            plan_id: PlanId("01HXTEST0000000000000000".to_string()),
+            // Overwritten below with the content-address, matching what
+            // sign_plan stamps — so a test's `plan.plan_id` equals the id that
+            // actually launches and is audited.
+            plan_id: PlanId(String::new()),
             plan_version: 1,
             tenant: TenantId("tenant-a".to_string()),
             workload: WorkloadId("workload-1".to_string()),
@@ -1209,7 +1225,9 @@ mod tests {
             deps_volume: None,
             shares: Vec::new(),
             agent_verbs: None,
-        }
+        };
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
+        plan
     }
 
     fn sign_sample(plan: &ExecutionPlan) -> (SignedExecutionPlan, SigningKey, VerifyingKey) {
@@ -1655,6 +1673,41 @@ mod tests {
         assert_eq!(backend.launches().len(), 2);
     }
 
+    #[tokio::test]
+    async fn launch_rejects_plan_id_not_content_address() {
+        use ed25519_dalek::Signer;
+
+        // A signature-valid envelope whose inner plan_id is NOT the
+        // content-address: sign_plan stamps, so mint the mismatch by hand.
+        let plan = sample_plan();
+        let (mut signed, sk, vk) = sign_sample(&plan);
+        let mut tampered = plan.clone();
+        tampered.plan_id = mvm_core::plan::PlanId("sha256:not-the-content-address".into());
+        let payload = serde_json::to_vec(&tampered).unwrap();
+        signed.0.signature = sk.sign(&payload).to_bytes().to_vec();
+        signed.0.payload = payload;
+
+        let backend = Arc::new(MockBackend::new());
+        let (mut s, audit) = make_supervisor_with_audit(backend.clone());
+        let err = s.launch(&signed, &[("test", &vk)]).await.unwrap_err();
+        assert!(matches!(err, SupervisorError::PlanVerify(_)), "got {err:?}");
+        assert_eq!(backend.launches().len(), 0, "mismatched plan must not boot");
+
+        // The rejection is a chain-signed audit entry, like every other
+        // admission decision — no unaudited control-plane refusal.
+        assert_eq!(audit_events(&audit), vec!["plan.rejected.plan_id_mismatch"]);
+        let entry = &audit.entries()[0];
+        assert_eq!(entry.plan_id, tampered.plan_id);
+        assert!(
+            entry
+                .labels
+                .get("reason")
+                .is_some_and(|r| r.contains("content-address")),
+            "reason label names the mismatch: {:?}",
+            entry.labels
+        );
+    }
+
     // ----- admission audit -----
 
     /// Convenience: collect just the `event` strings from captured
@@ -1731,6 +1784,9 @@ mod tests {
     async fn admission_refuses_sealed_plan_with_absent_entrypoint() {
         let mut plan = sample_plan();
         plan.image.entrypoint_present = false;
+        // Re-address after the edit so the fixture's id matches what sign_plan
+        // stamps and what the audit chain records.
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let (signed, _sk, vk) = sign_sample(&plan);
         let backend = Arc::new(MockBackend::new());
         let (mut s, _audit) = make_supervisor_with_audit(backend.clone());
@@ -1748,6 +1804,9 @@ mod tests {
     async fn admission_emits_plan_failed_entrypoint_absent_audit_entry() {
         let mut plan = sample_plan();
         plan.image.entrypoint_present = false;
+        // Re-address after the edit so the fixture's id matches what sign_plan
+        // stamps and what the audit chain records.
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let (signed, _sk, vk) = sign_sample(&plan);
         let backend = Arc::new(MockBackend::new());
         let (mut s, audit) = make_supervisor_with_audit(backend.clone());
@@ -2431,6 +2490,7 @@ mod tests {
     ) -> Result<ExecutionPlan, mvm_core::plan::DepsVolumeBindingError> {
         let mut plan = sample_plan();
         plan.deps_volume = Some(DepsVolumeBinding::new(volume_hash, manifest_sha256)?);
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         Ok(plan)
     }
 
@@ -2515,6 +2575,7 @@ mod tests {
         fs::write(final_vol_dir.join(FILE_CVE), b"{\"results\":[\"FORGED\"]}").unwrap();
         let mut tampered_plan = plan.clone();
         tampered_plan.nonce = Nonce::from_bytes([0xcd; 16]); // fresh nonce
+        tampered_plan.plan_id = mvm_core::plan::compute_plan_id(&tampered_plan);
         let (signed, _sk, vk) = sign_sample(&tampered_plan);
         let backend = Arc::new(MockBackend::new());
         let (mut s, audit) = make_supervisor_with_audit(backend.clone());

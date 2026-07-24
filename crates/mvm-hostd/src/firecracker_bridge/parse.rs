@@ -227,7 +227,10 @@ mod tests {
         use mvm_core::plan::sign_plan;
         use mvm_core::plan::signing::test_support::sample_plan;
 
-        let plan = sample_plan();
+        // sign_plan stamps the content-address; give the fixture that id so the
+        // decoded inner plan matches.
+        let mut plan = sample_plan();
+        plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         let sk = SigningKey::from_bytes(&[7u8; 32]);
         let signed = sign_plan(&plan, &sk, "test-signer");
         // This is exactly what stash_plan_for_bridge persists.
