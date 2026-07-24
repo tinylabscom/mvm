@@ -554,6 +554,68 @@ mod tests {
     }
 
     #[test]
+    fn literal_ipv4_target_offers_pinned_ipv6_sibling() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let v6: IpAddr = "2606:4700:10::6814:179a".parse().unwrap();
+        let v4: IpAddr = "104.20.23.154".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec![v6, v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        assert_eq!(
+            gate.decide_request("104.20.23.154:443"),
+            EgressVerdict::Allow {
+                ips: vec![v4, v6],
+                port: 443,
+            }
+        );
+    }
+
+    #[test]
+    fn literal_shared_ip_uses_lowest_dest_pin_for_fallback() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let shared_v6: IpAddr = "2606:4700:10::6814:179a".parse().unwrap();
+        let alpha_v4: IpAddr = "104.20.0.1".parse().unwrap();
+        let zebra_v4: IpAddr = "104.20.0.2".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "zebra.example",
+            vec![shared_v6, zebra_v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        pins.add(DnsPin::at(
+            "alpha.example",
+            vec![shared_v6, alpha_v4],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![
+            HostPort::new("alpha.example", 443),
+            HostPort::new("zebra.example", 443),
+        ]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        assert_eq!(
+            gate.decide_request("[2606:4700:10::6814:179a]:443"),
+            EgressVerdict::Allow {
+                ips: vec![alpha_v4, shared_v6],
+                port: 443,
+            }
+        );
+    }
+
+    #[test]
     fn dns_verdict_uses_pin_without_upstream_lookup() {
         use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
         use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
