@@ -239,7 +239,7 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
     }
 
     assert!(
-        libkrunfw.contains("linux-6.12.91.tar.xz")
+        libkrunfw.contains("linux-6.12.97.tar.xz")
             && libkrunfw.contains("KERNEL_REMOTE")
             && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)"),
         "libkrunfw must pin and substitute the kernel source instead of downloading it during build"

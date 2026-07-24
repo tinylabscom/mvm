@@ -35,7 +35,7 @@
           # "aarch64" / "x86_64" for the published filenames (matches the
           # per-arch checksum-manifest naming the downloader verifies).
           arch = nixpkgs.lib.head (nixpkgs.lib.splitString "-" system);
-          kver = pkgs.linux_6_12.version;
+          kver = base.kernelVersion;
 
           # vmlinux size + built-in symbol count. Pure measurement; the
           # number is what the "tiny kernel" claim is anchored to.

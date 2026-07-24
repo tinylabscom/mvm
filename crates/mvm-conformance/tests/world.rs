@@ -1,9 +1,10 @@
 //! Shared state cucumber threads through the steps of one scenario.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::process::Output;
 
+use mvm_core::kernel_advisory::{KernelAdvisory, KernelPin};
 use mvm_core::kernel_format::KernelFormat;
 
 /// Constructed fresh for every scenario. Holds the result of the most
@@ -27,6 +28,13 @@ pub struct CliWorld {
     pub isolated_home: Option<tempfile::TempDir>,
     /// Whether live CLI steps should keep one warm standby for the next run.
     pub warm_residency: bool,
+    /// Local kernel pins accumulated by the freshness-watcher scenarios.
+    pub kernel_pins: Vec<KernelPin>,
+    /// Latest upstream point release per `MAJOR.MINOR` series, as those same
+    /// scenarios stage it before assessing.
+    pub kernel_upstream: BTreeMap<String, String>,
+    /// The verdict from the most recent freshness assessment.
+    pub kernel_advisory: Option<KernelAdvisory>,
 }
 
 impl fmt::Debug for CliWorld {
@@ -42,6 +50,9 @@ impl fmt::Debug for CliWorld {
                 &self.isolated_home.as_ref().map(|t| t.path().to_path_buf()),
             )
             .field("warm_residency", &self.warm_residency)
+            .field("kernel_pins", &self.kernel_pins)
+            .field("kernel_upstream", &self.kernel_upstream)
+            .field("kernel_advisory", &self.kernel_advisory)
             .finish()
     }
 }
@@ -63,5 +74,13 @@ impl CliWorld {
                 "no address recorded for {fixture:?} — its `When` step must run and succeed first"
             )
         })
+    }
+
+    /// The advisory from the most recent freshness assessment, or a failed
+    /// assertion naming the missing `When` step.
+    pub fn advisory(&self) -> &KernelAdvisory {
+        self.kernel_advisory
+            .as_ref()
+            .expect("no advisory recorded yet — a prior `When` step must assess freshness")
     }
 }
