@@ -2943,6 +2943,7 @@ dependencies = [
  "mvm-fs",
  "mvm-net",
  "mvm-protocol",
+ "nix",
  "object_store",
  "rand 0.8.6",
  "secrecy",

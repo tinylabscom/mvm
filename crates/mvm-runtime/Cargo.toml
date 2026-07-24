@@ -100,6 +100,7 @@ mvm-core = { workspace = true, features = ["test-support"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-ioctls = "0.21"
 kvm-bindings = "0.11"
+nix = { version = "0.29", features = ["mount", "sched"] }
 
 [features]
 default = []

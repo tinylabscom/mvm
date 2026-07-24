@@ -42,12 +42,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::base::shell::{run_in_vm, shell_quote};
 use mvm_core::crypto::keystore;
 use mvm_core::crypto::snapshot_encryption;
 use mvm_core::crypto::snapshot_hmac::{
     EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles, VMSTATE_FILENAME,
     VerifyError, files_in, load_or_init_key, seal, verify,
 };
+
 use secrecy::ExposeSecret;
 
 /// Tenant id used for snapshot encryption in mvm's single-host
@@ -707,15 +709,38 @@ impl SnapshotIO for FirecrackerIO {
     }
 
     fn load_snapshot(&self, dir: &Path) -> Result<()> {
-        self.ensure_socket()?;
-        let payload = format!(
-            r#"{{"snapshot_path":"{}/{}","mem_file_path":"{}/{}","resume_vm":true}}"#,
-            dir.display(),
-            VMSTATE_FILENAME,
-            dir.display(),
-            MEM_FILENAME,
-        );
-        run_curl(&self.socket_path, "PUT", "/snapshot/load", &payload)
+        let vm_dir = self
+            .socket_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
+        let socket_str = self.socket_path.to_string_lossy();
+        let pid_file = vm_dir.join("fc.pid");
+        let pid_file_str = pid_file.to_string_lossy();
+
+        // Firecracker refuses `/snapshot/load` on a VMM that has already
+        // started a microVM. If a previous pause left the process alive, stop
+        // it; if it already exited, just start a fresh blank VMM. Either way
+        // resume from the sealed snapshot rather than assuming a live API.
+        if crate::firecracker::is_vm_running(&pid_file_str)? {
+            let q_pid = shell_quote(&pid_file_str);
+            run_in_vm(&format!(
+                "sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null; sleep 1"
+            ))
+            .with_context(|| "stopping paused Firecracker before snapshot restore")?;
+        }
+        crate::microvm::start_vm_firecracker(&vm_dir.to_string_lossy(), &socket_str)
+            .with_context(|| "starting fresh Firecracker for snapshot restore")?;
+
+        let body = serde_json::json!({
+            "snapshot_path": format!("{}/{}", dir.display(), VMSTATE_FILENAME),
+            "mem_backend": {
+                "backend_type": "File",
+                "backend_path": format!("{}/{}", dir.display(), MEM_FILENAME),
+            },
+            "resume_vm": true,
+        })
+        .to_string();
+        crate::microvm::api_put_socket(&socket_str, "/snapshot/load", &body)
             .with_context(|| "PUT /snapshot/load")?;
         Ok(())
     }

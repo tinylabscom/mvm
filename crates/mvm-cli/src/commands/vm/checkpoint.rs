@@ -932,6 +932,18 @@ struct ForkVmFullArmFcParams<'a> {
 /// the child, rename `memory.bin` → `mem.bin`, and boot the child via a fresh
 /// Firecracker VMM loaded from the checkpoint snapshot.
 fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
+    // FC vm_full fork loads a snapshot that still carries the parent's TAP
+    // name and guest MAC in bitcode. Remapping backing files is not enough to
+    // make a live-parent fork safe, so require the parent to be stopped first.
+    // The device-path remapping happens in a private mount namespace before
+    // the child Firecracker starts.
+    if vm_is_running(&p.parent_meta.vm_name) {
+        anyhow::bail!(
+            "Firecracker vm_full fork requires the parent VM '{}' to be stopped first;              live-parent fork would collide on the parent's TAP/MAC",
+            p.parent_meta.vm_name
+        );
+    }
+
     // Use safe defaults for FC cpu/mem plan admission. The actual cpu/mem are
     // baked into the snapshot and enforced by FC at load time; the plan values
     // are used for claim-8 admission metadata only.
