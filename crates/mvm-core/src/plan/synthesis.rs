@@ -29,7 +29,7 @@
 //!
 //! | Plan field | Where it comes from |
 //! |---|---|
-//! | `plan_id` | fresh `Uuid::new_v4()` per invocation |
+//! | `plan_id` | content-address of the finished plan (all load-bearing fields except the id itself) |
 //! | `plan_version` | always 1 for synthesized plans (mvmd revisions get higher numbers) |
 //! | `tenant` | `--tenant` flag or default `"local"` |
 //! | `workload` | derived from `--name` or flake ref leaf |
@@ -171,13 +171,13 @@ pub struct SynthesisInput<'a> {
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
 ///
-/// Generates a fresh `plan_id` (UUIDv4) and `nonce` (128 random bits)
-/// per invocation; the validity window starts at the call site's
-/// `now()` and lasts `VALIDITY_WINDOW_MINUTES`. The caller signs the
-/// returned plan via [`crate::plan::sign_plan`] before passing it to the
-/// supervisor.
+/// Generates a fresh `nonce` (128 random bits) per invocation and
+/// derives `plan_id` as the content-address of the finished plan (see
+/// [`crate::plan::compute_plan_id`]); the validity window starts at the
+/// call site's `now()` and lasts `VALIDITY_WINDOW_MINUTES`. The caller
+/// signs the returned plan via [`crate::plan::sign_plan`] before passing
+/// it to the supervisor — the signature covers the derived id.
 pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
-    let plan_id = PlanId(uuid::Uuid::new_v4().to_string());
     let nonce = fresh_nonce();
     let now = Utc::now();
 
@@ -238,12 +238,15 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         entrypoint_present: true,
     };
 
-    Ok(ExecutionPlan {
+    let mut plan = ExecutionPlan {
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: Default::default(),
         schema_version: SCHEMA_VERSION,
-        plan_id,
+        // Placeholder — overwritten below with the content-address once every
+        // load-bearing field is set. The derivation excludes `plan_id`, so this
+        // seed value never influences the result.
+        plan_id: PlanId(String::new()),
         plan_version: 1,
         tenant: TenantId(tenant_str.to_string()),
         workload: WorkloadId(input.vm_name.to_string()),
@@ -284,7 +287,12 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         // deps-volume gate is skipped).
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
-    })
+    };
+
+    // Content-address the finished plan. The fresh nonce makes this unique per
+    // synthesis; the signature the caller applies next covers the derived id.
+    plan.plan_id = crate::plan::compute_plan_id(&plan);
+    Ok(plan)
 }
 
 /// Generate a fresh 128-bit nonce from `OsRng`. `crate::plan::Nonce`
@@ -436,9 +444,37 @@ mod tests {
 
     #[test]
     fn generates_unique_plan_id_per_call() {
+        // Fresh nonce per synthesis ⇒ distinct content ⇒ distinct
+        // content-address, even for byte-identical CLI input.
         let p1 = synthesize_plan(&input("myvm")).unwrap();
         let p2 = synthesize_plan(&input("myvm")).unwrap();
         assert_ne!(p1.plan_id, p2.plan_id);
+    }
+
+    #[test]
+    fn plan_id_is_the_content_address_of_the_plan() {
+        let plan = synthesize_plan(&input("myvm")).unwrap();
+        assert!(
+            plan.plan_id.0.starts_with("sha256:"),
+            "content-addressed, not a UUID: {}",
+            plan.plan_id.0
+        );
+        // The stored id equals the address recomputed from the plan body.
+        assert_eq!(crate::plan::verify_plan_id(&plan), Ok(()));
+        assert_eq!(plan.plan_id, crate::plan::compute_plan_id(&plan));
+    }
+
+    #[test]
+    fn signing_does_not_perturb_the_content_address() {
+        // The signature lives in the envelope, not the plan body, so the id a
+        // verified plan carries is exactly the address of its content.
+        let plan = synthesize_plan(&input("myvm")).unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        let signed = crate::plan::sign_plan(&plan, &key, "host:test");
+        let recovered =
+            crate::plan::verify_plan(&signed, &[("host:test", &key.verifying_key())]).unwrap();
+        assert_eq!(recovered.plan_id, plan.plan_id);
+        assert_eq!(crate::plan::verify_plan_id(&recovered), Ok(()));
     }
 
     #[test]

@@ -49,7 +49,7 @@ use ed25519_dalek::VerifyingKey;
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, check_window,
-    sign_plan, verify_plan, verify_plan_bundle,
+    sign_plan, verify_plan, verify_plan_bundle, verify_plan_id,
 };
 use mvm_core::policy::PolicyBundle;
 use std::sync::Mutex;
@@ -153,6 +153,11 @@ pub fn admit_for_run(
     let signed = sign_plan(&plan, &signer.signing, &signer_id);
     let trusted: [(&str, &VerifyingKey); 1] = [(&signer_id, &signer.verifying)];
     let verified = verify_plan(&signed, &trusted).context("verifying just-signed plan")?;
+
+    // The plan_id is the content-address of the plan body — recompute it and
+    // refuse a plan whose stored id doesn't match, so a run is only ever
+    // admitted under an id that genuinely addresses its content.
+    verify_plan_id(&verified).context("plan_id content-address check")?;
 
     // Validity window — refuses plans whose now() is outside
     // [valid_from, valid_until). For freshly-synthesized plans this
@@ -651,6 +656,27 @@ mod tests {
             [(&admitted.signer_id, &signer.verifying)];
         let recovered = mvm_core::plan::verify_plan(&admitted.signed, &trusted).unwrap();
         assert_eq!(recovered.plan_id, admitted.plan_id);
+    }
+
+    #[test]
+    fn admitted_plan_id_is_a_content_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let admitted = admit_for_run(
+            &fixture_input("vm1"),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            None,
+        )
+        .expect("happy path");
+        assert!(
+            admitted.plan_id.0.starts_with("sha256:"),
+            "content-addressed, not a UUID: {}",
+            admitted.plan_id.0
+        );
+        // The admission path enforces the content-address; the admitted plan
+        // re-derives to exactly its stored id.
+        assert_eq!(mvm_core::plan::verify_plan_id(&admitted.plan), Ok(()));
     }
 
     #[test]

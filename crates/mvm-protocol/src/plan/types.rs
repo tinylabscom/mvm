@@ -87,10 +87,13 @@ pub struct BuildProvenance {
     pub artifacts: ArtifactDigests,
 }
 
-/// Stable identifier for an `ExecutionPlan` instance. Currently a
-/// ULID; we keep the type opaque so the constructor can switch
-/// generators (UUIDv7, snowflake, etc.) without touching the wire
-/// format. Audit entries reference this id verbatim.
+/// Stable identifier for an `ExecutionPlan` instance. Synthesis derives it
+/// as the content-address of the plan body — `sha256:<64 lowercase hex>` over
+/// every load-bearing field except the id itself — so a run is addressable and
+/// hash-linkable by digest. The type stays an opaque `String` newtype: the
+/// derivation lives in `mvm-core` (which owns the hashing crates), and this
+/// no_std DTO crate only carries the value across the wire. Audit entries
+/// reference this id verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PlanId(pub String);
