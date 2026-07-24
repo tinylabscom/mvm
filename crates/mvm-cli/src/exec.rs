@@ -993,6 +993,7 @@ fn run_inner(
 
     // Reap stale standbys, try a warm-pool claim, then fall back to
     // snapshot-restore / cold boot. See `boot_transient_vm`.
+    let requested_vm_name = vm_name.clone();
     let boot_attempt = BootAttempt {
         backend: &backend,
         start_config: &start_config,
@@ -1018,6 +1019,7 @@ fn run_inner(
         &start_config,
         &req.add_dirs,
         &staging_dir,
+        &requested_vm_name,
     );
     let t_torn_down = timing.then(std::time::Instant::now);
 
@@ -1433,6 +1435,7 @@ fn teardown_transient_vm(
     start_config: &VmStartConfig,
     add_dirs: &[AddDir],
     staging_dir: &str,
+    requested_vm_name: &str,
 ) {
     let _ = backend.stop_transient(&VmId(vm_name.to_string()));
 
@@ -1462,7 +1465,19 @@ fn teardown_transient_vm(
         }
     }
 
-    remove_transient_state_dir(&mvm_core::config::vm_state_dir(vm_name).to_string_lossy());
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    let requested_state_dir = mvm_core::config::vm_state_dir(requested_vm_name);
+    remove_transient_state_dirs(&state_dir, &requested_state_dir);
+}
+
+/// Remove both state directories involved in a transient launch. A warm-pool
+/// claim may replace the generated request name with a standby id, while plan
+/// admission has already persisted state under the generated name.
+fn remove_transient_state_dirs(effective_dir: &Path, requested_dir: &Path) {
+    remove_transient_state_dir(&effective_dir.to_string_lossy());
+    if effective_dir != requested_dir {
+        remove_transient_state_dir(&requested_dir.to_string_lossy());
+    }
 }
 
 /// Restore a transient microVM from a template snapshot instead of cold-booting.
@@ -2975,6 +2990,28 @@ mod tests {
         // Best-effort: an already-gone dir (or a boot that never created one) is
         // a clean no-op, never a panic.
         remove_transient_state_dir("/nonexistent/mvm/vms/never-created");
+    }
+
+    #[test]
+    fn warm_claim_cleanup_removes_requested_and_effective_state_dirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let requested = tmp.path().join("requested");
+        let effective = tmp.path().join("standby");
+        std::fs::create_dir_all(&requested).expect("create requested state dir");
+        std::fs::create_dir_all(&effective).expect("create effective state dir");
+        std::fs::write(requested.join("plan.json"), b"plan").expect("write requested plan");
+        std::fs::write(effective.join("console.log"), b"console").expect("write console");
+
+        remove_transient_state_dirs(&effective, &requested);
+
+        assert!(
+            !requested.exists(),
+            "the pre-claim plan dir must be removed"
+        );
+        assert!(
+            !effective.exists(),
+            "the claimed standby dir must be removed"
+        );
     }
 
     #[test]

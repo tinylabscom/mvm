@@ -105,6 +105,11 @@ fn isolated_mvm_home(world: &mut CliWorld) {
     world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
 }
 
+#[given(expr = "warm residency is enabled")]
+fn warm_residency_enabled(world: &mut CliWorld) {
+    world.warm_residency = true;
+}
+
 #[when(expr = "I run mvmctl in an isolated live home with {string}")]
 fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
@@ -119,12 +124,15 @@ fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
         .isolated_home
         .as_ref()
         .expect("isolated home is set above");
-    let output = mvmctl_command()
+    let mut command = mvmctl_command();
+    command
         .current_dir(workspace_root())
         .args(args.split_whitespace())
-        .env("MVM_HOME", home.path())
-        .output()
-        .expect("failed to spawn mvmctl");
+        .env("MVM_HOME", home.path());
+    if world.warm_residency {
+        command.env("MVM_RESIDENCY", "warm");
+    }
+    let output = command.output().expect("failed to spawn mvmctl");
     world.last_run = Some(output);
 }
 
@@ -138,6 +146,35 @@ fn isolated_home_no_dir(world: &mut CliWorld, rel: String) {
     assert!(
         !path.exists(),
         "expected {path:?} to be removed after teardown, but it still exists"
+    );
+}
+
+#[then(expr = "the isolated mvm home has no transient request state directories")]
+fn isolated_home_no_transient_request_dirs(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home must be created before checking it");
+    let vms_dir = home.path().join("vms");
+    let entries = match std::fs::read_dir(&vms_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("read transient VM state directory {vms_dir:?}: {error}"),
+    };
+
+    let request_dirs = entries
+        .map(|entry| entry.expect("read transient VM state entry").path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_none_or(|name| !name.starts_with("standby-"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        request_dirs.is_empty(),
+        "generated transient request state directories remain: {request_dirs:?}"
     );
 }
 
