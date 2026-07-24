@@ -315,11 +315,14 @@ impl Supervisor {
         // Step 1.1: the plan_id must be the content-address of the plan body.
         // A signature-valid plan whose id does not address its content is
         // refused before any resource-allocating work, so a run is only ever
-        // launched under an id that genuinely addresses what ran.
+        // launched under an id that genuinely addresses what ran. The plan is
+        // signature-verified here, so its plan_id is trusted enough to bind a
+        // chain-signed rejection entry to — unlike the Step 1 signature failure
+        // above, which has no trusted plan to audit.
         if let Err(e) = mvm_core::plan::verify_plan_id(&plan) {
-            let err = SupervisorError::PlanVerify(e.to_string());
-            self.transition_or_warn(PlanState::Failed);
-            return Err(err);
+            self.emit_audit_then_fail(&plan, "plan.rejected.plan_id_mismatch", &e.to_string())
+                .await?;
+            return Err(SupervisorError::PlanVerify(e.to_string()));
         }
 
         // Step 1.5: time-window + nonce-replay
@@ -1685,10 +1688,24 @@ mod tests {
         signed.0.payload = payload;
 
         let backend = Arc::new(MockBackend::new());
-        let mut s = make_supervisor_with_backend(backend.clone());
+        let (mut s, audit) = make_supervisor_with_audit(backend.clone());
         let err = s.launch(&signed, &[("test", &vk)]).await.unwrap_err();
         assert!(matches!(err, SupervisorError::PlanVerify(_)), "got {err:?}");
         assert_eq!(backend.launches().len(), 0, "mismatched plan must not boot");
+
+        // The rejection is a chain-signed audit entry, like every other
+        // admission decision — no unaudited control-plane refusal.
+        assert_eq!(audit_events(&audit), vec!["plan.rejected.plan_id_mismatch"]);
+        let entry = &audit.entries()[0];
+        assert_eq!(entry.plan_id, tampered.plan_id);
+        assert!(
+            entry
+                .labels
+                .get("reason")
+                .is_some_and(|r| r.contains("content-address")),
+            "reason label names the mismatch: {:?}",
+            entry.labels
+        );
     }
 
     // ----- admission audit -----
