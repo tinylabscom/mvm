@@ -93,7 +93,6 @@ fn main() {
     for name in [
         "mvm-guest-agent",
         "mvm-guest-netinit",
-        "mvm-guest-netd",
         "mvm-egress-client",
         "mvm-verity-init",
     ] {
@@ -367,7 +366,7 @@ fn run_cargo_zigbuild(
 fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
     eprintln!(
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-agentd \
-         --bin mvm-guest-agent --bin mvm-guest-netinit --bin mvm-guest-netd \
+         --bin mvm-guest-agent --bin mvm-guest-netinit \
          --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-verity-init \
          --bin mvm-egress-client --features mvm-agentd/interactive \
          --features mvm-agentd/addons"
@@ -385,8 +384,6 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "mvm-guest-agent",
         "--bin",
         "mvm-guest-netinit",
-        "--bin",
-        "mvm-guest-netd",
         "--bin",
         "mvm-oci-init",
         "--bin",
@@ -421,7 +418,6 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
     for name in [
         "mvm-guest-agent",
         "mvm-guest-netinit",
-        "mvm-guest-netd",
         "mvm-oci-init",
         "mvm-oci-entrypoint",
         "mvm-egress-client",

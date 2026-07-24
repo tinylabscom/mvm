@@ -28,9 +28,6 @@ use std::process::Command;
 /// into the build.
 const ALLOWLIST: &[&str] = &[
     "bitflags",
-    // logging facade pulled transitively by smoltcp's heapless; the second
-    // major is benign — there is no defmt consumer in the build.
-    "defmt",
     "getrandom",
     "hashbrown",
     // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;

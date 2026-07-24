@@ -1,7 +1,7 @@
 //! Live libkrun / HVF / Firecracker probes (tracked follow-up — see the
 //! `bench` module docs).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use super::MicrovmLaunchArgs;
 use super::harness::LaunchProbe;
@@ -56,7 +56,7 @@ impl LaunchProbe for LibkrunProbe {
         }
         #[cfg(not(feature = "libkrun-live"))]
         {
-            bail!(
+            anyhow::bail!(
                 "bench microvm-launch: this binary was built without the \
                  `libkrun-live` feature, so it cannot boot a real guest. \
                  Rebuild with `cargo build -p mvm-cli --features libkrun-live` \
@@ -230,7 +230,7 @@ fn wait_for_hvf_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
             return Ok((pid, std::time::Instant::now()));
         }
         if std::time::Instant::now() >= deadline {
-            bail!(
+            anyhow::bail!(
                 "probe: HVF supervisor pid file never appeared or was invalid at {}",
                 pid_path.display()
             );
@@ -255,7 +255,9 @@ fn wait_for_guest_readiness_and_record(
             return Ok((now, now));
         }
         if std::time::Instant::now() >= deadline {
-            bail!("probe: guest control plane never reached Ready (readiness) for {vm_name}");
+            anyhow::bail!(
+                "probe: guest control plane never reached Ready (readiness) for {vm_name}"
+            );
         }
         std::thread::sleep(adaptive_backoff(attempt));
         attempt += 1;
@@ -269,7 +271,7 @@ pub(super) fn assert_hvf_bench_cleanup(vm_name: &str) -> Result<()> {
         .list()
         .with_context(|| format!("listing HVF VMs after bench cleanup for {vm_name}"))?;
     if list.iter().any(|vm| vm.name == vm_name) {
-        bail!("bench cleanup leaked HVF VM registry entry for {vm_name}");
+        anyhow::bail!("bench cleanup leaked HVF VM registry entry for {vm_name}");
     }
     Ok(())
 }

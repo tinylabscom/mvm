@@ -129,12 +129,6 @@ impl VsockHandlerRegistry {
             mvm_agentd::vsock::BROKER_PORT,
             Box::new(StreamRelayHandler::new(mvm_agentd::vsock::BROKER_PORT)),
         );
-        guest_ports.insert(
-            mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
-            Box::new(StreamRelayHandler::new(
-                mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
-            )),
-        );
 
         let host_initiated: Vec<Box<dyn HostInitiatedHandler>> = vec![
             Box::new(AgentVsockHandler::new()),
@@ -190,27 +184,6 @@ impl VsockHandlerRegistry {
             .expect("broker handler present")
             .bridge
             .set_activity(counter);
-    }
-
-    pub(crate) fn set_network_tunnel_endpoint(&mut self, path: &Path) {
-        self.guest_handler_mut::<StreamRelayHandler>(
-            mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
-        )
-        .expect("network tunnel handler present")
-        .bridge
-        .set_endpoint(path);
-    }
-
-    pub(crate) fn set_network_tunnel_activity(
-        &mut self,
-        counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) {
-        self.guest_handler_mut::<StreamRelayHandler>(
-            mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
-        )
-        .expect("network tunnel handler present")
-        .bridge
-        .set_activity(counter);
     }
 
     pub(crate) fn set_console_sockets<'a>(

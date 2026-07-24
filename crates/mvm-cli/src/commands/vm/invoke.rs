@@ -80,9 +80,9 @@ pub(in crate::commands) struct EntrypointCall {
     /// placeholders are reused; the VM is left running (no teardown).
     pub attach: bool,
     /// Resolved egress policy for the transient entrypoint boot (from `--net` /
-    /// `--allow-host`). Threaded onto the admitted plan and onto
-    /// `VmStartConfig.network_tunnel` so a baked entrypoint enforces egress
-    /// identically to the transient argv path. Defaults to `deny_all`.
+    /// `--allow-host`). Threaded onto the admitted plan and shared vsock
+    /// endpoint so a baked entrypoint enforces egress identically to the
+    /// transient argv path. Defaults to `deny_all`.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 

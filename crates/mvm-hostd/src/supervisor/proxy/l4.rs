@@ -56,8 +56,8 @@ pub enum L4Decision {
 // Symmetric with `SupervisorEgressProxy` (L7) / `ToolGate` / `KeystoreReleaser` /
 // `ArtifactCollector`: a `Box<dyn L4Gate>` slot the supervisor consults
 // at admission. `CanonicalL4Gate` is wired from a parsed bundle's
-// `[[network.l4]]` rows; the smoltcp / TUN consumer that turns an
-// `Allow` into accept-the-connection ships separately.
+// `[[network.l4]]` rows; the live supervisor consumer turns an `Allow` into
+// an admitted host-side connection.
 // ──────────────────────────────────────────────────────────────────────
 
 /// Errors `L4Gate::evaluate` can return. `NotWired` is the

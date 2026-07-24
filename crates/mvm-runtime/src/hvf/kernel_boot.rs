@@ -159,11 +159,6 @@ pub struct HostChannels {
     /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
     /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
     pub broker_socket: Option<PathBuf>,
-    /// Per-VM userspace L3 egress tunnel UDS. When set, the guest's dial of
-    /// `NETWORK_TUNNEL_GUEST_PORT` relays here — the socket the per-VM tunnel worker
-    /// bound — so guest packets reach the host forwarder and admitted flows egress.
-    /// `None` ⇒ the tunnel port fails closed at the bridge (no forwarder reachable).
-    pub network_tunnel_socket: Option<PathBuf>,
     /// Dev-only host console listeners: one `(guest_port, host_socket)` per console
     /// data port the interactive PTY may reach. Populated only for a `dev_console`
     /// machine; empty for a sealed prod config, so nothing is bound (claim 15).
@@ -504,7 +499,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
                 broker_socket: channels.broker_socket,
-                network_tunnel_socket: channels.network_tunnel_socket,
                 console_data_sockets: channels.console_data_sockets,
                 virtiofs_root: channels.virtiofs_root,
             },
@@ -539,9 +533,6 @@ struct RunInputs {
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
-    /// Per-VM userspace L3 egress tunnel UDS. When set, `NETWORK_TUNNEL_GUEST_PORT`
-    /// relays here — the socket the per-VM tunnel worker bound.
-    network_tunnel_socket: Option<PathBuf>,
     /// Dev-only host console listeners (one `(guest_port, host_socket)` per console
     /// data port). Empty for a sealed prod config — nothing bound (claim 15).
     console_data_sockets: Vec<(u32, PathBuf)>,
@@ -566,7 +557,6 @@ unsafe fn run(
         substitution_socket,
         egress_relay,
         broker_socket,
-        network_tunnel_socket,
         console_data_sockets,
         virtiofs_root,
     } = inputs;
@@ -746,16 +736,6 @@ unsafe fn run(
             if let Some(broker) = broker_socket.as_ref() {
                 v.set_broker_activity(egress_active.clone());
                 v.set_broker_endpoint(broker);
-            }
-            // Userspace L3 egress tunnel (NETWORK_TUNNEL_GUEST_PORT): a pure relay to
-            // the per-VM tunnel worker UDS, which owns the packet-forwarding decision
-            // (default-deny gate + admitted-flow forward). Shares the heartbeat
-            // counter so in-flight forwarded traffic keeps the loop polling. With no
-            // tunnel socket wired, the port fails closed at the bridge — the
-            // deny-all / no-tunnel case.
-            if let Some(tunnel) = network_tunnel_socket.as_ref() {
-                v.set_network_tunnel_activity(egress_active.clone());
-                v.set_network_tunnel_endpoint(tunnel);
             }
             // Dev-only interactive console (`machine run -it`): bind one host
             // listener per guest console data port so the console driver can reach

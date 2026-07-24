@@ -117,7 +117,7 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // Bump whenever the packaging logic in this file changes in a way the source
 // fingerprint doesn't cover (that hash only walks crate sources, not this
 // file) — forces a locally cached overlay to rebuild instead of reusing
-// stale staged content. Bumped for the netd staging added below.
+// stale staged content.
 const LOCAL_BUILD_EPOCH: &str = "3";
 
 /// Resolve `arch`'s overlay from `resolver`'s cache; on a miss with a
@@ -175,7 +175,6 @@ pub fn build_runtime_overlay_from_guest_binaries(
     stage_runtime_overlay_binary(&bins.agent, &root.join("agent"))?;
     stage_runtime_overlay_binary(&bins.agent_interactive, &root.join("agent-interactive"))?;
     stage_runtime_overlay_binary(&bins.netinit, &root.join("netinit"))?;
-    stage_runtime_overlay_binary(&bins.netd, &root.join("netd"))?;
     stage_runtime_overlay_binary(&bins.seccomp_apply, &root.join("seccomp-apply"))?;
     stage_runtime_overlay_binary(&bins.runner, &root.join("runner"))?;
     stage_runtime_overlay_binary(&bins.egress_client, &root.join("egress-client"))?;
@@ -1120,7 +1119,6 @@ mod tests {
             "/agent",
             "/agent-interactive",
             "/netinit",
-            "/netd",
             "/seccomp-apply",
             "/runner",
             "/egress-client",
@@ -1940,7 +1938,6 @@ mod tests {
             agent: make_bin("agent"),
             agent_interactive: make_bin("agent-interactive"),
             netinit: make_bin("netinit"),
-            netd: make_bin("netd"),
             seccomp_apply: make_bin("seccomp-apply"),
             runner: make_bin("runner"),
             egress_client: make_bin("egress-client"),
@@ -1962,11 +1959,7 @@ mod tests {
         assert_eq!(artifact.version, "1.2.3");
         assert_eq!(artifact.roothash.len(), 64);
 
-        // The staged overlay carries every required guest path, netd included —
-        // OCI RuntimeLean runs resolve the tunnel packet pump at /mvm/runtime/netd.
         mvm_fs::overlay::validate_overlay_payload(&artifact.overlay_ext4)
             .expect("direct overlay carries all required guest paths");
-        let fs = ext4_view::Ext4::load_from_path(&artifact.overlay_ext4).unwrap();
-        assert!(fs.exists("/netd").unwrap(), "overlay must stage /netd");
     }
 }

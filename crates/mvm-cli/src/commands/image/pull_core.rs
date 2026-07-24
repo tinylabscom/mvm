@@ -490,7 +490,6 @@ mod tests {
             &guest_layout.oci_init,
             &guest_layout.agent,
             &guest_layout.netinit,
-            &guest_layout.netd,
             &guest_layout.egress_client,
             &guest_layout.entrypoint_runner,
             &guest_layout.verity_init,

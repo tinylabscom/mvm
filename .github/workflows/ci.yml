@@ -130,7 +130,7 @@ jobs:
       - name: vsock-only egress (no guest NIC on the vmm/HVF path, ADR-100)
         run: cargo run -p xtask -- check-vsock-only-egress
 
-      - name: uniform vsock egress (Firecracker + libkrun converged on the WorkloadRunner seam)
+      - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
         run: cargo run -p xtask -- check-uniform-vsock-egress
 
       - name: require-grant token confined to allowlist (guards mvmd no-brick invariant)

@@ -166,8 +166,6 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         // host.secrets.v1 reach the per-VM broker (or the per-tenant host-agent
         // daemon). Absent for a builder/dev VM, which runs no admitted workload.
         broker_socket: spec.host_socket_for_port(BROKER_PORT),
-        // Builder/dev VMs carry no admitted egress tunnel.
-        network_tunnel_socket: None,
         console_data_sockets,
     })
 }

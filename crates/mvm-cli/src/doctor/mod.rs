@@ -198,7 +198,6 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(daemons::host_agent_daemon_check());
     checks.push(builder::builderd_daemon_check());
     checks.push(builder::builder_transport_check(plat));
-    checks.push(daemons::network_tunnel_worker_check());
 
     checks.push(platform_checks::disk_space_check(false));
 

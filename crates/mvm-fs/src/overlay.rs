@@ -62,7 +62,6 @@ const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/agent",
     "/agent-interactive",
     "/netinit",
-    "/netd",
     "/seccomp-apply",
     "/runner",
     "/egress-client",
@@ -596,10 +595,7 @@ mod tests {
             version,
             arch,
             &[
-                (
-                    "overlay.ext4",
-                    &valid_overlay_ext4_bytes(true, true, true, true),
-                ),
+                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
                 ("overlay.verity", b"verity-sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", format!("{version}\n").as_bytes()),
@@ -611,7 +607,6 @@ mod tests {
         include_egress_client: bool,
         include_addon_dns: bool,
         include_exit_report: bool,
-        include_netd: bool,
     ) -> Vec<u8> {
         let mut nodes = vec![
             Node::File {
@@ -672,14 +667,6 @@ mod tests {
                 path: "/exit-report".into(),
                 mode: 0o555,
                 data: b"exit-report".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
-        if include_netd {
-            nodes.push(Node::File {
-                path: "/netd".into(),
-                mode: 0o555,
-                data: b"netd".to_vec(),
                 xattrs: Vec::new(),
             });
         }
@@ -766,10 +753,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                (
-                    "overlay.ext4",
-                    &valid_overlay_ext4_bytes(true, true, true, true),
-                ),
+                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -948,10 +932,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                (
-                    "overlay.ext4",
-                    &valid_overlay_ext4_bytes(true, true, true, true),
-                ),
+                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, true)),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", FAKE_ROOTHASH.as_bytes()),
                 ("VERSION", b"0.14.0"),
@@ -968,10 +949,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                (
-                    "overlay.ext4",
-                    &valid_overlay_ext4_bytes(false, true, true, true),
-                ),
+                ("overlay.ext4", &valid_overlay_ext4_bytes(false, true, true)),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -993,10 +971,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                (
-                    "overlay.ext4",
-                    &valid_overlay_ext4_bytes(true, false, true, true),
-                ),
+                ("overlay.ext4", &valid_overlay_ext4_bytes(true, false, true)),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -1018,10 +993,7 @@ mod tests {
             "0.14.0",
             "aarch64",
             &[
-                (
-                    "overlay.ext4",
-                    &valid_overlay_ext4_bytes(true, true, false, true),
-                ),
+                ("overlay.ext4", &valid_overlay_ext4_bytes(true, true, false)),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", b"0.14.0\n"),
@@ -1032,31 +1004,6 @@ mod tests {
         match err {
             OverlayError::PayloadIncomplete { missing_path, .. } => {
                 assert_eq!(missing_path, "/exit-report");
-            }
-            other => panic!("expected PayloadIncomplete, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_rejects_overlay_payload_missing_netd() {
-        let cache = make_cache(
-            "0.14.0",
-            "aarch64",
-            &[
-                (
-                    "overlay.ext4",
-                    &valid_overlay_ext4_bytes(true, true, true, false),
-                ),
-                ("overlay.verity", b"sidecar"),
-                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
-                ("VERSION", b"0.14.0\n"),
-            ],
-        );
-        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
-        let err = resolver.resolve("aarch64").unwrap_err();
-        match err {
-            OverlayError::PayloadIncomplete { missing_path, .. } => {
-                assert_eq!(missing_path, "/netd");
             }
             other => panic!("expected PayloadIncomplete, got {other:?}"),
         }
@@ -1235,7 +1182,7 @@ short  bar.ext4
         let tmp = TempDir::new().unwrap();
         std::fs::write(
             tmp.path().join("overlay.ext4"),
-            valid_overlay_ext4_bytes(true, true, true, true),
+            valid_overlay_ext4_bytes(true, true, true),
         )
         .unwrap();
         std::fs::write(tmp.path().join("overlay.verity"), b"verity").unwrap();

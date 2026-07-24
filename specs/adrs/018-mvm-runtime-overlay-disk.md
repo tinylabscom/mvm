@@ -65,7 +65,7 @@ unpack.
 **The overlay has a fixed size budget.** 32 MiB, enforced by
 pre-allocating the ext4 image at that size at build time. Today's
 contents — the agent (prod and dev-shell variants), the seccomp shim,
-the netinit and netd binaries, the runner, the egress client, the addon
+the netinit binary, the runner, the egress client, the addon
 binaries, the in-guest host-services FFI shared object, and the Python
 SDK runtime package — fit well under that cap, leaving headroom for
 per-language SDK runtime additions without re-sizing the image on every

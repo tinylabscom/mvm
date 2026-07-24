@@ -3,7 +3,7 @@
 //! Turns the artifacts a build produced into the signed plan's
 //! [`BuildProvenance`] by content-addressing each one. The recorder is the
 //! host-side bridge between the deterministic build pipeline (which writes the
-//! kernel / rootfs / `mvm-init` / `mvm-netd` / snapshot-base files) and the
+//! kernel / rootfs / `mvm-init` / snapshot-base files) and the
 //! signed [`ExecutionPlan`](mvm_core::plan::ExecutionPlan), so a launch is
 //! traceable to exact input and output bytes. Producing the artifacts is the
 //! builder VM's job; recording what it produced is this module's.
@@ -22,7 +22,6 @@ pub struct ArtifactPaths<'a> {
     pub rootfs: Option<&'a Path>,
     pub initramfs: Option<&'a Path>,
     pub mvm_init: Option<&'a Path>,
-    pub mvm_netd: Option<&'a Path>,
     pub snapshot_base: Option<&'a Path>,
 }
 
@@ -60,7 +59,6 @@ pub fn record_provenance(
             rootfs: digest(paths.rootfs)?,
             initramfs: digest(paths.initramfs)?,
             mvm_init: digest(paths.mvm_init)?,
-            mvm_netd: digest(paths.mvm_netd)?,
             snapshot_base: digest(paths.snapshot_base)?,
         },
     })
@@ -115,15 +113,15 @@ mod tests {
     #[test]
     fn distinct_bytes_produce_distinct_digests() {
         let a = write_temp("init-a", b"AAAA");
-        let b = write_temp("netd-b", b"BBBB");
+        let b = write_temp("snapshot-b", b"BBBB");
         let paths = ArtifactPaths {
             mvm_init: Some(&a),
-            mvm_netd: Some(&b),
+            snapshot_base: Some(&b),
             ..Default::default()
         };
         let prov = record_provenance(input(), &paths).unwrap();
         assert!(prov.artifacts.mvm_init.is_some());
-        assert_ne!(prov.artifacts.mvm_init, prov.artifacts.mvm_netd);
+        assert_ne!(prov.artifacts.mvm_init, prov.artifacts.snapshot_base);
         std::fs::remove_file(a).ok();
         std::fs::remove_file(b).ok();
     }

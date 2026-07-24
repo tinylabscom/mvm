@@ -20,18 +20,11 @@ pub(crate) fn aux_helper_specs(
     target_arch: &str,
     libkrun_present: bool,
 ) -> Vec<AuxHelperSpec> {
-    let mut specs = vec![
-        AuxHelperSpec {
-            package: "mvm-hostd",
-            bin: "mvm-substitution-endpoint",
-            features: &[],
-        },
-        AuxHelperSpec {
-            package: "mvm-hostd",
-            bin: "mvm-network-tunnel-worker",
-            features: &[],
-        },
-    ];
+    let mut specs = vec![AuxHelperSpec {
+        package: "mvm-hostd",
+        bin: "mvm-substitution-endpoint",
+        features: &[],
+    }];
     if target_os == "macos" && target_arch == "aarch64" {
         specs.push(AuxHelperSpec {
             package: "mvm-hostd",
@@ -73,17 +66,12 @@ mod tests {
     }
 
     #[test]
-    fn hostd_helpers_include_substitution_endpoint_and_tunnel_worker() {
+    fn hostd_helpers_include_substitution_endpoint() {
         let specs = aux_helper_specs("macos", "aarch64", false);
         assert!(
             specs
                 .iter()
                 .any(|spec| spec.bin == "mvm-substitution-endpoint")
-        );
-        assert!(
-            specs
-                .iter()
-                .any(|spec| spec.bin == "mvm-network-tunnel-worker")
         );
     }
 

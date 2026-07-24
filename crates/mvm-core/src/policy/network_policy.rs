@@ -295,22 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn nic_policy_behind_tunnel_collapses_to_denying_iptables_script() {
-        // A tunnel-carried workload's NIC policy collapses to
-        // deny-all; confirm the rendered script actually
-        // default-denies rather than just checking the DTO shape
-        // (that check lives with the DTO in mvm-protocol).
-        let allow = NetworkPolicy::allow_list(vec![HostPort::new("1.1.1.1", 443)]);
-        let behind = allow.nic_policy_behind_tunnel(true);
-        assert!(
-            iptables_script(&behind, "br-mvm", "172.16.0.2")
-                .unwrap()
-                .contains("-j DROP"),
-            "the NIC firewall default-denies"
-        );
-    }
-
-    #[test]
     fn iptables_cleanup_unrestricted_is_none() {
         let policy = NetworkPolicy::unrestricted();
         assert!(iptables_cleanup_script(&policy, "br-mvm", "172.16.0.2").is_none());

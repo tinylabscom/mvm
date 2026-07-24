@@ -99,7 +99,6 @@ fn oci_runtime_tag_with(source_fp: Option<&str>) -> String {
         "mvm-oci-entrypoint",
         "mvm-guest-agent",
         "mvm-guest-netinit",
-        "mvm-guest-netd",
         "mvm-egress-client",
         "mvm-verity-init",
     ] {
@@ -428,7 +427,6 @@ pub(super) fn embedded_guest_binaries()
         oci_init: find("mvm-oci-init")?,
         agent: find("mvm-guest-agent")?,
         netinit: find("mvm-guest-netinit")?,
-        netd: find("mvm-guest-netd")?,
         egress_client: find("mvm-egress-client")?,
         entrypoint_runner: find("mvm-oci-entrypoint")?,
         verity_init: find("mvm-verity-init")?,

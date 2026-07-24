@@ -121,12 +121,6 @@ pub const EGRESS_PORT: u32 = 5253;
 /// is no live collision.
 pub const BROKER_PORT: u32 = 5300;
 
-/// Vsock port for the backend-agnostic guest-TUN ↔ host-worker packet tunnel.
-/// The shared contract lives in `mvm_core::protocol::network_tunnel`; this
-/// guest crate re-exports the port so the standing vsock maps and any future
-/// guest network agent consume one source of truth.
-pub const NETWORK_TUNNEL_PORT: u32 = mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT;
-
 /// Base vsock port for TCP port forwarding.
 /// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
 pub const PORT_FORWARD_BASE: u32 = 10000;

@@ -912,19 +912,6 @@ impl<L, R> Either<L, R> {
 pub type PostureSink = std::cell::Cell<mvm_build::run_image::RootStrategy>;
 pub type RuntimeSourcePolicySink = std::cell::Cell<mvm_core::vm_backend::RuntimeSourcePolicy>;
 
-/// A backend that advertises a host-vsock egress proxy carries all guest
-/// egress over vsock with no routable guest NIC. The L3 packet tunnel is a
-/// second, incompatible egress data plane for the same workload — and its
-/// guest bring-up writes `/etc/resolv.conf`, which fails on a read-only
-/// sealed rootfs. A workload must boot with exactly one egress data plane,
-/// so drop the tunnel for host-vsock-proxy backends; backends without one
-/// (their only vsock-only egress IS this tunnel) keep it.
-fn drop_l3_tunnel_for_host_vsock_proxy(config: &mut VmStartConfig, backend: &AnyBackend) {
-    if config.network_tunnel.is_some() && backend.capabilities().host_vsock_proxy {
-        config.network_tunnel = None;
-    }
-}
-
 fn run_inner(
     req: ExecRequest,
     capture: bool,
@@ -986,10 +973,6 @@ fn run_inner(
     // admission would add an `admit_for_run` call here and a
     // `populate_audit_substrate` invocation after the struct literal.
     let mut start_config = build_start_config(&req, &vm_name, &resolved, &boot, &volumes);
-    // The tunnel worker spawns on the cold-boot path, not snapshot-restore.
-    if start_config.network_tunnel.is_some() {
-        use_snapshot = false;
-    }
 
     // Admit the transient run as a locally-signed workload. Setting
     // tenant_id + plan_json makes the libkrun/HVF supervisor spawn the gateway
@@ -1008,7 +991,6 @@ fn run_inner(
     }
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
-    drop_l3_tunnel_for_host_vsock_proxy(&mut start_config, &backend);
     let t_admitted = timing.then(std::time::Instant::now);
 
     // Reap stale standbys, try a warm-pool claim, then fall back to
@@ -1310,21 +1292,6 @@ fn build_start_config(
         secret_files: Vec::new(),
         runner_dir: None,
         network_policy: req.network_policy.clone(),
-        // Derive the userspace L3 egress tunnel from the resolved policy: an
-        // admitted allow-list gets a `mvm-network-tunnel-worker` (the smoltcp
-        // forwarder) whose gate enforces exactly those flows; deny-all /
-        // unrestricted return None (no forwarding tunnel). The identity is
-        // minted here so the guest cmdline token and the host worker's
-        // expected-session validate against identical values.
-        network_tunnel: mvm_runtime::network_tunnel_for_launch(
-            &req.network_policy,
-            mvm_runtime::TunnelLaunchIdentity {
-                tenant_id: "local".to_string(),
-                vm_id: vm_name.to_string(),
-                boot_id: uuid::Uuid::new_v4().to_string(),
-                session_nonce: uuid::Uuid::new_v4().to_string(),
-            },
-        ),
         warm_pool_size: req.warm_pool_size,
         runtime_source_policy: boot.runtime_source_policy,
         ..Default::default()
@@ -1547,7 +1514,6 @@ fn restore_via_snapshot(
         // Inherit the resolved egress policy so a restored transient VM
         // enforces the same posture as a cold-boot one.
         network_policy: start_config.network_policy.clone(),
-        network_tunnel: start_config.network_tunnel.clone(),
     };
     let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
         mvm_runtime::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
@@ -1797,21 +1763,6 @@ pub fn boot_session_vm(
         secret_files: vec![],
         runner_dir: None,
         network_policy: network_policy.clone(),
-        // Derive the userspace L3 egress tunnel from the resolved policy, exactly
-        // as the transient argv path does: an admitted allow-list gets the smoltcp
-        // forwarder whose gate enforces those flows; deny-all / unrestricted return
-        // None (no forwarding tunnel), so plain session/MCP boots are unaffected.
-        // The identity is minted here so the guest cmdline token and the host
-        // worker's expected-session validate against identical values.
-        network_tunnel: mvm_runtime::network_tunnel_for_launch(
-            network_policy,
-            mvm_runtime::TunnelLaunchIdentity {
-                tenant_id: "local".to_string(),
-                vm_id: vm_name.clone(),
-                boot_id: uuid::Uuid::new_v4().to_string(),
-                session_nonce: uuid::Uuid::new_v4().to_string(),
-            },
-        ),
         ..Default::default()
     };
 
@@ -1851,13 +1802,8 @@ pub fn boot_session_vm(
 
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
 
-    // The tunnel worker spawns on the cold-boot path, not snapshot-restore, so an
-    // egress-admitted session must cold-boot even when a snapshot exists.
-    let use_snapshot = !admitted_workload
-        && start_config.network_tunnel.is_none()
-        && snap_info.is_some()
-        && backend.capabilities().snapshots;
-    drop_l3_tunnel_for_host_vsock_proxy(&mut start_config, &backend);
+    let use_snapshot =
+        !admitted_workload && snap_info.is_some() && backend.capabilities().snapshots;
     let booted = if use_snapshot {
         let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
         match restore_via_snapshot(&vm_name, env, snap, &start_config) {
@@ -2100,68 +2046,6 @@ mod tests {
                 None => std::env::remove_var("MVM_BACKEND"),
             }
         }
-    }
-
-    fn fixture_network_tunnel() -> mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
-        mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
-            guest_port: mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
-            session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
-                tenant_id: "local".to_string(),
-                vm_id: "test-vm".to_string(),
-                boot_id: "test-boot".to_string(),
-                session_nonce: "test-nonce".to_string(),
-                requested_features: Default::default(),
-                maximum_frame_size: 65536,
-            },
-        }
-    }
-
-    #[test]
-    fn drop_l3_tunnel_for_host_vsock_proxy_drops_it_on_libkrun() {
-        let mut config = VmStartConfig {
-            network_tunnel: Some(fixture_network_tunnel()),
-            ..Default::default()
-        };
-        let backend = AnyBackend::from_hypervisor("libkrun");
-        drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
-        assert!(
-            config.network_tunnel.is_none(),
-            "libkrun carries all egress over its host-vsock proxy; the L3 tunnel is a redundant second data plane"
-        );
-    }
-
-    #[test]
-    fn drop_l3_tunnel_for_host_vsock_proxy_drops_it_on_firecracker() {
-        let mut config = VmStartConfig {
-            network_tunnel: Some(fixture_network_tunnel()),
-            ..Default::default()
-        };
-        // The converged Firecracker CLI path routes through the workload runner:
-        // NIC-less, egress over the per-VM vsock endpoint (a host-vsock proxy).
-        // The L3 tunnel is then a redundant second data plane and is dropped,
-        // exactly like libkrun.
-        let backend = AnyBackend::from_hypervisor("firecracker");
-        drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
-        assert!(
-            config.network_tunnel.is_none(),
-            "the converged firecracker path carries egress over its host-vsock proxy; the L3 tunnel is a redundant second data plane"
-        );
-    }
-
-    #[test]
-    fn drop_l3_tunnel_for_host_vsock_proxy_keeps_it_on_qemu() {
-        let mut config = VmStartConfig {
-            network_tunnel: Some(fixture_network_tunnel()),
-            ..Default::default()
-        };
-        // qemu advertises no host-vsock proxy, so the capability gate leaves the
-        // L3 tunnel in place — covering the keep branch of the decision.
-        let backend = AnyBackend::from_hypervisor("qemu");
-        drop_l3_tunnel_for_host_vsock_proxy(&mut config, &backend);
-        assert!(
-            config.network_tunnel.is_some(),
-            "qemu has no host-vsock proxy; a workload given the L3 tunnel keeps it"
-        );
     }
 
     #[test]

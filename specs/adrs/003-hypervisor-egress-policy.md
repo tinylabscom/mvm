@@ -11,12 +11,9 @@ data or reach hosts the operator never authorized. The hypervisor boundary is
 the only place enforcement can hold, because the guest's own network stack —
 where it has one — is inside the thing being defended against.
 
-Workload backends attach fundamentally different network hardware to a
-guest. Some backends can omit a network device entirely, closing off an
-entire class of guest-side attack surface: no kernel netdev driver, no
-in-guest IP stack to misconfigure or escape through. Others still expose a
-virtio-net NIC to the guest. A single egress story has to hold across both
-shapes without turning into one enforcement mechanism per VMM to audit.
+Historically, workload backends attached different network hardware to a
+guest. That split is retired: workload execution now uses one runner seam with
+no NIC surface, and the host endpoint spawner is the sole raw egress path.
 
 Separately, some workloads need to reach destinations that require a real
 credential — an API key, a registry token — without that credential ever
@@ -26,35 +23,13 @@ end-to-end TLS for every other destination the guest talks to.
 
 ## Decision
 
-**HVF and libkrun workload guests attach no virtio-net device.** Their only
-channel to the host, and through it to anything outside the guest, is
-`AF_VSOCK`. There is no guest kernel IP stack, no tap device, and no
-userspace network gateway process to compromise or misconfigure on these
-backends.
-
-**Firecracker attaches a TAP NIC behind a host-side nftables default-deny
-chain.** When a run also configures the vsock network tunnel described
-below, the TAP's own policy is pinned to deny-all so the tunnel is the sole
-enforced and audited egress path — a guest that brought the NIC up itself
-could otherwise reach an allow-listed host directly, bypassing the tunnel's
-audit and substitution logic. A Firecracker run with no tunnel configured
-keeps its egress on the TAP-plus-nftables path directly. QEMU also attaches
-a NIC, as a Linux dev/test substrate; it is never auto-selected and carries
-no default-deny enforcement, consistent with its status outside the
-security-claim boundary.
-
-**The network tunnel is one implementation shared by every backend.** The
-guest hands the host raw IPv4 packets over a dedicated `AF_VSOCK` port using
-a backend-agnostic framing. Before any packet can leave the host, a decision
-gate checks its destination against the admitted network policy, projected
-through a DNS-pin registry established at admission time — there is no
-guest-side DNS resolution to trust. An unparseable packet, an unpinned
-destination host, or a destination with no IP pin all resolve to drop
-(claim 10). Admitted packets are handed to an in-process, userspace
-`smoltcp` TCP/IP stack that terminates each guest flow and splices it to an
-ordinary host socket, or to an unprivileged ping socket for ICMP echo — no
-root, no host kernel TUN or NAT device, and one codebase shared by every
-backend instead of one per VMM.
+**Every workload backend uses the uniform vsock runner.** Its guest has no
+workload NIC surface. Default-deny admission is enforced before launch; an
+admitted raw host/port flow crosses vsock to the host's
+`RealEndpointSpawner`, while secret-bearing flows use the broker and the
+supervisor's live L4 gate. Firecracker, HVF, and libkrun therefore share the
+same host seam and cannot silently fall back to a routable guest NIC or a
+userspace L3 tunnel.
 
 **Secret-bound destinations never put the real credential in the guest.**
 The guest sends a request carrying an opaque placeholder in place of a
@@ -74,30 +49,17 @@ host-side allow-list check the substitution endpoint runs before every
 substitution.
 
 **Per-VM network provisioning goes through one trait.** Each backend's
-provider brings a VM's network up and down against an admitted network
-spec and reports the policy it enforces; a caller never branches on which
-backend it's talking to. Firecracker's TAP/bridge provider enforces its own
-nftables rules directly; the vsock-tunnel path enforces through the shared
-decision gate above. The same trait is implemented outside single-host mvm
-for fleet-mesh networking, so the provisioning seam is not
-workload-backend-specific.
+provider brings a VM up against an admitted network spec and reports the
+same vsock-only capability shape; a caller never branches on which backend it
+is talking to. QEMU remains a non-production development substrate outside
+the workload claim boundary.
 
 ## Consequences
 
-Removing the network device on HVF and libkrun closes an entire class of
-guest-side attack surface for those backends: no kernel netdev to drive, no
-ARP/DHCP/routing table to attack, and no way for a compromised guest to
-reach anything the host didn't explicitly proxy for it. Firecracker keeping
-its TAP means it carries two things that have to stay consistent whenever a
-tunnel is configured — the deny-all TAP policy and the tunnel's own admitted
-policy — rather than one.
-
-One shared `smoltcp` forwarder and one shared decision gate means a fix or
-an audit finding in the packet path applies to every backend at once,
-instead of being re-derived once per VMM's own network stack. The cost is
-that every workload backend now depends on this forwarder's correctness for
-its egress story; a bug in the shared gate is a bug on every backend
-simultaneously, not isolated to one.
+Removing the workload NIC surface and the dead L3 stack closes the guest-side
+network-device attack class for every production workload backend. One runner
+seam means default-deny and secret substitution are enforced in one place,
+instead of being re-derived once per VMM's network stack.
 
 The name-constrained per-VM CA bounds the blast radius of a leaked
 intermediate key to exactly the hosts that plan was allowed to reach, at the

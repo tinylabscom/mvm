@@ -245,14 +245,13 @@ name = "mvm-oci-init"
     }
 
     #[test]
-    fn extractors_each_find_the_seven_runtime_bins() {
+    fn extractors_each_find_the_six_runtime_bins() {
         let root = workspace_root();
         let expected = BTreeSet::from([
             "mvm-oci-init".to_string(),
             "mvm-oci-entrypoint".to_string(),
             "mvm-guest-agent".to_string(),
             "mvm-guest-netinit".to_string(),
-            "mvm-guest-netd".to_string(),
             "mvm-egress-client".to_string(),
             "mvm-verity-init".to_string(),
         ]);
@@ -276,7 +275,6 @@ name = "mvm-oci-init"
             "mvm-oci-entrypoint",
             "mvm-guest-agent",
             "mvm-guest-netinit",
-            "mvm-guest-netd",
             "mvm-egress-client",
             "mvm-verity-init",
         ] {

@@ -28,10 +28,6 @@ use mvm_core::vm_backend::{
 };
 
 use crate::base::ui;
-use crate::network_tunnel_spawn::{
-    NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
-    spawn_network_tunnel_worker_if_configured,
-};
 use crate::workload_runner::cmdline;
 
 /// PID file the supervisor writes inside `vm_state_dir`. Distinct from the other
@@ -428,26 +424,6 @@ impl VmBackend for HvfBackend {
             &config.network_policy,
             config.tenant_id.as_deref().unwrap_or(""),
         )?;
-        // The userspace L3 egress tunnel worker: for an admitted allow-list run it
-        // binds the per-VM tunnel UDS the guest dials over NETWORK_TUNNEL_GUEST_PORT
-        // and forwards admitted flows. Spawned before the supervisor's start_enter
-        // (below) so the UDS is bound before the guest can dial. The relay endpoint in
-        // the supervisor config points at this same socket. The guard reaps the worker
-        // on any early return below and is defused once boot is confirmed (the stop
-        // path then owns teardown); a run with no tunnel yields a defused no-op guard.
-        let network_tunnel_socket = config
-            .network_tunnel
-            .as_ref()
-            .map(|tunnel| mvm_core::config::vm_vsock_port_socket_at(&state_dir, tunnel.guest_port));
-        let mut tunnel_guard =
-            spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
-                state_dir: &state_dir,
-                runtime_config: config.network_tunnel.as_ref(),
-                listener: network_tunnel_socket
-                    .clone()
-                    .map(NetworkTunnelListener::Uds),
-                network_policy: Some(&config.network_policy),
-            })?;
         // Productionized per-VM agent RPC socket threaded through the supervisor
         // config; the `MVM_HVF_AGENT_SOCKET` dev hook still wins for live drivers.
         let agent_socket = std::env::var_os("MVM_HVF_AGENT_SOCKET")
@@ -511,7 +487,6 @@ impl VmBackend for HvfBackend {
             substitution_socket: None,
             egress_relay_socket,
             broker_socket: Some(broker_listen_socket.clone()),
-            network_tunnel_socket,
             console_data_sockets,
         };
         let json = serde_json::to_string(&cfg)
@@ -566,10 +541,8 @@ impl VmBackend for HvfBackend {
 
         // Boot confirmed: the supervisor's device is wired to the endpoint, so it
         // must outlive this launch. Defuse the guard (its Drop becomes a no-op);
-        // the stop path now owns reaping the endpoint. Same for the tunnel worker,
-        // which the guest reaches over the relay socket for the VM's lifetime.
+        // the stop path now owns reaping the endpoint for the VM's lifetime.
         endpoint_guard.defuse();
-        tunnel_guard.defuse();
 
         // Register an admitted workload with the per-tenant host-agent daemon,
         // same as on libkrun: the daemon starts tracking this VM and binds its
@@ -631,9 +604,6 @@ impl VmBackend for HvfBackend {
         // check), so a crashed VM's decrypted-secret process can't outlive the
         // guest. Idempotent + no-op when the VM spawned none (no secrets).
         crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
-        // Reap the per-VM egress tunnel worker (no-op when the VM spawned none), so
-        // the host forwarder can't outlive the guest.
-        reap_network_tunnel_worker(&state_dir);
         // Deregister from the per-tenant host-agent daemon (no-op if this VM
         // never registered — an unadmitted dev VM, or a failed registration
         // that was already logged). The daemon itself stays warm.

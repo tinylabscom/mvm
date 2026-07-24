@@ -36,8 +36,6 @@ pub struct MvmRuntimeBinaries {
     pub agent: PathBuf,
     /// Static guest netinit binary (`mvm-guest-netinit`).
     pub netinit: PathBuf,
-    /// Static guest network tunnel daemon (`mvm-guest-netd`).
-    pub netd: PathBuf,
     /// Static guest egress shim (`mvm-egress-client`).
     pub egress_client: PathBuf,
     /// Static OCI entrypoint runner (`mvm-oci-entrypoint`).
@@ -60,7 +58,6 @@ pub struct OciEntrypointConfig {
 
 const AGENT_DEST: &str = "usr/local/bin/mvm-guest-agent";
 const NETINIT_DEST: &str = "usr/local/bin/mvm-guest-netinit";
-const NETD_DEST: &str = "usr/local/bin/mvm-guest-netd";
 const EGRESS_CLIENT_DEST: &str = "usr/local/bin/mvm-egress-client";
 const ENTRYPOINT_RUNNER_DEST: &str = "usr/lib/mvm/wrappers/oci-entrypoint";
 const ENTRYPOINT_MARKER_DEST: &str = "etc/mvm/entrypoint";
@@ -133,19 +130,16 @@ pub fn inject_mvm_runtime(
 
     let agent_dest = rootfs_dir.join(AGENT_DEST);
     let netinit_dest = rootfs_dir.join(NETINIT_DEST);
-    let netd_dest = rootfs_dir.join(NETD_DEST);
     let egress_client_dest = rootfs_dir.join(EGRESS_CLIENT_DEST);
     if profile == RuntimeInjectionProfile::RootfsOnly {
         let bin_dir = rootfs_dir.join("usr").join("local").join("bin");
         std::fs::create_dir_all(&bin_dir)?;
         copy_exec(&bins.agent, &agent_dest)?;
         copy_exec(&bins.netinit, &netinit_dest)?;
-        copy_exec(&bins.netd, &netd_dest)?;
         copy_exec(&bins.egress_client, &egress_client_dest)?;
     } else {
         let _ = std::fs::remove_file(&agent_dest);
         let _ = std::fs::remove_file(&netinit_dest);
-        let _ = std::fs::remove_file(&netd_dest);
         let _ = std::fs::remove_file(&egress_client_dest);
     }
 
@@ -174,7 +168,6 @@ pub fn inject_mvm_runtime(
         init: init_dest,
         agent: agent_dest,
         netinit: netinit_dest,
-        netd: netd_dest,
         egress_client: egress_client_dest,
         entrypoint_runner: entrypoint_runner_dest,
         runtime_mount_point: runtime_dir,
@@ -187,7 +180,6 @@ pub struct InjectedPaths {
     pub init: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
-    pub netd: PathBuf,
     pub egress_client: PathBuf,
     pub entrypoint_runner: PathBuf,
     pub runtime_mount_point: PathBuf,
@@ -240,14 +232,12 @@ mod tests {
         let oci_init = dir.join("oci-init.bin");
         let agent = dir.join("agent.bin");
         let netinit = dir.join("netinit.bin");
-        let netd = dir.join("netd.bin");
         let egress_client = dir.join("egress-client.bin");
         let entrypoint_runner = dir.join("entrypoint-runner.bin");
         let verity_init = dir.join("verity-init.bin");
         std::fs::write(&oci_init, b"\x7fELF-oci-init").unwrap();
         std::fs::write(&agent, b"\x7fELF-agent").unwrap();
         std::fs::write(&netinit, b"\x7fELF-netinit").unwrap();
-        std::fs::write(&netd, b"\x7fELF-netd").unwrap();
         std::fs::write(&egress_client, b"\x7fELF-egress-client").unwrap();
         std::fs::write(&entrypoint_runner, b"\x7fELF-entrypoint-runner").unwrap();
         std::fs::write(&verity_init, b"\x7fELF-verity-init").unwrap();
@@ -255,7 +245,6 @@ mod tests {
             oci_init,
             agent,
             netinit,
-            netd,
             egress_client,
             entrypoint_runner,
             verity_init,
@@ -297,8 +286,6 @@ mod tests {
             b"\x7fELF-netinit"
         );
         assert!(is_executable(&injected.netinit));
-        assert_eq!(std::fs::read(&injected.netd).unwrap(), b"\x7fELF-netd");
-        assert!(is_executable(&injected.netd));
         assert_eq!(
             std::fs::read(&injected.egress_client).unwrap(),
             b"\x7fELF-egress-client"
@@ -361,7 +348,6 @@ mod tests {
         )
         .expect("second inject");
         assert!(is_executable(&second.agent));
-        assert!(is_executable(&second.netd));
         assert!(is_executable(&second.egress_client));
         assert!(!root.join("etc/mvm/entrypoint").exists());
     }
@@ -402,7 +388,6 @@ mod tests {
         assert!(injected.runtime_mount_point.is_dir());
         assert!(!injected.agent.exists());
         assert!(!injected.netinit.exists());
-        assert!(!injected.netd.exists());
         assert!(!injected.egress_client.exists());
     }
 

@@ -1,6 +1,6 @@
-//! Guest `mvm-netd` helpers.
+//! Shared guest loopback-egress helpers.
 //!
-//! `mvm-netd` listens on guest loopback and forwards over vsock to the host
+//! The guest loopback forwarder sends requests over vsock to the host
 //! egress broker. Cooperative apps are pointed at it via the standard proxy
 //! environment variables; loopback is excluded via `NO_PROXY` so the app's
 //! traffic to the local daemon (and to localhost) is not itself proxied. This
@@ -63,7 +63,7 @@ impl ConnectAck {
 }
 
 /// Build the standard proxy environment for a cooperative app, pointing it at
-/// the in-guest `mvm-netd` proxy at `proxy_addr` (e.g. `127.0.0.1:3128`). Both
+/// the in-guest loopback proxy at `proxy_addr` (e.g. `127.0.0.1:3128`). Both
 /// upper- and lower-case variants are emitted because tooling is inconsistent
 /// about which it reads. `NO_PROXY` excludes loopback.
 pub fn proxy_env_vars(proxy_addr: &str) -> Vec<(String, String)> {

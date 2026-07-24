@@ -2,7 +2,7 @@
 //!
 //! Every guest kernel-cmdline security token — dm-verity roothash, plan-bound
 //! verb grant + enforcement assertion + host-signer trust anchor, the in-guest
-//! vsock egress client, the network-tunnel handoff, and the runtime-source
+//! vsock egress client, and the runtime-source
 //! policy / overlay knobs — is strung together here, once, so the raw HVF
 //! backend and `WorkloadRunner::start` boot with the identical cmdline. Pure
 //! string assembly (cfg-free) so it stays unit-testable with no hypervisor.
@@ -83,19 +83,11 @@ pub(crate) fn workload_cmdline(
     base_bootargs: impl Fn(bool, bool) -> String,
 ) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
-    // The userspace L3 egress tunnel: tell the guest (via mvm-guest-netinit →
-    // mvm-guest-netd) to stand up its TUN and pump packets to the host worker over
-    // vsock. Present only for an admitted allow-list run.
-    let tunnel = config
-        .network_tunnel
-        .as_ref()
-        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline);
     let grants = crate::hvf_bootargs::grant_tokens(&config.name);
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
     let verity_is_enabled = verity_enabled(config);
     if egress.is_none()
-        && tunnel.is_none()
         && grants.is_empty()
         && !verity_is_enabled
         && config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
@@ -140,7 +132,7 @@ pub(crate) fn workload_cmdline(
     cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
         config.runtime_source_policy,
     ));
-    for token in egress.into_iter().chain(tunnel).chain(grants) {
+    for token in egress.into_iter().chain(grants) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -216,43 +208,6 @@ mod tests {
         assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
         assert!(cmdline.contains("mvm.runtime_source_policy=rootfs_only"));
-        assert!(cmdline.contains("mvm.vsock_egress=1"));
-    }
-
-    #[test]
-    fn workload_cmdline_appends_network_tunnel_token_for_admitted_allowlist() {
-        let dir = tempfile::tempdir().unwrap();
-        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-            mvm_core::network_policy::HostPort::new("93.184.216.34", 443),
-        ]);
-        let tunnel = crate::network_tunnel_spawn::network_tunnel_for_launch(
-            &policy,
-            crate::network_tunnel_spawn::TunnelLaunchIdentity {
-                tenant_id: "acme".to_string(),
-                vm_id: "vm-1".to_string(),
-                boot_id: "boot-1".to_string(),
-                session_nonce: "nonce-1".to_string(),
-            },
-        )
-        .expect("an allow-list launch carries a forwarding tunnel");
-        let expected = mvm_core::vm_backend::encode_network_tunnel_cmdline(&tunnel)
-            .expect("the tunnel encodes to a cmdline token");
-
-        let config = VmStartConfig {
-            virtiofs_root: Some("/tmp/root".to_string()),
-            network_policy: policy,
-            network_tunnel: Some(tunnel),
-            ..Default::default()
-        };
-        let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
-            .expect("cmdline");
-        assert!(
-            cmdline.contains(&expected),
-            "cmdline missing the tunnel token: {cmdline}"
-        );
-        assert!(cmdline.contains("mvm.network_tunnel="));
-        // An allow-list run carrying no bound secrets also turns on the raw vsock
-        // egress client, so both tokens coexist on one cmdline (mirrors libkrun).
         assert!(cmdline.contains("mvm.vsock_egress=1"));
     }
 
@@ -377,7 +332,7 @@ mod tests {
             volumes: vec![disk_volume("/vol/data.img", "/data")],
             ..Default::default()
         };
-        // Deny-all + RootfsOnly + no verity/tunnel/grants: workload_cmdline
+        // Deny-all + RootfsOnly + no verity/grants: workload_cmdline
         // alone would return None here (the "let the driver default apply"
         // shortcut), so runner_cmdline must not silently drop the base
         // bootargs the volume token needs to ride on.

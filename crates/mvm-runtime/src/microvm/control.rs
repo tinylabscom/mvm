@@ -6,7 +6,6 @@ use tracing::{instrument, warn};
 use crate::base::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
 use crate::base::ui;
 use crate::network_provider::BridgeTapNetworkProvider;
-use crate::network_tunnel_spawn::reap_network_tunnel_worker;
 use crate::{firecracker, network};
 use mvm_net::{NetHandle, NetworkProvider};
 
@@ -194,7 +193,6 @@ pub fn stop_vm(name: &str) -> Result<()> {
         &mvm_core::config::vm_state_dir(name),
         name,
     );
-    reap_network_tunnel_worker(&mvm_core::config::vm_state_dir(name));
     #[cfg(target_os = "linux")]
     if let Err(e) = crate::egress_redirect::teardown_by_name(name) {
         warn!(vm = %name, "remove egress redirect table: {e}");

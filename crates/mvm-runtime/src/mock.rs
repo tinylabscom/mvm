@@ -412,7 +412,6 @@ mod tests {
             warm_pool_size: 0,
             network_policy: Default::default(),
             dev_console: false,
-            network_tunnel: None,
         }
     }
 

@@ -91,6 +91,21 @@ Full descriptions and acceptance gates for every item above: [06-execution-plan.
 
 ## Deferred follow-ups (post-merge)
 
+- **Uniform vsock-egress convergence — COMPLETE.** Firecracker, libkrun, and
+  HVF workload launches now use the `WorkloadRunner`/`RealEndpointSpawner`
+  seam, and the machine-checked gate covers all three. F5.2 deleted the dead
+  smoltcp-L3 Model-A stack, including its guest netd, host tunnel worker,
+  protocol, cmdline, and image-manifest surfaces. The supervisor's live L4
+  policy gate remains in `supervisor/proxy/l4.rs`.
+- **NIC-less OCI loopback / forward-proxy gap.** `mvm-oci-init` currently
+  raises guest `lo` only when `mvm.vsock_egress=1`; default-deny OCI boots can
+  therefore prevent the admitted-egress substitution proxy at
+  `127.0.0.1:18080` from binding. Make loopback setup unconditional. This is
+  backend-agnostic and was intentionally not folded into F5.2.
+- **F4.2 raw libkrun cleanup.** Move `bench_probe` off raw
+  `LibkrunBackend::start`, then remove that entry point and
+  `spawn_libkrun_egress_endpoint_if_needed`.
+
 - **aarch64-linux nix CI lane.** The nix flakes are already fully multi-arch
   (`systems = ["aarch64-linux" "x86_64-linux"]` + `forAllSystems`, arch-aware
   kernel/package derivations, both `nixosConfigurations` siblings, release

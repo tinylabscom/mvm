@@ -1,34 +1,26 @@
 //! `xtask check-vsock-only-egress`
 //!
 //! vsock-only egress: a workload guest's only off-guest channel is vsock — there is **no
-//! guest NIC**, and egress flows guest → vsock → the host gateway. This gate
+//! guest NIC**, and egress flows guest → vsock → the host endpoint seam. This gate
 //! locks that in for the converged vsock-only path (the portable `vmm` device
 //! model + the raw-HVF backend): a regression that attaches a virtio-net device,
 //! a tap, or a userspace net gateway to that path re-introduces a guest NIC and
 //! fails closed here.
 //!
-//! Scope note: this gate covers the backend paths that are already expected to
-//! stay on the no-guest-NIC model in the current tree. If a backend still has
-//! historical gateway code elsewhere, that does not weaken the invariant here:
-//! the converged workload launch sites covered by this gate must remain
-//! vsock-only.
+//! Scope note: this gate covers the converged workload paths and fails closed
+//! if any of them grows a guest NIC or alternate host gateway.
 
 use anyhow::{Result, bail};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 
-/// Files/directories that implement the current no-guest-NIC path and the raw
-/// host-authority tunnel path. These must stay free of guest-NIC and legacy
-/// helper tokens.
+/// Files/directories that implement the current no-guest-NIC path. These must
+/// stay free of guest-NIC and legacy helper tokens.
 const GUARDED_PATHS: &[&str] = &[
     "crates/mvm-runtime/src/vmm",
     "crates/mvm-runtime/src/hvf",
     "crates/mvm-runtime/src/libkrun.rs",
     "crates/mvm-runtime/src/vsock_egress_bridge",
-    "crates/mvm-runtime/src/network_tunnel_spawn.rs",
-    "crates/mvm-agentd/src/network_tunnel.rs",
-    "crates/mvm-agentd/src/guest_tun.rs",
-    "crates/mvm-hostd/src/network_tunnel.rs",
 ];
 
 /// Tokens that signal a guest NIC / userspace net gateway on the data path.
@@ -57,7 +49,7 @@ pub fn run(workspace: &Path) -> Result<()> {
         );
     }
     eprintln!(
-        "check-vsock-only-egress: clean ({} files; the vmm/HVF + raw tunnel path is NIC-free)",
+        "check-vsock-only-egress: clean ({} files; the vmm/HVF workload path is NIC-free)",
         rs_files.len()
     );
     Ok(())

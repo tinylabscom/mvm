@@ -31,18 +31,4 @@ Feature: Default-deny egress through the auditable vsock seam
       | backend |
       | hvf     |
       | libkrun |
-
-  # Firecracker is not yet vsock-only on main: an OCI --image run with an
-  # allow-host rule under --hypervisor firecracker refuses admission instead
-  # of confirming vsock-mediated egress, because the firecracker backend does
-  # not yet advertise the vsock/no-routable-guest-nic/host-vsock-proxy
-  # capability set the other two backends do. This scenario states the
-  # definition-of-done a later firecracker driver change flips to passing —
-  # drop the @wip tag once it does, and fold this row back into the
-  # Scenario Outline above.
-  @wip
-  Scenario: Firecracker mediates admitted egress over the vsock seam, not a NIC
-    When I run mvmctl with "machine run --image alpine --name bdd-egress-allow-firecracker -d --hypervisor firecracker --allow-host example.com --dry-run"
-    Then the command exits with code 0
-    And the output contains "network: allow-list:example.com:443"
-    And the output contains "enforced: firecracker:l4-host-port"
+      | firecracker |

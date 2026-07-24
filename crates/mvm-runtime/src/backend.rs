@@ -154,7 +154,6 @@ impl FirecrackerConfig {
                 })
                 .collect(),
             network_policy: config.network_policy.clone(),
-            network_tunnel: config.network_tunnel.clone(),
         };
         Ok(Self { run_config })
     }
