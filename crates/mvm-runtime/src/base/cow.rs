@@ -93,16 +93,25 @@ pub fn prepare_instance_rootfs_inner(instance_path: &Path, source_rootfs: &str) 
     // The runtime-meta gate reads mvm-meta.json from the rootfs's own directory,
     // so any rootfs clone that may later be checkpointed or forked must carry the
     // sidecar alongside it.
-    copy_sidecar_if_present(source_path, instance_path);
+    copy_sidecars_if_present(source_path, instance_path);
 
     Ok(instance_path.to_path_buf())
 }
 
-/// Copy `mvm-meta.json` from the source rootfs's directory to the destination
-/// rootfs's directory when the sidecar exists. Silently does nothing when the
-/// source has no sidecar (older build dirs) or when source and destination dirs
-/// are the same.
-fn copy_sidecar_if_present(source_rootfs: &Path, dest_rootfs: &Path) {
+/// Guest sidecar files that may sit next to `rootfs.ext4` and must travel
+/// with it when it is cloned into a per-instance path.
+const ROOTFS_SIDECAR_FILES: &[&str] = &[
+    mvm_build::builder_vm::SIDECAR_FILENAME,
+    "rootfs.verity",
+    "rootfs.roothash",
+    "rootfs.initrd",
+];
+
+/// Copy guest sidecars from the source rootfs's directory to the destination
+/// rootfs's directory when they exist. Silently does nothing when the source
+/// has no sidecars (older build dirs / unsealed images) or when source and
+/// destination dirs are the same.
+fn copy_sidecars_if_present(source_rootfs: &Path, dest_rootfs: &Path) {
     let src_dir = match source_rootfs.parent() {
         Some(d) => d,
         None => return,
@@ -114,18 +123,20 @@ fn copy_sidecar_if_present(source_rootfs: &Path, dest_rootfs: &Path) {
     if src_dir == dst_dir {
         return;
     }
-    let src_sidecar = src_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
-    if !src_sidecar.exists() {
-        return;
-    }
-    let dst_sidecar = dst_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
-    if let Err(e) = std::fs::copy(&src_sidecar, &dst_sidecar) {
-        tracing::warn!(
-            src = %src_sidecar.display(),
-            dst = %dst_sidecar.display(),
-            error = %e,
-            "could not copy mvm-meta.json sidecar alongside rootfs clone",
-        );
+    for name in ROOTFS_SIDECAR_FILES {
+        let src_sidecar = src_dir.join(name);
+        if !src_sidecar.exists() {
+            continue;
+        }
+        let dst_sidecar = dst_dir.join(name);
+        if let Err(e) = std::fs::copy(&src_sidecar, &dst_sidecar) {
+            tracing::warn!(
+                src = %src_sidecar.display(),
+                dst = %dst_sidecar.display(),
+                error = %e,
+                "could not copy {name} sidecar alongside rootfs clone",
+            );
+        }
     }
 }
 
@@ -176,6 +187,24 @@ mod tests {
         );
         let content = std::fs::read_to_string(&dst_sidecar).unwrap();
         assert!(content.contains("accessible"));
+    }
+
+    #[test]
+    fn clone_copies_verity_sidecars_when_present() {
+        let src_dir = tempfile::tempdir().expect("src tempdir");
+        let dst_dir = tempfile::tempdir().expect("dst tempdir");
+        let src = src_dir.path().join("rootfs.ext4");
+        std::fs::write(&src, b"data").unwrap();
+        std::fs::write(src_dir.path().join("rootfs.verity"), b"verity-tree").unwrap();
+        std::fs::write(src_dir.path().join("rootfs.roothash"), b"abc123").unwrap();
+        std::fs::write(src_dir.path().join("rootfs.initrd"), b"initrd-bytes").unwrap();
+        let instance = dst_dir.path().join("rootfs.ext4");
+        prepare_instance_rootfs_inner(&instance, src.to_str().unwrap()).expect("clone");
+        assert!(dst_dir.path().join("rootfs.verity").exists());
+        assert!(dst_dir.path().join("rootfs.roothash").exists());
+        assert!(dst_dir.path().join("rootfs.initrd").exists());
+        let hash = std::fs::read_to_string(dst_dir.path().join("rootfs.roothash")).unwrap();
+        assert_eq!(hash, "abc123");
     }
 
     #[test]

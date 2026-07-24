@@ -1218,6 +1218,8 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         parent_meta.runtime_overlay_version.as_deref(),
     )?;
 
+    populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;
+
     if let Some(ctx) = admission.as_ref() {
         mvm_hostd::plan_admission::populate_audit_substrate(
             &mut start_config,
@@ -1308,6 +1310,34 @@ fn grant_predecessor_from_vm_name(vm_name: &str) -> Option<(String, mvm_core::pl
 /// Read the parent checkpoint's source VM plan and return (cpus, mem_mib).
 /// Returns (None, None) when the plan is absent — the caller falls back to
 /// global defaults. The parent checkpoint's `vm_name` field names the source VM.
+/// If the child rootfs directory carries dm-verity sidecars, populate the
+/// start config so the backend attaches the hash tree and emits the roothash
+/// on the kernel cmdline. Without this the child skips `mvm-verity-init` and
+/// cannot mount the runtime overlay, leading to a guest panic.
+fn populate_fork_rootfs_verity(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    rootfs: &std::path::Path,
+) -> anyhow::Result<()> {
+    let rootfs_dir = rootfs.parent().unwrap_or(std::path::Path::new("."));
+    let verity = rootfs_dir.join("rootfs.verity");
+    let roothash = rootfs_dir.join("rootfs.roothash");
+    if verity.exists() && roothash.exists() {
+        start_config.verity_path = Some(
+            verity
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("rootfs.verity path is not UTF-8"))?
+                .to_string(),
+        );
+        start_config.roothash = Some(
+            std::fs::read_to_string(&roothash)
+                .with_context(|| format!("reading {}", roothash.display()))?
+                .trim()
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Read the parent checkpoint's source VM plan and return the agent-verb
 /// override it was admitted with. Forks inherit the parent's explicit
 /// `--agent-verb` list so that a child of an unsealed image can still be

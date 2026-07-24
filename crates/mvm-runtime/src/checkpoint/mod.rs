@@ -571,16 +571,14 @@ pub fn capture_vm_full(
         });
     }
 
-    // Mirror the fs_quick path: when the source rootfs directory carries a
-    // mvm-meta.json sidecar, include it so that forks of this vm_full checkpoint
-    // can read the sidecar from their content dir and boot through the
-    // runtime-meta gate (image_is_sealed / fork grant reconciliation).
+    // Mirror the fs_quick path: copy guest sidecars (mvm-meta.json,
+    // rootfs.verity, rootfs.roothash, rootfs.initrd) so that forks of this
+    // vm_full checkpoint can read them from their content dir and boot through
+    // the runtime-meta gate plus verity reconstruction.
     // The sidecar read is from the static source dir — outside the pause window
     // is fine.
     let live_rootfs_for_sidecar = control.rootfs_path()?;
-    if let Some(sidecar_blob) =
-        copy_guest_sidecar_if_present(&live_rootfs_for_sidecar, &content_dir)?
-    {
+    for sidecar_blob in copy_guest_sidecars_if_present(&live_rootfs_for_sidecar, &content_dir)? {
         content.push(sidecar_blob);
     }
 
@@ -663,34 +661,47 @@ fn sha256_file_hex(path: &Path) -> Result<String> {
         .with_context(|| format!("hashing {}", path.display()))
 }
 
-/// Copy the `mvm-meta.json` guest sidecar from the directory that contains
-/// `src_rootfs` into `content_dir`, and return a `ContentBlob` for it.
+/// Guest sidecar files that may sit next to `rootfs.ext4` and must be
+/// carried into a checkpoint so that forks can reconstruct a verity boot.
+const GUEST_SIDECAR_FILES: &[&str] = &[
+    mvm_build::builder_vm::SIDECAR_FILENAME,
+    "rootfs.verity",
+    "rootfs.roothash",
+    "rootfs.initrd",
+];
+
+/// Copy guest sidecars from the directory that contains `src_rootfs` into
+/// `content_dir`, returning a `ContentBlob` for each one that exists.
 ///
-/// Returns `None` (no-op) when the sidecar is absent — unsealed/dev images
-/// have no sidecar and must not error. Call from both `capture_fs_quick` and
-/// `capture_vm_full` so that the sidecar propagation stays DRY.
-fn copy_guest_sidecar_if_present(
+/// Unsealed/dev images may have none of these; the function is a no-op for
+/// absent files. Call from both `capture_fs_quick` and `capture_vm_full` so
+/// that sidecar propagation stays DRY.
+fn copy_guest_sidecars_if_present(
     src_rootfs: &Path,
     content_dir: &Path,
-) -> Result<Option<ContentBlob>> {
+) -> Result<Vec<ContentBlob>> {
     let src_dir = src_rootfs
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let src_sidecar = src_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
-    if !src_sidecar.exists() {
-        return Ok(None);
+    let mut blobs = Vec::new();
+    for name in GUEST_SIDECAR_FILES {
+        let src_sidecar = src_dir.join(name);
+        if !src_sidecar.exists() {
+            continue;
+        }
+        let dst_sidecar = content_dir.join(name);
+        std::fs::copy(&src_sidecar, &dst_sidecar).with_context(|| {
+            format!(
+                "copying {name} sidecar into checkpoint content dir {}",
+                content_dir.display()
+            )
+        })?;
+        blobs.push(ContentBlob {
+            name: (*name).into(),
+            sha256: sha256_file_hex(&dst_sidecar)?,
+        });
     }
-    let dst_sidecar = content_dir.join(mvm_build::builder_vm::SIDECAR_FILENAME);
-    std::fs::copy(&src_sidecar, &dst_sidecar).with_context(|| {
-        format!(
-            "copying mvm-meta.json sidecar into checkpoint content dir {}",
-            content_dir.display()
-        )
-    })?;
-    Ok(Some(ContentBlob {
-        name: mvm_build::builder_vm::SIDECAR_FILENAME.into(),
-        sha256: sha256_file_hex(&dst_sidecar)?,
-    }))
+    Ok(blobs)
 }
 
 /// How blob `name` differs between two checkpoints (B relative to A).
@@ -838,10 +849,11 @@ pub fn capture_fs_quick(
         sha256: content_sha256,
     }];
 
-    // When the source rootfs directory carries a mvm-meta.json sidecar, include it
-    // as a second blob so that any fork materialised from this checkpoint can boot
-    // through the runtime-meta gate (which reads the sidecar from the rootfs dir).
-    if let Some(sidecar_blob) = copy_guest_sidecar_if_present(&params.rootfs, &content_dir)? {
+    // When the source rootfs directory carries guest sidecars (mvm-meta.json,
+    // rootfs.verity, rootfs.roothash, rootfs.initrd), include them so that any
+    // fork materialised from this checkpoint can boot through the runtime-meta
+    // gate and reconstruct a verity rootfs.
+    for sidecar_blob in copy_guest_sidecars_if_present(&params.rootfs, &content_dir)? {
         content.push(sidecar_blob);
     }
 
@@ -1145,6 +1157,42 @@ mod tests {
             .find(|b| b.name == mvm_build::builder_vm::SIDECAR_FILENAME)
             .unwrap();
         assert!(!sidecar_blob.sha256.is_empty());
+    }
+
+    #[test]
+    fn capture_includes_verity_sidecars_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = write_fake_rootfs(tmp.path());
+        std::fs::write(tmp.path().join("rootfs.verity"), b"verity-tree").unwrap();
+        std::fs::write(tmp.path().join("rootfs.roothash"), b"abc123").unwrap();
+        std::fs::write(tmp.path().join("rootfs.initrd"), b"initrd-bytes").unwrap();
+        let meta = capture_fs_quick(
+            &store,
+            CaptureFsQuickParams {
+                id: CheckpointId::new("c-verity"),
+                vm_name: "parentvm".into(),
+                rootfs,
+                supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
+                tag: None,
+                created_unix: 1,
+                quiesced: true,
+            },
+        )
+        .unwrap();
+        let names: Vec<&str> = meta.content.iter().map(|b| b.name.as_str()).collect();
+        assert!(names.contains(&"rootfs.ext4"));
+        assert!(names.contains(&"rootfs.verity"));
+        assert!(names.contains(&"rootfs.roothash"));
+        assert!(names.contains(&"rootfs.initrd"));
+        let roothash_blob = meta
+            .content
+            .iter()
+            .find(|b| b.name == "rootfs.roothash")
+            .unwrap();
+        assert!(!roothash_blob.sha256.is_empty());
     }
 
     #[test]
