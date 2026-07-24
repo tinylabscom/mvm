@@ -369,6 +369,38 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
         Ok(PathBuf::from(rootfs_str))
     }
 
+    fn device_anchors(&self) -> anyhow::Result<crate::checkpoint::DeviceAnchors> {
+        let vm_dir = crate::microvm::resolve_running_vm_dir(&self.vm_name)
+            .with_context(|| format!("resolving VM dir for '{}'", self.vm_name))?;
+        let rootfs = self.rootfs_path()?;
+        let rootfs_dir = rootfs
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent directory"))?;
+
+        let mut anchors = crate::checkpoint::DeviceAnchors {
+            rootfs: rootfs.clone(),
+            rootfs_verity: None,
+            config: None,
+            secrets: None,
+            vsock: PathBuf::from(crate::microvm::firecracker_vsock_uds_path(&vm_dir)),
+        };
+
+        let verity = rootfs_dir.join("rootfs.verity");
+        if verity.exists() {
+            anchors.rootfs_verity = Some(verity);
+        }
+        let config = PathBuf::from(&vm_dir).join("config.ext4");
+        if config.exists() {
+            anchors.config = Some(config);
+        }
+        let secrets = PathBuf::from(&vm_dir).join("secrets.ext4");
+        if secrets.exists() {
+            anchors.secrets = Some(secrets);
+        }
+
+        Ok(anchors)
+    }
+
     fn extra_content(&self, content_dir: &Path) -> Result<Vec<ContentBlob>> {
         let vmstate = content_dir.join(FC_VMSTATE_FILENAME);
         if !vmstate.exists() {
@@ -392,7 +424,10 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
 /// On `restore_fork`:
 /// 1. Renames `memory.bin` → `mem.bin` inside `child_dir` so
 ///    `warm_restore_instance_from_path` finds the right filename.
-/// 2. Calls `warm_restore_instance_from_path(child_vm_name, child_dir_str, [0u8; GENID_BYTES])`.
+/// 2. Reads the parent's device anchors and bind-mounts the child's copies over
+///    those paths in a private mount namespace, so the snapshot bitcode resolves
+///    to the child's files without editing `vmstate.bin`.
+/// 3. Calls `warm_restore_instance_from_path(child_vm_name, child_dir_str, [0u8; GENID_BYTES])`.
 ///    The VMGenID token is zeroed — the fork caller delivers the real grant/token
 ///    over vsock after `restore_fork` returns (mirrors the former Vz backend's fork path).
 pub struct FcForkRestorer;
@@ -412,6 +447,38 @@ impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
                 )
             })?;
         }
+
+        // Remap the absolute parent paths baked into vmstate.bin to the child's
+        // copies inside a private mount namespace, so the snapshot loads the
+        // child's devices without editing Firecracker bitcode.
+        let anchors_path = child_dir.join("device-anchors.json");
+        if anchors_path.exists() {
+            let anchors: crate::checkpoint::DeviceAnchors = serde_json::from_slice(
+                &std::fs::read(&anchors_path)
+                    .with_context(|| format!("reading {}", anchors_path.display()))?,
+            )
+            .with_context(|| format!("parsing {}", anchors_path.display()))?;
+            let child_vm_dir = crate::microvm::resolve_running_vm_dir(child_vm_name)
+                .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
+            let mut mappings = Vec::new();
+            mappings.push((anchors.rootfs, child_dir.join("rootfs.ext4")));
+            if let Some(parent) = anchors.rootfs_verity {
+                mappings.push((parent, child_dir.join("rootfs.verity")));
+            }
+            if let Some(parent) = anchors.config {
+                mappings.push((parent, child_dir.join("config.ext4")));
+            }
+            if let Some(parent) = anchors.secrets {
+                mappings.push((parent, child_dir.join("secrets.ext4")));
+            }
+            mappings.push((
+                anchors.vsock,
+                std::path::PathBuf::from(crate::microvm::firecracker_vsock_uds_path(&child_vm_dir)),
+            ));
+            crate::microvm::remap_paths_for_fork(&mappings)
+                .context("remapping parent device paths for FC fork")?;
+        }
+
         let child_dir_str = child_dir.to_string_lossy().into_owned();
         // Deliver a zero token; the CLI fork path delivers the real grant/VMGenID
         // token over vsock after restore_fork returns.
@@ -468,5 +535,85 @@ mod tests {
         assert_eq!(blobs.len(), 1, "exactly one blob expected for vmstate.bin");
         assert_eq!(blobs[0].name, FC_VMSTATE_FILENAME);
         assert!(!blobs[0].sha256.is_empty(), "sha256 must be non-empty");
+    }
+
+    /// `device_anchors` gathers the absolute paths Firecracker has open for
+    /// a VM, including optional verity/config/secrets sidecars when they exist.
+    #[test]
+    fn fc_vm_full_control_device_anchors_collects_present_sidecars() {
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let saved = std::env::var_os("MVM_HOME");
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe { std::env::set_var("MVM_HOME", tmp.path()) };
+
+        let vm_name = "anchor-test";
+        let vm_dir = mvm_core::config::vm_state_dir(vm_name);
+        let rootfs_parent = vm_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs_parent).unwrap();
+        let rootfs = rootfs_parent.join("rootfs.ext4");
+        std::fs::File::create(&rootfs).unwrap();
+        std::fs::File::create(rootfs_parent.join("rootfs.verity")).unwrap();
+        std::fs::File::create(vm_dir.join("config.ext4")).unwrap();
+        // secrets.ext4 intentionally absent.
+
+        let meta = serde_json::json!({
+            "mode": "attached",
+            "rootfs_path": rootfs.to_string_lossy(),
+        });
+        std::fs::write(vm_dir.join("mode.json"), meta.to_string()).unwrap();
+
+        let ctl = FcVmFullControl::new(vm_name);
+        let anchors = ctl.device_anchors().unwrap();
+        assert_eq!(anchors.rootfs, rootfs);
+        assert_eq!(
+            anchors.rootfs_verity,
+            Some(rootfs_parent.join("rootfs.verity"))
+        );
+        assert_eq!(anchors.config, Some(vm_dir.join("config.ext4")));
+        assert_eq!(anchors.secrets, None);
+        assert_eq!(
+            anchors.vsock,
+            std::path::PathBuf::from(crate::microvm::firecracker_vsock_uds_path(
+                &vm_dir.to_string_lossy()
+            ))
+        );
+
+        // Restore before dropping the lock so concurrent tests see clean env.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("MVM_HOME", v),
+                None => std::env::remove_var("MVM_HOME"),
+            }
+        }
+    }
+
+    /// `device_anchors` fails with a clear message when the VM has no persisted
+    /// mode.json (e.g. it was never started with runtime metadata tracking).
+    #[test]
+    fn fc_vm_full_control_device_anchors_errors_when_mode_json_missing() {
+        let _g = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let saved = std::env::var_os("MVM_HOME");
+        // SAFETY: serialized by HOME_TEST_LOCK.
+        unsafe { std::env::set_var("MVM_HOME", tmp.path()) };
+
+        let ctl = FcVmFullControl::new("no-mode-vm");
+        let err = ctl.device_anchors().unwrap_err();
+        assert!(
+            err.to_string().contains("mode.json"),
+            "error must mention missing mode.json: {err}"
+        );
+
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("MVM_HOME", v),
+                None => std::env::remove_var("MVM_HOME"),
+            }
+        }
     }
 }

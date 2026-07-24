@@ -449,6 +449,26 @@ fn vm_is_running(vm_name: &str) -> bool {
 
 /// Host-side control over a running VM's memory + disk, abstracted so the
 /// capture orchestration is testable without a live hypervisor.
+/// Absolute host paths to resources a vm_full snapshot embeds by path.
+/// Captured at checkpoint time so a forked child can make those paths
+/// resolve to its own copies without editing the snapshot bitcode.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeviceAnchors {
+    /// Live rootfs block device path.
+    pub rootfs: PathBuf,
+    /// dm-verity hash tree sidecar, if the rootfs is verity-sealed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs_verity: Option<PathBuf>,
+    /// Config drive (config.json + role.toml), if attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
+    /// Secrets drive, if attached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<PathBuf>,
+    /// vsock UDS path.
+    pub vsock: PathBuf,
+}
+
 pub trait VmFullControl {
     /// Pause vCPUs (idempotent if already paused).
     fn pause(&self) -> Result<()>;
@@ -471,6 +491,9 @@ pub trait VmFullControl {
         let _ = content_dir;
         Ok(vec![])
     }
+
+    /// Absolute host paths the snapshot embeds and a fork restore must remap.
+    fn device_anchors(&self) -> Result<DeviceAnchors>;
 }
 
 pub struct CaptureVmFullParams {
@@ -580,6 +603,45 @@ pub fn capture_vm_full(
     let live_rootfs_for_sidecar = control.rootfs_path()?;
     for sidecar_blob in copy_guest_sidecars_if_present(&live_rootfs_for_sidecar, &content_dir)? {
         content.push(sidecar_blob);
+    }
+
+    // Capture the absolute host paths the snapshot embeds, so a forked child
+    // can remap them to its own copies without editing Firecracker bitcode.
+    let anchors = control.device_anchors()?;
+    let anchors_path = content_dir.join("device-anchors.json");
+    std::fs::write(
+        &anchors_path,
+        serde_json::to_string_pretty(&anchors).context("serializing device anchors")?,
+    )
+    .with_context(|| format!("writing {}", anchors_path.display()))?;
+    content.push(ContentBlob {
+        name: "device-anchors.json".into(),
+        sha256: sha256_file_hex(&anchors_path)?,
+    });
+
+    // Copy the anchor files the snapshot references (verity sidecar, config,
+    // secrets) into the checkpoint so the child can materialize its own copies.
+    // The rootfs itself is already cloned above; the vsock UDS is recreated at
+    // restore time and must not be copied while the parent is bound to it.
+    for src in [
+        anchors.rootfs_verity.as_deref(),
+        anchors.config.as_deref(),
+        anchors.secrets.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let name = src
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("anchor path has no file name: {}", src.display()))?
+            .to_string_lossy();
+        let dst = content_dir.join(name.as_ref());
+        std::fs::copy(src, &dst)
+            .with_context(|| format!("copying anchor {} to checkpoint", src.display()))?;
+        content.push(ContentBlob {
+            name: name.into_owned(),
+            sha256: sha256_file_hex(&dst)?,
+        });
     }
 
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
@@ -1280,6 +1342,16 @@ mod tests {
         fn rootfs_path(&self) -> Result<PathBuf> {
             Ok(self.rootfs.clone())
         }
+        fn device_anchors(&self) -> Result<DeviceAnchors> {
+            let dir = self.rootfs.parent().unwrap_or(Path::new("."));
+            Ok(DeviceAnchors {
+                rootfs: self.rootfs.clone(),
+                rootfs_verity: None,
+                config: None,
+                secrets: None,
+                vsock: dir.join("v.sock"),
+            })
+        }
     }
 
     #[test]
@@ -1715,6 +1787,16 @@ mod tests {
         }
         fn rootfs_path(&self) -> Result<PathBuf> {
             Ok(self.rootfs.clone())
+        }
+        fn device_anchors(&self) -> Result<DeviceAnchors> {
+            let dir = self.rootfs.parent().unwrap_or(Path::new("."));
+            Ok(DeviceAnchors {
+                rootfs: self.rootfs.clone(),
+                rootfs_verity: None,
+                config: None,
+                secrets: None,
+                vsock: dir.join("v.sock"),
+            })
         }
         fn extra_content(&self, _content_dir: &Path) -> Result<Vec<ContentBlob>> {
             Ok(self.extra.clone())
