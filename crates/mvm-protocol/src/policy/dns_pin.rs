@@ -332,6 +332,21 @@ mod tests {
     }
 
     #[test]
+    fn registry_pin_containing_picks_lowest_dest_on_a_shared_ip() {
+        // Shared anycast addresses must resolve deterministically to the
+        // lexicographically lowest destination.
+        let mut reg = DnsPinRegistry::new();
+        reg.add(fixed_pin("zebra.example", &["203.0.113.7"]));
+        reg.add(fixed_pin("alpha.example", &["203.0.113.7"]));
+
+        assert_eq!(
+            reg.pin_containing(&ip("203.0.113.7"))
+                .map(|pin| pin.dest.as_str()),
+            Some("alpha.example")
+        );
+    }
+
+    #[test]
     fn pin_ttl_secs_returns_zero_on_malformed_timestamps() {
         let pin = DnsPin::at(
             "example.com",
