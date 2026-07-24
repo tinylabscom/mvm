@@ -86,6 +86,15 @@ After F5.1 (nothing populates a live `network_tunnel`), remove the dead second e
 - Tracked separately: unconditional OCI loopback setup for the NIC-less
   substitution forward proxy, and F4.2's raw `bench_probe` libkrun cleanup.
 
+## Firecracker raw-launch follow-up
+
+The normal Firecracker enum arm was runner-backed, but compatibility entry
+points for the old raw flake/lifecycle, standby, and snapshot paths still
+described TAP-backed guests. Those entry points now fail closed; their TAP
+provisioning, NIC API configuration, bridge/redirect machinery, and raw
+Firecracker workload claim are gone. Firecracker's runner is consequently the
+only workload launch path and the only path that can carry governed egress.
+
 ## F5.2 light-witness record
 
 - **2026-07-24 UTC — HVF, local macOS 26:** `mvmctl machine run --image alpine`

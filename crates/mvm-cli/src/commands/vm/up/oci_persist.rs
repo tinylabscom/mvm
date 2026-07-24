@@ -28,12 +28,11 @@ use super::runtime_source::{attach_runtime_overlay_if_cached, emit_runtime_sourc
 
 /// Whether the admitted plan must be persisted to `<state_dir>/plan.json`
 /// *before* `backend.start()`. Every backend whose `start()` reads that file
-/// off disk to decide whether to stand up its egress moat needs the pre-start
+/// off disk to decide whether to stand up its egress endpoint needs the pre-start
 /// persist:
 ///
-/// - **Firecracker**: the nft TAP-redirect moat reads the plan at spawn time.
-/// - **libkrun / hvf (macOS)**: the substitution endpoint reads
-///   `<state_dir>/plan.json` inside `start()` to decide whether to spawn.
+/// - **Firecracker / libkrun / hvf**: the runner-backed endpoint reads
+///   `<state_dir>/plan.json` during endpoint setup.
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.

@@ -5,12 +5,9 @@ use tracing::{instrument, warn};
 
 use crate::base::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
 use crate::base::ui;
-use crate::network_provider::BridgeTapNetworkProvider;
-use crate::{firecracker, network};
-use mvm_net::{NetHandle, NetworkProvider};
+use crate::firecracker;
 
 use super::observe::list_vms;
-use super::run_info::{read_slot_index, read_vm_run_info_from};
 use super::{abs_vms_dir, require_linux_env};
 
 /// Pause the vCPUs of a running Firecracker VM.
@@ -193,11 +190,6 @@ pub fn stop_vm(name: &str) -> Result<()> {
         &mvm_core::config::vm_state_dir(name),
         name,
     );
-    #[cfg(target_os = "linux")]
-    if let Err(e) = crate::egress_redirect::teardown_by_name(name) {
-        warn!(vm = %name, "remove egress redirect table: {e}");
-    }
-
     if !firecracker::is_vm_running(&pid_file)? {
         ui::info(&format!("VM '{}' is not running.", name));
         return Ok(());
@@ -244,25 +236,6 @@ pub fn stop_vm(name: &str) -> Result<()> {
         ))?;
     }
 
-    // Read run info to find the TAP device to destroy
-    if let Some(info) = read_vm_run_info_from(&abs_dir)
-        && let Some(ref vm_name) = info.name
-    {
-        // Reconstruct slot to find TAP name — scan for the index
-        if let Some(idx) = read_slot_index(&abs_dir) {
-            // Tear down through the NetworkProvider seam:
-            // best-effort drain of the iptables policy + TAP, symmetric with
-            // the provision path.
-            let handle = NetHandle {
-                vm: mvm_core::protocol::vm_backend::VmId(vm_name.clone()),
-                tag: idx.to_string(),
-            };
-            if let Err(e) = BridgeTapNetworkProvider::new().teardown(handle) {
-                warn!("network teardown: {e}");
-            }
-        }
-    }
-
     // Remove the VM directory
     if let Err(e) = run_in_vm(&format!("rm -rf {}", abs_dir)) {
         warn!("failed to remove VM directory: {e}");
@@ -287,12 +260,6 @@ pub fn stop_all_vms() -> Result<()> {
         if let Some(ref name) = info.name {
             stop_vm(name)?;
         }
-    }
-
-    // Clean up bridge if no VMs left
-    let remaining = list_vms()?;
-    if remaining.is_empty() {
-        network::bridge_teardown()?;
     }
 
     Ok(())

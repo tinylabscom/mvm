@@ -2941,7 +2941,6 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-fs",
- "mvm-net",
  "mvm-protocol",
  "object_store",
  "rand 0.8.6",

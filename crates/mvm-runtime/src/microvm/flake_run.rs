@@ -1,23 +1,11 @@
-//! Flake-based run: multi-VM with bridge networking.
+//! Compatibility data types for the retired raw Firecracker flake launcher.
 
 use anyhow::Result;
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use crate::base::config::VmSlot;
 use crate::base::shell::run_in_vm;
-use crate::base::ui;
-use crate::firecracker;
 use crate::image::RuntimeVolume;
-use crate::network_provider::BridgeTapNetworkProvider;
-use mvm_net::{NetworkProvider, NetworkSpec};
-
-use super::daemon::{api_put_socket, start_vm_firecracker};
-use super::guards::{FirecrackerGuard, TapGuard};
-use super::{firecracker_vsock_uds_path, require_linux_env};
-
-// ============================================================================
-// Flake-based run: multi-VM with bridge networking
-// ============================================================================
 
 /// A file to inject onto a config or secrets drive before boot.
 #[derive(Debug, Clone)]
@@ -100,8 +88,6 @@ pub struct FlakeRunConfig {
     pub secret_files: Vec<DriveFile>,
     /// Declared port mappings (host:guest) for forwarding and guest config.
     pub ports: Vec<crate::base::config::PortMapping>,
-    /// Network policy controlling outbound traffic from this VM.
-    pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 impl FlakeRunConfig {
@@ -148,36 +134,17 @@ impl FlakeRunConfig {
     }
 }
 
-/// Boot a Firecracker VM from flake-built artifacts (headless).
+/// Refuse the retired raw Firecracker flake launcher.
 ///
-/// Each VM gets its own directory under `<mvm_home>/vms/<name>/` with a
-/// separate Firecracker socket, PID file, and log.  The bridge network
-/// is shared, but each VM has its own TAP device and guest IP.
+/// Workloads must enter through the runner so the guest has no NIC and all
+/// admitted egress crosses the host-vsock endpoint.
 #[instrument(skip_all, fields(name = %config.name))]
 pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     config.validate()?;
-    require_linux_env()?;
-
-    let slot = &config.slot;
-
-    // Check if this VM name is already running
-    let abs_dir = slot.vm_dir.clone();
-    let abs_socket = format!("{}/fc.socket", abs_dir);
-    let pid_file = format!("{}/fc.pid", abs_dir);
-
-    if firecracker::is_vm_running(&pid_file)? {
-        ui::info(&format!("VM '{}' is already running.", slot.name));
-        ui::info("Use 'mvmctl stop <name>' to shut it down first.");
-        return Ok(());
-    }
-
-    run_configured_firecracker(config, &abs_dir, &abs_socket, true)
+    anyhow::bail!("raw Firecracker flake launch is disabled; use the vsock workload runner")
 }
 
-/// Finish launching a Firecracker VM whose daemon has already been started in
-/// the slot directory. Used by the standby pool: warming pays the daemon spawn
-/// cost; claiming still configures the exact admitted workload before
-/// `InstanceStart`.
+/// Refuse the retired raw Firecracker standby claim path.
 #[instrument(skip_all, fields(name = %config.name))]
 pub fn run_from_prestarted_build(
     config: &FlakeRunConfig,
@@ -185,197 +152,8 @@ pub fn run_from_prestarted_build(
     abs_socket: &str,
 ) -> Result<()> {
     config.validate()?;
-    require_linux_env()?;
-
-    let expected_dir = config.slot.vm_dir.clone();
-    if expected_dir != abs_dir {
-        anyhow::bail!(
-            "prestarted Firecracker dir mismatch for '{}': expected {}, got {}",
-            config.slot.name,
-            expected_dir,
-            abs_dir
-        );
-    }
-    let pid_file = format!("{}/fc.pid", abs_dir);
-    if !firecracker::is_vm_running(&pid_file)? {
-        anyhow::bail!(
-            "prestarted Firecracker daemon for '{}' is not running",
-            config.slot.name
-        );
-    }
-
-    run_configured_firecracker(config, abs_dir, abs_socket, false)
-}
-
-/// Return the policy applied to the raw Firecracker TAP substrate.
-pub(super) fn firecracker_tap_policy(
-    config: &FlakeRunConfig,
-) -> mvm_core::network_policy::NetworkPolicy {
-    config.network_policy.clone()
-}
-
-fn run_configured_firecracker(
-    config: &FlakeRunConfig,
-    abs_dir: &str,
-    abs_socket: &str,
-    start_daemon: bool,
-) -> Result<()> {
-    let slot = &config.slot;
-
-    // Provision the VM's bridge+TAP network + egress policy through the
-    // NetworkProvider seam. `provision` is transactional
-    // — it drops the TAP itself if the policy apply fails — and the TapGuard
-    // below re-arms to tear the TAP down if a *later* start step fails. Same
-    // operations, same order, as the direct calls this replaces.
-    BridgeTapNetworkProvider::new()
-        .provision(
-            &mvm_core::protocol::vm_backend::VmId(slot.name.clone()),
-            &NetworkSpec {
-                policy: firecracker_tap_policy(config),
-                slot_index: slot.index,
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("network provision: {e}"))?;
-    let mut tap_guard = TapGuard::new(slot);
-
-    // Spawn `mvm-bridge` alongside the Firecracker VM.
-    // The sidecar runs under
-    // `mvm-jailer-lite` confinement (seccomp + Landlock), verifies the
-    // operator-pinned passt SHA256, inherits both halves of a
-    // socketpair from this process, and runs
-    // `mvm-supervisor::gateway_bridge` with `BridgeEndpoints::Passt`.
-    //
-    // The guard kills the bridge on early return / panic between
-    // spawn and the FC VM's boot completion; after the VM is healthy
-    // the guard's child is detached and a watchdog thread takes over
-    // (writes `fc-bridge.pid` and SIGTERMs the FC VM on bridge death
-    // via `fc.pid`, hard-fail policy).
-    //
-    // No-op on non-Linux hosts (this Firecracker spawn path is Linux-only; the
-    // shared sidecar binary lives at `crates/mvm-hostd/src/bin/mvm-bridge.rs`).
-    //
-    // Opt-in via MVM_GATEWAY_BRIDGE=1, the same gate the libkrun/hvf
-    // gateway-bridge factory sits behind: the FC bridge lane is not yet
-    // working end-to-end (its confinement spec doesn't grant the
-    // observer-allowlist path it reads post-confinement), and its
-    // watchdog hard-fail policy would tear down an otherwise healthy
-    // VM. Before the egress moat landed, no producer wrote `plan.json`
-    // pre-boot on this path, so the bridge never actually spawned;
-    // the gate preserves that default while the moat (substitution
-    // endpoint + nft redirect below) runs unconditionally.
-    #[cfg(target_os = "linux")]
-    let mut bridge_guard = if std::env::var("MVM_GATEWAY_BRIDGE").as_deref() == Ok("1") {
-        super::egress_bridge::spawn_fc_bridge(&config.slot.name, abs_dir)?
-    } else {
-        tracing::debug!(
-            vm = %config.slot.name,
-            "MVM_GATEWAY_BRIDGE not set; skipping mvm-bridge sidecar"
-        );
-        super::egress_bridge::AttachedBridgeGuard { child: None }
-    };
-
-    if start_daemon {
-        // Start Firecracker daemon in per-VM directory.
-        start_vm_firecracker(abs_dir, abs_socket)?;
-    }
-    let mut fc_guard = FirecrackerGuard::new(abs_dir);
-
-    // Spawn the substitution endpoint BEFORE configuring boot args,
-    // so the placeholders it mints land in
-    // `vm_substitution_env_path` and `configure_flake_microvm` can carry them on
-    // the cmdline (`mvm.secret_env=`) into a sealed entrypoint. The endpoint
-    // binds its listener now; the nft REDIRECT that feeds it is installed
-    // post-boot (the TAP must exist). The guard reaps the endpoint if any step
-    // below fails before the VM is fully up. No-op without egress secrets.
-    #[cfg(target_os = "linux")]
-    let mut endpoint_guard = super::egress_bridge::spawn_egress_endpoint(config)?;
-    // Configure VM via Firecracker API
-    super::boot_config::configure_flake_microvm(config, abs_dir, abs_socket)?;
-
-    // Boot the instance
-    ui::info("Starting microVM...");
-    std::thread::sleep(std::time::Duration::from_millis(15));
-    api_put_socket(
-        abs_socket,
-        "/actions",
-        r#"{"action_type": "InstanceStart"}"#,
-    )?;
-
-    // Make vsock socket accessible to the current user
-    let vsock = firecracker_vsock_uds_path(abs_dir);
-    if let Err(e) = run_in_vm(&format!(
-        "sudo chmod 0666 {vsock} 2>/dev/null",
-        vsock = vsock,
-    )) {
-        warn!("failed to chmod vsock socket: {e}");
-    }
-
-    // Persist run info for `mvm status`
-    super::run_info::write_vm_run_info(config, abs_dir)?;
-
-    // VM is healthy. Detach the bridge guard so its child outlives
-    // this stack frame; persist the bridge PID to
-    // `<abs_dir>/fc-bridge.pid` and spawn the watchdog thread that
-    // SIGTERMs the FC VM if the bridge dies (hard-fail bridge crash
-    // policy).
-    //
-    // A failure here is non-fatal: the VM is already running. We log
-    // and proceed; the guard remains attached, so the bridge will be
-    // killed at function exit — observers lose flow events but the
-    // workload is fine. The next `stop_vm` reaps any orphan via the
-    // PID file if it was persisted.
-    #[cfg(target_os = "linux")]
-    if let Err(e) = super::egress_bridge::detach_and_spawn_bridge_watchdog(
-        &config.slot.name,
-        abs_dir,
-        &mut bridge_guard,
-    ) {
-        warn!(
-            vm = %config.slot.name,
-            "detach/watchdog setup for mvm-bridge failed (non-fatal): {e}"
-        );
-    }
-
-    // When the admitted plan carries secret bindings, stand up this
-    // VM's transparent egress moat now that the guest is healthy:
-    //   1. spawn the per-VM substitution endpoint with the terminator listener
-    //      bound on a per-slot host port, and
-    //   2. install the nft TAP prerouting REDIRECT that steers the guest's
-    //      outbound :80 to that terminator.
-    // Fail closed: a secret-bearing workload must not keep running without its
-    // substitution path, so any failure rolls the VM back. Linux-only (nft +
-    // the FC path itself). The plan source is the same `plan.json` the bridge
-    // parsed; a missing/unsigned file means a legacy/non-admitted boot with no
-    // secrets — nothing to install.
-    #[cfg(target_os = "linux")]
-    if let Err(e) = super::egress_bridge::install_egress_redirect(config) {
-        // Roll back the running VM + its network. The guards were about to be
-        // defused; instead let them fire by returning before defuse — but the
-        // bridge watchdog already detached, so tear down explicitly. `stop_vm`
-        // reaps the substitution endpoint, so the (still-armed) endpoint_guard's
-        // Drop is then a harmless no-op.
-        warn!(vm = %config.slot.name, "egress redirect install failed; rolling back VM: {e}");
-        let _ = super::control::stop_vm(&config.slot.name);
-        return Err(e);
-    }
-
-    // VM is fully started — defuse guards so normal stop path handles cleanup
-    fc_guard.defuse();
-    tap_guard.defuse();
-    #[cfg(target_os = "linux")]
-    endpoint_guard.defuse();
-
-    ui::banner(&[
-        &format!("MicroVM '{}' is running!", config.name),
-        "",
-        &format!("  Guest IP: {}", slot.guest_ip),
-        &format!("  Revision: {}", config.revision_hash),
-        "",
-        &format!("Use 'mvmctl stop {}' to shut down this VM.", config.name),
-        "Use 'mvmctl status' to list all running VMs.",
-    ]);
-
-    Ok(())
+    let _ = (abs_dir, abs_socket);
+    anyhow::bail!("raw Firecracker standby claim is disabled; use the vsock workload runner")
 }
 
 /// Generate shell commands to inject `DriveFile`s into a mounted drive.
@@ -489,15 +267,6 @@ mod tests {
         assert_eq!(f.mode, 0o444);
     }
 
-    #[test]
-    fn firecracker_tap_policy_passes_policy_through() {
-        let mut config = baseline_run_config(None);
-        config.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-            mvm_core::network_policy::HostPort::new("example.com", 443),
-        ]);
-        assert_eq!(firecracker_tap_policy(&config), config.network_policy);
-    }
-
     fn baseline_run_config(mem_initial: Option<u32>) -> FlakeRunConfig {
         FlakeRunConfig {
             name: "v".to_string(),
@@ -521,13 +290,18 @@ mod tests {
             config_files: Vec::new(),
             secret_files: Vec::new(),
             ports: Vec::new(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::default(),
         }
     }
 
     #[test]
     fn flake_run_config_validate_accepts_none_mem_initial() {
         baseline_run_config(None).validate().unwrap();
+    }
+
+    #[test]
+    fn raw_flake_launch_refuses_before_starting_firecracker() {
+        let err = run_from_build(&baseline_run_config(None)).expect_err("raw launch is retired");
+        assert!(err.to_string().contains("vsock workload runner"));
     }
 
     #[test]

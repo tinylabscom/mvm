@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 const GUARDED_PATHS: &[&str] = &[
     "crates/mvm-runtime/src/vmm",
     "crates/mvm-runtime/src/hvf",
+    "crates/mvm-runtime/src/driver/fc.rs",
     "crates/mvm-runtime/src/libkrun.rs",
     "crates/mvm-runtime/src/vsock_egress_bridge",
 ];
@@ -34,6 +35,9 @@ const FORBIDDEN: &[&str] = &[
     "tap0",
     "passt",
     "gvproxy",
+    "network-interfaces",
+    "iface_id",
+    "host_dev_name",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
