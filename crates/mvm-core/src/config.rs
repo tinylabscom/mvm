@@ -642,6 +642,12 @@ pub fn checkpoints_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("checkpoints")
 }
 
+/// Immutable image version-lineage store: `<mvm_home>/images/`. Each node is a
+/// subdirectory `<node-digest>/` holding `node.json`.
+pub fn images_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("images")
+}
+
 /// Chain-signed audit logs: `<mvm_home>/audit/`.
 pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("audit")

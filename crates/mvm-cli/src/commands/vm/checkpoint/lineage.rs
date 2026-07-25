@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use mvm_core::checkpoint::{CheckpointDigest, CheckpointMeta};
+use mvm_core::image_lineage::ImageNode;
 use mvm_runtime::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_lineage};
+use mvm_runtime::image_lineage::ImageChainAnchor;
 
 use super::validated_checkpoint_id;
 use crate::ui;
@@ -90,14 +92,17 @@ fn is_host_lifecycle_chain(path: &Path) -> bool {
 }
 
 /// Index one signed audit entry's creation content-address, when it is a
-/// checkpoint creation event. `checkpoint.created` keys on
+/// checkpoint or image-node creation event. `checkpoint.created` keys on
 /// `checkpoint_id`/`meta_digest`; `checkpoint.forked` is a child's creation, so
-/// it keys on `child_id`/`child_digest`.
+/// it keys on `child_id`/`child_digest`. `image.created` has no separate id —
+/// the node's identity *is* its content-address — so it keys the digest under
+/// itself.
 fn index_creation_digest(
     recorded: &mut std::collections::HashMap<String, CheckpointDigest>,
     envelope: &mvm_hostd::supervisor::SignedEnvelope,
 ) -> Result<()> {
     use mvm_hostd::audit::emitter::checkpoint_audit as k;
+    use mvm_hostd::audit::emitter::image_audit as ik;
     let event = envelope.entry.event.as_str();
     // The (id, digest) label pair a creation event keys on; non-creation events
     // carry neither.
@@ -105,6 +110,8 @@ fn index_creation_digest(
         Some((k::LABEL_CHECKPOINT_ID, k::LABEL_META_DIGEST))
     } else if event == k::FORKED_EVENT {
         Some((k::LABEL_CHILD_ID, k::LABEL_CHILD_DIGEST))
+    } else if event == ik::CREATED_EVENT {
+        Some((ik::LABEL_NODE_DIGEST, ik::LABEL_NODE_DIGEST))
     } else {
         None
     };
@@ -121,6 +128,15 @@ fn index_creation_digest(
 impl CheckpointChainAnchor for SignedChainAnchor {
     fn recorded_creation_digest(&self, meta: &CheckpointMeta) -> Result<Option<CheckpointDigest>> {
         Ok(self.recorded.get(meta.id.as_str()).cloned())
+    }
+}
+
+/// The same signed host-lifecycle chains anchor image-lineage nodes. An image
+/// node's identity is its own content-address, so the lookup key is the node
+/// digest the `image.created` entry recorded.
+impl ImageChainAnchor for SignedChainAnchor {
+    fn recorded_creation_digest(&self, node: &ImageNode) -> Result<Option<CheckpointDigest>> {
+        Ok(self.recorded.get(node.node_digest.as_str()).cloned())
     }
 }
 

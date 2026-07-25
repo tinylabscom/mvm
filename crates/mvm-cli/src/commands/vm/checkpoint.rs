@@ -2303,4 +2303,96 @@ mod tests {
             "the signed chain must catch a consistent local re-forge, got: {err}"
         );
     }
+
+    // ── image lineage: real signed-chain linkage ─────────────────────────────
+
+    use mvm_core::image_lineage::{
+        ImageBuildIdentity, ImageCanonicalId, ImageIdentity, ImageNode, ImageProvenance,
+    };
+    use mvm_runtime::image_lineage::{ImageStore, verify_image_lineage};
+
+    fn image_node(slot: &str, revision: &str, parent: Option<CheckpointDigest>) -> ImageNode {
+        ImageNode::builder(
+            ImageBuildIdentity::Flake {
+                slot_hash: slot.into(),
+            },
+            ImageIdentity {
+                canonical: ImageCanonicalId::Flake {
+                    revision_hash: revision.into(),
+                },
+                artifacts: vec![ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: revision.into(),
+                }],
+            },
+            ImageProvenance::Build {
+                input_ref: ".#app".into(),
+                lock_digest: None,
+            },
+        )
+        .parent(parent)
+        .created_unix(1)
+        .build()
+    }
+
+    /// Save a node and emit its `image.created` entry into the host-signed chain
+    /// under the active `MVM_HOME`, exactly as the build path (a later slice)
+    /// will. Returns nothing; the store + chain are the observable state.
+    fn seed_audited_image_node(store: &ImageStore, node: &ImageNode) {
+        store.save(node).unwrap();
+        let signer = super::super::host_signer::load_or_init().unwrap();
+        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-image-verify")
+            .build();
+        emitter.emit_image_created(&plan, node).unwrap();
+    }
+
+    #[test]
+    fn image_lineage_verifies_against_a_real_signed_chain() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let store = ImageStore::open();
+        let g0 = image_node("slot-a", "rev-1", None);
+        let g1 = image_node("slot-a", "rev-2", Some(g0.node_digest.clone()));
+        let g2 = image_node("slot-a", "rev-3", Some(g1.node_digest.clone()));
+        seed_audited_image_node(&store, &g0);
+        seed_audited_image_node(&store, &g1);
+        seed_audited_image_node(&store, &g2);
+
+        let anchor = SignedChainAnchor::load().unwrap();
+        // The anchor recovers each node's content-address from the signed chain,
+        // and the full three-node version lineage verifies against it.
+        verify_image_lineage(&store, &g2.node_digest, &anchor).unwrap();
+        // The store's head_for reports g2 as the chain's tip.
+        assert_eq!(
+            store
+                .head_for(&ImageBuildIdentity::Flake {
+                    slot_hash: "slot-a".into()
+                })
+                .unwrap()
+                .unwrap()
+                .node_digest,
+            g2.node_digest
+        );
+    }
+
+    #[test]
+    fn image_lineage_refuses_a_node_absent_from_the_signed_chain() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let store = ImageStore::open();
+        let g0 = image_node("slot-a", "rev-1", None);
+        // Saved but NEVER audited: no image.created entry anchors it.
+        store.save(&g0).unwrap();
+
+        let anchor = SignedChainAnchor::load().unwrap();
+        let err = verify_image_lineage(&store, &g0.node_digest, &anchor).unwrap_err();
+        assert!(err.to_string().contains("no signed audit entry"), "{err}");
+    }
 }

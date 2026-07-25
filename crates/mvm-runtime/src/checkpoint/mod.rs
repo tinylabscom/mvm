@@ -7,6 +7,8 @@ use mvm_core::checkpoint::{
     CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
 };
 
+use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
+
 /// Filename of the persisted supervisor launch config inside a vm_full
 /// checkpoint's content dir. Present only on checkpoints captured from a
 /// backend that writes a supervisor config (legacy captures); Firecracker
@@ -192,6 +194,54 @@ pub trait CheckpointChainAnchor {
     fn recorded_creation_digest(&self, meta: &CheckpointMeta) -> Result<Option<CheckpointDigest>>;
 }
 
+/// A checkpoint record participates in the shared, namespace-agnostic lineage
+/// walk ([`crate::lineage`]) as a content-addressed record: its stored digest is
+/// `meta_digest`, it recomputes via [`CheckpointMeta::compute_meta_digest`], and
+/// its parent hash-link is `parent`.
+impl LineageRecord for CheckpointMeta {
+    fn stored_digest(&self) -> &CheckpointDigest {
+        &self.meta_digest
+    }
+    fn recompute_digest(&self) -> CheckpointDigest {
+        self.compute_meta_digest()
+    }
+    fn parent_link(&self) -> Option<&CheckpointDigest> {
+        self.parent.as_ref()
+    }
+    fn kind(&self) -> &'static str {
+        "checkpoint"
+    }
+    fn id_label(&self) -> String {
+        self.id.to_string()
+    }
+    fn digest_field(&self) -> &'static str {
+        "meta_digest"
+    }
+}
+
+/// Bridge the checkpoint-specific anchor trait onto the generic one, so the
+/// shared walk accepts a `&dyn CheckpointChainAnchor` unchanged.
+impl LineageAnchor<CheckpointMeta> for dyn CheckpointChainAnchor + '_ {
+    fn recorded_creation_digest(&self, meta: &CheckpointMeta) -> Result<Option<CheckpointDigest>> {
+        CheckpointChainAnchor::recorded_creation_digest(self, meta)
+    }
+}
+
+/// Adapts a [`CheckpointStore`] to the generic [`LineageGraph`] the shared walk
+/// reads records from.
+struct CheckpointGraph<'a>(&'a CheckpointStore);
+
+impl LineageGraph for CheckpointGraph<'_> {
+    type Record = CheckpointMeta;
+    type Id = CheckpointId;
+    fn read(&self, id: &CheckpointId) -> Result<CheckpointMeta> {
+        self.0.read_meta(id)
+    }
+    fn by_digest(&self, digest: &CheckpointDigest) -> Result<Option<CheckpointMeta>> {
+        self.0.by_digest(digest)
+    }
+}
+
 /// Verify one checkpoint record against the signed audit chain: its stored
 /// `meta_digest` must equal a recomputation of its own fields (catches a
 /// post-seal edit that left the digest stale) AND must equal the
@@ -204,30 +254,7 @@ fn verify_checkpoint_against_chain(
     anchor: &dyn CheckpointChainAnchor,
     meta: &CheckpointMeta,
 ) -> Result<()> {
-    let recomputed = meta.compute_meta_digest();
-    if recomputed != meta.meta_digest {
-        anyhow::bail!(
-            "checkpoint '{}' meta_digest drift: stored {}, recomputed {} \
-             (its meta.json was edited after sealing)",
-            meta.id,
-            meta.meta_digest,
-            recomputed
-        );
-    }
-    match anchor.recorded_creation_digest(meta)? {
-        Some(recorded) if recorded == recomputed => Ok(()),
-        Some(recorded) => anyhow::bail!(
-            "checkpoint '{}' content-address {recomputed} does not match the \
-             signed audit chain, which recorded {recorded} at creation \
-             (the on-disk record was edited after it was audited)",
-            meta.id
-        ),
-        None => anyhow::bail!(
-            "checkpoint '{}' has no signed audit entry to anchor its \
-             content-address; refusing to treat an un-audited record as verified",
-            meta.id
-        ),
-    }
+    crate::lineage::verify_record_against_chain(anchor, meta)
 }
 
 /// Walk a checkpoint's lineage from `id` up to its genesis root, verifying each
@@ -253,34 +280,7 @@ pub fn verify_lineage(
     id: &CheckpointId,
     anchor: &dyn CheckpointChainAnchor,
 ) -> Result<()> {
-    let mut current = store.read_meta(id)?;
-    let mut seen: Vec<CheckpointDigest> = Vec::new();
-    loop {
-        verify_checkpoint_against_chain(anchor, &current)?;
-        if seen.contains(&current.meta_digest) {
-            anyhow::bail!(
-                "checkpoint '{}' lineage revisits digest {}: refusing a cyclic chain",
-                current.id,
-                current.meta_digest
-            );
-        }
-        seen.push(current.meta_digest.clone());
-
-        let parent_digest = match current.parent.clone() {
-            // Genesis root: no parent to chain to, the walk terminates clean.
-            None => return Ok(()),
-            Some(d) => d,
-        };
-        // Resolving the parent by its content-address *is* the hash-link check:
-        // by_digest only returns a record whose meta_digest equals the link, and
-        // that record's own digest is re-verified (against disk + chain) on the
-        // next iteration.
-        current = store.by_digest(&parent_digest)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "checkpoint lineage is broken: no checkpoint has parent-linked digest {parent_digest}"
-            )
-        })?;
-    }
+    crate::lineage::verify_lineage_chain(&CheckpointGraph(store), id, anchor)
 }
 
 /// The fork's source is the sealed checkpoint content (cloned at capture

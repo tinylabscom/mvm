@@ -31,6 +31,9 @@ pub mod guest_netd;
 /// decide restart/give-up actions. No I/O.
 pub mod health;
 /// Host ingress-broker decision logic (host listener only by explicit policy).
+/// Content-addressed image version-lineage nodes (the image analog of
+/// [`checkpoint`]). Provenance metadata, never authorization.
+pub mod image_lineage;
 pub mod ingress_broker;
 /// Ingress-broker handler: compose decision + trace into an audit record.
 pub mod ingress_handler;
