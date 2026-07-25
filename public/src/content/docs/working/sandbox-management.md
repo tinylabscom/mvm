@@ -42,7 +42,7 @@ mvmctl pause agent-sandbox
 mvmctl resume agent-sandbox
 ```
 
-Full-VM memory checkpoints (vm-full class) are currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore:
+Full-VM memory checkpoints (vm-full class) are currently unavailable through the selectable workload runners; check `mvmctl doctor` for the authoritative capability before requesting them:
 
 ```sh
 mvmctl checkpoint create agent-sandbox --class vm-full

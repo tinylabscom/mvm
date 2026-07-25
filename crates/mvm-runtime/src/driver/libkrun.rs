@@ -214,11 +214,14 @@ impl VmmDriver for LibkrunDriver {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        self.backend.capabilities()
-    }
-
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        self.backend.snapshot_capability()
+        // The raw libkrun shim has standalone disk-warm and supervisor-pool
+        // operations, but the selectable workload runner does not route those
+        // operations through its admission and endpoint guards. Do not expose
+        // an operation as selectable until the runner owns that path too.
+        let mut capabilities = self.backend.capabilities();
+        capabilities.snapshot_capability = SnapshotCapability::Unsupported;
+        capabilities.standby_pool = false;
+        capabilities
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
@@ -445,6 +448,7 @@ mod tests {
     use super::*;
     use crate::driver::{ConsoleCapture, VsockPort};
     use mvm_agentd::vsock::{BROKER_PORT, WORKLOAD_EXIT_PORT};
+    use mvm_core::vm_backend::SnapshotCapability;
 
     fn host_dials(guest_port: u32, uds: &str) -> VsockPort {
         VsockPort {
@@ -493,7 +497,7 @@ mod tests {
         assert!(caps.vsock);
         assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
-        assert_eq!(d.snapshot_capability(), SnapshotCapability::DiskOnly);
+        assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         assert_eq!(
             d.security_profile().tier,
             LibkrunBackend.security_profile().tier

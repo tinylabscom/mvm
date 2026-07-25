@@ -19,8 +19,8 @@ use mvm_agentd::vsock::{
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, VmBackend, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 
 use crate::driver::spec::KernelImage;
@@ -185,10 +185,6 @@ impl VmmDriver for HvfDriver {
 
     fn capabilities(&self) -> VmCapabilities {
         self.backend.capabilities()
-    }
-
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        self.backend.snapshot_capability()
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
@@ -386,6 +382,7 @@ impl RunningVm for HvfRunningVm {
 mod tests {
     use super::*;
     use crate::driver::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
+    use mvm_core::vm_backend::SnapshotCapability;
 
     fn egress_port(uds: &str) -> VsockPort {
         VsockPort {

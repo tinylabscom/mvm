@@ -52,6 +52,24 @@ Build time and runtime are separate. After an image is built:
 When reporting runtime behavior, include host OS, CPU architecture, selected
 backend, `mvmctl doctor` output, and whether `/dev/kvm` was available.
 
+## Recovery capability boundary
+
+Recovery is not interchangeable across backends. `mvmctl doctor` is the
+authoritative live matrix; its `snapshot_tier` and `standby_pool` values come
+from the selected backend's `VmCapabilities`.
+
+| Recovery path | Meaning | Current limitation |
+| --- | --- | --- |
+| Live-memory snapshot/restore | Resume captured guest RAM and device state. | Not advertised by the selectable production runners. |
+| Save/restore machine state | Restore a serialized VMM machine state without claiming live-memory fidelity. | No selectable backend currently advertises it. |
+| Disk-only CoW warm start | Rebuild from a copy-on-write disk/overlay artifact; no RAM is restored. | The raw libkrun substrate has this primitive, but no selectable workload runner advertises it yet. |
+| Prelaunched supervisor standby | Pay supervisor/setup latency before a workload is claimed; this is not snapshot restore. | The raw libkrun substrate has a standby primitive, but no selectable workload runner advertises the pool yet. |
+| Cold boot | Boot immutable kernel, initrd, image, and policy artifacts from scratch. | The portable fallback, with no saved machine state. |
+
+Unsupported recovery requests fail closed. They must not silently change from
+live-memory restore to disk-only warm start or cold boot; use the actionable
+error to select a supported tier or request a cold boot explicitly.
+
 ## Target system strings
 
 Nix target strings describe the Linux guest artifact, not the host operating

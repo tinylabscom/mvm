@@ -54,7 +54,7 @@ pub(in crate::commands) struct ResumeArgs {
     /// Drive the resume through the backend's live-memory warm-start path
     /// instead of the plain verify-and-resume. Fails closed with a typed
     /// recovery hint on a backend that can't warm-start at the live-memory tier
-    /// (e.g. libkrun is disk-only).
+    /// (e.g. a backend may expose no selectable snapshot tier).
     #[arg(long)]
     pub warm: bool,
 }

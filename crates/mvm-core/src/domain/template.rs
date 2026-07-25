@@ -1,5 +1,6 @@
 use sha2::Digest;
 
+use crate::arch::GuestArch;
 use serde::{Deserialize, Serialize};
 
 /// Current schema version for persisted state files.
@@ -109,7 +110,94 @@ pub fn template_snapshot_dir(template_id: &str, revision: &str) -> String {
     format!("{}/snapshot", template_revision_dir(template_id, revision))
 }
 
-/// Metadata about a template's pre-built Firecracker snapshot.
+/// The immutable inputs that make a snapshot restore-compatible.
+///
+/// Recovery must not infer compatibility from the VM name or from whichever
+/// backend happens to be selected at restore time. Every field is part of the
+/// snapshot identity: a changed backend, tool version, architecture, resource
+/// shape, image, or policy requires a cold boot or a newly captured snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotCompatibility {
+    /// Backend that produced the snapshot (for example, `firecracker`).
+    pub backend: String,
+    /// Backend/runtime version that produced the snapshot.
+    pub backend_version: String,
+    /// Guest architecture captured by the snapshot.
+    pub architecture: GuestArch,
+    /// vCPU count captured by the snapshot.
+    pub vcpus: u8,
+    /// Guest memory captured by the snapshot.
+    pub mem_mib: u32,
+    /// Content digest of the boot image.
+    pub image_sha256: String,
+    /// Digest of the effective policy bound to the boot.
+    pub policy_digest: String,
+}
+
+/// A snapshot cannot be restored under a different immutable input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SnapshotCompatibilityError {
+    #[error(
+        "snapshot compatibility mismatch for {field}: snapshot={snapshot:?}, current={current:?}"
+    )]
+    Mismatch {
+        field: &'static str,
+        snapshot: String,
+        current: String,
+    },
+    #[error("snapshot compatibility metadata is missing; capture a new snapshot before restoring")]
+    Missing,
+}
+
+impl SnapshotCompatibility {
+    /// Validate that this snapshot was produced for the requested restore
+    /// contract. The first mismatch is returned with both values so the CLI
+    /// can provide an actionable refusal.
+    pub fn check_against(&self, current: &Self) -> Result<(), SnapshotCompatibilityError> {
+        let checks = [
+            ("backend", self.backend.clone(), current.backend.clone()),
+            (
+                "backend_version",
+                self.backend_version.clone(),
+                current.backend_version.clone(),
+            ),
+            (
+                "architecture",
+                self.architecture.to_string(),
+                current.architecture.to_string(),
+            ),
+            ("vcpus", self.vcpus.to_string(), current.vcpus.to_string()),
+            (
+                "mem_mib",
+                self.mem_mib.to_string(),
+                current.mem_mib.to_string(),
+            ),
+            (
+                "image_sha256",
+                self.image_sha256.clone(),
+                current.image_sha256.clone(),
+            ),
+            (
+                "policy_digest",
+                self.policy_digest.clone(),
+                current.policy_digest.clone(),
+            ),
+        ];
+        if let Some((field, snapshot, current)) = checks
+            .into_iter()
+            .find(|(_, snapshot, current)| snapshot != current)
+        {
+            return Err(SnapshotCompatibilityError::Mismatch {
+                field,
+                snapshot,
+                current,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Metadata about a template's pre-built snapshot.
 ///
 /// Created by `mvmctl build --snapshot` after booting the VM and
 /// waiting for the service to become healthy. Used by `mvmctl up
@@ -125,13 +213,31 @@ pub struct SnapshotInfo {
     pub vcpus: u8,
     /// Memory MiB at snapshot time (must match on restore).
     pub mem_mib: u32,
+    /// Immutable compatibility contract for the snapshot. `None` is retained
+    /// only for reading legacy metadata; restore code must reject it.
+    #[serde(default)]
+    pub compatibility: Option<SnapshotCompatibility>,
+}
+
+impl SnapshotInfo {
+    /// Check the snapshot's compatibility contract, refusing legacy metadata
+    /// that predates the contract instead of guessing whether it is safe.
+    pub fn check_compatibility(
+        &self,
+        current: &SnapshotCompatibility,
+    ) -> Result<(), SnapshotCompatibilityError> {
+        self.compatibility
+            .as_ref()
+            .ok_or(SnapshotCompatibilityError::Missing)?
+            .check_against(current)
+    }
 }
 
 /// Describes what kind of pre-built artifact a template provides.
 ///
-/// All backends support `Image` (cold-boot from rootfs). Only backends
-/// with `capabilities().snapshots == true` (e.g. Firecracker) support
-/// `Snapshot` (warm-start from memory image).
+/// All backends support `Image` (cold boot from immutable artifacts). A
+/// `Snapshot` is valid only when its compatibility contract matches the
+/// selected backend's recovery capability.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TemplateKind {
     /// Pre-built rootfs image only — cold-boot on every start.
@@ -303,6 +409,80 @@ mod tests {
         assert!(back.build_mode.is_none());
     }
 
+    fn snapshot_contract() -> SnapshotCompatibility {
+        SnapshotCompatibility {
+            backend: "libkrun".into(),
+            backend_version: "1.2.3".into(),
+            architecture: GuestArch::Aarch64,
+            vcpus: 2,
+            mem_mib: 1024,
+            image_sha256: "a".repeat(64),
+            policy_digest: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn snapshot_compatibility_checks_every_restore_input() {
+        let expected = snapshot_contract();
+        let mut actual = expected.clone();
+        actual.policy_digest = "c".repeat(64);
+        let err = expected.check_against(&actual).unwrap_err();
+        assert!(matches!(
+            err,
+            SnapshotCompatibilityError::Mismatch {
+                field: "policy_digest",
+                ..
+            }
+        ));
+
+        type CompatibilityMutator = fn(&mut SnapshotCompatibility);
+        let cases: [(&str, CompatibilityMutator); 7] = [
+            ("backend", |c: &mut SnapshotCompatibility| {
+                c.backend = "qemu".into()
+            }),
+            ("backend_version", |c: &mut SnapshotCompatibility| {
+                c.backend_version = "9".into()
+            }),
+            ("architecture", |c: &mut SnapshotCompatibility| {
+                c.architecture = GuestArch::X86_64
+            }),
+            ("vcpus", |c: &mut SnapshotCompatibility| c.vcpus = 4),
+            ("mem_mib", |c: &mut SnapshotCompatibility| c.mem_mib = 2048),
+            ("image_sha256", |c: &mut SnapshotCompatibility| {
+                c.image_sha256 = "d".repeat(64)
+            }),
+            ("policy_digest", |c: &mut SnapshotCompatibility| {
+                c.policy_digest = "e".repeat(64)
+            }),
+        ];
+        for (field, mutate) in cases {
+            let mut current = expected.clone();
+            mutate(&mut current);
+            let err = expected.check_against(&current).unwrap_err();
+            assert!(
+                matches!(err, SnapshotCompatibilityError::Mismatch { field: got, .. } if got == field),
+                "expected {field}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_without_compatibility_is_rejected() {
+        let info = SnapshotInfo {
+            created_at: "2025-03-01T00:00:00Z".into(),
+            vmstate_size_bytes: 1,
+            mem_size_bytes: 1,
+            boot_args: String::new(),
+            vcpus: 1,
+            mem_mib: 64,
+            compatibility: None,
+        };
+        assert_eq!(
+            info.check_compatibility(&snapshot_contract()),
+            Err(SnapshotCompatibilityError::Missing)
+        );
+    }
+
     #[test]
     fn snapshot_info_serde_roundtrip() {
         let info = SnapshotInfo {
@@ -312,6 +492,7 @@ mod tests {
             boot_args: "root=/dev/vda rw init=/init console=ttyS0".to_string(),
             vcpus: 2,
             mem_mib: 1024,
+            compatibility: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let back: SnapshotInfo = serde_json::from_str(&json).unwrap();
@@ -353,6 +534,7 @@ mod tests {
             boot_args: "console=ttyS0".to_string(),
             vcpus: 2,
             mem_mib: 1024,
+            compatibility: None,
         });
         let json = serde_json::to_string(&rev).unwrap();
         let back: TemplateRevision = serde_json::from_str(&json).unwrap();
@@ -383,6 +565,7 @@ mod tests {
             boot_args: "console=ttyS0".to_string(),
             vcpus: 2,
             mem_mib: 512,
+            compatibility: None,
         };
         let kind = TemplateKind::Snapshot(snap.clone());
         let json = serde_json::to_string(&kind).unwrap();

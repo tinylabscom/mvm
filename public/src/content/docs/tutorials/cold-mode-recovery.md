@@ -22,7 +22,7 @@ cargo run -- checkpoint create agent-sandbox --class vm-full
 cargo run -- checkpoint restore agent-sandbox --name <checkpoint-name>
 ```
 
-Full-VM checkpoints capture full machine state. They are currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore. `mvm` records the checkpoint content hash in the audit chain when the launch plan and host signer are available, and restore records whether the content matched the prior chain entry.
+Full-VM checkpoints capture full machine state. They are currently unavailable through the selectable workload runners; request them only when `mvmctl doctor` reports a compatible backend and capability. `mvm` records the checkpoint content hash in the audit chain when the launch plan and host signer are available, and restore records whether the content matched the prior chain entry.
 
 ## Security checklist
 

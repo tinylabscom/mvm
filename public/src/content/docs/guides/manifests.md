@@ -159,7 +159,6 @@ The planner outputs a structured plan (preset, features, http port, entrypoint, 
 
 ```bash
 mvmctl build                                 # discover manifest, build
-mvmctl build --snapshot                       # also create a Firecracker snapshot where supported
 mvmctl build --force                          # rebuild even if the cache hits
 mvmctl build --update-hash                    # recompute Nix FOD hash (after package version bump)
 mvmctl build --vcpus 4 --mem 2G               # CLI overrides; persisted to the slot record
@@ -167,7 +166,9 @@ mvmctl build --vcpus 4 --mem 2G               # CLI overrides; persisted to the 
 
 Build artifacts are stored in a content-addressed registry under `~/.mvm/templates/<sha256(canonical_manifest_path)>/artifacts/revisions/<revision_hash>/`. The manifest's *path* identifies the project; `revision_hash = sha256(flake.lock + profile)` content-addresses the actual build outputs.
 
-Snapshots (`--snapshot`) are Firecracker-only. On the non-Firecracker backends (libkrun / HVF / QEMU) the flag downgrades gracefully to image-only.
+Build produces immutable image artifacts. Snapshot and warm-start recovery are
+separate backend capabilities; use `mvmctl doctor` before requesting them.
+An unsupported request fails closed instead of downgrading to image-only.
 
 ## Listing / inspecting / removing
 

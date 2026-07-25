@@ -416,17 +416,27 @@ impl VmExitStatus {
 
 /// Capabilities that a backend may or may not support.
 ///
-/// Used by consumers to check what operations are available before
-/// attempting them. For example, WASM backends won't support snapshots.
+/// Used by consumers to check what operations are available before attempting
+/// them. Recovery capabilities are deliberately part of this same value so a
+/// caller cannot accidentally combine a snapshot tier from one backend with a
+/// standby answer from another.
 #[derive(Debug, Clone, Default)]
 pub struct VmCapabilities {
     /// Can pause/resume vCPUs (Firecracker: yes, WASM: no).
     pub pause_resume: bool,
-    /// Can create/restore memory snapshots (Firecracker: yes, Docker: checkpoints, WASM: no).
+    /// Legacy coarse snapshot flag. New recovery callers should use
+    /// [`snapshot_capability`](Self::snapshot_capability), which distinguishes
+    /// live-memory, save/restore, disk-only, and unsupported paths.
     pub snapshots: bool,
+    /// The strongest recovery tier this backend actually wires.
+    pub snapshot_capability: SnapshotCapability,
+    /// Can maintain a prelaunched supervisor standby pool. This is separate
+    /// from snapshots: a standby pays spawn/setup latency in advance but does
+    /// not restore saved machine state.
+    pub standby_pool: bool,
     /// Supports vsock guest communication (Firecracker: yes, others: typically no).
     pub vsock: bool,
-    /// Supports TAP-based networking (Firecracker/Docker: yes, WASM: no).
+    /// Supports TAP-based networking.
     pub tap_networking: bool,
     /// Supports a virtio-balloon device with runtime inflate/deflate.
     /// When `true`, `VmBackend::balloon_set_target` is wired and the

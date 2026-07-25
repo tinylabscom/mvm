@@ -117,17 +117,14 @@ impl VmBackend for MockBackend {
         VmCapabilities {
             pause_resume: true,
             snapshots: true,
+            snapshot_capability: SnapshotCapability::LiveMemory,
+            standby_pool: self.supports_standby,
             vsock: false,
             tap_networking: false,
             balloon: false,
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
         }
-    }
-
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        // The mock is the fully-capable test double.
-        SnapshotCapability::LiveMemory
     }
 
     fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {

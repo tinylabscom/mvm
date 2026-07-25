@@ -15,8 +15,8 @@ use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StartMode,
-    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, StartMode, VmBackend, VmCapabilities,
+    VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::driver::{RunningVm, VmmDriver};
@@ -313,10 +313,6 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
 
     fn capabilities(&self) -> VmCapabilities {
         self.driver.capabilities()
-    }
-
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        self.driver.snapshot_capability()
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {

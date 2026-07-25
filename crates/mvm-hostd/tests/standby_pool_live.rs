@@ -42,6 +42,8 @@ fn spec(dir: &Path, nonce: &str) -> StandbySpec {
             .to_string_lossy()
             .into_owned(),
         vm_state_dir: dir.join("state").to_string_lossy().into_owned(),
+        image_path: None,
+        image_sha256: None,
     }
 }
 

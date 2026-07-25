@@ -77,18 +77,16 @@ What is installed where:
 The standby pool is governed by a single residency policy (ADR-090), surfaced on `mvmctl
 doctor`'s `residency` line as `<policy> — <source> — warm_target=N[, idle=Nm]`.
 
-- `MVM_RESIDENCY=warm|parked|cold` overrides the policy. Unset, it resolves to a per-host
-  default: **macOS 26+ Apple Silicon defaults to `warm`** (a compatible standby is kept ready,
-  so a command does not pay a builder/VM boot); **every other host, including CI, defaults to
-  `parked`** (nothing is held warm; resume on demand).
+- `MVM_RESIDENCY=warm|parked|cold` overrides the policy. Unset, it resolves to `parked`
+  (nothing is held warm) because the default selectable backend does not advertise a
+  standby pool. An explicit `warm` request is accepted only when the selected backend
+  advertises that capability.
 - The trade-off is resource cost vs. first-command latency: `warm` keeps a standby ready,
   `parked`/`cold` hold none.
-- On the snapshot-capable macOS backend a standby is a captured saved state; when one ages
-  past the warm TTL the pool **demotes it to `parked`** — kept as a claimable saved-state
-  snapshot rather than discarded — and resumes it on the next compatible claim (matched on
-  `kernel_sha256` + image digest). On the live-process backend (libkrun) a standby cannot be
-  snapshotted, so an idle one is reaped to cold. `mvmctl pool status` reports `idle`,
-  `claimed`, and `parked` counts.
+- Standby and snapshot capabilities are separate axes. The authoritative per-backend
+  matrix is exposed by `mvmctl doctor`; unsupported recovery requests fail with a typed
+  error instead of silently changing to another tier. `mvmctl pool status` reports `idle`,
+  `claimed`, and `parked` counts when the selected backend provides that pool.
 
 ## Workspace Structure
 

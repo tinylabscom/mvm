@@ -346,25 +346,24 @@ pub trait VmBackend: Send + Sync {
     /// Capabilities supported by this backend.
     fn capabilities(&self) -> VmCapabilities;
 
-    /// Warm-start snapshot tier — `LiveMemory` (Firecracker), `SaveRestore`
-    /// (HVF, macOS 26+), `DiskOnly` (libkrun), or `Unsupported`. Defaults to
-    /// `Unsupported` so a backend opts in explicitly; consumers check this
-    /// before requesting a snapshot rather than discovering a silent
-    /// degrade.
+    /// Warm-start snapshot tier. This compatibility accessor reads the
+    /// authoritative value in [`VmCapabilities`]; backend implementations
+    /// should set `capabilities().snapshot_capability` instead of overriding
+    /// this method. A raw substrate may implement a tier that its selectable
+    /// workload runner deliberately does not expose.
     fn snapshot_capability(&self) -> SnapshotCapability {
-        SnapshotCapability::Unsupported
+        self.capabilities().snapshot_capability
     }
 
     /// Warm-start a VM, requesting at least the `requested` snapshot tier.
     ///
     /// Fails closed: if [`snapshot_capability`](Self::snapshot_capability)
-    /// cannot satisfy `requested` (e.g. live-memory asked of libkrun's
-    /// disk-only), returns [`WarmStartError::Unsupported`] carrying a
+    /// cannot satisfy `requested`, returns [`WarmStartError::Unsupported`] carrying a
     /// recovery hint — never a silent cold boot. When the tier
     /// admits the request but the backend wires no warm-start path, the
     /// default returns [`WarmStartError::Failed`] rather than fabricating a
-    /// VM; backends that implement warm-start (libkrun disk-only,
-    /// Firecracker live-memory, HVF save/restore) override this.
+    /// VM; a backend overrides this only when its selectable runner owns the
+    /// complete recovery path.
     fn warm_start(
         &self,
         _config: &VmStartConfig,
@@ -389,12 +388,11 @@ pub trait VmBackend: Send + Sync {
     }
 
     /// Does this backend support a prelaunched-supervisor standby pool?
-    /// Opt-in, default `false` — orthogonal to [`snapshot_capability`]
-    /// (snapshot = restore a booted VM; standby = pre-pay spawn/setup latency).
-    ///
-    /// [`snapshot_capability`]: Self::snapshot_capability
+    /// This compatibility accessor reads the authoritative value in
+    /// [`VmCapabilities`]. Snapshot restore and standby remain separate
+    /// recovery tiers.
     fn supports_standby_pool(&self) -> bool {
-        false
+        self.capabilities().standby_pool
     }
 
     /// Spawn a prelaunched standby per `spec`, detached, blocked on its control UDS

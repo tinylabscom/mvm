@@ -26,8 +26,11 @@ pub trait VmmDriver: Send + Sync {
     fn is_available(&self) -> Result<bool>;
     /// Coarse capability flags.
     fn capabilities(&self) -> VmCapabilities;
-    /// Honest warm-start tier.
-    fn snapshot_capability(&self) -> SnapshotCapability;
+    /// Honest warm-start tier. The capability descriptor is authoritative;
+    /// this method remains as a compatibility accessor for driver callers.
+    fn snapshot_capability(&self) -> SnapshotCapability {
+        self.capabilities().snapshot_capability
+    }
     /// Which of the CI-enforced security claims this VMM's boot path holds.
     fn security_profile(&self) -> BackendSecurityProfile;
     /// Boot the VM described by `spec`, returning a live handle.

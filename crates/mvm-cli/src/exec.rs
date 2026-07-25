@@ -12,7 +12,9 @@
 //! "exec not available" regardless of any runtime configuration.
 
 use anyhow::{Context, Result, anyhow};
-use mvm_core::vm_backend::{RequiredCapabilities, VmId, VmStartConfig, VmVolume};
+use mvm_core::vm_backend::{
+    RequiredCapabilities, SnapshotCapability, VmId, VmStartConfig, VmVolume,
+};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport;
 use serde::Deserialize;
@@ -827,9 +829,12 @@ pub fn snapshot_eligible(
     image: &ImageSource,
     add_dirs: &[AddDir],
     snap_present: bool,
-    backend_supports_snapshots: bool,
+    snapshot_capability: SnapshotCapability,
 ) -> bool {
-    if !backend_supports_snapshots || !snap_present || !add_dirs.is_empty() {
+    if snapshot_capability == SnapshotCapability::Unsupported
+        || !snap_present
+        || !add_dirs.is_empty()
+    {
         return false;
     }
     matches!(image, ImageSource::Template(_))
@@ -1222,7 +1227,7 @@ fn resolve_boot_strategy(
         &req.image,
         &req.add_dirs,
         resolved.snap_info.is_some(),
-        backend.capabilities().snapshots,
+        backend.capabilities().snapshot_capability,
     );
 
     // Probe for the verity sidecar alongside the rootfs: production microVMs
@@ -1363,8 +1368,9 @@ fn boot_transient_vm(
     // returned name diverges from `vm_name` — the caller rebinds it for the
     // Ctrl-C handler, run_in_guest, and teardown. try_warm_claim gates
     // internally (warm_pool_size > 0, admitted tenant + signed plan threaded
-    // into start_config, no extra volumes, backend supports the pool); any
-    // miss/error fails open to the snapshot/cold-boot paths.
+    // into start_config, no extra volumes, backend supports the pool). An
+    // explicitly configured but unsupported standby pool is returned as an
+    // actionable error; only an ineligible launch shape proceeds cold.
     let (vm_name, warm_claimed) = match crate::commands::pool::try_warm_claim(
         attempt.backend,
         attempt.start_config,
@@ -1379,10 +1385,7 @@ fn boot_transient_vm(
             (id.0, true)
         }
         Ok(None) => (vm_name, false),
-        Err(e) => {
-            tracing::warn!(error = %e, "warm-claim attempt errored; cold-booting");
-            (vm_name, false)
-        }
+        Err(e) => return Err(e).context("claiming configured warm standby"),
     };
 
     let booted = warm_claimed
@@ -1402,13 +1405,7 @@ fn boot_transient_vm(
             ));
             match restore_via_snapshot(&vm_name, tmpl, snap, attempt.start_config) {
                 Ok(()) => true,
-                Err(e) => {
-                    // macOS backends without Firecracker (HVF, libkrun) return os
-                    // error 95 (EOPNOTSUPP) on vsock snapshots; cold boot still
-                    // works there. Fall back rather than failing the whole exec.
-                    ui::warn(&format!("Snapshot restore failed: {e}; cold-booting."));
-                    false
-                }
+                Err(e) => return Err(e).context("restoring transient VM snapshot"),
             }
         } else {
             false
@@ -1838,18 +1835,14 @@ pub fn boot_session_vm(
 
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
 
-    let use_snapshot =
-        !admitted_workload && snap_info.is_some() && backend.capabilities().snapshots;
+    let use_snapshot = !admitted_workload
+        && snap_info.is_some()
+        && backend.capabilities().snapshot_capability != SnapshotCapability::Unsupported;
     let booted = if use_snapshot {
         let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
         match restore_via_snapshot(&vm_name, env, snap, &start_config) {
             Ok(()) => true,
-            Err(e) => {
-                ui::warn(&format!(
-                    "Session VM snapshot restore failed: {e}; cold-booting."
-                ));
-                false
-            }
+            Err(e) => return Err(e).context("restoring session VM snapshot"),
         }
     } else {
         false
@@ -2819,29 +2812,54 @@ mod tests {
 
     #[test]
     fn snapshot_eligible_true_for_template_no_extras_with_snapshot() {
-        assert!(snapshot_eligible(&template("t"), &[], true, true));
+        assert!(snapshot_eligible(
+            &template("t"),
+            &[],
+            true,
+            SnapshotCapability::LiveMemory
+        ));
     }
 
     #[test]
     fn snapshot_eligible_false_when_backend_lacks_support() {
-        assert!(!snapshot_eligible(&template("t"), &[], true, false));
+        assert!(!snapshot_eligible(
+            &template("t"),
+            &[],
+            true,
+            SnapshotCapability::Unsupported
+        ));
     }
 
     #[test]
     fn snapshot_eligible_false_when_no_snapshot_present() {
-        assert!(!snapshot_eligible(&template("t"), &[], false, true));
+        assert!(!snapshot_eligible(
+            &template("t"),
+            &[],
+            false,
+            SnapshotCapability::LiveMemory
+        ));
     }
 
     #[test]
     fn snapshot_eligible_false_with_add_dirs() {
         // Adding extra drives changes the recorded layout; snapshot would fail.
-        assert!(!snapshot_eligible(&template("t"), &[add_dir()], true, true));
+        assert!(!snapshot_eligible(
+            &template("t"),
+            &[add_dir()],
+            true,
+            SnapshotCapability::LiveMemory
+        ));
     }
 
     #[test]
     fn snapshot_eligible_false_for_prebuilt_image() {
         // The bundled default image isn't a registered template — no snapshot exists.
-        assert!(!snapshot_eligible(&prebuilt(), &[], true, true));
+        assert!(!snapshot_eligible(
+            &prebuilt(),
+            &[],
+            true,
+            SnapshotCapability::LiveMemory
+        ));
     }
 
     #[test]

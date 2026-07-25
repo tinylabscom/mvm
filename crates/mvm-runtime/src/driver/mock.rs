@@ -79,11 +79,10 @@ impl VmmDriver for MockDriver {
     fn capabilities(&self) -> VmCapabilities {
         VmCapabilities {
             vsock: true,
+            snapshot_capability: SnapshotCapability::Unsupported,
+            standby_pool: false,
             ..Default::default()
         }
-    }
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        SnapshotCapability::Unsupported
     }
     fn security_profile(&self) -> BackendSecurityProfile {
         // Mirrors `MockBackend::security_profile` — the mock runs no guest and

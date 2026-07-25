@@ -23,8 +23,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, VmBackend, VmCapabilities,
-    VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
+    VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::base::ui;
@@ -340,6 +340,8 @@ impl VmBackend for HvfBackend {
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
+            snapshot_capability: SnapshotCapability::Unsupported,
+            standby_pool: false,
             vsock: true,
             // The hvf VMM is vsock-only by design: no guest NIC, and egress rides
             // the host vsock proxy (the per-VM gating endpoint), not a guest NIC.

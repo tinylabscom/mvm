@@ -96,10 +96,10 @@ CLI `--env` overrides any env vars the launch plan carries (see below).
 
 ## Snapshot restore (registered templates)
 
-When you pass `--manifest <name>` and that template has a captured
-snapshot, `mvmctl machine run` restores from the snapshot instead of cold-booting.
-This skips the kernel boot and service-start cost -- typically sub-second
-on Linux/KVM.
+When you pass `--manifest <name>` and that template has a compatible recovery
+artifact, `mvmctl machine run` may use the backend's advertised recovery tier
+instead of cold-booting. The tier is backend-specific; inspect `mvmctl doctor`
+before relying on its latency or fidelity.
 
 The snapshot path activates only when:
 
@@ -109,9 +109,9 @@ The snapshot path activates only when:
   the snapshot's recorded layout), AND
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (HVF, libkrun), vsock snapshots return `os error 95` (EOPNOTSUPP);
-restore failures fall back to cold boot with a warning rather than
-aborting. The harder branch -- parameterized snapshots that allow
+Unsupported recovery requests return an actionable typed error. `mvm` does not
+silently downgrade a live-memory or machine-state request to disk-only recovery
+or cold boot. The harder branch -- parameterized snapshots that allow
 `--mount` -- is tracked in [issue #7](https://github.com/tinylabscom/mvm/issues/7).
 
 ## Resource controls

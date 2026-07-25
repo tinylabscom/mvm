@@ -1,5 +1,5 @@
-//! Per-backend warm-start / capability matrix — snapshot tier, standby
-//! pool, and the Linux fast-resume substrate probe.
+//! Per-backend recovery capability matrix — snapshot tier, standby pool,
+//! and the Linux fast-resume substrate probe.
 
 use std::collections::BTreeMap;
 
@@ -11,17 +11,14 @@ use crate::ui;
 /// under `warm_start` in `mvmctl doctor --json`.
 #[derive(Debug, Serialize)]
 pub(super) struct WarmStartReport {
-    /// Backend name → warm-start tier label (`SnapshotCapability::label`).
+    /// Backend name → recovery tier label (`SnapshotCapability::label`).
     /// `BTreeMap` for deterministic JSON ordering, like `balloon_support`.
     backends: BTreeMap<String, &'static str>,
     /// The Linux-only fast-resume substrate (NBD module, HugeTLB reservation).
     /// `null` off Linux — the substrate backs the KVM Firecracker fast-resume
     /// path; macOS reports per-backend tiers but N/A here.
     substrate: Option<WarmStartSubstrate>,
-    /// Backend name → `supports_standby_pool()`. The standby pool
-    /// (pre-pay spawn/codesign latency) is a *different* axis from the snapshot tier above;
-    /// backends without warm-start support are omitted with the rest of their
-    /// warm-start row.
+    /// Backend name → standby-pool capability from `VmCapabilities`.
     standby_pool: BTreeMap<String, bool>,
     /// Live count of idle standbys recorded under `~/.mvm/pool/` (best-effort; `None` if
     /// the pool dir can't be read).
@@ -64,27 +61,31 @@ pub(super) struct BackendCapabilityRow {
     standby_pool: bool,
 }
 
-/// Build the per-backend capability matrix from the catalog's real backends
-/// (the Tier 3 `mock` double is excluded via the warm-start descriptor set).
-/// Each row reads off `VmBackend` so doctor's table is the runtime truth, not
-/// a hand-maintained copy. Sorted by name for deterministic output.
+/// Build the per-backend capability matrix from every selectable catalog
+/// backend. Each row reads the authoritative `VmCapabilities` value, so the
+/// doctor's table cannot drift from runtime behavior. Sorted by name for
+/// deterministic output.
 pub(super) fn collect_capability_table() -> Vec<BackendCapabilityRow> {
-    let mut rows: Vec<BackendCapabilityRow> =
-        mvm_runtime::catalog::warm_start_support_descriptors()
-            .map(|descriptor| {
-                let b = descriptor.instantiate_dyn();
-                let caps = b.capabilities();
-                BackendCapabilityRow {
-                    backend: b.name().to_string(),
-                    snapshot_tier: b.snapshot_capability().label(),
-                    tap_networking: caps.tap_networking,
-                    vsock: caps.vsock,
-                    balloon: caps.balloon,
-                    fs_quick_checkpoint: caps.fs_quick_checkpoint,
-                    standby_pool: b.supports_standby_pool(),
-                }
-            })
-            .collect();
+    let mut rows: Vec<BackendCapabilityRow> = mvm_runtime::catalog::descriptors()
+        .iter()
+        .filter(|descriptor| {
+            descriptor.kind != mvm_core::vm_backend::BackendKind::Mock
+                || cfg!(feature = "test-support")
+        })
+        .map(|descriptor| {
+            let b = descriptor.instantiate_dyn();
+            let caps = b.capabilities();
+            BackendCapabilityRow {
+                backend: b.name().to_string(),
+                snapshot_tier: caps.snapshot_capability.label(),
+                tap_networking: caps.tap_networking,
+                vsock: caps.vsock,
+                balloon: caps.balloon,
+                fs_quick_checkpoint: caps.fs_quick_checkpoint,
+                standby_pool: caps.standby_pool,
+            }
+        })
+        .collect();
     rows.sort_by(|a, b| a.backend.cmp(&b.backend));
     rows
 }
@@ -112,17 +113,24 @@ pub(super) fn render_capability_table(rows: &[BackendCapabilityRow]) {
     }
 }
 
-/// Enumerate every backend's `snapshot_capability()` tier and, on Linux,
-/// probe the fast-resume substrate. Surfaced so a user knows which admitted
-/// backend resumes from RAM vs. reboots from a disk snapshot before relying
-/// on a warm start.
+/// Enumerate every backend's authoritative recovery tier and standby
+/// capability and, on Linux, probe the fast-resume substrate. Unsupported
+/// backends remain in the report so an operator sees an explicit refusal
+/// instead of mistaking an omitted row for an undocumented fallback.
 pub(super) fn collect_warm_start_support() -> WarmStartReport {
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
-    for descriptor in mvm_runtime::catalog::warm_start_support_descriptors() {
+    for descriptor in mvm_runtime::catalog::descriptors()
+        .iter()
+        .filter(|descriptor| {
+            descriptor.kind != mvm_core::vm_backend::BackendKind::Mock
+                || cfg!(feature = "test-support")
+        })
+    {
         let b = descriptor.instantiate_dyn();
-        backends.insert(b.name().to_string(), b.snapshot_capability().label());
-        standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
+        let caps = b.capabilities();
+        backends.insert(b.name().to_string(), caps.snapshot_capability.label());
+        standby_pool.insert(b.name().to_string(), caps.standby_pool);
     }
     // Best-effort live idle count. A missing pool dir reads as 0.
     let standby_pool_idle = mvm_runtime::standby_pool::SupervisorStandbyPool::open()
@@ -232,12 +240,11 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_per_backend_tier() {
         let r = collect_warm_start_support();
-        // The honest per-backend warm-start matrix. Firecracker and libkrun
-        // route through the workload runner (trait-default no-warm-start), so
-        // both are omitted; qemu is the one remaining disk-only row.
-        assert_eq!(r.backends.get("firecracker"), None);
-        assert_eq!(r.backends.get("libkrun"), None);
-        assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
+        assert_eq!(r.backends.get("firecracker"), Some(&"unsupported"));
+        assert_eq!(r.backends.get("libkrun"), Some(&"unsupported"));
+        assert_eq!(r.backends.get("qemu"), Some(&"unsupported"));
+        assert_eq!(r.backends.get("hvf"), Some(&"unsupported"));
+        assert_eq!(r.backends.get("wasm"), Some(&"unsupported"));
     }
 
     #[test]
@@ -246,18 +253,33 @@ mod tests {
         let ordered_backends: Vec<_> = r.backends.into_iter().collect();
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
 
-        assert_eq!(ordered_backends, vec![("qemu".to_string(), "disk-only")]);
-        assert_eq!(ordered_standby_pool, vec![("qemu".to_string(), false)]);
+        assert_eq!(
+            ordered_backends,
+            vec![
+                ("firecracker".to_string(), "unsupported"),
+                ("hvf".to_string(), "unsupported"),
+                ("libkrun".to_string(), "unsupported"),
+                ("qemu".to_string(), "unsupported"),
+                ("wasm".to_string(), "unsupported"),
+            ]
+        );
+        assert_eq!(
+            ordered_standby_pool,
+            vec![
+                ("firecracker".to_string(), false),
+                ("hvf".to_string(), false),
+                ("libkrun".to_string(), false),
+                ("qemu".to_string(), false),
+                ("wasm".to_string(), false),
+            ]
+        );
     }
 
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        // The runner seam exposes neither Firecracker's nor libkrun's legacy
-        // standby implementation, so both are omitted; QEMU stays and reports
-        // no standby pool.
-        assert_eq!(r.standby_pool.get("firecracker"), None);
-        assert_eq!(r.standby_pool.get("libkrun"), None);
+        assert_eq!(r.standby_pool.get("firecracker"), Some(&false));
+        assert_eq!(r.standby_pool.get("libkrun"), Some(&false));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 
@@ -266,23 +288,22 @@ mod tests {
         let rows = collect_capability_table();
         let by = |name: &str| rows.iter().find(|r| r.backend == name).cloned();
 
-        // The Tier 3 `mock` test double and backends without warm-start
-        // support are excluded; the remaining rows use stable name order.
-        // Firecracker and libkrun both route through the workload runner, so
-        // neither carries a warm-start row — only qemu's disk-only row remains.
+        // Every selectable backend remains in the matrix, including explicit
+        // unsupported recovery tiers.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
-        assert_eq!(names, vec!["qemu"]);
-
-        assert!(by("firecracker").is_none());
-        assert!(by("libkrun").is_none());
+        assert_eq!(names, vec!["firecracker", "hvf", "libkrun", "qemu", "wasm"]);
 
         let qemu = by("qemu").unwrap();
-        assert_eq!(qemu.snapshot_tier, "disk-only");
+        assert_eq!(qemu.snapshot_tier, "unsupported");
         assert!(
             !qemu.tap_networking,
             "qemu uses user-mode slirp, not a host TAP"
         );
         assert!(qemu.vsock);
+
+        let libkrun = by("libkrun").unwrap();
+        assert_eq!(libkrun.snapshot_tier, "unsupported");
+        assert!(!libkrun.standby_pool);
     }
 
     #[test]
