@@ -1,7 +1,8 @@
 //! Shared state cucumber threads through the steps of one scenario.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::path::PathBuf;
 use std::process::Output;
 
 use mvm_core::kernel_advisory::{KernelAdvisory, KernelPin};
@@ -35,6 +36,12 @@ pub struct CliWorld {
     pub kernel_upstream: BTreeMap<String, String>,
     /// The verdict from the most recent freshness assessment.
     pub kernel_advisory: Option<KernelAdvisory>,
+    /// Root directory for the OCI unpack scenarios.
+    pub unpack_root: Option<tempfile::TempDir>,
+    /// Paths written by prior layers when unpacking multiple layers.
+    pub prior_layer_paths: HashSet<PathBuf>,
+    /// The most recent OCI unpack report.
+    pub last_unpack_report: Option<mvm_fs::oci::UnpackReport>,
 }
 
 impl fmt::Debug for CliWorld {

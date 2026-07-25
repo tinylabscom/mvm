@@ -5,8 +5,9 @@
 //! that [`super::fs_ops`] uses when a hardlink's target lives in a
 //! lower/prior layer.
 
+use std::collections::HashSet;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{RefusalReason, SetidEntry, SetidPolicy, UnpackOptions, UnpackReport};
 
@@ -22,6 +23,7 @@ impl<'a> super::fs_ops::Rooted<'a> {
         entry: &mut tar::Entry<R>,
         raw_path: &[u8],
         options: &UnpackOptions,
+        prior_layer_paths: &HashSet<PathBuf>,
         report: &mut UnpackReport,
     ) -> Result<(), RefusalReason> {
         use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
@@ -34,6 +36,9 @@ impl<'a> super::fs_ops::Rooted<'a> {
         let (parent, leaf) = self
             .open_parent(rel, true)
             .map_err(super::fs_ops::map_resolve_errno)?;
+        if prior_layer_paths.contains(rel) {
+            super::fs_ops::remove_prior_layer_path(self, rel)?;
+        }
         let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
         let flags =
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -77,8 +82,12 @@ impl<'a> super::fs_ops::Rooted<'a> {
         entry: &mut tar::Entry<R>,
         raw_path: &[u8],
         options: &UnpackOptions,
+        prior_layer_paths: &HashSet<PathBuf>,
         report: &mut UnpackReport,
     ) -> Result<(), RefusalReason> {
+        if prior_layer_paths.contains(rel) {
+            super::fs_ops::remove_prior_layer_path(self.root, rel)?;
+        }
         write_regular_file(entry, &self.root.join(rel), raw_path, options, report)
     }
 }

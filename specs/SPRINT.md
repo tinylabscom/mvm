@@ -449,7 +449,7 @@ WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net`
 | 1701     | issue      | Fold → WS3 (finish vsock tunnel), then close                        |
 | 1717     | PR         | Fold → WS3 (FC transparent net over vsock), then close              |
 | 1601     | issue      | Fold → WS3 (HVF host-vsock-proxy), then close                       |
-| 1674     | issue      | Fold → WS1c / WS8 (OCI unpack O_EXCL), then close                   |
+| 1674     | issue      | **Fixed by #1804** — prior-layer path tracking                      |
 | 1654     | issue      | Fold → WS4 (runtime sockets under `~/.mvm/run`), then close         |
 | 1462     | issue      | Fold → WS2 (verb-grant delivery), then close                        |
 | 1366     | issue      | **Closed** — landed via #1791 (Sandbox.connect dev-only exec guard) |

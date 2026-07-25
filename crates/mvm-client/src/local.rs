@@ -14,6 +14,7 @@
 //! it to `mvm_hostd::run::admit_and_boot_local`. A workload never boots on a
 //! path that skipped admission.
 
+use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -22,7 +23,7 @@ use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
-    OciManifestFetcher, UnpackOptions, unpack_layer,
+    OciManifestFetcher, UnpackOptions, UnpackReport, unpack_layer_with_prior_paths,
 };
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
@@ -448,28 +449,41 @@ async fn pull_image_to_dir(reference: &str, dest: &Path) -> Result<()> {
     }
     let layer_fetcher =
         OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
+    let mut prior_layer_paths = std::collections::HashSet::new();
     for layer in &layers {
         let mut bytes = Vec::new();
         layer_fetcher
             .fetch_layer(&image_ref, layer, &mut bytes)
             .await
             .map_err(|e| backend_err(format!("fetch layer {}: {e}", layer.digest)))?;
-        unpack_one_layer(layer, &bytes, dest)?;
+        let report = unpack_one_layer(layer, &bytes, dest, &prior_layer_paths)?;
+        prior_layer_paths.extend(report.paths_written);
     }
     Ok(())
 }
 
 /// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
-fn unpack_one_layer(layer: &LayerDescriptor, bytes: &[u8], dest: &Path) -> Result<()> {
+fn unpack_one_layer(
+    layer: &LayerDescriptor,
+    bytes: &[u8],
+    dest: &Path,
+    prior_layer_paths: &HashSet<PathBuf>,
+) -> Result<UnpackReport> {
     let mt = &layer.media_type;
     let report = if mt.ends_with("+gzip") || mt.ends_with(".gzip") || mt.contains("tar.gzip") {
-        unpack_layer(
+        unpack_layer_with_prior_paths(
             GzDecoder::new(Cursor::new(bytes)),
             dest,
             &UnpackOptions::default(),
+            prior_layer_paths,
         )
     } else {
-        unpack_layer(Cursor::new(bytes), dest, &UnpackOptions::default())
+        unpack_layer_with_prior_paths(
+            Cursor::new(bytes),
+            dest,
+            &UnpackOptions::default(),
+            prior_layer_paths,
+        )
     }
     .map_err(|e| backend_err(format!("unpack layer {}: {e}", layer.digest)))?;
     if !report.refused.is_empty() {
@@ -478,7 +492,7 @@ fn unpack_one_layer(layer: &LayerDescriptor, bytes: &[u8], dest: &Path) -> Resul
             layer.digest, report.refused
         )));
     }
-    Ok(())
+    Ok(report)
 }
 
 /// Probe the dm-verity sidecars the pure materializer writes beside the image

@@ -105,12 +105,27 @@ impl<'a> Rooted<'a> {
         Ok((parent, leaf))
     }
 
-    pub(super) fn create_directory(&self, rel: &Path) -> Result<bool, RefusalReason> {
-        use rustix::fs::{Mode, mkdirat};
+    pub(super) fn create_directory(
+        &self,
+        rel: &Path,
+        prior_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<bool, RefusalReason> {
+        use rustix::fs::{AtFlags, Mode, mkdirat, unlinkat};
         use rustix::io::Errno;
         use std::os::fd::AsFd;
 
         let (parent, leaf) = self.open_parent(rel, true).map_err(map_resolve_errno)?;
+        if prior_layer_paths.contains(rel) {
+            // A prior-layer file or symlink occupying this directory
+            // path must be removed before we can create the directory.
+            // If the prior entry is itself a directory, `mkdirat` will
+            // return EEXIST and we coalesce below.
+            if let Err(e) = unlinkat(parent.as_fd(), &leaf, AtFlags::empty()) {
+                if e != Errno::NOENT && e != Errno::ISDIR {
+                    return Err(RefusalReason::MalformedHeader);
+                }
+            }
+        }
         match mkdirat(parent.as_fd(), &leaf, Mode::from_raw_mode(0o755)) {
             Ok(()) => Ok(true),
             Err(e) if e == Errno::EXIST => Ok(false),
@@ -122,6 +137,7 @@ impl<'a> Rooted<'a> {
         &self,
         rel: &Path,
         link_target_bytes: Option<&[u8]>,
+        prior_layer_paths: &HashSet<PathBuf>,
     ) -> Result<(), RefusalReason> {
         use rustix::fs::symlinkat;
         use std::os::fd::AsFd;
@@ -131,6 +147,9 @@ impl<'a> Rooted<'a> {
             _ => return Err(RefusalReason::MalformedHeader),
         };
         let (parent, leaf) = self.open_parent(rel, true).map_err(map_resolve_errno)?;
+        if prior_layer_paths.contains(rel) {
+            remove_prior_layer_path(self, rel)?;
+        }
         symlinkat(OsStr::from_bytes(link_target), parent.as_fd(), &leaf)
             .map_err(|_| RefusalReason::MalformedHeader)
     }
@@ -141,6 +160,7 @@ impl<'a> Rooted<'a> {
         target_rel: &Path,
         options: &UnpackOptions,
         current_layer_paths: &HashSet<PathBuf>,
+        prior_layer_paths: &HashSet<PathBuf>,
     ) -> Result<HardlinkAction, RefusalReason> {
         use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags, linkat, openat2, statat};
         use rustix::io::Errno;
@@ -177,6 +197,10 @@ impl<'a> Rooted<'a> {
         let (dst_parent, dst_leaf) = self
             .open_parent(target_rel, true)
             .map_err(map_resolve_errno)?;
+
+        if prior_layer_paths.contains(target_rel) {
+            remove_prior_layer_path(self, target_rel)?;
+        }
 
         if current_layer_paths.contains(&src_rel) {
             linkat(
@@ -242,6 +266,101 @@ impl<'a> Rooted<'a> {
     }
 }
 
+/// Remove a path known to originate from a prior layer so the current
+/// layer can recreate it with a different entry type. Directories are
+/// removed recursively; files and symlinks are unlinked without
+/// dereferencing. Operations resolve through `openat2(RESOLVE_NO_SYMLINKS)`
+/// so a swapped symlink parent cannot redirect the removal.
+#[cfg(target_os = "linux")]
+pub(super) fn remove_prior_layer_path(rooted: &Rooted, rel: &Path) -> Result<(), RefusalReason> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags, openat2, statat, unlinkat};
+    use rustix::io::Errno;
+    use std::os::fd::AsFd;
+
+    let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+    let (parent, leaf) = match rooted.open_parent(rel, false) {
+        Ok(v) => v,
+        Err(e) if e == Errno::NOENT => return Ok(()),
+        Err(e) => return Err(map_resolve_errno(e)),
+    };
+
+    let st = match statat(parent.as_fd(), &leaf, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(s) => s,
+        Err(e) if e == Errno::NOENT => return Ok(()),
+        Err(_) => return Err(RefusalReason::MalformedHeader),
+    };
+
+    if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
+        let dir_fd = openat2(
+            parent.as_fd(),
+            &leaf,
+            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            resolve,
+        )
+        .map_err(map_resolve_errno)?;
+        remove_all_children_in_dir(&dir_fd)?;
+        unlinkat(parent.as_fd(), &leaf, AtFlags::REMOVEDIR)
+            .map_err(|_| RefusalReason::MalformedHeader)
+    } else {
+        unlinkat(parent.as_fd(), &leaf, AtFlags::empty())
+            .map_err(|_| RefusalReason::MalformedHeader)
+    }
+}
+
+/// Recursively remove every child of `dir_fd`, descending through
+/// directory handles so the walk cannot be redirected by a symlink swap.
+#[cfg(target_os = "linux")]
+fn remove_all_children_in_dir(dir_fd: &std::os::fd::OwnedFd) -> Result<(), RefusalReason> {
+    use rustix::fs::{
+        AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags, openat2, statat, unlinkat,
+    };
+    use std::os::fd::AsFd;
+
+    let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS;
+    let child_dir_oflags = OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+
+    let mut children: Vec<(std::ffi::OsString, bool)> = Vec::new();
+    let dir = Dir::read_from(dir_fd.as_fd()).map_err(|_| RefusalReason::MalformedHeader)?;
+    for entry in dir {
+        let entry = entry.map_err(|_| RefusalReason::MalformedHeader)?;
+        let name_bytes = entry.file_name().to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        let name = OsStr::from_bytes(name_bytes).to_os_string();
+        let is_dir = match entry.file_type() {
+            FileType::Directory => true,
+            FileType::Unknown => match statat(dir_fd.as_fd(), &name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(st) => FileType::from_raw_mode(st.st_mode) == FileType::Directory,
+                Err(_) => false,
+            },
+            _ => false,
+        };
+        children.push((name, is_dir));
+    }
+
+    for (name, is_dir) in children {
+        if is_dir {
+            let child_fd = openat2(
+                dir_fd.as_fd(),
+                &name,
+                child_dir_oflags,
+                Mode::empty(),
+                resolve,
+            )
+            .map_err(map_resolve_errno)?;
+            remove_all_children_in_dir(&child_fd)?;
+            unlinkat(dir_fd.as_fd(), &name, AtFlags::REMOVEDIR)
+                .map_err(|_| RefusalReason::MalformedHeader)?;
+        } else {
+            unlinkat(dir_fd.as_fd(), &name, AtFlags::empty())
+                .map_err(|_| RefusalReason::MalformedHeader)?;
+        }
+    }
+    Ok(())
+}
+
 /// Map an `openat2`/`*at` failure to the unpacker's refusal taxonomy.
 /// `ELOOP` is a `RESOLVE_NO_SYMLINKS` hit on a symlinked component;
 /// `EXDEV` is a `RESOLVE_IN_ROOT` boundary escape. Everything else is
@@ -258,13 +377,38 @@ pub(super) fn map_resolve_errno(e: rustix::io::Errno) -> RefusalReason {
     }
 }
 
+/// Remove a path known to originate from a prior layer so the current
+/// layer can recreate it. Non-Linux fallback only.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn remove_prior_layer_path(root: &Path, rel: &Path) -> Result<(), RefusalReason> {
+    let target = root.join(rel);
+    if !target.starts_with(root) {
+        return Err(RefusalReason::JoinedPathEscape);
+    }
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) if meta.file_type().is_dir() => {
+            std::fs::remove_dir_all(&target).map_err(|_| RefusalReason::MalformedHeader)
+        }
+        Ok(_) => std::fs::remove_file(&target).map_err(|_| RefusalReason::MalformedHeader),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(RefusalReason::MalformedHeader),
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 impl<'a> Rooted<'a> {
     pub(super) fn open(root: &'a Path) -> std::io::Result<Self> {
         Ok(Self { root })
     }
 
-    pub(super) fn create_directory(&self, rel: &Path) -> Result<bool, RefusalReason> {
+    pub(super) fn create_directory(
+        &self,
+        rel: &Path,
+        prior_layer_paths: &HashSet<PathBuf>,
+    ) -> Result<bool, RefusalReason> {
+        if prior_layer_paths.contains(rel) {
+            remove_prior_layer_path(self.root, rel)?;
+        }
         create_directory(&self.root.join(rel))
     }
 
@@ -272,7 +416,11 @@ impl<'a> Rooted<'a> {
         &self,
         rel: &Path,
         link_target_bytes: Option<&[u8]>,
+        prior_layer_paths: &HashSet<PathBuf>,
     ) -> Result<(), RefusalReason> {
+        if prior_layer_paths.contains(rel) {
+            remove_prior_layer_path(self.root, rel)?;
+        }
         write_symlink(link_target_bytes, &self.root.join(rel))
     }
 
@@ -282,6 +430,7 @@ impl<'a> Rooted<'a> {
         target_rel: &Path,
         options: &UnpackOptions,
         current_layer_paths: &HashSet<PathBuf>,
+        prior_layer_paths: &HashSet<PathBuf>,
     ) -> Result<HardlinkAction, RefusalReason> {
         materialize_hardlink(
             link_target_bytes,
@@ -289,6 +438,7 @@ impl<'a> Rooted<'a> {
             self.root,
             options,
             current_layer_paths,
+            prior_layer_paths,
         )
     }
 }
@@ -407,6 +557,7 @@ fn materialize_hardlink(
     output_root: &Path,
     options: &UnpackOptions,
     current_layer_paths: &HashSet<PathBuf>,
+    prior_layer_paths: &HashSet<PathBuf>,
 ) -> Result<HardlinkAction, RefusalReason> {
     let target_rel = validate_hardlink_target(link_target_bytes, output_root, options)?;
     let source = output_root.join(&target_rel);
@@ -433,6 +584,10 @@ fn materialize_hardlink(
         if std::fs::create_dir_all(parent).is_err() {
             return Err(RefusalReason::MalformedHeader);
         }
+    }
+
+    if prior_layer_paths.contains(&target_rel) {
+        remove_prior_layer_path(output_root, &target_rel)?;
     }
 
     if current_layer_paths.contains(&target_rel) {

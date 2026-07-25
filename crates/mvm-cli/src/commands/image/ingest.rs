@@ -97,9 +97,16 @@ pub(super) fn ingest_archive_from_reader<R: Read>(
     }
     fs::create_dir_all(&unpacked_root)
         .with_context(|| format!("create {}", unpacked_root.display()))?;
+    let mut prior_layer_paths = std::collections::HashSet::new();
     for layer in &image.layers {
-        unpack_layer_bytes(&layer.descriptor, &layer.bytes, &unpacked_root)
-            .with_context(|| format!("unpack layer {}", layer.descriptor.digest))?;
+        let report = unpack_layer_bytes(
+            &layer.descriptor,
+            &layer.bytes,
+            &unpacked_root,
+            &prior_layer_paths,
+        )
+        .with_context(|| format!("unpack layer {}", layer.descriptor.digest))?;
+        prior_layer_paths.extend(report.paths_written);
     }
 
     let rootfs_rel = format!("rootfs/{manifest_hex}-{}/rootfs.ext4", oci_runtime_tag());

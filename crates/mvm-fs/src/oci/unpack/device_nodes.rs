@@ -3,8 +3,9 @@
 //! major/minor pair against it, and the Linux (`mknodat`) /
 //! non-Linux (skip) materialization paths.
 
+use std::collections::HashSet;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::RefusalReason;
 
@@ -45,6 +46,7 @@ impl<'a> super::fs_ops::Rooted<'a> {
         entry: &tar::Entry<R>,
         rel: &Path,
         raw_path: &[u8],
+        prior_layer_paths: &HashSet<PathBuf>,
     ) -> Result<DeviceNodeAction, RefusalReason> {
         use rustix::fs::{FileType, Mode, makedev, mknodat};
         use std::os::fd::AsFd;
@@ -62,6 +64,9 @@ impl<'a> super::fs_ops::Rooted<'a> {
         let (parent, leaf) = self
             .open_parent(rel, true)
             .map_err(super::fs_ops::map_resolve_errno)?;
+        if prior_layer_paths.contains(rel) {
+            super::fs_ops::remove_prior_layer_path(self, rel)?;
+        }
         mknodat(
             parent.as_fd(),
             &leaf,
@@ -81,7 +86,11 @@ impl<'a> super::fs_ops::Rooted<'a> {
         entry: &tar::Entry<R>,
         rel: &Path,
         raw_path: &[u8],
+        prior_layer_paths: &HashSet<PathBuf>,
     ) -> Result<DeviceNodeAction, RefusalReason> {
+        if prior_layer_paths.contains(rel) {
+            super::fs_ops::remove_prior_layer_path(self.root, rel)?;
+        }
         materialize_device_node(entry, &self.root.join(rel), raw_path)
     }
 }

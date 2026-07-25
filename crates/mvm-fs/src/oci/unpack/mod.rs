@@ -247,6 +247,12 @@ impl Default for UnpackOptions {
 pub struct UnpackReport {
     /// Regular files materialized.
     pub files_written: u64,
+    /// Paths written by this layer (regular files, directories,
+    /// symlinks, hardlinks, device nodes). Callers applying multiple
+    /// layers to the same root accumulate this set and pass it as
+    /// `prior_layer_paths` to the next layer so that later layers can
+    /// replace paths known to originate from earlier layers.
+    pub paths_written: HashSet<PathBuf>,
     /// Directories created (counts only newly-created dirs; entries
     /// for already-existing dirs are silently coalesced).
     pub dirs_created: u64,
@@ -443,6 +449,11 @@ pub enum UnpackError {
 /// Unpack a single layer tarball under `output_root`, applying the
 /// safety policies described at module level.
 ///
+/// This is the backward-compatible entry point for single-layer
+/// callers and tests. Multi-layer callers should use
+/// [`unpack_layer_with_prior_paths`] and accumulate the
+/// [`UnpackReport::paths_written`] set across layers.
+///
 /// Caller's responsibilities:
 ///
 /// - Pre-create `output_root` (we refuse to silently `mkdir` it).
@@ -456,9 +467,28 @@ pub enum UnpackError {
 /// refused entries. Refusals are **not** errors — callers that want
 /// "all-or-nothing" inspect `report.refused.is_empty()`.
 pub fn unpack_layer<R: Read>(
+    layer_tar: R,
+    output_root: &Path,
+    options: &UnpackOptions,
+) -> Result<UnpackReport, UnpackError> {
+    unpack_layer_with_prior_paths(layer_tar, output_root, options, &HashSet::new())
+}
+
+/// Unpack a single layer tarball under `output_root`, with knowledge
+/// of paths written by earlier layers.
+///
+/// When `prior_layer_paths` contains the relative path of an entry
+/// being unpacked, the unpacker removes the existing leaf first
+/// (file, symlink, or directory tree) and then re-creates it with
+/// the new entry's type. This lets later OCI layers replace files
+/// from earlier layers without giving up the `O_EXCL` / `O_NOFOLLOW`
+/// first-creation safety for paths that are genuinely new. Same-layer
+/// duplicates remain refused.
+pub fn unpack_layer_with_prior_paths<R: Read>(
     mut layer_tar: R,
     output_root: &Path,
     options: &UnpackOptions,
+    prior_layer_paths: &HashSet<PathBuf>,
 ) -> Result<UnpackReport, UnpackError> {
     if !output_root.is_absolute() {
         return Err(UnpackError::NonAbsoluteOutputRoot(
@@ -599,6 +629,7 @@ pub fn unpack_layer<R: Read>(
             rel_path: &rel_path,
             raw_path: &raw_path,
             target: &target,
+            prior_layer_paths,
         };
         match entry_type {
             tar::EntryType::Regular | tar::EntryType::Continuous => unpack_regular_entry(

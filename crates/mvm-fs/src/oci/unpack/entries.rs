@@ -26,6 +26,7 @@ pub(super) struct EntryCtx<'a> {
     pub(super) rel_path: &'a Path,
     pub(super) raw_path: &'a [u8],
     pub(super) target: &'a Path,
+    pub(super) prior_layer_paths: &'a HashSet<PathBuf>,
 }
 
 /// Materialize a `Regular`/`Continuous` tar entry: either write the
@@ -41,14 +42,19 @@ pub(super) fn unpack_regular_entry<R: Read>(
 ) {
     match classify_whiteout(ctx.raw_path) {
         WhiteoutKind::None => {
-            match ctx
-                .rooted
-                .write_regular_file(ctx.rel_path, entry, ctx.raw_path, options, report)
-            {
+            match ctx.rooted.write_regular_file(
+                ctx.rel_path,
+                entry,
+                ctx.raw_path,
+                options,
+                ctx.prior_layer_paths,
+                report,
+            ) {
                 Ok(()) => {
                     report.files_written += 1;
                     apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
                     current_layer_paths.insert(ctx.rel_path.to_path_buf());
+                    report.paths_written.insert(ctx.rel_path.to_path_buf());
                 }
                 Err(refuse) => report.refused.push(RefusedEntry {
                     raw_path: ctx.raw_path.to_vec(),
@@ -101,13 +107,17 @@ pub(super) fn unpack_directory_entry(
     current_layer_paths: &mut HashSet<PathBuf>,
     report: &mut UnpackReport,
 ) {
-    match ctx.rooted.create_directory(ctx.rel_path) {
+    match ctx
+        .rooted
+        .create_directory(ctx.rel_path, ctx.prior_layer_paths)
+    {
         Ok(created) => {
             if created {
                 report.dirs_created += 1;
             }
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
+            report.paths_written.insert(ctx.rel_path.to_path_buf());
         }
         Err(refuse) => report.refused.push(RefusedEntry {
             raw_path: ctx.raw_path.to_vec(),
@@ -127,12 +137,13 @@ pub(super) fn unpack_symlink_entry<R: Read>(
     let link_target = entry.link_name_bytes().map(|b| b.into_owned());
     match ctx
         .rooted
-        .write_symlink(ctx.rel_path, link_target.as_deref())
+        .write_symlink(ctx.rel_path, link_target.as_deref(), ctx.prior_layer_paths)
     {
         Ok(()) => {
             report.symlinks_written += 1;
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
+            report.paths_written.insert(ctx.rel_path.to_path_buf());
         }
         Err(refuse) => report.refused.push(RefusedEntry {
             raw_path: ctx.raw_path.to_vec(),
@@ -156,16 +167,19 @@ pub(super) fn unpack_hardlink_entry<R: Read>(
         ctx.rel_path,
         options,
         current_layer_paths,
+        ctx.prior_layer_paths,
     ) {
         Ok(HardlinkAction::Linked) => {
             report.hardlinks_written += 1;
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
+            report.paths_written.insert(ctx.rel_path.to_path_buf());
         }
         Ok(HardlinkAction::Copied) => {
             report.hardlink_copies_written += 1;
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
+            report.paths_written.insert(ctx.rel_path.to_path_buf());
         }
         Err(refuse) => report.refused.push(RefusedEntry {
             raw_path: ctx.raw_path.to_vec(),
@@ -185,14 +199,17 @@ pub(super) fn unpack_device_entry<R: Read>(
     current_layer_paths: &mut HashSet<PathBuf>,
     report: &mut UnpackReport,
 ) {
-    match ctx
-        .rooted
-        .materialize_device_node(entry, ctx.rel_path, ctx.raw_path)
-    {
+    match ctx.rooted.materialize_device_node(
+        entry,
+        ctx.rel_path,
+        ctx.raw_path,
+        ctx.prior_layer_paths,
+    ) {
         Ok(DeviceNodeAction::Materialized) => {
             report.device_nodes_written += 1;
             apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
             current_layer_paths.insert(ctx.rel_path.to_path_buf());
+            report.paths_written.insert(ctx.rel_path.to_path_buf());
         }
         Err(refuse) => report.refused.push(RefusedEntry {
             raw_path: ctx.raw_path.to_vec(),
@@ -214,10 +231,12 @@ pub(super) fn unpack_device_entry<R: Read>(
     _current_layer_paths: &mut HashSet<PathBuf>,
     report: &mut UnpackReport,
 ) {
-    match ctx
-        .rooted
-        .materialize_device_node(entry, ctx.rel_path, ctx.raw_path)
-    {
+    match ctx.rooted.materialize_device_node(
+        entry,
+        ctx.rel_path,
+        ctx.raw_path,
+        ctx.prior_layer_paths,
+    ) {
         Ok(DeviceNodeAction::Skipped) => {
             report.device_nodes_skipped += 1;
         }

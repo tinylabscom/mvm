@@ -3,9 +3,10 @@
 //! registry pull. This is the run-path entry every OCI source funnels
 //! through once it's been classified as a registry reference.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
@@ -13,7 +14,7 @@ use serde_json::Value;
 
 use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
-    OciManifestFetcher, UnpackOptions, unpack_layer,
+    OciManifestFetcher, UnpackOptions, UnpackReport, unpack_layer_with_prior_paths,
 };
 
 use super::cache::{find_image, layer_blob_path, load_index, read_verified_cache_file, save_index};
@@ -263,12 +264,14 @@ fn pull_image_ref(
         .with_context(|| format!("create {}", unpacked_root.display()))?;
 
     let mut cached_layers = Vec::with_capacity(layers.len());
+    let mut prior_layer_paths = std::collections::HashSet::new();
     for layer in &layers {
         let compressed =
             fetch_or_read_layer(cache_root, &runtime, &layer_fetcher, &image_ref, layer)
                 .with_context(|| format!("fetch layer {}", layer.digest))?;
-        unpack_layer_bytes(layer, &compressed, &unpacked_root)
+        let report = unpack_layer_bytes(layer, &compressed, &unpacked_root, &prior_layer_paths)
             .with_context(|| format!("unpack layer {}", layer.digest))?;
+        prior_layer_paths.extend(report.paths_written);
         cached_layers.push(CachedOciLayer {
             digest: layer.digest.clone(),
             size_bytes: layer.size,
@@ -402,20 +405,27 @@ pub(super) fn unpack_layer_bytes(
     layer: &LayerDescriptor,
     bytes: &[u8],
     unpacked_root: &Path,
-) -> Result<()> {
+    prior_layer_paths: &HashSet<PathBuf>,
+) -> Result<UnpackReport> {
     let report = if is_gzip_layer(&layer.media_type) {
-        unpack_layer(
+        unpack_layer_with_prior_paths(
             GzDecoder::new(Cursor::new(bytes)),
             unpacked_root,
             &UnpackOptions::default(),
+            prior_layer_paths,
         )
     } else {
-        unpack_layer(Cursor::new(bytes), unpacked_root, &UnpackOptions::default())
+        unpack_layer_with_prior_paths(
+            Cursor::new(bytes),
+            unpacked_root,
+            &UnpackOptions::default(),
+            prior_layer_paths,
+        )
     }?;
     if !report.refused.is_empty() {
         bail!("layer unpack refused entries: {:?}", report.refused);
     }
-    Ok(())
+    Ok(report)
 }
 
 fn is_gzip_layer(media_type: &str) -> bool {
