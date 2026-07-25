@@ -149,6 +149,9 @@ impl Commands {
                 machine::MachineAction::Run(r) => r.json || r.up_json,
                 // `machine timeline --json` prints a structured lineage.
                 machine::MachineAction::Timeline(t) => t.json,
+                // A `--json` restore reuses the fork path's structured output.
+                machine::MachineAction::Revert(a) | machine::MachineAction::Rewind(a) => a.json,
+                machine::MachineAction::Advance(a) => a.json,
                 _ => false,
             },
             _ => false,

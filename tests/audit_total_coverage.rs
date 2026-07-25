@@ -229,6 +229,23 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // each hop against the signed chain but makes no trust decision and writes
     // nothing — no audit-chain emission.
     ("timeline", AuditPosture::ReadOnly),
+    // Time-travel restore verbs: launch a fresh, re-admitted VM at a prior
+    // checkpoint/image state. The two sub-paths emit different chain markers: a
+    // checkpoint restore emits `checkpoint.restored` (plus the fork boot's own
+    // admission trail); an OCI image restore emits `image.reverted` before it
+    // re-runs through the admitted run path.
+    (
+        "revert",
+        AuditPosture::Emits("CheckpointRestored+image.reverted"),
+    ),
+    (
+        "rewind",
+        AuditPosture::Emits("CheckpointRestored+image.reverted"),
+    ),
+    (
+        "advance",
+        AuditPosture::Emits("CheckpointRestored+image.reverted"),
+    ),
     // Advanced single-VM verbs folded under `machine` (hidden from default help).
     // The audit postures are unchanged from when these lived under `vm <sub>`.
     ("pause", AuditPosture::Emits("VmStop")),
@@ -671,6 +688,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",
+        // Image time-travel restore marker.
+        "image.reverted",
     ];
 
     let mut failures: Vec<(String, &'static str)> = Vec::new();

@@ -92,6 +92,9 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Console(_) => "console",
         MachineAction::CheckArtifact(_) => "check-artifact",
         MachineAction::Timeline(_) => "timeline",
+        MachineAction::Revert(_) => "revert",
+        MachineAction::Rewind(_) => "rewind",
+        MachineAction::Advance(_) => "advance",
         MachineAction::Vm(_) => "vm",
     }
 }
@@ -2347,4 +2350,47 @@ fn reconfigure_mem_initial_inconsistency_rejected() {
             || msg.contains("must be strictly less than"),
         "unexpected error: {err}"
     );
+}
+
+// ── revert / rewind / advance verb surface ────────────────────────────────
+
+#[test]
+fn revert_parses_target_and_kind() {
+    let action = parse(&["revert", "sha256:abc", "--kind", "image"]).expect("parse revert");
+    match action {
+        MachineAction::Revert(a) => {
+            assert_eq!(a.target, "sha256:abc");
+            // `--kind image` is accepted and captured (the variant internals stay
+            // private to the checkpoint module; parse acceptance is the contract).
+            assert!(a.kind.is_some());
+        }
+        other => panic!("expected revert, got {other:?}"),
+    }
+    // An unknown --kind is rejected by clap's value-enum.
+    assert!(parse(&["revert", "sha256:abc", "--kind", "bogus"]).is_err());
+}
+
+#[test]
+fn rewind_parses_as_its_own_verb() {
+    let action = parse(&["rewind", "ckpt-x"]).expect("parse rewind");
+    assert!(matches!(action, MachineAction::Rewind(_)));
+    assert_eq!(machine_subcommand(&action), "rewind");
+}
+
+/// The lineage forward-step is `advance`, deliberately NOT `forward` — `machine
+/// forward` is the port-forwarding op folded from `vm forward`. Both must parse
+/// to distinct, non-colliding actions.
+#[test]
+fn advance_does_not_collide_with_the_port_forward_verb() {
+    let advance = parse(&["advance", "ckpt-x", "--to", "sha256:child"]).expect("parse advance");
+    match advance {
+        MachineAction::Advance(a) => {
+            assert_eq!(a.target, "ckpt-x");
+            assert_eq!(a.to.as_deref(), Some("sha256:child"));
+        }
+        other => panic!("expected advance, got {other:?}"),
+    }
+    // `forward` still routes to the folded port-forwarding op, untouched.
+    let forward = parse(&["forward", "myvm", "8080:80"]).expect("parse forward");
+    assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
 }

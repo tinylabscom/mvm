@@ -63,6 +63,10 @@ pub mod checkpoint_audit {
     pub const LABEL_CLASS: &str = "class";
     /// Label: the owning VM name (created/restored).
     pub const LABEL_VM_NAME: &str = "vm_name";
+    /// Label: how a restore was initiated (`revert` / `rewind` / `advance`),
+    /// so a time-travel restore is distinguishable in the chain from a
+    /// same-identity resume. Carried on `checkpoint.restored`.
+    pub const LABEL_VIA: &str = "via";
     /// Label: the parent checkpoint id (forked).
     pub const LABEL_PARENT_ID: &str = "parent_id";
     /// Label: the child (new) checkpoint id (forked).
@@ -82,6 +86,17 @@ pub mod checkpoint_audit {
 pub mod image_audit {
     /// Emitted when a compiled image's version-lineage node is created.
     pub const CREATED_EVENT: &str = "image.created";
+    /// Emitted when a fresh VM is launched from a prior image-lineage node (a
+    /// time-travel restore), so a revert is distinguishable in the chain from an
+    /// ordinary image run. Not a creation event — the chain-anchor never indexes
+    /// it, since a restore mints no new lineage node.
+    pub const REVERTED_EVENT: &str = "image.reverted";
+    /// Label: how a restore was initiated (`revert` / `rewind` / `advance`).
+    /// Carried on [`REVERTED_EVENT`].
+    pub const LABEL_VIA: &str = "via";
+    /// Label: the reconstructed `machine run` reference a restore re-runs.
+    /// Carried on [`REVERTED_EVENT`].
+    pub const LABEL_REVERTED_REFERENCE: &str = "image_reverted_reference";
     /// Label: the node's own content-address. The chain-anchor keys on this.
     pub const LABEL_NODE_DIGEST: &str = "image_node_digest";
     /// Label: the predecessor node's content-address (the parent hash-link), or
@@ -403,15 +418,17 @@ impl AuditEmitter {
         )
     }
 
-    /// Record that a VM was restored to the state captured in a vm_full
-    /// checkpoint. The label set carries the checkpoint id, its content-address,
-    /// and the VM name.
+    /// Record that a VM was restored to the state captured in a checkpoint. The
+    /// label set carries the checkpoint id, its content-address, the restored VM
+    /// name, and `via` — how the restore was initiated (`revert` / `rewind` /
+    /// `advance`), so a time-travel restore reads distinctly in the chain.
     pub fn emit_checkpoint_restored(
         &self,
         plan: &ExecutionPlan,
         checkpoint_id: &str,
         meta_digest: &str,
         vm_name: &str,
+        via: &str,
     ) -> Result<()> {
         use checkpoint_audit as k;
         self.emit(
@@ -424,6 +441,7 @@ impl AuditEmitter {
                 ),
                 (k::LABEL_META_DIGEST.to_string(), meta_digest.to_string()),
                 (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+                (k::LABEL_VIA.to_string(), via.to_string()),
             ],
         )
     }
@@ -472,6 +490,33 @@ impl AuditEmitter {
         node: &mvm_core::image_lineage::ImageNode,
     ) -> Result<()> {
         self.emit(plan, image_audit::CREATED_EVENT, image_created_labels(node))
+    }
+
+    /// Record that a fresh VM was launched from a prior image-lineage node (a
+    /// time-travel restore). The label set carries the restored node's
+    /// content-address, the initiating verb (`via`), and the reconstructed
+    /// `machine run` reference the restore re-runs, so a revert is distinct in
+    /// the chain from an ordinary image run.
+    pub fn emit_image_reverted(
+        &self,
+        plan: &ExecutionPlan,
+        node_digest: &str,
+        via: &str,
+        reference: &str,
+    ) -> Result<()> {
+        use image_audit as k;
+        self.emit(
+            plan,
+            k::REVERTED_EVENT,
+            [
+                (k::LABEL_NODE_DIGEST.to_string(), node_digest.to_string()),
+                (k::LABEL_VIA.to_string(), via.to_string()),
+                (
+                    k::LABEL_REVERTED_REFERENCE.to_string(),
+                    reference.to_string(),
+                ),
+            ],
+        )
     }
 
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
@@ -1106,6 +1151,36 @@ mod tests {
     }
 
     #[test]
+    fn image_reverted_records_node_digest_via_and_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-IR");
+        let node_digest = format!("sha256:{}", "c".repeat(64));
+        emitter
+            .emit_image_reverted(
+                &plan,
+                &node_digest,
+                "revert",
+                "docker.io/library/alpine@sha256:aa",
+            )
+            .unwrap();
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("image.reverted"));
+        assert!(content.contains(&node_digest));
+        assert!(content.contains("\"via\""));
+        assert!(content.contains("revert"));
+        assert!(content.contains("docker.io/library/alpine@sha256:aa"));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
     fn checkpoint_restored_records_id_digest_and_vm() {
         let dir = tempfile::tempdir().unwrap();
         let key = {
@@ -1118,7 +1193,7 @@ mod tests {
         let plan = fixture_plan("local", "plan-R");
         let meta_digest = format!("sha256:{}", "d".repeat(64));
         emitter
-            .emit_checkpoint_restored(&plan, "ckpt-abc", &meta_digest, "myvm")
+            .emit_checkpoint_restored(&plan, "ckpt-abc", &meta_digest, "myvm", "revert")
             .unwrap();
         let path = dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&path).unwrap();
@@ -1126,6 +1201,9 @@ mod tests {
         assert!(content.contains("ckpt-abc"));
         assert!(content.contains("myvm"));
         assert!(content.contains(&meta_digest));
+        // The initiating verb rides as the `via` label.
+        assert!(content.contains("\"via\""));
+        assert!(content.contains("revert"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 }

@@ -128,6 +128,18 @@ pub(in crate::commands) enum MachineAction {
     /// no restore, no admission, no boot.
     #[command(display_order = 14)]
     Timeline(super::vm::checkpoint::TimelineArgs),
+    /// Restore a prior state: launch a fresh, re-admitted VM at the checkpoint or
+    /// image node the target names. Verifies the target against the signed audit
+    /// chain first and fails closed on an un-audited, tampered, or dangling
+    /// record.
+    #[command(display_order = 15)]
+    Revert(super::vm::checkpoint::RevertArgs),
+    /// Rewind one step: restore the target's parent in the lineage.
+    #[command(display_order = 16)]
+    Rewind(super::vm::checkpoint::RevertArgs),
+    /// Advance one step: restore a child of the target (a fork needs `--to`).
+    #[command(display_order = 17)]
+    Advance(super::vm::checkpoint::AdvanceArgs),
     /// Advanced single-VM operations (pause, snapshot, cp, fs, …). Hidden; use `machine <verb>` directly.
     #[command(flatten)]
     Vm(VmCmd),
@@ -158,6 +170,9 @@ impl MachineAction {
             | MachineAction::Console(_)
             | MachineAction::CheckArtifact(_) => "machine",
             MachineAction::Timeline(_) => "timeline",
+            MachineAction::Revert(_) => "revert",
+            MachineAction::Rewind(_) => "rewind",
+            MachineAction::Advance(_) => "advance",
         }
     }
 }
@@ -1291,9 +1306,84 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
         MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
         MachineAction::Timeline(a) => super::vm::checkpoint::run_timeline(a),
+        MachineAction::Revert(a) => {
+            complete_revert(cli, cfg, super::vm::checkpoint::run_revert(a)?)
+        }
+        MachineAction::Rewind(a) => {
+            complete_revert(cli, cfg, super::vm::checkpoint::run_rewind(a)?)
+        }
+        MachineAction::Advance(a) => {
+            complete_revert(cli, cfg, super::vm::checkpoint::run_advance(a)?)
+        }
         MachineAction::Vm(cmd) => {
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
+    }
+}
+
+/// Finish a restore. A checkpoint restore completes inside the engine (the fork
+/// re-admits + boots). An image-node restore re-runs the reconstructed reference
+/// through the normal admitted `machine run` path so it re-admits identically.
+fn complete_revert(
+    cli: &Cli,
+    cfg: &MvmConfig,
+    outcome: super::vm::checkpoint::RevertOutcome,
+) -> Result<()> {
+    match outcome {
+        super::vm::checkpoint::RevertOutcome::Done => Ok(()),
+        super::vm::checkpoint::RevertOutcome::RunImage(run) => {
+            run_dispatch(cli, run_args_for_image_revert(run), cfg)
+        }
+    }
+}
+
+/// Build the `machine run --image` args for an image-node restore. The restore
+/// re-derives the current network policy at launch and never bakes the
+/// snapshot-era posture: outbound networking stays off (`net = false`). On the
+/// default `firecracker` backend that resolves to enforced default-deny; note
+/// the pre-existing caveat that a libkrun transient run does not enforce
+/// per-run egress, so "off" is a request the FC path enforces, not a blanket
+/// guarantee on every backend.
+fn run_args_for_image_revert(run: super::vm::checkpoint::RevertRunImage) -> MachineRunArgs {
+    MachineRunArgs {
+        image: run.image,
+        flake: None,
+        hypervisor: run.hypervisor,
+        json: run.json,
+        name: None,
+        manifest: None,
+        runtime_pack: false,
+        flake_profile: None,
+        net: false,
+        allow_host: Vec::new(),
+        cpus: 2,
+        memory: "512M".to_string(),
+        profile: RunProfile::Standard,
+        agent_verb: Vec::new(),
+        volume: Vec::new(),
+        env: Vec::new(),
+        timeout: None,
+        receipt: None,
+        dry_run: false,
+        tty: false,
+        interactive: false,
+        force: false,
+        no_supervisor: false,
+        up_json: false,
+        ttl: None,
+        healthcheck: None,
+        health_interval: 30,
+        health_timeout: 5,
+        health_retries: 3,
+        health_start_period: 0,
+        entrypoint: false,
+        fresh: false,
+        reset: false,
+        from_workload_ir: None,
+        attach: false,
+        detach: false,
+        kernel_pin: None,
+        argv: Vec::new(),
     }
 }
 

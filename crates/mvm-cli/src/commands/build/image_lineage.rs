@@ -180,19 +180,28 @@ fn flake_node_inputs(
     }
 }
 
-/// Synthesize the audit-envelope plan an `image.created` entry binds to. A build
-/// is not a workload admission, so this plan is only the tenant / plan-id /
-/// image binding the chain entry carries — it is never signed, admitted, or
-/// booted. Tenant is the local host tenant (`DEFAULT_TENANT`).
-fn build_event_plan(image_name: &str, image_sha256: &str) -> Result<ExecutionPlan> {
+/// Synthesize the audit-envelope plan a host-side image-lineage chain entry
+/// (`image.created` / `image.reverted`) binds to. Such an event is not a
+/// workload admission, so this plan is only the tenant / plan-id / image binding
+/// the chain entry carries — it is never signed, admitted, or booted. Tenant is
+/// the local host tenant (`DEFAULT_TENANT`); `workload` / `intent` label the
+/// operation (build vs restore). `image_sha256` must be a 64-char lowercase hex
+/// digest. Shared with the revert engine so both host-side markers use one
+/// synthesis path.
+pub(in crate::commands) fn build_event_plan(
+    workload: &str,
+    intent: &str,
+    image_name: &str,
+    image_sha256: &str,
+) -> Result<ExecutionPlan> {
     let input = SynthesisInput {
-        vm_name: IMAGE_BUILD_WORKLOAD,
+        vm_name: workload,
         tenant: None,
-        backend_name: IMAGE_BUILD_WORKLOAD,
+        backend_name: workload,
         image_name,
         image_sha256,
         image_cosign_bundle: None,
-        intent: Some(IMAGE_BUILD_INTENT),
+        intent: Some(intent),
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         network_policy_ref: None,
         fs_policy_ref: None,
@@ -215,7 +224,7 @@ fn build_event_plan(image_name: &str, image_sha256: &str) -> Result<ExecutionPla
         audit_labels: Default::default(),
         agent_verbs: None,
     };
-    synthesize_plan(&input).context("synthesizing the image.created audit-envelope plan")
+    synthesize_plan(&input).context("synthesizing the image-lineage audit-envelope plan")
 }
 
 /// Record an audited image-lineage node for a completed flake build.
@@ -304,7 +313,12 @@ fn record_over_signed_chain(
     let emitter = AuditEmitter::new(signer.signing)
         .context("opening the signed audit chain for the image-lineage node")?;
     // The plan binds the audit entry to the local tenant + the rootfs digest.
-    let plan = build_event_plan(image_name, image_sha256)?;
+    let plan = build_event_plan(
+        IMAGE_BUILD_WORKLOAD,
+        IMAGE_BUILD_INTENT,
+        image_name,
+        image_sha256,
+    )?;
 
     let outcome = with_identity_lock(store, &inputs.build_identity, || {
         record_image_node(store, &emitter, &plan, inputs, now_unix())
@@ -819,7 +833,8 @@ mod tests {
     #[test]
     fn build_event_plan_binds_local_tenant_and_rootfs_digest() {
         let sha = "a".repeat(64);
-        let plan = build_event_plan(".#app", &sha).unwrap();
+        let plan =
+            build_event_plan(IMAGE_BUILD_WORKLOAD, IMAGE_BUILD_INTENT, ".#app", &sha).unwrap();
         assert_eq!(plan.tenant.0, "local");
         assert_eq!(plan.image.name, ".#app");
         assert_eq!(plan.image.sha256, sha);
