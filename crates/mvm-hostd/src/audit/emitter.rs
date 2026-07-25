@@ -86,6 +86,17 @@ pub mod checkpoint_audit {
 pub mod image_audit {
     /// Emitted when a compiled image's version-lineage node is created.
     pub const CREATED_EVENT: &str = "image.created";
+    /// Emitted when a fresh VM is launched from a prior image-lineage node (a
+    /// time-travel restore), so a revert is distinguishable in the chain from an
+    /// ordinary image run. Not a creation event — the chain-anchor never indexes
+    /// it, since a restore mints no new lineage node.
+    pub const REVERTED_EVENT: &str = "image.reverted";
+    /// Label: how a restore was initiated (`revert` / `rewind` / `advance`).
+    /// Carried on [`REVERTED_EVENT`].
+    pub const LABEL_VIA: &str = "via";
+    /// Label: the reconstructed `machine run` reference a restore re-runs.
+    /// Carried on [`REVERTED_EVENT`].
+    pub const LABEL_REVERTED_REFERENCE: &str = "image_reverted_reference";
     /// Label: the node's own content-address. The chain-anchor keys on this.
     pub const LABEL_NODE_DIGEST: &str = "image_node_digest";
     /// Label: the predecessor node's content-address (the parent hash-link), or
@@ -479,6 +490,33 @@ impl AuditEmitter {
         node: &mvm_core::image_lineage::ImageNode,
     ) -> Result<()> {
         self.emit(plan, image_audit::CREATED_EVENT, image_created_labels(node))
+    }
+
+    /// Record that a fresh VM was launched from a prior image-lineage node (a
+    /// time-travel restore). The label set carries the restored node's
+    /// content-address, the initiating verb (`via`), and the reconstructed
+    /// `machine run` reference the restore re-runs, so a revert is distinct in
+    /// the chain from an ordinary image run.
+    pub fn emit_image_reverted(
+        &self,
+        plan: &ExecutionPlan,
+        node_digest: &str,
+        via: &str,
+        reference: &str,
+    ) -> Result<()> {
+        use image_audit as k;
+        self.emit(
+            plan,
+            k::REVERTED_EVENT,
+            [
+                (k::LABEL_NODE_DIGEST.to_string(), node_digest.to_string()),
+                (k::LABEL_VIA.to_string(), via.to_string()),
+                (
+                    k::LABEL_REVERTED_REFERENCE.to_string(),
+                    reference.to_string(),
+                ),
+            ],
+        )
     }
 
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
@@ -1110,6 +1148,36 @@ mod tests {
         assert!(content.contains("image_build_identity"));
         assert!(content.contains("slot-a"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 2);
+    }
+
+    #[test]
+    fn image_reverted_records_node_digest_via_and_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-IR");
+        let node_digest = format!("sha256:{}", "c".repeat(64));
+        emitter
+            .emit_image_reverted(
+                &plan,
+                &node_digest,
+                "revert",
+                "docker.io/library/alpine@sha256:aa",
+            )
+            .unwrap();
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("image.reverted"));
+        assert!(content.contains(&node_digest));
+        assert!(content.contains("\"via\""));
+        assert!(content.contains("revert"));
+        assert!(content.contains("docker.io/library/alpine@sha256:aa"));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 
     #[test]

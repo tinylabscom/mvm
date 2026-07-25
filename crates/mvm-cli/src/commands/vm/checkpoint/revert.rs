@@ -10,26 +10,36 @@
 //!   into a new identity, and admits a fresh plan through
 //!   `admit_plan_for_boot` before booting. A restore therefore never touches
 //!   `restore_checkpoint` (which bypasses admission).
-//! - **Image-node targets** re-run the node's recorded reference through the
-//!   normal admitted `machine run` path, which re-admits identically.
+//! - **OCI image-node targets** re-run the node's digest-pinned reference
+//!   (`<registry>/<repository>@<resolved_digest>`) through the normal admitted
+//!   `machine run` path, which re-fetches the exact bytes and re-admits
+//!   identically.
+//! - **Flake image-node targets are refused.** Restoring a flake-built image to
+//!   its exact prior revision would re-run `machine run --flake`, which rebuilds
+//!   from whatever the flake resolves to *now* — not the revision being
+//!   restored. Booting a specific stored revision instead of the slot's current
+//!   one is not yet wired, so the restore fails closed rather than silently
+//!   relaunch drifted (or, mid-incident, modified) source.
 //!
 //! Every restore verifies its target against the signed audit chain up front and
 //! fails closed on an un-audited, tampered, or dangling record — the same
 //! `verify_lineage` / `verify_image_lineage` gate `machine checkpoint verify`
-//! and `fork` use. A completed checkpoint restore additionally emits a
-//! chain-signed `checkpoint.restored` entry carrying the initiating verb
-//! (`revert` / `rewind` / `advance`) as its `via` label.
+//! and `fork` use. A completed checkpoint restore emits a chain-signed
+//! `checkpoint.restored` entry, and an image restore an `image.reverted` entry;
+//! both carry the initiating verb (`revert` / `rewind` / `advance`) as their
+//! `via` label.
 
 use anyhow::{Context, Result, bail};
 
 use mvm_core::checkpoint::CheckpointMeta;
-use mvm_core::image_lineage::{ImageBuildIdentity, ImageCanonicalId, ImageNode, ImageProvenance};
+use mvm_core::image_lineage::{ImageBuildIdentity, ImageCanonicalId, ImageNode};
 use mvm_runtime::checkpoint::{
     CheckpointStore, checkpoint_ancestry, checkpoint_children, verify_lineage,
 };
 use mvm_runtime::image_lineage::{
     ImageStore, image_ancestry, image_children, verify_image_lineage,
 };
+use mvm_runtime::lineage::VerifiedNode;
 
 use super::SignedChainAnchor;
 use super::timeline::{LineageKind, ResolvedTarget, resolve_target};
@@ -115,12 +125,11 @@ pub(in crate::commands) enum RevertOutcome {
     RunImage(RevertRunImage),
 }
 
-/// The reconstructed `machine run` reference for an image-node restore. Exactly
-/// one of `image` / `flake` is set.
+/// The reconstructed `machine run --image` reference for an image-node restore.
+/// Always a digest-pinned OCI reference (flake nodes are refused upstream).
 #[derive(Debug)]
 pub(in crate::commands) struct RevertRunImage {
     pub image: Option<String>,
-    pub flake: Option<String>,
     pub hypervisor: Option<String>,
     pub json: bool,
 }
@@ -237,7 +246,7 @@ fn revert_checkpoint(
     let restored_vm_name = opts
         .new_id
         .map(ToString::to_string)
-        .unwrap_or_else(|| format!("revert-{}-{}", target.id.as_str(), now_unix()));
+        .unwrap_or_else(|| format!("revert-{}-{}", target.id.as_str(), super::now_unix()));
 
     // Reuse the fork path verbatim: it re-admits through `admit_plan_for_boot`,
     // re-derives the sealed attenuation, and boots. This is the anti-bypass
@@ -269,16 +278,26 @@ fn revert_checkpoint(
     Ok(())
 }
 
-/// Restore an image-node target: verify it against the signed audit chain, then
-/// reconstruct its recorded `machine run` reference. The caller re-runs that
-/// reference through the normal admitted run path, which re-admits identically
-/// and chain-signs its own admission trail.
+/// Restore an image-node target: verify it against the signed audit chain,
+/// reconstruct its digest-pinned reference, emit a chain-signed `image.reverted`
+/// marker, then hand the reference to the caller. The caller re-runs it through
+/// the normal admitted `machine run` path, which re-fetches the exact bytes and
+/// re-admits identically.
 fn revert_image(
     store: &ImageStore,
     node: ImageNode,
     via: RevertVia,
     opts: &RestoreOpts<'_>,
 ) -> Result<RevertOutcome> {
+    // `--new-id` names the restored VM, but an image restore auto-names its VM
+    // through the run path — reject rather than silently drop it.
+    if let Some(new_id) = opts.new_id {
+        bail!(
+            "--new-id {new_id:?} applies only to checkpoint restores; an image restore \
+             auto-names its VM through the run path"
+        );
+    }
+
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the restore target")?;
     verify_image_lineage(store, &node.node_digest, &anchor).with_context(|| {
@@ -289,24 +308,29 @@ fn revert_image(
         )
     })?;
 
-    let reference = reconstruct_image_run_reference(&node)?;
-    tracing::info!(
-        node = %node.node_digest,
-        via = via.as_str(),
-        "image restore re-runs the recorded reference through the admitted run path"
-    );
+    let image = reconstruct_image_run_reference(&node)?;
+
+    // Distinctly audit the restore BEFORE handing off, so the chain records
+    // "reverted to node X via Y" — not just an ordinary image run.
+    emit_image_revert_audit(&node, via, &image)?;
+
     Ok(RevertOutcome::RunImage(RevertRunImage {
-        image: reference.image,
-        flake: reference.flake,
+        image: Some(image),
         hypervisor: Some(opts.hypervisor.to_string()),
         json: opts.json,
     }))
 }
 
-/// Reconstruct the `machine run` reference an image node recorded, so a restore
-/// re-materializes the exact prior image. OCI nodes yield a digest-pinned
-/// `<registry>/<repository>@<digest>`; flake nodes yield the recorded input ref.
-fn reconstruct_image_run_reference(node: &ImageNode) -> Result<RevertRunImage> {
+/// Reconstruct the digest-pinned `machine run --image` reference an OCI node
+/// recorded, so a restore re-fetches the exact prior image
+/// (`<registry>/<repository>@<resolved_digest>`).
+///
+/// Flake nodes are refused: relaunching a flake image to its exact prior
+/// revision would re-run `machine run --flake`, which rebuilds from whatever the
+/// flake resolves to now — not the revision being restored. Booting a specific
+/// stored revision instead of the slot's current one is not yet wired, so this
+/// fails closed rather than silently relaunch drifted source.
+fn reconstruct_image_run_reference(node: &ImageNode) -> Result<String> {
     match &node.build_identity {
         ImageBuildIdentity::Oci {
             registry,
@@ -319,34 +343,63 @@ fn reconstruct_image_run_reference(node: &ImageNode) -> Result<RevertRunImage> {
                     node.node_digest
                 );
             };
-            Ok(RevertRunImage {
-                image: Some(format!("{registry}/{repository}@{resolved_digest}")),
-                flake: None,
-                hypervisor: None,
-                json: false,
-            })
+            Ok(format!("{registry}/{repository}@{resolved_digest}"))
         }
-        ImageBuildIdentity::Flake { .. } => {
-            let ImageProvenance::Build { input_ref, .. } = &node.provenance else {
-                bail!(
-                    "image node {} names a flake build identity but non-build provenance; \
-                     refusing to reconstruct an ambiguous reference",
-                    node.node_digest
-                );
-            };
-            Ok(RevertRunImage {
-                image: None,
-                flake: Some(input_ref.clone()),
-                hypervisor: None,
-                json: false,
-            })
-        }
+        ImageBuildIdentity::Flake { .. } => bail!(
+            "reverting a flake-built image to its exact prior revision isn't wired yet: the run \
+             path rebuilds the flake's CURRENT revision, not the stored one, so a flake restore \
+             would silently relaunch drifted source. OCI images and checkpoints support exact \
+             restore."
+        ),
     }
+}
+
+/// Workload/intent labels for the host-side `image.reverted` audit-envelope plan.
+const IMAGE_REVERT_WORKLOAD: &str = "image-revert";
+const IMAGE_REVERT_INTENT: &str = "image:revert";
+
+/// Emit the chain-signed `image.reverted` marker recording the restored node's
+/// content-address, the initiating verb, and the reconstructed reference. Bound
+/// to a lightweight host-side event plan (never admitted or booted) on the local
+/// tenant, keyed to the node's content-address — mirroring how the build path
+/// audits `image.created`. A missing signer degrades to a warning (best-effort,
+/// as capture does); a present signer whose emit fails is fatal, so an
+/// un-auditable restore refuses before it re-runs.
+fn emit_image_revert_audit(node: &ImageNode, via: RevertVia, reference: &str) -> Result<()> {
+    let signer = match crate::commands::vm::host_signer::load_or_init() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "host signer unavailable; image.reverted chain entry skipped");
+            return Ok(());
+        }
+    };
+    let emitter = crate::commands::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .context("refusing an unaudited image restore: audit emitter unavailable")?;
+    // The node's content-address is always a valid 64-hex digest — bind the
+    // event plan's image to it so synthesis can never reject a genuine node.
+    let node_hex = node
+        .node_digest
+        .as_str()
+        .strip_prefix(mvm_core::checkpoint::CheckpointDigest::PREFIX)
+        .unwrap_or_else(|| node.node_digest.as_str());
+    let plan = crate::commands::build::image_lineage::build_event_plan(
+        IMAGE_REVERT_WORKLOAD,
+        IMAGE_REVERT_INTENT,
+        reference,
+        node_hex,
+    )
+    .context("building the image.reverted audit-envelope plan")?;
+    emitter
+        .emit_image_reverted(&plan, node.node_digest.as_str(), via.as_str(), reference)
+        .context("refusing an unaudited image restore")?;
+    Ok(())
 }
 
 /// Resolve the parent of a restore target (the `rewind` step) via the C1
 /// ancestry enumeration, so the parent hop is chain-verified. Fails closed when
-/// the target is a genesis root or the ancestry is structurally broken.
+/// the target is a genesis root, the ancestry is structurally broken, or the
+/// parent hop itself did not verify — the selected node's own verdict is
+/// enforced here, not left to a downstream re-verify.
 fn parent_of(
     cstore: &CheckpointStore,
     istore: &ImageStore,
@@ -369,7 +422,8 @@ fn parent_of(
                     meta.id.as_str()
                 )
             })?;
-            Ok(ResolvedTarget::Checkpoint(parent.record))
+            let record = verified_record(parent, "rewind")?;
+            Ok(ResolvedTarget::Checkpoint(record))
         }
         ResolvedTarget::Image(node) => {
             let ancestry = image_ancestry(istore, &node.node_digest, anchor)?;
@@ -385,8 +439,21 @@ fn parent_of(
                     node.node_digest
                 )
             })?;
-            Ok(ResolvedTarget::Image(parent.record))
+            let record = verified_record(parent, "rewind")?;
+            Ok(ResolvedTarget::Image(record))
         }
+    }
+}
+
+/// Extract a verified node's record, failing closed if its per-hop verdict is
+/// not `Verified`. `op` names the verb for the error (`rewind` / `advance`).
+/// Safety here does not depend on the downstream restore re-verifying.
+fn verified_record<R>(node: VerifiedNode<R>, op: &str) -> Result<R> {
+    match node.status.error() {
+        None => Ok(node.record),
+        Some(reason) => bail!(
+            "cannot {op}: the selected node did not verify against the signed audit chain: {reason}"
+        ),
     }
 }
 
@@ -406,35 +473,37 @@ fn child_of(
             let picked = pick_child(
                 children
                     .into_iter()
-                    .map(|c| (c.record.meta_digest.to_string(), c.record)),
+                    .map(|c| (c.record.meta_digest.to_string(), c)),
                 to,
                 &format!("checkpoint {:?}", meta.id.as_str()),
             )?;
-            Ok(ResolvedTarget::Checkpoint(picked))
+            Ok(ResolvedTarget::Checkpoint(verified_record(
+                picked, "advance",
+            )?))
         }
         ResolvedTarget::Image(node) => {
             let children = image_children(istore, &node.node_digest, anchor)?;
             let picked = pick_child(
                 children
                     .into_iter()
-                    .map(|c| (c.record.node_digest.to_string(), c.record)),
+                    .map(|c| (c.record.node_digest.to_string(), c)),
                 to,
                 &format!("image node {}", node.node_digest),
             )?;
-            Ok(ResolvedTarget::Image(picked))
+            Ok(ResolvedTarget::Image(verified_record(picked, "advance")?))
         }
     }
 }
 
-/// Pick the single child to advance to. No children → nothing to advance to; one
-/// child → that one (or the one `--to` names); many children → `--to` must
-/// disambiguate the fork.
+/// Pick the single child to advance to, carrying its per-hop verdict for the
+/// caller to enforce. No children → nothing to advance to; one child → that one
+/// (or the one `--to` names); many children → `--to` must disambiguate the fork.
 fn pick_child<R>(
-    children: impl Iterator<Item = (String, R)>,
+    children: impl Iterator<Item = (String, VerifiedNode<R>)>,
     to: Option<&str>,
     target_label: &str,
-) -> Result<R> {
-    let all: Vec<(String, R)> = children.collect();
+) -> Result<VerifiedNode<R>> {
+    let all: Vec<(String, VerifiedNode<R>)> = children.collect();
     if all.is_empty() {
         bail!("cannot advance: {target_label} has no children to advance to");
     }
@@ -442,7 +511,7 @@ fn pick_child<R>(
         Some(want) => all
             .into_iter()
             .find(|(digest, _)| digest == want)
-            .map(|(_, record)| record)
+            .map(|(_, node)| node)
             .ok_or_else(|| {
                 anyhow::anyhow!("cannot advance: {target_label} has no child with digest {want:?}")
             }),
@@ -497,13 +566,6 @@ fn emit_revert_audit(
     )
     .context("refusing an unaudited restore")?;
     Ok(())
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -618,21 +680,27 @@ mod tests {
     #[test]
     fn oci_node_reconstructs_a_digest_pinned_reference() {
         let node = oci_node("a");
-        let out = reconstruct_image_run_reference(&node).unwrap();
+        let reference = reconstruct_image_run_reference(&node).unwrap();
         assert_eq!(
-            out.image.as_deref(),
-            Some(format!("docker.io/library/alpine@sha256:{}", "a".repeat(64)).as_str()),
+            reference,
+            format!("docker.io/library/alpine@sha256:{}", "a".repeat(64)),
             "OCI restore must re-fetch the exact resolved digest"
         );
-        assert!(out.flake.is_none());
     }
 
+    /// Restoring a flake image to its exact prior revision is not wired: the run
+    /// path rebuilds the flake's current revision, not the stored one, so it must
+    /// refuse rather than silently relaunch drifted source.
     #[test]
-    fn flake_node_reconstructs_the_recorded_input_ref() {
+    fn flake_node_reconstruction_is_refused_as_unwired() {
         let node = image_of("slot-a", "rev-1", None);
-        let out = reconstruct_image_run_reference(&node).unwrap();
-        assert_eq!(out.flake.as_deref(), Some(".#app"));
-        assert!(out.image.is_none());
+        let err = reconstruct_image_run_reference(&node).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("flake"), "{msg}");
+        assert!(
+            msg.contains("isn't wired") || msg.contains("not wired") || msg.contains("drifted"),
+            "the refusal must explain why: {msg}"
+        );
     }
 
     // ── invariant 5: verify the target before restoring (fail closed) ─────────
@@ -710,7 +778,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_HOME", tmp.path());
         let istore = ImageStore::open();
-        let node = image_of("slot-a", "rev-1", None);
+        let node = oci_node("a");
         // Saved but NEVER audited.
         istore.save(&node).unwrap();
 
@@ -729,18 +797,21 @@ mod tests {
         );
     }
 
-    /// An audited image node passes verification and reconstructs its recorded
-    /// reference, returning a `RunImage` that the dispatcher re-runs through the
-    /// normal admitted run path — the image analog of "re-admit, don't bypass".
-    /// `run_revert` never boots inline for an image target.
+    /// An audited OCI image node passes verification, reconstructs its
+    /// digest-pinned reference, emits a chain-signed `image.reverted` marker, and
+    /// returns a `RunImage` the dispatcher re-runs through the admitted run path —
+    /// the image analog of "re-admit, don't bypass". `run_revert` never boots
+    /// inline for an image target.
     #[test]
-    fn revert_of_an_audited_image_node_reconstructs_a_run_not_a_bypass() {
+    fn revert_of_an_audited_oci_node_reconstructs_a_run_and_audits_the_revert() {
+        use mvm_hostd::supervisor::verify_audit_chain;
+
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_HOME", tmp.path());
         let istore = ImageStore::open();
         let (em, plan) = emitter();
-        let node = image_of("slot-a", "rev-1", None);
+        let node = oci_node("a");
         seed_image(&istore, &em, &plan, &node);
 
         let outcome = run_revert(RevertArgs {
@@ -754,11 +825,10 @@ mod tests {
         match outcome {
             RevertOutcome::RunImage(run) => {
                 assert_eq!(
-                    run.flake.as_deref(),
-                    Some(".#app"),
-                    "a flake image node restores through its recorded input ref"
+                    run.image.as_deref(),
+                    Some(format!("docker.io/library/alpine@sha256:{}", "a".repeat(64)).as_str()),
+                    "an OCI image node restores through its digest-pinned reference"
                 );
-                assert!(run.image.is_none());
             }
             RevertOutcome::Done => {
                 panic!(
@@ -766,6 +836,95 @@ mod tests {
                 )
             }
         }
+
+        // The revert is distinctly audited BEFORE handoff: image.created (seed) +
+        // image.reverted (revert), both chain-signed and verifiable.
+        let signer = crate::commands::vm::host_signer::load_or_init().unwrap();
+        let path = mvm_hostd::audit::emitter::default_audit_dir()
+            .unwrap()
+            .join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("image.reverted"), "{content}");
+        assert!(content.contains(node.node_digest.as_str()));
+        assert!(content.contains("\"via\""));
+        assert!(content.contains("revert"));
+        assert_eq!(verify_audit_chain(&path, &signer.verifying).unwrap(), 2);
+    }
+
+    /// A flake image node is refused at the run_revert level even when audited:
+    /// exact-revision restore isn't wired, so it fails closed rather than rebuild
+    /// the flake's current (possibly drifted) source.
+    #[test]
+    fn revert_of_an_audited_flake_node_is_refused() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        let istore = ImageStore::open();
+        let (em, plan) = emitter();
+        let node = image_of("slot-a", "rev-1", None);
+        seed_image(&istore, &em, &plan, &node);
+
+        let err = run_revert(RevertArgs {
+            target: node.node_digest.as_str().to_string(),
+            kind: None,
+            hypervisor: "firecracker".into(),
+            new_id: None,
+            json: false,
+        })
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("flake"), "{msg}");
+    }
+
+    /// `--new-id` names the restored VM for a checkpoint restore; an image restore
+    /// auto-names through the run path, so passing it is rejected, not dropped.
+    #[test]
+    fn image_revert_rejects_new_id() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        let istore = ImageStore::open();
+        let (em, plan) = emitter();
+        let node = oci_node("a");
+        seed_image(&istore, &em, &plan, &node);
+
+        let err = run_revert(RevertArgs {
+            target: node.node_digest.as_str().to_string(),
+            kind: None,
+            hypervisor: "firecracker".into(),
+            new_id: Some("my-restored-vm".into()),
+            json: false,
+        })
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("--new-id"), "{msg}");
+    }
+
+    /// A rewind/advance target's own per-hop verdict is enforced here, not left
+    /// to the downstream restore re-verify: a `Failed` hop is refused, a
+    /// `Verified` hop yields its record.
+    #[test]
+    fn verified_record_gates_on_hop_status() {
+        use mvm_runtime::lineage::{HopStatus, VerifiedNode};
+        let meta = CheckpointMeta::builder(CheckpointId::new("n"), CheckpointClass::FsQuick, "vm")
+            .content(vec![])
+            .supervisor_config_digest("d")
+            .created_unix(1)
+            .build();
+        let verified = VerifiedNode {
+            record: meta.clone(),
+            status: HopStatus::Verified,
+        };
+        assert!(verified_record(verified, "rewind").is_ok());
+
+        let failed = VerifiedNode {
+            record: meta,
+            status: HopStatus::Failed("meta_digest drift".into()),
+        };
+        let err = verified_record(failed, "advance").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("advance"), "names the op: {msg}");
+        assert!(msg.contains("drift"), "preserves the reason: {msg}");
     }
 
     // ── cross-store ambiguity refused (shared resolver) ──────────────────────

@@ -1337,13 +1337,17 @@ fn complete_revert(
     }
 }
 
-/// Build the `machine run` args for an image-node restore. Egress defaults to
-/// deny-all — a restore re-derives the current policy at launch and never bakes
-/// the snapshot-era network posture.
+/// Build the `machine run --image` args for an image-node restore. The restore
+/// re-derives the current network policy at launch and never bakes the
+/// snapshot-era posture: outbound networking stays off (`net = false`). On the
+/// default `firecracker` backend that resolves to enforced default-deny; note
+/// the pre-existing caveat that a libkrun transient run does not enforce
+/// per-run egress, so "off" is a request the FC path enforces, not a blanket
+/// guarantee on every backend.
 fn run_args_for_image_revert(run: super::vm::checkpoint::RevertRunImage) -> MachineRunArgs {
     MachineRunArgs {
         image: run.image,
-        flake: run.flake,
+        flake: None,
         hypervisor: run.hypervisor,
         json: run.json,
         name: None,
