@@ -50,12 +50,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use libkrun_sys::{
     BridgeFds, LogLevel, SupervisorBaseConfig, SupervisorConfig, init_log, run_supervisor,
     run_supervisor_with_bridge, set_log_level,
 };
-use mvm_core::plan::{ExecutionPlan, NonceStore, SignedExecutionPlan};
+use mvm_core::plan::{ExecutionPlan, NonceStore, SignedExecutionPlan, verify_plan, verify_plan_id};
 use mvm_core::policy::PolicyBundle;
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
@@ -429,20 +429,30 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
         .ok_or_else(|| anyhow!("cfg.plan missing on bridge path"))?;
     let bundle_value = cfg.bundle.clone();
 
-    // Deserialize the JSON-Value-carrier into typed values. The
-    // round-trip cost is trivial vs the bridge's IO budget.
-    // cfg.plan carries the SignedExecutionPlan envelope the host admitted +
-    // signed (plan_admission.rs serializes `admitted.signed`), not a bare
-    // ExecutionPlan. Decode the envelope and read the inner plan from its
-    // payload. The host already verified the signature + G4 window/nonce at
-    // admit time and spawns this supervisor over a private channel, so since
-    // the host is trusted we extract rather than re-verify here.
-    // Defense-in-depth re-verify via `mvm_core::plan::verify_plan` with the host
-    // signer pubkey is a follow-up.
+    // Load the host signer secret bytes before trusting any field decoded from
+    // cfg.plan. The file is mode 0600 and written by mvm-cli's
+    // `host_signer::load_or_init_at` at admit time; the path was already
+    // canonicalized under `~/.mvm/keys/` by
+    // `SupervisorConfig::validate_audit_substrate`.
+    let key_bytes = std::fs::read(&signing_key_path)
+        .with_context(|| format!("read signing key {}", signing_key_path.display()))?;
+    let key_array: [u8; 32] = key_bytes.as_slice().try_into().with_context(|| {
+        format!(
+            "signing key {} is {} bytes, expected 32",
+            signing_key_path.display(),
+            key_bytes.len()
+        )
+    })?;
+    let signing_key = SigningKey::from_bytes(&key_array);
+    let verifying_key = signing_key.verifying_key();
+
+    // Deserialize the JSON-Value-carrier into the signed envelope, then verify
+    // its signature and content-address before trusting the typed plan. The
+    // round-trip cost is trivial versus the bridge's IO budget.
     let signed: SignedExecutionPlan =
         serde_json::from_value(plan_value).context("decode cfg.plan into SignedExecutionPlan")?;
-    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)
-        .context("decode ExecutionPlan from signed plan payload")?;
+    let signer_id = mvm_hostd::audit::host_keypair::host_signer_id();
+    let plan = verify_signed_plan(&signed, &signer_id, &verifying_key)?;
     let bundle: Option<PolicyBundle> = match bundle_value {
         Some(v) => Some(serde_json::from_value(v).context("decode cfg.bundle into PolicyBundle")?),
         None => None,
@@ -499,22 +509,6 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
             .krun
             .with_native_gateway_config(config_path.to_string_lossy().into_owned());
     }
-
-    // Load the host signer secret bytes. The file is mode 0600 and
-    // written by mvm-cli's `host_signer::load_or_init_at` at admit
-    // time; we re-read on each VM start. Path was already
-    // canonicalized under `~/.mvm/keys/` by
-    // `SupervisorConfig::validate_audit_substrate`.
-    let key_bytes = std::fs::read(&signing_key_path)
-        .with_context(|| format!("read signing key {}", signing_key_path.display()))?;
-    let key_array: [u8; 32] = key_bytes.as_slice().try_into().with_context(|| {
-        format!(
-            "signing key {} is {} bytes, expected 32",
-            signing_key_path.display(),
-            key_bytes.len()
-        )
-    })?;
-    let signing_key = SigningKey::from_bytes(&key_array);
 
     // FileAuditSigner is what mvm-supervisor's chain emitter wraps.
     // The cross-process flock serializes writes from concurrent VM
@@ -652,6 +646,20 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
     })
 }
 
+/// Verify the plan envelope before exposing its payload to the bridge setup.
+/// The supervisor receives the envelope over a private host channel, but the
+/// channel is not a substitute for the plan's cryptographic invariants.
+fn verify_signed_plan(
+    signed: &SignedExecutionPlan,
+    signer_id: &str,
+    verifying_key: &VerifyingKey,
+) -> Result<ExecutionPlan> {
+    let plan = verify_plan(signed, &[(signer_id, verifying_key)])
+        .context("verifying SignedExecutionPlan envelope")?;
+    verify_plan_id(&plan).context("verifying ExecutionPlan content address")?;
+    Ok(plan)
+}
+
 fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, detail: String) {
     let path = vm_state_dir.join("supervisor.lifecycle.log");
     if let Some(parent) = path.parent() {
@@ -672,8 +680,12 @@ fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, det
 mod tests {
     use super::{
         append_supervisor_breadcrumb, apply_egress_relay_override, should_use_bridge_route,
+        verify_signed_plan,
     };
+    use ed25519_dalek::{Signer, SigningKey};
     use libkrun_sys::{BridgeRestartPolicy, KrunContext, NetworkingMode, SupervisorConfig};
+    use mvm_core::plan::{SignedExecutionPlan, sign_plan};
+    use mvm_core::protocol::signing::SignedPayload;
 
     fn sample_cfg(networking: NetworkingMode, tenant_id: Option<&str>) -> SupervisorConfig {
         let mut krun = KrunContext::new("vm-1", "/k", "/r");
@@ -760,6 +772,55 @@ mod tests {
             cfg.krun
                 .host_listen_socket_path(mvm_agentd::vsock::EGRESS_PORT),
             derived
+        );
+    }
+
+    fn signed_fixture() -> (SignedExecutionPlan, SigningKey) {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        (sign_plan(&plan, &key, "host:test"), key)
+    }
+
+    #[test]
+    fn verify_signed_plan_accepts_valid_signature_and_content_address() {
+        let (signed, key) = signed_fixture();
+        let plan = verify_signed_plan(&signed, "host:test", &key.verifying_key())
+            .expect("valid signed plan verifies");
+        assert_eq!(plan.tenant.0, "local");
+        assert!(mvm_core::plan::verify_plan_id(&plan).is_ok());
+    }
+
+    #[test]
+    fn verify_signed_plan_rejects_tampered_payload() {
+        let (mut signed, key) = signed_fixture();
+        signed.0.payload[0] ^= 1;
+
+        let err = verify_signed_plan(&signed, "host:test", &key.verifying_key())
+            .expect_err("tampered payload must fail signature verification");
+        assert!(
+            err.to_string()
+                .contains("verifying SignedExecutionPlan envelope")
+        );
+    }
+
+    #[test]
+    fn verify_signed_plan_rejects_signed_plan_with_wrong_content_address() {
+        let (_, key) = signed_fixture();
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.plan_id = mvm_core::plan::PlanId("sha256:wrong".to_string());
+        let payload = serde_json::to_vec(&plan).expect("fixture plan serializes");
+        let signature = key.sign(&payload);
+        let signed = SignedExecutionPlan(SignedPayload {
+            payload,
+            signature: signature.to_bytes().to_vec(),
+            signer_id: "host:test".to_string(),
+        });
+
+        let err = verify_signed_plan(&signed, "host:test", &key.verifying_key())
+            .expect_err("wrong plan_id must fail content-address verification");
+        assert!(
+            err.to_string()
+                .contains("verifying ExecutionPlan content address")
         );
     }
 }
