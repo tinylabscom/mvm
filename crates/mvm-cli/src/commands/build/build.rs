@@ -256,6 +256,11 @@ fn build_manifest(
         &revision.revision_hash,
     );
 
+    // Record the compiled image as an audited version-lineage node before
+    // reporting success. A build that produced an image but could not record
+    // its lineage is a failure to surface, not a silent skip.
+    super::image_lineage::record_flake_build_node(&persisted, &revision)?;
+
     if json {
         #[derive(Serialize)]
         struct BuildResult {
@@ -670,6 +675,10 @@ pub(in crate::commands) fn build_flake_to_slot(
         .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;
 
     audit_build_ok("flake-slot", &resolved, &slot_hash, &revision.revision_hash);
+
+    // Record the compiled image as an audited version-lineage node (same
+    // fail-closed posture as the manifest build path).
+    super::image_lineage::record_flake_build_node(&persisted, &revision)?;
 
     Ok(slot_hash)
 }

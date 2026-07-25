@@ -314,6 +314,21 @@ fn pull_image_ref(
         &serde_json::to_vec_pretty(&provenance).context("serialize OCI provenance")?,
     )?;
 
+    // Record the pulled image as an audited version-lineage node before it is
+    // registered in the cache index — the same fail-closed posture as the flake
+    // build path (lineage is provenance, never authorization).
+    let canonical_reference = image_ref.canonical();
+    crate::commands::build::image_lineage::record_oci_pull_node(
+        &crate::commands::build::image_lineage::OciPullNode {
+            registry: &image_ref.registry,
+            repository: &image_ref.repository,
+            resolved_digest: &manifest.digest,
+            layer_digests: cached_layers.iter().map(|l| l.digest.clone()).collect(),
+            canonical_reference: &canonical_reference,
+            rootfs_path: &rootfs_abs,
+        },
+    )?;
+
     let mut index = load_index(cache_root)?;
     let cached = CachedOciImage {
         reference: image_ref.canonical(),

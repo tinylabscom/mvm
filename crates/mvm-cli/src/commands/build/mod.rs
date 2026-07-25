@@ -10,6 +10,10 @@ pub(super) mod compile;
 pub(super) mod group;
 #[cfg(feature = "builder-vm")]
 pub mod hvf_builder_image;
+/// Records an audited image-lineage node after a successful flake build, so
+/// every compiled image produces a tamper-evident version-chain record anchored
+/// in the host-signed audit log.
+pub(in crate::commands) mod image_lineage;
 /// Shared IR-JSON input loading (`--from-ir` / positional / `-` stdin) for the
 /// build-time verbs that read a Workload document.
 pub(super) mod ir_input;
