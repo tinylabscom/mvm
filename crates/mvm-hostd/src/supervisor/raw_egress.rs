@@ -30,7 +30,7 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::supervisor::audit_recorder::Recorder;
-use crate::supervisor::{dns_handler, http_forward};
+use crate::supervisor::{dns_handler, http_forward, socks5_udp};
 use mvm_core::guest_netd::ConnectAck;
 use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 
@@ -100,6 +100,9 @@ where
     if target == dns_handler::FRAME_LINE {
         return dns_handler::serve_dns(guest, gate, recorder.as_deref(), &rate_guard, timeout)
             .await;
+    }
+    if target == socks5_udp::FRAME_LINE {
+        return socks5_udp::serve(guest, gate, timeout).await;
     }
     match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
         EgressVerdict::Allow { ips, port } => {
@@ -285,6 +288,9 @@ fn handle_raw_conn_blocking(
             &rate_guard,
             timeout,
         );
+    }
+    if target == socks5_udp::FRAME_LINE {
+        return socks5_udp::serve_blocking(guest, gate, timeout);
     }
     let (ips, port) =
         match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
@@ -550,7 +556,7 @@ fn shutdown_write(fd: libc::c_int) -> std::io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn resolve_hostname_ips_pure(
+pub(crate) fn resolve_hostname_ips_pure(
     host: &str,
     timeout: Duration,
 ) -> std::io::Result<Vec<IpAddr>> {
@@ -580,7 +586,7 @@ pub(super) fn resolve_hostname_ips_pure(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn resolve_hostname_ips_pure(
+pub(crate) fn resolve_hostname_ips_pure(
     host: &str,
     timeout: Duration,
 ) -> std::io::Result<Vec<IpAddr>> {

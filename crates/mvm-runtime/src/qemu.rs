@@ -61,6 +61,17 @@ const BRIDGE_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 /// SIGTERM→SIGKILL grace on `stop`.
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// QEMU's unprivileged user-mode network gives dev/test guests transparent
+/// TCP and UDP without requiring a host TAP device or elevated setup.
+fn qemu_user_network_args() -> [&'static str; 4] {
+    [
+        "-netdev",
+        "user,id=n0",
+        "-device",
+        "virtio-net-pci,netdev=n0",
+    ]
+}
+
 /// Per-VM file names under `vm_state_dir(name)`.
 const QEMU_PID_FILE: &str = "qemu.pid";
 const QEMU_LOG_FILE: &str = "qemu.log";
@@ -334,12 +345,7 @@ impl VmBackend for QemuBackend {
         cmd.arg("-device")
             .arg(format!("vhost-vsock-pci,guest-cid={cid}"));
         // User-mode (slirp) networking — no root, no TAP.
-        cmd.args([
-            "-netdev",
-            "user,id=n0",
-            "-device",
-            "virtio-net-pci,netdev=n0",
-        ]);
+        cmd.args(qemu_user_network_args());
         cmd.args(["-display", "none", "-monitor", "none", "-no-reboot"]);
         cmd.arg("-serial")
             .arg(format!("file:{}", console_log.display()));
@@ -951,6 +957,19 @@ mod tests {
         assert!(!c.pause_resume);
         assert!(!c.snapshots);
         assert!(!c.tap_networking);
+    }
+
+    #[test]
+    fn qemu_user_network_is_rootless_and_transparent() {
+        assert_eq!(
+            qemu_user_network_args(),
+            [
+                "-netdev",
+                "user,id=n0",
+                "-device",
+                "virtio-net-pci,netdev=n0",
+            ]
+        );
     }
 
     #[test]

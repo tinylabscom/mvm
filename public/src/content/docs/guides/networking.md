@@ -9,20 +9,50 @@ Networking differs by backend:
 
 | Backend | Network Type | Guest IP | Host Access |
 |---------|-------------|----------|-------------|
-| Firecracker (Linux native) | TAP device | 172.16.0.2/30 | Direct via TAP |
-| HVF (macOS 26+, default) | vsock-only | — | Guest I/O over vsock; no guest NIC |
-| libkrun (macOS) | vsock-only | — | Control/data via vsock; egress via the host-side vsock proxy |
-| microvm.nix | TAP device | 172.16.0.2/30 | Direct via TAP |
+| Firecracker (Linux native) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
+| HVF (macOS 26+, default) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
+| libkrun (macOS) | NIC-less vsock egress | — | Host endpoint; default-deny policy gate |
+| QEMU (Linux dev/test) | Rootless user-mode virtio | 10.0.2.15/24 | QEMU user-mode network; outside production claims |
 
-## Firecracker Network Layout
+## Production Network Layout
 
 ```
-Firecracker microVM (172.16.0.2/30, eth0)
-    | TAP interface (tap0)
-Linux host (172.16.0.1/30, tap0)  --  iptables NAT  --  internet
+MicroVM workload (no guest NIC)
+    | loopback SOCKS5 TCP CONNECT / UDP ASSOCIATE
+    | authenticated vsock egress seam
+Host endpoint -- policy + host DNS -- internet
 ```
 
-On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. The TAP device connects the microVM to the host network namespace and gets NAT'd to the internet. On macOS hosts, networking is backend-specific: the default HVF backend is vsock-only (guest I/O crosses vsock, no guest NIC); libkrun now follows the same workload shape, with guest traffic routed through the host-side vsock egress path instead of a guest-NIC helper.
+Firecracker, HVF, and libkrun production workloads do not expose a guest NIC.
+Proxy-aware TCP applications use the injected loopback SOCKS5 listener; UDP
+applications use SOCKS5 `UDP ASSOCIATE`. The host resolves names, applies the
+signed allow/deny policy separately for TCP and UDP, and opens the external
+socket only after admission. This keeps DNS and egress on the same auditable
+host seam.
+
+Raw ICMP and arbitrary non-proxy-aware sockets are intentionally not available
+on this path. `ping` is therefore not a valid egress smoke test; use an HTTP,
+TCP, or SOCKS5-aware UDP probe.
+
+## Rootless QEMU transparent networking
+
+Linux users who need ordinary guest TCP and UDP sockets without configuring a
+host TAP device can opt into QEMU's dev/test backend:
+
+```bash
+mvmctl machine run --hypervisor qemu --image alpine --net -- \
+  sh -c 'wget -qO- https://example.com'
+```
+
+QEMU attaches `virtio-net-pci` to its unprivileged `-netdev user` stack. The
+workload sees a normal guest interface, so TCP and UDP are transparent to the
+application and no host bridge, NAT rule, or elevated network setup is needed.
+QEMU is explicit dev/test infrastructure, is never selected automatically for
+production, and does not inherit the production NIC-less security claim.
+
+The QEMU user-mode stack follows the host's normal routing as seen by QEMU's
+user-mode network process, but its behavior differs from a host TAP bridge:
+incoming connections require explicit forwarding, and ICMP support is limited.
 
 ## Port Forwarding
 
@@ -104,7 +134,22 @@ That wrapper packages both the exact CLI path
 and a second admit/deny relay proof that demonstrates allowed traffic is
 reachable while a non-admitted destination is refused, all without a guest NIC.
 
-Network policies are enforced via iptables FORWARD rules on the bridge interface (Firecracker backend on Linux). DNS (port 53) is always allowed so domain resolution works. Rules are automatically cleaned up when the VM stops. On macOS backends, policies are enforced at the host-side layer rather than via iptables.
+For production NIC-less backends, policies are enforced by the host endpoint
+and the shared egress gate rather than guest firewall rules. QEMU's user-mode
+network is a dev/test convenience and is not a substitute for that production
+policy boundary.
+
+## Measuring the paths
+
+Run the opt-in local benchmark to compare direct kernel sockets with the
+SOCKS5-framed relay overhead for TCP and UDP:
+
+```bash
+MVM_EGRESS_BENCH=1 cargo test --test egress_path_bench -- --nocapture
+```
+
+The benchmark measures local transport overhead only; it does not represent a
+particular hypervisor, VPN, or Internet route.
 
 ## Security Profiles
 

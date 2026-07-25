@@ -87,6 +87,8 @@ pub mod reversible_replacement_resolve;
 /// audit events (claim 13: metadata only, never the secret value).
 pub mod secret_audit;
 pub mod secrets_scanner;
+/// Policy-gated SOCKS5 UDP Associate relay over the egress vsock stream.
+pub mod socks5_udp;
 /// The per-VM substitution endpoint subprocess library half: the
 /// stdin config contract + store-opening/service assembly. The
 /// `mvm-substitution-endpoint` bin is the process wrapper.

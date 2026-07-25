@@ -21,9 +21,10 @@ use mvm_core::protocol::dns::DnsRecordType;
 /// Outcome of an egress request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressVerdict {
-    /// The plan permits a TCP connection to this destination. `ips` are every
-    /// admitted address (a pinned host can carry both an A and an AAAA record),
-    /// IPv4 first; the caller connects to them in order, first success wins.
+    /// The plan permits traffic to this destination. `ips` are every admitted
+    /// address (a pinned host can carry both an A and an AAAA record), IPv4
+    /// first; stream callers connect to them in order, while datagram callers
+    /// may send to each and accept the first valid response.
     Allow { ips: Vec<IpAddr>, port: u16 },
     /// Refused — policy did not admit it (claim-10 default-deny / mandatory-deny).
     Deny,
@@ -103,17 +104,12 @@ impl EgressGate {
     /// hostname path already gets. Every offered address is independently
     /// policy-checked, so widening the set never admits an unpinned target.
     pub fn decide_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
-        if !self.egress.permits(&Proto::Tcp, ip, port) {
-            return EgressVerdict::Deny;
-        }
-        let ips = match self.pins.pin_containing(&ip) {
-            Some(pin) => admitted_ips(&self.egress, &pin.ips, port),
-            None => Vec::new(),
-        };
-        // No pin (or a pin that admitted nothing for this port) ⇒ keep just the
-        // requested address, which the guard above already confirmed admitted.
-        let ips = if ips.is_empty() { vec![ip] } else { ips };
-        EgressVerdict::Allow { ips, port }
+        self.decide_addr_for_proto(Proto::Tcp, ip, port)
+    }
+
+    /// Decide a UDP datagram to an already-resolved address.
+    pub fn decide_udp_addr(&self, ip: IpAddr, port: u16) -> EgressVerdict {
+        self.decide_addr_for_proto(Proto::Udp, ip, port)
     }
 
     /// Decide a guest connect request — either a numeric `"<ip>:<port>"` or a
@@ -132,23 +128,63 @@ impl EgressGate {
     where
         F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
     {
+        self.decide_request_with_proto(Proto::Tcp, target, resolve)
+    }
+
+    /// Decide a UDP datagram request, resolving hostnames on the host side.
+    pub fn decide_udp_request_with<F>(&self, target: &str, resolve: F) -> EgressVerdict
+    where
+        F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+    {
+        self.decide_request_with_proto(Proto::Udp, target, resolve)
+    }
+
+    /// Decide a UDP datagram request using the host resolver.
+    pub fn decide_udp_request(&self, target: &str) -> EgressVerdict {
+        self.decide_udp_request_with(target, resolve_hostname_ips)
+    }
+
+    fn decide_addr_for_proto(&self, proto: Proto, ip: IpAddr, port: u16) -> EgressVerdict {
+        if !self.egress.permits(&proto, ip, port) {
+            return EgressVerdict::Deny;
+        }
+        let ips = match self.pins.pin_containing(&ip) {
+            Some(pin) => admitted_ips(&self.egress, &proto, &pin.ips, port),
+            None => Vec::new(),
+        };
+        // No pin (or a pin that admitted nothing for this port) ⇒ keep just the
+        // requested address, which the guard above already confirmed admitted.
+        let ips = if ips.is_empty() { vec![ip] } else { ips };
+        EgressVerdict::Allow { ips, port }
+    }
+
+    fn decide_request_with_proto<F>(&self, proto: Proto, target: &str, resolve: F) -> EgressVerdict
+    where
+        F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+    {
         let target = target.trim();
         // Numeric ip:port — decide directly.
         if let Ok(addr) = target.parse::<SocketAddr>() {
-            return self.decide_addr(addr.ip(), addr.port());
+            return self.decide_addr_for_proto(proto, addr.ip(), addr.port());
         }
         // hostname:port — resolve host-side against the pinned set, then policy-check
         // each pinned IP. Admit iff some pinned IP is permitted.
         match target.rsplit_once(':') {
             Some((host, port_str)) => match port_str.parse::<u16>() {
-                Ok(port) => self.decide_hostname_request(host, port, resolve),
+                Ok(port) => self.decide_hostname_request(proto, host, port, resolve),
                 Err(_) => EgressVerdict::Malformed,
             },
             None => EgressVerdict::Malformed,
         }
     }
 
-    fn decide_hostname_request<F>(&self, host: &str, port: u16, resolve: F) -> EgressVerdict
+    fn decide_hostname_request<F>(
+        &self,
+        proto: Proto,
+        host: &str,
+        port: u16,
+        resolve: F,
+    ) -> EgressVerdict
     where
         F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
     {
@@ -162,7 +198,7 @@ impl EgressGate {
         } else {
             return EgressVerdict::Deny;
         };
-        let ips = admitted_ips(&self.egress, &candidates, port);
+        let ips = admitted_ips(&self.egress, &proto, &candidates, port);
         if ips.is_empty() {
             EgressVerdict::Deny
         } else {
@@ -203,11 +239,16 @@ impl EgressGate {
     }
 }
 
-fn admitted_ips(egress: &CanonicalEgress, candidates: &[IpAddr], port: u16) -> Vec<IpAddr> {
+fn admitted_ips(
+    egress: &CanonicalEgress,
+    proto: &Proto,
+    candidates: &[IpAddr],
+    port: u16,
+) -> Vec<IpAddr> {
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
     for ip in candidates.iter().copied() {
-        if !egress.permits(&Proto::Tcp, ip, port) {
+        if !egress.permits(proto, ip, port) {
             continue;
         }
         match ip {
@@ -289,9 +330,27 @@ mod tests {
     }
 
     #[test]
+    fn udp_decision_uses_udp_rules_without_widening_tcp() {
+        let gate = EgressGate::new(CanonicalEgress::Rules(vec![CanonicalRule {
+            proto: Proto::Udp,
+            net: "192.0.2.1/32".parse().unwrap(),
+            port_lo: 5353,
+            port_hi: 5353,
+        }]));
+        assert_eq!(
+            gate.decide_udp_request("192.0.2.1:5353"),
+            EgressVerdict::Allow {
+                ips: vec!["192.0.2.1".parse().unwrap()],
+                port: 5353,
+            }
+        );
+        assert_eq!(gate.decide_request("192.0.2.1:5353"), EgressVerdict::Deny);
+    }
+
+    #[test]
     fn unrestricted_hostname_without_pin_resolves_host_side() {
         let gate = EgressGate::new(CanonicalEgress::Unrestricted);
-        let verdict = gate.decide_hostname_request("cache.nixos.org", 443, |_host| {
+        let verdict = gate.decide_hostname_request(Proto::Tcp, "cache.nixos.org", 443, |_host| {
             Ok(vec!["151.101.1.91".parse().unwrap()])
         });
         assert_eq!(
@@ -309,7 +368,7 @@ mod tests {
             "151.101.1.91/32",
             443,
         )]));
-        let verdict = gate.decide_hostname_request("cache.nixos.org", 443, |_host| {
+        let verdict = gate.decide_hostname_request(Proto::Tcp, "cache.nixos.org", 443, |_host| {
             Ok(vec!["151.101.1.91".parse().unwrap()])
         });
         assert_eq!(verdict, EgressVerdict::Deny);
@@ -478,11 +537,11 @@ mod tests {
 
         // Resolver order is v6-first (as a dual-stack host often returns); the
         // unlisted address is dropped and the admitted set is reordered v4-first.
-        let got = admitted_ips(&egress, &[v6, unlisted, v4], 443);
+        let got = admitted_ips(&egress, &Proto::Tcp, &[v6, unlisted, v4], 443);
         assert_eq!(got, vec![v4, v6]);
 
         // Wrong port admits nothing.
-        assert!(admitted_ips(&egress, &[v4, v6], 80).is_empty());
+        assert!(admitted_ips(&egress, &Proto::Tcp, &[v4, v6], 80).is_empty());
     }
 
     #[test]
