@@ -25,7 +25,7 @@ source inputs while claiming to restore the historical image.
 - [x] Route a successful flake revert through the normal admission callback.
 - [x] Add success, missing-revision, and tampered-artifact tests.
 - [x] Run workspace format, tests, check, and clippy gates.
-- [ ] Publish the verified branch as a pull request.
+- [x] Publish the verified branch as pull request #1843.
 
 ## Verification
 
@@ -39,4 +39,4 @@ cargo test --workspace -- --test-threads=1
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The branch is ready for pull request review.
+Pull request #1843 is open for review.
