@@ -7,13 +7,31 @@
 //! Nothing here grants a child trust because an ancestor is present or verified;
 //! boot integrity stays with dm-verity and admission with the signed bundle.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::CheckpointDigest;
 use mvm_core::image_lineage::{ImageBuildIdentity, ImageNode};
 
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
+
+/// Distinguishes concurrent temp files a single process writes into one node
+/// directory, so two threads saving the same content-address never collide on
+/// the scratch name before the atomic `rename`.
+static NEXT_TMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// Write `bytes` to `tmp_path`, fsync it, then `rename` it onto `final_path`.
+/// The rename is the atomic commit point; the fsync makes the committed bytes
+/// durable across a power loss.
+fn write_fsync_rename(tmp_path: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut f = std::fs::File::create(tmp_path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(tmp_path, final_path)
+}
 
 /// Filesystem-backed registry over `config::images_dir()` (or any root, for
 /// tests). Layout: `<root>/<node-digest>/node.json`. A node's directory name is
@@ -45,15 +63,42 @@ impl ImageStore {
         self.dir_for(node_digest).join("node.json")
     }
 
-    /// Persist a node under its own content-address.
+    /// Persist a node under its own content-address, atomically. The record is
+    /// written to a temp sibling, fsynced, and `rename`d into place, so a reader
+    /// (or a crash) never observes a half-written `node.json` — a save is
+    /// all-or-nothing. The recorder relies on this: it commits the node before
+    /// chain-signing its creation, and a partially-written record would break the
+    /// digest self-consistency [`read`] enforces.
     pub fn save(&self, node: &ImageNode) -> Result<()> {
         let dir = self.dir_for(&node.node_digest);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating image node dir {}", dir.display()))?;
         let json = serde_json::to_vec_pretty(node).context("serializing image node")?;
-        let path = self.node_path(&node.node_digest);
-        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+        let final_path = self.node_path(&node.node_digest);
+        let tmp_path = dir.join(format!(
+            "node.json.{}.{}.tmp",
+            std::process::id(),
+            NEXT_TMP_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        if let Err(e) = write_fsync_rename(&tmp_path, &final_path, &json) {
+            // Never leave a stray temp behind on a failed write.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e).with_context(|| format!("writing {}", final_path.display()));
+        }
         Ok(())
+    }
+
+    /// Delete a node's on-disk record and its directory. Tolerates an
+    /// already-absent node (idempotent). Used to roll back a just-saved node when
+    /// chain-signing its creation fails, so the store never keeps a node whose
+    /// creation the recorder abandoned.
+    pub fn remove(&self, node_digest: &CheckpointDigest) -> Result<()> {
+        let dir = self.dir_for(node_digest);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("removing image node dir {}", dir.display())),
+        }
     }
 
     /// Read the node stored under `node_digest` (its directory name). Fails
@@ -351,6 +396,52 @@ mod tests {
         let n = node("slot-a", "rev-1", None);
         store.save(&n).unwrap();
         assert_eq!(store.read(&n.node_digest).unwrap(), n);
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ImageStore::at(tmp.path());
+        let n = node("slot-a", "rev-1", None);
+        store.save(&n).unwrap();
+
+        // The committed record is complete and parses back to the same node.
+        assert_eq!(store.read(&n.node_digest).unwrap(), n);
+
+        // The node directory holds exactly node.json — the temp sibling was
+        // renamed away, never left behind.
+        let dir = store.dir_for(&n.node_digest);
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["node.json".to_string()],
+            "only node.json, no .tmp"
+        );
+
+        // Re-saving overwrites in place (rename-replace), still leaving one file.
+        store.save(&n).unwrap();
+        assert_eq!(store.read(&n.node_digest).unwrap(), n);
+        let after: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(after.len(), 1, "overwrite leaves a single node.json");
+    }
+
+    #[test]
+    fn remove_deletes_the_node_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ImageStore::at(tmp.path());
+        let n = node("slot-a", "rev-1", None);
+        store.save(&n).unwrap();
+        assert!(store.dir_for(&n.node_digest).exists());
+
+        store.remove(&n.node_digest).unwrap();
+        assert!(!store.dir_for(&n.node_digest).exists(), "node dir removed");
+        assert!(store.by_digest(&n.node_digest).unwrap().is_none());
+
+        // Removing an already-absent node is a no-op, not an error.
+        store.remove(&n.node_digest).unwrap();
     }
 
     #[test]
