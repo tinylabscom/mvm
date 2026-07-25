@@ -426,6 +426,7 @@ fn kill(pid: libc::pid_t, sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     // `stop_vm` reaps the moat BEFORE its not-running early return (so a crashed
     // VM's decrypted-secret endpoint can't outlive the guest). That ordering is
@@ -450,13 +451,12 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-uds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_mvm_home = std::env::var_os("MVM_HOME");
         // Route vm_substitution_env_path under a temp MVM_HOME so the write lands
         // somewhere disposable.
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_HOME", &dir) };
+        env.set("MVM_HOME", &dir);
 
         // Stub endpoint: dump stdin (the config JSON) to a file, then emit one
         // handshake line so the spawn helper's read_handshake_line succeeds.
@@ -474,9 +474,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let saved_bin = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub) };
+        env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
 
         // The spawn helper writes the minted (var→placeholder) handshake to
         // `vm_substitution_env_path` — ensure its parent dir exists under the root.
@@ -499,17 +497,6 @@ mod tests {
             raw_egress: false,
         });
 
-        // Restore env before asserting so a failure can't leak it.
-        unsafe {
-            match saved_bin {
-                Some(v) => std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", v),
-                None => std::env::remove_var("MVM_SUBSTITUTION_ENDPOINT_PATH"),
-            }
-            match saved_mvm_home {
-                Some(v) => std::env::set_var("MVM_HOME", v),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
         res.expect("spawn with stub endpoint should succeed");
 
         let captured = std::fs::read_to_string(&cfg_out).expect("stub wrote config");
@@ -525,13 +512,12 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-subst-rollback-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
 
-        let saved_mvm_home = std::env::var_os("MVM_HOME");
-        let saved_bin = std::env::var_os("MVM_SUBSTITUTION_ENDPOINT_PATH");
         let invalid_home = dir.join("mvm-home-file");
         std::fs::write(&invalid_home, b"not a directory").unwrap();
         let stub = dir.join("stub-endpoint.sh");
@@ -556,11 +542,8 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        // SAFETY: serialised by HOME_TEST_LOCK; restored before the test exits.
-        unsafe {
-            std::env::set_var("MVM_HOME", &invalid_home);
-            std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
-        }
+        env.set("MVM_HOME", &invalid_home);
+        env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
 
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let result = spawn_substitution_endpoint(SubstitutionSpawnParams {
@@ -577,17 +560,6 @@ mod tests {
             network_policy: None,
             raw_egress: false,
         });
-
-        unsafe {
-            match saved_bin {
-                Some(value) => std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", value),
-                None => std::env::remove_var("MVM_SUBSTITUTION_ENDPOINT_PATH"),
-            }
-            match saved_mvm_home {
-                Some(value) => std::env::set_var("MVM_HOME", value),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
 
         assert!(result.is_err(), "invalid MVM_HOME must fail sidecar setup");
         assert!(!state_dir.join(SUBST_PID_FILE).exists());

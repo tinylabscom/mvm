@@ -549,6 +549,7 @@ impl HostMediatedTool for WebFetchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     // Test fetcher — records its calls + returns canned responses.
     struct StubFetcher {
@@ -799,37 +800,27 @@ mod tests {
     fn allowlist_from_env_var_parses_comma_separated() {
         // Use a process-unique var name so parallel tests don't
         // race on the same key.
+        let mut env = TestEnv::new();
         let var = "MVM_TEST_WEB_FETCH_ALLOWLIST_PARSE";
-        // SAFETY: tests are single-threaded for this var; the name
-        // is unique to this test.
-        unsafe {
-            std::env::set_var(var, "api.openai.com,api.anthropic.com,api.brave.com");
-        }
+        env.set(var, "api.openai.com,api.anthropic.com,api.brave.com");
         let set = allowlist_from_env_var(var);
         assert!(set.contains("api.openai.com"));
         assert!(set.contains("api.anthropic.com"));
         assert!(set.contains("api.brave.com"));
         assert_eq!(set.len(), 3);
-        unsafe {
-            std::env::remove_var(var);
-        }
     }
 
     #[test]
     fn allowlist_from_env_var_drops_empty_entries_and_trims_whitespace() {
+        let mut env = TestEnv::new();
         let var = "MVM_TEST_WEB_FETCH_ALLOWLIST_TRIM";
-        unsafe {
-            std::env::set_var(var, "  api.openai.com  , ,, api.brave.com,");
-        }
+        env.set(var, "  api.openai.com  , ,, api.brave.com,");
         let set = allowlist_from_env_var(var);
         assert!(set.contains("api.openai.com"));
         assert!(set.contains("api.brave.com"));
         // Empty entries (`,,` / trailing comma) and whitespace-only
         // entries don't widen the allowlist.
         assert_eq!(set.len(), 2);
-        unsafe {
-            std::env::remove_var(var);
-        }
     }
 
     #[test]

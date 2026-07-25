@@ -1,3 +1,8 @@
+// The one `unsafe` carve-out under the crate's `deny(unsafe_code)`: this module
+// centralizes the process-wide env mutation Rust 2024 marks unsafe, serialized
+// behind `ENV_LOCK` and restored on drop.
+#![allow(unsafe_code)]
+
 use std::ffi::{OsStr, OsString};
 use std::sync::{Mutex, MutexGuard};
 

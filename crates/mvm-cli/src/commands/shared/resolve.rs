@@ -278,6 +278,7 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
 mod tests {
     use super::*;
     use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn run_net_default_is_deny_all() {
@@ -390,33 +391,16 @@ mod tests {
     /// under nextest; restored here so a threaded runner doesn't leak it.
     #[test]
     fn env_overrides_auto_detect_with_alias() {
-        let saved_hv = std::env::var_os("MVM_HYPERVISOR");
-        let saved_be = std::env::var_os("MVM_BACKEND");
-        // SAFETY: test-local env mutation, restored before returning.
-        unsafe {
-            std::env::remove_var("MVM_BACKEND");
-            std::env::set_var("MVM_HYPERVISOR", "libkrun");
-        }
+        let mut env = TestEnv::new();
+        env.remove("MVM_BACKEND");
+        env.set("MVM_HYPERVISOR", "libkrun");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "libkrun");
         // An explicit flag wins over the env override.
         assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
         // The older alias is still honored.
-        unsafe {
-            std::env::remove_var("MVM_HYPERVISOR");
-            std::env::set_var("MVM_BACKEND", "hvf");
-        }
+        env.remove("MVM_HYPERVISOR");
+        env.set("MVM_BACKEND", "hvf");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
-        // SAFETY: restore prior values.
-        unsafe {
-            match saved_hv {
-                Some(v) => std::env::set_var("MVM_HYPERVISOR", v),
-                None => std::env::remove_var("MVM_HYPERVISOR"),
-            }
-            match saved_be {
-                Some(v) => std::env::set_var("MVM_BACKEND", v),
-                None => std::env::remove_var("MVM_BACKEND"),
-            }
-        }
     }
 
     /// On the macOS-26 Apple Silicon tier the auto-detect default is the
@@ -428,24 +412,9 @@ mod tests {
         if !mvm_core::platform::current().is_hvf_default_tier() {
             return; // Not on the macOS-26 tier (e.g. macOS 13-25 CI runner).
         }
-        let saved_hv = std::env::var_os("MVM_HYPERVISOR");
-        let saved_be = std::env::var_os("MVM_BACKEND");
-        // SAFETY: test-local env mutation, restored before returning.
-        unsafe {
-            std::env::remove_var("MVM_HYPERVISOR");
-            std::env::remove_var("MVM_BACKEND");
-        }
+        let mut env = TestEnv::new();
+        env.remove("MVM_HYPERVISOR");
+        env.remove("MVM_BACKEND");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
-        // SAFETY: restore prior values.
-        unsafe {
-            match saved_hv {
-                Some(v) => std::env::set_var("MVM_HYPERVISOR", v),
-                None => std::env::remove_var("MVM_HYPERVISOR"),
-            }
-            match saved_be {
-                Some(v) => std::env::set_var("MVM_BACKEND", v),
-                None => std::env::remove_var("MVM_BACKEND"),
-            }
-        }
     }
 }

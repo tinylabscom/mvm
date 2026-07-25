@@ -496,6 +496,7 @@ impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
 mod tests {
     use super::*;
     use crate::checkpoint::VmFullControl as _;
+    use mvm_core::util::test_env::TestEnv;
 
     /// `save_memory` requires an absolute path — a relative path would be
     /// misinterpreted by the Firecracker API.
@@ -544,10 +545,9 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        let saved = std::env::var_os("MVM_HOME");
-        // SAFETY: serialized by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_HOME", tmp.path()) };
+        env.set("MVM_HOME", tmp.path());
 
         let vm_name = "anchor-test";
         let vm_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -580,14 +580,6 @@ mod tests {
                 &vm_dir.to_string_lossy()
             ))
         );
-
-        // Restore before dropping the lock so concurrent tests see clean env.
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("MVM_HOME", v),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
     }
 
     /// `device_anchors` fails with a clear message when the VM has no persisted
@@ -597,10 +589,9 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        let saved = std::env::var_os("MVM_HOME");
-        // SAFETY: serialized by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_HOME", tmp.path()) };
+        env.set("MVM_HOME", tmp.path());
 
         let ctl = FcVmFullControl::new("no-mode-vm");
         let err = ctl.device_anchors().unwrap_err();
@@ -608,12 +599,5 @@ mod tests {
             err.to_string().contains("mode.json"),
             "error must mention missing mode.json: {err}"
         );
-
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("MVM_HOME", v),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
     }
 }

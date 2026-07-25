@@ -74,15 +74,13 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    // `--no-persistent-builder` flips the
-    // env-var bridge that `mvm_build::pipeline::dev_build` reads.
-    // Set once at the top so every subsequent dispatch (flake /
-    // manifest / mvmfile) sees the same toggle. We deliberately
-    // leave the env var set for the process's lifetime — every
-    // codepath under `mvmctl build` should agree on the choice.
-    // SAFETY: called early, before any threads spawn.
+    // `--no-persistent-builder` flips the env-var bridge that
+    // `mvm_build::pipeline::dev_build` reads. Set once at the top so every
+    // subsequent dispatch (flake / manifest / mvmfile) sees the same toggle,
+    // and left set for the process's lifetime so every codepath under
+    // `mvmctl build` agrees on the choice.
     if args.no_persistent_builder {
-        unsafe { std::env::set_var("MVM_NO_PERSISTENT_BUILDER", "1") };
+        crate::commands::set_cli_env("MVM_NO_PERSISTENT_BUILDER", "1");
     }
     // `--deps` narrows the build to the deps
     // volume only. We invalidate the cache index entries pointing at

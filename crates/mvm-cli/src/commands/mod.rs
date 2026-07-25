@@ -227,21 +227,37 @@ pub fn run() -> Result<()> {
     with_hints(result)
 }
 
+/// Set a process-global environment variable from the CLI.
+///
+/// mvmctl uses the environment as its config-propagation channel: these values
+/// are read both in-process (`fc_version()`, the backend/kernel resolvers) and,
+/// crucially, by re-exec'd child `mvmctl` helpers — e.g. the builder-VM
+/// bootstrap — which receive the resolved CLI choice only by inheriting this
+/// environment. That rules out a `OnceCell` or a threaded parameter.
+pub(in crate::commands) fn set_cli_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
+    // SAFETY: every caller runs on the main thread before mvmctl creates any
+    // worker threads or async runtime — at CLI startup and at the very top of a
+    // command handler. The only thread alive by then is the SIGINT servicer
+    // (`crate::signal`), which blocks on a pipe read and never touches the
+    // environment, so no `getenv` can race this `setenv`.
+    unsafe { std::env::set_var(key, value) };
+}
+
 fn apply_startup_env(cli: &Cli) {
     if let Some(ref version) = cli.fc_version {
-        unsafe { std::env::set_var("MVM_FC_VERSION", version) };
+        set_cli_env("MVM_FC_VERSION", version);
     }
     if let Some(ref backend) = cli.builder {
-        unsafe { std::env::set_var("MVM_BUILDER_BACKEND", backend) };
+        set_cli_env("MVM_BUILDER_BACKEND", backend);
     }
     if let Some(dir) = aux_bin_dir_to_apply(
         env!("MVM_AUX_BIN_DIR"),
         std::env::var_os("MVM_AUX_BIN_DIR").is_some(),
     ) {
-        unsafe { std::env::set_var("MVM_AUX_BIN_DIR", dir) };
+        set_cli_env("MVM_AUX_BIN_DIR", dir);
     }
     if let Some(ref source) = cli.kernel_source {
-        unsafe { std::env::set_var("MVM_KERNEL_SOURCE", source) };
+        set_cli_env("MVM_KERNEL_SOURCE", source);
     }
 }
 
@@ -278,9 +294,7 @@ fn configure_runtime_logging(cli: &Cli) {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
     mvm_runtime::ui::set_verbose(verbose);
     if cli.verbose > 0 && std::env::var_os("RUST_LOG").is_none() {
-        unsafe {
-            std::env::set_var("RUST_LOG", logging::filter_for_verbosity(cli.verbose));
-        }
+        set_cli_env("RUST_LOG", logging::filter_for_verbosity(cli.verbose));
     }
     let log_format = match cli.log_format.as_deref() {
         Some("json") => LogFormat::Json,

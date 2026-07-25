@@ -1216,6 +1216,9 @@ fn nix_system() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The local `TestEnv` below is a ShellEnvironment mock; import the
+    // process-env guard under a distinct name so the two don't collide.
+    use mvm_core::util::test_env::TestEnv as EnvGuard;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -2076,17 +2079,9 @@ mod tests {
         // sentinel to check for in this mock), the env var escape
         // hatch can force one.
         let env = TestEnv::new();
-        // SAFETY: tests only; MVM_DEV_FLAKE_URL is process-global
-        // but the value is harmless and we restore it.
-        let prev = std::env::var("MVM_DEV_FLAKE_URL").ok();
-        unsafe { std::env::set_var("MVM_DEV_FLAKE_URL", "git+file:///tmp/fake?dir=nix/dev") };
+        let mut env_guard = EnvGuard::new();
+        env_guard.set("MVM_DEV_FLAKE_URL", "git+file:///tmp/fake?dir=nix/dev");
         let flags = dev_override_flags(&env, BuildMode::Dev);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_DEV_FLAKE_URL", v),
-                None => std::env::remove_var("MVM_DEV_FLAKE_URL"),
-            }
-        }
         assert!(
             flags.contains("--override-input mvm"),
             "Dev with MVM_DEV_FLAKE_URL set must produce an override; got: {flags:?}"

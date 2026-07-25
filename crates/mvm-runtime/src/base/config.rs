@@ -106,6 +106,7 @@ pub struct RunInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn test_constants_non_empty() {
@@ -289,7 +290,8 @@ mod tests {
     #[test]
     fn test_production_mode_disabled_by_default() {
         // Without env var set, should be false
-        unsafe { std::env::remove_var("MVM_PRODUCTION") };
+        let mut env = TestEnv::new();
+        env.remove("MVM_PRODUCTION");
         assert!(!mvm_core::config::is_production_mode());
     }
 }

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! `NetworkProvider` — the provisioning + policy + teardown seam for one
 //! VM's network.
 //!

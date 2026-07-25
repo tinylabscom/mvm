@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! mvm-sdk — build-time Rust SDK for declaring mvm workloads.
 //!
 //! Builder-pattern surface (no globals), build-time DSL only in v1 (no
