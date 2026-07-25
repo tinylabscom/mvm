@@ -20,6 +20,10 @@
       use the verified upstream hash; focused coverage, freshness checking,
       workspace tests, check, clippy, and formatting pass. Published as PR
       #1845 for review.
+- [x] #1813 workload-lifetime firewall state: key installs by `(tenant,
+      workload)` so hot plan revisions replace prior rules without orphaning
+      firewalls. Focused regression coverage, workspace check, full tests,
+      clippy, and formatting pass; published as PR #1847 for review.
 
 ---
 

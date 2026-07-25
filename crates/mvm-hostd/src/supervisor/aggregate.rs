@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::VerifyingKey;
 use mvm_core::plan::{
-    DepsVolumeBinding, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, check_window,
+    DepsVolumeBinding, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, TenantId,
+    WorkloadId, check_window,
 };
 use mvm_core::time::{Clock, SystemClock};
 use mvm_sdk::compile::deps_audit::{VolumeError, verify_sealed_volume};
@@ -50,6 +51,28 @@ use crate::supervisor::secrets_scanner::SecretsScanner;
 use crate::supervisor::ssrf_guard::SsrfGuard;
 use crate::supervisor::state::{PlanState, PlanStateMachine, StateTransitionError};
 use crate::supervisor::tool_gate::{NoopToolGate, ToolGate};
+
+/// Stable identity shared by every revision of one tenant workload.
+///
+/// `PlanId` identifies one content-addressed execution and therefore changes
+/// when a hot policy revision is published. Firewall state survives those
+/// revisions, so it is keyed by this identity instead.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WorkloadKey {
+    /// Tenant that owns the workload.
+    pub tenant: TenantId,
+    /// Stable workload identity within the tenant.
+    pub workload: WorkloadId,
+}
+
+impl WorkloadKey {
+    fn from_plan(plan: &mvm_core::plan::ExecutionPlan) -> Self {
+        Self {
+            tenant: plan.tenant.clone(),
+            workload: plan.workload.clone(),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum SupervisorError {
@@ -170,9 +193,12 @@ pub struct Supervisor {
     /// launch preparation; this is the only network identifier the
     /// supervisor still owns directly.
     pub firewall_proxy_iface: Option<String>,
-    /// VM-scoped firewall installs keyed by plan id. Used to tear
-    /// down the same rules if backend launch fails or on normal stop.
-    pub installed_firewalls: BTreeMap<PlanId, FirewallSpec>,
+    /// VM-scoped firewall installs keyed by stable workload identity. A hot
+    /// plan revision replaces the prior entry instead of orphaning its rules.
+    pub installed_firewalls: BTreeMap<WorkloadKey, FirewallSpec>,
+    /// Transient index from an execution plan to its workload key, allowing
+    /// the legacy stop API to withdraw the correct workload-scoped rules.
+    firewall_plan_keys: BTreeMap<PlanId, WorkloadKey>,
 }
 
 impl Default for Supervisor {
@@ -196,6 +222,7 @@ impl Default for Supervisor {
             deps_volumes_root: None,
             firewall_proxy_iface: None,
             installed_firewalls: BTreeMap::new(),
+            firewall_plan_keys: BTreeMap::new(),
         }
     }
 }
@@ -447,6 +474,20 @@ impl Supervisor {
                 .await?;
             return Err(SupervisorError::from(e));
         }
+        let workload_key = WorkloadKey::from_plan(&plan);
+        if let Some(previous) = self.installed_firewalls.get(&workload_key) {
+            if let Err(e) =
+                SupervisorEgressEnforcer::new(self.firewall.clone()).withdraw(&previous.vm_id)
+            {
+                self.emit_audit_then_fail(&plan, "plan.rejected.firewall", &e.to_string())
+                    .await?;
+                return Err(SupervisorError::EgressEnforcement(e));
+            }
+            self.installed_firewalls.remove(&workload_key);
+            self.firewall_plan_keys
+                .retain(|_, key| key != &workload_key);
+        }
+
         // Install host-side default-deny *through the EgressEnforcer seam*:
         // the supervisor enforces behind the trait instead of
         // calling the firewall directly. `SupervisorEgressEnforcer` delegates
@@ -465,7 +506,9 @@ impl Supervisor {
             return Err(SupervisorError::EgressEnforcement(e));
         }
         self.installed_firewalls
-            .insert(plan.plan_id.clone(), firewall_spec);
+            .insert(workload_key.clone(), firewall_spec);
+        self.firewall_plan_keys
+            .insert(plan.plan_id.clone(), workload_key);
 
         // Step 4: backend dispatch.
         if let Err(e) = self.backend.launch(&plan).await {
@@ -657,7 +700,8 @@ impl Supervisor {
         // Withdraw the host enforcement through the EgressEnforcer seam,
         // symmetric with the enforce-on-launch path. The adapter delegates to
         // the same firewall.teardown.
-        if let Some(spec) = self.installed_firewalls.remove(plan_id)
+        if let Some(workload_key) = self.firewall_plan_keys.remove(plan_id)
+            && let Some(spec) = self.installed_firewalls.remove(&workload_key)
             && let Err(e) =
                 SupervisorEgressEnforcer::new(self.firewall.clone()).withdraw(&spec.vm_id)
         {
@@ -684,7 +728,8 @@ impl Supervisor {
 
     fn teardown_firewall_for_plan(&mut self, plan_id: &PlanId) {
         // Best-effort withdraw through the seam.
-        if let Some(spec) = self.installed_firewalls.remove(plan_id)
+        if let Some(workload_key) = self.firewall_plan_keys.remove(plan_id)
+            && let Some(spec) = self.installed_firewalls.remove(&workload_key)
             && let Err(e) =
                 SupervisorEgressEnforcer::new(self.firewall.clone()).withdraw(&spec.vm_id)
         {
@@ -1348,6 +1393,39 @@ mod tests {
         assert!(backend.stops().is_empty());
         assert_eq!(firewall.installs(), vec![sample_firewall_spec()]);
         assert!(firewall.teardowns().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hot_revision_replaces_firewall_for_same_workload() {
+        let first = sample_plan();
+        let (signed_first, _first_sk, first_vk) = sign_sample(&first);
+        let mut revision = sample_plan();
+        revision.plan_version = 2;
+        revision.nonce = Nonce::from_bytes([0xcd; 16]);
+        revision.plan_id = mvm_core::plan::compute_plan_id(&revision);
+        let (signed_revision, _revision_sk, revision_vk) = sign_sample(&revision);
+
+        let backend = Arc::new(MockBackend::new());
+        let firewall = Arc::new(MockFirewall::new());
+        let mut supervisor = make_supervisor_with_firewall(backend, firewall.clone());
+
+        supervisor
+            .launch(&signed_first, &[("test", &first_vk)])
+            .await
+            .unwrap();
+        supervisor.state = PlanStateMachine::new();
+        supervisor
+            .launch(&signed_revision, &[("test", &revision_vk)])
+            .await
+            .unwrap();
+
+        assert_eq!(supervisor.installed_firewalls.len(), 1);
+        assert!(
+            supervisor
+                .installed_firewalls
+                .contains_key(&WorkloadKey::from_plan(&revision))
+        );
+        assert_eq!(firewall.teardowns(), vec!["vm1".to_string()]);
     }
 
     #[tokio::test]
