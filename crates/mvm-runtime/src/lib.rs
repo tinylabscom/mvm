@@ -66,11 +66,17 @@ pub mod hvf;
 pub mod hvf_backend;
 pub(crate) mod hvf_bootargs;
 pub mod image;
+/// Content-addressed image version-lineage store + chain-anchored verification
+/// (the image analog of [`checkpoint`]). Reuses the shared `lineage` walk.
+pub mod image_lineage;
 /// KVM (Linux) backend — drives [`vmm`] on Linux via `kvm-ioctls`, implementing
 /// the [`vmm::hv`] seam. `kvm::x86_boot` is pure logic
 /// (compiles + tests everywhere); the ioctl glue is Linux-only.
 pub mod kvm;
 pub mod libkrun;
+/// Namespace-agnostic hash-linked lineage walk shared by [`checkpoint`] and
+/// [`image_lineage`].
+pub(crate) mod lineage;
 pub mod microvm;
 /// The hermetic in-memory `MockBackend` — see its module docs for the
 /// security posture. Gated behind `test-support` so it never compiles into

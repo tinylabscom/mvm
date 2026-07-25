@@ -245,8 +245,10 @@ impl CheckpointDigestInput<'_> {
 }
 
 /// Content blobs borrowed and sorted by `name`, so a checkpoint's digest does
-/// not depend on the order capture happened to append them.
-fn sorted_content(content: &[ContentBlob]) -> Vec<&ContentBlob> {
+/// not depend on the order capture happened to append them. Shared with the
+/// image-lineage node digest so both content-address a blob manifest the same
+/// order-invariant way.
+pub(crate) fn sorted_content(content: &[ContentBlob]) -> Vec<&ContentBlob> {
     let mut refs: Vec<&ContentBlob> = content.iter().collect();
     refs.sort_by(|a, b| a.name.cmp(&b.name));
     // Blob names index the manifest (fork/restore/diff look up by name); a
@@ -254,7 +256,7 @@ fn sorted_content(content: &[ContentBlob]) -> Vec<&ContentBlob> {
     // ambiguate the lookup. Capture never emits one — assert it in debug.
     debug_assert!(
         refs.windows(2).all(|w| w[0].name != w[1].name),
-        "checkpoint content manifest has duplicate blob names"
+        "content manifest has duplicate blob names"
     );
     refs
 }

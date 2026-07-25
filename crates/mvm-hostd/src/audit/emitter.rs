@@ -75,6 +75,105 @@ pub mod checkpoint_audit {
     pub const LABEL_CHILD_DIGEST: &str = "child_digest";
 }
 
+/// Wire-stable event name and label keys for the image version-lineage audit
+/// entry. Shared so the emitter (writer) and the lineage chain-anchor (reader)
+/// cannot drift on a string — a drift there would silently defeat chain-anchored
+/// image-lineage verification.
+pub mod image_audit {
+    /// Emitted when a compiled image's version-lineage node is created.
+    pub const CREATED_EVENT: &str = "image.created";
+    /// Label: the node's own content-address. The chain-anchor keys on this.
+    pub const LABEL_NODE_DIGEST: &str = "image_node_digest";
+    /// Label: the predecessor node's content-address (the parent hash-link), or
+    /// [`GENESIS_PARENT`] when the node has none.
+    pub const LABEL_PARENT_DIGEST: &str = "image_parent_digest";
+    /// Label: the build-identity discriminant (`"flake"` / `"oci"`).
+    pub const LABEL_BUILD_IDENTITY_KIND: &str = "image_build_identity_kind";
+    /// Label: the build-identity value (flake slot hash, or
+    /// `"<registry>/<repository>"`).
+    pub const LABEL_BUILD_IDENTITY: &str = "image_build_identity";
+    /// Label: the provenance discriminant (`"build"` / `"oci"`).
+    pub const LABEL_PROVENANCE_KIND: &str = "image_provenance_kind";
+    /// Label: the build-provenance input reference.
+    pub const LABEL_PROVENANCE_INPUT_REF: &str = "image_provenance_input_ref";
+    /// Label: the build-provenance lock digest, when recorded.
+    pub const LABEL_PROVENANCE_LOCK_DIGEST: &str = "image_provenance_lock_digest";
+    /// Label: the OCI-provenance resolved manifest digest.
+    pub const LABEL_PROVENANCE_RESOLVED_DIGEST: &str = "image_provenance_resolved_digest";
+    /// Label: the OCI-provenance layer digest set (comma-joined).
+    pub const LABEL_PROVENANCE_LAYER_DIGESTS: &str = "image_provenance_layer_digests";
+    /// [`LABEL_PARENT_DIGEST`] sentinel for a genesis (parentless) node.
+    pub const GENESIS_PARENT: &str = "genesis";
+}
+
+/// Extract the `image.created` label set from a node's provenance attributes.
+/// The parent hash-link is recorded as provenance; nothing here is a trust
+/// grant (lineage is provenance, never authorization).
+fn image_created_labels(node: &mvm_core::image_lineage::ImageNode) -> Vec<(String, String)> {
+    use image_audit as k;
+    use mvm_core::image_lineage::{ImageBuildIdentity, ImageProvenance};
+
+    let mut labels = vec![
+        (
+            k::LABEL_NODE_DIGEST.to_string(),
+            node.node_digest.as_str().to_string(),
+        ),
+        (
+            k::LABEL_PARENT_DIGEST.to_string(),
+            node.parent
+                .as_ref()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| k::GENESIS_PARENT.to_string()),
+        ),
+    ];
+    match &node.build_identity {
+        ImageBuildIdentity::Flake { slot_hash } => {
+            labels.push((
+                k::LABEL_BUILD_IDENTITY_KIND.to_string(),
+                "flake".to_string(),
+            ));
+            labels.push((k::LABEL_BUILD_IDENTITY.to_string(), slot_hash.clone()));
+        }
+        ImageBuildIdentity::Oci {
+            registry,
+            repository,
+        } => {
+            labels.push((k::LABEL_BUILD_IDENTITY_KIND.to_string(), "oci".to_string()));
+            labels.push((
+                k::LABEL_BUILD_IDENTITY.to_string(),
+                format!("{registry}/{repository}"),
+            ));
+        }
+    }
+    match &node.provenance {
+        ImageProvenance::Build {
+            input_ref,
+            lock_digest,
+        } => {
+            labels.push((k::LABEL_PROVENANCE_KIND.to_string(), "build".to_string()));
+            labels.push((k::LABEL_PROVENANCE_INPUT_REF.to_string(), input_ref.clone()));
+            if let Some(lock) = lock_digest {
+                labels.push((k::LABEL_PROVENANCE_LOCK_DIGEST.to_string(), lock.clone()));
+            }
+        }
+        ImageProvenance::Oci {
+            resolved_digest,
+            layer_digests,
+        } => {
+            labels.push((k::LABEL_PROVENANCE_KIND.to_string(), "oci".to_string()));
+            labels.push((
+                k::LABEL_PROVENANCE_RESOLVED_DIGEST.to_string(),
+                resolved_digest.clone(),
+            ));
+            labels.push((
+                k::LABEL_PROVENANCE_LAYER_DIGESTS.to_string(),
+                layer_digests.join(","),
+            ));
+        }
+    }
+    labels
+}
+
 /// Resolve the default audit-chain directory: `~/.mvm/audit/`.
 pub fn default_audit_dir() -> Result<PathBuf> {
     Ok(mvm_core::config::mvm_home_strict()?.join("audit"))
@@ -360,6 +459,19 @@ impl AuditEmitter {
                 (k::LABEL_CHILD_DIGEST.to_string(), child_digest.to_string()),
             ],
         )
+    }
+
+    /// Record that a compiled image's version-lineage node was created. The
+    /// label set carries the node's content-address (the chain-anchor keys on
+    /// it), its parent hash-link, the build identity, and the provenance
+    /// attributes. Chain-signed so `verify_image_lineage` can anchor the node's
+    /// content-address to a signature it cannot forge.
+    pub fn emit_image_created(
+        &self,
+        plan: &ExecutionPlan,
+        node: &mvm_core::image_lineage::ImageNode,
+    ) -> Result<()> {
+        self.emit(plan, image_audit::CREATED_EVENT, image_created_labels(node))
     }
 
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
@@ -918,6 +1030,79 @@ mod tests {
         assert!(content.contains(&parent_digest));
         assert!(content.contains(&child_digest));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn image_created_is_chain_signed_with_required_labels() {
+        use mvm_core::image_lineage::{
+            ImageBuildIdentity, ImageCanonicalId, ImageIdentity, ImageNode, ImageProvenance,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-IMG");
+
+        let parent = ImageNode::builder(
+            ImageBuildIdentity::Flake {
+                slot_hash: "slot-a".into(),
+            },
+            ImageIdentity {
+                canonical: ImageCanonicalId::Flake {
+                    revision_hash: "rev-1".into(),
+                },
+                artifacts: vec![mvm_core::checkpoint::ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: "aa".into(),
+                }],
+            },
+            ImageProvenance::Build {
+                input_ref: ".#app".into(),
+                lock_digest: Some("sha256:lock".into()),
+            },
+        )
+        .created_unix(1)
+        .build();
+        let child = ImageNode::builder(
+            ImageBuildIdentity::Flake {
+                slot_hash: "slot-a".into(),
+            },
+            ImageIdentity {
+                canonical: ImageCanonicalId::Flake {
+                    revision_hash: "rev-2".into(),
+                },
+                artifacts: vec![mvm_core::checkpoint::ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: "bb".into(),
+                }],
+            },
+            ImageProvenance::Build {
+                input_ref: ".#app".into(),
+                lock_digest: None,
+            },
+        )
+        .parent(Some(parent.node_digest.clone()))
+        .created_unix(2)
+        .build();
+
+        emitter.emit_image_created(&plan, &parent).unwrap();
+        emitter.emit_image_created(&plan, &child).unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("image.created"));
+        assert!(content.contains("image_node_digest"));
+        assert!(content.contains(parent.node_digest.as_str()));
+        assert!(content.contains(child.node_digest.as_str()));
+        // The genesis node records the sentinel; the child records its hash-link.
+        assert!(content.contains("genesis"));
+        assert!(content.contains("image_build_identity"));
+        assert!(content.contains("slot-a"));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 2);
     }
 
     #[test]

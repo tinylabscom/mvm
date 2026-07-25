@@ -30,6 +30,9 @@ pub mod guest_netd;
 /// Pure health-state reducer: fold probe results into a health state and
 /// decide restart/give-up actions. No I/O.
 pub mod health;
+/// Content-addressed image version-lineage nodes (the image analog of
+/// [`checkpoint`]). Provenance metadata, never authorization.
+pub mod image_lineage;
 /// Host ingress-broker decision logic (host listener only by explicit policy).
 pub mod ingress_broker;
 /// Ingress-broker handler: compose decision + trace into an audit record.
