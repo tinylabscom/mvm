@@ -43,7 +43,7 @@ use mvm_runtime::machine::persist::{
 
 use super::Cli;
 use super::build::build;
-use super::vm::exec::{RunArgs, RunProfile, run_secure};
+use super::vm::exec::{RunArgs, RunProfile, run_secure, run_secure_with_source};
 use super::vm::group::VmCmd;
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
@@ -1332,59 +1332,79 @@ fn complete_revert(
     match outcome {
         super::vm::checkpoint::RevertOutcome::Done => Ok(()),
         super::vm::checkpoint::RevertOutcome::RunImage(run) => {
-            run_dispatch(cli, run_args_for_image_revert(run), cfg)
+            let (args, source) = run_args_for_image_revert(run);
+            run_secure_with_source(cli, args.into_run_args(), cfg, source)
         }
     }
 }
 
-/// Build the `machine run --image` args for an image-node restore. The restore
+/// Build the transient-run args and exact image source for an image-node restore. The restore
 /// re-derives the current network policy at launch and never bakes the
 /// snapshot-era posture: outbound networking stays off (`net = false`). On the
 /// default `firecracker` backend that resolves to enforced default-deny; note
 /// the pre-existing caveat that a libkrun transient run does not enforce
 /// per-run egress, so "off" is a request the FC path enforces, not a blanket
 /// guarantee on every backend.
-fn run_args_for_image_revert(run: super::vm::checkpoint::RevertRunImage) -> MachineRunArgs {
-    MachineRunArgs {
-        image: run.image,
-        flake: None,
-        hypervisor: run.hypervisor,
-        json: run.json,
-        name: None,
-        manifest: None,
-        runtime_pack: false,
-        flake_profile: None,
-        net: false,
-        allow_host: Vec::new(),
-        cpus: 2,
-        memory: "512M".to_string(),
-        profile: RunProfile::Standard,
-        agent_verb: Vec::new(),
-        volume: Vec::new(),
-        env: Vec::new(),
-        timeout: None,
-        receipt: None,
-        dry_run: false,
-        tty: false,
-        interactive: false,
-        force: false,
-        no_supervisor: false,
-        up_json: false,
-        ttl: None,
-        healthcheck: None,
-        health_interval: 30,
-        health_timeout: 5,
-        health_retries: 3,
-        health_start_period: 0,
-        entrypoint: false,
-        fresh: false,
-        reset: false,
-        from_workload_ir: None,
-        attach: false,
-        detach: false,
-        kernel_pin: None,
-        argv: Vec::new(),
-    }
+fn run_args_for_image_revert(
+    run: super::vm::checkpoint::RevertRunImage,
+) -> (MachineRunArgs, Option<crate::exec::ImageSource>) {
+    let (image, manifest, source) = match run.source {
+        super::vm::checkpoint::RevertImageSource::Oci(reference) => (Some(reference), None, None),
+        super::vm::checkpoint::RevertImageSource::Flake {
+            slot_hash,
+            revision_hash,
+        } => (
+            None,
+            Some(format!("slot:{slot_hash}@{revision_hash}")),
+            Some(crate::exec::ImageSource::PinnedTemplate {
+                slot_hash,
+                revision_hash,
+            }),
+        ),
+    };
+    (
+        MachineRunArgs {
+            image,
+            flake: None,
+            hypervisor: run.hypervisor,
+            json: run.json,
+            name: None,
+            manifest,
+            runtime_pack: false,
+            flake_profile: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            profile: RunProfile::Standard,
+            agent_verb: Vec::new(),
+            volume: Vec::new(),
+            env: Vec::new(),
+            timeout: None,
+            receipt: None,
+            dry_run: false,
+            tty: false,
+            interactive: false,
+            force: false,
+            no_supervisor: false,
+            up_json: false,
+            ttl: None,
+            healthcheck: None,
+            health_interval: 30,
+            health_timeout: 5,
+            health_retries: 3,
+            health_start_period: 0,
+            entrypoint: false,
+            fresh: false,
+            reset: false,
+            from_workload_ir: None,
+            attach: false,
+            detach: false,
+            kernel_pin: None,
+            argv: Vec::new(),
+        },
+        source,
+    )
 }
 
 fn set_machine_timeout(args: MachineSetTimeoutArgs) -> Result<()> {

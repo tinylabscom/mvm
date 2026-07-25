@@ -32,7 +32,8 @@ mod revert;
 mod timeline;
 pub(super) use lineage::SignedChainAnchor;
 pub(in crate::commands) use revert::{
-    AdvanceArgs, RevertArgs, RevertOutcome, RevertRunImage, run_advance, run_revert, run_rewind,
+    AdvanceArgs, RevertArgs, RevertImageSource, RevertOutcome, RevertRunImage, run_advance,
+    run_revert, run_rewind,
 };
 pub(in crate::commands) use timeline::{TimelineArgs, run_timeline};
 

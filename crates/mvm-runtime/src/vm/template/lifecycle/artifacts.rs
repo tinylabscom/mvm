@@ -178,7 +178,38 @@ pub fn template_artifacts_for_slot(
 ) -> Result<(PersistedManifest, String, Option<String>, String, String)> {
     let persisted = template_load_slot(slot_hash)?;
     let rev = current_revision_id_for_slot(slot_hash)?;
-    let rev_dir = slot_revision_dir(slot_hash, &rev);
+    template_artifacts_for_slot_revision_with_manifest(slot_hash, &rev, persisted)
+}
+
+/// Resolve a specific stored revision in a manifest-keyed slot.
+///
+/// Unlike [`template_artifacts_for_slot`], this never follows the slot's
+/// `current` symlink. Callers use it for content-addressed restore, where
+/// selecting the current revision would silently boot newer artifacts than
+/// the recorded node names.
+#[instrument(skip_all, fields(slot_hash = slot_hash, revision = revision_hash))]
+pub fn template_artifacts_for_slot_revision(
+    slot_hash: &str,
+    revision_hash: &str,
+) -> Result<(PersistedManifest, String, Option<String>, String, String)> {
+    let persisted = template_load_slot(slot_hash)?;
+    template_artifacts_for_slot_revision_with_manifest(slot_hash, revision_hash, persisted)
+}
+
+fn template_artifacts_for_slot_revision_with_manifest(
+    slot_hash: &str,
+    revision_hash: &str,
+    persisted: PersistedManifest,
+) -> Result<(PersistedManifest, String, Option<String>, String, String)> {
+    if revision_hash.is_empty()
+        || revision_hash.contains('/')
+        || revision_hash.contains('\\')
+        || revision_hash == "."
+        || revision_hash == ".."
+    {
+        anyhow::bail!("invalid slot revision hash {revision_hash:?}");
+    }
+    let rev_dir = slot_revision_dir(slot_hash, revision_hash);
 
     let vmlinux = format!("{rev_dir}/vmlinux");
     let rootfs = format!("{rev_dir}/rootfs.ext4");
@@ -206,7 +237,13 @@ pub fn template_artifacts_for_slot(
         None
     };
 
-    Ok((persisted, vmlinux, initrd_path, rootfs, rev))
+    Ok((
+        persisted,
+        vmlinux,
+        initrd_path,
+        rootfs,
+        revision_hash.to_string(),
+    ))
 }
 
 /// Resolve a bundle-sha256 reference through
