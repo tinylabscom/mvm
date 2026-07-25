@@ -16,9 +16,9 @@ tarball and must carry the same verified Nix SRI hash.
 - [x] Update the custom workload/builder kernel version and hash.
 - [x] Add or update focused coverage for synchronized kernel pins.
 - [x] Run formatting, workspace check, tests, and clippy gates.
-- [ ] Publish the verified branch as a pull request.
+- [x] Publish the verified branch as pull request #1845.
 
-The verified branch is ready for publication as a pull request.
+Pull request #1845 is open for review.
 
 ## Source verification
 
