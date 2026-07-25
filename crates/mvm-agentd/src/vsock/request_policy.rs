@@ -95,14 +95,13 @@ impl GuestRequest {
     /// `GuestRequest` variant fails to compile until it is classified.
     pub fn class(&self) -> RequestClass {
         match self {
-            // ProdSafe: handshake + lifecycle + status + entrypoint
+            // ProdSafe: compatibility negotiation + lifecycle + status + entrypoint
             // + sleep/wake + mount-volume + idle-timeout. Volume
             // mounts are additionally constrained by
             // `MountPathPolicy` inside the handler — the gate just
-            // lets the verb reach it. `ProtocolHello` MUST be
-            // prod-safe; it's the negotiation that runs before
-            // every other request and a sealed-prod agent that
-            // refuses it would never see another verb.
+            // lets the verb reach it. `ProtocolHello` remains prod-safe for
+            // compatibility. The authenticated session handshake already
+            // runs before dispatch on production control connections.
             GuestRequest::ProtocolHello { .. }
             | GuestRequest::WorkerStatus
             | GuestRequest::SleepPrep { .. }

@@ -20,6 +20,9 @@ preserve control-plane responsiveness while bounded data-plane work is active.
       data-plane limits so bounded control-plane capacity remains available.
 - [x] Reject console data-channel connections whose AF_VSOCK peer CID is not
       the host CID.
+- [x] Require every host↔guest control connection to complete the pinned
+      Ed25519/X25519 handshake and carry AES-GCM-encrypted, sequence-checked
+      frames; migrate unary and streaming RPC helpers plus the test backend.
 - [x] Refresh the guest-agent reference and stale packet-tunnel comments to
       describe the implemented transport accurately.
 - [x] Run `cargo test --workspace`, `cargo check --workspace`, generated-stub
@@ -36,3 +39,5 @@ preserve control-plane responsiveness while bounded data-plane work is active.
   budget, leaving 16 slots for control traffic.
 - Every `Verb` has an exhaustive `TrafficPlane` mapping.
 - Console relay peer authorization accepts CID 2 and rejects guest-local CIDs.
+- A host with the wrong signing key, a guest without its pinned host key, or a
+  tampered/replayed encrypted control frame is rejected before dispatch.

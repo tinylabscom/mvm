@@ -33,7 +33,12 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 263 (was 270): deleting the obsolete L3 egress stack removed seven crates
 /// from the default closure.
-const CLOSURE_BUDGET: usize = 263;
+///
+/// 266 (was 263): the mandatory authenticated control session uses
+/// `x25519-dalek` for ephemeral host↔guest key agreement; the three-crate
+/// increase is the measured cost of keeping that security boundary in the
+/// default control path.
+const CLOSURE_BUDGET: usize = 266;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

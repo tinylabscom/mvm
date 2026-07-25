@@ -202,6 +202,7 @@ base64 = "0.22"
 ed25519-dalek = "3"
 hmac = "0.13"
 rand = "0.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 # Plan 129 Stage 2 (ADR-003): mint the per-VM name-constrained egress CA /
 # intermediate / leaf certs for transparent https substitution. 0.13+ for the
 # `nameConstraints` API. `ring` crypto backend (no cmake/C-toolchain like the

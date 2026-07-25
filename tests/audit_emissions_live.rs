@@ -1084,8 +1084,12 @@ fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture
     // sets, so it computes the same path we compute here.
     let vm_dir = sandbox.mvm_root().join("mock-vms").join(name);
     std::fs::create_dir_all(&vm_dir).expect("mkdir mock vm_dir");
-    let agent = mvm_runtime::mock_guest_agent::MockGuestAgent::start(&vm_dir)
-        .expect("start mock guest agent");
+    let host_signer = sandbox.mvm_root().join("keys").join("host-signer.ed25519");
+    let agent = mvm_runtime::mock_guest_agent::MockGuestAgent::start_with_host_signer(
+        &vm_dir,
+        &host_signer,
+    )
+    .expect("start mock guest agent");
     MockVmAgentFixture { _agent: agent }
 }
 

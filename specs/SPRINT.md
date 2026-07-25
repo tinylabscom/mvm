@@ -197,8 +197,9 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [x] **Cross-cutting guest protocol hardening (Plan 254):** made the logical
       control/data-plane split executable with exhaustive verb classification,
       64 total / 48 data request admission, symmetric 256 KiB frame limits,
-      48 KiB filesystem/process chunks, offset-addressed `fs`/`cp` transfers, and
-      host-CID-only console data admission. Guest protocol v2 is a hard cutover;
+      48 KiB filesystem/process chunks, offset-addressed `fs`/`cp` transfers,
+      host-CID-only console data admission, and mandatory authenticated /
+      encrypted host↔guest control sessions on every backend. Guest protocol v2 is a hard cutover;
       schemas and Python/TypeScript bindings are regenerated. Host workspace tests
       and checks plus affected-crate clippy are green; Linux workspace-wide clippy
       remains the required merge-CI gate.

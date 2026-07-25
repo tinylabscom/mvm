@@ -2,12 +2,13 @@
 //! CONNECT/OK handshake, reconnect backoff, and the guest-facing
 //! AF_VSOCK dial path used by the substitution forward proxy.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use ed25519_dalek::SigningKey;
 
 use super::*;
 
@@ -49,6 +50,27 @@ fn should_retry_connect_error(err: &(dyn std::error::Error + 'static)) -> bool {
         .is_some_and(is_transient_connect_error)
 }
 
+fn read_connect_response_line(stream: &mut UnixStream) -> std::io::Result<String> {
+    const MAX_CONNECT_RESPONSE_LEN: usize = 128;
+    let mut response = Vec::with_capacity(16);
+    let mut byte = [0_u8; 1];
+
+    loop {
+        stream.read_exact(&mut byte)?;
+        response.push(byte[0]);
+        if byte[0] == b'\n' {
+            return String::from_utf8(response)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+        }
+        if response.len() >= MAX_CONNECT_RESPONSE_LEN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CONNECT response line is too long",
+            ));
+        }
+    }
+}
+
 /// Single attempt to connect and perform the Firecracker CONNECT handshake.
 fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let timeout = Duration::from_secs(timeout_secs);
@@ -82,26 +104,17 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
     stream.flush()?;
 
     // Read response line: "OK <port>\n"
-    let mut reader = BufReader::new(&stream);
-    let mut response_line = String::new();
-    let bytes = reader.read_line(&mut response_line).map_err(|e| {
+    let response_line = read_connect_response_line(&mut stream).map_err(|e| {
         if is_timeout_error(&e) {
-            anyhow::anyhow!(
+            anyhow::Error::from(e).context(format!(
                 "Guest agent did not respond within {}s \
                  (the agent may not be running or the microVM may be unhealthy)",
                 timeout_secs
-            )
+            ))
         } else {
-            anyhow::anyhow!("Failed to read CONNECT response: {}", e)
+            anyhow::Error::from(e).context("Failed to read CONNECT response")
         }
     })?;
-    if bytes == 0 {
-        return Err(anyhow::Error::from(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "guest agent closed the CONNECT handshake before replying",
-        ))
-        .context("Failed to read CONNECT response"));
-    }
 
     if !response_line.starts_with("OK ") {
         bail!(
@@ -126,7 +139,8 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
 /// 1. Open Unix stream to the given UDS path.
 /// 2. Write `CONNECT <port>\n`.
 /// 3. Read `OK <port>\n`.
-/// 4. Then exchange length-prefixed JSON frames.
+/// 4. Then establish the authenticated, encrypted session that carries
+///    length-prefixed control envelopes.
 ///
 /// Retries up to `CONNECT_RETRIES` times on timeout errors, skipping retries
 /// for definitive failures (connection refused, socket not found).
@@ -274,40 +288,29 @@ pub(super) fn connect(instance_dir: &str, timeout_secs: u64) -> Result<UnixStrea
 
 /// Send a request and receive a response over a vsock connection.
 ///
-/// Uses 4-byte big-endian length prefix + JSON body (same pattern as hostd).
+/// Establishes the authenticated, encrypted control session and sends one
+/// length-prefixed JSON request envelope.
 pub fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResponse> {
-    write_frame(stream, req).with_context(|| "Failed to write request frame")?;
+    let mut session = open_authenticated_session(stream)?;
+    session.write(stream, req)?;
+    session.read(stream)
+}
 
-    // Read response length
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(|e| {
-        if is_timeout_error(&e) {
-            anyhow::anyhow!("Guest agent timed out while waiting for response")
-        } else {
-            anyhow::anyhow!("Failed to read response length: {}", e)
-        }
-    })?;
-    let resp_len = u32::from_be_bytes(len_buf) as usize;
-
-    if resp_len > MAX_FRAME_SIZE {
-        bail!(
-            "Response frame too large: {} bytes (max {})",
-            resp_len,
-            MAX_FRAME_SIZE
-        );
-    }
-
-    // Read response body
-    let mut buf = vec![0u8; resp_len];
-    stream.read_exact(&mut buf).map_err(|e| {
-        if is_timeout_error(&e) {
-            anyhow::anyhow!("Guest agent timed out while reading response body")
-        } else {
-            anyhow::anyhow!("Failed to read response body: {}", e)
-        }
-    })?;
-
-    serde_json::from_slice(&buf).with_context(|| "Failed to deserialize response")
+/// Establish the authenticated and encrypted host side of a fresh control
+/// connection. The host signer is the same identity pinned in the guest's
+/// `/run/mvm/host-signer.pub` trust anchor.
+pub(crate) fn open_authenticated_session(
+    stream: &mut UnixStream,
+) -> Result<crate::vsock::AuthenticatedSession> {
+    let key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
+    let key_bytes: [u8; 32] = std::fs::read(&key_path)
+        .with_context(|| format!("read host signer key {}", key_path.display()))?
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("host signer key must be exactly 32 bytes"))?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    let session_id = format!("vsock-{:032x}", rand::random::<u128>());
+    crate::vsock::AuthenticatedSession::host(stream, &session_id, signing_key)
 }
 
 #[cfg(test)]
@@ -463,6 +466,33 @@ mod tests {
         let stream =
             connect_to_port(&socket_path, port, 1).expect("connect succeeds after restart");
         drop(stream);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn test_connect_response_preserves_bytes_after_ack() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("v.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), format!("CONNECT {}", GUEST_AGENT_PORT));
+            stream
+                .write_all(format!("OK {}\nsentinel", GUEST_AGENT_PORT).as_bytes())
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut stream = try_connect_once(socket.to_str().unwrap(), GUEST_AGENT_PORT, 1).unwrap();
+        let mut sentinel = [0_u8; 8];
+        stream.read_exact(&mut sentinel).unwrap();
+        assert_eq!(&sentinel, b"sentinel");
         worker.join().unwrap();
     }
 }

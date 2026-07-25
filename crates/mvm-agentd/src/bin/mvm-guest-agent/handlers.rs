@@ -4,6 +4,7 @@
 //! `RunDetached`, the console) get a production stub here; their real
 //! implementation lives in `interactive` behind the `interactive` feature.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -90,7 +91,7 @@ fn evt(e: EntrypointEvent) -> GuestResponse {
     GuestResponse::EntrypointEvent(e)
 }
 
-fn emit_entrypoint_bytes(file: &mut std::fs::File, bytes: &[u8], stdout: bool) {
+fn emit_entrypoint_bytes(file: &mut dyn Write, bytes: &[u8], stdout: bool) {
     for chunk in bytes.chunks(mvm_agentd::vsock::MAX_DATA_CHUNK_SIZE) {
         let event = if stdout {
             EntrypointEvent::Stdout {
@@ -105,7 +106,7 @@ fn emit_entrypoint_bytes(file: &mut std::fs::File, bytes: &[u8], stdout: bool) {
     }
 }
 
-fn emit_entrypoint_output(file: &mut std::fs::File, stdout: &[u8], stderr: &[u8]) {
+fn emit_entrypoint_output(file: &mut dyn Write, stdout: &[u8], stderr: &[u8]) {
     emit_entrypoint_bytes(file, stdout, true);
     emit_entrypoint_bytes(file, stderr, false);
 }
@@ -124,7 +125,7 @@ fn emit_entrypoint_output(file: &mut std::fs::File, stdout: &[u8], stderr: &[u8]
 /// extra call boundary in a slow-path RPC handler — imperceptible.
 #[inline(never)]
 fn handle_run_entrypoint(
-    file: &mut std::fs::File,
+    file: &mut dyn Write,
     stdin: Vec<u8>,
     timeout_secs: u64,
     env: Vec<(String, String)>,
@@ -250,7 +251,7 @@ fn handle_run_entrypoint(
 /// wrapper's own control emission. v1 emits all records after stdout
 /// and stderr; the host already accepts non-terminal events in any
 /// order before the terminal `Exit` / `Error`.
-fn emit_controls(file: &mut std::fs::File, records: Vec<mvm_agentd::entrypoint::ControlRecord>) {
+fn emit_controls(file: &mut dyn Write, records: Vec<mvm_agentd::entrypoint::ControlRecord>) {
     for r in records {
         write_response(
             file,
@@ -278,7 +279,7 @@ fn emit_controls(file: &mut std::fs::File, records: Vec<mvm_agentd::entrypoint::
 /// `nm` output.
 #[inline(never)]
 fn dispatch_via_warm_pool(
-    file: &mut std::fs::File,
+    file: &mut dyn Write,
     pool: &Arc<WorkerPool>,
     stdin: Vec<u8>,
     timeout_secs: u64,

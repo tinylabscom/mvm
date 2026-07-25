@@ -167,6 +167,7 @@ mvm-protocol.workspace = true
 # Only under `schema` (protocol-schema codegen) — see the feature above.
 schemars = { version = "0.8", optional = true }
 anyhow.workspace = true
+aes-gcm.workspace = true
 base64.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
@@ -174,6 +175,9 @@ libc.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
 # The readiness/shutdown hook runner uses thiserror for
 # typed error variants (ReadinessError, ShutdownError).
 thiserror.workspace = true
