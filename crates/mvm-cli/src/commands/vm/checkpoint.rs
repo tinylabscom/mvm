@@ -2395,4 +2395,143 @@ mod tests {
         let err = verify_image_lineage(&store, &g0.node_digest, &anchor).unwrap_err();
         assert!(err.to_string().contains("no signed audit entry"), "{err}");
     }
+
+    /// End-to-end proof that the *build path*'s node recorder produces nodes
+    /// that verify against the real host-signed chain: a genesis build, an
+    /// idempotent rebuild of the same revision, and a new-revision child, all
+    /// through `record_image_node` with the real signer / emitter / store under
+    /// `MVM_HOME`, then verified with the real `SignedChainAnchor`.
+    #[test]
+    fn build_path_nodes_verify_against_the_real_signed_chain() {
+        use crate::commands::build::image_lineage::{
+            ImageNodeInputs, ImageNodeOutcome, record_image_node,
+        };
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let store = ImageStore::open();
+        let signer = super::super::host_signer::load_or_init().unwrap();
+        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-build-path")
+            .build();
+
+        let inputs = |revision: &str| ImageNodeInputs {
+            build_identity: ImageBuildIdentity::Flake {
+                slot_hash: "slot-a".into(),
+            },
+            canonical: ImageCanonicalId::Flake {
+                revision_hash: revision.into(),
+            },
+            artifacts: vec![ContentBlob {
+                name: "rootfs.ext4".into(),
+                sha256: revision.into(),
+            }],
+            provenance: ImageProvenance::Build {
+                input_ref: ".#app".into(),
+                lock_digest: Some("sha256:lock".into()),
+            },
+        };
+
+        // Genesis build.
+        let genesis = match record_image_node(&store, &emitter, &plan, &inputs("rev-1"), 1).unwrap()
+        {
+            ImageNodeOutcome::Created(d) => d,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        // Idempotent rebuild of the identical revision → no new node.
+        assert!(matches!(
+            record_image_node(&store, &emitter, &plan, &inputs("rev-1"), 2).unwrap(),
+            ImageNodeOutcome::AlreadyCurrent(_)
+        ));
+        // New revision chains as a child of genesis.
+        let child = match record_image_node(&store, &emitter, &plan, &inputs("rev-2"), 3).unwrap() {
+            ImageNodeOutcome::Created(d) => d,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        assert_eq!(
+            store.by_digest(&child).unwrap().unwrap().parent.as_ref(),
+            Some(&genesis)
+        );
+
+        // The two-node chain verifies against the real signed audit chain, and
+        // the store reports the child as the single tip.
+        let anchor = SignedChainAnchor::load().unwrap();
+        verify_image_lineage(&store, &child, &anchor).unwrap();
+        assert_eq!(
+            store
+                .head_for(&ImageBuildIdentity::Flake {
+                    slot_hash: "slot-a".into()
+                })
+                .unwrap()
+                .unwrap()
+                .node_digest,
+            child
+        );
+    }
+
+    /// The OCI-pull recorder keys the chain on registry+repository and the
+    /// resolved manifest digest, and its nodes verify against the real signed
+    /// chain just like the flake path's.
+    #[test]
+    fn oci_pull_nodes_verify_against_the_real_signed_chain() {
+        use crate::commands::build::image_lineage::{
+            ImageNodeInputs, ImageNodeOutcome, record_image_node,
+        };
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let store = ImageStore::open();
+        let signer = super::super::host_signer::load_or_init().unwrap();
+        let emitter = super::super::audit_chain::AuditEmitter::new(signer.signing).unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("plan-oci-pull")
+            .build();
+
+        let inputs = |digest_hex: &str| ImageNodeInputs {
+            build_identity: ImageBuildIdentity::Oci {
+                registry: "docker.io".into(),
+                repository: "library/alpine".into(),
+            },
+            canonical: ImageCanonicalId::Oci {
+                resolved_digest: format!("sha256:{}", digest_hex.repeat(64)),
+            },
+            artifacts: vec![ContentBlob {
+                name: "rootfs.ext4".into(),
+                sha256: digest_hex.into(),
+            }],
+            provenance: ImageProvenance::Oci {
+                resolved_digest: format!("sha256:{}", digest_hex.repeat(64)),
+                layer_digests: vec![format!("sha256:{}", "e".repeat(64))],
+            },
+        };
+
+        let genesis = match record_image_node(&store, &emitter, &plan, &inputs("a"), 1).unwrap() {
+            ImageNodeOutcome::Created(d) => d,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        // Re-pulling the same digest is idempotent.
+        assert!(matches!(
+            record_image_node(&store, &emitter, &plan, &inputs("a"), 2).unwrap(),
+            ImageNodeOutcome::AlreadyCurrent(_)
+        ));
+        // A newly-resolved digest for the same repo chains as a child.
+        let child = match record_image_node(&store, &emitter, &plan, &inputs("b"), 3).unwrap() {
+            ImageNodeOutcome::Created(d) => d,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        assert_eq!(
+            store.by_digest(&child).unwrap().unwrap().parent.as_ref(),
+            Some(&genesis)
+        );
+
+        let anchor = SignedChainAnchor::load().unwrap();
+        verify_image_lineage(&store, &child, &anchor).unwrap();
+    }
 }
