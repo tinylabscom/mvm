@@ -40,6 +40,7 @@
 //! recorded provenance is never an input to it.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
@@ -220,13 +221,26 @@ fn create_image_node(
 /// orphan (which would make `verify_image_lineage` fail closed forever). Returns
 /// whether any node was healed.
 ///
-/// Marker-first: a node carrying an `audit_ref` is anchored, and by the
-/// create-time invariant so is its whole ancestry, so the walk stops there
-/// without touching the signed chain. Only an unmarked node consults the
-/// authoritative `anchor`: an already-audited-but-unmarked node (e.g. a
-/// pre-marker record) is confirmed and its marker backfilled with no re-emit; a
-/// genuine orphan has `image.created` re-emitted, then is marked. A single crash
-/// orphans one node, but the walk heals a run of them from successive crashes.
+/// The walk terminates on exactly two things: an `audit_ref` marker we stamped,
+/// or genesis. A marker is only ever set *after* healing a node's ancestry
+/// (`create_image_node` heals the tip before emitting+marking a new node; this
+/// walk marks each node it processes), so a marker means the whole chain below is
+/// already anchored — the walk stops there without touching the signed chain.
+///
+/// An *unmarked* node is never trusted to end the walk: it was written by a flow
+/// that did not heal its ancestry (a pre-marker record, or a crash between emit
+/// and mark), so an orphan may still lurk beneath it. Its state is resolved
+/// against the authoritative `anchor` and then the walk **continues** to the
+/// parent: an already-audited node has its marker backfilled with no re-emit; a
+/// genuine orphan has `image.created` re-emitted, then is marked. So the first
+/// post-upgrade build walks to genesis once (one lazy anchor load, reused),
+/// backfilling markers and healing any real orphans; later builds stop at the
+/// first marked node.
+///
+/// A `seen` set refuses to revisit a digest, so a fabricated cross-identity cycle
+/// fails closed rather than looping or re-emitting duplicates — even if a
+/// persistently-failing `mark_audited` never sets the markers that would
+/// otherwise end the walk (mirrors the lineage walkers' cycle guard).
 fn heal_unaudited_ancestry(
     store: &ImageStore,
     emitter: &dyn ImageCreatedEmitter,
@@ -235,24 +249,35 @@ fn heal_unaudited_ancestry(
     tip: &ImageNode,
 ) -> Result<bool> {
     let mut healed = false;
+    let mut seen: HashSet<CheckpointDigest> = HashSet::new();
     let mut current = tip.clone();
     loop {
+        // A revisit can only mean a cycle — a valid ancestry is a simple path.
+        if !seen.insert(current.node_digest.clone()) {
+            anyhow::bail!(
+                "image-lineage ancestry of {} revisits {}: a cycle; refusing to heal",
+                tip.node_digest,
+                current.node_digest
+            );
+        }
+        // A marker we stamped means this node's ancestry is already healed — stop.
         if current.audit_ref.is_some() {
             break;
         }
         if anchor.recorded_creation_digest(&current)?.is_some() {
-            // Anchored already; the missing marker is just a stale record. Backfill
-            // it and stop — its ancestry is anchored too.
+            // Anchored but unmarked (a pre-marker record, or a crash between emit
+            // and mark). Backfill the marker without re-emitting — but keep
+            // walking: this node's writer did not heal its ancestry.
             mark_audited(store, &current, plan);
-            break;
+        } else {
+            // A genuine orphan (saved, never emitted). The envelope binds to this
+            // build's plan; the entry's identity labels come from the node itself.
+            emitter
+                .emit_image_created(plan, &current)
+                .context("completing the audit of a crash-orphaned image-lineage ancestor")?;
+            mark_audited(store, &current, plan);
+            healed = true;
         }
-        // A genuine orphan (saved, never emitted). The envelope binds to this
-        // build's plan; the entry's identity labels come from the node itself.
-        emitter
-            .emit_image_created(plan, &current)
-            .context("completing the audit of a crash-orphaned image-lineage ancestor")?;
-        mark_audited(store, &current, plan);
-        healed = true;
 
         match &current.parent {
             Some(parent_digest) => {
@@ -1354,6 +1379,61 @@ mod tests {
         );
     }
 
+    /// A fabricated ancestry cycle (only reachable by tampering — a real
+    /// content-address cannot point at its own descendant) must fail closed
+    /// rather than loop the heal or re-emit duplicates.
+    #[test]
+    fn heal_refuses_a_fabricated_ancestry_cycle() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (store, emitter, vk) = harness(store_dir.path(), audit_dir.path());
+        let plan = fixture_plan();
+
+        // A (genesis) and B (child of A), both unmarked.
+        let a = node_for(&flake_inputs("rev-a", ".#app"), 1);
+        store.save(&a).unwrap();
+        let b = ImageNode::builder(
+            a.build_identity.clone(),
+            ImageIdentity {
+                canonical: ImageCanonicalId::Flake {
+                    revision_hash: "rev-b".into(),
+                },
+                artifacts: vec![blob("rootfs.ext4", "rev-b")],
+            },
+            a.provenance.clone(),
+        )
+        .parent(Some(a.node_digest.clone()))
+        .created_unix(2)
+        .build();
+        store.save(&b).unwrap();
+
+        // Rewrite A to point back at B, keeping A's digest (its directory name) so
+        // the store's self-consistency check still admits it — an A↔B cycle.
+        let cyclic_a = ImageNode {
+            parent: Some(b.node_digest.clone()),
+            ..a.clone()
+        };
+        std::fs::write(
+            store.dir_for(&a.node_digest).join("node.json"),
+            serde_json::to_vec_pretty(&cyclic_a).unwrap(),
+        )
+        .unwrap();
+
+        // Healing from B walks B → A → B and must refuse the revisit.
+        let err =
+            heal_unaudited_ancestry(&store, &emitter, &plan, &UnauditedAnchor, &b).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cycle"),
+            "a cycle must surface, got: {err:#}"
+        );
+        // Each node was emitted at most once before the bail — no duplicates.
+        let count = verify_audit_chain(&audit_dir.path().join("local.jsonl"), &vk).unwrap();
+        assert_eq!(
+            count, 2,
+            "B and A emitted once each, then the revisit bailed"
+        );
+    }
+
     #[test]
     fn flake_node_inputs_maps_slot_revision_and_artifacts() {
         let revision = TemplateRevision {
@@ -1684,6 +1764,99 @@ mod tests {
         assert_eq!(store.list().unwrap().len(), 2);
         let anchor = SignedChainAnchor::load().unwrap();
         verify_image_lineage(&store, &tip.node_digest, &anchor).unwrap();
+    }
+
+    /// The re-review's regression: a genuine orphan hidden *beneath* an
+    /// emitted-but-unmarked ancestor. The heal must not stop at the unmarked
+    /// ancestor (it was written by a flow that did not heal its own ancestry) —
+    /// it must walk through to the deeper orphan. Exercised against the real
+    /// signed chain: back it out and `verify_image_lineage(rev-3)` fails forever.
+    #[test]
+    fn record_image_node_heals_a_deep_orphan_beneath_an_unmarked_ancestor() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let slot_hash = "slot-deep";
+        let store = ImageStore::open();
+        let emitter = AuditEmitter::new(load_or_init().unwrap().signing).unwrap();
+        let plan = fixture_plan();
+
+        let node = |rev: &str, sha_seed: &str, parent: Option<CheckpointDigest>, ts: u64| {
+            ImageNode::builder(
+                flake_build_identity(slot_hash),
+                ImageIdentity {
+                    canonical: flake_canonical(rev),
+                    artifacts: vec![blob("rootfs.ext4", &sha_seed.repeat(64))],
+                },
+                ImageProvenance::Build {
+                    input_ref: ".#app".into(),
+                    lock_digest: None,
+                },
+            )
+            .parent(parent)
+            .created_unix(ts)
+            .build()
+        };
+
+        // rev-1: a genuine orphan (saved, never emitted, unmarked) — genesis.
+        let rev1 = node("rev-1", "a", None, 1);
+        store.save(&rev1).unwrap();
+        // rev-2: emitted (raw) but never marked — the pre-marker / crash-after-emit
+        // flow — child of rev-1.
+        let rev2 = node("rev-2", "b", Some(rev1.node_digest.clone()), 2);
+        store.save(&rev2).unwrap();
+        emitter.emit_image_created(&plan, &rev2).unwrap();
+        assert_eq!(
+            local_audit_chain_len(tmp.path()),
+            1,
+            "only rev-2 is emitted pre-build"
+        );
+
+        // Build rev-3. The walk must backfill rev-2 (no re-emit) AND heal rev-1
+        // beneath it, or the new tip fails lineage verification forever.
+        let rev3 = ImageNodeInputs {
+            build_identity: flake_build_identity(slot_hash),
+            canonical: flake_canonical("rev-3"),
+            artifacts: vec![blob("rootfs.ext4", &"c".repeat(64))],
+            provenance: ImageProvenance::Build {
+                input_ref: ".#app".into(),
+                lock_digest: None,
+            },
+        };
+        let outcome = record_image_node(
+            &store,
+            &emitter,
+            &plan,
+            &rev3,
+            3,
+            &SignedChainAnchor::load().unwrap(),
+        )
+        .unwrap();
+        let rev3_digest = match outcome {
+            ImageNodeOutcome::Created(d) => d,
+            other => panic!("expected Created, got {other:?}"),
+        };
+
+        // rev-1 healed + rev-3 created; rev-2 backfilled, NOT re-emitted → exactly
+        // three entries, three nodes, and the whole lineage verifies.
+        assert_eq!(
+            local_audit_chain_len(tmp.path()),
+            3,
+            "rev-1 healed + rev-3 created; rev-2 not re-emitted"
+        );
+        assert_eq!(store.list().unwrap().len(), 3);
+        assert_eq!(
+            store
+                .by_digest(&rev3_digest)
+                .unwrap()
+                .unwrap()
+                .parent
+                .as_ref(),
+            Some(&rev2.node_digest)
+        );
+        let anchor = SignedChainAnchor::load().unwrap();
+        verify_image_lineage(&store, &rev3_digest, &anchor).unwrap();
     }
 
     #[test]
