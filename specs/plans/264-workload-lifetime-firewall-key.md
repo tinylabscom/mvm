@@ -21,4 +21,4 @@ hot revisions become live.
 - [x] Add a regression test covering two plan revisions with one firewall
       install and no orphaned teardown state.
 - [x] Run formatting, workspace check, tests, and clippy gates.
-- [ ] Publish the verified branch as a pull request.
+- [x] Publish the verified branch as pull request #1847.
