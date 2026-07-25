@@ -311,7 +311,7 @@ Then unify + retire the old paths:
 
 **WS9 — lifecycle correctness**
 
-- [ ] Confirm transient teardown (entrypoint exit + no healthcheck → VM stops) — already centralized; add tests.
+- [x] Confirm transient teardown (entrypoint exit + no healthcheck → VM stops) — already centralized; add tests. _Fixed: emit_launched_if no longer re-persists plan.json for transient runs, so teardown actually removes the VM state directory. Hermetic BDD 27/27; live BDD on Hetzner 36/37 (only Nix-flake network timeout remains, environment issue)._
 - [ ] **Capture workload stdout/stderr + exit code over vsock** (reuse the `BuilderStatus`/`BuilderOutcome` pattern the builder VM already uses) so all workload output crosses the auditable seam and the transient exit code is sourced from it.
 - [ ] Implement the missing **host-side healthcheck reaper** for persistent machines (probe the stored `health_check`; restart/mark-unhealthy on failure). Today it's persisted but never executed.
 - Gate: transient exits propagate the vsock-sourced exit code + tear down; workload stdout/stderr captured over vsock; a persistent machine with a healthcheck is actively probed.
