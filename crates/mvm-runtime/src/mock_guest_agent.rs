@@ -82,23 +82,21 @@ impl MockGuestAgent {
     /// for the agent's lifetime.
     pub fn start(vm_dir: &Path) -> Result<Self> {
         let host_key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
-        let host_key_bytes: [u8; 32] = match std::fs::read(&host_key_path) {
-            Ok(bytes) => bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("mock host signer key must be 32 bytes"))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let bytes = [7u8; 32];
-                let parent = host_key_path
-                    .parent()
-                    .context("host signer key has no parent directory")?;
-                std::fs::create_dir_all(parent)?;
-                std::fs::write(&host_key_path, bytes)?;
-                bytes
-            }
-            Err(error) => return Err(error).with_context(|| "read mock host signer key"),
-        };
+        Self::start_with_host_signer(vm_dir, &host_key_path)
+    }
+
+    /// Start a mock agent using the host signer at `host_signer_path`.
+    ///
+    /// This is useful when the client runs with an isolated `MVM_HOME`, such
+    /// as a subprocess test sandbox. The mock and client must use the same
+    /// signer so the guest-side trust anchor validates the host handshake.
+    pub fn start_with_host_signer(vm_dir: &Path, host_signer_path: &Path) -> Result<Self> {
+        let host_key_bytes = load_host_signer(host_signer_path)?;
         let host_key = SigningKey::from_bytes(&host_key_bytes).verifying_key();
+        Self::start_with_host_key(vm_dir, host_key)
+    }
+
+    fn start_with_host_key(vm_dir: &Path, host_key: VerifyingKey) -> Result<Self> {
         let runtime_dir = vm_dir.join("runtime");
         std::fs::create_dir_all(&runtime_dir)
             .with_context(|| format!("creating runtime dir at {}", runtime_dir.display()))?;
@@ -149,6 +147,25 @@ impl MockGuestAgent {
             let _ = t.join();
         }
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+fn load_host_signer(host_key_path: &Path) -> Result<[u8; 32]> {
+    match std::fs::read(host_key_path) {
+        Ok(bytes) => bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("mock host signer key must be 32 bytes")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let bytes = [7u8; 32];
+            let parent = host_key_path
+                .parent()
+                .context("host signer key has no parent directory")?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(host_key_path, bytes)?;
+            Ok(bytes)
+        }
+        Err(error) => Err(error).with_context(|| "read mock host signer key"),
     }
 }
 
