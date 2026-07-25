@@ -1974,6 +1974,7 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn build_healthcheck_wraps_shell_command() {
@@ -2001,28 +2002,13 @@ mod tests {
 
     #[test]
     fn select_exec_backend_none_with_no_env_falls_to_auto_detect() {
-        let saved_hv = std::env::var_os("MVM_HYPERVISOR");
-        let saved_be = std::env::var_os("MVM_BACKEND");
-        // SAFETY: test-local env mutation, restored before returning.
-        unsafe {
-            std::env::remove_var("MVM_HYPERVISOR");
-            std::env::remove_var("MVM_BACKEND");
-        }
+        let mut env = TestEnv::new();
+        env.remove("MVM_HYPERVISOR");
+        env.remove("MVM_BACKEND");
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         let backend =
             select_exec_backend(false, &deny_all, None).expect("auto-detect always resolves");
         assert_eq!(backend.name(), AnyBackend::auto_select().name());
-        // SAFETY: restore prior values.
-        unsafe {
-            match saved_hv {
-                Some(v) => std::env::set_var("MVM_HYPERVISOR", v),
-                None => std::env::remove_var("MVM_HYPERVISOR"),
-            }
-            match saved_be {
-                Some(v) => std::env::set_var("MVM_BACKEND", v),
-                None => std::env::remove_var("MVM_BACKEND"),
-            }
-        }
     }
 
     /// The CLI `--hypervisor` flag (the `requested` param) wins over a
@@ -2030,13 +2016,9 @@ mod tests {
     /// sites must all resolve to the same backend as what was requested.
     #[test]
     fn select_exec_backend_requested_flag_beats_conflicting_env() {
-        let saved_hv = std::env::var_os("MVM_HYPERVISOR");
-        let saved_be = std::env::var_os("MVM_BACKEND");
-        // SAFETY: test-local env mutation, restored before returning.
-        unsafe {
-            std::env::remove_var("MVM_BACKEND");
-            std::env::set_var("MVM_HYPERVISOR", "qemu");
-        }
+        let mut env = TestEnv::new();
+        env.remove("MVM_BACKEND");
+        env.set("MVM_HYPERVISOR", "qemu");
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
         let backend = select_exec_backend(false, &deny_all, Some("libkrun"))
             .expect("libkrun resolves without probing availability (image not requested)");
@@ -2045,17 +2027,6 @@ mod tests {
             "libkrun",
             "the requested flag must win over MVM_HYPERVISOR=qemu"
         );
-        // SAFETY: restore prior values.
-        unsafe {
-            match saved_hv {
-                Some(v) => std::env::set_var("MVM_HYPERVISOR", v),
-                None => std::env::remove_var("MVM_HYPERVISOR"),
-            }
-            match saved_be {
-                Some(v) => std::env::set_var("MVM_BACKEND", v),
-                None => std::env::remove_var("MVM_BACKEND"),
-            }
-        }
     }
 
     #[test]
@@ -2063,13 +2034,11 @@ mod tests {
         let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
             mvm_core::network_policy::HostPort::new("example.com", 443),
         ]);
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
-        }
+        env.set("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
         let err = validate_backend_for_egress(
             "hvf",
             true,
@@ -2077,10 +2046,6 @@ mod tests {
             "OCI --image runs with outbound egress enabled",
         )
         .expect_err("unavailable hvf must fail closed before OCI work");
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-        }
         // HVF always advertises the NIC-less host-vsock-proxy egress caps (they
         // are unconditional — the fail-closed posture), so the capability
         // shortfall is empty and the refusal comes from the availability probe:
@@ -2096,6 +2061,7 @@ mod tests {
         let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
         let supervisor = dir.path().join("mvm-hvf-supervisor");
         std::fs::write(&supervisor, b"stub").expect("stub supervisor");
@@ -2103,10 +2069,7 @@ mod tests {
             mvm_core::network_policy::HostPort::new("example.com", 443),
         ]);
 
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", &supervisor);
-        }
+        env.set("MVM_HVF_SUPERVISOR_PATH", &supervisor);
         let selected = select_backend_name_for_egress(
             None,
             true,
@@ -2114,10 +2077,6 @@ mod tests {
             "OCI --image runs with outbound egress enabled",
         )
         .expect("hvf should satisfy the proxy backend requirement");
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-        }
 
         assert_eq!(selected, "hvf");
     }

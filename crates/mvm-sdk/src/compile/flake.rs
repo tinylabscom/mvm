@@ -207,6 +207,7 @@ pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error>
 mod tests {
     use super::*;
     use crate::ir::{App, Entrypoint, Image, Resources, Source};
+    use mvm_core::util::test_env::TestEnv;
 
     fn sample() -> Workload {
         Workload {
@@ -250,7 +251,8 @@ mod tests {
     #[test]
     fn flake_is_deterministic_under_default_pin() {
         // Defensive: clear any test-set override.
-        unsafe { std::env::remove_var("MVM_FLAKE_URL") };
+        let mut env = TestEnv::new();
+        env.remove("MVM_FLAKE_URL");
         let a = build_flake_nix(&sample()).unwrap();
         let b = build_flake_nix(&sample()).unwrap();
         assert_eq!(a, b);

@@ -414,7 +414,6 @@ mod tests {
         let sock =
             mvm_core::config::vm_hvf_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT);
         let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_HOME") };
             return;
         };
 
@@ -440,7 +439,6 @@ mod tests {
         let name = "hvf-picker-probe";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
         let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_HOME") };
             return;
         };
 
@@ -462,7 +460,6 @@ mod tests {
         let name = "hvf-picker-long-path";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
         let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_HOME") };
             return;
         };
 

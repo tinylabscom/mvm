@@ -242,29 +242,20 @@ pub fn record_from_start_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     fn with_home_temp<F>(f: F)
     where
         F: FnOnce(&std::path::Path),
     {
         let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
         // `meta_path` resolves via `vm_state_dir`, which honors the MVM_HOME
         // override — point it at the tempdir so every path lands there, even
         // if a sibling test (under the same lock) leaked its own override.
-        let prev = std::env::var_os("MVM_HOME");
-        // SAFETY: tests only; MVM_HOME is process-global but the
-        // HOME_TEST_LOCK serializes us with everything else that reads it.
-        unsafe {
-            std::env::set_var("MVM_HOME", tmp.path());
-        }
+        env.set("MVM_HOME", tmp.path());
         f(tmp.path());
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_HOME", v),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
     }
 
     #[test]

@@ -464,6 +464,7 @@ impl Drop for BrokerServicesGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -471,12 +472,11 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-as-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_mvm_home = std::env::var_os("MVM_HOME");
         // Route mvm_audit_dir() / mvm_keys_dir() under a disposable MVM_HOME.
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_HOME", &dir) };
+        env.set("MVM_HOME", &dir);
 
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -497,9 +497,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let saved_bin = std::env::var_os("MVM_AUDIT_SIGNER_PATH");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_AUDIT_SIGNER_PATH", &stub) };
+        env.set("MVM_AUDIT_SIGNER_PATH", &stub);
 
         let res = spawn_audit_signer(AuditSignerSpawnParams {
             workload_id: "wl-001",
@@ -508,14 +506,6 @@ mod tests {
             state_dir: &state_dir,
         });
 
-        // Restore the bin override before asserting so a failure can't leak it.
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            match saved_bin {
-                Some(v) => std::env::set_var("MVM_AUDIT_SIGNER_PATH", v),
-                None => std::env::remove_var("MVM_AUDIT_SIGNER_PATH"),
-            }
-        }
         let handle = res.expect("spawn with stub audit-signer should succeed");
         assert_eq!(handle.uds_path, uds);
 
@@ -549,13 +539,6 @@ mod tests {
         );
 
         reap_audit_signer(&state_dir);
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            match saved_mvm_home {
-                Some(v) => std::env::set_var("MVM_HOME", v),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -564,11 +547,10 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-as-nobind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_mvm_home = std::env::var_os("MVM_HOME");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_HOME", &dir) };
+        env.set("MVM_HOME", &dir);
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
 
@@ -577,9 +559,7 @@ mod tests {
         let stub = dir.join("stub-nobind.sh");
         std::fs::write(&stub, "#!/bin/sh\ncat > /dev/null\nsleep 5\n").unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let saved_bin = std::env::var_os("MVM_AUDIT_SIGNER_PATH");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_AUDIT_SIGNER_PATH", &stub) };
+        env.set("MVM_AUDIT_SIGNER_PATH", &stub);
 
         let res = spawn_audit_signer_with_timeout(
             AuditSignerSpawnParams {
@@ -591,17 +571,6 @@ mod tests {
             Duration::from_millis(200),
         );
 
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            match saved_bin {
-                Some(v) => std::env::set_var("MVM_AUDIT_SIGNER_PATH", v),
-                None => std::env::remove_var("MVM_AUDIT_SIGNER_PATH"),
-            }
-            match saved_mvm_home {
-                Some(v) => std::env::set_var("MVM_HOME", v),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
         let err = res.expect_err("must fail closed when the UDS never binds");
         assert!(err.to_string().contains("did not bind"), "got {err}");
         // No PID file is left behind on a failed spawn.
@@ -614,11 +583,10 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-as-nobin-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_bin = std::env::var_os("MVM_AUDIT_SIGNER_PATH");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_AUDIT_SIGNER_PATH", dir.join("nope")) };
+        env.set("MVM_AUDIT_SIGNER_PATH", dir.join("nope"));
 
         let res = spawn_audit_signer(AuditSignerSpawnParams {
             workload_id: "wl",
@@ -627,13 +595,6 @@ mod tests {
             state_dir: &dir,
         });
 
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            match saved_bin {
-                Some(v) => std::env::set_var("MVM_AUDIT_SIGNER_PATH", v),
-                None => std::env::remove_var("MVM_AUDIT_SIGNER_PATH"),
-            }
-        }
         let err = res.expect_err("a missing bin override must error");
         assert!(err.to_string().contains("is not a file"), "got {err}");
         std::fs::remove_dir_all(&dir).ok();
@@ -644,11 +605,10 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-broker-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_mvm_home = std::env::var_os("MVM_HOME");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_HOME", &dir) };
+        env.set("MVM_HOME", &dir);
 
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -669,9 +629,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let saved_bin = std::env::var_os("MVM_BROKER_PATH");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_BROKER_PATH", &stub) };
+        env.set("MVM_BROKER_PATH", &stub);
 
         let audit_uds = state_dir.join(AUDIT_SIGNER_SOCK);
         let res = spawn_broker(BrokerSpawnParams {
@@ -682,13 +640,6 @@ mod tests {
             audit_signer_uds_path: &audit_uds,
         });
 
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            match saved_bin {
-                Some(v) => std::env::set_var("MVM_BROKER_PATH", v),
-                None => std::env::remove_var("MVM_BROKER_PATH"),
-            }
-        }
         let handle = res.expect("spawn with stub broker should succeed");
         assert_eq!(handle.uds_path, uds);
 
@@ -716,13 +667,6 @@ mod tests {
         assert!(state_dir.join(BROKER_PID_FILE).exists());
 
         reap_broker(&state_dir);
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            match saved_mvm_home {
-                Some(v) => std::env::set_var("MVM_HOME", v),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -753,11 +697,10 @@ mod tests {
         let _g = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let mut env = TestEnv::new();
         let dir = std::env::temp_dir().join(format!("mvm-bs-admit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_mvm_home = std::env::var_os("MVM_HOME");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("MVM_HOME", &dir) };
+        env.set("MVM_HOME", &dir);
 
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -789,13 +732,8 @@ mod tests {
         for s in [&as_stub, &br_stub] {
             std::fs::set_permissions(s, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let saved_as = std::env::var_os("MVM_AUDIT_SIGNER_PATH");
-        let saved_br = std::env::var_os("MVM_BROKER_PATH");
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            std::env::set_var("MVM_AUDIT_SIGNER_PATH", &as_stub);
-            std::env::set_var("MVM_BROKER_PATH", &br_stub);
-        }
+        env.set("MVM_AUDIT_SIGNER_PATH", &as_stub);
+        env.set("MVM_BROKER_PATH", &br_stub);
 
         let res = spawn_broker_services_if_admitted(BrokerServicesSpawnParams {
             workload_id: "wl-001",
@@ -805,17 +743,6 @@ mod tests {
             broker_listen_socket: &broker_uds,
         });
 
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            match saved_as {
-                Some(v) => std::env::set_var("MVM_AUDIT_SIGNER_PATH", v),
-                None => std::env::remove_var("MVM_AUDIT_SIGNER_PATH"),
-            }
-            match saved_br {
-                Some(v) => std::env::set_var("MVM_BROKER_PATH", v),
-                None => std::env::remove_var("MVM_BROKER_PATH"),
-            }
-        }
         let mut guard = res.expect("admitted VM spawns both broker services");
         // Both subprocesses bound their UDS and wrote their PID files.
         assert!(
@@ -826,13 +753,6 @@ mod tests {
 
         guard.defuse();
         reap_broker_services(&state_dir);
-        // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe {
-            match saved_mvm_home {
-                Some(v) => std::env::set_var("MVM_HOME", v),
-                None => std::env::remove_var("MVM_HOME"),
-            }
-        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -746,26 +746,16 @@ mod tests {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
         let good = dir.path().join("mvm-hvf-supervisor");
         std::fs::write(&good, b"stub").expect("stub supervisor");
 
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", &good);
-        }
+        env.set("MVM_HVF_SUPERVISOR_PATH", &good);
         assert!(hvf_supervisor_launch_support_available());
 
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", dir.path().join("missing"));
-        }
+        env.set("MVM_HVF_SUPERVISOR_PATH", dir.path().join("missing"));
         assert!(!hvf_supervisor_launch_support_available());
-
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-        }
     }
 
     #[test]
@@ -773,15 +763,9 @@ mod tests {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
         let caps = HvfBackend.capabilities();
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-        }
         // Fail-closed: even a degraded host (unlaunchable supervisor) advertises
         // no routable NIC and the host vsock proxy, so egress can only ride the
         // per-VM endpoint — it never falls back to a guest NIC. Only the dev-tier
@@ -797,20 +781,14 @@ mod tests {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
         let good = dir.path().join("mvm-hvf-supervisor");
         std::fs::write(&good, b"stub").expect("stub supervisor");
 
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", &good);
-        }
+        env.set("MVM_HVF_SUPERVISOR_PATH", &good);
         let caps = HvfBackend.capabilities();
         let available = HvfBackend.is_available().expect("availability probe");
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-        }
         assert!(available);
         // The egress caps are unconditional (fail-closed); a launchable
         // supervisor additionally enables the dev-tier virtiofs-root boot.

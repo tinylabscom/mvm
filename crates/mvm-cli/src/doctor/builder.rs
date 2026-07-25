@@ -646,13 +646,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_transport_check_reports_hvf_as_vsock_only() {
-        unsafe {
-            std::env::set_var("MVM_BUILDER_BACKEND", "hvf");
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "hvf");
         let c = builder_transport_check(Platform::MacOS);
-        unsafe {
-            std::env::remove_var("MVM_BUILDER_BACKEND");
-        }
         assert_eq!(c.name, "builder transport");
         assert_eq!(c.category, "platform");
         assert!(c.ok);
@@ -663,13 +659,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_transport_check_reports_libkrun_as_legacy_guest_network() {
-        unsafe {
-            std::env::set_var("MVM_BUILDER_BACKEND", "libkrun");
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "libkrun");
         let c = builder_transport_check(Platform::MacOS);
-        unsafe {
-            std::env::remove_var("MVM_BUILDER_BACKEND");
-        }
         assert_eq!(c.name, "builder transport");
         assert!(
             c.info.contains("legacy guest-network bootstrap"),
@@ -682,13 +674,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_transport_check_marks_qemu_as_unsupported_legacy() {
-        unsafe {
-            std::env::set_var("MVM_BUILDER_BACKEND", "qemu");
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "qemu");
         let c = builder_transport_check(Platform::LinuxNoKvm);
-        unsafe {
-            std::env::remove_var("MVM_BUILDER_BACKEND");
-        }
         assert_eq!(c.name, "builder transport");
         assert!(c.info.contains("unsupported legacy"), "got {:?}", c.info);
         assert!(c.info.contains("qemu"), "got {:?}", c.info);
@@ -697,22 +685,10 @@ mod tests {
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]
     #[test]
     fn builder_backend_check_linux_reports_qemu_auto_detected() {
-        // SAFETY: single-threaded test phase per crate; this env var
-        // isn't read elsewhere in this test binary.
-        let prev = std::env::var_os("MVM_BUILDER_BACKEND");
-        unsafe {
-            std::env::remove_var("MVM_BUILDER_BACKEND");
-        }
+        let mut env = TestEnv::new();
+        env.remove("MVM_BUILDER_BACKEND");
 
         let c = builder_backend_check(Platform::LinuxNative);
-
-        // Restore before any assertion so a panic doesn't strand the
-        // env var.
-        unsafe {
-            if let Some(v) = prev {
-                std::env::set_var("MVM_BUILDER_BACKEND", v);
-            }
-        }
 
         assert!(c.ok, "builder backend check must not fail informational");
         assert_eq!(c.name, "builder backend");
@@ -738,19 +714,10 @@ mod tests {
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]
     #[test]
     fn builder_backend_check_linux_honors_env_override() {
-        let prev = std::env::var_os("MVM_BUILDER_BACKEND");
-        unsafe {
-            std::env::set_var("MVM_BUILDER_BACKEND", "qemu");
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "qemu");
 
         let c = builder_backend_check(Platform::LinuxNative);
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_BUILDER_BACKEND", v),
-                None => std::env::remove_var("MVM_BUILDER_BACKEND"),
-            }
-        }
 
         assert!(c.ok);
         // Env override flips the resolved backend even when
@@ -775,19 +742,10 @@ mod tests {
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]
     #[test]
     fn builder_backend_check_linux_libkrun_override_no_longer_reports_a_rootfs_gap() {
-        let prev = std::env::var_os("MVM_BUILDER_BACKEND");
-        unsafe {
-            std::env::set_var("MVM_BUILDER_BACKEND", "libkrun");
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "libkrun");
 
         let c = builder_backend_check(Platform::LinuxNative);
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_BUILDER_BACKEND", v),
-                None => std::env::remove_var("MVM_BUILDER_BACKEND"),
-            }
-        }
 
         assert!(
             c.info.starts_with("libkrun — "),
@@ -815,25 +773,11 @@ mod tests {
         // When MVM_LINUX_BUILDER_VM=1 is set, the builder-backend line
         // adds the rollout-opt-in annotation alongside the resolved
         // backend + availability.
-        let prev_bb = std::env::var_os("MVM_BUILDER_BACKEND");
-        let prev_lbvm = std::env::var_os("MVM_LINUX_BUILDER_VM");
-        unsafe {
-            std::env::remove_var("MVM_BUILDER_BACKEND");
-            std::env::set_var("MVM_LINUX_BUILDER_VM", "1");
-        }
+        let mut env = TestEnv::new();
+        env.remove("MVM_BUILDER_BACKEND");
+        env.set("MVM_LINUX_BUILDER_VM", "1");
 
         let c = builder_backend_check(Platform::LinuxNative);
-
-        unsafe {
-            match prev_bb {
-                Some(v) => std::env::set_var("MVM_BUILDER_BACKEND", v),
-                None => std::env::remove_var("MVM_BUILDER_BACKEND"),
-            }
-            match prev_lbvm {
-                Some(v) => std::env::set_var("MVM_LINUX_BUILDER_VM", v),
-                None => std::env::remove_var("MVM_LINUX_BUILDER_VM"),
-            }
-        }
 
         assert!(c.ok);
         assert!(

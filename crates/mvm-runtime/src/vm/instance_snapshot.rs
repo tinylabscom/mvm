@@ -784,7 +784,7 @@ mod tests {
     /// `DATA_DIR_LOCK` since `set_var` is process-global.
     struct DataDirGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
-        _env: TestEnv,
+        env: TestEnv,
         _tmp: tempfile::TempDir,
     }
 
@@ -798,7 +798,7 @@ mod tests {
             env.set("MVM_HOME", tmp.path());
             DataDirGuard {
                 _guard: lock,
-                _env: env,
+                env,
                 _tmp: tmp,
             }
         }
@@ -957,39 +957,10 @@ mod tests {
     /// provider via `MVM_TENANT_KEY_LOCAL`.
     const TEST_DEK_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    /// RAII guard that pins `MVM_TENANT_KEY_LOCAL` for the lifetime
-    /// of the test. Combine with `DataDirGuard` (which holds the
-    /// data-dir lock) — both pieces must be in scope so the
-    /// env-var mutation is serialised across the test binary.
-    struct TenantKeyGuard {
-        prev: Option<String>,
-    }
-
-    impl TenantKeyGuard {
-        fn set(hex: &str) -> Self {
-            let prev = std::env::var("MVM_TENANT_KEY_LOCAL").ok();
-            unsafe {
-                std::env::set_var("MVM_TENANT_KEY_LOCAL", hex);
-            }
-            Self { prev }
-        }
-    }
-
-    impl Drop for TenantKeyGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("MVM_TENANT_KEY_LOCAL", v),
-                    None => std::env::remove_var("MVM_TENANT_KEY_LOCAL"),
-                }
-            }
-        }
-    }
-
     #[test]
     fn pause_and_seal_encrypts_vmstate_and_mem_when_key_is_configured() {
-        let _g = DataDirGuard::new();
-        let _k = TenantKeyGuard::set(TEST_DEK_HEX);
+        let mut g = DataDirGuard::new();
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
         let _s = pause_and_seal("vm-encrypt", &canned()).unwrap();
         let dir = snapshot_dir("vm-encrypt");
         // Both artifact files must now begin with the MVSE magic.
@@ -1014,11 +985,11 @@ mod tests {
 
     #[test]
     fn pause_and_seal_leaves_artifacts_unencrypted_when_no_key() {
-        let _g = DataDirGuard::new();
+        let mut g = DataDirGuard::new();
         // Defensive: clear the env var in case a parallel test left
         // it set. The DataDirGuard's lock means we're alone for the
         // duration of this test.
-        unsafe { std::env::remove_var("MVM_TENANT_KEY_LOCAL") };
+        g.env.remove("MVM_TENANT_KEY_LOCAL");
         let _s = pause_and_seal("vm-plain", &canned()).unwrap();
         let dir = snapshot_dir("vm-plain");
         // No MVSE magic — vmstate is raw bytes from CannedIO.
@@ -1033,8 +1004,8 @@ mod tests {
 
     #[test]
     fn verify_and_resume_round_trips_encrypted_snapshot() {
-        let _g = DataDirGuard::new();
-        let _k = TenantKeyGuard::set(TEST_DEK_HEX);
+        let mut g = DataDirGuard::new();
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
         let sealed = pause_and_seal("vm-rt", &canned()).unwrap();
         let verified = verify_and_resume("vm-rt", &canned()).unwrap();
         assert_eq!(verified, sealed);
@@ -1047,15 +1018,14 @@ mod tests {
 
     #[test]
     fn verify_and_resume_rejects_encrypted_snapshot_with_wrong_key() {
-        let _g = DataDirGuard::new();
-        let _k = TenantKeyGuard::set(TEST_DEK_HEX);
+        let mut g = DataDirGuard::new();
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
         pause_and_seal("vm-wk", &canned()).unwrap();
-        drop(_k);
         // Swap to a different DEK and try to resume. HMAC verify
         // passes (it's keyed on the host HMAC key, not the DEK), so
         // we fail at the AEAD step.
         let wrong = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-        let _k2 = TenantKeyGuard::set(wrong);
+        g.env.set("MVM_TENANT_KEY_LOCAL", wrong);
         let err = verify_and_resume("vm-wk", &canned()).unwrap_err();
         let s = err.to_string();
         assert!(
@@ -1066,16 +1036,16 @@ mod tests {
 
     #[test]
     fn verify_and_resume_refuses_unencrypted_snapshot_when_key_configured() {
-        let _g = DataDirGuard::new();
+        let mut g = DataDirGuard::new();
         // First seal WITHOUT a key — unencrypted, v1-shape.
-        unsafe { std::env::remove_var("MVM_TENANT_KEY_LOCAL") };
+        g.env.remove("MVM_TENANT_KEY_LOCAL");
         pause_and_seal("vm-mix", &canned()).unwrap();
 
         // Now configure a key and try to resume. Refuse because the
         // snapshot was sealed before the DEK was
         // provisioned (downgrade vs v1 leftover indistinguishable
         // at this layer).
-        let _k = TenantKeyGuard::set(TEST_DEK_HEX);
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
         let err = verify_and_resume("vm-mix", &canned()).unwrap_err();
         let chained: String = err
             .chain()
@@ -1093,14 +1063,13 @@ mod tests {
         // The one-time v1 → v2 migration escape: operator opts in
         // via MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1 to resume a legacy
         // unencrypted snapshot under a key-configured tenant.
-        let _g = DataDirGuard::new();
-        unsafe { std::env::remove_var("MVM_TENANT_KEY_LOCAL") };
+        let mut g = DataDirGuard::new();
+        g.env.remove("MVM_TENANT_KEY_LOCAL");
         pause_and_seal("vm-mig", &canned()).unwrap();
 
-        let _k = TenantKeyGuard::set(TEST_DEK_HEX);
-        unsafe { std::env::set_var(ALLOW_UNENCRYPTED_ENV, "1") };
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
+        g.env.set(ALLOW_UNENCRYPTED_ENV, "1");
         let result = verify_and_resume("vm-mig", &canned());
-        unsafe { std::env::remove_var(ALLOW_UNENCRYPTED_ENV) };
         assert!(
             result.is_ok(),
             "migration escape should let unencrypted v1 snapshot resume; got {:?}",
@@ -1110,13 +1079,12 @@ mod tests {
 
     #[test]
     fn verify_and_resume_refuses_encrypted_snapshot_when_key_missing() {
-        let _g = DataDirGuard::new();
-        let _k = TenantKeyGuard::set(TEST_DEK_HEX);
+        let mut g = DataDirGuard::new();
+        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
         pause_and_seal("vm-lost", &canned()).unwrap();
-        drop(_k);
         // Operator lost the key. Resume must refuse rather than
         // silently produce gibberish.
-        unsafe { std::env::remove_var("MVM_TENANT_KEY_LOCAL") };
+        g.env.remove("MVM_TENANT_KEY_LOCAL");
         let err = verify_and_resume("vm-lost", &canned()).unwrap_err();
         let chained: String = err
             .chain()

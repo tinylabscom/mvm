@@ -366,6 +366,7 @@ pub fn default_env() -> &'static dyn LinuxEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn test_create_linux_env_returns_env() {
@@ -405,7 +406,7 @@ mod tests {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
         env.set("HOME", tmp.path());
         env.remove("MVM_HOME");
@@ -432,66 +433,34 @@ mod tests {
     /// parallel tests can't see partial state.
     #[test]
     fn test_auto_start_allowed_env_precedence() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
-
-        // Snapshot then clear so the test isn't perturbed by the runner.
-        let saved: Vec<(&str, Option<String>)> =
-            ["MVM_NO_AUTO_DEV", "MVM_AUTO_DEV", "MVM_DEV_DAEMON"]
-                .iter()
-                .map(|k| (*k, std::env::var(k).ok()))
-                .collect();
-        let restore = || {
-            for (k, v) in &saved {
-                // SAFETY: serialised via ENV_LOCK above.
-                unsafe {
-                    match v {
-                        Some(val) => std::env::set_var(k, val),
-                        None => std::env::remove_var(k),
-                    }
-                }
-            }
-        };
-
-        let set = |k: &str, v: Option<&str>| {
-            // SAFETY: serialised via ENV_LOCK above.
-            unsafe {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        };
+        let mut env = TestEnv::new();
 
         // Clear all three so each branch is exercised in isolation.
-        set("MVM_NO_AUTO_DEV", None);
-        set("MVM_AUTO_DEV", None);
-        set("MVM_DEV_DAEMON", None);
+        env.remove("MVM_NO_AUTO_DEV");
+        env.remove("MVM_AUTO_DEV");
+        env.remove("MVM_DEV_DAEMON");
 
         // Opt-out always wins, even alongside the explicit opt-in.
-        set("MVM_NO_AUTO_DEV", Some("1"));
-        set("MVM_AUTO_DEV", Some("1"));
+        env.set("MVM_NO_AUTO_DEV", "1");
+        env.set("MVM_AUTO_DEV", "1");
         assert!(
             !auto_start_allowed(),
             "MVM_NO_AUTO_DEV must override opt-in"
         );
 
         // Daemon-self check prevents re-spawn recursion.
-        set("MVM_NO_AUTO_DEV", None);
-        set("MVM_AUTO_DEV", None);
-        set("MVM_DEV_DAEMON", Some("1"));
+        env.remove("MVM_NO_AUTO_DEV");
+        env.remove("MVM_AUTO_DEV");
+        env.set("MVM_DEV_DAEMON", "1");
         assert!(!auto_start_allowed(), "daemon must not auto-start itself");
 
         // Explicit opt-in overrides the TTY heuristic in headless runs.
-        set("MVM_DEV_DAEMON", None);
-        set("MVM_AUTO_DEV", Some("1"));
+        env.remove("MVM_DEV_DAEMON");
+        env.set("MVM_AUTO_DEV", "1");
         assert!(
             auto_start_allowed(),
             "MVM_AUTO_DEV=1 must enable auto-start"
         );
-
-        restore();
     }
 
     /// `SUDO_SHIM` must parse cleanly in POSIX `sh` (busybox ash on the

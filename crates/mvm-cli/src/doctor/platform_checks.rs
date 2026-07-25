@@ -397,16 +397,9 @@ mod tests {
         // "platform", and the info text covers one of the four
         // documented branches (env-set + ready, env-set + missing,
         // env-unset + ready, env-unset + missing).
-        let prev = std::env::var_os("MVM_LINUX_BUILDER_VM");
-        unsafe {
-            std::env::remove_var("MVM_LINUX_BUILDER_VM");
-        }
+        let mut env = TestEnv::new();
+        env.remove("MVM_LINUX_BUILDER_VM");
         let c = nested_kvm_check(Platform::LinuxNative);
-        unsafe {
-            if let Some(v) = prev {
-                std::env::set_var("MVM_LINUX_BUILDER_VM", v);
-            }
-        }
         assert_eq!(c.name, "nested-kvm");
         assert_eq!(c.category, "platform");
         let info = &c.info;

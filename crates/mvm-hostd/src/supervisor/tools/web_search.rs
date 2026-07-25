@@ -812,6 +812,7 @@ pub const GOOGLE_CSE_ID_ENV_VAR: &str = "GOOGLE_CSE_ID";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     /// Test helper: wrap a literal in `SecretBox<String>`. The
     /// production callers receive a `SecretBox` from the credential
@@ -1408,18 +1409,14 @@ mod tests {
 
     #[test]
     fn allowlist_env_var_parses_comma_separated() {
+        let mut env = TestEnv::new();
         let var = "MVM_TEST_WEB_SEARCH_ALLOWLIST_PARSE";
-        unsafe {
-            std::env::set_var(var, "brave,google,duckduckgo");
-        }
+        env.set(var, "brave,google,duckduckgo");
         let set = allowlist_from_env_var(var);
         assert!(set.contains("brave"));
         assert!(set.contains("google"));
         assert!(set.contains("duckduckgo"));
         assert_eq!(set.len(), 3);
-        unsafe {
-            std::env::remove_var(var);
-        }
     }
 
     #[test]
