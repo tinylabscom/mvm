@@ -2,7 +2,7 @@
 //! CONNECT/OK handshake, reconnect backoff, and the guest-facing
 //! AF_VSOCK dial path used by the substitution forward proxy.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -50,6 +50,27 @@ fn should_retry_connect_error(err: &(dyn std::error::Error + 'static)) -> bool {
         .is_some_and(is_transient_connect_error)
 }
 
+fn read_connect_response_line(stream: &mut UnixStream) -> std::io::Result<String> {
+    const MAX_CONNECT_RESPONSE_LEN: usize = 128;
+    let mut response = Vec::with_capacity(16);
+    let mut byte = [0_u8; 1];
+
+    loop {
+        stream.read_exact(&mut byte)?;
+        response.push(byte[0]);
+        if byte[0] == b'\n' {
+            return String::from_utf8(response)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+        }
+        if response.len() >= MAX_CONNECT_RESPONSE_LEN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CONNECT response line is too long",
+            ));
+        }
+    }
+}
+
 /// Single attempt to connect and perform the Firecracker CONNECT handshake.
 fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let timeout = Duration::from_secs(timeout_secs);
@@ -83,26 +104,17 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
     stream.flush()?;
 
     // Read response line: "OK <port>\n"
-    let mut reader = BufReader::new(&stream);
-    let mut response_line = String::new();
-    let bytes = reader.read_line(&mut response_line).map_err(|e| {
+    let response_line = read_connect_response_line(&mut stream).map_err(|e| {
         if is_timeout_error(&e) {
-            anyhow::anyhow!(
+            anyhow::Error::from(e).context(format!(
                 "Guest agent did not respond within {}s \
                  (the agent may not be running or the microVM may be unhealthy)",
                 timeout_secs
-            )
+            ))
         } else {
-            anyhow::anyhow!("Failed to read CONNECT response: {}", e)
+            anyhow::Error::from(e).context("Failed to read CONNECT response")
         }
     })?;
-    if bytes == 0 {
-        return Err(anyhow::Error::from(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "guest agent closed the CONNECT handshake before replying",
-        ))
-        .context("Failed to read CONNECT response"));
-    }
 
     if !response_line.starts_with("OK ") {
         bail!(
@@ -454,6 +466,33 @@ mod tests {
         let stream =
             connect_to_port(&socket_path, port, 1).expect("connect succeeds after restart");
         drop(stream);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn test_connect_response_preserves_bytes_after_ack() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("v.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), format!("CONNECT {}", GUEST_AGENT_PORT));
+            stream
+                .write_all(format!("OK {}\nsentinel", GUEST_AGENT_PORT).as_bytes())
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut stream = try_connect_once(socket.to_str().unwrap(), GUEST_AGENT_PORT, 1).unwrap();
+        let mut sentinel = [0_u8; 8];
+        stream.read_exact(&mut sentinel).unwrap();
+        assert_eq!(&sentinel, b"sentinel");
         worker.join().unwrap();
     }
 }
