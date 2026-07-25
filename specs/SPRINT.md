@@ -15,6 +15,11 @@
       Implementation, focused tests, workspace tests, check, and clippy pass;
       branch is ready for pull request review.
 
+- [x] #1833 image.created atomicity: stage image-lineage nodes before audit
+      emission and atomically publish them only after the signed entry succeeds.
+      Focused tests, workspace check, full tests, clippy, and formatting pass;
+      PR publication is pending.
+
 ---
 
 ## 1. Why

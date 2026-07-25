@@ -7,6 +7,7 @@
 //! Nothing here grants a child trust because an ancestor is present or verified;
 //! boot integrity stays with dm-verity and admission with the signed bundle.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -20,6 +21,34 @@ use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 /// its own content-address, so a node is addressable by digest without an index.
 pub struct ImageStore {
     root: PathBuf,
+}
+
+/// A serialized image node prepared for publication after its audit entry is
+/// durable. Dropping an uncommitted stage removes its temporary file, so an
+/// audit failure cannot leave a visible node behind.
+#[must_use = "a staged image node must be committed after its audit entry succeeds"]
+pub struct StagedImageNode {
+    temp: Option<tempfile::NamedTempFile>,
+    destination: PathBuf,
+}
+
+impl StagedImageNode {
+    /// Atomically publish the staged node at its content-addressed destination.
+    pub fn commit(mut self) -> Result<()> {
+        let Some(temp) = self.temp.take() else {
+            anyhow::bail!("staged image node was already committed");
+        };
+        let destination = self.destination.clone();
+        match temp.persist(&destination) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let _ = error.file.close();
+                Err(error.error).with_context(|| {
+                    format!("publishing staged image node {}", destination.display())
+                })
+            }
+        }
+    }
 }
 
 impl ImageStore {
@@ -45,15 +74,29 @@ impl ImageStore {
         self.dir_for(node_digest).join("node.json")
     }
 
-    /// Persist a node under its own content-address.
-    pub fn save(&self, node: &ImageNode) -> Result<()> {
+    /// Prepare a node under its own content-address without publishing it.
+    pub fn stage(&self, node: &ImageNode) -> Result<StagedImageNode> {
         let dir = self.dir_for(&node.node_digest);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("creating image node dir {}", dir.display()))?;
         let json = serde_json::to_vec_pretty(node).context("serializing image node")?;
-        let path = self.node_path(&node.node_digest);
-        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)
+            .with_context(|| format!("creating staged image node in {}", dir.display()))?;
+        temp.write_all(&json)
+            .with_context(|| format!("writing staged image node in {}", dir.display()))?;
+        temp.flush().context("flushing staged image node")?;
+        temp.as_file()
+            .sync_all()
+            .context("syncing staged image node")?;
+        Ok(StagedImageNode {
+            temp: Some(temp),
+            destination: self.node_path(&node.node_digest),
+        })
+    }
+
+    /// Persist a node under its own content-address atomically.
+    pub fn save(&self, node: &ImageNode) -> Result<()> {
+        self.stage(node)?.commit()
     }
 
     /// Read the node stored under `node_digest` (its directory name). Fails
@@ -351,6 +394,22 @@ mod tests {
         let n = node("slot-a", "rev-1", None);
         store.save(&n).unwrap();
         assert_eq!(store.read(&n.node_digest).unwrap(), n);
+    }
+
+    #[test]
+    fn dropping_an_uncommitted_stage_does_not_publish_a_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ImageStore::at(tmp.path());
+        let n = node("slot-a", "rev-1", None);
+
+        {
+            let _staged = store.stage(&n).unwrap();
+            assert!(store.by_digest(&n.node_digest).unwrap().is_none());
+        }
+
+        assert!(store.by_digest(&n.node_digest).unwrap().is_none());
+        let node_dir = store.dir_for(&n.node_digest);
+        assert!(std::fs::read_dir(node_dir).unwrap().next().is_none());
     }
 
     #[test]

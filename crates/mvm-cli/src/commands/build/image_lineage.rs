@@ -3,8 +3,8 @@
 //! A build produces a compiled microVM image; this module content-addresses
 //! that image into an [`ImageNode`], hash-links it onto the prior build of the
 //! same slot identity, and binds its creation into the host-signed audit chain
-//! *before* the build reports success. The store never holds a node the audit
-//! chain cannot anchor.
+//! after staging the node, then atomically publishes it before the build reports
+//! success. The store never holds a node the audit chain cannot anchor.
 //!
 //! # Lineage is PROVENANCE, not AUTHORIZATION
 //!
@@ -77,9 +77,10 @@ pub(in crate::commands) enum ImageNodeOutcome {
 /// surfaces as an error rather than a silent guess — the store's `head_for`
 /// fails closed on a fork and that error is propagated.
 ///
-/// Creation is chain-signed into the audit log *before* the node is persisted:
-/// an audit failure aborts with no unaudited node left behind, so a node in the
-/// store is always backed by a signature the verifier can anchor.
+/// The node is staged before its creation is chain-signed, then atomically
+/// published after the audit succeeds. An audit or staging failure therefore
+/// leaves no visible node, while a node in the store is always backed by a
+/// signature the verifier can anchor.
 pub(in crate::commands) fn record_image_node(
     store: &ImageStore,
     emitter: &AuditEmitter,
@@ -103,7 +104,30 @@ pub(in crate::commands) fn record_image_node(
         None => None,
     };
 
-    let node = ImageNode::builder(
+    let node = build_image_node(inputs, parent, created_unix);
+
+    // Prepare all filesystem writes before signing. If staging fails, no audit
+    // entry is emitted and no visible node can be left behind.
+    let staged = store
+        .stage(&node)
+        .context("staging the image-lineage node before audit")?;
+
+    emitter
+        .emit_image_created(plan, &node)
+        .context("recording image.created in the signed audit chain")?;
+    staged
+        .commit()
+        .context("publishing the image-lineage node after audit")?;
+
+    Ok(ImageNodeOutcome::Created(node.node_digest))
+}
+
+fn build_image_node(
+    inputs: &ImageNodeInputs,
+    parent: Option<CheckpointDigest>,
+    created_unix: u64,
+) -> ImageNode {
+    ImageNode::builder(
         inputs.build_identity.clone(),
         ImageIdentity {
             canonical: inputs.canonical.clone(),
@@ -113,18 +137,7 @@ pub(in crate::commands) fn record_image_node(
     )
     .parent(parent)
     .created_unix(created_unix)
-    .build();
-
-    // Chain-sign the creation before persisting: the store must never hold a
-    // node the signed chain cannot anchor.
-    emitter
-        .emit_image_created(plan, &node)
-        .context("recording image.created in the signed audit chain")?;
-    store
-        .save(&node)
-        .context("persisting the image-lineage node")?;
-
-    Ok(ImageNodeOutcome::Created(node.node_digest))
+    .build()
 }
 
 fn flake_build_identity(slot_hash: &str) -> ImageBuildIdentity {
@@ -566,6 +579,23 @@ mod tests {
         // Its creation is a single chain-signed audit entry that verifies clean.
         let count = verify_audit_chain(&audit_dir.path().join("local.jsonl"), &vk).unwrap();
         assert_eq!(count, 1, "one image.created entry, chain-signed");
+    }
+
+    #[test]
+    fn staging_failure_does_not_emit_a_phantom_creation_entry() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (store, emitter, _vk) = harness(store_dir.path(), audit_dir.path());
+        let plan = fixture_plan();
+        let inputs = flake_inputs("rev-1", ".#app");
+        let node = build_image_node(&inputs, None, 100);
+
+        // A regular file at the content-addressed directory makes staging fail
+        // before the emitter can append image.created.
+        std::fs::write(store.dir_for(&node.node_digest), b"not a directory").unwrap();
+        let err = record_image_node(&store, &emitter, &plan, &inputs, 100).unwrap_err();
+        assert!(format!("{err:#}").contains("staging the image-lineage node"));
+        assert!(!audit_dir.path().join("local.jsonl").exists());
     }
 
     #[test]
