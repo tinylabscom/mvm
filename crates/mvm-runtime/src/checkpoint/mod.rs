@@ -240,6 +240,9 @@ impl LineageGraph for CheckpointGraph<'_> {
     fn by_digest(&self, digest: &CheckpointDigest) -> Result<Option<CheckpointMeta>> {
         self.0.by_digest(digest)
     }
+    fn children_of(&self, parent_digest: &CheckpointDigest) -> Result<Vec<CheckpointMeta>> {
+        self.0.children_of(parent_digest)
+    }
 }
 
 /// Verify one checkpoint record against the signed audit chain: its stored
@@ -281,6 +284,31 @@ pub fn verify_lineage(
     anchor: &dyn CheckpointChainAnchor,
 ) -> Result<()> {
     crate::lineage::verify_lineage_chain(&CheckpointGraph(store), id, anchor)
+}
+
+/// Enumerate a checkpoint's ancestry (itself + every ancestor up to genesis),
+/// verifying each hop against the signed audit chain. Read-only navigation: it
+/// records each node's [`crate::lineage::HopStatus`] and keeps walking rather
+/// than bailing, so a caller can render the whole chain with a failed hop marked;
+/// it still fails closed on a dangling parent or a cycle via
+/// [`crate::lineage::Ancestry::broken`]. The backward analog of the forward
+/// [`checkpoint_children`].
+pub fn checkpoint_ancestry(
+    store: &CheckpointStore,
+    id: &CheckpointId,
+    anchor: &dyn CheckpointChainAnchor,
+) -> Result<crate::lineage::Ancestry<CheckpointMeta>> {
+    crate::lineage::collect_ancestry(&CheckpointGraph(store), id, anchor)
+}
+
+/// Enumerate a checkpoint's immediate children (forward is a tree — a checkpoint
+/// may be forked many times), each verified against the signed audit chain.
+pub fn checkpoint_children(
+    store: &CheckpointStore,
+    parent_digest: &CheckpointDigest,
+    anchor: &dyn CheckpointChainAnchor,
+) -> Result<Vec<crate::lineage::VerifiedNode<CheckpointMeta>>> {
+    crate::lineage::verified_children(&CheckpointGraph(store), parent_digest, anchor)
 }
 
 /// The fork's source is the sealed checkpoint content (cloned at capture

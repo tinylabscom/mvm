@@ -91,6 +91,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Logs(_) => "logs",
         MachineAction::Console(_) => "console",
         MachineAction::CheckArtifact(_) => "check-artifact",
+        MachineAction::Timeline(_) => "timeline",
         MachineAction::Vm(_) => "vm",
     }
 }

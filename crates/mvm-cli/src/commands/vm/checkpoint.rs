@@ -28,7 +28,9 @@ use super::shared::clap_vm_name;
 use crate::ui;
 
 mod lineage;
+mod timeline;
 pub(super) use lineage::SignedChainAnchor;
+pub(in crate::commands) use timeline::{TimelineArgs, run_timeline};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct CheckpointArgs {

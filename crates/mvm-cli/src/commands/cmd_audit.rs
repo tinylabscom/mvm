@@ -147,6 +147,8 @@ impl Commands {
                 // `machine run --up-json` emits the SDK boot envelope;
                 // reserve stdout so reconcile chrome can't interleave.
                 machine::MachineAction::Run(r) => r.json || r.up_json,
+                // `machine timeline --json` prints a structured lineage.
+                machine::MachineAction::Timeline(t) => t.json,
                 _ => false,
             },
             _ => false,

@@ -222,6 +222,9 @@ impl LineageGraph for ImageGraph<'_> {
     fn by_digest(&self, digest: &CheckpointDigest) -> Result<Option<ImageNode>> {
         self.0.by_digest(digest)
     }
+    fn children_of(&self, parent_digest: &CheckpointDigest) -> Result<Vec<ImageNode>> {
+        self.0.children_of(parent_digest)
+    }
 }
 
 /// Walk an image node's version lineage from `node_digest` to its genesis root,
@@ -240,6 +243,30 @@ pub fn verify_image_lineage(
     anchor: &dyn ImageChainAnchor,
 ) -> Result<()> {
     crate::lineage::verify_lineage_chain(&ImageGraph(store), node_digest, anchor)
+}
+
+/// Enumerate an image node's ancestry (itself + every ancestor up to genesis),
+/// verifying each hop against the signed audit chain. Read-only navigation: each
+/// node carries its [`crate::lineage::HopStatus`] and the walk fails closed on a
+/// dangling parent or a cycle via [`crate::lineage::Ancestry::broken`] rather
+/// than bailing on the first bad node. The image analog of
+/// [`crate::checkpoint::checkpoint_ancestry`].
+pub fn image_ancestry(
+    store: &ImageStore,
+    node_digest: &CheckpointDigest,
+    anchor: &dyn ImageChainAnchor,
+) -> Result<crate::lineage::Ancestry<ImageNode>> {
+    crate::lineage::collect_ancestry(&ImageGraph(store), node_digest, anchor)
+}
+
+/// Enumerate an image node's immediate children (forward is a tree — the same
+/// build identity can fork), each verified against the signed audit chain.
+pub fn image_children(
+    store: &ImageStore,
+    parent_digest: &CheckpointDigest,
+    anchor: &dyn ImageChainAnchor,
+) -> Result<Vec<crate::lineage::VerifiedNode<ImageNode>>> {
+    crate::lineage::verified_children(&ImageGraph(store), parent_digest, anchor)
 }
 
 #[cfg(test)]
