@@ -1078,7 +1078,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     ) {
         Ok(vm) => {
             let ctx = admit_ctx.borrow_mut().take();
-            super::up::emit_launched_if(&ctx, &backend_name);
+            super::up::emit_launched_if(&ctx, &backend_name, true);
             vm
         }
         Err(e) => {

@@ -786,6 +786,32 @@ fn remove_transient_state_dir(staging_dir: &str) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             tracing::debug!(error = %e, dir = staging_dir, "transient state dir cleanup failed");
+            // Firecracker is launched under sudo, so its console/hypervisor
+            // logs, API socket, and vsock UDS are root-owned. A normal
+            // `remove_dir_all` cannot delete them; fall back to the same
+            // privilege level on Linux. On other platforms the leak is logged
+            // and left for the next convergence pass / manual cleanup.
+            #[cfg(target_os = "linux")]
+            {
+                let quoted = mvm_runtime::shell::shell_quote(staging_dir);
+                match std::process::Command::new("bash")
+                    .args(["-c", &format!("sudo rm -rf {quoted}")])
+                    .output()
+                {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => {
+                        tracing::debug!(
+                            status = ?output.status,
+                            stderr = %String::from_utf8_lossy(&output.stderr),
+                            dir = staging_dir,
+                            "privileged transient state dir cleanup failed"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, dir = staging_dir, "privileged transient state dir cleanup command failed");
+                    }
+                }
+            }
         }
     }
 }

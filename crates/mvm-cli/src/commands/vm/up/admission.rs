@@ -629,15 +629,21 @@ pub(super) fn resolve_policy_for_admission(
 /// Plan persistence failure is non-fatal — the launch already
 /// succeeded; the cost is that lifecycle audit will be unbound on
 /// this VM until the next launch.
-pub(in crate::commands::vm) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
+pub(in crate::commands::vm) fn emit_launched_if(
+    ctx: &Option<AdmissionContext>,
+    backend: &str,
+    persist_plan: bool,
+) {
     let Some(ctx) = ctx else { return };
     if let Err(e) = ctx.emitter.emit_launched(&ctx.admitted.plan, backend) {
         tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
     }
-    if let Err(e) = crate::commands::vm::plan_persist::write_plan(
-        &ctx.admitted.plan.workload.0,
-        &ctx.admitted.plan,
-    ) {
+    if persist_plan
+        && let Err(e) = crate::commands::vm::plan_persist::write_plan(
+            &ctx.admitted.plan.workload.0,
+            &ctx.admitted.plan,
+        )
+    {
         tracing::warn!(
             error = %e,
             "persisting admitted plan to ~/.mvm/vms/<vm>/plan.json failed (non-fatal)"
@@ -1045,7 +1051,7 @@ mod admit_plan_tests {
         // legacy --no-supervisor path must not panic or write audit
         // lines.
         let none: Option<AdmissionContext> = None;
-        emit_launched_if(&none, "firecracker");
+        emit_launched_if(&none, "firecracker", true);
         emit_failed_if(
             &none,
             "backend-start",
