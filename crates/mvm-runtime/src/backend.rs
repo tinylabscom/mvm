@@ -196,6 +196,8 @@ impl VmBackend for FirecrackerBackend {
         VmCapabilities {
             pause_resume: true,
             snapshots: false,
+            snapshot_capability: SnapshotCapability::Unsupported,
+            standby_pool: false,
             vsock: true,
             tap_networking: false,
             no_routable_guest_nic: true,
@@ -204,12 +206,6 @@ impl VmBackend for FirecrackerBackend {
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
         }
-    }
-
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        // The runner's Firecracker path is cold-boot only. The legacy live-memory
-        // restore path provisions a TAP and is deliberately unavailable here.
-        SnapshotCapability::Unsupported
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
@@ -606,7 +602,7 @@ impl AnyBackend {
     }
 
     pub fn snapshot_capability(&self) -> SnapshotCapability {
-        self.inner().snapshot_capability()
+        self.capabilities().snapshot_capability
     }
 
     /// Borrow the wrapped backend as `&dyn VmBackend` — for callers (the warm-pool
@@ -642,9 +638,10 @@ impl AnyBackend {
     }
 
     /// Does this backend support a prelaunched-supervisor standby
-    /// pool? See [`VmBackend::supports_standby_pool`]. Only libkrun does today.
+    /// pool? See [`VmBackend::supports_standby_pool`]. The capability is
+    /// authoritative for the selectable runner.
     pub fn supports_standby_pool(&self) -> bool {
-        self.inner().supports_standby_pool()
+        self.capabilities().standby_pool
     }
 
     /// Spawn a prelaunched standby. See [`VmBackend::spawn_standby`].
@@ -1137,7 +1134,7 @@ mod tests {
                     Some(1),
                     true,
                     true,
-                    true,
+                    false,
                 ),
                 (
                     "mock",
@@ -1230,36 +1227,72 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_capability_disk_only_on_firecracker() {
-        // The runner-backed Firecracker path is honest about disk-only
-        // warm-start; the raw compatibility shim is stricter and unsupported.
+    fn snapshot_capability_unsupported_on_firecracker_runner() {
+        // The runner-backed Firecracker path is cold-boot only. The old raw
+        // snapshot helper is not part of the selectable backend.
         assert_eq!(
             AnyBackend::from_hypervisor("firecracker").snapshot_capability(),
-            SnapshotCapability::DiskOnly
+            SnapshotCapability::Unsupported
         );
     }
 
     #[test]
-    fn snapshot_capability_disk_only_on_libkrun() {
+    fn snapshot_capability_unsupported_on_selectable_libkrun_runner() {
         assert_eq!(
             AnyBackend::from_hypervisor("libkrun").snapshot_capability(),
-            SnapshotCapability::DiskOnly
+            SnapshotCapability::Unsupported
         );
     }
 
     #[test]
-    fn snapshot_capability_disk_only_on_qemu() {
-        // QEMU warm-start is a disk-image fast reboot (no live-memory QMP
-        // snapshot wired) — same posture as libkrun.
+    fn snapshot_capability_unsupported_on_qemu() {
+        // QEMU has no wired snapshot/restore operation; a possible QMP future
+        // must not be advertised as a recovery tier today.
         assert_eq!(
             AnyBackend::from_hypervisor("qemu").snapshot_capability(),
-            SnapshotCapability::DiskOnly
+            SnapshotCapability::Unsupported
         );
+    }
+
+    #[test]
+    fn recovery_capability_matrix_is_explicit_for_every_selectable_backend() {
+        let mut expected = vec![
+            ("firecracker", SnapshotCapability::Unsupported, false),
+            ("hvf", SnapshotCapability::Unsupported, false),
+            ("libkrun", SnapshotCapability::Unsupported, false),
+            ("qemu", SnapshotCapability::Unsupported, false),
+            ("wasm", SnapshotCapability::Unsupported, false),
+        ];
+        if cfg!(feature = "test-support") {
+            expected.push(("mock", SnapshotCapability::LiveMemory, false));
+        }
+        for (name, snapshot, standby) in expected {
+            let backend = AnyBackend::from_hypervisor(name);
+            let capabilities = backend.capabilities();
+            assert_eq!(
+                capabilities.snapshot_capability, snapshot,
+                "{name}: snapshot tier drifted from the recovery matrix"
+            );
+            assert_eq!(
+                capabilities.standby_pool, standby,
+                "{name}: standby capability drifted from the recovery matrix"
+            );
+            assert_eq!(
+                backend.snapshot_capability(),
+                snapshot,
+                "{name}: compatibility snapshot accessor drifted"
+            );
+            assert_eq!(
+                backend.supports_standby_pool(),
+                standby,
+                "{name}: compatibility standby accessor drifted"
+            );
+        }
     }
 
     #[test]
     fn libkrun_warm_start_refuses_live_memory_with_recovery_hint() {
-        // A live-memory warm-start asked of libkrun's disk-only tier must
+        // A live-memory warm-start asked of the selectable libkrun runner must
         // fail closed (no cold-boot fallback) and name a recovery action.
         // The Unsupported branch returns before any boot, so this needs
         // no VM/KVM. Post-runner-flip libkrun takes the trait-default warm_start,
@@ -1279,7 +1312,7 @@ mod tests {
                 hint,
             }) => {
                 assert_eq!(requested, SnapshotCapability::LiveMemory);
-                assert_eq!(available, SnapshotCapability::DiskOnly);
+                assert_eq!(available, SnapshotCapability::Unsupported);
                 assert!(hint.contains("cold boot"), "{hint}");
             }
             other => panic!("expected Unsupported, got {other:?}"),
@@ -1407,7 +1440,8 @@ mod tests {
     #[test]
     fn warm_start_on_libkrun_refuses_live_memory_with_typed_hint() {
         use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
-        // libkrun is disk-only: a live-memory warm-start request must fail
+        // The selectable libkrun runner does not advertise a warm-start tier:
+        // a live-memory request must fail
         // closed with the typed Unsupported variant + a recovery hint, never a
         // silent cold boot.
         let backend = AnyBackend::from_hypervisor("libkrun");
@@ -1425,7 +1459,7 @@ mod tests {
                 hint,
             } => {
                 assert_eq!(requested, SnapshotCapability::LiveMemory);
-                assert_eq!(available, SnapshotCapability::DiskOnly);
+                assert_eq!(available, SnapshotCapability::Unsupported);
                 // The recovery hint points at a cold boot rather than a silent
                 // degrade (libkrun overrides with a richer message; the stable
                 // phrase both it and the default share is the cold-boot hint).

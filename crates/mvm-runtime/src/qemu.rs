@@ -248,6 +248,8 @@ impl VmBackend for QemuBackend {
             // monitor lands.
             pause_resume: false,
             snapshots: false,
+            snapshot_capability: SnapshotCapability::Unsupported,
+            standby_pool: false,
             vsock: true,
             // User-mode (slirp) networking — no host TAP device.
             tap_networking: false,
@@ -255,12 +257,6 @@ impl VmBackend for QemuBackend {
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
         }
-    }
-
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        // No live-memory snapshot wired (no QMP). Warm-start would be a
-        // fast reboot from the disk image, same posture as libkrun.
-        SnapshotCapability::DiskOnly
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {

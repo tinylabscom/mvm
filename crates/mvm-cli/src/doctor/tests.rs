@@ -211,9 +211,9 @@ fn doctor_report_serializes_warm_start() {
     })
     .unwrap();
     assert!(json.contains("\"warm_start\""), "{json}");
-    // The CLI workload runners are disk-only, so the warm-start section serializes
-    // the disk-only tier (qemu is the one remaining warm-start row).
-    assert!(json.contains("\"disk-only\""), "{json}");
+    // The capability matrix includes both supported and explicitly unsupported
+    // recovery tiers, including the selectable libkrun runner's refusal.
+    assert!(json.contains("\"unsupported\""), "{json}");
 }
 
 #[test]

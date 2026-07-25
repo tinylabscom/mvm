@@ -122,9 +122,8 @@ struct DoctorReport {
     /// output is deterministic.
     balloon_support: BTreeMap<String, bool>,
     /// Per-backend warm-start tier + the Linux fast-resume substrate probe.
-    /// Surfaces the honest capability matrix — Firecracker live-memory, HVF
-    /// save/restore, libkrun disk-only — so a user can predict which backend
-    /// resumes from RAM vs. reboots from disk.
+    /// Surfaces the honest capability matrix so a user can predict which
+    /// backend resumes from RAM, reboots from disk, or refuses recovery.
     warm_start: warm_start::WarmStartReport,
     /// Per-backend capability matrix — snapshot tier, network/storage
     /// disposition, and the boot-latency (standby-pool) axis — the

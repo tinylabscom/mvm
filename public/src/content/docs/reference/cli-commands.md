@@ -130,7 +130,6 @@ guest-RPC surface, fleet-shaped workflows).
 |---------|-------------|
 | `mvmctl build image [PATH]` | Build the manifest at `PATH` (file or directory; default: cwd walk-up). Persists artifacts to a slot keyed by `sha256(canonical_manifest_path)`. Subsumes today's `mvmctl build image --flake .` and the legacy `Mvmfile.toml` flow into one verb |
 | `mvmctl build image [PATH] --force` | Rebuild even if the cache hits |
-| `mvmctl build image [PATH] --snapshot` | After build, boot, wait for healthy, and capture a Firecracker snapshot (Firecracker backend only) |
 | `mvmctl build image [PATH] --update-hash` | Recompute the Nix fixed-output derivation hash |
 | `mvmctl build image [PATH] --vcpus N --mem SIZE --data-disk SIZE` | CLI overrides for resource sizing; persisted to the slot record |
 | `mvmctl build image [PATH] --json` | Stream structured build events |
@@ -599,12 +598,14 @@ host registry records.
 
 ## Checkpoint
 
-`mvmctl machine save` / `mvmctl machine restore` are the first-class HVF machine-state verbs. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk through HVF `saveMachineStateToURL`, restore verifies the sealed checkpoint content and resumes the same VM identity. `mvmctl machine checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl machine snapshot ls` / `mvmctl machine snapshot rm` remain for Firecracker sealed snapshots.
+`mvmctl machine checkpoint` is the advanced checkpoint store surface for
+list/remove/fork/diff and explicit class selection. Recovery tiers are
+backend-specific; inspect `mvmctl doctor` before requesting one. Unsupported
+save/restore and warm-start requests fail with an actionable error rather than
+silently selecting a weaker tier.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl machine save <name> [--tag <tag>] [--json]` | Save a running HVF VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
-| `mvmctl machine restore <checkpoint> [--json]` | Restore a previously saved `vm_full` checkpoint into the original VM identity after content verification. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
 | `mvmctl machine checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via HVF's `saveMachineStateToURL`. Records content hash in the audit chain. |
 | `mvmctl machine checkpoint restore <checkpoint> [--json]` | Restore a previously created `vm_full` checkpoint into the original VM identity. Re-hashes content against the recorded metadata before loading. |
 | `mvmctl machine checkpoint fork <checkpoint> [--new-id <name>] [--boot] [--json]` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). `vm_full` forks auto-boot; `fs_quick` forks boot only with `--boot`. |
@@ -612,8 +613,6 @@ host registry records.
 | `mvmctl machine checkpoint diff <a> <b> [--json]` | Compare two checkpoint metadata/content manifests. |
 | `mvmctl machine checkpoint verify <checkpoint> [--json]` | Verify a checkpoint's full lineage against the signed audit chain (recomputed content-address must match both the stored `meta_digest` and the digest signed at creation, at every hop). Exits nonzero on any drift, chain mismatch, missing signed entry, or broken lineage. |
 | `mvmctl machine checkpoint rm <checkpoint> [--json]` | Delete a checkpoint and its blobs. |
-| `mvmctl machine snapshot ls [--json]` | List sealed Firecracker instance snapshots. |
-| `mvmctl machine snapshot rm <name> [--json]` | Delete a sealed Firecracker instance snapshot. |
 
 Checkpoint blobs are stored under the configured checkpoint store (`MVM_HOME` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
 
@@ -696,8 +695,8 @@ highest): top-level/app `env` → `entrypoint.env` → CLI `--env`.
 ### Snapshot restore
 
 When the request boots a registered template (`--manifest <name>`) and
-that template has a captured snapshot, `mvmctl run` restores from the
-snapshot instead of cold-booting — typically sub-second on Linux/KVM.
+that template has a compatible recovery artifact, `mvmctl run` uses the
+selected backend's advertised recovery tier instead of cold-booting.
 
 The snapshot path activates only when *all* of the following hold:
 
@@ -707,10 +706,10 @@ The snapshot path activates only when *all* of the following hold:
   snapshot's recorded drive layout);
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (HVF, libkrun), vsock
-snapshots return `os error 95` (EOPNOTSUPP); restore failures fall back
-to cold boot with a warning rather than aborting the exec. See the
-[Sandboxed Exec](/guides/exec/) guide for the full background.
+Recovery tiers are not interchangeable. Unsupported live-memory,
+machine-state, disk-only, or standby requests fail with an actionable error;
+the CLI does not silently fall back to a weaker tier. See the [Sandboxed
+Exec](/guides/exec/) guide for the full background.
 
 ## Volumes
 

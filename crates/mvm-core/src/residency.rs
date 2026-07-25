@@ -126,12 +126,11 @@ fn parse_env_residency(raw: &str) -> Option<ResidencyPolicy> {
     }
 }
 
-fn host_default_for(is_hvf_default_tier: bool) -> ResidencyPolicy {
-    if is_hvf_default_tier {
-        ResidencyPolicy::always_warm()
-    } else {
-        ResidencyPolicy::parked()
-    }
+fn host_default_for(_is_hvf_default_tier: bool) -> ResidencyPolicy {
+    // The default selectable macOS backend does not advertise a standby pool.
+    // Keep the automatic policy parked until a backend with that capability is
+    // selected; an explicit warm request must still fail with a typed error.
+    ResidencyPolicy::parked()
 }
 
 /// The warm-pool size to use: an explicit request wins; otherwise the resolved
@@ -211,8 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn host_default_is_warm_on_hvf_tier_parked_otherwise() {
-        assert_eq!(host_default_for(true), ResidencyPolicy::always_warm());
+    fn host_default_is_parked_until_a_standby_backend_is_selected() {
+        assert_eq!(host_default_for(true), ResidencyPolicy::parked());
         assert_eq!(host_default_for(false), ResidencyPolicy::parked());
     }
 

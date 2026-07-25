@@ -37,8 +37,8 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, StartMode, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StartMode,
+    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 use thiserror::Error;
 
@@ -275,6 +275,8 @@ impl VmBackend for WasmBackend {
             // all. Egress, when a later phase adds it, rides host-provided
             // WASI imports, not a routable NIC.
             no_routable_guest_nic: true,
+            snapshot_capability: SnapshotCapability::Unsupported,
+            standby_pool: false,
             ..VmCapabilities::default()
         }
     }

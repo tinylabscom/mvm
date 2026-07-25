@@ -29,8 +29,9 @@ a user-facing claim.
 
 Snapshots are separate from first boot. Firecracker sealed pause/resume has its
 own integrity evidence. Full-VM machine-state save/restore is currently
-unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore. A
-restore is a lifecycle transition, not a new security boundary.
+unavailable through the selectable workload runners; `mvmctl doctor` is the
+authoritative capability check. A restore is a lifecycle transition, not a new
+security boundary.
 
 ## Documentation rule
 

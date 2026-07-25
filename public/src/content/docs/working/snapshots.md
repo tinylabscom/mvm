@@ -5,17 +5,25 @@ description: Pause a microVM into sealed state, create checkpoints, and restore 
 
 Cold mode means a workload is not currently consuming a running guest, but it has recoverable state. In `mvm`, that state is represented by backend-specific snapshot and checkpoint artifacts.
 
-## Current snapshot and checkpoint paths
+## Recovery paths and current status
 
-| Path | Backend | Commands | Status |
+| Path | Meaning | Current status |
 | --- | --- | --- | --- |
-| Sealed instance snapshot | Firecracker | `mvmctl pause`, `mvmctl resume`, `mvmctl snapshot ls`, `mvmctl snapshot rm` | Shipped for the Firecracker snapshot path. |
-| Memory checkpoint (vm-full) | Firecracker (Linux) | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore`, `mvmctl checkpoint ls`, `mvmctl checkpoint rm` | Currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore. |
-| Pool instance sleep | Firecracker pool lifecycle | internal pool lifecycle APIs | Implemented in pool lifecycle; public docs should stay tied to the CLI surface. |
+| Live-memory snapshot/restore | Restore guest RAM plus VMM state. | Not advertised by the selectable workload runners. `resume --warm` refuses with a typed error when the selected backend cannot honor it. |
+| Save/restore machine state | Restore serialized VMM state without claiming live-memory fidelity. | No selectable backend currently advertises this tier. |
+| Disk-only CoW warm start | Reboot from a copy-on-write disk/overlay artifact without restoring RAM. | The raw libkrun substrate has this primitive, but no selectable workload runner advertises it yet. |
+| Prelaunched supervisor standby | Pre-pay supervisor/setup latency before attaching a workload. | Separate from snapshots; the raw libkrun substrate has the primitive, but no selectable workload runner advertises it yet. |
+| Cold boot | Boot immutable artifacts from scratch. | Supported baseline recovery path. |
 
-Other backends may support stop/start without machine-state recovery. Do not assume snapshot or checkpoint support unless the active backend reports it.
+Other backends may support stop/start without machine-state recovery. Do not
+assume a recovery tier unless the active backend reports it in
+`mvmctl doctor`.
 
-## Firecracker pause and resume
+## Sealed instance snapshots
+
+The `pause`/plain `resume` commands use the sealed instance-snapshot envelope
+when that lifecycle is available for the selected backend. They do not imply
+that the backend supports live-memory warm start.
 
 Pause a running VM:
 
@@ -23,7 +31,9 @@ Pause a running VM:
 mvmctl pause agent-sandbox
 ```
 
-`mvmctl pause` asks Firecracker to write `vmstate.bin` and `mem.bin` under the VM's instance snapshot directory, seals the sidecar with an epoch-bound HMAC envelope, and marks the VM as paused in the local registry.
+`mvmctl pause` asks the backend snapshot transport to write `vmstate.bin` and
+`mem.bin` under the VM's instance snapshot directory, seals the sidecar with
+an epoch-bound HMAC envelope, and marks the VM as paused in the local registry.
 
 Resume it:
 
@@ -31,7 +41,10 @@ Resume it:
 mvmctl resume agent-sandbox
 ```
 
-`mvmctl resume` verifies the sealed envelope before loading the state and clearing the paused flag. Replay of older sealed snapshots is refused by the epoch binding.
+`mvmctl resume` verifies the sealed envelope before loading the state and
+clearing the paused flag. Replay of older sealed snapshots is refused by the
+epoch binding. `mvmctl resume --warm` is a distinct live-memory request and
+fails closed when the selected backend cannot honor that tier.
 
 List and remove local sealed snapshots:
 
@@ -42,7 +55,7 @@ mvmctl snapshot rm agent-sandbox
 
 ## Full-VM memory checkpoints
 
-Full-VM memory checkpoints capture full guest state. They are currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore:
+Full-VM memory checkpoints capture full guest state. They are currently unavailable through the selectable workload runners; request them only when `mvmctl doctor` reports a compatible backend and capability:
 
 ```sh
 mvmctl checkpoint create agent-sandbox --class vm-full

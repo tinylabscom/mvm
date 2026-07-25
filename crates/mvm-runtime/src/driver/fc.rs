@@ -366,10 +366,12 @@ impl VmmDriver for FcDriver {
         // carries no guest NIC and routes egress solely over the vsock proxy,
         // matching libkrun and hvf. Pause/resume and balloon stay true (both are
         // wired through this driver's boot + running-VM handle); live-memory
-        // snapshots are dropped, since the runner path warm-starts disk-only.
+        // snapshots are dropped, since the runner path is cold-boot only.
         VmCapabilities {
             pause_resume: true,
             snapshots: false,
+            snapshot_capability: SnapshotCapability::Unsupported,
+            standby_pool: false,
             vsock: true,
             tap_networking: false,
             no_routable_guest_nic: true,
@@ -378,12 +380,6 @@ impl VmmDriver for FcDriver {
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
         }
-    }
-
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        // The runner takes no live-memory warm-start on this path, so the driver
-        // is honest about disk-only — matching libkrun and hvf.
-        SnapshotCapability::DiskOnly
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
@@ -701,7 +697,7 @@ mod tests {
         assert!(caps.host_vsock_proxy);
         assert!(!caps.tap_networking);
         assert!(!FirecrackerBackend.capabilities().tap_networking);
-        assert_eq!(d.snapshot_capability(), SnapshotCapability::DiskOnly);
+        assert_eq!(d.snapshot_capability(), SnapshotCapability::Unsupported);
         // Security tier still delegates to the raw backend (same claims).
         assert_eq!(
             d.security_profile().tier,

@@ -152,10 +152,8 @@ backend_catalog![
         marker_file: Some("fc.pid"),
         started_vm_probe_order: Some(3),
         list_all: true,
-        // The runner takes the trait-default warm-start/standby (no live-memory
-        // snapshot, no standby pool) and takes the admitted plan in-process, so
-        // Firecracker drops off the balloon + warm-start doctor surfaces and
-        // needs no disk-stashed plan for an external bridge.
+        // Discovery metadata is retained for legacy filtered surfaces; the
+        // recovery truth is `VmCapabilities` on the constructed backend.
         balloon_support: false,
         warm_start_support: false,
         bundled_kernel: false,
@@ -171,9 +169,8 @@ backend_catalog![
         marker_file: Some("libkrun.pid"),
         started_vm_probe_order: Some(2),
         list_all: true,
-        // The runner takes the trait-default warm-start/standby (no live-memory
-        // snapshot, no standby pool) and reports no balloon elasticity, so
-        // libkrun drops off the balloon + warm-start doctor surfaces.
+        // The raw libkrun shim has disk-only and standby primitives, but the
+        // selectable workload runner does not expose those paths yet.
         balloon_support: false,
         warm_start_support: false,
         bundled_kernel: true,
@@ -190,7 +187,7 @@ backend_catalog![
         started_vm_probe_order: Some(1),
         list_all: true,
         balloon_support: true,
-        warm_start_support: true,
+        warm_start_support: false,
         bundled_kernel: false,
         needs_plan_json: false,
         is_workload: false
@@ -349,13 +346,16 @@ mod tests {
     }
 
     /// The descriptor-filtered surfaces feed user-visible ordering in
-    /// `mvmctl doctor` (balloon + warm-start matrices), `mvmctl ls`
+    /// legacy `mvmctl doctor` (balloon + warm-start matrices), `mvmctl ls`
     /// (list-all), and the started-VM probe. Freeze those orders so a table
     /// reshuffle can't silently change what users see or the probe priority.
     #[test]
     fn descriptor_surface_ordering_is_frozen() {
         assert_eq!(selectors(balloon_support_descriptors()), ["qemu"]);
-        assert_eq!(selectors(warm_start_support_descriptors()), ["qemu"]);
+        assert_eq!(
+            selectors(warm_start_support_descriptors()),
+            Vec::<&str>::new()
+        );
         assert_eq!(
             selectors(list_all_descriptors()),
             ["firecracker", "libkrun", "qemu", "hvf", "wasm"]

@@ -22,11 +22,14 @@ mvmctl pause agent-sandbox
 mvmctl resume agent-sandbox
 ```
 
-The exact backend mechanics differ. See [Snapshots](/working/snapshots/) for Firecracker sealed snapshots and full-VM machine-state files.
+The exact backend mechanics differ. See [Snapshots](/working/snapshots/) for the
+separate live-memory, machine-state, disk-only, standby, and cold-boot tiers.
+Use `mvmctl doctor` to see which tier the selected backend advertises.
 
 ## Cold mode
 
-Cold mode is the product posture where a sandbox is snapshotted, compute is released, and the sandbox can later be restored. See [Cold mode](/working/cold-mode/).
+Cold mode is the product posture where compute is released while an explicitly
+supported recovery artifact is retained. See [Cold mode](/working/cold-mode/).
 
 ## Cleanup
 

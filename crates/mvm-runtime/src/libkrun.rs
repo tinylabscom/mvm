@@ -812,6 +812,8 @@ impl VmBackend for LibkrunBackend {
         VmCapabilities {
             pause_resume: false,
             snapshots: false,
+            snapshot_capability: SnapshotCapability::DiskOnly,
+            standby_pool: true,
             vsock: true,
             tap_networking: false,
             // The virtio-net device is attached but drained into a disconnected
@@ -828,13 +830,6 @@ impl VmBackend for LibkrunBackend {
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
         }
-    }
-
-    fn snapshot_capability(&self) -> SnapshotCapability {
-        // libkrun has no memory snapshot — warm-start is a fast reboot from
-        // the overlay/rootfs disk snapshot. A live-memory
-        // request is refused with a typed error, not silently degraded.
-        SnapshotCapability::DiskOnly
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {

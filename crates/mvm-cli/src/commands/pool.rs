@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
-    StandbyClaim, StandbyCompat, StandbyHandle, StandbySpec, StandbyState, VmBackend, VmId,
-    VmStartConfig,
+    StandbyClaim, StandbyCompat, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmBackend,
+    VmId, VmStartConfig,
 };
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
@@ -143,11 +143,17 @@ pub struct WarmResult {
 /// surface them as an error.  Returns a [`WarmResult`] with success and
 /// failure counts.
 pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
-    if p.target == 0 || !p.backend.supports_standby_pool() {
+    if p.target == 0 {
         return Ok(WarmResult {
             spawned: 0,
             failed: 0,
         });
+    }
+    if !p.backend.capabilities().standby_pool {
+        return Err(anyhow::Error::new(StandbyError::Unsupported {
+            backend: p.backend.name().to_string(),
+        })
+        .context("requested standby-pool recovery"));
     }
     // Serialize concurrent warms on the pool directory. Without this lock two
     // launches can both read an empty pool and each spawn up to `target`,
@@ -222,14 +228,15 @@ pub enum LaunchDecision {
     ColdBoot,
 }
 
-/// Try to claim an idle standby compatible with `want`; **fail open to cold boot**. On a
-/// claim error the standby is removed (it's spent/broken), never left idle, so the next
-/// launch doesn't keep retrying a dead standby.
+/// Try to claim an idle standby compatible with `want`. On a claim error the standby is
+/// removed (it's spent/broken), never left idle, so the next launch doesn't keep retrying
+/// a dead standby. A backend without standby support is an explicit typed error rather
+/// than a silent cold-boot fallback.
 ///
 /// `make_claim` builds the [`StandbyClaim`] **for the selected standby's id** — the audit
 /// substrate (`gateway-<vm>.sock`) is name-keyed, and a claimed VM runs under its
 /// standby-id, so the caller must compute those paths against `handle.id`. A `make_claim`
-/// error also fails open to cold boot (and reaps the reserved standby).
+/// error returns a cold-boot decision after reaping the reserved standby.
 pub fn claim_or_cold<F>(
     pool: &SupervisorStandbyPool,
     backend: &dyn VmBackend,
@@ -239,8 +246,11 @@ pub fn claim_or_cold<F>(
 where
     F: FnOnce(&StandbyHandle) -> Result<StandbyClaim>,
 {
-    if !backend.supports_standby_pool() {
-        return Ok(LaunchDecision::ColdBoot);
+    if !backend.capabilities().standby_pool {
+        return Err(anyhow::Error::new(StandbyError::Unsupported {
+            backend: backend.name().to_string(),
+        })
+        .context("requested standby-pool recovery"));
     }
     let Some(handle) = pool.select_idle_compatible(want)? else {
         return Ok(LaunchDecision::ColdBoot);
@@ -285,8 +295,9 @@ fn compat_for_launch(
 }
 
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
-/// the VM now runs under) or `None` to cold-boot. **Fail-open**: anything not default-
-/// shaped, not bridge-admitted, or any error → `None` (the caller cold-boots as normal).
+/// the VM now runs under) or `None` when this launch shape is not eligible. A configured
+/// warm pool on a backend without standby support is an explicit typed error; it must not
+/// silently become a cold boot.
 ///
 /// Eligibility (all required): `warm_pool_size > 0`, the launch is auto-named (no explicit
 /// `--name` — a claimed VM is named by its standby-id), no extra volumes or virtio-fs
@@ -302,12 +313,10 @@ pub fn try_warm_claim(
     user_named: bool,
     admitted_image_sha256: Option<&str>,
 ) -> Result<Option<VmId>> {
-    if cfg.warm_pool_size == 0
-        || user_named
-        || !cfg.volumes.is_empty()
-        || cfg.virtiofs_root.is_some()
-        || !backend.supports_standby_pool()
-    {
+    if cfg.warm_pool_size == 0 {
+        return Ok(None);
+    }
+    if user_named || !cfg.volumes.is_empty() || cfg.virtiofs_root.is_some() {
         return Ok(None);
     }
     let Some(tenant) = cfg.tenant_id.clone() else {
@@ -319,6 +328,12 @@ pub fn try_warm_claim(
         // supervisor attach path; without it, cold-boot.
         return Ok(None);
     };
+    if !backend.capabilities().standby_pool {
+        return Err(anyhow::Error::new(StandbyError::Unsupported {
+            backend: backend.name().to_string(),
+        })
+        .context("requested standby-pool recovery"));
+    }
     // Reuse the rootfs sha claim-8 admission already computed (same bytes) so
     // the claim decision doesn't re-hash the whole rootfs on the launch path.
     let want = compat_for_launch(backend.as_vm_backend(), cfg, admitted_image_sha256)?;
@@ -404,8 +419,8 @@ fn should_replenish_inline(
 /// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
 /// replenish-on-use maintainer). Best-effort — failures are logged, never propagated.
 ///
-/// For libkrun standbys — the only backend `supports_standby_pool()` today —
-/// this path fires automatically after each claimed launch.
+/// This path fires automatically after each claimed launch when the selected
+/// backend advertises standby support.
 pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
     if !should_replenish_inline(
         backend.supports_standby_pool(),
@@ -480,6 +495,22 @@ mod tests {
         let mut c = eligible_cfg();
         c.warm_pool_size = 0;
         assert_eq!(try_warm_claim(&b, &c, false, None).unwrap(), None);
+    }
+
+    #[test]
+    fn try_warm_claim_refuses_unsupported_backend_instead_of_cold_booting() {
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        let err = try_warm_claim(&backend, &eligible_cfg(), false, None)
+            .expect_err("configured warm pool must not silently cold-boot");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("standby pool is not supported"),
+            "{message}"
+        );
+        assert!(
+            message.contains("requested standby-pool recovery"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -746,7 +777,10 @@ mod tests {
             BackendKind::Mock
         }
         fn capabilities(&self) -> VmCapabilities {
-            VmCapabilities::default()
+            VmCapabilities {
+                standby_pool: true,
+                ..VmCapabilities::default()
+            }
         }
         fn supports_standby_pool(&self) -> bool {
             true
@@ -869,7 +903,10 @@ mod tests {
             BackendKind::Mock
         }
         fn capabilities(&self) -> VmCapabilities {
-            VmCapabilities::default()
+            VmCapabilities {
+                standby_pool: true,
+                ..VmCapabilities::default()
+            }
         }
         fn supports_standby_pool(&self) -> bool {
             true
@@ -1014,7 +1051,6 @@ pub(in crate::commands) enum PoolAction {
 /// resolve through the same pieces so a warmed standby is claimable by a default `up`.
 struct WarmShape {
     backend: AnyBackend,
-    backend_name: String,
     kernel: std::path::PathBuf,
     /// Source rootfs for an image-bound saved-standby capture. Always `None`
     /// today (no current backend needs it).
@@ -1040,7 +1076,6 @@ fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<
     let kernel = std::path::PathBuf::from(default_kernel);
     Ok(WarmShape {
         backend,
-        backend_name,
         kernel,
         image,
         vcpus,
@@ -1065,13 +1100,6 @@ fn run_warm(
     rootfs_override: Option<&str>,
 ) -> Result<()> {
     let shape = resolve_warm_shape(cfg, rootfs_override)?;
-    if !shape.backend.supports_standby_pool() {
-        crate::ui::warn(&format!(
-            "backend '{}' has no supervisor standby pool; nothing warmed.",
-            shape.backend_name
-        ));
-        return Ok(());
-    }
     // Ensure the host signer exists — the standby re-verifies the attach plan against it.
     let signer = host_signer::load_or_init()?;
     let result = warm_to_target(

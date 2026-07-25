@@ -39,9 +39,11 @@ cleanup is still required.
 
 Lifecycle names are shared across the product, but the implementation varies:
 
-- Firecracker paths use sealed snapshots for pause and resume where supported.
-- macOS virtualization paths use machine-state save and restore where the host
-  platform supports that capability.
+- Recovery is backend-specific: live-memory restore, machine-state restore,
+  disk-only CoW warm start, standby, and cold boot are separate capabilities.
+- `mvmctl doctor` is authoritative for the selected backend; an unsupported
+  request fails with an actionable error rather than falling back to another
+  tier.
 - Pool-backed flows may sleep an instance internally, but public docs should
   still describe the user-facing CLI state rather than provider internals.
 
