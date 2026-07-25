@@ -13,10 +13,22 @@
 //! entry). The invariant that actually protects trust is not "the store only
 //! holds anchored nodes" but "a stored node is never *trusted* without its
 //! signed chain entry": `verify_image_lineage` fails closed on any un-audited
-//! node. A process crash between the save and the emit can leave a stored node
-//! transiently un-audited; it is rejected by verification and self-healed on the
-//! next same-revision build, which detects the orphaned tip and completes its
-//! audit by re-emitting `image.created`.
+//! node.
+//!
+//! A process crash between the save and the emit can leave a stored node
+//! transiently un-audited. Verification rejects it; the next build self-heals
+//! it. Because a *later* revision can chain onto a crash-orphaned predecessor,
+//! the self-heal walks the tip's ancestry and completes the audit of every
+//! un-audited ancestor before either no-oping (same revision) or chaining a new
+//! child onto it — so a newly created node's full ancestry is always anchored
+//! and lineage verification cannot fail closed on a stranded orphan.
+//!
+//! A node carries a non-load-bearing `audit_ref` back-pointer, stamped once its
+//! creation is anchored, so the common path tells "already audited" from a cheap
+//! field read; the full signed chain is loaded (lazily, once) only when a node
+//! lacks the marker. The signed chain stays authoritative: a missing marker on
+//! an actually-audited node is confirmed against it and backfilled, never
+//! double-emitted.
 //!
 //! # Lineage is PROVENANCE, not AUTHORIZATION
 //!
@@ -27,6 +39,7 @@
 //! strictly on the build identity and the image's canonical revision — the
 //! recorded provenance is never an input to it.
 
+use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
@@ -108,12 +121,15 @@ pub(in crate::commands) enum ImageNodeOutcome {
 /// an error rather than a silent guess — the store's `head_for` fails closed on
 /// a fork and that error is propagated.
 ///
-/// A new node is committed to the store (atomically) and *then* chain-signed; an
-/// emit failure rolls the node back, so the chain never references a node the
-/// store dropped. When the tip already records this revision the outcome is a
-/// no-op ([`ImageNodeOutcome::AlreadyCurrent`]) if it is anchored in the signed
-/// chain, or a self-heal ([`ImageNodeOutcome::Healed`]) if a crash orphaned it
-/// before its `image.created` — checked via the same `anchor` the verifier uses.
+/// Before either no-oping or chaining a child, the tip's ancestry is healed: any
+/// un-audited ancestor (a crash orphan) has its `image.created` re-emitted, so a
+/// newly created node's full ancestry is always anchored and lineage
+/// verification cannot fail closed on a stranded orphan. A new node is committed
+/// atomically and *then* chain-signed; an emit failure rolls it back so the
+/// chain never references a node the store dropped. The healing check is
+/// marker-first — a node's `audit_ref` back-pointer proves it is anchored
+/// cheaply — and consults `anchor` (the same reader the verifier uses) only when
+/// a marker is absent.
 pub(in crate::commands) fn record_image_node(
     store: &ImageStore,
     emitter: &dyn ImageCreatedEmitter,
@@ -126,14 +142,26 @@ pub(in crate::commands) fn record_image_node(
         .head_for(&inputs.build_identity)
         .context("resolving the current image-lineage tip for this build identity")?;
 
+    // Heal any un-audited ancestor before we no-op on the tip or chain a child
+    // onto it, so the resulting tip's whole ancestry is anchored.
+    let healed = match &head {
+        Some(tip) => heal_unaudited_ancestry(store, emitter, plan, anchor, tip)?,
+        None => false,
+    };
+
     // The current tip already records this exact revision. We do not fork a
-    // second tip for one identity; instead reconcile its audit state. Provenance
-    // is deliberately not compared — it is recorded, never a chain-shaping input.
+    // second tip for one identity; the ancestry heal above already completed any
+    // orphaned audit. Provenance is deliberately not compared — it is recorded,
+    // never a chain-shaping input.
     if let Some(tip) = head
         .as_ref()
         .filter(|tip| tip.image_identity.canonical == inputs.canonical)
     {
-        return reconcile_recorded_tip(emitter, plan, anchor, tip);
+        return Ok(if healed {
+            ImageNodeOutcome::Healed(tip.node_digest.clone())
+        } else {
+            ImageNodeOutcome::AlreadyCurrent(tip.node_digest.clone())
+        });
     }
 
     let parent = head.map(|tip| tip.node_digest);
@@ -145,6 +173,8 @@ pub(in crate::commands) fn record_image_node(
 /// Save precedes emit so the store never holds a node the chain references but
 /// cannot resolve; the save is atomic ([`ImageStore::save`]). If the emit fails
 /// the just-saved node is rolled back, leaving nothing behind for a clean retry.
+/// On success the node is stamped with its audit back-pointer so a later build
+/// recognizes it as anchored without scanning the chain.
 fn create_image_node(
     store: &ImageStore,
     emitter: &dyn ImageCreatedEmitter,
@@ -171,30 +201,130 @@ fn create_image_node(
     if let Err(e) = emitter.emit_image_created(plan, &node) {
         // Roll the node back so the chain never references a node the store
         // dropped, and a retry re-creates it cleanly.
-        let _ = store.remove(&node.node_digest);
+        if let Err(rollback_err) = store.remove(&node.node_digest) {
+            tracing::warn!(
+                node_digest = %node.node_digest,
+                error = %rollback_err,
+                "failed to roll back an un-audited image-lineage node after its audit emit \
+                 failed; it will be rejected by lineage verification and healed on the next build"
+            );
+        }
         return Err(e).context("recording image.created in the signed audit chain");
     }
+    mark_audited(store, &node, plan);
     Ok(ImageNodeOutcome::Created(node.node_digest))
 }
 
-/// The tip already records this revision. A no-op if it is anchored in the
-/// signed chain; otherwise (a crash orphaned it between save and emit) complete
-/// its audit by re-emitting `image.created` for the *stored* node — no re-hash,
-/// no new node. The anchor is the same signed-chain reader the verifier uses, so
-/// "un-anchored" here means exactly what `verify_image_lineage` fails closed on.
-fn reconcile_recorded_tip(
+/// Walk `tip`'s ancestry to genesis, completing the audit of every un-audited
+/// node so a build never chains onto — or no-ops on — a chain with a stranded
+/// orphan (which would make `verify_image_lineage` fail closed forever). Returns
+/// whether any node was healed.
+///
+/// Marker-first: a node carrying an `audit_ref` is anchored, and by the
+/// create-time invariant so is its whole ancestry, so the walk stops there
+/// without touching the signed chain. Only an unmarked node consults the
+/// authoritative `anchor`: an already-audited-but-unmarked node (e.g. a
+/// pre-marker record) is confirmed and its marker backfilled with no re-emit; a
+/// genuine orphan has `image.created` re-emitted, then is marked. A single crash
+/// orphans one node, but the walk heals a run of them from successive crashes.
+fn heal_unaudited_ancestry(
+    store: &ImageStore,
     emitter: &dyn ImageCreatedEmitter,
     plan: &ExecutionPlan,
     anchor: &dyn ImageChainAnchor,
     tip: &ImageNode,
-) -> Result<ImageNodeOutcome> {
-    if anchor.recorded_creation_digest(tip)?.is_some() {
-        return Ok(ImageNodeOutcome::AlreadyCurrent(tip.node_digest.clone()));
+) -> Result<bool> {
+    let mut healed = false;
+    let mut current = tip.clone();
+    loop {
+        if current.audit_ref.is_some() {
+            break;
+        }
+        if anchor.recorded_creation_digest(&current)?.is_some() {
+            // Anchored already; the missing marker is just a stale record. Backfill
+            // it and stop — its ancestry is anchored too.
+            mark_audited(store, &current, plan);
+            break;
+        }
+        // A genuine orphan (saved, never emitted). The envelope binds to this
+        // build's plan; the entry's identity labels come from the node itself.
+        emitter
+            .emit_image_created(plan, &current)
+            .context("completing the audit of a crash-orphaned image-lineage ancestor")?;
+        mark_audited(store, &current, plan);
+        healed = true;
+
+        match &current.parent {
+            Some(parent_digest) => {
+                current = store
+                    .read(parent_digest)
+                    .context("reading an image-lineage ancestor to heal its audit")?;
+            }
+            None => break,
+        }
     }
-    emitter
-        .emit_image_created(plan, tip)
-        .context("completing the audit of a crash-orphaned image-lineage node")?;
-    Ok(ImageNodeOutcome::Healed(tip.node_digest.clone()))
+    Ok(healed)
+}
+
+/// Stamp a node's `audit_ref` back-pointer once its creation is anchored, so a
+/// later build recognizes it as audited from a field read rather than a chain
+/// scan. `audit_ref` is excluded from the content-address, so the re-save keeps
+/// the same `node_digest` (and directory) — the record is unchanged for
+/// verification. Best-effort: the marker is an optimization, and the signed
+/// chain stays authoritative, so a re-save failure is logged, not fatal.
+fn mark_audited(store: &ImageStore, node: &ImageNode, plan: &ExecutionPlan) {
+    if node.audit_ref.is_some() {
+        return;
+    }
+    let marked = ImageNode {
+        audit_ref: Some(audit_ref_marker(plan)),
+        ..node.clone()
+    };
+    if let Err(e) = store.save(&marked) {
+        tracing::warn!(
+            node_digest = %node.node_digest,
+            error = %e,
+            "failed to stamp an image-lineage node's audit marker; the next build will \
+             re-confirm it against the signed chain"
+        );
+    }
+}
+
+/// The value stamped in `audit_ref`: the per-tenant chain file the node's
+/// `image.created` entry lives in. Only its presence is load-bearing (the cheap
+/// "audited" marker); the value is informational, so the chain filename suffices.
+fn audit_ref_marker(plan: &ExecutionPlan) -> String {
+    format!("{}.jsonl", plan.tenant.0)
+}
+
+/// A [`SignedChainAnchor`] loaded on first use and cached, so the hot build path
+/// pays the full `~/.mvm/audit/` scan + verify only when a node lacks its cheap
+/// `audit_ref` marker (the rare orphan / pre-marker case), never on a build whose
+/// ancestry is fully marked.
+struct LazySignedChainAnchor {
+    inner: RefCell<Option<SignedChainAnchor>>,
+}
+
+impl LazySignedChainAnchor {
+    fn new() -> Self {
+        Self {
+            inner: RefCell::new(None),
+        }
+    }
+}
+
+impl ImageChainAnchor for LazySignedChainAnchor {
+    fn recorded_creation_digest(&self, node: &ImageNode) -> Result<Option<CheckpointDigest>> {
+        if self.inner.borrow().is_none() {
+            let loaded = load_signed_chain_anchor()?;
+            *self.inner.borrow_mut() = Some(loaded);
+        }
+        self.inner
+            .borrow()
+            .as_ref()
+            .expect("anchor was just loaded")
+            .recorded_creation_digest(node)
+    }
 }
 
 fn flake_build_identity(slot_hash: &str) -> ImageBuildIdentity {
@@ -317,16 +447,25 @@ pub(in crate::commands) fn record_flake_build_node(
     let canonical = flake_canonical(&revision.revision_hash);
     let store = ImageStore::open();
 
-    if tip_already_records(&store, &build_identity, &canonical)? {
-        // Tip already records this revision: reconcile its audit state without
-        // re-hashing the rootfs — a no-op if it is anchored, a self-heal if a
-        // crash orphaned it before its `image.created`.
-        return reconcile_over_signed_chain(
-            &store,
-            &build_identity,
-            &canonical,
-            &revision.flake_ref,
-        );
+    match classify_tip(&store, &build_identity, &canonical)? {
+        // Tip records this revision and is marked audited — the whole ancestry is
+        // anchored, so this is a genuine no-op: no lock, no hash, no chain scan.
+        TipDisposition::CurrentAndAudited(digest) => {
+            report_already_current(&digest);
+            return Ok(());
+        }
+        // Tip records this revision but is unmarked: reconcile (heal) without
+        // re-hashing the rootfs.
+        TipDisposition::CurrentButUnmarked => {
+            return reconcile_over_signed_chain(
+                &store,
+                &build_identity,
+                &canonical,
+                &revision.flake_ref,
+            );
+        }
+        // A genuinely new revision falls through to hash + record.
+        TipDisposition::NewRevision => {}
     }
 
     // Genuinely new (or genesis): hash the installed artifacts now, using the
@@ -351,20 +490,40 @@ pub(in crate::commands) fn record_flake_build_node(
     record_over_signed_chain(&store, &inputs, &revision.flake_ref, &rootfs_sha256)
 }
 
-/// Whether the current tip already records `canonical` for `build_identity` (an
-/// identical-revision rebuild). Cheap: reads only the stored node records, never
-/// hashing an artifact — this is the guard the hot path relies on to skip
-/// re-hashing an unchanged image. Propagates `head_for`'s fork error, so an
-/// ambiguous tip surfaces before any work.
-fn tip_already_records(
+/// How the current tip relates to the revision being recorded. Cheap: reads only
+/// the stored node records (and their `audit_ref` markers), never hashing an
+/// artifact and never scanning the signed chain — this is the guard the hot path
+/// relies on to skip re-hashing an unchanged image. Propagates `head_for`'s fork
+/// error, so an ambiguous tip surfaces before any work.
+enum TipDisposition {
+    /// The tip records this revision and carries its audit marker (so its whole
+    /// ancestry is anchored). Carries the tip digest.
+    CurrentAndAudited(CheckpointDigest),
+    /// The tip records this revision but has no audit marker — reconcile it (heal
+    /// an orphan, or backfill a pre-marker record) without re-hashing.
+    CurrentButUnmarked,
+    /// This revision is not the current tip — a new node must be created.
+    NewRevision,
+}
+
+fn classify_tip(
     store: &ImageStore,
     build_identity: &ImageBuildIdentity,
     canonical: &ImageCanonicalId,
-) -> Result<bool> {
+) -> Result<TipDisposition> {
     let head = store
         .head_for(build_identity)
         .context("resolving the current image-lineage tip for this build identity")?;
-    Ok(head.is_some_and(|tip| &tip.image_identity.canonical == canonical))
+    Ok(match head {
+        Some(tip) if &tip.image_identity.canonical == canonical => {
+            if tip.audit_ref.is_some() {
+                TipDisposition::CurrentAndAudited(tip.node_digest)
+            } else {
+                TipDisposition::CurrentButUnmarked
+            }
+        }
+        _ => TipDisposition::NewRevision,
+    })
 }
 
 /// Shared tail for a genuinely-new node: load the host signer, synthesize the
@@ -372,13 +531,14 @@ fn tip_already_records(
 /// `image_name` / `image_sha256` bind the audit entry; `image_sha256` is the
 /// rootfs digest for both callers.
 ///
-/// The lock serializes the `head_for` → save → emit critical section per build
-/// identity, so two concurrent recorders of one identity (e.g. two concurrent
-/// `machine run --flake` of one slot) cannot both read the same tip and fork the
-/// chain. The signed-chain anchor is loaded *inside* the lock so it reflects the
-/// chain as of the write, and `record_image_node`'s own reconcile guard is the
-/// backstop: a second writer that finds the first's node as the tip reconciles
-/// (no-op or self-heal) rather than forking.
+/// The lock serializes the `head_for` → heal → save → emit critical section per
+/// build identity, so two concurrent recorders of one identity (e.g. two
+/// concurrent `machine run --flake` of one slot) cannot both read the same tip
+/// and fork the chain. The signed-chain anchor is loaded lazily (and only inside
+/// the lock), so a build whose ancestry is fully marked never pays the scan, and
+/// `record_image_node`'s own reconcile guard is the backstop: a second writer
+/// that finds the first's node as the tip reconciles (no-op or self-heal) rather
+/// than forking.
 fn record_over_signed_chain(
     store: &ImageStore,
     inputs: &ImageNodeInputs,
@@ -395,7 +555,7 @@ fn record_over_signed_chain(
     )?;
 
     let outcome = with_identity_lock(store, &inputs.build_identity, || {
-        let anchor = load_signed_chain_anchor()?;
+        let anchor = LazySignedChainAnchor::new();
         record_image_node(store, &emitter, &plan, inputs, now_unix(), &anchor)
     })?;
     report_outcome(&outcome);
@@ -405,8 +565,9 @@ fn record_over_signed_chain(
 /// Shared tail for an already-recorded tip: reconcile its audit state under the
 /// per-identity lock without re-hashing the rootfs. The tip is re-read under the
 /// lock (it may have advanced since the caller's cheap pre-lock check); if it
-/// still records `canonical` its audit is completed when orphaned, else there is
-/// nothing to do here (a concurrent build advanced the chain past this revision).
+/// still records `canonical` its ancestry is healed (any orphan's audit
+/// completed, any pre-marker record backfilled), else there is nothing to do
+/// here (a concurrent build advanced the chain past this revision).
 fn reconcile_over_signed_chain(
     store: &ImageStore,
     build_identity: &ImageBuildIdentity,
@@ -416,7 +577,7 @@ fn reconcile_over_signed_chain(
     let emitter = open_audit_emitter()?;
 
     let outcome = with_identity_lock(store, build_identity, || {
-        let anchor = load_signed_chain_anchor()?;
+        let anchor = LazySignedChainAnchor::new();
         let Some(tip) = store
             .head_for(build_identity)
             .context("resolving the current image-lineage tip for this build identity")?
@@ -432,7 +593,12 @@ fn reconcile_over_signed_chain(
             image_name,
             &image_sha256,
         )?;
-        reconcile_recorded_tip(&emitter, &plan, &anchor, &tip).map(Some)
+        let healed = heal_unaudited_ancestry(store, &emitter, &plan, &anchor, &tip)?;
+        Ok(Some(if healed {
+            ImageNodeOutcome::Healed(tip.node_digest.clone())
+        } else {
+            ImageNodeOutcome::AlreadyCurrent(tip.node_digest.clone())
+        }))
     })?;
 
     if let Some(outcome) = outcome {
@@ -594,16 +760,23 @@ pub(in crate::commands) fn record_oci_pull_node(node: &OciPullNode<'_>) -> Resul
     let canonical = oci_canonical(node.resolved_digest);
     let store = ImageStore::open();
 
-    if tip_already_records(&store, &build_identity, &canonical)? {
-        // Tip already records this digest: reconcile its audit state without
-        // re-hashing the materialized rootfs (no-op if anchored, self-heal if a
-        // crash orphaned it).
-        return reconcile_over_signed_chain(
-            &store,
-            &build_identity,
-            &canonical,
-            node.canonical_reference,
-        );
+    match classify_tip(&store, &build_identity, &canonical)? {
+        // Tip records this digest and is marked audited — a genuine no-op.
+        TipDisposition::CurrentAndAudited(digest) => {
+            report_already_current(&digest);
+            return Ok(());
+        }
+        // Tip records this digest but is unmarked: reconcile (heal) without
+        // re-hashing the materialized rootfs.
+        TipDisposition::CurrentButUnmarked => {
+            return reconcile_over_signed_chain(
+                &store,
+                &build_identity,
+                &canonical,
+                node.canonical_reference,
+            );
+        }
+        TipDisposition::NewRevision => {}
     }
 
     let rootfs_sha256 = sha256_file_cached(node.rootfs_path).with_context(|| {
@@ -660,6 +833,24 @@ mod tests {
         }
     }
 
+    /// A test anchor that recognizes exactly the node digests it was given —
+    /// models a signed chain that recorded precisely those creations, so lineage
+    /// verification fails closed on any node whose heal was missed.
+    struct RecognizingAnchor(std::collections::HashSet<CheckpointDigest>);
+    impl RecognizingAnchor {
+        fn of(digests: &[&CheckpointDigest]) -> Self {
+            Self(digests.iter().map(|d| (*d).clone()).collect())
+        }
+    }
+    impl ImageChainAnchor for RecognizingAnchor {
+        fn recorded_creation_digest(&self, n: &ImageNode) -> Result<Option<CheckpointDigest>> {
+            Ok(self
+                .0
+                .contains(&n.node_digest)
+                .then(|| n.node_digest.clone()))
+        }
+    }
+
     /// An emitter whose `image.created` always fails — exercises the
     /// save-then-emit rollback without a real audit chain.
     struct FailingEmitter;
@@ -667,6 +858,21 @@ mod tests {
         fn emit_image_created(&self, _plan: &ExecutionPlan, _node: &ImageNode) -> Result<()> {
             anyhow::bail!("injected audit-emit failure")
         }
+    }
+
+    /// Build an [`ImageNode`] from node inputs at a fixed timestamp, as the
+    /// recorder would — for seeding crash-orphan fixtures directly into the store.
+    fn node_for(inputs: &ImageNodeInputs, created_unix: u64) -> ImageNode {
+        ImageNode::builder(
+            inputs.build_identity.clone(),
+            ImageIdentity {
+                canonical: inputs.canonical.clone(),
+                artifacts: inputs.artifacts.clone(),
+            },
+            inputs.provenance.clone(),
+        )
+        .created_unix(created_unix)
+        .build()
     }
 
     fn keypair() -> (SigningKey, VerifyingKey) {
@@ -1021,6 +1227,133 @@ mod tests {
         assert_eq!(count, 1, "a healed tip is not re-emitted again");
     }
 
+    /// The reviewer's regression: a DIFFERENT revision must heal a crash-orphaned
+    /// ancestor before chaining onto it. Without the ancestry walk, `rev-2` would
+    /// chain onto an un-audited `rev-1` and `verify_image_lineage(rev-2)` would
+    /// fail closed forever.
+    #[test]
+    fn a_new_revision_heals_the_orphaned_ancestor_it_chains_onto() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (store, emitter, vk) = harness(store_dir.path(), audit_dir.path());
+        let plan = fixture_plan();
+
+        // Crash-orphan a genesis node for rev-1: saved, never emitted, unmarked.
+        let orphan = node_for(&flake_inputs("rev-1", ".#app"), 1);
+        store.save(&orphan).unwrap();
+
+        // A different revision rev-2 records. The anchor recognizes only what was
+        // emitted (nothing yet), so the orphaned ancestor must be healed first.
+        let rev2 = flake_inputs("rev-2", ".#app");
+        let outcome =
+            record_image_node(&store, &emitter, &plan, &rev2, 2, &UnauditedAnchor).unwrap();
+        let rev2_digest = match outcome {
+            ImageNodeOutcome::Created(d) => d,
+            other => panic!("expected Created, got {other:?}"),
+        };
+
+        // rev-2 hash-links to the (now healed) rev-1.
+        assert_eq!(
+            store
+                .by_digest(&rev2_digest)
+                .unwrap()
+                .unwrap()
+                .parent
+                .as_ref(),
+            Some(&orphan.node_digest)
+        );
+        // The chain grew by exactly two — the healed ancestor + the new node —
+        // with no duplicate emits, and the store holds exactly those two nodes.
+        let count = verify_audit_chain(&audit_dir.path().join("local.jsonl"), &vk).unwrap();
+        assert_eq!(count, 2, "one ancestor heal + one create, no duplicates");
+        assert_eq!(store.list().unwrap().len(), 2);
+        // The full lineage now verifies against a chain that records every node.
+        let recognized = RecognizingAnchor::of(&[&orphan.node_digest, &rev2_digest]);
+        verify_image_lineage(&store, &rev2_digest, &recognized).unwrap();
+    }
+
+    /// The walk heals a *run* of orphaned ancestors from successive crashes, not
+    /// just the immediate parent, and emits each exactly once.
+    #[test]
+    fn the_heal_walks_a_run_of_orphaned_ancestors() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (store, emitter, vk) = harness(store_dir.path(), audit_dir.path());
+        let plan = fixture_plan();
+
+        // Two stacked orphans: rev-1 (genesis) ← rev-2, both saved, none emitted.
+        let g0 = node_for(&flake_inputs("rev-1", ".#app"), 1);
+        let g1 = ImageNode::builder(
+            g0.build_identity.clone(),
+            ImageIdentity {
+                canonical: ImageCanonicalId::Flake {
+                    revision_hash: "rev-2".into(),
+                },
+                artifacts: vec![blob("rootfs.ext4", "rev-2")],
+            },
+            g0.provenance.clone(),
+        )
+        .parent(Some(g0.node_digest.clone()))
+        .created_unix(2)
+        .build();
+        store.save(&g0).unwrap();
+        store.save(&g1).unwrap();
+
+        // A third revision chains on. Both orphaned ancestors must be healed.
+        let rev3 = flake_inputs("rev-3", ".#app");
+        let outcome =
+            record_image_node(&store, &emitter, &plan, &rev3, 3, &UnauditedAnchor).unwrap();
+        let rev3_digest = match outcome {
+            ImageNodeOutcome::Created(d) => d,
+            other => panic!("expected Created, got {other:?}"),
+        };
+
+        // Three emits total (two heals + one create), no double-heal, three nodes.
+        let count = verify_audit_chain(&audit_dir.path().join("local.jsonl"), &vk).unwrap();
+        assert_eq!(count, 3, "two ancestor heals + one create, each once");
+        assert_eq!(store.list().unwrap().len(), 3);
+        let recognized = RecognizingAnchor::of(&[&g0.node_digest, &g1.node_digest, &rev3_digest]);
+        verify_image_lineage(&store, &rev3_digest, &recognized).unwrap();
+    }
+
+    /// An audited-but-unmarked node (as a pre-marker record would be) is confirmed
+    /// against the signed chain and its marker backfilled — never re-emitted.
+    #[test]
+    fn an_audited_but_unmarked_tip_is_backfilled_not_re_emitted() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let (store, emitter, vk) = harness(store_dir.path(), audit_dir.path());
+        let plan = fixture_plan();
+        let inputs = flake_inputs("rev-1", ".#app");
+
+        // A node that was emitted but carries no audit marker on disk.
+        let node = node_for(&inputs, 5);
+        store.save(&node).unwrap();
+        emitter.emit_image_created(&plan, &node).unwrap();
+        assert!(node.audit_ref.is_none(), "seeded record has no marker");
+
+        // Recording the same revision: the anchor confirms it is audited, so the
+        // marker is backfilled with no second emit — a no-op, not a heal.
+        let outcome =
+            record_image_node(&store, &emitter, &plan, &inputs, 99, &AgreeingAnchor).unwrap();
+        assert_eq!(
+            outcome,
+            ImageNodeOutcome::AlreadyCurrent(node.node_digest.clone()),
+            "an already-audited tip is a no-op, not a heal"
+        );
+        let count = verify_audit_chain(&audit_dir.path().join("local.jsonl"), &vk).unwrap();
+        assert_eq!(count, 1, "confirmed-audited node must not be re-emitted");
+        assert!(
+            store
+                .by_digest(&node.node_digest)
+                .unwrap()
+                .unwrap()
+                .audit_ref
+                .is_some(),
+            "the marker was backfilled"
+        );
+    }
+
     #[test]
     fn flake_node_inputs_maps_slot_revision_and_artifacts() {
         let revision = TemplateRevision {
@@ -1295,6 +1628,62 @@ mod tests {
         assert_eq!(local_audit_chain_len(tmp.path()), 1, "orphan self-healed");
         let anchor = SignedChainAnchor::load().unwrap();
         verify_image_lineage(&store, &orphan.node_digest, &anchor).unwrap();
+    }
+
+    /// End-to-end regression against the real signed chain: a build of a DIFFERENT
+    /// revision must heal a crash-orphaned ancestor before chaining onto it, so
+    /// the new tip verifies. This is the reviewer's exact case, through the real
+    /// flake entry point and the production `SignedChainAnchor`.
+    #[test]
+    fn record_flake_build_node_heals_an_orphaned_ancestor_across_revisions() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let slot_hash = "slot-cross";
+        let store = ImageStore::open();
+
+        // Crash-orphan a genesis node for rev-1: saved, never emitted, unmarked.
+        let orphan = ImageNode::builder(
+            flake_build_identity(slot_hash),
+            ImageIdentity {
+                canonical: flake_canonical("rev-1"),
+                artifacts: vec![blob("rootfs.ext4", &"a".repeat(64))],
+            },
+            ImageProvenance::Build {
+                input_ref: ".#app".into(),
+                lock_digest: None,
+            },
+        )
+        .created_unix(1)
+        .build();
+        store.save(&orphan).unwrap();
+        assert!(!tmp.path().join("audit").join("local.jsonl").exists());
+
+        // A different revision rev-2 builds and records. It must heal rev-1 first.
+        let revision_hash = "rev-2";
+        seed_slot_artifacts(slot_hash, revision_hash);
+        record_flake_build_node(
+            &persisted_manifest(slot_hash),
+            &template_revision(revision_hash),
+        )
+        .unwrap();
+
+        // rev-2 chained onto the (now healed) rev-1; the chain grew by exactly two
+        // (heal + create); the whole lineage verifies against the real chain.
+        let tip = store
+            .head_for(&flake_build_identity(slot_hash))
+            .unwrap()
+            .expect("rev-2 recorded");
+        assert_eq!(tip.parent.as_ref(), Some(&orphan.node_digest));
+        assert_eq!(
+            local_audit_chain_len(tmp.path()),
+            2,
+            "heal + create, no dupes"
+        );
+        assert_eq!(store.list().unwrap().len(), 2);
+        let anchor = SignedChainAnchor::load().unwrap();
+        verify_image_lineage(&store, &tip.node_digest, &anchor).unwrap();
     }
 
     #[test]
