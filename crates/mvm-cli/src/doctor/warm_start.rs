@@ -291,7 +291,12 @@ mod tests {
         // Every selectable backend remains in the matrix, including explicit
         // unsupported recovery tiers.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
-        assert_eq!(names, vec!["firecracker", "hvf", "libkrun", "qemu", "wasm"]);
+        let mut expected = vec!["firecracker", "hvf", "libkrun", "qemu", "wasm"];
+        if cfg!(feature = "test-support") {
+            expected.push("mock");
+            expected.sort_unstable();
+        }
+        assert_eq!(names, expected);
 
         let qemu = by("qemu").unwrap();
         assert_eq!(qemu.snapshot_tier, "unsupported");
