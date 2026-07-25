@@ -30,7 +30,7 @@ use crate::ui;
 mod lineage;
 mod revert;
 mod timeline;
-pub(super) use lineage::SignedChainAnchor;
+pub(in crate::commands) use lineage::SignedChainAnchor;
 pub(in crate::commands) use revert::{
     AdvanceArgs, RevertArgs, RevertOutcome, RevertRunImage, run_advance, run_revert, run_rewind,
 };
@@ -2442,19 +2442,46 @@ mod tests {
             },
         };
 
-        // Genesis build.
-        let genesis = match record_image_node(&store, &emitter, &plan, &inputs("rev-1"), 1).unwrap()
+        // Genesis build. The anchor is the real signed-chain reader, reloaded per
+        // call so it reflects the chain as of that record.
+        let genesis = match record_image_node(
+            &store,
+            &emitter,
+            &plan,
+            &inputs("rev-1"),
+            1,
+            &SignedChainAnchor::load().unwrap(),
+        )
+        .unwrap()
         {
             ImageNodeOutcome::Created(d) => d,
             other => panic!("expected Created, got {other:?}"),
         };
-        // Idempotent rebuild of the identical revision → no new node.
+        // Idempotent rebuild of the identical revision → no new node (the genesis
+        // is now anchored in the reloaded chain).
         assert!(matches!(
-            record_image_node(&store, &emitter, &plan, &inputs("rev-1"), 2).unwrap(),
+            record_image_node(
+                &store,
+                &emitter,
+                &plan,
+                &inputs("rev-1"),
+                2,
+                &SignedChainAnchor::load().unwrap(),
+            )
+            .unwrap(),
             ImageNodeOutcome::AlreadyCurrent(_)
         ));
         // New revision chains as a child of genesis.
-        let child = match record_image_node(&store, &emitter, &plan, &inputs("rev-2"), 3).unwrap() {
+        let child = match record_image_node(
+            &store,
+            &emitter,
+            &plan,
+            &inputs("rev-2"),
+            3,
+            &SignedChainAnchor::load().unwrap(),
+        )
+        .unwrap()
+        {
             ImageNodeOutcome::Created(d) => d,
             other => panic!("expected Created, got {other:?}"),
         };
@@ -2518,17 +2545,43 @@ mod tests {
             },
         };
 
-        let genesis = match record_image_node(&store, &emitter, &plan, &inputs("a"), 1).unwrap() {
+        let genesis = match record_image_node(
+            &store,
+            &emitter,
+            &plan,
+            &inputs("a"),
+            1,
+            &SignedChainAnchor::load().unwrap(),
+        )
+        .unwrap()
+        {
             ImageNodeOutcome::Created(d) => d,
             other => panic!("expected Created, got {other:?}"),
         };
-        // Re-pulling the same digest is idempotent.
+        // Re-pulling the same digest is idempotent (the genesis is now anchored).
         assert!(matches!(
-            record_image_node(&store, &emitter, &plan, &inputs("a"), 2).unwrap(),
+            record_image_node(
+                &store,
+                &emitter,
+                &plan,
+                &inputs("a"),
+                2,
+                &SignedChainAnchor::load().unwrap(),
+            )
+            .unwrap(),
             ImageNodeOutcome::AlreadyCurrent(_)
         ));
         // A newly-resolved digest for the same repo chains as a child.
-        let child = match record_image_node(&store, &emitter, &plan, &inputs("b"), 3).unwrap() {
+        let child = match record_image_node(
+            &store,
+            &emitter,
+            &plan,
+            &inputs("b"),
+            3,
+            &SignedChainAnchor::load().unwrap(),
+        )
+        .unwrap()
+        {
             ImageNodeOutcome::Created(d) => d,
             other => panic!("expected Created, got {other:?}"),
         };

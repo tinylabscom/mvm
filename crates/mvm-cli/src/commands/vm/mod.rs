@@ -3,7 +3,7 @@
 pub(super) mod agent_verbs;
 pub(super) mod artifact;
 pub(super) mod audit_chain;
-pub(super) mod checkpoint;
+pub(in crate::commands) mod checkpoint;
 pub(crate) mod console;
 pub(super) mod cp;
 pub(super) mod diff;
