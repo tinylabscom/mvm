@@ -14,12 +14,11 @@
 //!   (`<registry>/<repository>@<resolved_digest>`) through the normal admitted
 //!   `machine run` path, which re-fetches the exact bytes and re-admits
 //!   identically.
-//! - **Flake image-node targets are refused.** Restoring a flake-built image to
-//!   its exact prior revision would re-run `machine run --flake`, which rebuilds
-//!   from whatever the flake resolves to *now* — not the revision being
-//!   restored. Booting a specific stored revision instead of the slot's current
-//!   one is not yet wired, so the restore fails closed rather than silently
-//!   relaunch drifted (or, mid-incident, modified) source.
+//! - **Flake image-node targets pin the stored revision.** Restoring a
+//!   flake-built image resolves the recorded slot/revision directory directly,
+//!   reconciles every committed artifact hash before boot, and then runs that
+//!   exact source through the normal admitted path. It never rebuilds the flake
+//!   or follows the slot's mutable `current` symlink.
 //!
 //! Every restore verifies its target against the signed audit chain up front and
 //! fails closed on an un-audited, tampered, or dangling record — the same
@@ -28,6 +27,8 @@
 //! `checkpoint.restored` entry, and an image restore an `image.reverted` entry;
 //! both carry the initiating verb (`revert` / `rewind` / `advance`) as their
 //! `via` label.
+
+use std::path::{Component, Path};
 
 use anyhow::{Context, Result, bail};
 
@@ -125,11 +126,34 @@ pub(in crate::commands) enum RevertOutcome {
     RunImage(RevertRunImage),
 }
 
-/// The reconstructed `machine run --image` reference for an image-node restore.
-/// Always a digest-pinned OCI reference (flake nodes are refused upstream).
+/// The exact source selected for an image-node restore.
+#[derive(Debug)]
+pub(in crate::commands) enum RevertImageSource {
+    /// A digest-pinned OCI reference.
+    Oci(String),
+    /// A content-addressed stored flake revision.
+    Flake {
+        slot_hash: String,
+        revision_hash: String,
+    },
+}
+
+impl RevertImageSource {
+    fn audit_reference(&self) -> String {
+        match self {
+            Self::Oci(reference) => reference.clone(),
+            Self::Flake {
+                slot_hash,
+                revision_hash,
+            } => format!("flake:{slot_hash}@{revision_hash}"),
+        }
+    }
+}
+
+/// The source and run options for an image-node restore.
 #[derive(Debug)]
 pub(in crate::commands) struct RevertRunImage {
-    pub image: Option<String>,
+    pub source: RevertImageSource,
     pub hypervisor: Option<String>,
     pub json: bool,
 }
@@ -308,29 +332,26 @@ fn revert_image(
         )
     })?;
 
-    let image = reconstruct_image_run_reference(&node)?;
+    let source = reconstruct_image_source(&node)?;
+    let reference = source.audit_reference();
 
     // Distinctly audit the restore BEFORE handing off, so the chain records
     // "reverted to node X via Y" — not just an ordinary image run.
-    emit_image_revert_audit(&node, via, &image)?;
+    emit_image_revert_audit(&node, via, &reference)?;
 
     Ok(RevertOutcome::RunImage(RevertRunImage {
-        image: Some(image),
+        source,
         hypervisor: Some(opts.hypervisor.to_string()),
         json: opts.json,
     }))
 }
 
-/// Reconstruct the digest-pinned `machine run --image` reference an OCI node
-/// recorded, so a restore re-fetches the exact prior image
-/// (`<registry>/<repository>@<resolved_digest>`).
+/// Resolve the exact boot source recorded by an image node.
 ///
-/// Flake nodes are refused: relaunching a flake image to its exact prior
-/// revision would re-run `machine run --flake`, which rebuilds from whatever the
-/// flake resolves to now — not the revision being restored. Booting a specific
-/// stored revision instead of the slot's current one is not yet wired, so this
-/// fails closed rather than silently relaunch drifted source.
-fn reconstruct_image_run_reference(node: &ImageNode) -> Result<String> {
+/// OCI nodes become digest-pinned references. Flake nodes resolve the stored
+/// slot revision, reconcile every committed artifact hash, and become a
+/// pinned template source. Neither branch follows a mutable tag or `current`.
+fn reconstruct_image_source(node: &ImageNode) -> Result<RevertImageSource> {
     match &node.build_identity {
         ImageBuildIdentity::Oci {
             registry,
@@ -343,14 +364,80 @@ fn reconstruct_image_run_reference(node: &ImageNode) -> Result<String> {
                     node.node_digest
                 );
             };
-            Ok(format!("{registry}/{repository}@{resolved_digest}"))
+            Ok(RevertImageSource::Oci(format!(
+                "{registry}/{repository}@{resolved_digest}"
+            )))
         }
-        ImageBuildIdentity::Flake { .. } => bail!(
-            "reverting a flake-built image to its exact prior revision isn't wired yet: the run \
-             path rebuilds the flake's CURRENT revision, not the stored one, so a flake restore \
-             would silently relaunch drifted source. OCI images and checkpoints support exact \
-             restore."
-        ),
+        ImageBuildIdentity::Flake { slot_hash } => {
+            let ImageCanonicalId::Flake { revision_hash } = &node.image_identity.canonical else {
+                bail!(
+                    "image node {} names a flake build identity but a non-flake canonical id; \
+                     refusing to reconstruct an ambiguous source",
+                    node.node_digest
+                );
+            };
+            let (_, _, _, rootfs, _) =
+                mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision(
+                    slot_hash,
+                    revision_hash,
+                )
+                .with_context(|| {
+                    format!("resolving stored flake revision {slot_hash}@{revision_hash}")
+                })?;
+            reconcile_flake_artifacts(
+                node,
+                Path::new(&rootfs).parent().ok_or_else(|| {
+                    anyhow::anyhow!("stored flake rootfs has no revision directory")
+                })?,
+            )?;
+            Ok(RevertImageSource::Flake {
+                slot_hash: slot_hash.clone(),
+                revision_hash: revision_hash.clone(),
+            })
+        }
+    }
+}
+
+/// Reconcile the stored revision's bytes against the image node before the
+/// admitted boot path sees them. The node must commit both boot artifacts and
+/// may not name paths outside its revision directory.
+fn reconcile_flake_artifacts(node: &ImageNode, revision_dir: &Path) -> Result<()> {
+    let required = ["vmlinux", "rootfs.ext4"];
+    for name in required {
+        if !node
+            .image_identity
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.name == name)
+        {
+            bail!(
+                "image node {} does not commit required flake artifact {name:?}",
+                node.node_digest
+            );
+        }
+    }
+
+    for artifact in &node.image_identity.artifacts {
+        let path = revision_dir.join(safe_artifact_name(&artifact.name)?);
+        let actual = mvm_core::crypto::image_verify::sha256_file(&path)
+            .with_context(|| format!("hashing stored flake artifact {}", path.display()))?;
+        if actual != artifact.sha256 {
+            bail!(
+                "stored flake artifact {:?} failed image-lineage reconciliation: expected {}, got {}",
+                artifact.name,
+                artifact.sha256,
+                actual
+            );
+        }
+    }
+    Ok(())
+}
+
+fn safe_artifact_name(name: &str) -> Result<&str> {
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(name),
+        _ => bail!("image-lineage artifact name {name:?} is not a plain file name"),
     }
 }
 
@@ -575,6 +662,7 @@ mod tests {
     use mvm_core::image_lineage::{
         ImageBuildIdentity, ImageCanonicalId, ImageIdentity, ImageNode, ImageProvenance,
     };
+    use mvm_core::manifest::{PersistedManifest, Provenance, slot_dir, slot_revision_dir};
     use mvm_core::plan::test_support::PlanFixture;
     use mvm_hostd::audit::bind::bind_checkpoint_created;
     use mvm_hostd::audit::emitter::AuditEmitter;
@@ -640,6 +728,71 @@ mod tests {
         .build()
     }
 
+    fn seed_flake_revision(slot_hash: &str, revision_hash: &str) -> ImageNode {
+        let slot = std::path::PathBuf::from(slot_dir(slot_hash));
+        std::fs::create_dir_all(&slot).unwrap();
+        PersistedManifest {
+            schema_version: 1,
+            manifest_path: "/tmp/mvm.toml".into(),
+            manifest_hash: slot_hash.into(),
+            flake_ref: ".#app".into(),
+            profile: "app".into(),
+            vcpus: 2,
+            mem_mib: 512,
+            mem_initial_mib: None,
+            data_disk_mib: 0,
+            name: None,
+            backend: "firecracker".into(),
+            provenance: Provenance {
+                toolchain_version: "test".into(),
+                builder_image_digest: None,
+                host_arch: "aarch64-darwin".into(),
+                built_at: "2026-01-01T00:00:00Z".into(),
+                ir_hash: None,
+            },
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+        .write_to_slot(&slot)
+        .unwrap();
+
+        let revision_dir = std::path::PathBuf::from(slot_revision_dir(slot_hash, revision_hash));
+        std::fs::create_dir_all(&revision_dir).unwrap();
+        let rootfs = revision_dir.join("rootfs.ext4");
+        let vmlinux = revision_dir.join("vmlinux");
+        std::fs::write(&rootfs, b"rootfs-revision-1").unwrap();
+        std::fs::write(&vmlinux, b"kernel-revision-1").unwrap();
+        let rootfs_sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
+        let vmlinux_sha = mvm_core::crypto::image_verify::sha256_file(&vmlinux).unwrap();
+
+        ImageNode::builder(
+            ImageBuildIdentity::Flake {
+                slot_hash: slot_hash.into(),
+            },
+            ImageIdentity {
+                canonical: ImageCanonicalId::Flake {
+                    revision_hash: revision_hash.into(),
+                },
+                artifacts: vec![
+                    ContentBlob {
+                        name: "rootfs.ext4".into(),
+                        sha256: rootfs_sha,
+                    },
+                    ContentBlob {
+                        name: "vmlinux".into(),
+                        sha256: vmlinux_sha,
+                    },
+                ],
+            },
+            ImageProvenance::Build {
+                input_ref: ".#app".into(),
+                lock_digest: Some("lock".into()),
+            },
+        )
+        .created_unix(1)
+        .build()
+    }
+
     fn seed_image(
         store: &ImageStore,
         em: &AuditEmitter,
@@ -680,27 +833,21 @@ mod tests {
     #[test]
     fn oci_node_reconstructs_a_digest_pinned_reference() {
         let node = oci_node("a");
-        let reference = reconstruct_image_run_reference(&node).unwrap();
-        assert_eq!(
-            reference,
-            format!("docker.io/library/alpine@sha256:{}", "a".repeat(64)),
-            "OCI restore must re-fetch the exact resolved digest"
-        );
+        let source = reconstruct_image_source(&node).unwrap();
+        assert!(matches!(
+            source,
+            RevertImageSource::Oci(reference)
+                if reference == format!("docker.io/library/alpine@sha256:{}", "a".repeat(64))
+        ));
     }
 
-    /// Restoring a flake image to its exact prior revision is not wired: the run
-    /// path rebuilds the flake's current revision, not the stored one, so it must
-    /// refuse rather than silently relaunch drifted source.
     #[test]
-    fn flake_node_reconstruction_is_refused_as_unwired() {
+    fn flake_node_reconstruction_requires_the_stored_revision() {
         let node = image_of("slot-a", "rev-1", None);
-        let err = reconstruct_image_run_reference(&node).unwrap_err();
+        let err = reconstruct_image_source(&node).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("flake"), "{msg}");
-        assert!(
-            msg.contains("isn't wired") || msg.contains("not wired") || msg.contains("drifted"),
-            "the refusal must explain why: {msg}"
-        );
+        assert!(msg.contains("manifest") || msg.contains("stored"), "{msg}");
     }
 
     // ── invariant 5: verify the target before restoring (fail closed) ─────────
@@ -824,11 +971,15 @@ mod tests {
         .unwrap();
         match outcome {
             RevertOutcome::RunImage(run) => {
-                assert_eq!(
-                    run.image.as_deref(),
-                    Some(format!("docker.io/library/alpine@sha256:{}", "a".repeat(64)).as_str()),
-                    "an OCI image node restores through its digest-pinned reference"
-                );
+                assert!(matches!(
+                    run.source,
+                    RevertImageSource::Oci(reference)
+                        if reference
+                            == format!(
+                                "docker.io/library/alpine@sha256:{}",
+                                "a".repeat(64)
+                            )
+                ));
             }
             RevertOutcome::Done => {
                 panic!(
@@ -851,29 +1002,48 @@ mod tests {
         assert_eq!(verify_audit_chain(&path, &signer.verifying).unwrap(), 2);
     }
 
-    /// A flake image node is refused at the run_revert level even when audited:
-    /// exact-revision restore isn't wired, so it fails closed rather than rebuild
-    /// the flake's current (possibly drifted) source.
     #[test]
-    fn revert_of_an_audited_flake_node_is_refused() {
+    fn flake_node_reconstruction_rejects_tampered_artifacts() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        let node = seed_flake_revision("slot-a", "rev-1");
+        let rootfs =
+            std::path::PathBuf::from(slot_revision_dir("slot-a", "rev-1")).join("rootfs.ext4");
+        std::fs::write(rootfs, b"tampered").unwrap();
+        let err = reconstruct_image_source(&node).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("reconciliation"), "{msg}");
+    }
+
+    #[test]
+    fn revert_of_an_audited_flake_node_selects_the_pinned_revision() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_HOME", tmp.path());
         let istore = ImageStore::open();
         let (em, plan) = emitter();
-        let node = image_of("slot-a", "rev-1", None);
+        let node = seed_flake_revision("slot-a", "rev-1");
         seed_image(&istore, &em, &plan, &node);
 
-        let err = run_revert(RevertArgs {
+        let outcome = run_revert(RevertArgs {
             target: node.node_digest.as_str().to_string(),
             kind: None,
             hypervisor: "firecracker".into(),
             new_id: None,
             json: false,
         })
-        .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("flake"), "{msg}");
+        .unwrap();
+        match outcome {
+            RevertOutcome::RunImage(run) => assert!(matches!(
+                run.source,
+                RevertImageSource::Flake {
+                    slot_hash,
+                    revision_hash,
+                } if slot_hash == "slot-a" && revision_hash == "rev-1"
+            )),
+            RevertOutcome::Done => panic!("flake image restore must use the admitted run path"),
+        }
     }
 
     /// `--new-id` names the restored VM for a checkpoint restore; an image restore

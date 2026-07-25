@@ -8,6 +8,13 @@
 > The current tree is treated as a **disposable v1**. This sprint restructures it completely.
 > **No legacy paths, no compatibility shims, no aliases.** Hard renames only.
 
+## Current issue delivery
+
+- [x] #1840 faithful flake-image revert: boot the recorded slot revision,
+      reconcile signed artifact hashes, and preserve the admitted restore path.
+      Implementation, focused tests, workspace tests, check, and clippy pass;
+      branch is ready for pull request review.
+
 ---
 
 ## 1. Why

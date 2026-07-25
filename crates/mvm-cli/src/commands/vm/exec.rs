@@ -321,6 +321,19 @@ pub(in crate::commands) fn run_receipt(
 }
 
 pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig) -> Result<()> {
+    run_secure_with_source(cli, args, cfg, None)
+}
+
+/// Run a transient workload through the normal admitted path, optionally
+/// overriding the user-facing image lookup with an already-verified source.
+/// The override is used only by content-addressed restore, where following a
+/// mutable template pointer would boot the wrong revision.
+pub(in crate::commands) fn run_secure_with_source(
+    cli: &Cli,
+    args: RunArgs,
+    cfg: &MvmConfig,
+    source_override: Option<crate::exec::ImageSource>,
+) -> Result<()> {
     // When an SDK transport mode is requested, peel off the
     // SDK-shaped surface before the sandbox-runner validation kicks
     // in. `--dev` (alias for live) is refused in v1; `--prod` (alias
@@ -461,6 +474,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             "`mvmctl run`",
             selection,
             network_policy,
+            source_override.clone(),
         )?;
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
         let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
@@ -516,6 +530,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         cfg,
         selection,
         network_policy,
+        source_override,
         RunAudit {
             admit: Some(&admit),
             ctx: &admit_ctx,
@@ -633,9 +648,16 @@ fn run_run_args(
     _cfg: &MvmConfig,
     selection: ImageSelection,
     network_policy: mvm_core::network_policy::NetworkPolicy,
+    source_override: Option<crate::exec::ImageSource>,
     audit: RunAudit<'_>,
 ) -> Result<()> {
-    let req = build_exec_request(args, "`mvmctl run`", selection, network_policy)?;
+    let req = build_exec_request(
+        args,
+        "`mvmctl run`",
+        selection,
+        network_policy,
+        source_override,
+    )?;
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
         mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
@@ -667,6 +689,7 @@ fn build_exec_request(
     command_name: &str,
     selection: ImageSelection,
     network_policy: mvm_core::network_policy::NetworkPolicy,
+    source_override: Option<crate::exec::ImageSource>,
 ) -> Result<crate::exec::ExecRequest> {
     let ImageSelection {
         image_ref,
@@ -717,6 +740,8 @@ fn build_exec_request(
     let image = if runtime_pack {
         super::runtime_pack::resolve_runtime_pack_image_source(prod)
             .context("resolving --runtime-pack image source")?
+    } else if let Some(source) = source_override {
+        source
     } else {
         match (args.manifest, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
@@ -810,6 +835,10 @@ fn build_exec_request(
                     let label = match &src {
                         crate::exec::ImageSource::Prebuilt { label, .. } => label.clone(),
                         crate::exec::ImageSource::Template(name) => name.clone(),
+                        crate::exec::ImageSource::PinnedTemplate {
+                            slot_hash,
+                            revision_hash,
+                        } => format!("{slot_hash}@{revision_hash}"),
                     };
                     ui::info(&format!(
                         "Instant boot from verified runtime pack ({label}); \

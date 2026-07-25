@@ -143,6 +143,12 @@ fn expand_tilde(path: &str) -> String {
 pub enum ImageSource {
     /// A registered template (resolved via `template::lifecycle::template_artifacts`).
     Template(String),
+    /// A specific stored revision in a manifest-keyed slot. This is used by
+    /// content-addressed image restore so the boot cannot follow `current`.
+    PinnedTemplate {
+        slot_hash: String,
+        revision_hash: String,
+    },
     /// Pre-built kernel + rootfs paths (e.g., the cached dev image).
     Prebuilt {
         kernel_path: String,
@@ -187,7 +193,9 @@ pub fn runtime_source_policy_for(
         return mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay;
     }
     let launch_kind = match image {
-        ImageSource::Template(_) => mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
+        ImageSource::Template(_) | ImageSource::PinnedTemplate { .. } => {
+            mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage
+        }
         ImageSource::Prebuilt { .. } => {
             mvm_core::vm_backend::RuntimeSourceLaunchKind::InjectedRootfs
         }
@@ -1125,6 +1133,29 @@ fn resolve_image_artifacts(image: &ImageSource) -> Result<ResolvedImage> {
                 profile: Some(spec.profile.clone()),
                 snap_info,
                 template_id: Some(name.clone()),
+            })
+        }
+        ImageSource::PinnedTemplate {
+            slot_hash,
+            revision_hash,
+        } => {
+            let (spec, vmlinux, initrd, rootfs, rev) =
+                mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot_revision(
+                    slot_hash,
+                    revision_hash,
+                )
+                .with_context(|| {
+                    format!("Loading stored template revision {slot_hash}@{revision_hash}")
+                })?;
+            Ok(ResolvedImage {
+                vmlinux,
+                initrd,
+                rootfs,
+                revision: rev,
+                flake_ref: spec.flake_ref,
+                profile: Some(spec.profile),
+                snap_info: None,
+                template_id: Some(slot_hash.clone()),
             })
         }
         ImageSource::Prebuilt {
