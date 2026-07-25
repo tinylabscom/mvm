@@ -510,6 +510,7 @@ attestation.
 - [Writing Nix flakes for guests (mkGuest)](public/src/content/docs/guides/nix-flakes.md)
 - [Secrets and credentials](public/src/content/docs/guides/secrets-and-credentials.mdx) ·
   [Network egress policy](public/src/content/docs/guides/network-egress-policy.mdx) ·
+  [Rootless networking](public/src/content/docs/guides/networking.md) ·
   [AI agent integration](public/src/content/docs/guides/ai-agent-integration.md)
 - [Security](public/src/content/docs/security/) ·
   [Troubleshooting](public/src/content/docs/guides/troubleshooting.md)

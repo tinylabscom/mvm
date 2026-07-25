@@ -100,6 +100,8 @@ pub mod residency;
 /// Hardened snapshot frame v0: cap-bounded, fail-closed parsing of the
 /// snapshot container mvm controls (eager-CoW / raw-hypervisor path).
 pub mod snapshot_frame;
+/// Shared SOCKS5 UDP datagram wire codec for the guest proxy and host relay.
+pub mod socks5_udp;
 /// The guest↔host substitution-endpoint wire contract, shared so the
 /// in-guest client and the host server serialize identical bytes.
 pub mod substitution_wire;

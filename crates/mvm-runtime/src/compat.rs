@@ -10,9 +10,10 @@
 //! - **Libkrun**: `crates/mvm-libkrun/src/sys.rs` FFI mapping;
 //!   `crates/mvm-runtime/src/libkrun.rs` `DEFAULT_CMDLINE`; macOS-only so
 //!   `console=hvc0`; no jailer or snapshots (host process == supervisor).
-//! - **Qemu**: no implementation yet; capabilities are conventional QEMU
-//!   defaults for the mvm workload shape (ELF/Image per arch, ext4 rootfs,
-//!   TAP networking, snapshots, no jailer). Flagged with `// assumption`.
+//! - **Qemu**: the dev/test backend in `crates/mvm-runtime/src/qemu.rs` uses
+//!   QEMU's unprivileged user-mode virtio network (`-netdev user`), not a host
+//!   TAP device. It provides transparent guest TCP/UDP for the dev tier; it
+//!   is not part of the production claim boundary.
 //!
 //! `MicrovmBackend` has no `Hvf` variant yet (the removed Vz backend's row
 //! was deleted rather than repurposed); the raw HVF backend
@@ -133,23 +134,18 @@ static LIBKRUN: BackendCompat = BackendCompat {
     networking: NetworkingModel::None,
 };
 
-// Qemu: no implementation yet. Capabilities are conventional QEMU defaults
-// for the mvm workload shape. All fields are marked // assumption below.
-// x86_64: ELF vmlinux or bzImage (Raw accepted as generic blob);  // assumption
-// aarch64: uncompressed arm64 Image or ELF vmlinux;               // assumption
-// ext4 rootfs; TAP networking; snapshots; no jailer (FC-specific). // assumption
+// QEMU is the Linux dev/test substrate. Its user-mode virtio network gives the
+// guest an ordinary NIC without requiring a host TAP, bridge, or firewall
+// setup. It remains outside the production egress claim boundary.
 static QEMU: BackendCompat = BackendCompat {
     backend: MicrovmBackend::Qemu,
-    guest_arches: &[X86_64, Aarch64], // assumption: QEMU supports both
-    kernel_formats: &[
-        (X86_64, &[K::Elf, K::Raw]), // assumption: vmlinux ELF or bzImage (Raw)
-        (Aarch64, &[K::Image, K::Elf]), // assumption: arm64 Image or vmlinux
-    ],
-    rootfs_formats: &[R::Ext4, R::Raw],     // assumption
-    required_boot_args: &["console=ttyS0"], // assumption: ttyS0 for QEMU serial
-    supports_snapshots: true,               // assumption: QEMU supports savevm/loadvm
-    supports_jailer: false,                 // assumption: no FC jailer; QEMU has own isolation
-    networking: NetworkingModel::Tap,       // assumption: QEMU standard TAP
+    guest_arches: &[X86_64, Aarch64],
+    kernel_formats: &[(X86_64, &[K::Elf, K::Raw]), (Aarch64, &[K::Image, K::Elf])],
+    rootfs_formats: &[R::Ext4, R::Raw],
+    required_boot_args: &["console=ttyS0"],
+    supports_snapshots: false,
+    supports_jailer: false,
+    networking: NetworkingModel::UserModeVirtio,
 };
 
 // ── lookup ────────────────────────────────────────────────────────────────────
@@ -215,6 +211,14 @@ mod tests {
         for b in [MicrovmBackend::Libkrun, MicrovmBackend::Qemu] {
             assert!(!compat(b).supports_jailer, "{b:?} should not have jailer");
         }
+    }
+
+    #[test]
+    fn qemu_uses_rootless_user_mode_virtio_networking() {
+        let c = compat(MicrovmBackend::Qemu);
+        assert_eq!(c.networking, NetworkingModel::UserModeVirtio);
+        assert!(!c.supports_snapshots);
+        assert!(!c.supports_jailer);
     }
 
     #[test]

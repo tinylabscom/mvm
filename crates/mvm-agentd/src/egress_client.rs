@@ -18,6 +18,7 @@ use tokio::sync::watch;
 
 use crate::guest_vsock_session::HostVsockSession;
 use mvm_core::guest_netd::ConnectAck;
+use mvm_core::socks5_udp::{self, Datagram};
 
 const EGRESS_VSOCK_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
 
@@ -50,6 +51,7 @@ const METHOD_NO_AUTH: u8 = 0x00;
 const METHOD_NONE: u8 = 0xFF;
 /// SOCKS5 CONNECT command.
 const CMD_CONNECT: u8 = 0x01;
+const CMD_UDP_ASSOCIATE: u8 = 0x03;
 /// Address types.
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
@@ -65,6 +67,7 @@ const HTTP_FORWARD_FRAME: &[u8] = b"MVM_HTTP_FORWARD/1\n";
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProxyRoute {
     Socks { target: String },
+    SocksUdpAssociate,
     HttpConnect { target: String },
     HttpForward { head: Vec<u8>, content_length: u64 },
 }
@@ -111,10 +114,25 @@ where
 {
     let mut version = [0u8; 1];
     stream.read_exact(&mut version).await?;
-    negotiate_with_prefetched(stream, version[0]).await
+    match negotiate_request_with_prefetched(stream, version[0]).await? {
+        SocksRequest::Connect(target) => Ok(target),
+        SocksRequest::UdpAssociate => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socks: UDP ASSOCIATE is not a CONNECT request",
+        )),
+    }
 }
 
-async fn negotiate_with_prefetched<S>(stream: &mut S, version: u8) -> std::io::Result<String>
+#[derive(Debug, PartialEq, Eq)]
+enum SocksRequest {
+    Connect(String),
+    UdpAssociate,
+}
+
+async fn negotiate_request_with_prefetched<S>(
+    stream: &mut S,
+    version: u8,
+) -> std::io::Result<SocksRequest>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -141,10 +159,10 @@ where
     if req[0] != SOCKS5 {
         return Err(invalid("socks: request not version 5"));
     }
-    if req[1] != CMD_CONNECT {
+    if req[1] != CMD_CONNECT && req[1] != CMD_UDP_ASSOCIATE {
         // Reply "command not supported" before closing.
         let _ = reply(stream, REP_CMD_NOT_SUPPORTED).await;
-        return Err(invalid("socks: only CONNECT is supported"));
+        return Err(invalid("socks: unsupported command"));
     }
     let atyp = req[3];
     let addr = match atyp {
@@ -169,7 +187,12 @@ where
     };
     let mut port = [0u8; 2];
     stream.read_exact(&mut port).await?;
-    format_target(atyp, &addr, u16::from_be_bytes(port))
+    let target = format_target(atyp, &addr, u16::from_be_bytes(port))?;
+    if req[1] == CMD_UDP_ASSOCIATE {
+        Ok(SocksRequest::UdpAssociate)
+    } else {
+        Ok(SocksRequest::Connect(target))
+    }
 }
 
 /// Send a SOCKS5 reply with code `rep` and a zero bind address (RFC 1928 §6).
@@ -191,9 +214,10 @@ where
     let mut first = [0u8; 1];
     stream.read_exact(&mut first).await?;
     if first[0] == SOCKS5 {
-        return Ok(ProxyRoute::Socks {
-            target: negotiate_with_prefetched(stream, first[0]).await?,
-        });
+        return match negotiate_request_with_prefetched(stream, first[0]).await? {
+            SocksRequest::Connect(target) => Ok(ProxyRoute::Socks { target }),
+            SocksRequest::UdpAssociate => Ok(ProxyRoute::SocksUdpAssociate),
+        };
     }
     read_http_proxy_route(stream, first[0]).await
 }
@@ -310,12 +334,105 @@ async fn serve(mut client: TcpStream) -> std::io::Result<()> {
     };
     match route {
         ProxyRoute::Socks { target } => serve_socks(client, &target).await,
+        ProxyRoute::SocksUdpAssociate => serve_socks_udp(client).await,
         ProxyRoute::HttpConnect { target } => serve_http_connect(client, &target).await,
         ProxyRoute::HttpForward {
             head,
             content_length,
         } => serve_http_forward(client, &head, content_length).await,
     }
+}
+
+async fn serve_socks_udp(control: TcpStream) -> std::io::Result<()> {
+    let upstream = HostVsockSession::connect(configured_egress_vsock_port())
+        .await?
+        .write_initial_bytes(format!("{}\n", socks5_udp::FRAME_LINE).as_bytes())
+        .await?
+        .into_inner();
+    serve_socks_udp_with_upstream(control, upstream).await
+}
+
+async fn serve_socks_udp_with_upstream<C, U>(mut control: C, mut upstream: U) -> std::io::Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let port = udp.local_addr()?.port();
+    control
+        .write_all(&[SOCKS5, REP_SUCCESS, 0, ATYP_IPV4, 127, 0, 0, 1])
+        .await?;
+    control.write_all(&port.to_be_bytes()).await?;
+    control.flush().await?;
+
+    let mut udp_buffer = vec![0_u8; socks5_udp::MAX_DATAGRAM_BYTES];
+    let mut control_buffer = [0_u8; 1];
+    let mut last_peer = None;
+
+    loop {
+        tokio::select! {
+            result = udp.recv_from(&mut udp_buffer) => {
+                let (length, peer) = result?;
+                let packet = match Datagram::decode(&udp_buffer[..length]) {
+                    Ok(packet) => packet,
+                    Err(_) => continue,
+                };
+                let frame = packet
+                    .encode()
+                    .map_err(|_| invalid_udp("UDP datagram is too large"))?;
+                write_udp_frame(&mut upstream, &frame).await?;
+                last_peer = Some(peer);
+            }
+            result = read_udp_frame(&mut upstream) => {
+                let Some(frame) = result? else { return Ok(()); };
+                let packet = match Datagram::decode(&frame) {
+                    Ok(packet) => packet,
+                    Err(_) => continue,
+                };
+                if let Some(peer) = last_peer {
+                    udp.send_to(&packet.payload, peer).await?;
+                }
+            }
+            result = control.read(&mut control_buffer) => {
+                if result? == 0 {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+async fn read_udp_frame<S>(stream: &mut S) -> std::io::Result<Option<Vec<u8>>>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut length = [0_u8; 2];
+    match stream.read_exact(&mut length).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let length = usize::from(u16::from_be_bytes(length));
+    if length == 0 || length > socks5_udp::MAX_DATAGRAM_BYTES {
+        return Err(invalid_udp("invalid UDP frame length"));
+    }
+    let mut frame = vec![0_u8; length];
+    stream.read_exact(&mut frame).await?;
+    Ok(Some(frame))
+}
+
+async fn write_udp_frame<S>(stream: &mut S, frame: &[u8]) -> std::io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let length = u16::try_from(frame.len()).map_err(|_| invalid_udp("UDP frame is too large"))?;
+    stream.write_all(&length.to_be_bytes()).await?;
+    stream.write_all(frame).await?;
+    stream.flush().await
+}
+
+fn invalid_udp(message: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.to_string())
 }
 
 /// Which client-facing proxy reply flavour a completed CONNECT-style session
@@ -884,6 +1001,115 @@ mod tests {
         let mut buf = [0u8; 10];
         client.read_exact(&mut buf).await.unwrap();
         assert_eq!(buf[1], REP_CMD_NOT_SUPPORTED);
+    }
+
+    #[tokio::test]
+    async fn udp_associate_frames_datagrams_over_the_upstream() {
+        let (mut client, control) = tokio::io::duplex(4096);
+        let (upstream, mut upstream_side) = tokio::io::duplex(4096);
+        let task = tokio::spawn(async move {
+            let mut control = control;
+            assert_eq!(
+                read_route(&mut control).await.expect("read UDP route"),
+                ProxyRoute::SocksUdpAssociate
+            );
+            serve_socks_udp_with_upstream(control, upstream)
+                .await
+                .expect("UDP relay succeeds");
+        });
+
+        client
+            .write_all(&[
+                SOCKS5,
+                1,
+                METHOD_NO_AUTH,
+                SOCKS5,
+                CMD_UDP_ASSOCIATE,
+                0,
+                ATYP_IPV4,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ])
+            .await
+            .expect("write associate request");
+
+        let mut selection = [0_u8; 2];
+        client
+            .read_exact(&mut selection)
+            .await
+            .expect("method reply");
+        assert_eq!(selection, [SOCKS5, METHOD_NO_AUTH]);
+        let mut association = [0_u8; 10];
+        client
+            .read_exact(&mut association)
+            .await
+            .expect("associate reply");
+        assert_eq!(association[..4], [SOCKS5, REP_SUCCESS, 0, ATYP_IPV4]);
+        let relay_port = u16::from_be_bytes([association[8], association[9]]);
+
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind UDP client");
+        let packet = Datagram {
+            address: mvm_core::socks5_udp::Address::Ip("192.0.2.1".parse().expect("valid address")),
+            port: 5353,
+            payload: b"query".to_vec(),
+        };
+        let encoded = packet.encode().expect("encode packet");
+        socket
+            .send_to(&encoded, ("127.0.0.1", relay_port))
+            .await
+            .expect("send UDP packet");
+
+        let mut length = [0_u8; 2];
+        upstream_side
+            .read_exact(&mut length)
+            .await
+            .expect("upstream frame length");
+        let mut frame = vec![0_u8; usize::from(u16::from_be_bytes(length))];
+        upstream_side
+            .read_exact(&mut frame)
+            .await
+            .expect("upstream frame");
+        assert_eq!(Datagram::decode(&frame).expect("decode frame"), packet);
+
+        let response = Datagram {
+            address: mvm_core::socks5_udp::Address::Ip("192.0.2.1".parse().expect("valid address")),
+            port: 5353,
+            payload: b"answer".to_vec(),
+        }
+        .encode()
+        .expect("encode response");
+        upstream_side
+            .write_all(
+                &u16::try_from(response.len())
+                    .expect("response fits")
+                    .to_be_bytes(),
+            )
+            .await
+            .expect("response length");
+        upstream_side
+            .write_all(&response)
+            .await
+            .expect("response frame");
+
+        let mut received = [0_u8; 32];
+        let (length, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            socket.recv_from(&mut received),
+        )
+        .await
+        .expect("UDP response timeout")
+        .expect("UDP response");
+        assert_eq!(&received[..length], b"answer");
+
+        drop(client);
+        drop(upstream_side);
+        task.await.expect("relay joins");
     }
 
     #[tokio::test]

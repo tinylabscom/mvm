@@ -300,6 +300,8 @@ First vertical slice (build in this order):
 - [ ] `VmDuplexTransport` trait + an in-memory / process-UDS test backend (so CI needs no VMM).
 - [x] Guest loopback/egress-client path and host `RealEndpointSpawner` enforce the admitted policy.
 - [x] Supervisor L4 gate owns raw host/port forwarding and structured allow/deny audit.
+- [x] SOCKS5 UDP Associate uses the same NIC-less vsock seam with shared UDP policy gating.
+- [x] User-space egress evaluation, transparent rootless QEMU prototype, local TCP/UDP path benchmark, and non-root networking documentation are complete.
 
 Then unify + retire the old paths:
 
