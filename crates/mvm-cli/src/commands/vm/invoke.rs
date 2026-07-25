@@ -362,7 +362,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     ) {
         Ok(vm) => {
             let ctx = admit_ctx.borrow_mut().take();
-            super::up::emit_launched_if(&ctx, &backend_name);
+            super::up::emit_launched_if(&ctx, &backend_name, true);
             if let Some(ctx) = ctx {
                 *admit_ctx.borrow_mut() = Some(ctx);
             }

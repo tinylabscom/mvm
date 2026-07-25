@@ -266,7 +266,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         emit_failed_if(&admission, "backend-start", &err);
         return Err(err);
     }
-    emit_launched_if(&admission, backend_name);
+    emit_launched_if(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);
     Ok(())

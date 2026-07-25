@@ -474,7 +474,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         ) {
             Ok(o) => {
                 let ctx = admit_ctx.borrow_mut().take();
-                super::up::emit_launched_if(&ctx, &receipt_backend);
+                super::up::emit_launched_if(&ctx, &receipt_backend, false);
                 super::up::emit_boot_posture_if(&ctx, posture.get(), runtime_source_policy.get());
                 o
             }
@@ -647,7 +647,7 @@ fn run_run_args(
                 // admission launched — emit `plan.launched` plus the resolved boot
                 // posture (virtiofs-root vs block-ext4) against the same plan.
                 let ctx = audit.ctx.borrow_mut().take();
-                super::up::emit_launched_if(&ctx, audit.backend);
+                super::up::emit_launched_if(&ctx, audit.backend, false);
                 super::up::emit_boot_posture_if(&ctx, posture.get(), runtime_source_policy.get());
                 code
             }

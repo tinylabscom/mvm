@@ -1036,7 +1036,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         .with_context(|| format!("forking FC vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
 
     bind_checkpoint_forked(p.checkpoint, &meta, &p.child_vm_name, p.store)?;
-    super::up::emit_launched_if(&admission, "firecracker");
+    super::up::emit_launched_if(&admission, "firecracker", true);
 
     // Best-effort: deliver the freshly-minted grant to the restored child
     // agent over the FC vsock UDS, re-pinning it to the child's plan instead
@@ -1251,7 +1251,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         super::up::emit_failed_if(&admission, "backend-start", &e);
         return Err(e);
     }
-    super::up::emit_launched_if(&admission, &effective_hypervisor);
+    super::up::emit_launched_if(&admission, &effective_hypervisor, true);
 
     if p.emit_text {
         ui::success(&format!(
