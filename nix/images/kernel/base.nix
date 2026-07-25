@@ -49,10 +49,10 @@ let
   # kernel — lets both of mvm's kernels track the latest point release exactly
   # and keeps the two pins from drifting apart. Bump `kernelVersion` + `hash`
   # together (the tarball's own sha256, e.g. via `nix store prefetch-file`).
-  kernelVersion = "6.12.97";
+  kernelVersion = "6.12.98";
   kernelSrc = pkgs.fetchurl {
     url = "mirror://kernel/linux/kernel/v6.x/linux-${kernelVersion}.tar.xz";
-    hash = "sha256-bL3fo7vSIpAm98xeSPa31rRtOXQt45qSV6L0kKD0XG8=";
+    hash = "sha256-pitqLSB/9yUQ5fRxVrcHjh5xeXNXQSQRuOT/+X/I9Mc=";
   };
 
   # ── Base: minimal feature set common to every mvm microVM kernel ──

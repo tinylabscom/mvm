@@ -216,6 +216,8 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         .unwrap_or_else(|e| panic!("nix/packages/libkrunfw.nix must be present: {e}"));
     let libkrun = fs::read_to_string(packages_dir.join("libkrun.nix"))
         .unwrap_or_else(|e| panic!("nix/packages/libkrun.nix must be present: {e}"));
+    let kernel_base = fs::read_to_string(nix_dir().join("images/kernel/base.nix"))
+        .unwrap_or_else(|e| panic!("nix/images/kernel/base.nix must be present: {e}"));
 
     for (name, content) in [
         ("libkrunfw.nix", libkrunfw.as_str()),
@@ -238,11 +240,19 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         );
     }
 
+    const KERNEL_VERSION: &str = "6.12.98";
+    const KERNEL_HASH: &str = "sha256-pitqLSB/9yUQ5fRxVrcHjh5xeXNXQSQRuOT/+X/I9Mc=";
     assert!(
-        libkrunfw.contains("linux-6.12.97.tar.xz")
+        libkrunfw.contains(&format!("linux-{KERNEL_VERSION}.tar.xz"))
+            && libkrunfw.contains(&format!("hash = \"{KERNEL_HASH}\""))
             && libkrunfw.contains("KERNEL_REMOTE")
             && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)"),
         "libkrunfw must pin and substitute the kernel source instead of downloading it during build"
+    );
+    assert!(
+        kernel_base.contains(&format!("kernelVersion = \"{KERNEL_VERSION}\""))
+            && kernel_base.contains(&format!("hash = \"{KERNEL_HASH}\"")),
+        "the custom kernel must use the same verified point-release pin as libkrunfw"
     );
     assert!(
         libkrun.contains("rustPlatform.fetchCargoVendor")
