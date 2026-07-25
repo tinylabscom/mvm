@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! The `MvmClient` facade users touch. One import surface fronts every piece:
 //! the trait + DTOs + `MockBackend` (re-exported from `mvm-core`'s `client`
 //! module), the in-process [`LocalBackend`], and the [`connect`] selector. A
