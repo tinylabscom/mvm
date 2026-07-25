@@ -834,32 +834,28 @@ fn dispatch_run_code(
     let mut stream = transport
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on {:?}", record.vm_name))?;
-    // Hard cutover requires hello before any operational request.
-    // `RunCode` is an interactive request not
-    // covered by the closed `GuestCapability` enum, so request no
-    // specific capability — the hello alone unblocks dispatch.
-    let _ = mvm_agentd::vsock::negotiate_protocol(&mut stream, Vec::new())
-        .with_context(|| format!("Negotiating guest agent protocol on {:?}", record.vm_name))?;
+    let request_code = code.clone();
     let req = mvm_agentd::vsock::GuestRequest::RunCode { code, timeout_secs };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(&record.vm_name, &req);
-    // RunCode now streams ExecEvent frames. The hello + request write
-    // above mirror the old send_request path; read_exec_stream takes
-    // over from here.
-    mvm_agentd::vsock::write_frame(&mut stream, &req)?;
-    let terminal = mvm_agentd::vsock::read_exec_stream(&mut stream, |event| match event {
-        mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
-            let mut so = std::io::stdout();
-            let _ = so.write_all(chunk);
-            let _ = so.flush();
-        }
-        mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
-            let mut se = std::io::stderr();
-            let _ = se.write_all(chunk);
-            let _ = se.flush();
-        }
-        _ => {}
-    })?;
+    let terminal = mvm_agentd::vsock::send_run_code_streaming(
+        &mut stream,
+        &request_code,
+        timeout_secs,
+        |event| match event {
+            mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
+                let mut so = std::io::stdout();
+                let _ = so.write_all(chunk);
+                let _ = so.flush();
+            }
+            mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
+                let mut se = std::io::stderr();
+                let _ = se.write_all(chunk);
+                let _ = se.flush();
+            }
+            _ => {}
+        },
+    )?;
     let exit_code = match terminal {
         mvm_agentd::vsock::ExecEvent::Exit { code } => code,
         mvm_agentd::vsock::ExecEvent::TimedOut => {

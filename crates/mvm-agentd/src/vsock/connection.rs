@@ -2,12 +2,13 @@
 //! CONNECT/OK handshake, reconnect backoff, and the guest-facing
 //! AF_VSOCK dial path used by the substitution forward proxy.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use ed25519_dalek::SigningKey;
 
 use super::*;
 
@@ -126,7 +127,8 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
 /// 1. Open Unix stream to the given UDS path.
 /// 2. Write `CONNECT <port>\n`.
 /// 3. Read `OK <port>\n`.
-/// 4. Then exchange length-prefixed JSON frames.
+/// 4. Then establish the authenticated, encrypted session that carries
+///    length-prefixed control envelopes.
 ///
 /// Retries up to `CONNECT_RETRIES` times on timeout errors, skipping retries
 /// for definitive failures (connection refused, socket not found).
@@ -274,40 +276,29 @@ pub(super) fn connect(instance_dir: &str, timeout_secs: u64) -> Result<UnixStrea
 
 /// Send a request and receive a response over a vsock connection.
 ///
-/// Uses 4-byte big-endian length prefix + JSON body (same pattern as hostd).
+/// Establishes the authenticated, encrypted control session and sends one
+/// length-prefixed JSON request envelope.
 pub fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResponse> {
-    write_frame(stream, req).with_context(|| "Failed to write request frame")?;
+    let mut session = open_authenticated_session(stream)?;
+    session.write(stream, req)?;
+    session.read(stream)
+}
 
-    // Read response length
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).map_err(|e| {
-        if is_timeout_error(&e) {
-            anyhow::anyhow!("Guest agent timed out while waiting for response")
-        } else {
-            anyhow::anyhow!("Failed to read response length: {}", e)
-        }
-    })?;
-    let resp_len = u32::from_be_bytes(len_buf) as usize;
-
-    if resp_len > MAX_FRAME_SIZE {
-        bail!(
-            "Response frame too large: {} bytes (max {})",
-            resp_len,
-            MAX_FRAME_SIZE
-        );
-    }
-
-    // Read response body
-    let mut buf = vec![0u8; resp_len];
-    stream.read_exact(&mut buf).map_err(|e| {
-        if is_timeout_error(&e) {
-            anyhow::anyhow!("Guest agent timed out while reading response body")
-        } else {
-            anyhow::anyhow!("Failed to read response body: {}", e)
-        }
-    })?;
-
-    serde_json::from_slice(&buf).with_context(|| "Failed to deserialize response")
+/// Establish the authenticated and encrypted host side of a fresh control
+/// connection. The host signer is the same identity pinned in the guest's
+/// `/run/mvm/host-signer.pub` trust anchor.
+pub(crate) fn open_authenticated_session(
+    stream: &mut UnixStream,
+) -> Result<crate::vsock::AuthenticatedSession> {
+    let key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
+    let key_bytes: [u8; 32] = std::fs::read(&key_path)
+        .with_context(|| format!("read host signer key {}", key_path.display()))?
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("host signer key must be exactly 32 bytes"))?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    let session_id = format!("vsock-{:032x}", rand::random::<u128>());
+    crate::vsock::AuthenticatedSession::host(stream, &session_id, signing_key)
 }
 
 #[cfg(test)]

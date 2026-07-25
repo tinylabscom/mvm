@@ -43,15 +43,18 @@ mod socket;
 #[path = "mvm-guest-agent/state.rs"]
 mod state;
 
+use ed25519_dalek::SigningKey;
+use std::io::Write;
 use std::mem::size_of;
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mvm_agentd::vsock::{
-    GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, TrafficPlane, TrustDecision,
-    VERB_TRUST_POLICY_PATH, enforce_verb_grant, is_verb_trust_baseline, launch_requires_grant,
-    load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy, trust_decision,
+    AuthenticatedSession, GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, TrafficPlane,
+    TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant, is_verb_trust_baseline,
+    launch_requires_grant, load_host_signer_verifying_key, load_pinned_verb_grant,
+    load_verb_trust_policy, trust_decision,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -105,8 +108,8 @@ use crate::globals::{
 use crate::monitoring::monitoring_loop;
 use crate::signals::{apply_reload, install_signal_handlers, shutdown_subsystems};
 use crate::socket::{
-    AF_VSOCK, SOCK_STREAM, SockAddrVm, VMADDR_CID_ANY, accept, bind, close, listen,
-    peer_cid_is_authorized, read_request, socket, write_response,
+    AF_VSOCK, AuthenticatedWriter, SOCK_STREAM, SockAddrVm, VMADDR_CID_ANY, accept, bind, close,
+    listen, peer_cid_is_authorized, socket, write_response,
 };
 use crate::state::{AgentBootState, AgentState, IntegrationState, ProbeState};
 
@@ -138,11 +141,20 @@ use interactive::{
 /// intermediate frames to `file` before returning their terminal
 /// response.
 struct HandlerCtx<'a> {
-    file: &'a mut std::fs::File,
+    file: &'a mut dyn Write,
     state: &'a Arc<Mutex<AgentState>>,
     integration_state: &'a Arc<Mutex<IntegrationState>>,
     probe_state: &'a Arc<Mutex<ProbeState>>,
     boot_state: &'a Arc<AgentBootState>,
+}
+
+fn send_authenticated_response(
+    file: &mut std::fs::File,
+    session: &mut AuthenticatedSession,
+    response: &GuestResponse,
+) {
+    let mut sink = AuthenticatedWriter::new(file, session);
+    write_response(&mut sink, response);
 }
 
 fn handle_client(
@@ -151,19 +163,35 @@ fn handle_client(
     integration_state: &Arc<Mutex<IntegrationState>>,
     probe_state: &Arc<Mutex<ProbeState>>,
     boot_state: &Arc<AgentBootState>,
+    guest_signing_key: &SigningKey,
 ) {
     // SAFETY: fd comes from accept and is a valid file descriptor owned by this function.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
 
-    // Hard cutover: every operational request must be preceded by at
-    // least one successful protocol_hello in this
-    // session. A non-hello first request is treated as a protocol
-    // violation and rejected with `ProtocolMismatch`; we do not maintain
-    // a soft compatibility shim for pre-hello hosts.
-    let mut hello_seen = false;
+    let Some(host_signer_key) = boot_state.host_signer_key() else {
+        eprintln!("mvm-guest-agent: rejecting control connection without a pinned host key");
+        return;
+    };
+    let mut session =
+        match AuthenticatedSession::guest(&mut file, guest_signing_key.clone(), &host_signer_key) {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("mvm-guest-agent: authenticated control handshake failed: {error}");
+                return;
+            }
+        };
+
+    // The authenticated session handshake is the mandatory prelude. A legacy
+    // ProtocolHello may still be sent by an older helper for capability
+    // negotiation, but it is no longer the security boundary.
+    let mut hello_seen = true;
     let req = loop {
-        let Some(req) = read_request(&mut file) else {
-            return;
+        let req: GuestRequest = match session.read(&mut file) {
+            Ok(req) => req,
+            Err(error) => {
+                eprintln!("mvm-guest-agent: rejected control frame: {error}");
+                return;
+            }
         };
 
         match req {
@@ -182,7 +210,7 @@ fn handle_client(
                 if matches!(resp, GuestResponse::ProtocolHelloAck { .. }) {
                     hello_seen = true;
                 }
-                write_response(&mut file, &resp);
+                send_authenticated_response(&mut file, &mut session, &resp);
             }
             other => {
                 if !hello_seen {
@@ -193,7 +221,7 @@ fn handle_client(
                         message: "guest agent requires protocol_hello before any other request"
                             .to_string(),
                     };
-                    write_response(&mut file, &resp);
+                    send_authenticated_response(&mut file, &mut session, &resp);
                     return;
                 }
                 break other;
@@ -216,7 +244,7 @@ fn handle_client(
             profile: active_profile,
             verb: req.verb_name().to_string(),
         };
-        write_response(&mut file, &resp);
+        send_authenticated_response(&mut file, &mut session, &resp);
         return;
     }
 
@@ -229,20 +257,21 @@ fn handle_client(
         let resp = GuestResponse::VerbNotAuthorized {
             verb: req.kind_name().to_string(),
         };
-        write_response(&mut file, &resp);
+        send_authenticated_response(&mut file, &mut session, &resp);
         return;
     }
 
     if let Some(resp) = enforce_verb_grant(&req, verb_grant.as_ref()) {
-        write_response(&mut file, &resp);
+        send_authenticated_response(&mut file, &mut session, &resp);
         return;
     }
 
     let limits = ConnectionLimits::default();
     let _data_guard = if req.verb().traffic_plane() == TrafficPlane::Data {
         let Some(guard) = try_acquire(&ACTIVE_DATA_REQUESTS, limits.data) else {
-            write_response(
+            send_authenticated_response(
                 &mut file,
+                &mut session,
                 &GuestResponse::Error {
                     message: "guest data plane is at its concurrency limit".to_string(),
                 },
@@ -254,197 +283,199 @@ fn handle_client(
         None
     };
 
-    let mut ctx = HandlerCtx {
-        file: &mut file,
-        state,
-        integration_state,
-        probe_state,
-        boot_state,
+    let resp = {
+        let mut sink = AuthenticatedWriter::new(&mut file, &mut session);
+        let mut ctx = HandlerCtx {
+            file: &mut sink,
+            state,
+            integration_state,
+            probe_state,
+            boot_state,
+        };
+
+        match req {
+            // The hello-prelude loop above guarantees `req` is not a
+            // ProtocolHello, but keep an explicit, loud panic to catch
+            // future loop refactors that would silently let a hello fall
+            // through. Returning `Error` here would mask the bug.
+            GuestRequest::ProtocolHello { .. } => {
+                unreachable!("protocol hello reached operational dispatch")
+            }
+
+            GuestRequest::Ping => handle_ping(),
+            GuestRequest::WorkerStatus => handle_worker_status(&mut ctx),
+            GuestRequest::SleepPrep { drain_timeout_secs } => handle_sleep_prep(drain_timeout_secs),
+            GuestRequest::Wake => handle_wake(&mut ctx),
+            GuestRequest::IntegrationStatus => handle_integration_status(&mut ctx),
+            GuestRequest::CheckpointIntegrations { integrations } => {
+                handle_checkpoint_integrations(integrations)
+            }
+            GuestRequest::ProbeStatus => handle_probe_status(&mut ctx),
+            GuestRequest::PrimedStatus => handle_primed_status(),
+            GuestRequest::PostRestore {
+                token,
+                grant_envelope,
+            } => handle_post_restore(&mut ctx, token, grant_envelope),
+
+            GuestRequest::Exec {
+                command,
+                stdin,
+                timeout_secs,
+            } => handle_exec(&mut ctx, command, stdin, timeout_secs),
+
+            GuestRequest::ExecBatch {
+                stages,
+                commands,
+                timeout_secs,
+            } => handle_exec_batch(stages, commands, timeout_secs),
+
+            GuestRequest::RunCode { code, timeout_secs } => {
+                handle_run_code(&mut ctx, code, timeout_secs)
+            }
+
+            GuestRequest::RunEntrypoint {
+                stdin,
+                timeout_secs,
+                env,
+            } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env),
+
+            GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
+
+            GuestRequest::FsDiff => handle_fs_diff(),
+
+            GuestRequest::StartPortForward { guest_port } => handle_start_port_forward(guest_port),
+
+            GuestRequest::StartUnixSocketForward {
+                guest_path,
+                host_vsock_port,
+                socket_mode,
+            } => handle_start_unix_socket_forward(guest_path, host_vsock_port, socket_mode),
+
+            // PTY-over-vsock console — the single dev-only interactive path. The
+            // relay lives behind `#[cfg(feature = "interactive")]` so its symbols are
+            // absent from a sealed production agent (claim 15; mirrors the
+            // `do_exec` gate). The protocol profile gate
+            // above already rejects these verbs in sealed-prod, but the compile-time
+            // gate is the load-bearing guarantee — no console code is even linked.
+            GuestRequest::ConsoleOpen {
+                cols,
+                rows,
+                env,
+                argv,
+            } => handle_console_open(cols, rows, env, argv),
+
+            GuestRequest::ConsoleClose { session_id } => handle_console_close(session_id),
+
+            GuestRequest::ConsoleResize {
+                session_id,
+                cols,
+                rows,
+            } => handle_console_resize(session_id, cols, rows),
+
+            // Report whether boot-time entrypoint validation succeeded.
+            // Used by `mvmctl doctor` against a
+            // running guest. Prod-safe — no inputs, no secrets in the
+            // response (just a path + reason string).
+            GuestRequest::EntrypointStatus => handle_entrypoint_status(),
+
+            // Structured readiness snapshot. Cheap — a single mutex
+            // lock + struct copy. Designed to be the
+            // verb a host polls during `mvmctl wait <vm> --for ...`
+            // without back-pressure on the rest of the agent.
+            GuestRequest::ReadinessStatus => handle_readiness_status(&mut ctx),
+
+            // FS RPC verbs. Production-safe surface backed by
+            // `mvm_agentd::fs_rpc::handle_with_defaults`: every path
+            // routes through `mvm_core::crypto::policy::PathPolicy` (deny
+            // list + canonicalization), per-call caps gate read/write
+            // sizes, and `FsResult::Error` carries a typed `kind` so
+            // the host can branch without parsing message text.
+            GuestRequest::FsRead {
+                path,
+                offset,
+                length,
+                ..
+            } => handle_fs_read(path, offset, length),
+            GuestRequest::FsWrite {
+                path,
+                content,
+                mode,
+                create_parents,
+                offset,
+                truncate,
+                ..
+            } => handle_fs_write(
+                path,
+                content,
+                mode,
+                create_parents,
+                offset.unwrap_or(0),
+                truncate,
+            ),
+            GuestRequest::FsList { path, .. } => handle_fs_list(path),
+            GuestRequest::FsStat {
+                path,
+                follow_symlinks,
+            } => handle_fs_stat(path, follow_symlinks),
+            GuestRequest::FsMkdir {
+                path,
+                mode,
+                parents,
+            } => handle_fs_mkdir(path, mode, parents),
+            GuestRequest::FsRemove {
+                path, recursive, ..
+            } => handle_fs_remove(path, recursive),
+            GuestRequest::FsMove { from, to, .. } => handle_fs_move(from, to),
+
+            // Process control verbs. Dev-only — the handler lives behind
+            // `#[cfg(feature = "interactive")]` so its symbols are stripped
+            // from prod builds (the `prod-agent-runentry-contract` CI
+            // gate enforces it). Prod builds return a typed
+            // `UnsupportedInProduction` error so SDK callers can branch
+            // on capability without parsing message text.
+            GuestRequest::ProcStart {
+                argv,
+                env,
+                cwd,
+                stdin,
+                timeout_secs: _, // applied during ProcWait
+            } => handle_proc_start(argv, env, cwd, stdin),
+            GuestRequest::ProcList => handle_proc_list(),
+            GuestRequest::ProcSignal { pid_token, signum } => handle_proc_signal(pid_token, signum),
+            GuestRequest::ProcSendInput { pid_token, bytes } => {
+                handle_proc_send_input(pid_token, bytes)
+            }
+            GuestRequest::ProcKill { pid_token } => handle_proc_kill(pid_token),
+            GuestRequest::ProcWait {
+                pid_token,
+                timeout_secs,
+            } => handle_proc_wait(&mut ctx, pid_token, timeout_secs),
+
+            // virtio-fs volume mount/unmount. Production-safe; every
+            // host-supplied path runs through
+            // `mvm_core::crypto::policy::MountPathPolicy` before any
+            // mount(2) syscall. Real handler lives in `mvm_agentd::volume`.
+            GuestRequest::MountVolume {
+                volume_name,
+                guest_path,
+                read_only,
+            } => handle_mount_volume(volume_name, guest_path, read_only),
+            GuestRequest::UnmountVolume { guest_path, force } => {
+                handle_unmount_volume(guest_path, force)
+            }
+
+            // Substrate-side mirror of `mvmctl session set-timeout`. If
+            // the warm-process pool is active (tier-2 dispatch), the
+            // agent updates its idle-recycle threshold and a recycler
+            // thread reaps individual workers idle past the new
+            // timeout — keeping the VM up while pruning waste. If no pool
+            // is active, the verb is a no-op acknowledged with
+            // `applied_secs = 0`; the host-side reaper remains the only
+            // enforcement on cold-path-only builds.
+            GuestRequest::UpdateIdleTimeout { secs } => handle_update_idle_timeout(secs),
+        }
     };
-
-    let resp = match req {
-        // The hello-prelude loop above guarantees `req` is not a
-        // ProtocolHello, but keep an explicit, loud panic to catch
-        // future loop refactors that would silently let a hello fall
-        // through. Returning `Error` here would mask the bug.
-        GuestRequest::ProtocolHello { .. } => {
-            unreachable!("protocol hello reached operational dispatch")
-        }
-
-        GuestRequest::Ping => handle_ping(),
-        GuestRequest::WorkerStatus => handle_worker_status(&mut ctx),
-        GuestRequest::SleepPrep { drain_timeout_secs } => handle_sleep_prep(drain_timeout_secs),
-        GuestRequest::Wake => handle_wake(&mut ctx),
-        GuestRequest::IntegrationStatus => handle_integration_status(&mut ctx),
-        GuestRequest::CheckpointIntegrations { integrations } => {
-            handle_checkpoint_integrations(integrations)
-        }
-        GuestRequest::ProbeStatus => handle_probe_status(&mut ctx),
-        GuestRequest::PrimedStatus => handle_primed_status(),
-        GuestRequest::PostRestore {
-            token,
-            grant_envelope,
-        } => handle_post_restore(&mut ctx, token, grant_envelope),
-
-        GuestRequest::Exec {
-            command,
-            stdin,
-            timeout_secs,
-        } => handle_exec(&mut ctx, command, stdin, timeout_secs),
-
-        GuestRequest::ExecBatch {
-            stages,
-            commands,
-            timeout_secs,
-        } => handle_exec_batch(stages, commands, timeout_secs),
-
-        GuestRequest::RunCode { code, timeout_secs } => {
-            handle_run_code(&mut ctx, code, timeout_secs)
-        }
-
-        GuestRequest::RunEntrypoint {
-            stdin,
-            timeout_secs,
-            env,
-        } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env),
-
-        GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
-
-        GuestRequest::FsDiff => handle_fs_diff(),
-
-        GuestRequest::StartPortForward { guest_port } => handle_start_port_forward(guest_port),
-
-        GuestRequest::StartUnixSocketForward {
-            guest_path,
-            host_vsock_port,
-            socket_mode,
-        } => handle_start_unix_socket_forward(guest_path, host_vsock_port, socket_mode),
-
-        // PTY-over-vsock console — the single dev-only interactive path. The
-        // relay lives behind `#[cfg(feature = "interactive")]` so its symbols are
-        // absent from a sealed production agent (claim 15; mirrors the
-        // `do_exec` gate). The protocol profile gate
-        // above already rejects these verbs in sealed-prod, but the compile-time
-        // gate is the load-bearing guarantee — no console code is even linked.
-        GuestRequest::ConsoleOpen {
-            cols,
-            rows,
-            env,
-            argv,
-        } => handle_console_open(cols, rows, env, argv),
-
-        GuestRequest::ConsoleClose { session_id } => handle_console_close(session_id),
-
-        GuestRequest::ConsoleResize {
-            session_id,
-            cols,
-            rows,
-        } => handle_console_resize(session_id, cols, rows),
-
-        // Report whether boot-time entrypoint validation succeeded.
-        // Used by `mvmctl doctor` against a
-        // running guest. Prod-safe — no inputs, no secrets in the
-        // response (just a path + reason string).
-        GuestRequest::EntrypointStatus => handle_entrypoint_status(),
-
-        // Structured readiness snapshot. Cheap — a single mutex
-        // lock + struct copy. Designed to be the
-        // verb a host polls during `mvmctl wait <vm> --for ...`
-        // without back-pressure on the rest of the agent.
-        GuestRequest::ReadinessStatus => handle_readiness_status(&mut ctx),
-
-        // FS RPC verbs. Production-safe surface backed by
-        // `mvm_agentd::fs_rpc::handle_with_defaults`: every path
-        // routes through `mvm_core::crypto::policy::PathPolicy` (deny
-        // list + canonicalization), per-call caps gate read/write
-        // sizes, and `FsResult::Error` carries a typed `kind` so
-        // the host can branch without parsing message text.
-        GuestRequest::FsRead {
-            path,
-            offset,
-            length,
-            ..
-        } => handle_fs_read(path, offset, length),
-        GuestRequest::FsWrite {
-            path,
-            content,
-            mode,
-            create_parents,
-            offset,
-            truncate,
-            ..
-        } => handle_fs_write(
-            path,
-            content,
-            mode,
-            create_parents,
-            offset.unwrap_or(0),
-            truncate,
-        ),
-        GuestRequest::FsList { path, .. } => handle_fs_list(path),
-        GuestRequest::FsStat {
-            path,
-            follow_symlinks,
-        } => handle_fs_stat(path, follow_symlinks),
-        GuestRequest::FsMkdir {
-            path,
-            mode,
-            parents,
-        } => handle_fs_mkdir(path, mode, parents),
-        GuestRequest::FsRemove {
-            path, recursive, ..
-        } => handle_fs_remove(path, recursive),
-        GuestRequest::FsMove { from, to, .. } => handle_fs_move(from, to),
-
-        // Process control verbs. Dev-only — the handler lives behind
-        // `#[cfg(feature = "interactive")]` so its symbols are stripped
-        // from prod builds (the `prod-agent-runentry-contract` CI
-        // gate enforces it). Prod builds return a typed
-        // `UnsupportedInProduction` error so SDK callers can branch
-        // on capability without parsing message text.
-        GuestRequest::ProcStart {
-            argv,
-            env,
-            cwd,
-            stdin,
-            timeout_secs: _, // applied during ProcWait
-        } => handle_proc_start(argv, env, cwd, stdin),
-        GuestRequest::ProcList => handle_proc_list(),
-        GuestRequest::ProcSignal { pid_token, signum } => handle_proc_signal(pid_token, signum),
-        GuestRequest::ProcSendInput { pid_token, bytes } => {
-            handle_proc_send_input(pid_token, bytes)
-        }
-        GuestRequest::ProcKill { pid_token } => handle_proc_kill(pid_token),
-        GuestRequest::ProcWait {
-            pid_token,
-            timeout_secs,
-        } => handle_proc_wait(&mut ctx, pid_token, timeout_secs),
-
-        // virtio-fs volume mount/unmount. Production-safe; every
-        // host-supplied path runs through
-        // `mvm_core::crypto::policy::MountPathPolicy` before any
-        // mount(2) syscall. Real handler lives in `mvm_agentd::volume`.
-        GuestRequest::MountVolume {
-            volume_name,
-            guest_path,
-            read_only,
-        } => handle_mount_volume(volume_name, guest_path, read_only),
-        GuestRequest::UnmountVolume { guest_path, force } => {
-            handle_unmount_volume(guest_path, force)
-        }
-
-        // Substrate-side mirror of `mvmctl session set-timeout`. If
-        // the warm-process pool is active (tier-2 dispatch), the
-        // agent updates its idle-recycle threshold and a recycler
-        // thread reaps individual workers idle past the new
-        // timeout — keeping the VM up while pruning waste. If no pool
-        // is active, the verb is a no-op acknowledged with
-        // `applied_secs = 0`; the host-side reaper remains the only
-        // enforcement on cold-path-only builds.
-        GuestRequest::UpdateIdleTimeout { secs } => handle_update_idle_timeout(secs),
-    };
-
-    write_response(&mut file, &resp);
+    send_authenticated_response(&mut file, &mut session, &resp);
 }
 
 fn main() {
@@ -570,6 +601,7 @@ fn main() {
         }
     }
     let boot_state = Arc::new(boot_state_val);
+    let guest_signing_key = Arc::new(SigningKey::from_bytes(&rand::random::<[u8; 32]>()));
     boot_state.mark_vsock_bound();
     eprintln!(
         "mvm-guest-agent: control plane ready ({}ms)",
@@ -737,9 +769,17 @@ fn main() {
         let integration_state = Arc::clone(&integration_state);
         let probe_state = Arc::clone(&probe_state);
         let bs = Arc::clone(&boot_state);
+        let guest_signing_key = Arc::clone(&guest_signing_key);
         std::thread::spawn(move || {
             let _connection_guard = connection_guard;
-            handle_client(cfd, &state, &integration_state, &probe_state, &bs);
+            handle_client(
+                cfd,
+                &state,
+                &integration_state,
+                &probe_state,
+                &bs,
+                &guest_signing_key,
+            );
         });
     }
 
@@ -755,7 +795,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_agentd::vsock::{GuestCapability, read_frame, write_frame};
+    use mvm_agentd::vsock::GuestCapability;
     use mvm_core::security::AgentProfile;
     use std::os::fd::IntoRawFd;
     use std::os::unix::net::UnixStream;
@@ -785,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_client_accepts_protocol_hello_before_request() {
+    fn handle_client_requires_authenticated_control() {
         let (mut host, guest) = UnixStream::pair().expect("unix stream pair");
         host.set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set read timeout");
@@ -805,6 +845,13 @@ mod tests {
             std::time::Instant::now(),
         ));
         boot_state.mark_vsock_bound();
+        let host_key = SigningKey::from_bytes(&[7u8; 32]);
+        let guest_key = SigningKey::from_bytes(&[9u8; 32]);
+        boot_state
+            .inner
+            .lock()
+            .expect("boot state lock")
+            .host_signer_key = Some(host_key.verifying_key());
 
         let handle = std::thread::spawn(move || {
             handle_client(
@@ -813,21 +860,25 @@ mod tests {
                 &integration_state,
                 &probe_state,
                 &boot_state,
+                &guest_key,
             );
         });
 
-        write_frame(
-            &mut host,
-            &GuestRequest::ProtocolHello {
-                host_protocol_version: mvm_agentd::vsock::PROTOCOL_VERSION,
-                min_supported_version: mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
-                host_version: "test-host".to_string(),
-                requested_capabilities: vec![GuestCapability::Ping],
-            },
-        )
-        .expect("write protocol hello");
+        let mut session = AuthenticatedSession::host(&mut host, "test-control", host_key)
+            .expect("authenticated host session");
+        session
+            .write(
+                &mut host,
+                &GuestRequest::ProtocolHello {
+                    host_protocol_version: mvm_agentd::vsock::PROTOCOL_VERSION,
+                    min_supported_version: mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+                    host_version: "test-host".to_string(),
+                    requested_capabilities: vec![GuestCapability::Ping],
+                },
+            )
+            .expect("write protocol hello");
 
-        let ack: GuestResponse = read_frame(&mut host).expect("read protocol ack");
+        let ack: GuestResponse = session.read(&mut host).expect("read protocol ack");
         assert!(matches!(
             ack,
             GuestResponse::ProtocolHelloAck {
@@ -836,20 +887,19 @@ mod tests {
             } if capabilities == vec![GuestCapability::Ping]
         ));
 
-        write_frame(&mut host, &GuestRequest::Ping).expect("write ping");
-        let pong: GuestResponse = read_frame(&mut host).expect("read pong");
+        session
+            .write(&mut host, &GuestRequest::Ping)
+            .expect("write ping");
+        let pong: GuestResponse = session.read(&mut host).expect("read pong");
         assert!(matches!(pong, GuestResponse::Pong));
 
         handle.join().expect("handle_client thread");
     }
 
-    /// Hard-cutover regression: an operational request sent as the
-    /// *first* request in a session (no prior
-    /// `ProtocolHello`) must be rejected with `ProtocolMismatch`
-    /// (`required_action: upgrade_host`) and the connection must be
-    /// closed without dispatching the underlying operation.
+    /// A control connection without the pinned host identity must fail during
+    /// the authenticated session handshake, before request dispatch begins.
     #[test]
-    fn handle_client_rejects_non_hello_first_request() {
+    fn handle_client_rejects_control_without_pinned_host_key() {
         let (mut host, guest) = UnixStream::pair().expect("unix stream pair");
         host.set_read_timeout(Some(Duration::from_secs(5)))
             .expect("set read timeout");
@@ -866,6 +916,8 @@ mod tests {
             std::time::Instant::now(),
         ));
         boot_state.mark_vsock_bound();
+        let host_key = SigningKey::from_bytes(&[7u8; 32]);
+        let guest_key = SigningKey::from_bytes(&[9u8; 32]);
 
         let handle = std::thread::spawn(move || {
             handle_client(
@@ -874,37 +926,14 @@ mod tests {
                 &integration_state,
                 &probe_state,
                 &boot_state,
+                &guest_key,
             );
         });
 
-        // Bare `Ping` with no prior hello — the soft-cutover path used
-        // to let this through and answer `Pong`. Under hard cutover the
-        // agent must respond with `ProtocolMismatch` and close.
-        write_frame(&mut host, &GuestRequest::Ping).expect("write ping");
-        let resp: GuestResponse = read_frame(&mut host).expect("read mismatch");
-        match resp {
-            GuestResponse::ProtocolMismatch {
-                required_action,
-                agent_protocol_version,
-                ..
-            } => {
-                assert_eq!(
-                    required_action,
-                    mvm_agentd::vsock::ProtocolUpgradeAction::UpgradeHost
-                );
-                assert_eq!(agent_protocol_version, mvm_agentd::vsock::PROTOCOL_VERSION);
-            }
-            other => panic!("expected ProtocolMismatch, got {other:?}"),
-        }
-
-        // After the mismatch the agent closed the connection: another
-        // read returns either an EOF/read error or no further bytes.
-        // We assert the read does not succeed with a fresh response —
-        // i.e. there is no second operational dispatch.
-        let trailing: anyhow::Result<GuestResponse> = read_frame(&mut host);
+        let result = AuthenticatedSession::host(&mut host, "untrusted-control", host_key);
         assert!(
-            trailing.is_err(),
-            "agent must close after ProtocolMismatch; got trailing {trailing:?}"
+            result.is_err(),
+            "agent must refuse an unpinned host identity"
         );
 
         handle.join().expect("handle_client thread");

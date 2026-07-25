@@ -1,9 +1,11 @@
 //! Vsock socket constants, raw FFI, the peer-authorization gate, and the
 //! length-prefixed frame I/O that mirrors `vsock.rs`'s wire protocol.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
-use mvm_agentd::vsock::{GuestRequest, GuestResponse, HOST_CID, MAX_FRAME_SIZE, write_frame};
+use mvm_agentd::vsock::{
+    AuthenticatedSession, GuestResponse, HOST_CID, MAX_FRAME_SIZE, write_frame,
+};
 
 pub(crate) const AF_VSOCK: i32 = 40;
 pub(crate) const SOCK_STREAM: i32 = 1;
@@ -36,25 +38,7 @@ pub(crate) fn peer_cid_is_authorized(cid: u32) -> bool {
     cid == HOST_CID
 }
 
-pub(crate) fn read_request(file: &mut std::fs::File) -> Option<GuestRequest> {
-    let mut len_buf = [0u8; 4];
-    if file.read_exact(&mut len_buf).is_err() {
-        return None;
-    }
-    let frame_len =
-        usize::try_from(u32::from_be_bytes(len_buf)).expect("u32 frame length fits usize");
-    if frame_len > MAX_FRAME_SIZE {
-        eprintln!("frame too large: {} bytes", frame_len);
-        return None;
-    }
-    let mut buf = vec![0u8; frame_len];
-    if file.read_exact(&mut buf).is_err() {
-        return None;
-    }
-    serde_json::from_slice(&buf).ok()
-}
-
-pub(crate) fn write_response(file: &mut impl Write, resp: &GuestResponse) {
+pub(crate) fn write_response(file: &mut (impl Write + ?Sized), resp: &GuestResponse) {
     let fallback = GuestResponse::Error {
         message: "guest response exceeded the protocol frame cap".to_string(),
     };
@@ -70,6 +54,62 @@ pub(crate) fn write_response(file: &mut impl Write, resp: &GuestResponse) {
         // Do not append a fallback after an I/O error: the original frame may
         // already be partially written, so another prefix would corrupt it.
         eprintln!("failed to write vsock response: {error}");
+    }
+}
+
+/// Adapts the existing response-writing handlers to the authenticated session
+/// without allowing a raw JSON response to bypass encryption.
+pub(crate) struct AuthenticatedWriter<'a> {
+    file: &'a mut std::fs::File,
+    session: &'a mut AuthenticatedSession,
+    pending: Vec<u8>,
+}
+
+impl<'a> AuthenticatedWriter<'a> {
+    pub(crate) fn new(file: &'a mut std::fs::File, session: &'a mut AuthenticatedSession) -> Self {
+        Self {
+            file,
+            session,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl Write for AuthenticatedWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.pending.len() < 4 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "incomplete response frame",
+            ));
+        }
+        let body_len = usize::try_from(u32::from_be_bytes(
+            self.pending[..4]
+                .try_into()
+                .expect("response frame prefix is exactly four bytes"),
+        ))
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid frame length")
+        })?;
+        if body_len > MAX_FRAME_SIZE || self.pending.len() != body_len + 4 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid response frame body length",
+            ));
+        }
+        let response: GuestResponse = serde_json::from_slice(&self.pending[4..]).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid response")
+        })?;
+        self.session
+            .write(self.file, &response)
+            .map_err(std::io::Error::other)?;
+        self.pending.clear();
+        Ok(())
     }
 }
 

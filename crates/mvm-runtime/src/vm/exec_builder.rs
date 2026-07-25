@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use mvm_agentd::vsock::{
-    EntrypointEvent, ExecEvent, GUEST_AGENT_PORT, GuestRequest, GuestResponse, StageFile,
-    call_streaming, call_unary,
+    ControlSession, EntrypointEvent, ExecEvent, GUEST_AGENT_PORT, GuestRequest, GuestResponse,
+    StageFile, call_unary,
 };
 
 use super::lease::WarmLease;
@@ -115,7 +115,8 @@ impl<'a> ExecBuilder<'a> {
     /// last command's outcome (or the first failing one).
     pub fn output(self) -> Result<ExecOutcome> {
         let mut stream = self.connect()?;
-        stage_files(&mut stream, &self.stages)?;
+        let mut session = ControlSession::open(&mut stream)?;
+        stage_files(&mut session, &mut stream, &self.stages)?;
         let mut last = ExecOutcome {
             status: 0,
             stdout: Vec::new(),
@@ -124,7 +125,13 @@ impl<'a> ExecBuilder<'a> {
             peak_rss_kib: None,
         };
         for argv in &self.commands {
-            last = run_exec(&mut stream, argv, self.stdin.clone(), self.timeout)?;
+            last = run_exec(
+                &mut session,
+                &mut stream,
+                argv,
+                self.stdin.clone(),
+                self.timeout,
+            )?;
             if last.status != 0 {
                 break;
             }
@@ -135,8 +142,9 @@ impl<'a> ExecBuilder<'a> {
     /// Stage the files, then run the production entrypoint (no argv, no shell).
     pub fn run_entrypoint(self, stdin: Vec<u8>) -> Result<ExecOutcome> {
         let mut stream = self.connect()?;
-        stage_files(&mut stream, &self.stages)?;
-        run_entrypoint(&mut stream, stdin, self.timeout)
+        let mut session = ControlSession::open(&mut stream)?;
+        stage_files(&mut session, &mut stream, &self.stages)?;
+        run_entrypoint(&mut session, &mut stream, stdin, self.timeout)
     }
 
     /// Tier-2: run the whole staged batch (files + every command) in **one
@@ -156,21 +164,26 @@ impl<'a> ExecBuilder<'a> {
     }
 }
 
-fn stage_files(stream: &mut UnixStream, stages: &[StagedFile]) -> Result<()> {
+fn stage_files(
+    session: &mut ControlSession,
+    stream: &mut UnixStream,
+    stages: &[StagedFile],
+) -> Result<()> {
     for s in stages {
-        call_unary(
-            stream,
-            &GuestRequest::FsWrite {
-                path: s.path.clone(),
-                content: s.content.clone(),
-                mode: s.mode,
-                create_parents: true,
-                follow_symlinks: false,
-                offset: None,
-                truncate: true,
-            },
-        )
-        .with_context(|| format!("staging {}", s.path))?;
+        session
+            .call_unary(
+                stream,
+                &GuestRequest::FsWrite {
+                    path: s.path.clone(),
+                    content: s.content.clone(),
+                    mode: s.mode,
+                    create_parents: true,
+                    follow_symlinks: false,
+                    offset: None,
+                    truncate: true,
+                },
+            )
+            .with_context(|| format!("staging {}", s.path))?;
     }
     Ok(())
 }
@@ -251,6 +264,7 @@ fn make_exec_request(
 }
 
 fn run_exec(
+    session: &mut ControlSession,
     stream: &mut UnixStream,
     argv: &[String],
     stdin_bytes: Vec<u8>,
@@ -260,21 +274,22 @@ fn run_exec(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut status = 0;
-    call_streaming(
-        stream,
-        &make_exec_request(argv, stdin_bytes, timeout),
-        |ev| {
-            if let GuestResponse::ExecEvent(e) = ev {
-                match e {
-                    ExecEvent::Stdout { chunk } => stdout.extend_from_slice(chunk),
-                    ExecEvent::Stderr { chunk } => stderr.extend_from_slice(chunk),
-                    ExecEvent::Exit { code } => status = *code,
-                    ExecEvent::TimedOut => status = 124,
+    session
+        .call_streaming(
+            stream,
+            &make_exec_request(argv, stdin_bytes, timeout),
+            |ev| {
+                if let GuestResponse::ExecEvent(e) = ev {
+                    match e {
+                        ExecEvent::Stdout { chunk } => stdout.extend_from_slice(chunk),
+                        ExecEvent::Stderr { chunk } => stderr.extend_from_slice(chunk),
+                        ExecEvent::Exit { code } => status = *code,
+                        ExecEvent::TimedOut => status = 124,
+                    }
                 }
-            }
-        },
-    )
-    .with_context(|| format!("running {argv:?}"))?;
+            },
+        )
+        .with_context(|| format!("running {argv:?}"))?;
     Ok(ExecOutcome {
         status,
         stdout,
@@ -285,6 +300,7 @@ fn run_exec(
 }
 
 fn run_entrypoint(
+    session: &mut ControlSession,
     stream: &mut UnixStream,
     stdin: Vec<u8>,
     timeout: Option<Duration>,
@@ -293,25 +309,26 @@ fn run_entrypoint(
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut status = 0;
-    call_streaming(
-        stream,
-        &GuestRequest::RunEntrypoint {
-            stdin,
-            timeout_secs: timeout.map_or(0, |d| d.as_secs()),
-            env: Vec::new(),
-        },
-        |ev| {
-            if let GuestResponse::EntrypointEvent(e) = ev {
-                match e {
-                    EntrypointEvent::Stdout { chunk } => stdout.extend_from_slice(chunk),
-                    EntrypointEvent::Stderr { chunk } => stderr.extend_from_slice(chunk),
-                    EntrypointEvent::Exit { code } => status = *code,
-                    _ => {}
+    session
+        .call_streaming(
+            stream,
+            &GuestRequest::RunEntrypoint {
+                stdin,
+                timeout_secs: timeout.map_or(0, |d| d.as_secs()),
+                env: Vec::new(),
+            },
+            |ev| {
+                if let GuestResponse::EntrypointEvent(e) = ev {
+                    match e {
+                        EntrypointEvent::Stdout { chunk } => stdout.extend_from_slice(chunk),
+                        EntrypointEvent::Stderr { chunk } => stderr.extend_from_slice(chunk),
+                        EntrypointEvent::Exit { code } => status = *code,
+                        _ => {}
+                    }
                 }
-            }
-        },
-    )
-    .context("running entrypoint")?;
+            },
+        )
+        .context("running entrypoint")?;
     Ok(ExecOutcome {
         status,
         stdout,
@@ -400,14 +417,22 @@ mod tests {
         let Some((_d, _a, mut stream)) = agent_stream() else {
             return;
         };
+        let mut session = ControlSession::open(&mut stream).unwrap();
         let stages = [StagedFile {
             path: "/tmp/main.rs".to_string(),
             content: b"fn main(){}".to_vec(),
             mode: 0o644,
         }];
         // Stage + run on the SAME stream (Tier 1 pipelining).
-        stage_files(&mut stream, &stages).unwrap();
-        let out = run_exec(&mut stream, &["echo".into(), "hi".into()], Vec::new(), None).unwrap();
+        stage_files(&mut session, &mut stream, &stages).unwrap();
+        let out = run_exec(
+            &mut session,
+            &mut stream,
+            &["echo".into(), "hi".into()],
+            Vec::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(out.status, 0);
         assert!(out.duration >= Duration::ZERO);
     }
@@ -418,9 +443,15 @@ mod tests {
         let Some((_d, _a, mut stream)) = agent_stream() else {
             return;
         };
-        stage_files(&mut stream, &[]).unwrap();
-        let out =
-            run_entrypoint(&mut stream, b"input".to_vec(), Some(Duration::from_secs(5))).unwrap();
+        let mut session = ControlSession::open(&mut stream).unwrap();
+        stage_files(&mut session, &mut stream, &[]).unwrap();
+        let out = run_entrypoint(
+            &mut session,
+            &mut stream,
+            b"input".to_vec(),
+            Some(Duration::from_secs(5)),
+        )
+        .unwrap();
         assert_eq!(out.status, 0);
     }
 
@@ -451,6 +482,7 @@ mod tests {
         let Some((_d, _a, mut stream)) = agent_stream() else {
             return;
         };
+        let mut session = ControlSession::open(&mut stream).unwrap();
         let stages = [
             StagedFile {
                 path: "/tmp/a".to_string(),
@@ -463,8 +495,15 @@ mod tests {
                 mode: 0o644,
             },
         ];
-        stage_files(&mut stream, &stages).unwrap();
-        let out = run_exec(&mut stream, &["true".into()], Vec::new(), None).unwrap();
+        stage_files(&mut session, &mut stream, &stages).unwrap();
+        let out = run_exec(
+            &mut session,
+            &mut stream,
+            &["true".into()],
+            Vec::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(out.status, 0);
     }
 }

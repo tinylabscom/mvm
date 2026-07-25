@@ -34,8 +34,8 @@ pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, send_request, vsock_uds_path,
 };
 pub use framing::{
-    handshake_as_guest, handshake_as_host, read_authenticated_frame, read_frame,
-    verify_authenticated_frame, write_authenticated_frame, write_frame,
+    AuthenticatedSession, handshake_as_guest, handshake_as_host, read_authenticated_frame,
+    read_frame, verify_authenticated_frame, write_authenticated_frame, write_frame,
 };
 pub use request::{GuestRequest, StageFile};
 pub use request_policy::RequestClass;
@@ -50,8 +50,9 @@ pub use response_payloads::{
     FsErrorKind, FsResult, FsStat, ProcErrorKind, ProcInfo, ProcResult, ProcState, ProcWaitEvent,
 };
 pub use rpc::{
-    RpcError, call_streaming, call_unary, check_response, negotiate_protocol, read_exec_stream,
-    require_capabilities, send_exec_streaming, send_run_detached, send_run_entrypoint,
+    ControlSession, RpcError, call_streaming, call_unary, check_response, negotiate_protocol,
+    read_exec_stream, require_capabilities, send_exec_streaming, send_run_code_streaming,
+    send_run_detached, send_run_entrypoint,
 };
 pub use verb_grant::{
     HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant,

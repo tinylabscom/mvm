@@ -6,6 +6,7 @@
 //! the same gate so the boundary is legible from inside the file too.
 
 use mvm_agentd::vsock::GuestResponse;
+use std::io::Write;
 
 use crate::HandlerCtx;
 use crate::socket::write_response;
@@ -26,7 +27,7 @@ pub(crate) fn proc_registry() -> &'static mvm_agentd::process_rpc::Registry {
 /// dispatch loop to write last. Mirrors `handle_run_entrypoint`.
 #[cfg(feature = "interactive")]
 pub(crate) fn handle_proc_wait_streaming(
-    file: &mut std::fs::File,
+    file: &mut dyn Write,
     pid_token: &str,
     timeout_secs: Option<u64>,
 ) -> mvm_agentd::vsock::ProcWaitEvent {
@@ -43,7 +44,7 @@ pub(crate) fn handle_proc_wait_streaming(
 /// `handle_proc_wait_streaming`. (interactive only)
 #[cfg(feature = "interactive")]
 fn do_exec_streaming(
-    file: &mut std::fs::File,
+    file: &mut dyn Write,
     command: &str,
     stdin_data: Option<&str>,
     timeout_secs: Option<u64>,
@@ -278,7 +279,7 @@ fn read_wrapper_language() -> Option<String> {
 /// providing stateful eval across calls. Wire shape stays identical —
 /// the dispatch flips inside this function.
 #[cfg(feature = "interactive")]
-fn do_run_code(file: &mut std::fs::File, code: &str, timeout_secs: Option<u64>) -> GuestResponse {
+fn do_run_code(file: &mut dyn Write, code: &str, timeout_secs: Option<u64>) -> GuestResponse {
     let lang = match read_wrapper_language() {
         Some(l) => l,
         None => {

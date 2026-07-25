@@ -353,9 +353,10 @@ pub fn send_proc_wait_on<F: FnMut(&ProcWaitEvent)>(
         pid_token: pid_token.to_string(),
         timeout_secs,
     };
-    write_frame(stream, &req)?;
+    let mut session = super::connection::open_authenticated_session(stream)?;
+    session.write(stream, &req)?;
     loop {
-        let resp: GuestResponse = read_frame(stream)?;
+        let resp: GuestResponse = session.read(stream)?;
         match resp {
             GuestResponse::ProcWaitEvent(ev) => {
                 if ev.is_terminal() {

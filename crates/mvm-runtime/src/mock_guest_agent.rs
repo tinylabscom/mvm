@@ -5,8 +5,8 @@
 //! the same Unix-domain socket path Firecracker exposes for the
 //! vsock UDS multiplexer. The host-side fs/proc helpers in
 //! `mvm_agentd::vsock` connect to that path, send the
-//! `CONNECT <port>\n` line, then exchange length-prefixed JSON
-//! `GuestRequest` / `GuestResponse` frames. The mock implements that
+//! `CONNECT <port>\n` line, then establish the authenticated encrypted session
+//! carrying length-prefixed `GuestRequest` / `GuestResponse` envelopes. The mock implements that
 //! protocol faithfully enough for the audit-emit live tests in
 //! `tests/audit_emissions_live.rs` to exercise `mvmctl fs *` and
 //! `mvmctl proc *` end-to-end without a real microVM.
@@ -31,10 +31,10 @@
 //!
 //! ## Security profile
 //!
-//! Tier 3 / test-only. The mock accepts every request, never
-//! validates signatures, and never enforces policy. It mirrors
-//! `MockBackend`'s posture — never selectable from
-//! `AnyBackend::auto_select`, only via `--hypervisor mock`.
+//! Tier 3 / test-only. The mock uses the same authenticated and encrypted
+//! session framing as the real guest agent, but intentionally accepts every
+//! verb after authentication and does not model guest policy. It is never
+//! selectable from `AnyBackend::auto_select`, only via `--hypervisor mock`.
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -45,15 +45,11 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_agentd::vsock::{
-    EntrypointEvent, ExecEvent, ExecOutcomeWire, FsErrorKind, FsResult, GuestRequest,
-    GuestResponse, ProcResult, ProcWaitEvent, protocol_hello_response,
+    AuthenticatedSession, EntrypointEvent, ExecEvent, ExecOutcomeWire, FsErrorKind, FsResult,
+    GuestRequest, GuestResponse, ProcResult, ProcWaitEvent, protocol_hello_response,
 };
-
-/// Maximum frame size accepted by the mock agent — matches the
-/// host-side `MAX_FRAME_SIZE` (256 KiB) so the mock breaks loud
-/// rather than silent if a caller exceeds the production cap.
-const MAX_FRAME_SIZE: usize = 256 * 1024;
 
 /// How long the accept loop waits between shutdown-flag checks.
 /// Short enough that `MockGuestAgent::stop()` returns promptly,
@@ -85,6 +81,24 @@ impl MockGuestAgent {
     /// on a background thread; callers must hold the returned handle
     /// for the agent's lifetime.
     pub fn start(vm_dir: &Path) -> Result<Self> {
+        let host_key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
+        let host_key_bytes: [u8; 32] = match std::fs::read(&host_key_path) {
+            Ok(bytes) => bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("mock host signer key must be 32 bytes"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let bytes = [7u8; 32];
+                let parent = host_key_path
+                    .parent()
+                    .context("host signer key has no parent directory")?;
+                std::fs::create_dir_all(parent)?;
+                std::fs::write(&host_key_path, bytes)?;
+                bytes
+            }
+            Err(error) => return Err(error).with_context(|| "read mock host signer key"),
+        };
+        let host_key = SigningKey::from_bytes(&host_key_bytes).verifying_key();
         let runtime_dir = vm_dir.join("runtime");
         std::fs::create_dir_all(&runtime_dir)
             .with_context(|| format!("creating runtime dir at {}", runtime_dir.display()))?;
@@ -108,7 +122,7 @@ impl MockGuestAgent {
                 "mock-guest-agent-{}",
                 vm_dir.file_name().and_then(|s| s.to_str()).unwrap_or("vm")
             ))
-            .spawn(move || run_accept_loop(listener, shutdown_clone, next_token_clone))
+            .spawn(move || run_accept_loop(listener, shutdown_clone, next_token_clone, host_key))
             .with_context(|| "spawning mock guest-agent thread")?;
 
         Ok(Self {
@@ -144,7 +158,12 @@ impl Drop for MockGuestAgent {
     }
 }
 
-fn run_accept_loop(listener: UnixListener, shutdown: Arc<AtomicBool>, next_token: Arc<AtomicU64>) {
+fn run_accept_loop(
+    listener: UnixListener,
+    shutdown: Arc<AtomicBool>,
+    next_token: Arc<AtomicU64>,
+    host_key: VerifyingKey,
+) {
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _addr)) => {
@@ -166,7 +185,7 @@ fn run_accept_loop(listener: UnixListener, shutdown: Arc<AtomicBool>, next_token
                 // unbounded spawn is fine at this scale.
                 let _ = std::thread::Builder::new()
                     .name("mock-guest-agent-worker".to_string())
-                    .spawn(move || handle_connection(stream, token_counter));
+                    .spawn(move || handle_connection(stream, token_counter, host_key));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(POLL_INTERVAL);
@@ -183,7 +202,7 @@ fn run_accept_loop(listener: UnixListener, shutdown: Arc<AtomicBool>, next_token
 /// Handle one client connection: CONNECT handshake, then one
 /// request/response cycle, then close. Matches the host-side
 /// `connect_to_port` + `send_request` shape.
-fn handle_connection(mut stream: UnixStream, next_token: Arc<AtomicU64>) {
+fn handle_connection(mut stream: UnixStream, next_token: Arc<AtomicU64>, host_key: VerifyingKey) {
     // Read the CONNECT line one byte at a time. A `BufReader` would
     // be more idiomatic but it pre-buffers from the underlying
     // stream, which means it can swallow the length-prefix bytes
@@ -203,36 +222,25 @@ fn handle_connection(mut stream: UnixStream, next_token: Arc<AtomicU64>) {
         return;
     }
 
-    // Read length-prefixed JSON requests until the client closes the
-    // stream or an error occurs. The host-side helpers let a single
-    // session issue `ProtocolHello` then the operational request on
-    // the same connection — a one-shot mock would close after the
-    // hello and strand the follow-up request. The real agent
-    // (`handle_client` in `mvm-guest-agent`) also reads multiple
-    // frames per session, so this matches production semantics.
+    let guest_key = SigningKey::from_bytes(&[9u8; 32]);
+    let mut session = match AuthenticatedSession::guest(&mut stream, guest_key, &host_key) {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::warn!("mock-guest-agent: authenticated handshake failed: {error}");
+            return;
+        }
+    };
+
+    // Read encrypted, authenticated requests until the client closes the
+    // stream. The real guest agent uses the same per-connection session.
     loop {
-        let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).is_err() {
-            return;
-        }
-        let frame_len = u32::from_be_bytes(len_buf) as usize;
-        if frame_len == 0 || frame_len > MAX_FRAME_SIZE {
-            return;
-        }
-        let mut body = vec![0u8; frame_len];
-        if stream.read_exact(&mut body).is_err() {
-            return;
-        }
-        let req: GuestRequest = match serde_json::from_slice(&body) {
-            Ok(r) => r,
-            Err(_) => {
-                let _ = write_error(&mut stream, "mock: failed to deserialize GuestRequest");
-                return;
-            }
+        let req: GuestRequest = match session.read(&mut stream) {
+            Ok(req) => req,
+            Err(_) => return,
         };
 
         let resp = dispatch(req, &next_token);
-        if write_frame(&mut stream, &resp).is_err() {
+        if session.write(&mut stream, &resp).is_err() {
             return;
         }
     }
@@ -265,24 +273,6 @@ fn read_line_byte_by_byte(stream: &mut UnixStream) -> Option<String> {
         }
     }
     None
-}
-
-fn write_frame(stream: &mut UnixStream, resp: &GuestResponse) -> Result<()> {
-    let data = serde_json::to_vec(resp).context("serialize GuestResponse")?;
-    let len = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len)?;
-    stream.write_all(&data)?;
-    stream.flush()?;
-    Ok(())
-}
-
-fn write_error(stream: &mut UnixStream, message: &str) -> Result<()> {
-    write_frame(
-        stream,
-        &GuestResponse::Error {
-            message: message.to_string(),
-        },
-    )
 }
 
 /// Translate one `GuestRequest` into the matching success-shaped

@@ -27,7 +27,8 @@ use mvm_core::platform::Platform;
 /// returns can cross thread boundaries (the console wires data and
 /// control channels through separate worker threads).
 pub trait VsockTransport: Send + Sync {
-    /// Connect and return a stream ready for length-prefixed JSON I/O.
+    /// Connect and return a stream ready for the authenticated session
+    /// handshake and length-prefixed control envelopes.
     /// The Firecracker handshake (`CONNECT <port>\n` / `OK <port>\n`)
     /// is performed inside this call when applicable; on Apple
     /// Container the framework returns a stream directly.

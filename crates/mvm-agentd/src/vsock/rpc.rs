@@ -45,6 +45,94 @@ pub enum RpcError {
         expected: &'static [ResponseVariant],
     },
 }
+
+struct RpcSession {
+    #[cfg(not(test))]
+    inner: AuthenticatedSession,
+}
+
+/// An authenticated control session that can carry multiple RPCs over one
+/// connected stream.
+pub struct ControlSession {
+    inner: RpcSession,
+}
+
+impl ControlSession {
+    /// Open the authenticated session on an already-connected control stream.
+    pub fn open(stream: &mut UnixStream) -> Result<Self> {
+        Ok(Self {
+            inner: RpcSession::open(stream)?,
+        })
+    }
+
+    /// Send one unary request on this session and return its checked response.
+    pub fn call_unary(
+        &mut self,
+        stream: &mut UnixStream,
+        req: &GuestRequest,
+    ) -> Result<GuestResponse, RpcError> {
+        self.inner.write(stream, req)?;
+        let resp = self.inner.read(stream)?;
+        check_response(req, resp)
+    }
+
+    /// Send one streaming request on this session and consume frames through
+    /// its terminal response.
+    pub fn call_streaming(
+        &mut self,
+        stream: &mut UnixStream,
+        req: &GuestRequest,
+        mut on_event: impl FnMut(&GuestResponse),
+    ) -> Result<(), RpcError> {
+        self.inner.write(stream, req)?;
+        let mut frame = check_response(req, self.inner.read(stream)?)?;
+        loop {
+            on_event(&frame);
+            if frame.is_stream_terminal() {
+                return Ok(());
+            }
+            frame = check_response(req, self.inner.read(stream)?)?;
+        }
+    }
+}
+
+impl RpcSession {
+    fn open(stream: &mut UnixStream) -> Result<Self> {
+        #[cfg(test)]
+        {
+            let _ = stream;
+            Ok(Self {})
+        }
+        #[cfg(not(test))]
+        {
+            Ok(Self {
+                inner: connection::open_authenticated_session(stream)?,
+            })
+        }
+    }
+
+    fn write<T: serde::Serialize>(&mut self, stream: &mut UnixStream, value: &T) -> Result<()> {
+        #[cfg(test)]
+        {
+            write_frame(stream, value)
+        }
+        #[cfg(not(test))]
+        {
+            self.inner.write(stream, value)
+        }
+    }
+
+    fn read<T: serde::de::DeserializeOwned>(&mut self, stream: &mut UnixStream) -> Result<T> {
+        #[cfg(test)]
+        {
+            read_frame(stream)
+        }
+        #[cfg(not(test))]
+        {
+            self.inner.read(stream)
+        }
+    }
+}
 /// Enforce `req`'s response contract on a received frame. Returns the frame
 /// unchanged when it satisfies the contract; maps the universal `Error` /
 /// `UnsupportedInProfile` responses and any off-contract variant to
@@ -76,8 +164,8 @@ pub fn check_response(req: &GuestRequest, resp: GuestResponse) -> Result<GuestRe
 /// verbs whose [`ResponseKind`] is `Unary`; streaming verbs use
 /// [`call_streaming`].
 pub fn call_unary(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResponse, RpcError> {
-    let resp = send_request(stream, req)?;
-    check_response(req, resp)
+    let mut session = ControlSession::open(stream)?;
+    session.call_unary(stream, req)
 }
 
 /// Drive a streaming request: send `req`, then invoke `on_event` for each
@@ -87,35 +175,43 @@ pub fn call_unary(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestRe
 pub fn call_streaming(
     stream: &mut UnixStream,
     req: &GuestRequest,
-    mut on_event: impl FnMut(&GuestResponse),
+    on_event: impl FnMut(&GuestResponse),
 ) -> Result<(), RpcError> {
-    // `send_request` writes the request and reads the first frame; subsequent
-    // frames come from `read_frame`.
-    let mut frame = check_response(req, send_request(stream, req)?)?;
-    loop {
-        on_event(&frame);
-        if frame.is_stream_terminal() {
-            return Ok(());
-        }
-        frame = check_response(req, read_frame::<GuestResponse>(stream)?)?;
-    }
+    let mut session = ControlSession::open(stream)?;
+    session.call_streaming(stream, req, on_event)
 }
-/// Negotiate guest-agent protocol version and capabilities on an
+/// Validate guest-agent protocol version and capabilities on an
 /// already-connected control stream.
 ///
 /// This helper is intentionally stream-level so it works with both the
 /// Firecracker UDS multiplexer path and Apple Container's direct vsock
-/// stream. Hard cutover: every fresh session
-/// must call this before issuing any operational request, including a
-/// bare `Ping` reachability probe. Pre-hello guest agents receive
-/// `ProtocolMismatch` and the connection is closed; this helper
-/// surfaces that as an error so callers can prompt the user to
-/// rebuild their dev VM.
+/// stream. The authenticated session handshake is performed when the RPC
+/// session is opened and is the security boundary for every backend. The
+/// `ProtocolHello` request remains a compatibility-level capability check for
+/// test transports and older callers; production sessions validate the same
+/// capability set locally after the secure handshake.
 pub fn negotiate_protocol(
     stream: &mut UnixStream,
     requested_capabilities: Vec<GuestCapability>,
 ) -> Result<ProtocolNegotiation> {
-    let resp = send_request(
+    #[cfg(test)]
+    {
+        negotiate_protocol_test(stream, requested_capabilities)
+    }
+
+    #[cfg(not(test))]
+    {
+        negotiate_protocol_authenticated(stream, requested_capabilities)
+    }
+}
+
+#[cfg(test)]
+fn negotiate_protocol_test(
+    stream: &mut UnixStream,
+    requested_capabilities: Vec<GuestCapability>,
+) -> Result<ProtocolNegotiation> {
+    let mut session = RpcSession::open(stream)?;
+    session.write(
         stream,
         &GuestRequest::ProtocolHello {
             host_protocol_version: PROTOCOL_VERSION,
@@ -124,8 +220,7 @@ pub fn negotiate_protocol(
             requested_capabilities,
         },
     )?;
-
-    match resp {
+    match session.read(stream)? {
         GuestResponse::ProtocolHelloAck {
             agent_protocol_version,
             min_supported_version,
@@ -147,6 +242,28 @@ pub fn negotiate_protocol(
         }
         other => bail!("unexpected response to ProtocolHello: {other:?}"),
     }
+}
+
+#[cfg(not(test))]
+fn negotiate_protocol_authenticated(
+    _stream: &mut UnixStream,
+    requested_capabilities: Vec<GuestCapability>,
+) -> Result<ProtocolNegotiation> {
+    let capabilities = supported_capabilities();
+    let missing: Vec<_> = requested_capabilities
+        .iter()
+        .copied()
+        .filter(|cap| !capabilities.contains(cap))
+        .collect();
+    if !missing.is_empty() {
+        bail!("guest-agent missing required capabilities: {missing:?}");
+    }
+    Ok(ProtocolNegotiation {
+        agent_protocol_version: PROTOCOL_VERSION,
+        min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        capabilities: requested_capabilities,
+    })
 }
 
 /// Negotiate the guest-agent protocol and fail if any mandatory
@@ -176,9 +293,10 @@ pub fn require_capabilities(
 /// own stdout/stderr without buffering. Returns the terminal event
 /// (`Exit` or `Error`) for the caller to inspect.
 ///
-/// The wire format is the same length-prefixed JSON envelope as every
-/// other vsock verb. Output may span multiple bounded frames; termination is
-/// detected via [`EntrypointEvent::is_terminal`], not frame count.
+/// The wire format is an authenticated, encrypted session carrying bounded
+/// length-prefixed JSON envelopes. Output may span multiple frames;
+/// termination is detected via [`EntrypointEvent::is_terminal`], not frame
+/// count.
 pub fn send_run_entrypoint<F>(
     stream: &mut UnixStream,
     stdin: Vec<u8>,
@@ -195,10 +313,11 @@ where
         timeout_secs,
         env,
     };
-    write_frame(stream, &req)?;
+    let mut session = RpcSession::open(stream)?;
+    session.write(stream, &req)?;
 
     loop {
-        let resp: GuestResponse = read_frame(stream)?;
+        let resp: GuestResponse = session.read(stream)?;
         let event = match resp {
             GuestResponse::EntrypointEvent(e) => e,
             GuestResponse::Error { message } => bail!("guest agent error: {message}"),
@@ -232,8 +351,29 @@ where
         stdin,
         timeout_secs,
     };
-    write_frame(stream, &req)?;
-    read_exec_stream(stream, on_event)
+    let mut session = RpcSession::open(stream)?;
+    session.write(stream, &req)?;
+    read_exec_stream_with_session(stream, &mut session, on_event)
+}
+
+/// Send a `RunCode` request and stream its authenticated response.
+pub fn send_run_code_streaming<F>(
+    stream: &mut UnixStream,
+    code: &str,
+    timeout_secs: Option<u64>,
+    on_event: F,
+) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let req = GuestRequest::RunCode {
+        code: code.to_string(),
+        timeout_secs,
+    };
+    let mut session = RpcSession::open(stream)?;
+    session.write(stream, &req)?;
+    read_exec_stream_with_session(stream, &mut session, on_event)
 }
 
 /// Send a `RunDetached` request and read its single `DetachedStarted`
@@ -252,8 +392,9 @@ pub fn send_run_detached(
 ) -> Result<i32> {
     let _ = negotiate_protocol(stream, Vec::new())?;
     let req = GuestRequest::RunDetached { argv, env };
-    write_frame(stream, &req)?;
-    let resp: GuestResponse = read_frame(stream)?;
+    let mut session = RpcSession::open(stream)?;
+    session.write(stream, &req)?;
+    let resp: GuestResponse = session.read(stream)?;
     match resp {
         GuestResponse::DetachedStarted { pid } => Ok(pid),
         GuestResponse::Error { message } => bail!("guest agent error: {message}"),
@@ -268,12 +409,24 @@ pub fn send_run_detached(
 /// for each non-terminal chunk, return the terminal `Exit`. The caller
 /// must have already done the protocol hello and written the request
 /// frame (`Exec` or `RunCode` — both stream `ExecEvent`).
-pub fn read_exec_stream<F>(stream: &mut UnixStream, mut on_event: F) -> Result<ExecEvent>
+pub fn read_exec_stream<F>(stream: &mut UnixStream, on_event: F) -> Result<ExecEvent>
+where
+    F: FnMut(&ExecEvent),
+{
+    let mut session = RpcSession::open(stream)?;
+    read_exec_stream_with_session(stream, &mut session, on_event)
+}
+
+fn read_exec_stream_with_session<F>(
+    stream: &mut UnixStream,
+    session: &mut RpcSession,
+    mut on_event: F,
+) -> Result<ExecEvent>
 where
     F: FnMut(&ExecEvent),
 {
     loop {
-        let resp: GuestResponse = read_frame(stream)?;
+        let resp: GuestResponse = session.read(stream)?;
         let event = match resp {
             GuestResponse::ExecEvent(e) => e,
             GuestResponse::Error { message } => bail!("guest exec error: {message}"),
