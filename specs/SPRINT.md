@@ -18,7 +18,7 @@
 - [x] #1833 image.created atomicity: stage image-lineage nodes before audit
       emission and atomically publish them only after the signed entry succeeds.
       Focused tests, workspace check, full tests, clippy, and formatting pass;
-      PR publication is pending.
+      published as PR #1846 for review.
 
 ---
 
