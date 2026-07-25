@@ -253,26 +253,26 @@ mod tests {
         let ordered_backends: Vec<_> = r.backends.into_iter().collect();
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
 
-        assert_eq!(
-            ordered_backends,
-            vec![
-                ("firecracker".to_string(), "unsupported"),
-                ("hvf".to_string(), "unsupported"),
-                ("libkrun".to_string(), "unsupported"),
-                ("qemu".to_string(), "unsupported"),
-                ("wasm".to_string(), "unsupported"),
-            ]
-        );
-        assert_eq!(
-            ordered_standby_pool,
-            vec![
-                ("firecracker".to_string(), false),
-                ("hvf".to_string(), false),
-                ("libkrun".to_string(), false),
-                ("qemu".to_string(), false),
-                ("wasm".to_string(), false),
-            ]
-        );
+        let mut expected_backends = vec![
+            ("firecracker".to_string(), "unsupported"),
+            ("hvf".to_string(), "unsupported"),
+            ("libkrun".to_string(), "unsupported"),
+            ("qemu".to_string(), "unsupported"),
+            ("wasm".to_string(), "unsupported"),
+        ];
+        let mut expected_standby_pool = vec![
+            ("firecracker".to_string(), false),
+            ("hvf".to_string(), false),
+            ("libkrun".to_string(), false),
+            ("qemu".to_string(), false),
+            ("wasm".to_string(), false),
+        ];
+        if cfg!(feature = "test-support") {
+            expected_backends.insert(3, ("mock".to_string(), "live-memory"));
+            expected_standby_pool.insert(3, ("mock".to_string(), false));
+        }
+        assert_eq!(ordered_backends, expected_backends);
+        assert_eq!(ordered_standby_pool, expected_standby_pool);
     }
 
     #[test]
