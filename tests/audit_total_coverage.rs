@@ -225,6 +225,10 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("check-artifact", AuditPosture::ReadOnly),
     ("logs", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),
+    // Read-only lineage navigator over the checkpoint + image DAGs. Verifies
+    // each hop against the signed chain but makes no trust decision and writes
+    // nothing — no audit-chain emission.
+    ("timeline", AuditPosture::ReadOnly),
     // Advanced single-VM verbs folded under `machine` (hidden from default help).
     // The audit postures are unchanged from when these lived under `vm <sub>`.
     ("pause", AuditPosture::Emits("VmStop")),

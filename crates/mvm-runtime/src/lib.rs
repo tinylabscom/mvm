@@ -74,9 +74,12 @@ pub mod image_lineage;
 /// (compiles + tests everywhere); the ioctl glue is Linux-only.
 pub mod kvm;
 pub mod libkrun;
-/// Namespace-agnostic hash-linked lineage walk shared by [`checkpoint`] and
-/// [`image_lineage`].
-pub(crate) mod lineage;
+/// Namespace-agnostic hash-linked lineage walk + read-only enumeration shared by
+/// [`checkpoint`] and [`image_lineage`]. The walk traits stay crate-private (the
+/// stores provide concrete wrappers); the enumeration result types
+/// ([`lineage::Ancestry`], [`lineage::VerifiedNode`], [`lineage::HopStatus`]) are
+/// public so a navigator can name what the wrappers return.
+pub mod lineage;
 pub mod microvm;
 /// The hermetic in-memory `MockBackend` — see its module docs for the
 /// security posture. Gated behind `test-support` so it never compiles into

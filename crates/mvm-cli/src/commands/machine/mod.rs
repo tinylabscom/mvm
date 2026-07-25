@@ -123,6 +123,11 @@ pub(in crate::commands) enum MachineAction {
     /// extraction, no boot.
     #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
+    /// Render a checkpoint or image's lineage (ancestors to genesis + immediate
+    /// children), verifying each hop against the signed audit chain. Read-only:
+    /// no restore, no admission, no boot.
+    #[command(display_order = 14)]
+    Timeline(super::vm::checkpoint::TimelineArgs),
     /// Advanced single-VM operations (pause, snapshot, cp, fs, …). Hidden; use `machine <verb>` directly.
     #[command(flatten)]
     Vm(VmCmd),
@@ -152,6 +157,7 @@ impl MachineAction {
             | MachineAction::Logs(_)
             | MachineAction::Console(_)
             | MachineAction::CheckArtifact(_) => "machine",
+            MachineAction::Timeline(_) => "timeline",
         }
     }
 }
@@ -1284,6 +1290,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
         MachineAction::Console(console_args) => super::vm::console::run(cli, console_args, cfg),
         MachineAction::CheckArtifact(a) => portable::run_check_artifact(a),
+        MachineAction::Timeline(a) => super::vm::checkpoint::run_timeline(a),
         MachineAction::Vm(cmd) => {
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
