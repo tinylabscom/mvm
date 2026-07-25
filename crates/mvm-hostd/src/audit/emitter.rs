@@ -63,6 +63,10 @@ pub mod checkpoint_audit {
     pub const LABEL_CLASS: &str = "class";
     /// Label: the owning VM name (created/restored).
     pub const LABEL_VM_NAME: &str = "vm_name";
+    /// Label: how a restore was initiated (`revert` / `rewind` / `advance`),
+    /// so a time-travel restore is distinguishable in the chain from a
+    /// same-identity resume. Carried on `checkpoint.restored`.
+    pub const LABEL_VIA: &str = "via";
     /// Label: the parent checkpoint id (forked).
     pub const LABEL_PARENT_ID: &str = "parent_id";
     /// Label: the child (new) checkpoint id (forked).
@@ -403,15 +407,17 @@ impl AuditEmitter {
         )
     }
 
-    /// Record that a VM was restored to the state captured in a vm_full
-    /// checkpoint. The label set carries the checkpoint id, its content-address,
-    /// and the VM name.
+    /// Record that a VM was restored to the state captured in a checkpoint. The
+    /// label set carries the checkpoint id, its content-address, the restored VM
+    /// name, and `via` — how the restore was initiated (`revert` / `rewind` /
+    /// `advance`), so a time-travel restore reads distinctly in the chain.
     pub fn emit_checkpoint_restored(
         &self,
         plan: &ExecutionPlan,
         checkpoint_id: &str,
         meta_digest: &str,
         vm_name: &str,
+        via: &str,
     ) -> Result<()> {
         use checkpoint_audit as k;
         self.emit(
@@ -424,6 +430,7 @@ impl AuditEmitter {
                 ),
                 (k::LABEL_META_DIGEST.to_string(), meta_digest.to_string()),
                 (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+                (k::LABEL_VIA.to_string(), via.to_string()),
             ],
         )
     }
@@ -1118,7 +1125,7 @@ mod tests {
         let plan = fixture_plan("local", "plan-R");
         let meta_digest = format!("sha256:{}", "d".repeat(64));
         emitter
-            .emit_checkpoint_restored(&plan, "ckpt-abc", &meta_digest, "myvm")
+            .emit_checkpoint_restored(&plan, "ckpt-abc", &meta_digest, "myvm", "revert")
             .unwrap();
         let path = dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&path).unwrap();
@@ -1126,6 +1133,9 @@ mod tests {
         assert!(content.contains("ckpt-abc"));
         assert!(content.contains("myvm"));
         assert!(content.contains(&meta_digest));
+        // The initiating verb rides as the `via` label.
+        assert!(content.contains("\"via\""));
+        assert!(content.contains("revert"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 }

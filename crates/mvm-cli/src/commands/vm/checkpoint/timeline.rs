@@ -56,9 +56,10 @@ impl LineageKind {
     }
 }
 
-/// The record a target string resolved to, in one of the two stores.
+/// The record a target string resolved to, in one of the two stores. Shared
+/// with the revert engine, which resolves a target identically before restoring.
 #[derive(Debug)]
-enum ResolvedTarget {
+pub(in crate::commands::vm::checkpoint) enum ResolvedTarget {
     Checkpoint(CheckpointMeta),
     Image(ImageNode),
 }
@@ -88,8 +89,9 @@ pub(in crate::commands) fn run_timeline(args: TimelineArgs) -> Result<()> {
 /// Resolve `target` to a record in one of the two stores. A `sha256:<hex>`
 /// addresses either store (disambiguated by `kind` on a collision); anything
 /// else is a checkpoint id (image nodes have no id — their identity is their
-/// digest).
-fn resolve_target(
+/// digest). Shared with the revert engine so a target resolves identically
+/// whether it is being navigated (timeline) or restored (revert).
+pub(in crate::commands::vm::checkpoint) fn resolve_target(
     checkpoint_store: &CheckpointStore,
     image_store: &ImageStore,
     target: &str,
@@ -383,12 +385,34 @@ fn render_human(timeline: &Timeline) -> String {
     }
 
     lines.push(String::new());
-    lines.push(if timeline.verified {
-        "lineage verified against the signed audit chain".to_string()
-    } else {
-        "lineage has unverified hop(s) — see the UNVERIFIED marks above".to_string()
-    });
+    lines.push(timeline_footer(timeline));
     lines.join("\n")
+}
+
+/// The overall-verdict footer. A failed verdict has two independent causes that
+/// read very differently, so the footer names which one(s) apply rather than
+/// blaming every failure on a bad hop: a *structural* break (a dangling or
+/// cyclic parent hash-link that stopped the walk before genesis) versus a
+/// *per-hop* verification failure (a hop present in the chain that did not
+/// verify against the signed audit log). Both can hold at once.
+fn timeline_footer(timeline: &Timeline) -> String {
+    if timeline.verified {
+        return "lineage verified against the signed audit chain".to_string();
+    }
+    let structural_break = timeline.lineage_broken.is_some();
+    let has_failed_hop = !timeline.node.verified
+        || timeline.ancestors.iter().any(|n| !n.verified)
+        || timeline.children.iter().any(|n| !n.verified);
+    match (structural_break, has_failed_hop) {
+        (true, true) => "lineage is structurally broken (dangling or cyclic parent link) AND \
+             has unverified hop(s) — see the incompleteness note and the UNVERIFIED marks above"
+            .to_string(),
+        (true, false) => "lineage is structurally broken (dangling or cyclic parent link): the \
+             walk could not reach genesis — see the incompleteness note above"
+            .to_string(),
+        // structural_break is false here, so the only remaining cause is a failed hop.
+        (false, _) => "lineage has unverified hop(s) — see the UNVERIFIED marks above".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -733,6 +757,42 @@ mod tests {
         // Overall verdict is failed, and the walk still reached genesis.
         assert!(!timeline.verified);
         assert!(timeline.lineage_broken.is_none());
+    }
+
+    #[test]
+    fn dangling_ancestry_sets_lineage_broken_and_renders_a_structural_break() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        let store = CheckpointStore::open();
+        let (em, plan) = emitter();
+
+        // A checkpoint whose parent hash-link names a digest no stored record
+        // carries: the node itself is audited and verifies, but the walk cannot
+        // reach genesis — a genuine structural break, not a per-hop failure.
+        let missing_parent = digest_of('e');
+        let target = seed_ckpt(&store, &em, &plan, "orphan", Some(missing_parent));
+
+        let anchor = SignedChainAnchor::load().unwrap();
+        let timeline = build_checkpoint_timeline(&store, &anchor, target).unwrap();
+
+        // The reachable node is listed and verified...
+        assert!(timeline.node.verified);
+        // ...but the walk fails closed with a structural break, not a bad hop.
+        assert!(
+            timeline.lineage_broken.is_some(),
+            "a dangling parent must surface as a structural break"
+        );
+        assert!(!timeline.verified, "a broken lineage is not verified");
+
+        let out = render_human(&timeline);
+        assert!(out.contains("lineage incomplete"), "{out}");
+        // The footer names the STRUCTURAL cause, not a phantom unverified hop.
+        assert!(out.contains("structurally broken"), "{out}");
+        assert!(
+            !out.contains("unverified hop(s)"),
+            "a purely structural break must not be reported as an unverified hop: {out}"
+        );
     }
 
     #[test]

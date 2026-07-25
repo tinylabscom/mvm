@@ -229,6 +229,12 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // each hop against the signed chain but makes no trust decision and writes
     // nothing — no audit-chain emission.
     ("timeline", AuditPosture::ReadOnly),
+    // Time-travel restore verbs: launch a fresh, re-admitted VM at a prior
+    // checkpoint/image state. A completed checkpoint restore emits a chain-signed
+    // `checkpoint.restored` entry (plus the fork boot's own admission trail).
+    ("revert", AuditPosture::Emits("CheckpointRestored")),
+    ("rewind", AuditPosture::Emits("CheckpointRestored")),
+    ("advance", AuditPosture::Emits("CheckpointRestored")),
     // Advanced single-VM verbs folded under `machine` (hidden from default help).
     // The audit postures are unchanged from when these lived under `vm <sub>`.
     ("pause", AuditPosture::Emits("VmStop")),

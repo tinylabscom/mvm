@@ -33,17 +33,23 @@ pub fn bind_checkpoint_created(
     )
 }
 
-/// Emit `checkpoint.restored` for a same-identity resume.
+/// Emit `checkpoint.restored` binding a restore to the plan it launched under.
+/// `restored_vm_name` is the identity that came up carrying the checkpoint's
+/// state (the fresh re-admitted VM for a time-travel restore), and `via` records
+/// how the restore was initiated (`revert` / `rewind` / `advance`).
 pub fn bind_checkpoint_restored(
     emitter: &AuditEmitter,
     plan: &ExecutionPlan,
     meta: &CheckpointMeta,
+    restored_vm_name: &str,
+    via: &str,
 ) -> Result<()> {
     emitter.emit_checkpoint_restored(
         plan,
         meta.id.as_str(),
         meta.meta_digest.as_str(),
-        &meta.vm_name,
+        restored_vm_name,
+        via,
     )
 }
 
@@ -127,6 +133,34 @@ mod tests {
     fn class_str_maps_both_variants() {
         assert_eq!(class_str(CheckpointClass::FsQuick), "fs_quick");
         assert_eq!(class_str(CheckpointClass::VmFull), "vm_full");
+    }
+
+    #[test]
+    fn bind_restored_binds_the_restored_vm_and_via() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-RV");
+        // The target checkpoint is captured on `origin`; the restore comes up as
+        // a fresh identity `restored-child`, which the bound entry must name.
+        let target = vm_full_meta("ckpt-target", "origin");
+
+        bind_checkpoint_restored(&emitter, &plan, &target, "restored-child", "rewind").unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("checkpoint.restored"));
+        assert!(content.contains("ckpt-target"));
+        assert!(content.contains(target.meta_digest.as_str()));
+        // The restored VM name is the fresh identity, not the origin.
+        assert!(content.contains("restored-child"));
+        assert!(content.contains("rewind"));
+        assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
     }
 
     #[test]
