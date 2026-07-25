@@ -29,8 +29,23 @@ struct CheckpointVerifyJson<'a> {
 /// chains that verify clean are indexed: an entry stranded behind a tampered
 /// line is not trusted, so the checkpoint it names fails closed as un-anchored.
 pub struct SignedChainAnchor {
-    /// checkpoint id -> content-address the signed chain recorded at creation.
+    /// `<namespace>:<id>` -> content-address the signed chain recorded at
+    /// creation. The namespace tag (`checkpoint` / `image`) keeps the checkpoint
+    /// and image key spaces structurally disjoint in one map, rather than
+    /// relying on their raw id/digest strings happening not to collide.
     recorded: std::collections::HashMap<String, CheckpointDigest>,
+}
+
+/// Namespace tag for a checkpoint-id key in [`SignedChainAnchor::recorded`].
+const CHECKPOINT_NS: &str = "checkpoint";
+/// Namespace tag for an image-node-digest key in [`SignedChainAnchor::recorded`].
+const IMAGE_NS: &str = "image";
+
+/// Compose a namespaced anchor-map key so the checkpoint and image key spaces
+/// cannot collide. The same composition is used by the indexer (writer) and
+/// both `recorded_creation_digest` lookups (readers), so the key cannot drift.
+fn anchor_key(namespace: &str, id: &str) -> String {
+    format!("{namespace}:{id}")
 }
 
 impl SignedChainAnchor {
@@ -104,39 +119,48 @@ fn index_creation_digest(
     use mvm_hostd::audit::emitter::checkpoint_audit as k;
     use mvm_hostd::audit::emitter::image_audit as ik;
     let event = envelope.entry.event.as_str();
-    // The (id, digest) label pair a creation event keys on; non-creation events
-    // carry neither.
-    let key_pair = if event == k::CREATED_EVENT {
-        Some((k::LABEL_CHECKPOINT_ID, k::LABEL_META_DIGEST))
+    // The (id-label, digest-label, namespace) a creation event keys on;
+    // non-creation events carry none.
+    let keys = if event == k::CREATED_EVENT {
+        Some((k::LABEL_CHECKPOINT_ID, k::LABEL_META_DIGEST, CHECKPOINT_NS))
     } else if event == k::FORKED_EVENT {
-        Some((k::LABEL_CHILD_ID, k::LABEL_CHILD_DIGEST))
+        Some((k::LABEL_CHILD_ID, k::LABEL_CHILD_DIGEST, CHECKPOINT_NS))
     } else if event == ik::CREATED_EVENT {
-        Some((ik::LABEL_NODE_DIGEST, ik::LABEL_NODE_DIGEST))
+        Some((ik::LABEL_NODE_DIGEST, ik::LABEL_NODE_DIGEST, IMAGE_NS))
     } else {
         None
     };
-    let Some((id_key, digest_key)) = key_pair else {
+    let Some((id_key, digest_key, namespace)) = keys else {
         return Ok(());
     };
     let labels = &envelope.entry.labels;
     if let (Some(id), Some(digest)) = (labels.get(id_key), labels.get(digest_key)) {
-        recorded.insert(id.clone(), CheckpointDigest::parse(digest.clone())?);
+        recorded.insert(
+            anchor_key(namespace, id),
+            CheckpointDigest::parse(digest.clone())?,
+        );
     }
     Ok(())
 }
 
 impl CheckpointChainAnchor for SignedChainAnchor {
     fn recorded_creation_digest(&self, meta: &CheckpointMeta) -> Result<Option<CheckpointDigest>> {
-        Ok(self.recorded.get(meta.id.as_str()).cloned())
+        Ok(self
+            .recorded
+            .get(&anchor_key(CHECKPOINT_NS, meta.id.as_str()))
+            .cloned())
     }
 }
 
 /// The same signed host-lifecycle chains anchor image-lineage nodes. An image
 /// node's identity is its own content-address, so the lookup key is the node
-/// digest the `image.created` entry recorded.
+/// digest the `image.created` entry recorded, under the image namespace.
 impl ImageChainAnchor for SignedChainAnchor {
     fn recorded_creation_digest(&self, node: &ImageNode) -> Result<Option<CheckpointDigest>> {
-        Ok(self.recorded.get(node.node_digest.as_str()).cloned())
+        Ok(self
+            .recorded
+            .get(&anchor_key(IMAGE_NS, node.node_digest.as_str()))
+            .cloned())
     }
 }
 

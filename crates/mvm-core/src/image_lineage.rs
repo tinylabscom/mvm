@@ -32,7 +32,7 @@ use crate::checkpoint::{CheckpointDigest, ContentBlob};
 /// legitimately moves build to build (a resolved digest, a lockfile hash) so
 /// successive builds of one source line up on one chain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageBuildIdentity {
     /// A Nix flake output, keyed on the resolved slot hash of the flake ref.
     Flake { slot_hash: String },
@@ -49,7 +49,7 @@ pub enum ImageBuildIdentity {
 /// [`ImageBuildIdentity`] (the chain key): this pins the exact image this node
 /// records, not the line of builds it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageCanonicalId {
     /// A Nix flake build, identified by its revision hash.
     Flake { revision_hash: String },
@@ -76,7 +76,7 @@ pub struct ImageIdentity {
 /// this records the upstream input the build consumed. The verifier records it
 /// and never walks it, and it confers no trust.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageProvenance {
     /// A Nix flake / template / local-project build input.
     Build {
@@ -336,6 +336,41 @@ mod tests {
             .unwrap()
             .insert("bogus".into(), serde_json::json!(true));
         assert!(serde_json::from_value::<ImageNode>(value).is_err());
+    }
+
+    #[test]
+    fn tagged_enum_variants_reject_unknown_fields() {
+        // deny_unknown_fields applies per-variant on the internally-tagged
+        // enums: an extra key inside a variant's object fails closed.
+        assert!(
+            serde_json::from_str::<ImageBuildIdentity>(
+                r#"{"kind":"flake","slot_hash":"s","bogus":1}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ImageCanonicalId>(
+                r#"{"kind":"oci","resolved_digest":"d","bogus":1}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ImageProvenance>(
+                r#"{"kind":"build","input_ref":"r","bogus":1}"#
+            )
+            .is_err()
+        );
+        // The well-formed variant forms still parse.
+        assert!(
+            serde_json::from_str::<ImageBuildIdentity>(r#"{"kind":"flake","slot_hash":"s"}"#)
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_str::<ImageProvenance>(
+                r#"{"kind":"oci","resolved_digest":"d","layer_digests":[]}"#
+            )
+            .is_ok()
+        );
     }
 
     #[test]

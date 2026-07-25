@@ -56,11 +56,27 @@ impl ImageStore {
         Ok(())
     }
 
-    /// Read the node stored under `node_digest` (its directory name).
+    /// Read the node stored under `node_digest` (its directory name). Fails
+    /// closed on a mis-filed record: the deserialized `node_digest` field must
+    /// equal the requested digest (the directory name), so a node planted under
+    /// another node's directory cannot slip through as that other node. This
+    /// self-consistency is what the lineage walk's first hop
+    /// (`graph.read(start)`) relies on; the walk then recomputes the digest to
+    /// prove the field is genuine.
     pub fn read(&self, node_digest: &CheckpointDigest) -> Result<ImageNode> {
         let path = self.node_path(node_digest);
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+        let node: ImageNode = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        if &node.node_digest != node_digest {
+            anyhow::bail!(
+                "image node at {} is mis-filed: its directory names {node_digest} but the \
+                 record's node_digest is {}",
+                path.display(),
+                node.node_digest
+            );
+        }
+        Ok(node)
     }
 
     /// Every node with a well-formed `node.json`. `O(n)` directory scan (matches
@@ -109,21 +125,44 @@ impl ImageStore {
     }
 
     /// The current tip of `build_identity`'s version chain: the node with that
-    /// identity that is nobody's parent. `None` when no node carries the
+    /// identity that is nobody's parent. `Ok(None)` when no node carries the
     /// identity. A clean linear chain has exactly one such node; this is what a
     /// new build of the same identity hash-links its `parent` to.
+    ///
+    /// Fails closed on an ambiguous tip: if two or more nodes share the identity
+    /// and none descends from the others (a fork), there is no single tip to
+    /// build on, so this errors rather than silently pick a filesystem-order
+    /// arbitrary one — a caller (the build path) must not set a new node's
+    /// parent to a guessed head. It likewise errors if every matching node is
+    /// referenced as a parent (a cyclic/broken set with no tip).
     pub fn head_for(&self, build_identity: &ImageBuildIdentity) -> Result<Option<ImageNode>> {
         let matching: Vec<ImageNode> = self
             .list()?
             .into_iter()
             .filter(|n| &n.build_identity == build_identity)
             .collect();
+        if matching.is_empty() {
+            return Ok(None);
+        }
         let referenced_parents: std::collections::HashSet<&CheckpointDigest> =
             matching.iter().filter_map(|n| n.parent.as_ref()).collect();
-        Ok(matching
+        let tips: Vec<&ImageNode> = matching
             .iter()
-            .find(|n| !referenced_parents.contains(&n.node_digest))
-            .cloned())
+            .filter(|n| !referenced_parents.contains(&n.node_digest))
+            .collect();
+        match tips.as_slice() {
+            [tip] => Ok(Some((*tip).clone())),
+            [] => anyhow::bail!(
+                "image build identity {build_identity:?} has no version-chain tip: every \
+                 matching node is referenced as a parent (a cyclic or broken chain)"
+            ),
+            _ => anyhow::bail!(
+                "image build identity {build_identity:?} has an ambiguous version-chain tip: \
+                 {} nodes share it and none descends from the others (a fork); refusing to \
+                 pick one",
+                tips.len()
+            ),
+        }
     }
 }
 
@@ -349,6 +388,45 @@ mod tests {
             store.dir_for(&n.node_digest),
             tmp.path().join(n.node_digest.as_str())
         );
+    }
+
+    #[test]
+    fn read_rejects_a_misfiled_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ImageStore::at(tmp.path());
+        let real = node("slot-a", "rev-1", None);
+        let other = node("slot-a", "rev-2", None); // a different node_digest
+
+        // Plant `real`'s record under `other`'s directory name.
+        let dir = store.dir_for(&other.node_digest);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("node.json"),
+            serde_json::to_vec_pretty(&real).unwrap(),
+        )
+        .unwrap();
+
+        // Reading by the directory name must reject the mis-filed record...
+        let err = store.read(&other.node_digest).unwrap_err();
+        assert!(err.to_string().contains("mis-filed"), "{err}");
+        // ...and so must the walk's first hop.
+        let err = verify_image_lineage(&store, &other.node_digest, &AgreeingAnchor).unwrap_err();
+        assert!(err.to_string().contains("mis-filed"), "{err}");
+    }
+
+    #[test]
+    fn head_for_errors_on_an_ambiguous_forked_tip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ImageStore::at(tmp.path());
+        // g0 branches into two children — a genuine fork with two tips.
+        let g0 = node("slot-a", "rev-1", None);
+        let a = node("slot-a", "rev-2a", Some(g0.node_digest.clone()));
+        let b = node("slot-a", "rev-2b", Some(g0.node_digest.clone()));
+        for n in [&g0, &a, &b] {
+            store.save(n).unwrap();
+        }
+        let err = store.head_for(&flake_identity("slot-a")).unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err}");
     }
 
     // ── lineage tests (mock anchors) ─────────────────────────────────────────
