@@ -15,6 +15,12 @@
       Implementation, focused tests, workspace tests, check, and clippy pass;
       branch is ready for pull request review.
 
+- [x] #1839 kernel pin freshness remediation: update the synchronized
+      libkrunfw and custom guest kernel pins to Linux 6.12.98. Both pins now
+      use the verified upstream hash; focused coverage, freshness checking,
+      workspace tests, check, clippy, and formatting pass. Published as PR
+      #1845 for review.
+
 ---
 
 ## 1. Why
