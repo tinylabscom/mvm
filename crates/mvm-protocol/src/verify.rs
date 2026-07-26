@@ -155,7 +155,7 @@ impl core::error::Error for AuditVerifyError {}
 /// Parse a 32-byte Ed25519 public key from hex (64 hex chars, optional
 /// `0x` prefix and surrounding whitespace).
 pub fn verifying_key_from_hex(hex: &str) -> Result<VerifyingKey, AuditVerifyError> {
-    let bytes = decode_hex32(hex)?;
+    let bytes = decode_hex32(hex).map_err(AuditVerifyError::KeyDecode)?;
     VerifyingKey::from_bytes(&bytes).map_err(|e| AuditVerifyError::KeyDecode(e.to_string()))
 }
 
@@ -235,25 +235,29 @@ pub fn verify_audit_chain_bytes(
     })
 }
 
-fn hash_line(bytes: &[u8]) -> [u8; 32] {
+/// SHA-256 of `bytes` with no domain-separation prefix. The chain hash
+/// each audit line advances the running `prev_hash` by. Shared with
+/// `merkle` (the empty-tree Merkle root is the SHA-256 of the empty
+/// input, i.e. `hash_line(&[])`).
+pub(crate) fn hash_line(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finalize().into()
 }
 
 /// Decode exactly 32 bytes from a hex string. A tiny local decoder so
-/// the crate needs no `hex` dependency.
-fn decode_hex32(input: &str) -> Result<[u8; 32], AuditVerifyError> {
+/// the crate needs no `hex` dependency; the `Err` is a human-readable
+/// reason so each caller can wrap it into its own error type (`verify`
+/// into [`AuditVerifyError::KeyDecode`], `merkle` into its hex-decode
+/// variant).
+pub(crate) fn decode_hex32(input: &str) -> Result<[u8; 32], String> {
     let s = input.trim();
     let s = s
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
     if s.len() != 64 {
-        return Err(AuditVerifyError::KeyDecode(format!(
-            "expected 64 hex chars (32 bytes), got {}",
-            s.len()
-        )));
+        return Err(format!("expected 64 hex chars (32 bytes), got {}", s.len()));
     }
     let mut out = [0u8; 32];
     let bytes = s.as_bytes();
@@ -265,15 +269,34 @@ fn decode_hex32(input: &str) -> Result<[u8; 32], AuditVerifyError> {
     Ok(out)
 }
 
-fn hex_nibble(c: u8) -> Result<u8, AuditVerifyError> {
+/// Encode 32 bytes as 64 lowercase hex chars. The inverse of
+/// [`decode_hex32`], colocated so the crate's hex codec lives in one
+/// place; `merkle` renders sibling and root hashes through it.
+pub(crate) fn encode_hex32(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for b in bytes {
+        out.push(hex_nibble_char(b >> 4));
+        out.push(hex_nibble_char(b & 0x0f));
+    }
+    out
+}
+
+fn hex_nibble_char(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + (n - 10)) as char,
+        // `n` is always a single hex nibble: every caller masks with
+        // `>> 4` or `& 0x0f`, so values above 15 are unreachable.
+        _ => '0',
+    }
+}
+
+fn hex_nibble(c: u8) -> Result<u8, String> {
     match c {
         b'0'..=b'9' => Ok(c - b'0'),
         b'a'..=b'f' => Ok(c - b'a' + 10),
         b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(AuditVerifyError::KeyDecode(format!(
-            "non-hex character {:?}",
-            c as char
-        ))),
+        _ => Err(format!("non-hex character {:?}", c as char)),
     }
 }
 

@@ -23,6 +23,8 @@ pub mod entrypoint;
 pub mod ir;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
 pub mod lifecycle;
+/// RFC 6962 Merkle transparency-log inclusion proofs over the audit log.
+pub mod merkle;
 pub mod plan;
 pub mod policy;
 pub mod protocol;
