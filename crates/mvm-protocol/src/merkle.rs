@@ -79,6 +79,32 @@ const INTERIOR_PREFIX: u8 = 0x01;
 /// proof is self-describing: [`verify_inclusion`] recomputes the leaf hash
 /// from `leaf_line`, folds the path, and checks the result against `root`
 /// — no external tree state needed.
+///
+/// # Security: this proof is only half of a membership check
+///
+/// A successful [`verify_inclusion`] proves *only* that the proof is
+/// internally consistent with its **own embedded `root`** — a fully
+/// fabricated proof (invent leaves, compute their root, embed it)
+/// self-verifies. To prove membership in a **real published log**, a caller
+/// MUST additionally:
+///
+/// 1. obtain the log's [`SignedAuditRoot`];
+/// 2. [`verify_signed_root`] it against the trusted host `VerifyingKey`; and
+/// 3. check `proof.root == root.root_hash` **and**
+///    `proof.tree_size == root.tree_size`.
+///
+/// Only then does a verified proof attest membership in the authenticated
+/// tree. Binding the proof to a signed root is the entire security property.
+///
+/// # Framing responsibility
+///
+/// `audit_path` is attacker-controlled once deserialized from untrusted
+/// bytes (e.g. in a browser). The fold in [`verify_inclusion`] consumes
+/// only the deterministic per-level sibling count, so a padded path is
+/// rejected with no per-element work amplification — but the transport /
+/// framing layer that deserializes this struct is still responsible for
+/// bounding the `Vec` length before allocation (a sane log has an
+/// `audit_path` no longer than `ceil(log2(tree_size))`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InclusionProof {
@@ -134,6 +160,11 @@ pub enum MerkleError {
         /// The tree size it was checked against.
         tree_size: u64,
     },
+    /// A leaf's bytes are not valid UTF-8 and so cannot be carried in the
+    /// proof's `String` `leaf_line`. The tree is hashed from raw bytes, so
+    /// building a proof fails loud here rather than lossily transcoding a
+    /// leaf that would then never re-verify.
+    LeafNotUtf8,
     /// The audit path had fewer siblings than the tree shape requires.
     AuditPathTooShort,
     /// The audit path had more siblings than the tree shape requires.
@@ -166,6 +197,7 @@ impl fmt::Display for MerkleError {
                 f,
                 "leaf index {leaf_index} out of range for tree of size {tree_size}"
             ),
+            Self::LeafNotUtf8 => write!(f, "leaf bytes are not valid UTF-8"),
             Self::AuditPathTooShort => write!(f, "audit path shorter than the tree requires"),
             Self::AuditPathTooLong => write!(f, "audit path longer than the tree requires"),
             Self::HexDecode(reason) => write!(f, "hex decode failed: {reason}"),
@@ -242,9 +274,12 @@ pub fn merkle_root(leaf_lines: &[impl AsRef<[u8]>]) -> [u8; 32] {
 /// `leaf_lines`.
 ///
 /// Fails with [`MerkleError::LeafIndexOutOfRange`] if `index` is not a
-/// leaf (which also covers an empty tree). The returned proof's
-/// `audit_path` is ordered bottom→top and verifies via
-/// [`verify_inclusion`].
+/// leaf (which also covers an empty tree), or [`MerkleError::LeafNotUtf8`]
+/// if the target leaf's bytes are not valid UTF-8 — the proof carries the
+/// leaf as a `String`, and the tree is hashed from raw bytes, so a lossy
+/// transcode would yield a proof that could never re-verify. Real canonical
+/// audit lines are always valid UTF-8. The returned proof's `audit_path`
+/// is ordered bottom→top and verifies via [`verify_inclusion`].
 pub fn build_inclusion_proof(
     leaf_lines: &[impl AsRef<[u8]>],
     index: usize,
@@ -256,7 +291,8 @@ pub fn build_inclusion_proof(
             tree_size: n as u64,
         });
     }
-    let leaf_line = String::from_utf8_lossy(leaf_lines[index].as_ref()).into_owned();
+    let leaf_line = String::from_utf8(leaf_lines[index].as_ref().to_vec())
+        .map_err(|_| MerkleError::LeafNotUtf8)?;
     let mut level: Vec<[u8; 32]> = leaf_lines.iter().map(|l| leaf_hash(l.as_ref())).collect();
     let mut idx = index;
     let mut audit_path: Vec<String> = Vec::new();
@@ -289,6 +325,12 @@ pub fn build_inclusion_proof(
 /// and checks the result against `root`. Fails closed on: `leaf_index >=
 /// tree_size`, an audit path length inconsistent with `tree_size`, any hex
 /// decode error, and root mismatch.
+///
+/// An `Ok` result attests **only** that the proof folds to its own embedded
+/// `proof.root`; it does not by itself prove membership in a real log. The
+/// caller must bind `proof.root` / `proof.tree_size` to a
+/// [`verify_signed_root`]-checked [`SignedAuditRoot`] — see the
+/// [`InclusionProof`] "Security" note.
 pub fn verify_inclusion(proof: &InclusionProof) -> Result<[u8; 32], MerkleError> {
     if proof.leaf_index >= proof.tree_size {
         return Err(MerkleError::LeafIndexOutOfRange {
@@ -528,23 +570,74 @@ mod tests {
     }
 
     #[test]
-    fn proof_cannot_forge_an_interior_digest_as_a_leaf() {
-        // Second-preimage across the 0x00/0x01 boundary: take a genuine
-        // interior hash and try to pass it off as a leaf line. Because the
-        // leaf is re-hashed with the 0x00 prefix, the fold cannot land on
-        // the same root, so verification fails closed.
-        let l = lines(4);
+    fn interior_digest_cannot_masquerade_as_a_leaf() {
+        // Domain separation across the 0x00 / 0x01 boundary, exercised with
+        // RAW bytes (no UTF-8 transcoding). In a real 4-leaf tree the root
+        // is interior(left, right), where `left` is itself the interior
+        // digest of leaves 0 and 1. An attacker who learns `left` cannot
+        // present it as a *leaf* and reach the same root: a leaf is hashed
+        // with the 0x00 tag, an interior node with 0x01, so leaf_hash(left)
+        // is not the interior digest it came from.
+        let real: [&[u8]; 4] = [b"l0", b"l1", b"l2", b"l3"];
+        let real_root = merkle_root(&real);
+        let left = interior_hash(&leaf_hash(b"l0"), &leaf_hash(b"l1"));
+        let right = interior_hash(&leaf_hash(b"l2"), &leaf_hash(b"l3"));
+
+        // The tag alone defeats the second preimage.
+        assert_ne!(leaf_hash(&left), left);
+        assert_ne!(leaf_hash(&left), right);
+
+        // Feed the raw 32-byte interior digest in as a leaf via the
+        // raw-bytes `merkle_root` API. Because it is re-hashed with the leaf
+        // tag, the 2-node tree over [left, right] has a DIFFERENT root than
+        // the real 4-leaf tree — the interior digest cannot fold to the
+        // real root.
+        let forged: [&[u8]; 2] = [&left, &right];
+        let forged_root = merkle_root(&forged);
+        assert_ne!(
+            forged_root, real_root,
+            "an interior digest presented as a leaf must not fold to the real root"
+        );
+        // And it is exactly the leaf-tagged re-hash, confirming the 0x00
+        // prefix was applied rather than the digest being spliced in raw.
+        assert_eq!(
+            forged_root,
+            interior_hash(&leaf_hash(&left), &leaf_hash(&right))
+        );
+    }
+
+    #[test]
+    fn build_proof_rejects_non_utf8_leaf() {
+        // A leaf whose bytes are not valid UTF-8: build must fail loud
+        // rather than lossily transcode into a proof that can never verify.
+        let good_bytes = b"ok-leaf";
+        let bad_bytes = [0xffu8, 0xfe, 0x00, 0x80];
+        let leaves: [&[u8]; 2] = [good_bytes, &bad_bytes];
+        assert_eq!(
+            build_inclusion_proof(&leaves, 1),
+            Err(MerkleError::LeafNotUtf8)
+        );
+        // The valid-UTF-8 leaf at index 0 still builds a verifying proof.
+        let proof = build_inclusion_proof(&leaves, 0).unwrap();
+        assert_eq!(verify_inclusion(&proof).unwrap(), merkle_root(&leaves));
+    }
+
+    #[test]
+    fn non_ascii_utf8_leaf_round_trips() {
+        // Real audit lines carry UTF-8 label values; a non-ASCII leaf must
+        // build a proof and verify to the right root, byte-exact.
+        let l = vec![
+            r#"{"event":"plan.admitted","label":"café"}"#.to_string(),
+            r#"{"event":"plan.launched","label":"你好"}"#.to_string(),
+            r#"{"event":"plan.failed","label":"Ωmega"}"#.to_string(),
+        ];
         let root = merkle_root(&l);
-        let interior = interior_hash(&leaf_hash(l[0].as_bytes()), &leaf_hash(l[1].as_bytes()));
-        let forged = InclusionProof {
-            leaf_index: 0,
-            tree_size: 2,
-            // Feed the raw interior digest bytes as if they were a leaf line.
-            leaf_line: String::from_utf8_lossy(&interior).into_owned(),
-            audit_path: vec![encode_hex32(&leaf_hash(l[2].as_bytes()))],
-            root: encode_hex32(&root),
-        };
-        assert_eq!(verify_inclusion(&forged), Err(MerkleError::RootMismatch));
+        for (i, line) in l.iter().enumerate() {
+            let proof = build_inclusion_proof(&l, i).unwrap();
+            // Byte-exact: no transcoding of the multibyte leaf.
+            assert_eq!(&proof.leaf_line, line);
+            assert_eq!(verify_inclusion(&proof).unwrap(), root);
+        }
     }
 
     #[test]
