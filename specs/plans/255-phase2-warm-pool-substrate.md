@@ -406,83 +406,41 @@ git commit -m "feat(runtime): claim_standby forks a clean parent into a fresh ad
 
 ---
 
-## Task 6: Fail-closed witnesses + never-promote guard (surfaces 1, 6, 7, 8)
+## Task 6: never-promote guard + remaining runner-level fail-closed witnesses (surfaces 1, 6-drift, 8)
+
+REVISED SCOPE. Task 5 already landed the un-audited-parent quarantine test and the overlay-refusal + resource-cleanup test; and the corrected layering means the runner does NOT re-admit the plan (validity window / nonce replay) — that is the supervisor's attach re-verify, NOT `claim_standby`. So **surface 7 (expired/replayed plan) is a supervisor-layer witness, out of this runner-only slice** — note it, do not test it against `claim_standby`. This task adds the never-promote guard plus the runner-level negatives Task 5 did not cover.
 
 **Files:**
-- Modify: `crates/mvm-runtime/src/workload_runner/runner.rs` (never-promote guard on the workload `run` entry)
-- Test: unit tests in `runner.rs`.
+- Modify: `crates/mvm-runtime/src/workload_runner/runner.rs` (the guard, if a real entry point exists, + the negative tests)
+- Test: unit tests in `runner.rs`, built on Task 5's REAL test helpers.
 
 **Interfaces:**
-- Consumes: Task 5's `claim_standby`; the runner's workload `run` entry.
-- Produces: the `run` entry refuses a `VmId` registered as a standby parent (`ClaimRefusal::ParentPromotionRefused`).
+- Consumes: Task 5's `claim_standby(ctx, handle, claim)` and its real test helpers (`seed_audited_parent`, `orphan_child_dirs`, the `ClaimContext` builder — READ Task 5's test module; the illustrative `ClaimTestEnv`/`err_is_refusal`/`with_*` names do NOT exist).
+- Produces: if a real "run a workload on an existing `VmId`" entry exists, it refuses a `VmId` registered as a standby parent (`ClaimRefusal::ParentPromotionRefused`) before any side effect.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing tests** (adapt to the real `claim_standby`/`ClaimContext`/helpers):
+  - `claim_refuses_plan_parent_image_mismatch` — a claim whose plan image digest differs from the parent's rootfs digest refuses with `PlanParentMismatch`, leaves NO child dir, and returns the parent to claimable (Task 5's cleanup).
+  - `claim_refuses_drift_tampered_parent` — a parent whose on-disk meta is mutated after sealing (`compute_meta_digest != stored`) refuses (drift) and is quarantined, not released. (Task 5 tests the un-audited case; this adds the drift case.)
+  - `concurrent_claims_do_not_double_claim_one_parent` — two threads claim the same parent; exactly one succeeds (the atomic reserve under the registry lock holds).
+  - `promoting_a_parent_to_a_workload_is_refused` — see the guard note in Step 3.
 
-```rust
-#[test]
-fn claim_refuses_plan_parent_image_mismatch() {
-    let env = ClaimTestEnv::with_audited_parent().with_plan_image("cc".repeat(32));
-    let dst_before = env.child_dir_exists();
-    let err = env.runner.claim_standby(&env.handle, &env.claim).unwrap_err();
-    assert!(err_is_refusal(&err, ClaimRefusal::PlanParentMismatch { .. }));
-    assert!(!dst_before && !env.child_dir_exists()); // no side effect
-}
+- [ ] **Step 2: Run tests to verify they fail (or, for the negative claim tests, confirm they codify already-holding witnesses).**
 
-#[test]
-fn claim_refuses_unaudited_and_tampered_parent() {
-    for env in [ClaimTestEnv::with_unaudited_parent(), ClaimTestEnv::with_tampered_parent()] {
-        assert!(env.runner.claim_standby(&env.handle, &env.claim).is_err());
-        assert!(!env.child_dir_exists());
-        assert!(!substitution_endpoint_exists(&env.would_be_child_id()));
-    }
-}
+Run: `cargo test -p mvm-runtime workload_runner -- claim_refuses concurrent_claims promoting_a_parent`
 
-#[test]
-fn claim_refuses_expired_and_replayed_plan() {
-    let expired = ClaimTestEnv::with_audited_parent().with_expired_plan();
-    assert!(expired.runner.claim_standby(&expired.handle, &expired.claim).is_err());
-    let env = ClaimTestEnv::with_audited_parent();
-    env.runner.claim_standby(&env.handle, &env.claim).expect("first ok");
-    // replay the same signed claim → nonce ledger refuses
-    assert!(env.runner.claim_standby(&env.handle, &env.claim).is_err());
-}
+- [ ] **Step 3: Write minimal implementation — the never-promote guard.**
 
-#[test]
-fn concurrent_claims_do_not_double_claim_one_parent() {
-    let env = ClaimTestEnv::with_audited_parent();
-    let outcomes = env.race_two_claims_on_the_same_parent(); // spawns two threads
-    assert_eq!(outcomes.iter().filter(|o| o.is_ok()).count(), 1);
-}
+FIRST determine whether a real "promote a parent to a workload" entry point exists: is there any code path that takes an existing `VmId` (which could be a standby parent) and runs a workload on it? Task 4 established that `StandbySpec`/`StandbyHandle` carry NO plan/secret field, so a parent has no workload authority by construction, and the only way to consume a parent is `claim_standby` (which forks a fresh child).
+  - If such an entry point EXISTS: add the guard there — look up the `VmId` against the standby pool and refuse with `ClaimRefusal::ParentPromotionRefused` before any side effect; test it (`promoting_a_parent_to_a_workload_is_refused`).
+  - If NO such entry point exists (the property is already structural — a parent cannot be run because there is no API to run an existing-VmId workload, and a parent carries no plan): document that finding, and write `promoting_a_parent_to_a_workload_is_refused` as a test that codifies the structural guarantee (e.g. a parent `VmId`/handle can only be `claim`ed, never started as a workload). Do NOT invent a guard for a non-existent path. Report which case you found (mirrors Task 4's structural-not-runtime finding).
 
-#[test]
-fn running_a_workload_on_a_parent_is_refused() {
-    let env = ClaimTestEnv::with_audited_parent();
-    assert!(err_is_refusal(
-        &env.runner.run_workload(&env.parent_vm_id, workload_for_test()).unwrap_err(),
-        ClaimRefusal::ParentPromotionRefused
-    ));
-}
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cargo test -p mvm-runtime workload_runner -- claim_refuses concurrent_claims running_a_workload`
-Expected: FAIL — never-promote guard absent; assert refusals not yet wired.
-
-- [ ] **Step 3: Write minimal implementation**
-
-Add the never-promote guard: the runner's workload `run` entry looks up the `VmId` in the pool; if it is a registered standby parent, refuse with `ClaimRefusal::ParentPromotionRefused` before doing anything. Confirm the fail-closed refusals from Task 5 leave no child dir / endpoint (they should already; add cleanup on the error path if a partial dir is created).
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cargo test -p mvm-runtime workload_runner -- claim_refuses concurrent_claims running_a_workload`
-Expected: PASS.
+- [ ] **Step 4: Run tests to verify they pass**; existing `workload_runner` tests stay green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-runtime/src/workload_runner/runner.rs
-git commit -m "feat(runtime): fail-closed claim witnesses + never-promote-a-parent guard"
+git commit -m "feat(runtime): never-promote-a-parent guard + remaining fail-closed claim witnesses"
 ```
 
 ---
