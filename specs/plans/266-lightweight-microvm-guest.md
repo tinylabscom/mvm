@@ -122,75 +122,84 @@ git -C "$WT" commit -m "feat(light-guest): build guest setpriv static-musl, drop
 
 ---
 
-### Task 2: Measure the glibc drop and set the rootfs budget
+### Task 2: CI-provable no-glibc closure gate
 
 **Files:**
-- Modify: `xtask/src/perf.rs` — `ROOTFS_MAX_BYTES` (~line 57) and its pin test (~line 410).
+- Modify: `nix/flake.nix` — add a `checks.<system>.guest-rootfs-no-glibc` derivation.
+- Modify: `.github/workflows/ci.yml` — build that check in the existing `nix-flake-check` job.
+- Modify: `specs/plans/266-lightweight-microvm-guest.md` — add the deferred WS-6 note (budget left as-is).
 
 **Interfaces:**
-- Consumes: `passthru.setpriv` and `passthru.rootfsTree` from Task 1.
-- Produces: an updated, measured rootfs budget pinned by test.
+- Consumes: `libFor` (already in the flake's `let`) and `passthru.rootfsTree` (already exposed; Task 1 added `setpriv`).
+- Produces: a build-backed flake check that fails if any `glibc` store path is in the mkGuest rootfs closure — provable on every PR.
 
-- [ ] **Step 1: Prove glibc is gone from the rootfs closure**
+**Why a build-backed check, not a byte measurement.** Task 1's eval gate proves `setpriv` *references* the static build. This task proves the *actual closure* carries no glibc — the stronger, end-to-end property — and enforces it in CI. A pure `nix eval` cannot see a derivation's runtime closure, so the check must realize the closure; the `ubuntu-latest` Nix runner builds it natively (no sudo, no darwin linux-builder). The exact rootfs byte budget is deferred to WS-6 — `ROOTFS_MAX_BYTES` gates a packed *release* rootfs, not this `lib` output, so it must not be tightened here.
 
-Build the mkGuest rootfs tree for a minimal sealed workload and inspect its closure:
+- [ ] **Step 1: Add the check derivation to `nix/flake.nix`**
+
+Add a `checks` output beside the `packages` output (systems come from the existing `systems` list):
+
+```nix
+      checks = nixpkgs.lib.genAttrs systems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          guest = (libFor { inherit system; }).mkGuest {
+            name = "no-glibc-check";
+            entrypoint.command = [ "/bin/true" ];
+          };
+        in
+        {
+          # The mkGuest rootfs is static-musl only. If any glibc store path
+          # enters its closure, this build fails — the guest privilege-drop
+          # setpriv and every other rootfs binary must stay static.
+          guest-rootfs-no-glibc =
+            pkgs.runCommand "guest-rootfs-no-glibc"
+              { closure = pkgs.closureInfo { rootPaths = [ guest.passthru.rootfsTree ]; }; }
+              ''
+                if grep -Eq -- '-glibc(-|$)' "$closure/store-paths"; then
+                  echo "glibc present in guest rootfs closure:" >&2
+                  grep -- '-glibc' "$closure/store-paths" >&2
+                  exit 1
+                fi
+                echo ok > "$out"
+              '';
+        });
+```
+
+- [ ] **Step 2: Verify the check evaluates (local, no build, no sudo)**
 
 ```bash
 cd nix
-TREE=$(nix --extra-experimental-features 'nix-command flakes' build --impure --no-link --print-out-paths \
-  --expr 'let f = builtins.getFlake (toString ./.); g = f.lib.x86_64-linux.mkGuest { name = "measure"; entrypoint.command = ["/bin/true"]; }; in g.passthru.rootfsTree')
-echo "rootfsTree: $TREE"
-nix --extra-experimental-features 'nix-command flakes' path-info -rsSh "$TREE" | sort -k2 -h | tail -20
-nix --extra-experimental-features 'nix-command flakes' path-info -r "$TREE" | grep -i glibc && echo "GLIBC STILL PRESENT — investigate" || echo "no glibc in rootfs closure"
+nix --extra-experimental-features 'nix-command flakes' eval \
+  .#checks.x86_64-linux.guest-rootfs-no-glibc.drvPath
 ```
 
-Expected: `no glibc in rootfs closure`. If glibc persists, another store path anchors it — record the offending path; it becomes a WS-5 (rootfs closure minimization) item, and this task stops here with that finding.
+Expected: prints a `/nix/store/…-guest-rootfs-no-glibc.drv` path. Cross-system eval works on macOS; this confirms the derivation and its `closureInfo` input are well-formed. Do NOT `nix build` it here — realizing an `x86_64-linux`/`aarch64-linux` closure on this macOS host needs the sudo-gated linux-builder, which is out of bounds. The build-proof runs in CI (Step 3). Also run the existing loop to confirm no eval regression: `nix flake check --no-build ./` from `nix/`.
 
-- [ ] **Step 2: Measure the ext4 byte delta**
+- [ ] **Step 3: Build the check in CI**
 
-Build the packed rootfs image (the derivation itself, not the tree) on this branch and on `main`, and record both sizes:
+In `.github/workflows/ci.yml`, in the `nix-flake-check` job, add a step after "Eval-check every flake":
 
-```bash
-cd nix
-build_ext4() {
-  nix --extra-experimental-features 'nix-command flakes' build --impure --no-link --print-out-paths \
-    --expr 'let f = builtins.getFlake (toString ./.); in f.lib.x86_64-linux.mkGuest { name = "measure"; entrypoint.command = ["/bin/true"]; }'
-}
-AFTER=$(build_ext4); echo "after (static setpriv): $(stat -c%s "$AFTER"/*.ext4 2>/dev/null || stat -f%z "$AFTER"/*.ext4) bytes"
-# Repeat from a clean `main` checkout for the baseline; record both numbers in the commit body.
+```yaml
+      - name: Guest rootfs carries no glibc
+        run: |
+          set -euo pipefail
+          nix build --print-build-logs \
+            ./nix#checks.x86_64-linux.guest-rootfs-no-glibc
 ```
 
-Record the before/after rootfs bytes and the closure-size delta in the Task 2 commit message — these seed the campaign scoreboard.
+The runner is `ubuntu-latest` (x86_64-linux); this realizes the rootfs closure (substituted from cache) and fails the job if glibc appears — the per-PR proof.
 
-- [ ] **Step 3: Set the budget from the measurement**
+- [ ] **Step 4: Leave the size budget; record the deferred gate**
 
-`ROOTFS_MAX_BYTES` gates the packed release/pack rootfs (`release.yml`, `security.yml`, `pack-signing-smoke.yml` invoke `xtask perf rootfs-size --rootfs …`). Decide from Step 2:
-
-- If the measured `after` rootfs is comfortably below the current 20 MiB, tighten `ROOTFS_MAX_BYTES` (`xtask/src/perf.rs:57`) to `after` rounded up with ~15% headroom, and update the pin test (`xtask/src/perf.rs:410`):
-
-```rust
-pub const ROOTFS_MAX_BYTES: u64 = <measured_after_plus_headroom>; // set from Step 2
-```
-```rust
-assert_eq!(ROOTFS_MAX_BYTES, <measured_after_plus_headroom>);
-```
-
-- If the packed rootfs the gate measures does not reflect the mkGuest closure (a different artifact), leave `ROOTFS_MAX_BYTES` unchanged, and add a one-line note in the plan's deferred section that a mkGuest-rootfs size gate belongs to WS-6 (unified footprint ledger). Do not tighten a budget against the wrong artifact.
-
-- [ ] **Step 4: Run the pin test**
-
-```bash
-cargo nextest run -p xtask perf
-```
-
-Expected: PASS (the `ROOTFS_MAX_BYTES` pin test agrees with the constant).
+Do NOT change `xtask/src/perf.rs` `ROOTFS_MAX_BYTES` — it gates a packed release rootfs, a different artifact. Add one line under "## Deferred follow-ups" for WS-6: a mkGuest-rootfs *size* (bytes) budget belongs with the unified footprint ledger; this task lands the *no-glibc* gate, not a byte budget.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 WT=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-light-guest
-git -C "$WT" add xtask/src/perf.rs
-git -C "$WT" commit -m "perf(light-guest): record glibc-drop rootfs measurement and set the budget"
+git -C "$WT" add nix/flake.nix .github/workflows/ci.yml specs/plans/266-lightweight-microvm-guest.md
+git -C "$WT" commit -m "test(light-guest): CI gate asserting the guest rootfs closure carries no glibc"
 ```
 
 ---
