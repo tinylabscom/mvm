@@ -89,20 +89,44 @@ nothing more. If "ready" ever advances past this line, every child inherits the
 residue — memory, filesystem, and open state. This precondition is what the
 cross-fork-residue and shared-entropy mitigations below rely on.
 
+## Where each guard runs (layering)
+
+The guards are not all at the runner — they are enforced at their existing
+layers, and the warm claim reuses each in place (the same shape the FC
+checkpoint-fork already uses):
+
+- **Admission (claim 8)** — the CLI caller (`try_warm_claim`) mints the child's
+  fresh signed `ExecutionPlan` via `admit_plan_for_boot`; the supervisor
+  (`mvm-hostd`) re-verifies it at attach. The runner receives an already-admitted
+  plan. (The runner cannot re-verify itself: the re-verify code lives in
+  `mvm-hostd`, which depends on `mvm-runtime`.)
+- **Verity inherit (claim 3)** — CLI-side, via `populate_fork_rootfs_verity` on
+  the cloned child rootfs; the runner only consumes the resulting
+  `VmStartConfig.verity_path`/`roothash`.
+- **Confinement (claim 1)** — applied by guest init (setpriv uid 901 + seccomp
+  `standard`) and inherited into the forked child by construction: the parent
+  snapshot is taken at the post-init ready point (parent-cleanliness contract),
+  so the child carries the same confinement a cold boot's init applies. There is
+  no host-side confinement to re-derive on the runner.
+- **Runner (`claim_standby`)** — owns only the genuinely runner-side, host-side
+  steps: the atomic parent select + lineage gate, the CoW materialize, the
+  plan↔parent bind, identity-scrub, the VMM fork, the per-child substitution
+  endpoint, the overlay-contract gate, and the audit/provenance emit.
+
 ## Claim data-flow (guarded, fail-closed)
 
 `claim_standby(handle, claim)` runs this order; nothing clones or boots until
-every gate passes:
+every gate passes. Steps are annotated with the layer that owns them:
 
 1. **Parent state + lineage gate.** Parent must be `Idle`/`Parked`, selected and
    marked claimed atomically under the name-registry lock (no double-claim); its
    checkpoint must pass `verify_content` + `verify_lineage` (un-audited or
    tampered parent refuses). Runs before any clone.
-2. **Re-admit the child plan (claim 8).** The child's signed `ExecutionPlan`
-   (minted fresh at the CLI with a fresh nonce and the child's own `vm_name`) is
-   re-verified at attach through the existing `prelaunch` path: `verify_plan` →
-   `verify_plan_id` → `check_window` (G4) → nonce-ledger `check_and_insert`
-   (replay). This is the shared cold-boot admission, not a parallel copy.
+2. **Admit the child plan (claim 8) [CLI + supervisor].** The CLI caller mints
+   the child's fresh signed `ExecutionPlan` (fresh nonce, child `vm_name`) via
+   `admit_plan_for_boot`; the supervisor re-verifies it at attach (`verify_plan` →
+   `check_window` (G4) → nonce `check_and_insert`). This reuses the exact cold-boot
+   admission at its real layer; the runner receives the admitted plan in the claim.
 3. **Materialize child rootfs.** `materialize_child_from_parent` — self-binding,
    lineage-anchored CoW clone from the verified parent's own content.
 4. **Bind the plan to the parent (claim 8 integrity).** Verify the admitted
@@ -111,8 +135,10 @@ every gate passes:
    exactly what boots, so a claim can never pair a plan with a different parent's
    rootfs. This is the warm-pool analog of the Phase-1 self-binding clone, applied
    to authority.
-5. **Verity inherit (claim 3).** Resolve `verity_path`/`roothash` from the cloned
-   rootfs sidecars into the child `VmStartConfig`; the sidecars ride the clone.
+5. **Verity inherit (claim 3) [CLI].** The CLI caller resolves
+   `verity_path`/`roothash` from the cloned rootfs sidecars into the child
+   `VmStartConfig` via `populate_fork_rootfs_verity`; the sidecars ride the clone.
+   The runner consumes these fields; it does not derive them.
 6. **Identity-scrub.** Fresh registry-unique `VmId`, the plan's fresh nonce, and a
    fresh VMGenID token. The token must be delivered and acted on (guest CSPRNG
    reseed + session drop) before any guest randomness consumer runs — otherwise
@@ -126,10 +152,12 @@ every gate passes:
 8. **Per-child endpoint + gateway.** Spawn the child's own substitution endpoint,
    keyed on the fresh `VmId`, socket mode 0700, never reusing a sibling's; the
    factory parent has no substitution endpoint at all. Secrets stay host-side.
-9. **Re-apply confinement from a known baseline.** Seccomp + jailer + per-service
-   uid re-derived on the child, not assumed-inherited — a fork starts from the
-   parent's namespaces/cgroups/fds, so the guards must override, and no parent fd
-   or namespace may leak in. Same helper, same result as cold boot.
+9. **Confinement inherited (claim 1) [guest init].** Confinement is applied by
+   guest init (setpriv uid 901 + seccomp `standard`) and inherited into the child
+   by construction — the parent snapshot is post-init (parent-cleanliness
+   contract), so the child carries the same confinement a cold boot's init
+   applies. There is no host-side re-derivation on the runner. The runner only
+   enforces the overlay-contract gate host-side, identical to cold boot.
 10. **Audit + provenance.** Emit `plan.launched` on the child's chain and the fork
     lineage event recording the parent, so a claimed child's provenance (which
     parent + fresh plan) is verifiable — no less auditable than a cold boot.
@@ -150,8 +178,12 @@ Made unrepresentable, not merely checked:
 - The runner's workload entry refuses a `VmId` that is registered as a standby
   parent.
 
-Steps 2 and 9 execute the exact guard code a cold boot uses, via a single shared
-`ClaimGuards` builder, so a warm claim can never diverge to a weaker posture.
+A warm claim can never diverge to a weaker posture because each guard reuses the
+cold-boot mechanism at its own layer: the same `admit_plan_for_boot` admission
+(CLI), the same `populate_fork_rootfs_verity` (CLI), the same guest-init
+confinement (inherited via the post-init parent snapshot), and — for the
+genuinely runner-side host steps — a single shared `ClaimGuards` covering the
+per-child substitution endpoint and the overlay-contract gate.
 
 ## Security surfaces → mitigation → witness
 
@@ -162,7 +194,7 @@ Each surface this claim path opens or widens, with the witness that covers it.
 | 1 | Plan/parent confusion — audit records image X, guest boots parent image Y | Fail-closed bind: admitted plan image digest == materialized parent rootfs content-address (claim-flow step 4) | `claim_refuses_plan_parent_image_mismatch` |
 | 2 | Cross-fork residue from a dirty parent | Parent cleanliness contract: snapshot strictly pre-workload / pre-secret / pre-tenant | `parent_snapshot_is_pre_workload`; satisfies Plan 265 fork-no-residue |
 | 3 | Shared CSPRNG state across forks | Fresh VMGenID delivered + acted on before any randomness consumer; clean parent bounds consumers to init+agent | `fork_delivers_fresh_genid_before_workload` (trigger + ordering); Plan 265 owns reseed |
-| 4 | Weaker confinement via inherited parent state | Re-derive seccomp/jailer/uid from a known baseline; byte-identical to cold + no leaked fd/namespace | `claimed_child_confinement_equals_cold` |
+| 4 | Weaker confinement on a forked child | Confinement is guest-init-applied and inherited via the post-init parent snapshot; the parent-cleanliness contract guarantees the snapshot is post-confinement, so the child carries the same uid 901 + seccomp `standard` as a cold boot | folds into surface 2 (`parent_snapshot_is_pre_workload` — i.e. post-init ready point) + the existing claim-1 guest witnesses |
 | 5 | Cross-workload secrets endpoint access | Per-child endpoint keyed on fresh `VmId`, 0700, no reuse; factory parent has none | `child_endpoint_isolated_parent_has_none` |
 | 6 | Un-audited / tampered parent forked | Phase-1 `verify_content` + `verify_lineage` gate before clone | `claim_refuses_unaudited_and_tampered_parent` |
 | 7 | Replayed claim / stale plan | prelaunch re-verify: `check_window` + nonce ledger | `claim_refuses_expired_and_replayed_plan` |
@@ -170,9 +202,11 @@ Each surface this claim path opens or widens, with the witness that covers it.
 
 ## Best-practice shape
 
-- A `ClaimGuards` builder carrying the shared admission + plan/parent bind +
-  verity + endpoint + confinement steps, called by both cold boot and warm claim
-  — divergence is unrepresentable.
+- A `ClaimGuards` builder carrying the genuinely runner-side, host-side shared
+  steps — the per-child substitution-endpoint spawn and the overlay-contract gate
+  — called by both cold boot and warm claim. Admission (CLI/supervisor), verity
+  (CLI), and confinement (guest init) are reused at their own layers, not
+  re-implemented in the runner.
 - `StandbyState` (exists) drives the state machine; a `ClaimOutcome` enum for
   results; typed fail-closed error enums (thiserror in mvm-core, anyhow in
   mvm-runtime, per crate convention).
@@ -212,8 +246,11 @@ plus the identity and capability paths:
   (`parent_snapshot_is_pre_workload`).
 - Surface 3: the fork delivers a fresh VMGenID before any workload randomness
   consumer runs (`fork_delivers_fresh_genid_before_workload`).
-- Surface 4: a claimed child's seccomp profile + uid equal a cold boot's, with no
-  leaked parent fd/namespace (`claimed_child_confinement_equals_cold`).
+- Surface 4: confinement is guest-init-inherited, not host-re-derived — covered by
+  surface 2 (the parent snapshot is post-init) plus the existing claim-1 guest
+  witnesses; no host-side confinement-parity test is written (there is no host-side
+  cold-boot confinement to match). The runner's host-side shared leaf is instead
+  the overlay-contract gate, asserted alongside the endpoint isolation.
 - Surface 5: the child endpoint is keyed on its fresh `VmId`, 0700, and the parent
   has none (`child_endpoint_isolated_parent_has_none`).
 - Surface 6: un-audited and drift-tampered parents refuse, with no child dir/boot

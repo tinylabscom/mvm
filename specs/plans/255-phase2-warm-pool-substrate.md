@@ -218,55 +218,69 @@ git commit -m "feat(runtime): bind admitted plan image digest to the verified pa
 
 ---
 
-## Task 3: `ClaimGuards` — the shared cold-boot guard sequence
+## Task 3: `ClaimGuards` — the runner-side shared host steps (endpoint + overlay gate)
 
-Factor the cold-boot admission-reverify + verity-inherit + endpoint-spawn + confinement calls out of the runner's start path into one builder both cold boot and warm claim call, so a warm claim can never be less-guarded.
+REVISED SCOPE (a first attempt found the original scope invalid): the runner does
+NOT host-apply admission, verity, or confinement — those live at their own layers
+(the CLI mints/admits the plan and inherits verity; the supervisor re-verifies at
+attach; guest init confines the forked child by construction — see the design
+note "Where each guard runs"). The only genuinely runner-side, host-side steps a
+warm claim shares with cold boot are the per-child substitution-endpoint spawn and
+the overlay-contract admission gate. Factor exactly those two into a `ClaimGuards`
+both cold boot and warm claim call. Do NOT invent a host-side confinement path.
 
 **Files:**
 - Modify: `crates/mvm-runtime/src/workload_runner/claim.rs` (define `ClaimGuards`)
-- Modify: `crates/mvm-runtime/src/workload_runner/runner.rs` (route cold boot through `ClaimGuards`)
+- Modify: `crates/mvm-runtime/src/workload_runner/runner.rs` (route the cold-boot start path's endpoint spawn + overlay-contract gate through `ClaimGuards`)
 - Test: unit test in `claim.rs`; the existing runner cold-boot tests must stay green.
 
 **Interfaces:**
-- Consumes: the runner's existing helpers — the `prelaunch` re-verify (`verify_plan` + `check_window` + nonce `check_and_insert`), `populate_fork_rootfs_verity` / `probe_verity_sidecar`, `spawn_substitution_endpoint`, and the confinement application (seccomp/jailer/uid) already invoked in the cold-boot start fn. Read `runner.rs`'s start path to find the exact call sites; move them, do not reimplement.
-- Produces: `pub struct ClaimGuards<'a> { /* refs to signer keys dir, nonce ledger, clock, endpoint spawner, confinement config */ }` with `pub fn readmit(&self, signed_plan_json: &str) -> anyhow::Result<AdmittedPlan>`, `pub fn inherit_verity(&self, child_rootfs: &Path, cfg: &mut VmStartConfig) -> anyhow::Result<()>`, `pub fn spawn_endpoint(&self, child: &VmId, ...) -> anyhow::Result<EndpointHandle>`, `pub fn apply_confinement(&self, child: &VmId, ...) -> anyhow::Result<ConfinementApplied>`. (Adapt exact params to the real helpers.)
+- Consumes: the runner's existing per-VM substitution-endpoint spawn (the implementer identified `EndpointSpawner::spawn`) and the overlay-contract gate (`admit_runtime_overlay_contract`), both already invoked on the cold-boot start path (`VmBackend::start` → `start_workload`). Read `runner.rs` for the exact call sites and signatures; move them, do not reimplement.
+- Produces: `pub struct ClaimGuards<'a> { /* the endpoint spawner + overlay-contract inputs the runner threads */ }` with `pub fn admit_overlay_contract(&self, cfg: &VmStartConfig) -> anyhow::Result<()>` and `pub fn spawn_endpoint(&self, vm: &VmId, /* real params */) -> anyhow::Result<EndpointHandle>`. (Adapt exact names/params to `runner.rs`.)
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test** — endpoint isolation + overlay-gate parity (no confinement).
 
 ```rust
 #[test]
-fn claim_guards_confinement_matches_cold_boot_baseline() {
-    // A ClaimGuards built from the same config a cold boot uses must apply the
-    // identical seccomp tier + uid. Assert against the known cold-boot baseline.
-    let guards = ClaimGuards::for_test_baseline();
-    let applied = guards.apply_confinement_dry_run();
-    assert_eq!(applied.seccomp_tier, cold_boot_baseline_seccomp_tier());
-    assert_eq!(applied.service_uid, cold_boot_baseline_uid());
-    assert!(applied.no_parent_fd_or_namespace_leaked);
+fn claim_guards_spawn_endpoint_is_private_to_the_given_vm() {
+    // ClaimGuards::spawn_endpoint keys the substitution endpoint on the vm id it
+    // is given (0700, private), never a shared/parent socket.
+    let guards = ClaimGuards::for_test();
+    let ep = guards.spawn_endpoint(&vm_id("child-a"), /* real params */).expect("spawn");
+    assert!(endpoint_socket_is_private_to(&ep, &vm_id("child-a"))); // mode 0700, path keyed on child-a
+}
+
+#[test]
+fn claim_guards_overlay_contract_matches_cold_boot() {
+    // The overlay-contract gate accepts a valid overlay config and rejects an
+    // invalid one — identical to what the cold-boot start path enforced.
+    let guards = ClaimGuards::for_test();
+    assert!(guards.admit_overlay_contract(&valid_overlay_cfg()).is_ok());
+    assert!(guards.admit_overlay_contract(&invalid_overlay_cfg()).is_err());
 }
 ```
 
-(`for_test_baseline` / `apply_confinement_dry_run` are test-only constructors that exercise the confinement derivation without a live VM; `cold_boot_baseline_*` read the same constants the cold path uses.)
+(`for_test` builds a `ClaimGuards` over test doubles; the `*_overlay_cfg` helpers build a `VmStartConfig` the real gate accepts/rejects, mirroring the cold-boot gate's existing tests.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p mvm-runtime workload_runner::claim -- claim_guards_confinement`
+Run: `cargo test -p mvm-runtime workload_runner::claim -- claim_guards`
 Expected: FAIL — `ClaimGuards` not defined.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Define `ClaimGuards` holding references to the pieces the cold-boot start fn already threads (signer keys dir, nonce ledger, clock, endpoint spawner, confinement config). Move the cold-boot start fn's admission-reverify, verity-inherit, endpoint-spawn, and confinement calls into `ClaimGuards` methods, and have the cold-boot start fn call them. Implement `apply_confinement` so it re-derives seccomp/jailer/uid from the config baseline (never assumes the parent's state) and reports `no_parent_fd_or_namespace_leaked`.
+Define `ClaimGuards` holding what the cold-boot start fn threads for these two steps (the endpoint spawner + the overlay-contract inputs). Move the cold-boot start fn's `EndpointSpawner::spawn` call and its `admit_runtime_overlay_contract` call into `ClaimGuards::spawn_endpoint` / `admit_overlay_contract`, and have the cold-boot start fn call them. Behavior-preserving — the cold path does exactly what it did, just through `ClaimGuards`. Do NOT add any confinement/admission/verity logic here.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p mvm-runtime workload_runner::claim -- claim_guards_confinement` then `cargo nextest run -p mvm-runtime` (cold-boot tests must still pass).
+Run: `cargo test -p mvm-runtime workload_runner::claim -- claim_guards` then `cargo test -p mvm-runtime` (all cold-boot tests still pass).
 Expected: PASS, no regressions.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/mvm-runtime/src/workload_runner/claim.rs crates/mvm-runtime/src/workload_runner/runner.rs
-git commit -m "refactor(runtime): factor cold-boot admission/verity/endpoint/confinement into ClaimGuards"
+git commit -m "refactor(runtime): factor runner-side endpoint spawn + overlay-contract gate into ClaimGuards"
 ```
 
 ---
@@ -329,7 +343,7 @@ git commit -m "feat(runtime): spawn_standby boots a clean pre-workload parent th
 - Test: unit tests in `runner.rs` with the mock backend.
 
 **Interfaces:**
-- Consumes: Task 1-3 (`ClaimRefusal`, `bind_plan_to_parent`, `ClaimGuards`); `SupervisorStandbyPool::{select_idle_compatible, mark_claimed}`; `acquire_registry_lock` (`crates/mvm-runtime/src/vm/name_registry.rs`); `mvm_runtime::warm_snapshot::materialize_child_from_parent`; `mvm_runtime::checkpoint::{verify_content, verify_lineage}`; `FcForkRestorer::restore_fork` (`crates/mvm-runtime/src/firecracker.rs:436`); `mvm_core::crypto::vmgenid::fresh_generation_token`; `populate_fork_rootfs_verity`.
+- Consumes: Task 1-3 (`ClaimRefusal`, `bind_plan_to_parent`, `ClaimGuards`); `SupervisorStandbyPool::{select_idle_compatible, mark_claimed}`; `acquire_registry_lock` (`crates/mvm-runtime/src/vm/name_registry.rs`); `mvm_runtime::warm_snapshot::materialize_child_from_parent`; `mvm_runtime::checkpoint::{verify_content, verify_lineage}`; `FcForkRestorer::restore_fork` (`crates/mvm-runtime/src/firecracker.rs:436`); `mvm_core::crypto::vmgenid::fresh_generation_token`. The `StandbyClaim` carries the already-admitted child plan (CLI-minted via `admit_plan_for_boot`) and a `VmStartConfig` whose verity fields the CLI already populated (`populate_fork_rootfs_verity`) — the runner consumes these, it does not mint the plan or derive verity.
 - Produces: `impl WorkloadRunner { fn claim_standby(&self, handle: &StandbyHandle, claim: &StandbyClaim) -> Result<VmId, StandbyError> }` executing the design's 11-step guarded flow.
 
 - [ ] **Step 1: Write the failing test**
@@ -349,8 +363,8 @@ fn claim_produces_fresh_identity_and_isolated_endpoint() {
     assert!(substitution_endpoint_is_private(&child)); // keyed on child VmId, mode 0700
     assert!(!substitution_endpoint_exists(&env.parent_vm_id));
 
-    // surface 4: confinement equals a cold boot
-    assert_eq!(env.child_confinement(), cold_boot_confinement());
+    // the runner-side overlay-contract gate ran (host-side, same as cold boot)
+    assert!(env.overlay_contract_admitted());
 
     // surface 3: the fresh VMGenID is delivered before any workload randomness consumer runs
     assert!(env.genid_delivered_before_workload());
@@ -364,16 +378,16 @@ Expected: FAIL — `claim_standby` hits the `Unsupported` default.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Implement `claim_standby` in the exact order from the design note (read it):
+Implement `claim_standby` in the order from the design note "Where each guard runs" + "Claim data-flow" (read them). The runner owns only the runner-side, host-side steps; admission (claim 8) and verity (claim 3) are already done by the CLI caller and arrive in the claim, and confinement (claim 1) is guest-inherited via the forked rootfs.
 (1) under `acquire_registry_lock`, `select_idle_compatible` + `mark_claimed` atomically; assert `Idle`/`Parked` else `ClaimRefusal::ParentNotClaimable`; `verify_content` + `verify_lineage` (map failures to `ParentTampered` / `ParentUnaudited`).
-(2) `ClaimGuards::readmit(claim.plan_json)` (prelaunch re-verify → `PlanExpired`/`PlanReplayed`).
+(2) parse the already-admitted child plan carried in `claim` (minted by the CLI via `admit_plan_for_boot`; re-verified by the supervisor at attach — the runner does NOT re-admit). If the plan is absent when claim 8 is required, refuse.
 (3) `materialize_child_from_parent(...)` into the child dir.
 (4) `bind_plan_to_parent(plan.image.sha256, &parent_meta)?` (→ `PlanParentMismatch`).
-(5) `inherit_verity` from the cloned sidecars.
+(5) the child `VmStartConfig` arrives with `verity_path`/`roothash` already populated by the CLI caller (`populate_fork_rootfs_verity`); the runner consumes them, it does not derive them.
 (6) identity-scrub: fresh `VmId` (registry-unique), fresh `fresh_generation_token`, ensure delivery ordering precedes any workload randomness consumer.
 (7) `FcForkRestorer::restore_fork(child_vm_name, child_dir)`.
-(8) `ClaimGuards::spawn_endpoint` (child-keyed, 0700).
-(9) `ClaimGuards::apply_confinement`.
+(8) `ClaimGuards::spawn_endpoint` (child-keyed, 0700) + `ClaimGuards::admit_overlay_contract`.
+(9) confinement is guest-init-inherited via the forked rootfs (parent snapshot is post-init) — nothing to apply host-side; do not add a host-side confinement path.
 (10) emit `plan.launched` + the fork lineage event.
 (11) `replenish_after_launch`.
 Nothing in 3-11 runs until 1-2 and step 4 pass.
