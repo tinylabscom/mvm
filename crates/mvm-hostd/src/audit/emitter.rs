@@ -40,8 +40,11 @@ use std::path::{Path, PathBuf};
 
 use crate::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
 use anyhow::{Context, Result};
-use ed25519_dalek::SigningKey;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use ed25519_dalek::{Signer, SigningKey};
 use mvm_core::plan::ExecutionPlan;
+use mvm_protocol::merkle::{SignedAuditRoot, root_signing_bytes};
 
 /// Wire-stable event names and label keys for the checkpoint audit entries.
 /// Shared so the emitter (writer) and the lineage chain-anchor (reader) can't
@@ -201,11 +204,25 @@ pub fn audit_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
     audit_dir.join(format!("{tenant}.jsonl"))
 }
 
+/// Resolve the per-tenant published Merkle-root sidecar:
+/// `<audit_dir>/<tenant>.root.json`. Sibling to [`audit_path_for_tenant`];
+/// `mvm_core::config::audit_root_path` is the global-default counterpart the
+/// CLI reads.
+pub fn audit_root_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
+    audit_dir.join(format!("{tenant}.root.json"))
+}
+
 /// Host-side emitter wrapping `FileAuditSigner`. Owns its own signing
 /// key half (cloned from the host signer at construction); calls
 /// `tokio::runtime::Builder::new_current_thread()` per emit.
+///
+/// Also retains the signing key + primary audit directory so it can build
+/// and sign a published Merkle root over the tenant chain
+/// ([`Self::publish_root`]).
 pub struct AuditEmitter {
     signers: Vec<FileAuditSigner>,
+    signing_key: SigningKey,
+    audit_dir: PathBuf,
 }
 
 impl AuditEmitter {
@@ -236,10 +253,12 @@ impl AuditEmitter {
                 })?;
             }
         }
-        let signer = FileAuditSigner::open(signing_key, audit_dir)
+        let signer = FileAuditSigner::open(signing_key.clone(), audit_dir)
             .with_context(|| format!("opening FileAuditSigner at {}", audit_dir.display()))?;
         Ok(Self {
             signers: vec![signer],
+            signing_key,
+            audit_dir: audit_dir.to_path_buf(),
         })
     }
 
@@ -578,6 +597,39 @@ impl AuditEmitter {
         )
     }
 
+    /// Build, sign, and atomically publish a Merkle transparency-log root
+    /// over `tenant`'s chain-signed audit log.
+    ///
+    /// The root is built only over a `verify_audit_chain`-valid chain (see
+    /// [`crate::audit::merkle::build_root_in`]); a corrupt log refuses here.
+    /// The signature covers `root_signing_bytes(tenant, tree_size,
+    /// hex(root), timestamp)` under the host signer's Ed25519 key — the
+    /// exact bytes `mvm_protocol::merkle::verify_signed_root` re-checks. The
+    /// sidecar is written temp-then-fsync-then-rename to
+    /// `<audit_dir>/<tenant>.root.json` so a reader never observes a partial
+    /// file.
+    pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {
+        let vk = self.signing_key.verifying_key();
+        let (root, tree_size) = crate::audit::merkle::build_root_in(&self.audit_dir, tenant, &vk)?;
+        let root_hash = hex::encode(root);
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let payload = root_signing_bytes(tenant, tree_size, &root_hash, &timestamp)
+            .map_err(|e| anyhow::anyhow!("serializing Merkle root signing payload: {e}"))?;
+        let signature = self.signing_key.sign(&payload);
+        let signed = SignedAuditRoot {
+            tenant: tenant.to_string(),
+            tree_size,
+            root_hash,
+            timestamp,
+            signature: BASE64_STANDARD.encode(signature.to_bytes()),
+            signer_pubkey: hex::encode(vk.to_bytes()),
+        };
+        let path = audit_root_path_for_tenant(&self.audit_dir, tenant);
+        write_atomic(&path, serde_json::to_vec_pretty(&signed)?.as_slice())
+            .with_context(|| format!("publishing signed root to {}", path.display()))?;
+        Ok(signed)
+    }
+
     fn emit<E>(&self, plan: &ExecutionPlan, event: &str, extras: E) -> Result<()>
     where
         E: IntoIterator<Item = (String, String)>,
@@ -593,6 +645,44 @@ impl AuditEmitter {
         }
         Ok(())
     }
+}
+
+/// Write `bytes` to `path` atomically: a same-directory temp file is
+/// written, fsync'd, then `rename`d over `path`. A concurrent reader sees
+/// either the old file or the complete new one, never a torn write. The
+/// temp name carries the pid so two publishers don't collide on it.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path {} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("path {} has no file name", path.display()))?;
+    let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    // Best-effort: if any step before the rename fails, don't leave the
+    // partial temp file behind.
+    let write = (|| -> Result<()> {
+        let mut f = std::fs::File::create(&tmp)
+            .with_context(|| format!("creating temp file {}", tmp.display()))?;
+        f.write_all(bytes)
+            .with_context(|| format!("writing temp file {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("fsync temp file {}", tmp.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::from(e))
+            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1205,5 +1295,66 @@ mod tests {
         assert!(content.contains("\"via\""));
         assert!(content.contains("revert"));
         assert_eq!(verify_audit_chain(&path, &vk).unwrap(), 1);
+    }
+
+    #[test]
+    fn publish_root_writes_a_verifiable_signed_root() {
+        use mvm_protocol::merkle::{verify_inclusion, verify_signed_root};
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-ROOT");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+        emitter.emit_launched(&plan, "firecracker").unwrap();
+
+        let signed = emitter.publish_root("local").unwrap();
+        assert_eq!(signed.tenant, "local");
+        assert_eq!(signed.tree_size, 2);
+        assert_eq!(signed.signer_pubkey, hex::encode(vk.to_bytes()));
+        // The published signature verifies under the host key.
+        assert_eq!(verify_signed_root(&signed, &vk), Ok(()));
+
+        // The sidecar landed at `<audit_dir>/<tenant>.root.json` and
+        // round-trips to the same struct.
+        let root_path = dir.path().join("local.root.json");
+        assert!(root_path.exists(), "root sidecar must be written");
+        let on_disk: SignedAuditRoot =
+            serde_json::from_str(&std::fs::read_to_string(&root_path).unwrap()).unwrap();
+        assert_eq!(on_disk, signed);
+
+        // A host-built inclusion proof folds to the published root.
+        let proof = crate::audit::merkle::build_inclusion_in(dir.path(), "local", &vk, 1).unwrap();
+        assert_eq!(
+            hex::encode(verify_inclusion(&proof).unwrap()),
+            signed.root_hash
+        );
+        assert_eq!(proof.tree_size, signed.tree_size);
+    }
+
+    #[test]
+    fn publish_root_refuses_a_tampered_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-ROOT2");
+        emitter.emit_admitted(&plan, "host:test").unwrap();
+
+        // Corrupt the chain, then a root must not be published.
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, content.replacen("plan.admitted", "plan.evil", 1)).unwrap();
+        assert!(emitter.publish_root("local").is_err());
+        // And no partial sidecar was left behind.
+        assert!(!dir.path().join("local.root.json").exists());
     }
 }

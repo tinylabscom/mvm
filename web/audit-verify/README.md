@@ -43,3 +43,22 @@ under the key. Any reordering, edit, or deletion fails. The equivalence
 is pinned by `mvm-supervisor`'s `mvm_verify_matches_supervisor_chain`
 test, so if the audit entry shape drifts, CI fails before the browser
 tool can silently disagree.
+
+## Merkle inclusion proofs
+
+Three further exports let a browser verify an `O(log n)` transparency-log
+inclusion proof (from `mvmctl trust audit prove`) against a host-signed
+Merkle root (`mvmctl trust audit publish-root`) without downloading the
+whole chain:
+
+- `verify_inclusion(proof_json)` — folds a proof to its own embedded root.
+  This is only half a membership check.
+- `verify_signed_root(root_json, pubkey_hex)` — checks the root's Ed25519
+  signature under the trusted host key.
+- `verify_membership(proof_json, root_json, pubkey_hex, tenant)` — the full
+  check: verifies the signed root, checks it is for the intended `tenant`,
+  verifies the proof, and binds root + tree_size. This is the exact
+  composition `mvmctl trust audit verify-inclusion` enforces host-side, so a
+  root signed for a different tenant, or a self-consistent proof over an
+  unsigned root, is rejected. `index.html` wiring for this flow is a
+  follow-up.

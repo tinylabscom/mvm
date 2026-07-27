@@ -1831,6 +1831,123 @@ fn test_audit_show_parses() {
 }
 
 #[test]
+fn test_audit_publish_root_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "trust", "audit", "publish-root"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action: AuditAction::PublishRoot { tenant },
+        }) => assert_eq!(tenant, "local"),
+        _ => panic!("Expected Audit::PublishRoot"),
+    }
+}
+
+#[test]
+fn test_audit_prove_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "trust",
+        "audit",
+        "prove",
+        "sha256:abc",
+        "--tenant",
+        "acme",
+        "--json",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Prove {
+                    selector,
+                    tenant,
+                    json,
+                },
+        }) => {
+            assert_eq!(selector, "sha256:abc");
+            assert_eq!(tenant, "acme");
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Prove"),
+    }
+}
+
+#[test]
+fn test_audit_verify_inclusion_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "trust",
+        "audit",
+        "verify-inclusion",
+        "--proof",
+        "proof.json",
+        "--root",
+        "root.json",
+        "--pubkey",
+        "host.pub",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::VerifyInclusion {
+                    proof,
+                    root,
+                    pubkey,
+                    tenant,
+                },
+        }) => {
+            assert_eq!(proof, "proof.json");
+            assert_eq!(root.as_deref(), Some(std::path::Path::new("root.json")));
+            assert_eq!(pubkey.as_deref(), Some(std::path::Path::new("host.pub")));
+            assert_eq!(tenant, "local");
+        }
+        _ => panic!("Expected Audit::VerifyInclusion"),
+    }
+}
+
+#[test]
+fn test_audit_verify_inclusion_defaults_optional_paths() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "trust",
+        "audit",
+        "verify-inclusion",
+        "--proof",
+        "-",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::VerifyInclusion {
+                    proof,
+                    root,
+                    pubkey,
+                    tenant,
+                },
+        }) => {
+            assert_eq!(proof, "-");
+            assert!(root.is_none());
+            assert!(pubkey.is_none());
+            assert_eq!(tenant, "local");
+        }
+        _ => panic!("Expected Audit::VerifyInclusion"),
+    }
+}
+
+#[test]
 fn test_audit_tail_no_log_prints_message() {
     // When no audit log exists, the command should succeed with a
     // helpful message rather than an error.

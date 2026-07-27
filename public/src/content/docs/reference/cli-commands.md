@@ -186,6 +186,9 @@ fail honestly instead of emitting fake numbers.
 | `mvmctl trust audit tail` | Show the last 20 audit events from /var/log/mvm/audit.jsonl |
 | `mvmctl trust audit tail -n <N>` | Show the last N audit events |
 | `mvmctl trust audit tail -f` | Follow audit log output (poll until Ctrl-C) |
+| `mvmctl trust audit publish-root [--tenant <t>]` | Build, sign, and publish a Merkle transparency-log root over the tenant's chain-signed audit log to `~/.mvm/audit/<tenant>.root.json`. Only builds over a chain that verifies clean |
+| `mvmctl trust audit prove <selector> [--tenant <t>] [--json]` | Emit an inclusion proof that one audit line is in the log, paired with the current signed root. `<selector>` is a numeric line index, a `plan_id`, or `sha256:<hex>` of the exact line; an ambiguous selector is refused |
+| `mvmctl trust audit verify-inclusion --proof <file\|-> [--root <file>] [--pubkey <file>] [--tenant <t>]` | Verify an inclusion proof against a host-signed root: verifies the signed root under the trusted host key, checks its tenant, verifies the proof, and binds root_hash + tree_size. Nonzero exit naming the failed check |
 
 ## Local Secrets
 

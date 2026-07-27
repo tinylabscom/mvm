@@ -390,13 +390,20 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
 
 // `trust audit <sub>` — the chain inspection/verification verbs are read-only;
 // `transcript` is the one emitting subgroup (promoted to DelegatesToSub so its
-// emitting leaves are classified).
+// emitting leaves are classified). The Merkle transparency-log verbs
+// (`publish-root` / `prove` / `verify-inclusion`) emit no audit-chain entry of
+// their own: `publish-root` writes a signed-root sidecar derived from the chain
+// (not a new chain event), and `prove` / `verify-inclusion` are pure reads —
+// the same audit posture as `verify-cert`.
 const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("show", AuditPosture::ReadOnly),
     ("posture", AuditPosture::ReadOnly),
     ("verify-cert", AuditPosture::ReadOnly),
+    ("publish-root", AuditPosture::ReadOnly),
+    ("prove", AuditPosture::ReadOnly),
+    ("verify-inclusion", AuditPosture::ReadOnly),
     ("transcript", AuditPosture::DelegatesToSub(TRANSCRIPT_SUB)),
 ];
 

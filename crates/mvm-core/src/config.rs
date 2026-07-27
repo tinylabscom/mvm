@@ -653,6 +653,15 @@ pub fn mvm_audit_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("audit")
 }
 
+/// Published Merkle transparency-log root for a tenant's audit chain:
+/// `<mvm_home>/audit/<tenant>.root.json`. Sibling to the `<tenant>.jsonl`
+/// chain the root is computed over; the host writes it and an external
+/// auditor pins it. Shared so the writer (`publish_root`) and the reader
+/// (`mvmctl trust audit verify-inclusion`) can't drift on the location.
+pub fn audit_root_path(tenant: &str) -> std::path::PathBuf {
+    mvm_audit_dir().join(format!("{tenant}.root.json"))
+}
+
 /// Forensic transcript captures: `<mvm_home>/audit/transcripts/`. Each
 /// capture is `<tenant>/<vm>/<capture-id>/` holding `manifest.json` + encrypted
 /// chunk files. Kept under `audit/` since it is opt-in forensic evidence.
@@ -1030,6 +1039,23 @@ mod tests {
         env.set("MVM_HOME", temp.path());
         let dir = checkpoints_dir();
         assert_eq!(dir, temp.path().join("checkpoints"));
+        env.remove("MVM_HOME");
+    }
+
+    #[test]
+    fn audit_root_path_is_sibling_of_chain() {
+        let mut env = TestEnv::new();
+        let temp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", temp.path());
+        // The published root sits next to the `<tenant>.jsonl` chain it covers.
+        assert_eq!(
+            audit_root_path("local"),
+            temp.path().join("audit").join("local.root.json")
+        );
+        assert_eq!(
+            audit_root_path("local").parent(),
+            mvm_audit_dir().to_str().map(std::path::Path::new)
+        );
         env.remove("MVM_HOME");
     }
 
