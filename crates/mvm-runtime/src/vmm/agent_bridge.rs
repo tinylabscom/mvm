@@ -23,6 +23,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::vsock_transport::MAX_CONNECTIONS;
+
 /// Per-drain read budget per host connection.
 const READ_CHUNK: usize = 16 * 1024;
 /// First host-assigned vsock port. Host-initiated streams take ports from here up
@@ -124,6 +126,9 @@ impl AgentBridge {
             return opened;
         };
         loop {
+            if self.conns.len() >= MAX_CONNECTIONS {
+                break;
+            }
             match listener.accept() {
                 Ok((stream, _)) => {
                     if stream.set_nonblocking(true).is_err() {
