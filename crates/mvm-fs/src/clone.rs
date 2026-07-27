@@ -14,7 +14,8 @@
 
 #![allow(unsafe_code)]
 
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// What strategy [`reflink_or_copy`] used to materialize the destination.
@@ -67,11 +68,48 @@ pub fn reflink_or_copy(src: &Path, dst: &Path) -> io::Result<CloneStrategy> {
     match reflink_or_err(src, dst) {
         Ok(()) => Ok(CloneStrategy::Reflink),
         Err(e) if is_unsupported(&e) => {
-            std::fs::copy(src, dst)?;
+            // Sparse-aware fallback: a memory snapshot or an ext4 image with
+            // free space has large zero runs that must not fully expand
+            // into allocated bytes just because reflink isn't available.
+            sparse_copy(src, dst)?;
             Ok(CloneStrategy::Copied)
         }
         Err(e) => Err(e),
     }
+}
+
+/// Byte-copy `src` to `dst`, skipping any fixed-size block that is
+/// entirely zero by seeking the destination forward instead of writing it.
+/// On a sparse-capable filesystem the skipped region becomes a hole and
+/// reads back as zeros (POSIX semantics) without ever being allocated on
+/// disk.
+///
+/// `dst` must not already exist.
+pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<()> {
+    const BLOCK: usize = 64 * 1024;
+
+    let mut src_file = File::open(src)?;
+    let src_len = src_file.metadata()?.len();
+    let mut dst_file = OpenOptions::new().write(true).create_new(true).open(dst)?;
+
+    let mut buf = vec![0u8; BLOCK];
+    loop {
+        let n = src_file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if buf[..n].iter().all(|&b| b == 0) {
+            dst_file.seek(SeekFrom::Current(n as i64))?;
+        } else {
+            dst_file.write_all(&buf[..n])?;
+        }
+    }
+    // A trailing zero run leaves the file short of `src_len` (the final
+    // seek has no write behind it to extend the file) — pin the length
+    // explicitly so a zero-tailed source still produces an exact-length
+    // destination.
+    dst_file.set_len(src_len)?;
+    Ok(())
 }
 
 fn is_unsupported(e: &io::Error) -> bool {
@@ -265,6 +303,30 @@ mod tests {
             CloneStrategy::Reflink | CloneStrategy::Copied
         ));
         assert_eq!(std::fs::read(&dst).unwrap(), b"hello snapshot");
+    }
+
+    #[test]
+    fn sparse_copy_roundtrips_byte_equal_across_hole_blocks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+
+        const BLOCK: usize = 64 * 1024;
+        let mut data = Vec::with_capacity(BLOCK * 4);
+        data.extend(std::iter::repeat_n(0xAB_u8, BLOCK)); // nonzero block
+        data.extend(std::iter::repeat_n(0u8, BLOCK)); // zero block -> hole
+        data.extend(std::iter::repeat_n(0xCD_u8, BLOCK)); // nonzero block
+        data.extend(std::iter::repeat_n(0u8, BLOCK)); // trailing zero run
+        std::fs::write(&src, &data).unwrap();
+
+        sparse_copy(&src, &dst).expect("sparse copy");
+
+        assert_eq!(std::fs::read(&dst).unwrap(), data, "must be byte-identical");
+        assert_eq!(
+            std::fs::metadata(&dst).unwrap().len(),
+            data.len() as u64,
+            "length must match exactly even with a trailing zero run"
+        );
     }
 
     #[test]

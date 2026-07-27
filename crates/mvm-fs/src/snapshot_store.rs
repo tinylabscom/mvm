@@ -15,8 +15,17 @@
 //!   marker, and materializes it as a single file.
 //!
 //! This is the persistence layer behind the warm-parent pool: a paused
-//! microVM's rootfs (and, later, memory snapshot) is stored once and then
+//! microVM's rootfs (and its memory snapshot) is stored once and then
 //! reflink-cloned into each child's per-instance path.
+//!
+//! A memory snapshot — a large, often-sparse `mem.bin` file, or a
+//! `{vmstate.bin, mem.bin}` pair stored as a directory — is a first-class
+//! content-addressed artifact here: it is stored via
+//! [`FsSnapshotStore::create_content_addressed`] like any other snapshot
+//! and materialized through the same sparse-aware reflink/copy path, with
+//! no separate mechanism. The Firecracker pause/seal lifecycle that
+//! produces those bytes stays in mvm-runtime; this store only owns the
+//! artifact once it exists on disk.
 
 use std::fmt;
 use std::fs;
@@ -24,9 +33,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::clone::{CloneStrategy, reflink_or_copy, reflink_or_copy_dir};
+use crate::hash;
 
 const FILE_MARKER: &str = ".mvm-snapshot-is-file";
 const META_FILE: &str = ".mvm-snapshot-meta";
+const REFCOUNT_FILE: &str = ".mvm-snapshot-refcount";
 
 /// Opaque identifier for a snapshot stored in a [`SnapshotStore`].
 ///
@@ -109,6 +120,13 @@ pub trait SnapshotStore {
 
     /// Remove snapshot `id` and reclaim its storage.
     ///
+    /// This is a force-remove: it deletes storage unconditionally,
+    /// bypassing the reference count that `FsSnapshotStore::retain`/
+    /// `release` track for content-addressed snapshots. It's the right
+    /// tool for the plain, unshared [`SnapshotStore::create`] path (which
+    /// has no refcount) or an explicit force-delete; a content-addressed
+    /// snapshot that may be shared should be freed via `release` instead.
+    ///
     /// Returns `NotFound` if the snapshot does not exist.
     fn remove(&self, id: &SnapshotId) -> io::Result<()>;
 
@@ -166,6 +184,23 @@ impl FsSnapshotStore {
             fs::write(dir.join(META_FILE), meta)?;
         }
         Ok(())
+    }
+
+    fn read_refcount(dir: &Path) -> io::Result<Option<u32>> {
+        match fs::read_to_string(dir.join(REFCOUNT_FILE)) {
+            Ok(s) => s.trim().parse::<u32>().map(Some).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt snapshot refcount: {s:?}"),
+                )
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write_refcount(dir: &Path, n: u32) -> io::Result<()> {
+        fs::write(dir.join(REFCOUNT_FILE), n.to_string())
     }
 
     fn read_meta(&self, dir: &Path, id: &str) -> SnapshotId {
@@ -288,6 +323,93 @@ impl SnapshotStore for FsSnapshotStore {
             }
         }
         Ok(ids)
+    }
+}
+
+/// Content-addressed create + reference counting, layered on the plain
+/// [`SnapshotStore`] primitives above. Kept as inherent methods rather than
+/// trait methods: they're specific to content-addressed dedup, not a
+/// capability every `SnapshotStore` implementation is required to offer.
+impl FsSnapshotStore {
+    /// Persist `source` (file or directory) under an id derived from its
+    /// SHA-256 content hash, deduplicating identical content.
+    ///
+    /// Unlike [`SnapshotStore::create`], which errors when the id already
+    /// exists, this is idempotent by construction: since the id *is* the
+    /// content hash, a second call with identical bytes is a share, not a
+    /// conflict — it increments the refcount and returns the existing id
+    /// instead of erroring.
+    pub fn create_content_addressed(&self, source: &Path) -> io::Result<SnapshotId> {
+        let h = hash::hash_source(source)?;
+        let id = SnapshotId::with_digest(h.clone(), format!("sha256:{h}"));
+        let dir = self.snapshot_dir(&id);
+
+        if dir.exists() {
+            self.retain(&id)?;
+            return Ok(id);
+        }
+
+        self.create(&id, source)?;
+        Self::write_refcount(&dir, 1)?;
+        Ok(id)
+    }
+
+    /// Increment `id`'s reference count and return the new value.
+    ///
+    /// Snapshots created via the plain [`SnapshotStore::create`] have no
+    /// refcount file; a missing file reads as count 1 before incrementing,
+    /// so both creation paths compose under `retain`/`release`.
+    ///
+    /// Concurrency: this is a plain read-modify-write on one file. Two
+    /// processes racing on the same id can lose an update; that's out of
+    /// scope for this phase because the warm-pool caller serializes store
+    /// mutations.
+    pub fn retain(&self, id: &SnapshotId) -> io::Result<u32> {
+        let dir = self.existing_snapshot_dir(id)?;
+        let next = Self::read_refcount(&dir)?.unwrap_or(1) + 1;
+        Self::write_refcount(&dir, next)?;
+        Ok(next)
+    }
+
+    /// Decrement `id`'s reference count; at 0, delete the snapshot's
+    /// storage and return 0.
+    ///
+    /// Returns `NotFound` if the snapshot does not exist.
+    pub fn release(&self, id: &SnapshotId) -> io::Result<u32> {
+        let dir = self.existing_snapshot_dir(id)?;
+        let current = Self::read_refcount(&dir)?.unwrap_or(1);
+        if current <= 1 {
+            fs::remove_dir_all(&dir)?;
+            Ok(0)
+        } else {
+            let next = current - 1;
+            Self::write_refcount(&dir, next)?;
+            Ok(next)
+        }
+    }
+
+    /// Read `id`'s current reference count without mutating it. A missing
+    /// refcount file (a plain-`create`d snapshot) reads as 1.
+    ///
+    /// Returns `NotFound` if the snapshot does not exist.
+    pub fn refcount(&self, id: &SnapshotId) -> io::Result<u32> {
+        let dir = self.existing_snapshot_dir(id)?;
+        Ok(Self::read_refcount(&dir)?.unwrap_or(1))
+    }
+
+    /// Validate `id` and resolve its directory, failing `NotFound` if the
+    /// snapshot isn't present. Shared precondition for `retain`/`release`/
+    /// `refcount`.
+    fn existing_snapshot_dir(&self, id: &SnapshotId) -> io::Result<PathBuf> {
+        Self::ensure_id_is_safe(&id.id)?;
+        let dir = self.snapshot_dir(id);
+        if !dir.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("snapshot {} not found", id.id),
+            ));
+        }
+        Ok(dir)
     }
 }
 
@@ -417,5 +539,189 @@ mod tests {
         assert!(store.create(&id, &source).is_err());
         assert!(store.materialize(&id, &tmp.path().join("dst")).is_err());
         assert!(store.remove(&id).is_err());
+    }
+
+    // -- content-addressed create + dedup (work item 2) --
+
+    #[test]
+    fn create_content_addressed_dedups_identical_content() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let source = tmp.path().join("payload.bin");
+        fs::write(&source, b"dedup me").unwrap();
+
+        let id1 = store
+            .create_content_addressed(&source)
+            .expect("first store");
+        let id2 = store
+            .create_content_addressed(&source)
+            .expect("second store (dedup)");
+        assert_eq!(id1.id(), id2.id());
+        assert_eq!(
+            id1.digest(),
+            Some(format!("sha256:{}", id1.id())).as_deref()
+        );
+
+        let entries: Vec<_> = fs::read_dir(store.root()).unwrap().collect();
+        assert_eq!(entries.len(), 1, "identical content stored exactly once");
+        assert_eq!(store.refcount(&id1).expect("refcount"), 2);
+    }
+
+    #[test]
+    fn create_content_addressed_distinct_content_gets_distinct_ids() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let a = tmp.path().join("a.bin");
+        fs::write(&a, b"content a").unwrap();
+        let b = tmp.path().join("b.bin");
+        fs::write(&b, b"content b").unwrap();
+
+        let id_a = store.create_content_addressed(&a).expect("store a");
+        let id_b = store.create_content_addressed(&b).expect("store b");
+        assert_ne!(id_a.id(), id_b.id());
+    }
+
+    // -- reference counting (work item 3) --
+
+    #[test]
+    fn retain_and_release_transition_refcount() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let source = tmp.path().join("x.bin");
+        fs::write(&source, b"x").unwrap();
+        let id = store.create_content_addressed(&source).expect("store");
+
+        assert_eq!(store.refcount(&id).unwrap(), 1);
+        assert_eq!(store.retain(&id).unwrap(), 2);
+        assert_eq!(store.retain(&id).unwrap(), 3);
+        assert_eq!(store.release(&id).unwrap(), 2);
+        assert_eq!(store.release(&id).unwrap(), 1);
+        assert_eq!(store.release(&id).unwrap(), 0);
+        assert!(
+            !store.snapshot_dir(&id).exists(),
+            "storage reclaimed at refcount 0"
+        );
+    }
+
+    #[test]
+    fn double_create_content_addressed_then_two_releases_deletes_exactly_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let source = tmp.path().join("shared.bin");
+        fs::write(&source, b"shared content").unwrap();
+
+        let id1 = store.create_content_addressed(&source).expect("first");
+        let id2 = store
+            .create_content_addressed(&source)
+            .expect("second (dedup)");
+        assert_eq!(id1.id(), id2.id());
+        assert_eq!(store.refcount(&id1).unwrap(), 2);
+
+        assert_eq!(store.release(&id1).unwrap(), 1);
+        assert!(
+            store.snapshot_dir(&id1).exists(),
+            "still referenced once, storage intact"
+        );
+        assert_eq!(store.release(&id1).unwrap(), 0);
+        assert!(
+            !store.snapshot_dir(&id1).exists(),
+            "deleted exactly once, at the second release"
+        );
+
+        // A third release must fail closed, not double-delete.
+        assert!(store.release(&id1).is_err());
+    }
+
+    #[test]
+    fn refcount_on_plain_create_snapshot_reads_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+        let source = tmp.path().join("plain.bin");
+        fs::write(&source, b"plain").unwrap();
+
+        let id = SnapshotId::new("plain-snap");
+        store.create(&id, &source).expect("plain create");
+
+        assert_eq!(store.refcount(&id).expect("refcount"), 1);
+        assert_eq!(store.release(&id).expect("release"), 0);
+        assert!(!store.snapshot_dir(&id).exists());
+    }
+
+    // -- content-addressed memory-snapshot storage (work item 4) --
+
+    #[test]
+    fn content_addressed_memory_snapshot_roundtrips_and_is_independent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+
+        // Synthetic mem.bin: nonzero header, a large zero run (guest-free
+        // RAM), nonzero tail — representative of a real memory snapshot's
+        // sparseness, exercising the sparse-copy fallback path.
+        let mut mem = vec![0xEE_u8; 8192];
+        mem.extend(std::iter::repeat_n(0u8, 131072));
+        mem.extend(vec![0x11_u8; 4096]);
+        let source = tmp.path().join("mem.bin");
+        fs::write(&source, &mem).unwrap();
+
+        let id = store
+            .create_content_addressed(&source)
+            .expect("store mem snapshot");
+
+        let instance = tmp.path().join("instance-mem.bin");
+        store.materialize(&id, &instance).expect("materialize");
+        assert_eq!(fs::read(&instance).unwrap(), mem);
+
+        fs::write(&instance, b"mutated instance").unwrap();
+        let restored = tmp.path().join("instance-mem-2.bin");
+        store
+            .materialize(&id, &restored)
+            .expect("materialize again");
+        assert_eq!(
+            fs::read(&restored).unwrap(),
+            mem,
+            "stored snapshot must be unaffected by instance mutation"
+        );
+    }
+
+    // -- snapshot-graph-integrity (work item 5) --
+
+    #[test]
+    fn deleting_one_snapshot_does_not_affect_sibling_or_materialized_child() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+
+        let source_a = tmp.path().join("a.bin");
+        fs::write(&source_a, b"snapshot A content").unwrap();
+        let source_b = tmp.path().join("b.bin");
+        fs::write(&source_b, b"snapshot B content, distinct").unwrap();
+
+        let id_a = store.create_content_addressed(&source_a).expect("store a");
+        let id_b = store.create_content_addressed(&source_b).expect("store b");
+        assert_ne!(id_a.id(), id_b.id());
+
+        // Materialize a "child" instance off snapshot A.
+        let child = tmp.path().join("child-instance.bin");
+        store.materialize(&id_a, &child).expect("materialize child");
+
+        // The child is just a materialized copy, not tracked by the store;
+        // deleting it and releasing snapshot A entirely must not touch B.
+        fs::remove_file(&child).unwrap();
+        let remaining = store.release(&id_a).expect("release a");
+        assert_eq!(remaining, 0);
+        assert!(!store.snapshot_dir(&id_a).exists());
+
+        assert_eq!(store.refcount(&id_b).expect("refcount b"), 1);
+        let listed = store.list().expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id(), id_b.id());
+
+        let materialize_b = tmp.path().join("materialize-b.bin");
+        store
+            .materialize(&id_b, &materialize_b)
+            .expect("sibling still materializes");
+        assert_eq!(
+            fs::read(&materialize_b).unwrap(),
+            b"snapshot B content, distinct"
+        );
     }
 }

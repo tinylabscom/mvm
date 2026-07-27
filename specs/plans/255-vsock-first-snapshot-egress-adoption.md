@@ -197,13 +197,25 @@ Non-goals above — what this plan takes, refuses, and why.
 
 ### Phase 1 — Snapshot-first storage in `mvm-fs`
 
-- [ ] Introduce `SnapshotStore` trait in `mvm-fs` with operations `create`,
+- [x] Introduce `SnapshotStore` trait in `mvm-fs` with operations `create`,
       `clone`, `delete`, `list_parents`. Implementation uses reflink when
-      supported, sparse copy fallback otherwise.
-- [ ] Move memory-snapshot file handling from `mvm-runtime` into `mvm-fs` if it
+      supported, sparse copy fallback otherwise. (The trait and its
+      `FsSnapshotStore` impl pre-existed as `create`/`materialize`/`remove`/
+      `list`; this phase extended it with a sparse-copy fallback in
+      `clone::reflink_or_copy`, a real content-addressed `create_content_addressed`
+      with dedup, and `retain`/`release`/`refcount` reference counting.
+      `list_parents` is deliberately not added — reference *counting* is a
+      storage primitive, but parent *lineage* stays out of `mvm-fs` per this
+      phase's task brief, to be plugged in from `mvm-runtime`'s checkpoint
+      lineage in a later task.)
+- [x] Move memory-snapshot file handling from `mvm-runtime` into `mvm-fs` if it
       is not already there; ensure content-addressed naming and reference
-      tracking.
-- [ ] Add unit tests for reflink/fallback roundtrips and for snapshot graph
+      tracking. (`mvm-fs` now owns content-addressed memory-snapshot
+      *storage*: a `mem.bin` file or `{vmstate.bin, mem.bin}` directory is
+      just another `create_content_addressed` artifact, materialized via the
+      sparse-aware clone. The Firecracker pause/seal lifecycle that produces
+      those bytes stays in `mvm-runtime` per Product decision 2.)
+- [x] Add unit tests for reflink/fallback roundtrips and for snapshot graph
       integrity (deleting a child does not affect parent or siblings).
 - [ ] Add a BDD scenario: build a template with a warm snapshot, clone it into
       an instance, and verify the instance boots faster than a cold-booted
