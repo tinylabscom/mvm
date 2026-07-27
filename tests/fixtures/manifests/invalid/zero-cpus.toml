@@ -1,0 +1,4 @@
+# Invalid: cpus must be >= 1.
+flake = "."
+cpus = 0
+mem = "256M"
