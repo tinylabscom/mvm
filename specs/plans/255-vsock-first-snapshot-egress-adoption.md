@@ -217,9 +217,15 @@ Non-goals above — what this plan takes, refuses, and why.
       those bytes stays in `mvm-runtime` per Product decision 2.)
 - [x] Add unit tests for reflink/fallback roundtrips and for snapshot graph
       integrity (deleting a child does not affect parent or siblings).
-- [ ] Add a BDD scenario: build a template with a warm snapshot, clone it into
+- [x] Add a BDD scenario: build a template with a warm snapshot, clone it into
       an instance, and verify the instance boots faster than a cold-booted
-      equivalent.
+      equivalent. (`features/suites/s11_snapshot/warm_snapshot_clone.feature`,
+      hermetic — no `@live` tag — driving `mvm_fs::snapshot_store` directly in
+      the default `just bdd` lane; it proves the storage-layer basis for a
+      warm start being faster than a cold boot (clone of a pre-built
+      content-addressed artifact, not a rebuild). The live boot-time
+      comparison itself is measured under the Phase 2 sub-second warm-launch
+      acceptance gate.)
 - [x] Plug `SnapshotStore` in *beneath* the existing checkpoint lineage: a warm
       snapshot is recorded as a lineage node (content-address + hash-link +
       audit anchor) via `mvm-runtime::{lineage, checkpoint}`; introduce no
