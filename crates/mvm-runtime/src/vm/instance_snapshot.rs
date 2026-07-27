@@ -1519,4 +1519,202 @@ mod tests {
             });
         assert_eq!(outcome, PrimedOutcome::TimedOut);
     }
+
+    // ──────────────────────────────────────────────────────────────
+    // Live warm-restore timing harness
+    //
+    // Boots a real Firecracker VM against a real KVM host, snapshots it, and
+    // times `guarded_load_resume` — the warm-restore path this module owns —
+    // so the reported number measures the actual restore code instead of a
+    // full CLI boot chase. A second test proves the guard refuses a
+    // NIC-carrying restore end-to-end. Both are `#[ignore]`d and gated on
+    // `MVM_LIVE_KERNEL`/`MVM_LIVE_ROOTFS` + `/dev/kvm`: unset or absent, the
+    // test prints a skip note and returns — a clean no-op everywhere except a
+    // KVM host with the env wired up (the controller runs these, not CI).
+    // ──────────────────────────────────────────────────────────────
+
+    /// Kernel + rootfs paths for the live warm-restore tests, read from
+    /// `MVM_LIVE_KERNEL`/`MVM_LIVE_ROOTFS`.
+    struct LiveImages {
+        kernel: PathBuf,
+        rootfs: PathBuf,
+    }
+
+    /// Env gate for the live warm-restore tests: both path env vars set AND
+    /// `/dev/kvm` present. Prints a skip note and returns `None` otherwise, so
+    /// an accidental `--ignored` run on a non-KVM host is a clean pass rather
+    /// than a failure.
+    fn live_images() -> Option<LiveImages> {
+        let kernel = std::env::var("MVM_LIVE_KERNEL").ok();
+        let rootfs = std::env::var("MVM_LIVE_ROOTFS").ok();
+        if kernel.is_none() || rootfs.is_none() || !Path::new("/dev/kvm").exists() {
+            eprintln!(
+                "skip: live warm-restore test needs MVM_LIVE_KERNEL + MVM_LIVE_ROOTFS + \
+                 /dev/kvm — not present here"
+            );
+            return None;
+        }
+        Some(LiveImages {
+            kernel: PathBuf::from(kernel.expect("checked above")),
+            rootfs: PathBuf::from(rootfs.expect("checked above")),
+        })
+    }
+
+    /// Boot the SOURCE Firecracker VM the live warm-restore tests snapshot:
+    /// the four-call API sequence validated live (boot-source, drive, vsock,
+    /// InstanceStart), with an optional NIC inserted before InstanceStart so
+    /// `warm_restore_refuses_nic_live` can snapshot a genuinely NIC-carrying
+    /// VM. Sleeps ~1s after InstanceStart for the instance to come up.
+    fn boot_live_source_vm(
+        images: &LiveImages,
+        src_dir: &Path,
+        rootfs_copy: &Path,
+        tap: Option<&str>,
+    ) -> Result<()> {
+        let src_sock = src_dir.join("fc.socket");
+        crate::microvm::start_vm_firecracker(
+            &src_dir.to_string_lossy(),
+            &src_sock.to_string_lossy(),
+        )?;
+        let sock = src_sock.to_string_lossy();
+
+        crate::microvm::api_put_socket(
+            &sock,
+            "/boot-source",
+            &crate::microvm::boot_source_body(
+                &images.kernel.to_string_lossy(),
+                "console=ttyS0 pci=off",
+                None,
+            ),
+        )?;
+        crate::microvm::api_put_socket(
+            &sock,
+            "/drives/rootfs",
+            &crate::microvm::drive_body("rootfs", &rootfs_copy.to_string_lossy(), true, false),
+        )?;
+        crate::microvm::api_put_socket(
+            &sock,
+            "/vsock",
+            &crate::microvm::vsock_body(
+                3,
+                &crate::microvm::firecracker_vsock_uds_path(&src_dir.to_string_lossy()),
+            ),
+        )?;
+        if let Some(tap) = tap {
+            crate::microvm::api_put_socket(
+                &sock,
+                "/network-interfaces/eth0",
+                &format!(r#"{{"iface_id":"eth0","host_dev_name":"{tap}"}}"#),
+            )?;
+        }
+        crate::microvm::api_put_socket(&sock, "/actions", r#"{"action_type":"InstanceStart"}"#)?;
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        Ok(())
+    }
+
+    /// Best-effort: kill the Firecracker process in `vm_dir` (by its
+    /// `fc.pid` file) so a live test doesn't leave a paused VMM running.
+    /// Mirrors `FirecrackerIO::teardown_paused`.
+    fn kill_live_vm(vm_dir: &Path) {
+        let pid_file = vm_dir.join("fc.pid");
+        if !pid_file.exists() {
+            return;
+        }
+        let pid_file_str = pid_file.to_string_lossy();
+        let q_pid = shell_quote(&pid_file_str);
+        let _ = run_in_vm(&format!(
+            "sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null; sleep 1"
+        ));
+    }
+
+    #[test]
+    #[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS"]
+    fn warm_restore_latency_live() {
+        let Some(images) = live_images() else {
+            return;
+        };
+
+        let base = std::env::temp_dir().join(format!("mvm-warmtest-{}", std::process::id()));
+        let src_dir = base.join("src");
+        let dest_dir = base.join("dest");
+        let snap_dir = base.join("snap");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+        std::fs::create_dir_all(&snap_dir).expect("create snap dir");
+
+        let rootfs_copy = src_dir.join("rootfs.ext4");
+        std::fs::copy(&images.rootfs, &rootfs_copy).expect("copy rootfs into writable src dir");
+
+        boot_live_source_vm(&images, &src_dir, &rootfs_copy, None).expect("boot source FC VM");
+
+        let src_sock = src_dir.join("fc.socket");
+        FirecrackerIO::new(src_sock)
+            .create_snapshot(&snap_dir)
+            .expect("create_snapshot on source VM");
+        assert!(
+            snap_dir.join(VMSTATE_FILENAME).exists(),
+            "vmstate.bin must exist after snapshot"
+        );
+        assert!(
+            snap_dir.join(MEM_FILENAME).exists(),
+            "mem.bin must exist after snapshot"
+        );
+
+        kill_live_vm(&src_dir);
+
+        // Time the warm restore — this is the number this test exists to produce.
+        let dest_io = FirecrackerIO::new(dest_dir.join("fc.socket"));
+        let t = std::time::Instant::now();
+        guarded_load_resume(&dest_io, &snap_dir).expect("warm restore must resume");
+        let ms = t.elapsed().as_millis();
+        println!("WARM_RESTORE_MS={ms}");
+
+        kill_live_vm(&dest_dir);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS/TAP"]
+    fn warm_restore_refuses_nic_live() {
+        let Some(images) = live_images() else {
+            return;
+        };
+        let Ok(tap) = std::env::var("MVM_LIVE_TAP") else {
+            eprintln!("skip: MVM_LIVE_TAP not set — NIC-refusal live test is a no-op here");
+            return;
+        };
+
+        let base = std::env::temp_dir().join(format!("mvm-warmtest-nic-{}", std::process::id()));
+        let src_dir = base.join("src");
+        let dest_dir = base.join("dest");
+        let snap_dir = base.join("snap");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+        std::fs::create_dir_all(&snap_dir).expect("create snap dir");
+
+        let rootfs_copy = src_dir.join("rootfs.ext4");
+        std::fs::copy(&images.rootfs, &rootfs_copy).expect("copy rootfs into writable src dir");
+
+        boot_live_source_vm(&images, &src_dir, &rootfs_copy, Some(&tap))
+            .expect("boot NIC-carrying source FC VM");
+
+        let src_sock = src_dir.join("fc.socket");
+        FirecrackerIO::new(src_sock)
+            .create_snapshot(&snap_dir)
+            .expect("create_snapshot on NIC-carrying source VM");
+
+        kill_live_vm(&src_dir);
+
+        let dest_io = FirecrackerIO::new(dest_dir.join("fc.socket"));
+        let err =
+            guarded_load_resume(&dest_io, &snap_dir).expect_err("NIC restore must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("device-model guard") || msg.contains("network"),
+            "expected a device-model-guard refusal, got: {msg}"
+        );
+
+        kill_live_vm(&dest_dir);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
