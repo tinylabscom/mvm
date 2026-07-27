@@ -4,13 +4,31 @@
 //! permission and never sees an admitted plan — it boots what the spec
 //! describes and nothing more.
 
+use std::path::Path;
+
 use anyhow::Result;
+use mvm_core::crypto::vmgenid::GenerationToken;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
     StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::driver::spec::VmmSpec;
+
+/// What a driver needs to fork a materialized standby parent into a fresh child
+/// VMM. Grouped so the seam takes one value instead of a positional list, and so
+/// the generation-token delivery rides the fork call itself — the token is
+/// delivered as the child boots, before any guest randomness consumer runs.
+pub struct ChildForkRequest<'a> {
+    /// The child's fresh, registry-unique name (its `~/.mvm/vms/<name>` key).
+    pub child_vm_name: &'a str,
+    /// The child's state dir, already holding the copy-on-write clone of the
+    /// verified parent's own content.
+    pub child_dir: &'a Path,
+    /// Fresh VMGenID token, bound to the child's content-address, delivered as
+    /// the child boots so its CSPRNG diverges from the parent's.
+    pub genid: GenerationToken,
+}
 
 /// A bidirectional, owned guest channel (a connected vsock stream).
 pub trait DuplexStream: std::io::Read + std::io::Write + Send {}
@@ -50,6 +68,25 @@ pub trait VmmDriver: Send + Sync {
         &self,
         _spec: &StandbySpec,
     ) -> std::result::Result<StandbyHandle, StandbyError> {
+        Err(StandbyError::Unsupported {
+            backend: self.name().to_string(),
+        })
+    }
+
+    /// Fork a clean standby parent — already materialized into `req.child_dir` as
+    /// a copy-on-write clone of its verified content — into a fresh child VMM
+    /// identity, delivering `req.genid` as the boot-time reseed token so the
+    /// child's CSPRNG diverges from the parent's before any guest randomness
+    /// consumer runs. The driver owns the VMM fork/restore mechanics only: the
+    /// role layer above has already admitted the plan, bound it to the parent,
+    /// materialized the rootfs, and scrubbed the identity.
+    ///
+    /// Fail-closed default: a driver opts in explicitly, mirroring
+    /// [`spawn_standby_parent`](Self::spawn_standby_parent).
+    fn fork_standby_child(
+        &self,
+        _req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
         Err(StandbyError::Unsupported {
             backend: self.name().to_string(),
         })

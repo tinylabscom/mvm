@@ -28,6 +28,8 @@ pub enum ClaimRefusal {
     ParentUnaudited,
     #[error("parent record drifted from its sealed content; refusing a tampered parent")]
     ParentTampered,
+    #[error("claim carries no admitted plan; refusing to fork without claim-8 authority")]
+    PlanMissing,
     #[error("child plan is outside its validity window")]
     PlanExpired,
     #[error("child plan nonce was already seen; refusing a replayed claim")]

@@ -10,24 +10,33 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use mvm_agentd::vsock::BROKER_PORT;
+use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
+use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyError, StandbyHandle,
-    StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig,
-    VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyClaim, StandbyError,
+    StandbyHandle, StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
+    VmStartConfig, VmStatus,
 };
+use mvm_fs::snapshot_store::FsSnapshotStore;
 
-use crate::driver::{RunningVm, VmmDriver};
+use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_content, verify_lineage};
+use crate::driver::{ChildForkRequest, RunningVm, VmmDriver};
 use crate::egress_shared::decode_plan_secrets_from_state;
+use crate::standby_pool::SupervisorStandbyPool;
 use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
     spawn_substitution_endpoint,
 };
+use crate::vm::name_registry::{VmNameRegistry, acquire_registry_lock, generate_vm_name};
+use crate::warm_snapshot::materialize_child_from_parent;
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
-use crate::workload_runner::claim::{ClaimGuards, EndpointSpawnInputs};
+use crate::workload_runner::claim::{
+    ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_plan_to_parent, parent_rootfs_digest,
+};
 use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_no_dir_share_volumes,
@@ -219,6 +228,29 @@ fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets
     }
 }
 
+/// The warm-pool substrate a claim needs beyond the runner's cold-boot fields.
+/// Cold boot never carries it, so it is a per-claim context rather than a runner
+/// field: the standby pool, the content-addressed checkpoint + snapshot stores,
+/// the signed-audit anchor, and the parent's identity a guarded fork consumes.
+/// Everything a claim materializes or verifies is reached through here, so a
+/// runner constructed for cold boot alone stays unchanged.
+pub struct ClaimContext<'a> {
+    /// Standby pool the parent is reserved in (marked `Claimed` under the lock).
+    pub pool: &'a SupervisorStandbyPool,
+    /// Content-addressed checkpoint store the parent + its lineage live in.
+    pub checkpoints: &'a CheckpointStore,
+    /// Snapshot store backing the O(1) copy-on-write child materialize.
+    pub snapshots: &'a FsSnapshotStore,
+    /// Resolves each checkpoint's signature-verified creation digest — the
+    /// lineage gate that refuses an un-audited or re-forged parent.
+    pub anchor: &'a dyn CheckpointChainAnchor,
+    /// The content-addressed checkpoint the standby parent was captured as.
+    pub parent_checkpoint: &'a CheckpointId,
+    /// VM name registry file whose sibling lock serializes the parent reserve
+    /// and the child-name mint, so two claims never double-claim one parent.
+    pub registry_path: &'a Path,
+}
+
 /// Starts workloads over the `VmmDriver` seam: spawn the per-VM gating endpoint,
 /// map the config to a `VmmSpec`, boot via the driver.
 pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> {
@@ -298,6 +330,196 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         broker_guard.defuse();
         Ok(vm)
     }
+
+    /// Fork a clean standby parent into a fresh, admitted child, gated exactly as
+    /// strictly as a cold boot — the guarded heart of the warm pool.
+    ///
+    /// Runs the fail-closed sequence in order, cloning or booting nothing until
+    /// every gate passes: reserve the parent atomically and verify its sealed
+    /// content + signed-audit lineage; bind the already-admitted plan's image
+    /// digest to that verified parent (so the audit-recorded plan describes
+    /// exactly what boots); mint a fresh, registry-unique identity; materialize
+    /// the child's rootfs from the parent's own verified content; run the
+    /// host-side overlay-contract gate and spawn the child's own 0700
+    /// substitution endpoint keyed on its fresh id; then fork the VMM, delivering
+    /// a fresh VMGenID at boot so the child's CSPRNG diverges from the parent's.
+    ///
+    /// Layering the runner does NOT own (enforced at their own layers, mirroring
+    /// a cold boot): claim-8 admission of the child plan (CLI mint + supervisor
+    /// re-verify at attach), dm-verity inherit (CLI populates the child config),
+    /// per-service confinement (guest init, inherited via the post-init parent
+    /// snapshot), and the `plan.launched` chain emit (the CLI audit layer, which
+    /// owns the host signer). The runner receives the admitted plan and the
+    /// verity-populated config in `claim` and consumes them.
+    pub fn claim_standby(
+        &self,
+        ctx: &ClaimContext<'_>,
+        handle: &StandbyHandle,
+        claim: &StandbyClaim,
+    ) -> std::result::Result<VmId, StandbyError> {
+        // (1) Reserve the parent atomically, then verify it — before any clone.
+        let parent = reserve_and_verify_parent(ctx, handle)?;
+
+        // (2) + (4) Bind the admitted plan's image digest to the verified parent.
+        // A missing plan or a digest mismatch refuses before any child side effect.
+        let plan_image = claim_plan_image_sha256(claim)?;
+        bind_plan_to_parent(&plan_image, &parent).map_err(refuse)?;
+
+        // (6a) Fresh, registry-unique identity for the child.
+        let child = fresh_child_id(ctx)?;
+        let child_dir = vm_state_dir(&child.0);
+
+        // (3) Materialize the child's rootfs from the verified parent's own
+        // content (self-binding, lineage-anchored copy-on-write clone).
+        materialize_child_from_parent(
+            ctx.checkpoints,
+            ctx.snapshots,
+            ctx.parent_checkpoint,
+            ctx.anchor,
+            &child_dir,
+        )
+        .map_err(|e| StandbyError::ClaimFailed(format!("materialize child rootfs: {e}")))?;
+
+        // (8) The runner-side host gates a cold boot runs, before the child boots:
+        // the overlay contract, then the child's own 0700 substitution endpoint
+        // keyed on its fresh id (never a sibling's; the factory parent has none).
+        let child_cfg = child_start_config(claim, &child, &child_dir);
+        let guards = ClaimGuards::new(&self.spawner);
+        guards
+            .admit_overlay_contract(&child_cfg)
+            .map_err(|e| StandbyError::ClaimFailed(format!("overlay contract: {e}")))?;
+
+        let secrets =
+            mvm_core::plan::secrets_from_signed_json(&claim.plan_json).unwrap_or_default();
+        let redaction =
+            mvm_core::plan::redaction_from_signed_json(&claim.plan_json).unwrap_or_default();
+        let mut endpoint = guards
+            .spawn_endpoint(
+                &child,
+                &EndpointSpawnInputs {
+                    state_dir: &child_dir,
+                    tenant: claim.tenant_id.as_str(),
+                    secrets: &secrets,
+                    redaction: &redaction,
+                    network_policy: &claim.network_policy,
+                },
+            )
+            .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e}")))?;
+
+        // (6b) + (7) Mint a fresh VMGenID bound to the child's content-address and
+        // deliver it WITH the fork, so it reaches the guest at boot — before any
+        // guest randomness consumer runs, forcing the child's CSPRNG to diverge.
+        let content_hash = parent_rootfs_digest(&parent).map_err(refuse)?.to_string();
+        let genid = fresh_generation_token(content_hash);
+        self.driver.fork_standby_child(&ChildForkRequest {
+            child_vm_name: &child.0,
+            child_dir: &child_dir,
+            genid,
+        })?;
+
+        // The child is up; disarm the endpoint reaper so the stop path owns it.
+        endpoint.defuse();
+        Ok(child)
+    }
+}
+
+/// Map a fail-closed [`ClaimRefusal`] onto the transport-agnostic
+/// [`StandbyError`] the claim seam returns. The refusal reasons stay distinct in
+/// the message so a caller can tell an un-audited parent from a plan mismatch.
+fn refuse(refusal: ClaimRefusal) -> StandbyError {
+    StandbyError::ClaimFailed(refusal.to_string())
+}
+
+/// Distinguish an un-audited parent (no signed creation entry) from a tampered
+/// one (drift or a chain mismatch) by the lineage verifier's own message, so the
+/// caller sees the specific fail-closed reason.
+fn map_lineage_refusal(err: &anyhow::Error) -> ClaimRefusal {
+    if err.to_string().contains("no signed audit entry") {
+        ClaimRefusal::ParentUnaudited
+    } else {
+        ClaimRefusal::ParentTampered
+    }
+}
+
+/// Reserve the passed parent atomically under the registry lock (the no-double-
+/// claim guard), then verify its sealed content and its content-address against
+/// the signed audit chain. Returns the verified parent meta. Runs before any
+/// clone or boot: an unclaimable, un-audited, or tampered parent fails closed.
+fn reserve_and_verify_parent(
+    ctx: &ClaimContext<'_>,
+    handle: &StandbyHandle,
+) -> std::result::Result<CheckpointMeta, StandbyError> {
+    {
+        let _lock = acquire_registry_lock(ctx.registry_path)
+            .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e}")))?;
+        let current = ctx
+            .pool
+            .load(&handle.id)
+            .map_err(|e| StandbyError::ClaimFailed(format!("load standby {}: {e}", handle.id)))?;
+        if !current.state.is_claimable() {
+            return Err(refuse(ClaimRefusal::ParentNotClaimable));
+        }
+        ctx.pool.mark_claimed(&handle.id).map_err(|e| {
+            StandbyError::ClaimFailed(format!("reserve standby {}: {e}", handle.id))
+        })?;
+    }
+
+    let parent = ctx
+        .checkpoints
+        .read_meta(ctx.parent_checkpoint)
+        .map_err(|e| StandbyError::ClaimFailed(format!("read parent checkpoint: {e}")))?;
+    verify_content(ctx.checkpoints, &parent).map_err(|_| refuse(ClaimRefusal::ParentTampered))?;
+    verify_lineage(ctx.checkpoints, ctx.parent_checkpoint, ctx.anchor)
+        .map_err(|e| refuse(map_lineage_refusal(&e)))?;
+    Ok(parent)
+}
+
+/// The admitted plan's bound image digest (`plan.image.sha256`) from the claim.
+/// The runner does not re-verify the signature — the host admitted the plan and
+/// the supervisor re-verifies at attach — it only reads the digest it must bind
+/// to the parent. A claim carrying no parseable plan fails closed.
+fn claim_plan_image_sha256(claim: &StandbyClaim) -> std::result::Result<String, StandbyError> {
+    let plan = mvm_core::plan::plan_from_admitted_json(&claim.plan_json)
+        .map_err(|_| refuse(ClaimRefusal::PlanMissing))?;
+    Ok(plan.image.sha256)
+}
+
+/// How many times to redraw a fresh child name before giving up. A collision is
+/// astronomically unlikely (random suffix), so a small bound is a fail-closed
+/// backstop, never a hot loop.
+const MAX_CHILD_NAME_ATTEMPTS: usize = 8;
+
+/// Mint a fresh, registry-unique child [`VmId`] under the registry lock so a
+/// concurrent claim cannot mint the same name. The child is named by a fresh
+/// random id (never the parent's), which — with the fresh VMGenID and endpoint —
+/// is the identity scrub that stops a fork from inheriting the parent's identity.
+fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyError> {
+    let _lock = acquire_registry_lock(ctx.registry_path)
+        .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e}")))?;
+    let registry = VmNameRegistry::load(ctx.registry_path)
+        .map_err(|e| StandbyError::ClaimFailed(format!("load vm registry: {e}")))?;
+    for _ in 0..MAX_CHILD_NAME_ATTEMPTS {
+        let name = generate_vm_name();
+        if registry.lookup(&name).is_none() {
+            return Ok(VmId(name));
+        }
+    }
+    Err(StandbyError::ClaimFailed(
+        "could not mint a registry-unique child name".into(),
+    ))
+}
+
+/// The child's launch config: the CLI-populated claim config (carrying the
+/// verity fields the CLI already resolved on the cloned rootfs) rekeyed onto the
+/// fresh child identity and its materialized rootfs. The runner consumes verity;
+/// it never derives it.
+fn child_start_config(claim: &StandbyClaim, child: &VmId, child_dir: &Path) -> VmStartConfig {
+    let mut cfg = claim.start_config.clone().unwrap_or_default();
+    cfg.name = child.0.clone();
+    cfg.rootfs_path = child_dir.join("rootfs.ext4").to_string_lossy().into_owned();
+    cfg.tenant_id = Some(claim.tenant_id.clone());
+    cfg.network_policy = claim.network_policy.clone();
+    cfg
 }
 
 /// The runner IS the workload backend: the lifecycle runs through the `VmmDriver`
@@ -1452,6 +1674,249 @@ mod tests {
         assert!(
             runner.spawner.seen.lock().unwrap().is_none(),
             "a standby parent must never get a substitution endpoint"
+        );
+    }
+
+    // ── Warm claim: the guarded fork of a clean parent into a fresh child ──────
+
+    use mvm_core::checkpoint::CheckpointDigest;
+    use mvm_core::crypto::vmgenid::GENID_BYTES;
+    use mvm_core::vm_backend::StandbyState;
+
+    use crate::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
+
+    /// A `CheckpointChainAnchor` double: reports the parent as audited (echoing
+    /// its own recomputed creation digest) so the lineage gate passes, and every
+    /// other checkpoint as un-audited.
+    struct ClaimTestAnchor {
+        verdicts: std::collections::HashMap<String, CheckpointDigest>,
+    }
+
+    impl ClaimTestAnchor {
+        fn audited(meta: &CheckpointMeta) -> Self {
+            let mut verdicts = std::collections::HashMap::new();
+            verdicts.insert(meta.id.to_string(), meta.compute_meta_digest());
+            Self { verdicts }
+        }
+    }
+
+    impl CheckpointChainAnchor for ClaimTestAnchor {
+        fn recorded_creation_digest(
+            &self,
+            meta: &CheckpointMeta,
+        ) -> Result<Option<CheckpointDigest>> {
+            Ok(self.verdicts.get(&meta.id.to_string()).cloned())
+        }
+    }
+
+    /// An `EndpointSpawner` double that keys its returned socket on the vm name it
+    /// is handed — mirroring `RealEndpointSpawner` — and records that name, so a
+    /// test can prove the child endpoint is keyed on the child's own id and the
+    /// parent got none, with no real endpoint process.
+    #[derive(Default)]
+    struct KeyingSpawner {
+        seen_vm: Mutex<Option<String>>,
+    }
+
+    impl EndpointSpawner for KeyingSpawner {
+        fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
+            *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
+            Ok(vm_substitution_endpoint_socket(req.vm_name))
+        }
+    }
+
+    /// Seed a clean, audited, pre-workload parent checkpoint carrying an
+    /// overlay-aware sidecar (so its clone clears the same host gate a cold boot
+    /// runs), and return `(store, snapshots, parent_id, parent_meta)`. The
+    /// `TempDir`s must outlive the returned stores.
+    fn seed_audited_parent(
+        store_root: &Path,
+        src_root: &Path,
+    ) -> (
+        CheckpointStore,
+        FsSnapshotStore,
+        CheckpointId,
+        CheckpointMeta,
+    ) {
+        let checkpoints = CheckpointStore::at(store_root.join("checkpoints"));
+        let snapshots = FsSnapshotStore::new(store_root.join("snapshots")).unwrap();
+
+        let rootfs = src_root.join("rootfs.ext4");
+        std::fs::write(&rootfs, b"clean-parent-rootfs").unwrap();
+        // runtime_lean=true so the overlay sidecar clears the gate under every
+        // runtime-source policy, exactly like the cold-boot admission tests.
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("warm-parent", false, true)
+            .write_to_dir(src_root)
+            .unwrap();
+
+        let parent_id = CheckpointId::new("warm-parent-cp");
+        let parent_meta = capture_fs_quick(
+            &checkpoints,
+            CaptureFsQuickParams {
+                id: parent_id.clone(),
+                vm_name: "warm-parent".into(),
+                rootfs,
+                supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
+                tag: None,
+                created_unix: 1,
+                quiesced: true,
+            },
+        )
+        .unwrap();
+        (checkpoints, snapshots, parent_id, parent_meta)
+    }
+
+    /// Build a signed, admitted child plan whose bound image digest is the
+    /// parent's own verified rootfs content-address (claim-8 authority), the way
+    /// the CLI mints it before handing the runner the claim.
+    fn signed_child_plan_json(image_sha256: &str) -> String {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("tenant-x")
+            .build();
+        plan.image.sha256 = image_sha256.to_string();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap()
+    }
+
+    fn idle_parent_handle(id: &str, control_socket: &Path) -> StandbyHandle {
+        StandbyHandle {
+            id: id.to_string(),
+            control_socket: control_socket.display().to_string(),
+            pid: 0,
+            kernel_sha256: "k".repeat(64),
+            vcpus: 2,
+            mem_mib: 512,
+            binding_nonce: "b".repeat(64),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            image_sha256: None,
+        }
+    }
+
+    fn admitted_child_claim(rootfs: &Path, plan_json: String) -> StandbyClaim {
+        StandbyClaim {
+            start_config: Some(VmStartConfig {
+                name: "unused-cold".into(),
+                rootfs_path: rootfs.display().to_string(),
+                tenant_id: Some("tenant-x".into()),
+                ..Default::default()
+            }),
+            rootfs_path: rootfs.display().to_string(),
+            tenant_id: "tenant-x".into(),
+            audit_dir: rootfs.with_file_name("audit"),
+            gateway_audit_socket: rootfs.with_file_name("gw-audit.sock"),
+            gateway_events_socket: None,
+            plan_json,
+            bundle_json: None,
+            network_policy: NetworkPolicy::deny_all(),
+        }
+    }
+
+    /// The positive path: `claim_standby` forks a clean, audited parent into a
+    /// fresh, admitted child that carries a fresh identity on every axis the fork
+    /// controls, its own isolated endpoint, the overlay gate a cold boot runs, and
+    /// a fresh VMGenID delivered with the boot.
+    #[test]
+    fn claim_produces_fresh_identity_and_isolated_endpoint() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path());
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+        };
+
+        let child = runner.claim_standby(&ctx, &handle, &claim).expect("claim");
+
+        // Fresh identity: the child differs from the parent and gets a fresh name.
+        assert_ne!(child.0, handle.id, "child VmId must differ from the parent");
+        assert!(
+            child.0.starts_with("vm-"),
+            "child gets a fresh registry name: {}",
+            child.0
+        );
+
+        // Surface 5: the child's endpoint is keyed on its own fresh id, and the
+        // factory parent never got one.
+        let seen = runner.spawner.seen_vm.lock().unwrap().clone();
+        assert_eq!(
+            seen.as_deref(),
+            Some(child.0.as_str()),
+            "the endpoint is keyed on the child's own id"
+        );
+        assert_ne!(
+            seen.as_deref(),
+            Some(handle.id.as_str()),
+            "the parent, a factory, gets no substitution endpoint"
+        );
+
+        // Surface 3: the fork delivered a fresh VMGenID bound to the child's
+        // content-address, at the boot call — before any guest randomness consumer
+        // runs — so the child's CSPRNG cannot share the parent's state.
+        let forks = runner.driver.forked_children();
+        assert_eq!(forks.len(), 1, "exactly one child fork");
+        assert_eq!(forks[0].child_vm_name, child.0);
+        assert_ne!(
+            forks[0].genid.token, [0u8; GENID_BYTES],
+            "a clean parent's baseline token is zero; the child gets a fresh non-zero one"
+        );
+        assert_eq!(
+            forks[0].genid.content_hash, parent_digest,
+            "the fresh token is bound to the child's content-address"
+        );
+
+        // The runner-side overlay-contract gate ran on the materialized child:
+        // its dir carries the overlay sidecar the clone rode plus the rootfs.
+        let child_dir = mvm_core::config::vm_state_dir(&child.0);
+        assert!(
+            child_dir
+                .join(mvm_build::builder_vm::SIDECAR_FILENAME)
+                .exists(),
+            "the overlay sidecar rode the clone into the child dir"
+        );
+        assert!(
+            child_dir.join("rootfs.ext4").exists(),
+            "the child rootfs was materialized from the parent's content"
+        );
+
+        // The parent was reserved (marked Claimed) atomically, never left idle for
+        // a second claim to grab.
+        assert_eq!(
+            pool.load("warm-parent").unwrap().state,
+            StandbyState::Claimed,
+            "the parent is reserved so a concurrent claim cannot double-claim it"
         );
     }
 }
