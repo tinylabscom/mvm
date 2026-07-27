@@ -256,58 +256,10 @@ pub const HOST_CID: u32 = 2;
 /// length-prefixed frame helpers ([`read_frame`]/[`write_frame`]) work over it
 /// unchanged.
 pub fn connect_host_vsock(port: u32, timeout_secs: u64) -> Result<UnixStream> {
-    use std::os::fd::FromRawFd;
-
-    const AF_VSOCK: libc::c_int = 40;
-    // Kernel uapi `struct sockaddr_vm`: family u16 + reserved u16 + port u32 +
-    // cid u32 + 4-byte pad = 16 (== sizeof(struct sockaddr)).
-    #[repr(C)]
-    struct SockaddrVm {
-        svm_family: libc::sa_family_t,
-        svm_reserved1: u16,
-        svm_port: u32,
-        svm_cid: u32,
-        svm_zero: [u8; 4],
-    }
-    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
-
     let mut last_err = None;
     let mut stream = None;
     for attempt in 0..CONNECT_RETRIES {
-        // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; `addr` is fully
-        // initialized and sized exactly. The fd is adopted by `UnixStream` on
-        // success (closed on its drop) or closed explicitly on the error path.
-        let connect_result = unsafe {
-            let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
-            if fd < 0 {
-                Err(anyhow::Error::from(std::io::Error::last_os_error())
-                    .context("AF_VSOCK socket()"))
-            } else {
-                let addr = SockaddrVm {
-                    svm_family: AF_VSOCK as libc::sa_family_t,
-                    svm_reserved1: 0,
-                    svm_port: port,
-                    svm_cid: HOST_CID,
-                    svm_zero: [0; 4],
-                };
-                let rc = libc::connect(
-                    fd,
-                    std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
-                    std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
-                );
-                if rc < 0 {
-                    let err = std::io::Error::last_os_error();
-                    libc::close(fd);
-                    Err(anyhow::Error::from(err).context(format!(
-                        "AF_VSOCK connect to host CID {HOST_CID} port {port}"
-                    )))
-                } else {
-                    Ok(UnixStream::from_raw_fd(fd))
-                }
-            }
-        };
-
-        match connect_result {
+        match dial_host_once(port) {
             Ok(open_stream) => {
                 stream = Some(open_stream);
                 break;
@@ -337,6 +289,23 @@ pub fn connect_host_vsock(port: u32, timeout_secs: u64) -> Result<UnixStream> {
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
     Ok(stream)
+}
+
+/// One guest→host AF_VSOCK dial attempt, wrapping the leaf's owned fd as a
+/// [`UnixStream`]. The `anyhow` context carries the io::Error as its root
+/// cause so [`connect_host_vsock`]'s transient-error classifier keys on it.
+#[cfg(target_os = "linux")]
+fn dial_host_once(port: u32) -> Result<UnixStream> {
+    let fd = crate::vsock::sys::dial(HOST_CID, port)
+        .with_context(|| format!("AF_VSOCK connect to host CID {HOST_CID} port {port}"))?;
+    Ok(UnixStream::from(fd))
+}
+
+/// The guest→host vsock path is Linux-only; the workspace still compiles on
+/// macOS dev hosts, where this direction is never dialed.
+#[cfg(not(target_os = "linux"))]
+fn dial_host_once(port: u32) -> Result<UnixStream> {
+    bail!("guest→host AF_VSOCK dial to port {port} is Linux-only")
 }
 
 /// Connect to the guest vsock agent via the fleet-mode instance directory convention.
