@@ -135,8 +135,11 @@ fn build_produces_verity_sidecar_matching_overlay_block_geometry() {
     const OVERLAY_DATA_BLOCK_SIZE: u64 = 1024;
     const OVERLAY_VERITY_HASH_BLOCK_SIZE: u64 = 4096;
     let data_blocks = overlay_bytes.len() as u64 / OVERLAY_DATA_BLOCK_SIZE;
+    // `veritysetup format` (not passed `--no-superblock`) writes a one-block
+    // superblock ahead of the hash tree, so the sidecar is the tree plus one
+    // hash block.
     let expected_sidecar_blocks =
-        verity_tree_block_count(data_blocks, OVERLAY_VERITY_HASH_BLOCK_SIZE);
+        1 + verity_tree_block_count(data_blocks, OVERLAY_VERITY_HASH_BLOCK_SIZE);
 
     assert_eq!(
         sidecar_bytes.len() as u64,
