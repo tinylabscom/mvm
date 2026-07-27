@@ -381,6 +381,7 @@ mod tests {
     fn cfg(name: &str) -> VmStartConfig {
         VmStartConfig {
             name: name.to_string(),
+            template_id: None,
             kernel_path: None,
             initrd_path: None,
             rootfs_path: "/tmp/stub.ext4".to_string(),

@@ -5,6 +5,10 @@
 //! `GuestResponse`.
 
 use super::*;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 use mvm_core::security::AgentProfile;
 use serde::{Deserialize, Serialize};
 
@@ -225,6 +229,10 @@ pub enum GuestResponse {
         /// on the wire for forward-compat with a pre-rotation ack.
         #[serde(default)]
         reseeded: bool,
+        /// `true` iff the guest applied the host-provided restore epoch before
+        /// signaling init. Defaults to `false` for older agents.
+        #[serde(default, skip_serializing_if = "is_false")]
+        clock_resynced: bool,
     },
     /// Filesystem diff result.
     FsDiffResult { changes: Vec<FsChange> },
@@ -766,6 +774,7 @@ mod tests {
             success: true,
             detail: None,
             reseeded: true,
+            clock_resynced: true,
         };
         let json = serde_json::to_string(&ack).unwrap();
         match serde_json::from_str::<GuestResponse>(&json).unwrap() {
@@ -778,7 +787,14 @@ mod tests {
         )
         .unwrap()
         {
-            GuestResponse::PostRestoreAck { reseeded, .. } => assert!(!reseeded),
+            GuestResponse::PostRestoreAck {
+                reseeded,
+                clock_resynced,
+                ..
+            } => {
+                assert!(!reseeded);
+                assert!(!clock_resynced);
+            }
             other => panic!("expected PostRestoreAck, got {other:?}"),
         }
     }
@@ -884,6 +900,7 @@ mod tests {
                 success: true,
                 detail: Some("post-restore signal sent to init".to_string()),
                 reseeded: false,
+                clock_resynced: false,
             },
             GuestResponse::FsDiffResult {
                 changes: vec![

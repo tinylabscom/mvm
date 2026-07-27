@@ -153,16 +153,19 @@ pub fn query_probe_status_at(vsock_uds_path: &str) -> Result<Vec<crate::probes::
 }
 
 /// Outcome of a `PostRestore` signal: whether the guest acknowledged the
-/// signal and whether it actually rotated its VMGenID from the host token.
+/// signal, rotated its VMGenID, and applied the host wall-clock epoch.
 ///
 /// `reseeded` is the load-bearing field for the warm-start verb's honesty —
-/// `acknowledged` only says the guest answered, `reseeded` says it rotated.
+/// `acknowledged` only says the guest answered, `reseeded` says it rotated,
+/// and `clock_resynced` says the restore clock was applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PostRestoreReply {
     /// The guest acknowledged the post-restore signal with success.
     pub acknowledged: bool,
     /// The guest rotated its VMGenID from the delivered token.
     pub reseeded: bool,
+    /// The guest applied the host-provided wall-clock epoch.
+    pub clock_resynced: bool,
 }
 
 /// Interpret a guest's response to `PostRestore` into the host-facing reply.
@@ -170,10 +173,14 @@ pub struct PostRestoreReply {
 fn interpret_post_restore(resp: GuestResponse) -> Result<PostRestoreReply> {
     match resp {
         GuestResponse::PostRestoreAck {
-            success, reseeded, ..
+            success,
+            reseeded,
+            clock_resynced,
+            ..
         } => Ok(PostRestoreReply {
             acknowledged: success,
             reseeded,
+            clock_resynced,
         }),
         GuestResponse::Error { message } => {
             bail!("Guest post-restore error: {}", message);
@@ -198,6 +205,7 @@ pub fn post_restore_at(
         &mut stream,
         &GuestRequest::PostRestore {
             token,
+            host_epoch_secs: None,
             grant_envelope: None,
         },
     )?;
@@ -212,11 +220,23 @@ pub fn post_restore_with_grant_at(
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
     grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
 ) -> Result<PostRestoreReply> {
+    post_restore_with_grant_and_clock_at(vsock_uds_path, token, grant_envelope, None)
+}
+
+/// Like [`post_restore_with_grant_at`] but also asks the guest to synchronize
+/// its wall clock before restarting init-owned services.
+pub fn post_restore_with_grant_and_clock_at(
+    vsock_uds_path: &str,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    host_epoch_secs: Option<u64>,
+) -> Result<PostRestoreReply> {
     let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
     let resp = send_request(
         &mut stream,
         &GuestRequest::PostRestore {
             token,
+            host_epoch_secs,
             grant_envelope,
         },
     )?;
@@ -507,14 +527,16 @@ mod tests {
             success: true,
             detail: None,
             reseeded: true,
+            clock_resynced: true,
         })
         .unwrap();
-        assert!(r.acknowledged && r.reseeded);
+        assert!(r.acknowledged && r.reseeded && r.clock_resynced);
         // Acknowledged but the guest did not rotate (e.g. a zero/no-op token).
         let r = interpret_post_restore(GuestResponse::PostRestoreAck {
             success: true,
             detail: None,
             reseeded: false,
+            clock_resynced: false,
         })
         .unwrap();
         assert!(r.acknowledged && !r.reseeded);
@@ -523,6 +545,7 @@ mod tests {
             success: false,
             detail: Some("kill failed".into()),
             reseeded: false,
+            clock_resynced: false,
         })
         .unwrap();
         assert!(!r.acknowledged && !r.reseeded);

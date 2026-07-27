@@ -96,6 +96,27 @@ impl SupervisorStandbyPool {
             .find(|h| h.state.is_claimable() && h.is_compatible(want) && Self::is_live_or_saved(h)))
     }
 
+    /// Atomically reserve one compatible warm parent.
+    ///
+    /// Selection and the persisted `Claimed` transition must share one lock;
+    /// otherwise two launchers can both observe the same idle parent before
+    /// either writes its reservation. The returned handle is already reserved
+    /// and must be removed after the backend consumes its one-shot control
+    /// channel.
+    pub fn claim_idle_compatible(&self, want: &StandbyCompat) -> Result<Option<StandbyHandle>> {
+        let _claim_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
+        let Some(mut handle) = self
+            .list()?
+            .into_iter()
+            .find(|h| h.state.is_claimable() && h.is_compatible(want) && Self::is_live_or_saved(h))
+        else {
+            return Ok(None);
+        };
+        self.mark_claimed(&handle.id)?;
+        handle.state = StandbyState::Claimed;
+        Ok(Some(handle))
+    }
+
     /// True when the recorded standby still has a resource that can be claimed or displayed
     /// as live. Saved-state standbys have no process; the snapshot payload is the resource.
     pub fn is_live_or_saved(h: &StandbyHandle) -> bool {
@@ -111,6 +132,52 @@ impl SupervisorStandbyPool {
                 h.state == StandbyState::Idle && h.is_compatible(want) && Self::is_live_or_saved(h)
             })
             .count())
+    }
+
+    /// Evict the oldest idle or parked parents for one template until their
+    /// recorded memory footprint fits `max_memory_mib`.
+    ///
+    /// Claimed parents are never selected: a launcher may already be consuming
+    /// one, and removing its registry entry here would turn a reservation into
+    /// an untracked live VM. Template identities are compared exactly; legacy
+    /// records with `None` remain in the image-agnostic pool.
+    pub fn evict_to_memory_budget(
+        &self,
+        template_id: Option<&str>,
+        max_memory_mib: u64,
+    ) -> Result<Vec<String>> {
+        // Share the claim lock with reservation so a parent cannot be selected
+        // for eviction from an idle listing while another launcher claims it.
+        let _budget_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
+        let mut candidates: Vec<_> = self
+            .list()?
+            .into_iter()
+            .filter(|h| {
+                h.template_id.as_deref() == template_id
+                    && matches!(h.state, StandbyState::Idle | StandbyState::Parked)
+            })
+            .collect();
+        let mut memory_mib = candidates
+            .iter()
+            .fold(0u64, |total, h| total.saturating_add(u64::from(h.mem_mib)));
+        candidates.sort_by_key(|h| h.spawned_unix_secs);
+
+        let mut evicted = Vec::new();
+        for h in candidates {
+            if memory_mib <= max_memory_mib {
+                break;
+            }
+            if !h.is_saved_state() && pid_alive(h.pid) {
+                // SAFETY: the pid belongs to a live supervisor recorded by this
+                // pool; a subsequent claim cannot race because only idle/parked
+                // records are candidates under the budget lock.
+                unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
+            }
+            self.remove(&h.id)?;
+            memory_mib = memory_mib.saturating_sub(u64::from(h.mem_mib));
+            evicted.push(h.id);
+        }
+        Ok(evicted)
     }
 
     /// Mark a standby `Claimed` (persisted) — so a concurrent launch won't double-claim.
@@ -226,6 +293,7 @@ mod tests {
     fn handle(id: &str, kernel: &str, state: StandbyState) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
+            template_id: None,
             control_socket: format!("/p/{id}/control.sock"),
             pid: std::process::id(), // a live pid so liveness passes
             kernel_sha256: kernel.into(),
@@ -240,6 +308,7 @@ mod tests {
 
     fn compat(kernel: &str) -> StandbyCompat {
         StandbyCompat {
+            template_id: None,
             kernel_sha256: kernel.into(),
             vcpus: 2,
             mem_mib: 1024,
@@ -293,6 +362,85 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn atomic_claim_reserves_a_parent_before_returning_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let want = compat("aa");
+        pool.record(&handle("parent", "aa", StandbyState::Idle))
+            .unwrap();
+
+        let claimed = pool
+            .claim_idle_compatible(&want)
+            .unwrap()
+            .expect("compatible parent");
+        assert_eq!(claimed.id, "parent");
+        assert_eq!(claimed.state, StandbyState::Claimed);
+        assert_eq!(pool.load("parent").unwrap().state, StandbyState::Claimed);
+        assert!(
+            pool.claim_idle_compatible(&want).unwrap().is_none(),
+            "a reserved parent must not be claimable twice"
+        );
+    }
+
+    #[test]
+    fn template_bound_parent_never_matches_a_different_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut parent = handle("template-parent", "aa", StandbyState::Idle);
+        parent.template_id = Some("template-a".into());
+        pool.record(&parent).unwrap();
+
+        let mut wrong_template = compat("aa");
+        wrong_template.template_id = Some("template-b".into());
+        assert!(
+            pool.select_idle_compatible(&wrong_template)
+                .unwrap()
+                .is_none(),
+            "warm parents must not cross template identities"
+        );
+    }
+
+    #[test]
+    fn memory_budget_evicts_oldest_parent_within_one_template() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut old = saved_handle("old", "aa", "img", StandbyState::Idle);
+        old.template_id = Some("template-a".into());
+        old.spawned_unix_secs = 1;
+        let mut recent = saved_handle("recent", "aa", "img", StandbyState::Parked);
+        recent.template_id = Some("template-a".into());
+        recent.spawned_unix_secs = 2;
+        let mut other = saved_handle("other", "aa", "img", StandbyState::Idle);
+        other.template_id = Some("template-b".into());
+        pool.record(&old).unwrap();
+        pool.record(&recent).unwrap();
+        pool.record(&other).unwrap();
+
+        let evicted = pool
+            .evict_to_memory_budget(Some("template-a"), 1024)
+            .unwrap();
+        assert_eq!(evicted, vec!["old"]);
+        assert!(pool.load("recent").is_ok());
+        assert!(pool.load("other").is_ok());
+    }
+
+    #[test]
+    fn memory_budget_never_evicts_claimed_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut claimed = saved_handle("claimed", "aa", "img", StandbyState::Claimed);
+        claimed.template_id = Some("template-a".into());
+        pool.record(&claimed).unwrap();
+
+        assert!(
+            pool.evict_to_memory_budget(Some("template-a"), 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(pool.load("claimed").unwrap().state, StandbyState::Claimed);
     }
 
     #[test]
@@ -372,6 +520,7 @@ mod tests {
     fn saved_handle(id: &str, kernel: &str, image: &str, state: StandbyState) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
+            template_id: None,
             control_socket: format!("/p/{id}/control.sock"),
             pid: 0, // no live supervisor for saved-state standbys
             kernel_sha256: kernel.into(),
@@ -386,6 +535,7 @@ mod tests {
 
     fn hvf_compat(kernel: &str, image: &str) -> StandbyCompat {
         StandbyCompat {
+            template_id: None,
             kernel_sha256: kernel.into(),
             vcpus: 2,
             mem_mib: 1024,

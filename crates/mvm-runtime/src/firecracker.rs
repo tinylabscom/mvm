@@ -422,21 +422,21 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
 /// FC path.
 ///
 /// On `restore_fork`:
-/// 1. Renames `memory.bin` → `mem.bin` inside `child_dir` so
-///    `warm_restore_instance_from_path` finds the right filename.
+/// 1. Renames `memory.bin` → `mem.bin` inside `child_dir` so the snapshot
+///    loader finds Firecracker's canonical memory filename.
 /// 2. Reads the parent's device anchors and bind-mounts the child's copies over
 ///    those paths in a private mount namespace, so the snapshot bitcode resolves
 ///    to the child's files without editing `vmstate.bin`.
-/// 3. Calls `warm_restore_instance_from_path(child_vm_name, child_dir_str, [0u8; GENID_BYTES])`.
-///    The VMGenID token is zeroed — the fork caller delivers the real grant/token
-///    over vsock after `restore_fork` returns (mirrors the former Vz backend's fork path).
+/// 3. Starts a fresh Firecracker and loads the cloned snapshot. The fork
+///    caller delivers the real generation token and optional grant over vsock
+///    after `restore_fork` returns.
 pub struct FcForkRestorer;
 
 impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
     fn restore_fork(&self, child_vm_name: &str, child_dir: &std::path::Path) -> anyhow::Result<()> {
         use anyhow::Context as _;
-        // FC saves memory as `memory.bin` but `warm_restore_instance_from_path`
-        // expects `mem.bin` (the canonical FC snapshot name).
+        // FC saves memory as `memory.bin`; the snapshot loader expects
+        // `mem.bin`, Firecracker's canonical load filename.
         let memory_bin = child_dir.join("memory.bin");
         let mem_bin = child_dir.join("mem.bin");
         if memory_bin.exists() && !mem_bin.exists() {
@@ -452,43 +452,47 @@ impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
         // copies inside a private mount namespace, so the snapshot loads the
         // child's devices without editing Firecracker bitcode.
         let anchors_path = child_dir.join("device-anchors.json");
-        if anchors_path.exists() {
-            let anchors: crate::checkpoint::DeviceAnchors = serde_json::from_slice(
-                &std::fs::read(&anchors_path)
-                    .with_context(|| format!("reading {}", anchors_path.display()))?,
-            )
-            .with_context(|| format!("parsing {}", anchors_path.display()))?;
-            let child_vm_dir = crate::microvm::resolve_running_vm_dir(child_vm_name)
-                .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
-            let mut mappings = Vec::new();
-            mappings.push((anchors.rootfs, child_dir.join("rootfs.ext4")));
-            if let Some(parent) = anchors.rootfs_verity {
-                mappings.push((parent, child_dir.join("rootfs.verity")));
-            }
-            if let Some(parent) = anchors.config {
-                mappings.push((parent, child_dir.join("config.ext4")));
-            }
-            if let Some(parent) = anchors.secrets {
-                mappings.push((parent, child_dir.join("secrets.ext4")));
-            }
-            mappings.push((
-                anchors.vsock,
-                std::path::PathBuf::from(crate::microvm::firecracker_vsock_uds_path(&child_vm_dir)),
-            ));
-            crate::microvm::remap_paths_for_fork(&mappings)
-                .context("remapping parent device paths for FC fork")?;
+        let anchors: crate::checkpoint::DeviceAnchors =
+            serde_json::from_slice(&std::fs::read(&anchors_path).with_context(|| {
+                format!(
+                    "reading required FC fork device anchors {}",
+                    anchors_path.display()
+                )
+            })?)
+            .with_context(|| {
+                format!(
+                    "parsing required FC fork device anchors {}",
+                    anchors_path.display()
+                )
+            })?;
+        let child_vm_dir = crate::microvm::resolve_running_vm_dir(child_vm_name)
+            .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
+        let mut mappings = Vec::new();
+        mappings.push((anchors.rootfs, child_dir.join("rootfs.ext4")));
+        if let Some(parent) = anchors.rootfs_verity {
+            mappings.push((parent, child_dir.join("rootfs.verity")));
         }
+        if let Some(parent) = anchors.config {
+            mappings.push((parent, child_dir.join("config.ext4")));
+        }
+        if let Some(parent) = anchors.secrets {
+            mappings.push((parent, child_dir.join("secrets.ext4")));
+        }
+        mappings.push((
+            anchors.vsock,
+            std::path::PathBuf::from(crate::microvm::firecracker_vsock_uds_path(&child_vm_dir)),
+        ));
+        crate::microvm::remap_paths_for_fork(&mappings)
+            .context("remapping parent device paths for FC fork")?;
 
-        let child_dir_str = child_dir.to_string_lossy().into_owned();
-        // Deliver a zero token; the CLI fork path delivers the real grant/VMGenID
-        // token over vsock after restore_fork returns.
-        crate::microvm::warm_restore_instance_from_path(
-            child_vm_name,
-            &child_dir_str,
-            [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-        )
-        .map(|_| ())
-        .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+        // The namespace is already active, so preserve the mounted child vsock
+        // path while Firecracker loads the cloned VM state. The CLI delivers
+        // the real generation token and optional grant after the guest agent
+        // becomes reachable.
+        let io = crate::vm::instance_snapshot::FirecrackerIO::new(child_dir.join("fc.socket"));
+        io.load_snapshot_for_fork(child_dir)
+            .map(|_| ())
+            .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
     }
 }
 

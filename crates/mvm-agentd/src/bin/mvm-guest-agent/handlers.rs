@@ -466,6 +466,7 @@ pub(crate) fn handle_primed_status() -> GuestResponse {
 pub(crate) fn handle_post_restore(
     ctx: &mut HandlerCtx,
     token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    host_epoch_secs: Option<u64>,
     grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
 ) -> GuestResponse {
     // First, rotate the VMGenID: feed the host-minted token to the
@@ -477,6 +478,13 @@ pub(crate) fn handle_post_restore(
         reseed_on_post_restore(token),
         mvm_agentd::genid::GenIdAction::Reseeded
     );
+    let (clock_resynced, clock_error) = match host_epoch_secs {
+        None => (false, None),
+        Some(epoch_secs) => match mvm_agentd::restore_clock::resync(epoch_secs) {
+            Ok(()) => (true, None),
+            Err(error) => (false, Some(format!("clock resync failed: {error}"))),
+        },
+    };
     // Re-pin the verb grant if the host sent a fresh envelope. This
     // covers restore across a plan change (a fork mints a fresh
     // host-signed grant with the child's new session_id/plan_nonce and
@@ -507,25 +515,29 @@ pub(crate) fn handle_post_restore(
     let result = std::process::Command::new("kill")
         .args(["-USR1", "1"])
         .output();
-    match result {
-        Ok(out) if out.status.success() => GuestResponse::PostRestoreAck {
-            success: true,
-            detail: Some("post-restore signal sent to init".to_string()),
-            reseeded,
-        },
-        Ok(out) => GuestResponse::PostRestoreAck {
-            success: false,
-            detail: Some(format!(
-                "kill failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            )),
-            reseeded,
-        },
-        Err(e) => GuestResponse::PostRestoreAck {
-            success: false,
-            detail: Some(format!("failed to send signal: {}", e)),
-            reseeded,
-        },
+    let signal_detail = match result {
+        Ok(out) if out.status.success() => None,
+        Ok(out) => Some(format!(
+            "kill failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )),
+        Err(e) => Some(format!("failed to send signal: {}", e)),
+    };
+    let success = clock_error.is_none() && signal_detail.is_none();
+    let detail = match (clock_error, signal_detail) {
+        (None, None) if host_epoch_secs.is_some() => {
+            Some("post-restore clock sync and init signal completed".to_string())
+        }
+        (None, None) => Some("post-restore signal sent to init".to_string()),
+        (Some(clock), None) => Some(clock),
+        (None, Some(signal)) => Some(signal),
+        (Some(clock), Some(signal)) => Some(format!("{clock}; {signal}")),
+    };
+    GuestResponse::PostRestoreAck {
+        success,
+        detail,
+        reseeded,
+        clock_resynced,
     }
 }
 

@@ -70,6 +70,10 @@ PostRestore: {
  */
 grant_envelope?: (VerbGrantEnvelope | null)
 /**
+ * Host wall-clock epoch seconds to apply before the init restart hook. Omitted by legacy callers that do not request clock sync.
+ */
+host_epoch_secs?: (number | null)
+/**
  * @minItems 16
  * @maxItems 16
  */
@@ -334,6 +338,10 @@ pid: number
 }
 } | {
 PostRestoreAck: {
+/**
+ * `true` iff the guest applied the host-provided restore epoch before signaling init. Defaults to `false` for older agents.
+ */
+clock_resynced?: boolean
 detail?: (string | null)
 /**
  * `true` iff the delivered generation token changed and the guest reseeded its CSPRNG (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore). Defaults to `false` on the wire for forward-compat with a pre-rotation ack.

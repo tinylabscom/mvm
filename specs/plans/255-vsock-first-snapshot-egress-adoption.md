@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Draft.
+**Status:** In progress.
 
 ## Goal
 
@@ -249,23 +249,57 @@ un-audited or tampered parent; no second provenance graph is introduced (reuses
 
 ### Phase 2 — Warm pool and fork hygiene in `mvm-runtime`
 
-- [ ] Implement paused-parent pool keyed by template id in `mvm-runtime`:
-      create, maintain, and evict parents based on TTL / memory budget.
-- [ ] Implement `fork_from_parent` that performs the CoW clone and assigns fresh
-      identity (CID, `boot_id`, `session_nonce`, generation id, per-instance
-      secrets disk).
-- [ ] Implement post-resume hygiene: entropy reseed, clock resync, vsock flow
-      teardown, and fresh handshake.
-- [ ] Add a hard guard that refuses to resume a warm parent as a workload
-      (different code path / enum variant).
-- [ ] Add unit tests for identity freshness and replay refusal; add BDD
-      scenarios for sub-second warm launch and for fork isolation.
-- [ ] `fork_from_parent` mints or inherits a fresh signed `ExecutionPlan` for
-      the child and refuses to launch a child whose plan is unsigned, expired,
-      or replayed (claim 8). Add a negative test.
-- [ ] On block+ext4 backends the forked child inherits the parent template's
-      dm-verity roothash binding; a fork that would drop verity fails closed
-      (claim 3).
+- [x] Thread the stable registered-template identity through `VmStartConfig`,
+      `StandbySpec`, persisted `StandbyHandle` records, and warm-claim
+      compatibility. Template-bound parents can only satisfy launches for the
+      same template; legacy records without the field remain image-agnostic.
+- [x] Make warm-parent reservation atomic: selecting a compatible idle parent
+      and persisting its `Claimed` state now share the pool claim lock, and the
+      lease path consumes that reservation directly. Add coverage for
+      double-claim prevention and cross-template refusal.
+- [x] Implement paused-parent pool keyed by template id in `mvm-runtime`:
+      create and maintain parents with the existing TTL reaper, and evict the
+      oldest idle/parked parents per template when their recorded memory
+      footprint exceeds the target budget. Claimed parents are protected.
+- [~] Implement `fork_from_parent`: the verified checkpoint content is now
+      CoW-cloned into a distinct child state directory and the Firecracker
+      snapshot is loaded into a fresh VMM. Fresh CID/boot-id/session isolation
+      and per-instance secret rotation still need to be completed.
+- [~] Implement post-resume hygiene: fork restore now always delivers a fresh
+      generation token, a host epoch, and the guest remount/restart hook through
+      `PostRestore`; the CLI now fails closed and stops the child unless the
+      guest acknowledges, reports reseeding, and confirms clock resync. The
+      guest agent applies the epoch through its agent-only `CAP_SYS_TIME`
+      capability; workload processes receive no clock-setting capability.
+      Explicit vsock flow teardown and the fresh handshake contract are covered
+      by the guest's one-operational-request connection lifetime and a regression
+      test proving a replied-to authenticated stream cannot be reused. Dedicated
+      live builder/guest coverage remains.
+- [x] Add a hard guard that refuses to fork from a live parent or reuse the
+      parent's checkpoint id or VM name. The child must enter through the
+      distinct fork path; direct warm-parent resume remains unavailable.
+- [~] Add unit tests for identity freshness and replay refusal; focused
+      coverage now includes independent VMGenID clone reseeding, snapshot
+      epoch replay refusal, atomic warm-parent claims, template isolation,
+      fork identity guards, and post-request authenticated-session teardown.
+      Dedicated live warm-launch and fork-isolation BDD scenarios remain for
+      the builder/KVM test environment.
+- [~] `fork_from_parent` now requires a child admission envelope at the
+      vm_full runtime boundary and refuses missing, malformed, tenant-mismatched,
+      stale, or incorrectly content-addressed plans before cloning/restoring.
+      The CLI mints the fresh signed plan; cryptographic trust and nonce replay
+      checks remain in the admission supervisor, with negative coverage for
+      absent, malformed, tenant-mismatched, and expired admission.
+- [~] The Firecracker block-rooted fork now requires `device-anchors.json`,
+      preserves paired `rootfs.verity`/`rootfs.roothash` sidecars, and refuses
+      an incomplete binding before starting the child. Equivalent enforcement
+      for any future block+ext4 backend remains to be added.
+- [x] Prove the QEMU Stage 0 raw-egress path on the FC host: concurrent
+      `cache.nixos.org` and `cdn.kernel.org` flows now cross the guest SOCKS5
+      client, AF_VSOCK listener, host admission gate, and upstream splice;
+      bootstrap completed with `vsock_egress_ready: true`. Add a Linux
+      regression test that keeps one raw connection open while a second
+      connection is admitted and handled independently.
 
 **Acceptance gate:** warm launch is sub-second on Linux and macOS; forked child
 has a new session nonce and cannot reuse an old one; a forked/restored child

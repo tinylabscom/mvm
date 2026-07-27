@@ -64,6 +64,8 @@ pub mod lifecycle_hooks;
 /// is Linux-only and gated inside the module.
 pub mod netinit;
 pub mod probes;
+/// Restore-time guest wall-clock synchronization.
+pub mod restore_clock;
 /// In-guest entrypoint runtime for function-call workloads. The
 /// `mvm-runner` binary (`src/bin/mvm-runner.rs`) is the thin entry over
 /// these testable units. Folded in from the former `mvm-runner` crate.

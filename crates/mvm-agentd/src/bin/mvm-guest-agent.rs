@@ -314,8 +314,9 @@ fn handle_client(
             GuestRequest::PrimedStatus => handle_primed_status(),
             GuestRequest::PostRestore {
                 token,
+                host_epoch_secs,
                 grant_envelope,
-            } => handle_post_restore(&mut ctx, token, grant_envelope),
+            } => handle_post_restore(&mut ctx, token, host_epoch_secs, grant_envelope),
 
             GuestRequest::Exec {
                 command,
@@ -892,6 +893,14 @@ mod tests {
             .expect("write ping");
         let pong: GuestResponse = session.read(&mut host).expect("read pong");
         assert!(matches!(pong, GuestResponse::Pong));
+
+        // An operational request owns the authenticated connection. The
+        // agent closes it after replying, so a caller cannot carry a
+        // pre-restore session (including its sequence numbers) into a later
+        // request; the next request must perform a fresh handshake.
+        let _ = session.write(&mut host, &GuestRequest::Ping);
+        let reused = session.read::<GuestResponse>(&mut host);
+        assert!(reused.is_err(), "operational sessions must not be reusable");
 
         handle.join().expect("handle_client thread");
     }

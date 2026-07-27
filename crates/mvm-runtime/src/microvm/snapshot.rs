@@ -1,4 +1,4 @@
-//! Firecracker snapshot controls that do not alter the runner's device model.
+//! Firecracker snapshot capture controls and fail-closed legacy restore entries.
 
 use anyhow::{Context, Result};
 use tracing::instrument;
@@ -27,16 +27,16 @@ pub fn restore_from_template_snapshot(
     );
 }
 
-/// Refuse live-memory restore entry points.
+/// Refuse the legacy live-memory restore entry point.
 ///
-/// A restored VMM can reintroduce devices captured in an older snapshot, so
-/// Firecracker memory restore is unavailable on the vsock-only workload path.
+/// Verified instance resume is owned by `vm::instance_snapshot`, and verified
+/// checkpoint forks use `FirecrackerIO::load_snapshot_for_fork` directly.
 pub fn warm_restore_instance(
     name: &str,
     _token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
 ) -> Result<mvm_core::vm_backend::ReseedStatus> {
     anyhow::bail!(
-        "Firecracker memory restore is disabled; use the vsock workload runner for a cold boot of '{name}'"
+        "Firecracker memory restore is disabled; use the verified snapshot resume path for '{name}'"
     )
 }
 
@@ -46,7 +46,7 @@ pub fn warm_restore_instance_from_path(
     _token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
 ) -> Result<mvm_core::vm_backend::ReseedStatus> {
     anyhow::bail!(
-        "Firecracker memory restore is disabled; use the vsock workload runner for '{name}'"
+        "Firecracker memory restore is disabled; use the verified snapshot fork path for '{name}'"
     )
 }
 
@@ -100,6 +100,6 @@ mod tests {
     fn memory_restore_is_fail_closed() {
         let err = warm_restore_instance("vm", [0u8; mvm_core::crypto::vmgenid::GENID_BYTES])
             .expect_err("legacy restore must refuse");
-        assert!(err.to_string().contains("disabled"));
+        assert!(err.to_string().contains("verified snapshot resume path"));
     }
 }

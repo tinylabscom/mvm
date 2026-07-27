@@ -1230,6 +1230,7 @@ impl VmBackend for LibkrunBackend {
 
         Ok(StandbyHandle {
             id: spec.id.clone(),
+            template_id: spec.template_id.clone(),
             control_socket: spec.control_socket.clone(),
             pid,
             kernel_sha256: spec.kernel_sha256.clone(),
@@ -1422,6 +1423,7 @@ mod tests {
     fn sample_standby_spec() -> StandbySpec {
         StandbySpec {
             id: "standby-x".into(),
+            template_id: None,
             kernel_path: "/k/vmlinux".into(),
             kernel_sha256: "a".repeat(64),
             vcpus: 2,

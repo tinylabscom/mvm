@@ -808,6 +808,7 @@ class GuestResponse17:
 @dataclass
 class PostRestoreAck:
     success: bool
+    clock_resynced: Optional[bool] = None
     detail: Optional[str] = None
     reseeded: Optional[bool] = False
 
@@ -1432,6 +1433,7 @@ class VerbGrantEnvelope:
 @dataclass
 class PostRestore:
     grant_envelope: Optional[VerbGrantEnvelope] = None
+    host_epoch_secs: Optional[int] = None
     token: Optional[List[TokenItem]] = field(
         default_factory=lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     )

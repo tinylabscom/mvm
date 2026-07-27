@@ -816,7 +816,8 @@ let
     # forks and vsock port 5252 stays unbound.
     /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
       --reuid=${toString agentUid} --regid=${toString agentUid} \
-      --clear-groups --no-new-privs \
+      --clear-groups --securebits=keep-caps \
+      --inh-caps=+sys_time --ambient-caps=+sys_time --no-new-privs \
       -- "$MVM_AGENT_BIN" &
 
     # Stage 3 — hostname + console. /dev/console is what the

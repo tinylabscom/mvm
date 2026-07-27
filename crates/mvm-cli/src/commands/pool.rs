@@ -64,6 +64,8 @@ pub fn kernel_identity(backend: &dyn VmBackend, kernel_path: Option<&str>) -> Re
 pub struct StandbySpecParams<'a> {
     /// `~/.mvm/pool/` root — holds the control UDS.
     pub pool_root: &'a Path,
+    /// Registered template identity for a template-bound warm parent.
+    pub template_id: Option<&'a str>,
     /// `~/.mvm/vms/` root — the standby's runtime state dir lives at `vms_root/<id>/`.
     pub vms_root: &'a Path,
     /// Kernel image the standby pre-loads (the path; for libkrun mkGuest the bundled kernel
@@ -96,6 +98,7 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
     let id = format!("standby-{}", &nonce[..16]);
     Ok(StandbySpec {
         kernel_path: p.kernel.to_string_lossy().into_owned(),
+        template_id: p.template_id.map(str::to_string),
         kernel_sha256: p.kernel_sha256.to_string(),
         vcpus: p.vcpus,
         mem_mib: p.mem_mib,
@@ -118,6 +121,8 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
 /// Parameters for [`warm_to_target`] — grouped to keep the signature small.
 pub struct WarmParams<'a> {
     pub backend: &'a dyn VmBackend,
+    /// Registered template identity for the warm-parent set, if applicable.
+    pub template_id: Option<&'a str>,
     pub kernel: &'a Path,
     pub vcpus: u8,
     pub mem_mib: u32,
@@ -172,6 +177,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
         None => None,
     };
     let want = StandbyCompat {
+        template_id: p.template_id.map(str::to_string),
         kernel_sha256: kernel_sha256.clone(),
         vcpus: p.vcpus,
         mem_mib: p.mem_mib,
@@ -185,6 +191,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     for _ in have..p.target {
         let spec = build_standby_spec(&StandbySpecParams {
             pool_root: &pool_root,
+            template_id: p.template_id,
             vms_root: &vms_root,
             kernel: p.kernel,
             kernel_sha256: &kernel_sha256,
@@ -205,6 +212,19 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 failed += 1;
             }
         }
+    }
+    // Bound the retained parent footprint for this template. The target is
+    // also the intended number of parents, so its per-parent memory cap gives
+    // the warm set a deterministic upper bound even when older records were
+    // created with a different resource shape.
+    let max_memory_mib = u64::from(p.target).saturating_mul(u64::from(p.mem_mib));
+    let evicted = pool.evict_to_memory_budget(p.template_id, max_memory_mib)?;
+    if !evicted.is_empty() {
+        tracing::debug!(
+            template_id = ?p.template_id,
+            count = evicted.len(),
+            "evicted warm parents over memory budget"
+        );
     }
     Ok(WarmResult { spawned, failed })
 }
@@ -252,11 +272,9 @@ where
         })
         .context("requested standby-pool recovery"));
     }
-    let Some(handle) = pool.select_idle_compatible(want)? else {
+    let Some(handle) = pool.claim_idle_compatible(want)? else {
         return Ok(LaunchDecision::ColdBoot);
     };
-    // Reserve it so a concurrent launch won't double-claim.
-    pool.mark_claimed(&handle.id)?;
     let claim = match make_claim(&handle) {
         Ok(c) => c,
         Err(e) => {
@@ -287,6 +305,7 @@ fn compat_for_launch(
 ) -> Result<StandbyCompat> {
     let image_sha256 = image_identity(backend, cfg.rootfs_path.as_str())?;
     Ok(StandbyCompat {
+        template_id: cfg.template_id.clone(),
         kernel_sha256: kernel_identity(backend, cfg.kernel_path.as_deref())?,
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: cfg.memory_mib,
@@ -438,6 +457,7 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
         &pool,
         &WarmParams {
             backend: backend.as_vm_backend(),
+            template_id: cfg.template_id.as_deref(),
             kernel: Path::new(kernel),
             vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
             mem_mib: cfg.memory_mib,
@@ -651,6 +671,7 @@ mod tests {
         let vms_root = tmp.path().join("vms");
         let spec = build_standby_spec(&StandbySpecParams {
             pool_root: &pool_root,
+            template_id: None,
             vms_root: &vms_root,
             kernel: &kp,
             kernel_sha256: &kernel_sha256_hex(&kp).unwrap(),
@@ -721,6 +742,7 @@ mod tests {
     fn idle_handle(id: &str, kernel: &str) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
+            template_id: None,
             control_socket: format!("/p/{id}.sock"),
             pid: std::process::id(),
             kernel_sha256: kernel.into(),
@@ -736,6 +758,7 @@ mod tests {
     fn saved_idle_handle(id: &str, kernel: &str, image: &str) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
+            template_id: None,
             control_socket: format!("/p/{id}/control.sock"),
             pid: 0,
             kernel_sha256: kernel.into(),
@@ -837,6 +860,7 @@ mod tests {
             &pool,
             &WarmParams {
                 backend: &backend,
+                template_id: None,
                 kernel: &kernel,
                 vcpus: 2,
                 mem_mib: 1024,
@@ -875,6 +899,7 @@ mod tests {
             &pool,
             &WarmParams {
                 backend: &backend,
+                template_id: None,
                 kernel: &kernel,
                 vcpus: h.vcpus,
                 mem_mib: h.mem_mib,
@@ -917,6 +942,7 @@ mod tests {
         ) -> std::result::Result<StandbyHandle, StandbyError> {
             Ok(StandbyHandle {
                 id: spec.id.clone(),
+                template_id: spec.template_id.clone(),
                 control_socket: spec.control_socket.clone(),
                 pid: std::process::id(),
                 kernel_sha256: spec.kernel_sha256.clone(),
@@ -984,6 +1010,7 @@ mod tests {
                 pool,
                 &WarmParams {
                     backend,
+                    template_id: None,
                     kernel,
                     vcpus: 2,
                     mem_mib: 1024,
@@ -1004,6 +1031,7 @@ mod tests {
         });
 
         let want = StandbyCompat {
+            template_id: None,
             kernel_sha256: kernel_sha256_hex(&kernel).unwrap(),
             vcpus: 2,
             mem_mib: 1024,
@@ -1106,6 +1134,7 @@ fn run_warm(
         pool,
         &WarmParams {
             backend: shape.backend.as_vm_backend(),
+            template_id: None,
             kernel: &shape.kernel,
             vcpus: shape.vcpus,
             mem_mib: shape.mem_mib,

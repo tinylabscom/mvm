@@ -691,6 +691,9 @@ pub struct WarmStartOutcome {
 pub struct StandbySpec {
     /// Stable id for this standby (also the `~/.mvm/pool/<id>/` dir name).
     pub id: String,
+    /// Registered template identity, when this parent is template-bound.
+    /// `None` means the parent is image-agnostic.
+    pub template_id: Option<String>,
     /// Kernel image path the standby pre-loads.
     pub kernel_path: String,
     /// Lowercase-hex sha256 of the kernel image — part of the base-compat key.
@@ -727,6 +730,9 @@ pub struct StandbySpec {
 /// (libkrun) and `Some(a) == Some(b)` iff `a == b`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandbyCompat {
+    /// Registered template identity. Compatibility is exact, including the
+    /// distinction between a template-bound and image-agnostic standby.
+    pub template_id: Option<String>,
     pub kernel_sha256: String,
     pub vcpus: u8,
     pub mem_mib: u32,
@@ -743,6 +749,9 @@ pub struct StandbyCompat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StandbyHandle {
     pub id: String,
+    /// Registered template identity, when the standby is template-bound.
+    #[serde(default)]
+    pub template_id: Option<String>,
     pub control_socket: String,
     pub pid: u32,
     pub kernel_sha256: String,
@@ -760,6 +769,7 @@ impl StandbyHandle {
     /// The base-compat key this standby was spawned with.
     pub fn compat(&self) -> StandbyCompat {
         StandbyCompat {
+            template_id: self.template_id.clone(),
             kernel_sha256: self.kernel_sha256.clone(),
             vcpus: self.vcpus,
             mem_mib: self.mem_mib,
@@ -1014,6 +1024,7 @@ mod tests {
     fn standby_handle_serde_roundtrip_and_compat_match() {
         let h = StandbyHandle {
             id: "standby-abc".into(),
+            template_id: None,
             control_socket: "/p/standby-abc/control-deadbeef.sock".into(),
             pid: 4242,
             kernel_sha256: "a".repeat(64),
@@ -1029,6 +1040,7 @@ mod tests {
         assert_eq!(back.id, "standby-abc");
         assert_eq!(back.state, StandbyState::Idle);
         let want = StandbyCompat {
+            template_id: None,
             kernel_sha256: "a".repeat(64),
             vcpus: 2,
             mem_mib: 1024,
@@ -1108,6 +1120,7 @@ mod tests {
         assert!(!h.is_saved_state(), "pid != 0 → live standby");
         // An old libkrun standby is compatible with a libkrun launch (both None).
         let want = StandbyCompat {
+            template_id: None,
             kernel_sha256: "aabbcc".into(),
             vcpus: 2,
             mem_mib: 1024,
@@ -1122,6 +1135,7 @@ mod tests {
     fn standby_handle_saved_state_pid_zero_flag() {
         let saved = StandbyHandle {
             id: "standby-hvf".into(),
+            template_id: None,
             control_socket: "/p/standby-hvf/control.sock".into(),
             pid: 0,
             kernel_sha256: "cc".repeat(32),

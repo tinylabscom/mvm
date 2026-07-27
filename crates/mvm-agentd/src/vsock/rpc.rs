@@ -51,8 +51,10 @@ struct RpcSession {
     inner: AuthenticatedSession,
 }
 
-/// An authenticated control session that can carry multiple RPCs over one
-/// connected stream.
+/// An authenticated control session that can carry multiple RPCs when the
+/// peer keeps the connection open. The guest agent's production control
+/// listener closes after one operational request, so callers that cross a
+/// restore boundary must obtain a new stream and handshake.
 pub struct ControlSession {
     inner: RpcSession,
 }

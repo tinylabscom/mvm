@@ -116,7 +116,14 @@ const QEMU_STAGE0_OUT_ARTIFACT_NAMES: &[&str] = &[
 /// packing — the heavy build/VCS dirs the nix workspace filter ignores
 /// anyway. Shared with the libkrun Stage 0 path (`libkrun_builder`), which
 /// packs `/work` onto an ext4 disk the same way this QEMU path does.
-pub(crate) const WORK_TREE_EXCLUDE_DIRS: &[&str] = &["target", ".git", ".claude", "node_modules"];
+pub(crate) const WORK_TREE_EXCLUDE_DIRS: &[&str] = &[
+    "target",
+    ".git",
+    ".claude",
+    "node_modules",
+    ".mvm",
+    ".mvm-test",
+];
 
 /// Ext4 image sizes (sparse — `set_len` + `mkfs.ext4 -d` only touch real
 /// content). The seed disk holds the whole build closure nix downloads.
@@ -327,22 +334,47 @@ fn stage_qemu_vsock_guest_modules(host_bins_dir: &Path) -> Result<(), BuilderVmE
     std::fs::create_dir_all(&dest_dir)
         .map_err(|e| io_err("creating stage0 vsock module dir", &dest_dir, e))?;
     for module in QEMU_STAGE0_VSOCK_GUEST_MODULES {
-        let src = module_root.join(module);
-        if !src.is_file() {
-            return Err(BuilderVmError::VmmUnavailable {
+        let src = locate_qemu_vsock_module(&module_root, module).ok_or_else(|| {
+            BuilderVmError::VmmUnavailable {
                 requested: "qemu-stage0-vsock-modules".to_string(),
                 reason: format!(
                     "required guest vsock module {} missing on host; install the distro kernel modules package for {}",
-                    src.display(),
+                    module_root.join(module).display(),
                     release
                 ),
-            });
-        }
+            }
+        })?;
         let dst = dest_dir.join(module);
-        std::fs::copy(&src, &dst)
-            .map_err(|e| io_err("copying stage0 vsock guest module", &src, e))?;
+        if src.extension().is_some_and(|extension| extension == "zst") {
+            let output = Command::new("zstd")
+                .args(["--quiet", "--decompress", "--stdout"])
+                .arg(&src)
+                .output()
+                .map_err(|e| io_err("decompressing stage0 vsock guest module", &src, e))?;
+            if !output.status.success() {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "decompressing stage0 vsock guest module {} failed with {}",
+                    src.display(),
+                    output.status
+                )));
+            }
+            std::fs::write(&dst, output.stdout)
+                .map_err(|e| io_err("writing decompressed stage0 vsock guest module", &dst, e))?;
+        } else {
+            std::fs::copy(&src, &dst)
+                .map_err(|e| io_err("copying stage0 vsock guest module", &src, e))?;
+        }
     }
     Ok(())
+}
+
+fn locate_qemu_vsock_module(module_root: &Path, module: &str) -> Option<PathBuf> {
+    let uncompressed = module_root.join(module);
+    if uncompressed.is_file() {
+        return Some(uncompressed);
+    }
+    let compressed = module_root.join(format!("{module}.zst"));
+    compressed.is_file().then_some(compressed)
 }
 
 /// Create + populate an ext4 image from a directory tree without mounting it
@@ -497,7 +529,8 @@ mod tests {
     use super::{
         DirStats, QEMU_STAGE0_OUT_ARTIFACT_NAMES, QEMU_STAGE0_VSOCK_GUEST_MODULES,
         WORK_EXT4_DIR_OVERHEAD_BYTES, WORK_EXT4_FILE_OVERHEAD_BYTES,
-        WORK_EXT4_FIXED_HEADROOM_BYTES, dir_stats,
+        WORK_EXT4_FIXED_HEADROOM_BYTES, WORK_TREE_EXCLUDE_DIRS, copy_tree_filtered, dir_stats,
+        locate_qemu_vsock_module,
     };
     use std::fs;
 
@@ -545,6 +578,44 @@ mod tests {
         assert_eq!(stats.file_count, 2);
         assert_eq!(stats.dir_count, 2);
         assert_eq!(stats.file_bytes, 10);
+    }
+
+    #[test]
+    fn work_tree_copy_excludes_runtime_state_dirs() {
+        let source = tempfile::tempdir().expect("tempdir");
+        let destination = tempfile::tempdir().expect("tempdir");
+        fs::write(source.path().join("README"), b"workspace").expect("workspace file");
+        for state_dir in [".mvm", ".mvm-test"] {
+            fs::create_dir_all(source.path().join(state_dir).join("cache"))
+                .expect("state directory");
+            fs::write(
+                source.path().join(state_dir).join("cache").join("payload"),
+                b"runtime state",
+            )
+            .expect("state file");
+        }
+
+        copy_tree_filtered(source.path(), destination.path(), WORK_TREE_EXCLUDE_DIRS)
+            .expect("copy filtered work tree");
+
+        assert_eq!(
+            fs::read(destination.path().join("README")).expect("read workspace file"),
+            b"workspace"
+        );
+        assert!(!destination.path().join(".mvm").exists());
+        assert!(!destination.path().join(".mvm-test").exists());
+    }
+
+    #[test]
+    fn qemu_vsock_module_lookup_accepts_compressed_modules() {
+        let module_root = tempfile::tempdir().expect("tempdir");
+        fs::write(module_root.path().join("vsock.ko.zst"), b"compressed")
+            .expect("compressed module");
+
+        assert_eq!(
+            locate_qemu_vsock_module(module_root.path(), "vsock.ko"),
+            Some(module_root.path().join("vsock.ko.zst"))
+        );
     }
 }
 

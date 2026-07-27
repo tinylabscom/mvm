@@ -337,6 +337,9 @@ pub struct PostRestoreOutcome {
     /// generation token changed (a fresh clone of the snapshot). `false` for a
     /// plain wake or a no-rotation (zero-token) restore.
     pub reseeded: bool,
+    /// `true` iff the guest applied the host wall-clock epoch before
+    /// acknowledging the restore.
+    pub clock_resynced: bool,
 }
 
 /// Sends the `PostRestore` signal to a resumed guest so it finishes coming
@@ -374,6 +377,12 @@ pub fn signal_post_restore<S: PostRestoreSignal + ?Sized>(
              — config/secrets drives may be unmounted; re-run `mvmctl resume`"
         );
     }
+    if !outcome.clock_resynced {
+        bail!(
+            "VM {vm_name} resumed but the guest did not resynchronize its wall clock — \
+             refusing to report post-restore readiness"
+        );
+    }
     Ok(outcome)
 }
 
@@ -405,6 +414,12 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
             &mut stream,
             &GuestRequest::PostRestore {
                 token: self.token,
+                host_epoch_secs: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .context("reading host wall clock for post-restore")?
+                        .as_secs(),
+                ),
                 grant_envelope: None,
             },
         )? {
@@ -412,10 +427,12 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
                 success,
                 detail,
                 reseeded,
+                clock_resynced,
             } => Ok(PostRestoreOutcome {
                 acknowledged: success,
                 detail,
                 reseeded,
+                clock_resynced,
             }),
             other => bail!("unexpected response to PostRestore: {other:?}"),
         }
@@ -686,6 +703,12 @@ impl FirecrackerIO {
         }
         Ok(())
     }
+
+    /// Load a forked snapshot after its recorded device paths have been
+    /// remapped in the child's private mount namespace.
+    pub(crate) fn load_snapshot_for_fork(&self, dir: &Path) -> Result<()> {
+        self.load_snapshot_inner(dir, false)
+    }
 }
 
 impl SnapshotIO for FirecrackerIO {
@@ -709,6 +732,12 @@ impl SnapshotIO for FirecrackerIO {
     }
 
     fn load_snapshot(&self, dir: &Path) -> Result<()> {
+        self.load_snapshot_inner(dir, true)
+    }
+}
+
+impl FirecrackerIO {
+    fn load_snapshot_inner(&self, dir: &Path, clean_vsock: bool) -> Result<()> {
         let vm_dir = self
             .socket_path
             .parent()
@@ -728,7 +757,12 @@ impl SnapshotIO for FirecrackerIO {
             ))
             .with_context(|| "stopping paused Firecracker before snapshot restore")?;
         }
-        crate::microvm::start_vm_firecracker(&vm_dir.to_string_lossy(), &socket_str)
+        let start = if clean_vsock {
+            crate::microvm::start_vm_firecracker
+        } else {
+            crate::microvm::start_vm_firecracker_for_snapshot
+        };
+        start(&vm_dir.to_string_lossy(), &socket_str)
             .with_context(|| "starting fresh Firecracker for snapshot restore")?;
 
         let body = serde_json::json!({
@@ -1120,6 +1154,7 @@ mod tests {
             acknowledged: true,
             detail: Some("post-restore signal sent to init".into()),
             reseeded: true,
+            clock_resynced: true,
         }));
         let outcome = signal_post_restore("vm-1", &signal).unwrap();
         assert!(outcome.acknowledged);
@@ -1134,11 +1169,24 @@ mod tests {
             acknowledged: false,
             detail: Some("kill failed: no such process".into()),
             reseeded: false,
+            clock_resynced: false,
         }));
         let err = signal_post_restore("vm-1", &signal).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("did not acknowledge"), "got: {msg}");
         assert!(msg.contains("kill failed"), "detail must surface: {msg}");
+    }
+
+    #[test]
+    fn signal_post_restore_errors_when_clock_is_not_resynced() {
+        let signal = MockSignal(Ok(PostRestoreOutcome {
+            acknowledged: true,
+            detail: Some("post-restore signal sent to init".into()),
+            reseeded: true,
+            clock_resynced: false,
+        }));
+        let err = signal_post_restore("vm-1", &signal).unwrap_err();
+        assert!(err.to_string().contains("wall clock"));
     }
 
     #[test]

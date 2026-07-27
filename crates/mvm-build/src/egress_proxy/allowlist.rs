@@ -24,6 +24,8 @@
 //!   so flake input tarballs must be admitted on this host as well.
 //! - `api.github.com` — flake metadata resolution for GitHub-backed
 //!   inputs when Nix cannot satisfy it from the local lock/cache.
+//! - `cdn.kernel.org` — pinned Linux kernel source tarballs used by
+//!   the builder kernel derivations.
 //!
 //! Everything else fails closed: the proxy returns HTTP 403 and
 //! tears the socket down without ever establishing a tunnel.
@@ -66,6 +68,7 @@ pub const PRODUCTION_HOSTNAMES: &[&str] = &[
     "github.com",
     "codeload.github.com",
     "api.github.com",
+    "cdn.kernel.org",
 ];
 
 /// Only port the proxy permits — the allowlisted hosts serve
@@ -149,7 +152,7 @@ mod tests {
         let a = Allowlist::production();
         assert_eq!(
             a.hostnames().len(),
-            11,
+            12,
             "builder allowlist should stay explicit"
         );
         assert!(a.is_allowed("pypi.org", 443));
@@ -163,6 +166,7 @@ mod tests {
         assert!(a.is_allowed("github.com", 443));
         assert!(a.is_allowed("codeload.github.com", 443));
         assert!(a.is_allowed("api.github.com", 443));
+        assert!(a.is_allowed("cdn.kernel.org", 443));
     }
 
     #[test]

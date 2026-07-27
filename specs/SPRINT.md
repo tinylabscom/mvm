@@ -25,6 +25,27 @@
       firewalls. Focused regression coverage, workspace check, full tests,
       clippy, and formatting pass; published as PR #1847 for review.
 
+- [~] #1851 vsock-first snapshot, egress, and warm-start adoption: Phase 0 and
+      Phase 1 are landed; Phase 2 now carries stable template identity into
+      warm parents, atomically reserves compatible parents, and bounds each
+      template's idle/parked memory footprint. Forks now reject live-parent and
+      identity collisions, load the cloned Firecracker snapshot in a fresh VMM,
+      and always deliver a fresh generation token through PostRestore; fork
+      launch now fails closed and stops the child if acknowledgement or
+      reseeding is not proven, and vm_full restore requires a structurally
+      valid, fresh child admission envelope while preserving FC dm-verity
+      sidecars and device anchors. The guest's one-request authenticated
+      connection lifetime now has regression coverage for stale-session
+      refusal after a reply. Focused pool, checkpoint, snapshot, check,
+      clippy, and formatting gates pass; child-plan negative coverage now
+      includes malformed, tenant-mismatched, and expired envelopes. The FC
+      host now proves concurrent QEMU raw-egress flows through the guest
+      SOCKS5 client and host AF_VSOCK gate; bootstrap completed with the
+      generated builder artifact reporting `vsock_egress_ready: true`, and
+      Linux coverage prevents one long-lived raw flow from starving later
+      connections. Live warm-launch/fork-isolation and restore clock
+      resynchronization remain.
+
 ---
 
 ## 1. Why
@@ -373,10 +394,11 @@ Then unify + retire the old paths:
 **WS-DX — developer experience & performance** (the story #1637 promises)
 
 - [ ] **Sub-second launch**, verified: a timed `mvmctl up` → PTY shell → `mvmctl down` e2e on Mac (HVF) and Linux (libkrun + FC), asserting sub-second boot + clean teardown.
-- [ ] **Warm start / warm pool** (pre-warmed standby VMs), **snapshot / fork / restore** (bake once, fork many via CoW, fast restore), **streaming exec**, **`expose_tcp`** (host↔guest port forward), **live host-directory mount** — the supermachine/microsandbox-shaped capabilities, exposed through `mvm-client` + the SDK.
+- [~] **Warm start / warm pool** (pre-warmed standby VMs), **snapshot / fork / restore** (bake once, fork many via CoW, fast restore), **streaming exec**, **`expose_tcp`** (host↔guest port forward), **live host-directory mount** — the supermachine/microsandbox-shaped capabilities, exposed through `mvm-client` + the SDK. Phase 2 now scopes warm parents by template identity, reserves claims atomically, bounds idle/parked parent memory, and sends an authenticated restore epoch that the guest agent applies with an agent-only clock capability; live warm-launch and fork-isolation verification remains.
 - [ ] `specs/plans/255-vsock-first-snapshot-egress-adoption.md` details the
-      vsock-first snapshot/egress/warm-start adoption boundary; Phase 0 (spec)
-      and Phase 1 (snapshot storage) are landing (tracking issue: #1851).
+      vsock-first snapshot/egress/warm-start adoption boundary; Phase 0 and
+      Phase 1 are landed and Phase 2 is in progress (tracking issue: #1851;
+      warm replacement follow-up: #1819).
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.

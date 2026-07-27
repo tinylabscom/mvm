@@ -72,7 +72,7 @@ pub fn fc_pid_path(name: &str) -> Option<std::path::PathBuf> {
 /// Firecracker VM whose per-VM directory is `dir` (as returned by
 /// [`resolve_running_vm_dir`]). `pub` so CLI-layer callers — e.g. the FC fork
 /// path delivering a post-restore grant to a forked child — can locate the
-/// same socket `warm_restore_instance_from_path` talks to, without
+/// same socket used by the verified snapshot restore paths, without
 /// reimplementing the layout.
 pub fn firecracker_vsock_uds_path(dir: &str) -> String {
     format!("{dir}/runtime/v.sock")

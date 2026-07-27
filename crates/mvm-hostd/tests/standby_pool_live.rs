@@ -27,6 +27,7 @@ use mvm_core::vm_backend::{StandbySpec, VmBackend};
 fn spec(dir: &Path, nonce: &str) -> StandbySpec {
     StandbySpec {
         id: format!("standby-{nonce}"),
+        template_id: None,
         kernel_path: "/nonexistent/vmlinux".into(),
         kernel_sha256: "a".repeat(64),
         vcpus: 1,
