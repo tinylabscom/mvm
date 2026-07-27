@@ -339,7 +339,7 @@ jobs:
             nix flake check --no-build "./$d"
           done
 
-      - name: Guest rootfs carries no glibc
+      - name: Baked guest rootfs tree is glibc-free (runtime overlay excluded)
         run: |
           set -euo pipefail
           nix build --print-build-logs \

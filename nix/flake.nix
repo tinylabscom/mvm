@@ -206,6 +206,13 @@
       # build-backed guarantee a pure `nix eval` can't provide, since
       # eval can't see a derivation's runtime closure. Wired into the
       # `nix-flake-check` CI job.
+      #
+      # Scope: this covers only the baked rootfs tree that ships inside
+      # the guest image (busybox, init, setpriv, and friends). It does
+      # not cover the runtime overlay that gets bind-mounted into the
+      # guest at boot, which still carries its own glibc today; that
+      # gets addressed separately. A green result here means the baked
+      # tree is glibc-free, not the whole running guest.
       checks = nixpkgs.lib.genAttrs systems (system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -224,7 +231,7 @@
               ''
                 if grep -Eq -- '-glibc(-|$)' "$closure/store-paths"; then
                   echo "glibc present in guest rootfs closure:" >&2
-                  grep -- '-glibc' "$closure/store-paths" >&2
+                  grep -E -- '-glibc(-|$)' "$closure/store-paths" >&2
                   exit 1
                 fi
                 echo ok > "$out"
