@@ -941,12 +941,17 @@ fn run_curl_capture(socket: &Path, method: &str, endpoint: &str) -> Result<Strin
 /// Crate-visible (not just `mod tests`-local) so both this module's own
 /// guard-ordering tests and the template-restore tests in
 /// `crate::microvm::snapshot` drive the same double against
-/// `guarded_load_resume`.
+/// `guarded_load_resume`. `#[cfg(test)]`-gated (unlike `CannedIO` above) so
+/// this test-only double never links into the production `mvm-runtime`
+/// library — crate-visibility does not by itself keep it out of a release
+/// build.
+#[cfg(test)]
 pub struct SpyIO {
     nic_on_restore: bool,
     calls: std::cell::RefCell<Vec<&'static str>>,
 }
 
+#[cfg(test)]
 impl SpyIO {
     pub fn new(nic_on_restore: bool) -> Self {
         Self {
@@ -960,6 +965,7 @@ impl SpyIO {
     }
 }
 
+#[cfg(test)]
 impl SnapshotIO for SpyIO {
     fn create_snapshot(&self, dir: &Path) -> Result<()> {
         std::fs::write(dir.join(VMSTATE_FILENAME), b"spy-vmstate")?;
