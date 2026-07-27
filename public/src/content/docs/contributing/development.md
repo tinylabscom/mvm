@@ -29,15 +29,27 @@ for anything missing — run it first and follow what it says.
 ### Getting started
 
 ```bash
-# Install zig + cargo-zigbuild if exercising source-checkout runtime builds
-brew install zig && cargo install cargo-zigbuild
-
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm
+
+# Source-checkout contributors exercising Linux helper/release builds:
+# install the *pinned* zig + the Linux cross-targets for the active
+# toolchain. Do NOT `brew install zig` — Homebrew's zig drifts off the
+# pinned cargo-zigbuild and fails with a cryptic CacheCheckFailed.
+just toolchain-embed
+
 cargo build
 cargo run -- doctor     # reports the builder backend + anything missing
 cargo run -- bootstrap  # pre-fetch the builder VM image (optional — builds auto-bootstrap it)
 ```
+
+> **Note — after a toolchain-version change.** `rust-toolchain.toml` pins an
+> exact Rust version, and rustup keys installed cross-targets per toolchain
+> *name*. When that pin changes (a version bump), rustup resolves a fresh
+> toolchain that carries none of the Linux cross-targets, so `just check-linux`
+> or an `mvmctl` build fails with `error[E0463]: can't find crate for core …
+> target may not be installed`. Re-run `just toolchain-embed` to reinstall the
+> targets for the new toolchain.
 
 Or run the bootstrap script on a fresh machine:
 
