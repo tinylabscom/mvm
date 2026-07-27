@@ -220,13 +220,21 @@ Non-goals above — what this plan takes, refuses, and why.
 - [ ] Add a BDD scenario: build a template with a warm snapshot, clone it into
       an instance, and verify the instance boots faster than a cold-booted
       equivalent.
-- [ ] Plug `SnapshotStore` in *beneath* the existing checkpoint lineage: a warm
+- [x] Plug `SnapshotStore` in *beneath* the existing checkpoint lineage: a warm
       snapshot is recorded as a lineage node (content-address + hash-link +
       audit anchor) via `mvm-runtime::{lineage, checkpoint}`; introduce no
-      second provenance graph.
-- [ ] A clone/fork from a parent whose lineage node is missing, un-audited, or
+      second provenance graph. (`mvm-runtime::warm_snapshot::stage_warm_snapshot`
+      stores a checkpoint's content dir into `FsSnapshotStore` under its own
+      content hash; the checkpoint's `meta.json` remains the sole lineage
+      record — no second graph.)
+- [x] A clone/fork from a parent whose lineage node is missing, un-audited, or
       hash-mismatched fails closed, reusing the checkpoint lineage's
       parent-verification path. Add a negative test.
+      (`mvm-runtime::warm_snapshot::materialize_child_from_parent` runs
+      `read_meta -> verify_content -> verify_lineage` before calling
+      `SnapshotStore::materialize`; four tests cover the positive control plus
+      missing/un-audited/tampered-parent refusal, each asserting `dst` is
+      never created.)
 
 **Acceptance gate:** `cargo test -p mvm-fs` green; BDD scenario passes on Linux;
 no `mvm-fs` consumer sees filesystem-specific logic; clone/fork refuses an
