@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed. Records a design boundary for future warm-path work; nothing
-in this ADR has shipped yet.
+Accepted. Records the adopt/refuse/constrain boundary for warm-path work;
+implementation is sequenced in Plan 265.
 
 ## Context
 
@@ -135,6 +135,20 @@ mechanism is refused for the same reason as above: it would move
 enforcement off the vsock seam and change the guest's trust model,
 exactly what this refusal rejects.
 
+### Constrain — same-page merging confined to a fork family
+
+Density benefits from sharing identical guest pages, but host-wide
+same-page merging across unrelated guests is a cross-VM side channel: a
+write to a merged page faults measurably slower, leaking co-residency and
+page contents over a timing channel and amplifying rowhammer. mvm
+therefore constrains page sharing to copy-on-write *within a single fork
+family* — the paused parent and the children forked from it, all the same
+sealed image — and refuses merging across tenants or across distinct
+workload images. This keeps the density win that CoW fork already provides
+(children share the parent's pages intrinsically, same-image) without
+opening a cross-workload channel. The policy gate fails closed: absent an
+explicit same-family scope, no merging occurs.
+
 ## Out of scope
 
 Warm-pool sizing and admission policy at the fleet level; the warmed-
@@ -146,7 +160,10 @@ that owns it, not this one.
 
 ## Consequences
 
-Page-cache priming at freeze time is a deferred follow-up on mvm's
-existing warm-snapshot design; no code or schema exists yet. No security
-claim changes as a result of this ADR — it is a prior-art boundary
-record, not a security-claim ADR.
+Page-cache priming at freeze time, the same-page-merging constraint, and
+the warm snapshot-fork restore path are implemented and sequenced in Plan
+265, which lands the restore-path security witnesses. No existing security
+claim is relaxed: the constraints above gate the warm path more tightly
+than cold boot, extending claims 1, 3, 8, 10, and 13 into the restore path
+rather than weakening them. The full surface-by-surface enumeration lives
+in `specs/notes/2026-07-26-fast-start-warm-snapshot-design.md`.

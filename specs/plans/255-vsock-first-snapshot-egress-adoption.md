@@ -4,6 +4,11 @@
 
 **Status:** In progress.
 
+> Backend sequencing, the concrete warm-start/density SLOs, the new
+> restore-path security witnesses, and the competitive-positioning
+> deliverables live in Plan 265, which depends on this plan's substrate
+> (Phases 1–2). See `specs/notes/2026-07-26-fast-start-warm-snapshot-design.md`.
+
 ## Goal
 
 Adopt the useful, externally-proven techniques identified in the prior

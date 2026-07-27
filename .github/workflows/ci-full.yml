@@ -801,7 +801,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
 
       - name: Install firecracker
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'

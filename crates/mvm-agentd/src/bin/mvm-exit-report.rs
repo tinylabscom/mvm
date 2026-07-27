@@ -28,39 +28,13 @@ fn main() -> ExitCode {
 fn report(code: i32) -> std::io::Result<()> {
     use std::io::Write;
     use std::net::TcpStream;
-    use std::os::fd::FromRawFd;
 
-    // Must match mvm_agentd::vsock::WORKLOAD_EXIT_PORT — duplicated here so
-    // this one-shot helper stays a minimal, dependency-free syscall path.
-    // Keep in sync manually.
-    const WORKLOAD_EXIT_PORT: u32 = 5251;
-    const VMADDR_CID_HOST: u32 = 2;
+    use mvm_agentd::vsock::{HOST_CID, WORKLOAD_EXIT_PORT, sys};
 
-    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let addr = libc::sockaddr_vm {
-        svm_family: libc::AF_VSOCK as libc::sa_family_t,
-        svm_reserved1: 0,
-        svm_port: WORKLOAD_EXIT_PORT,
-        svm_cid: VMADDR_CID_HOST,
-        svm_zero: [0; 4],
-    };
-    let rc = unsafe {
-        libc::connect(
-            fd,
-            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
-            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
-        )
-    };
-    if rc < 0 {
-        let err = std::io::Error::last_os_error();
-        unsafe { libc::close(fd) };
-        return Err(err);
-    }
-    // SAFETY: fd is a valid connected AF_VSOCK stream we own.
-    let mut stream = unsafe { TcpStream::from_raw_fd(fd) };
+    let fd = sys::dial(HOST_CID, WORKLOAD_EXIT_PORT)?;
+    // A vsock SOCK_STREAM fd wrapped as a `TcpStream` for its `Read`/`Write`;
+    // read/write hit the same syscalls regardless of the wrapper type.
+    let mut stream = TcpStream::from(fd);
     stream.write_all(&code.to_le_bytes())?;
     stream.flush()?;
     // Wait (bounded) for the host's ack so /init doesn't poweroff until

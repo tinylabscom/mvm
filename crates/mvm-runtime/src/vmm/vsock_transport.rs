@@ -7,7 +7,6 @@ pub(crate) const VIRTIO_VERSION: u32 = 2;
 pub(crate) const VIRTIO_ID_VSOCK: u32 = 19;
 pub(crate) const VIRTIO_VENDOR: u32 = 0x4d56_4d76;
 
-pub(crate) const QUEUE_SIZE_MAX: u32 = 256;
 pub(crate) const NUM_QUEUES: usize = 3;
 const RX: usize = 0;
 const TX: usize = 1;
@@ -128,7 +127,7 @@ impl VsockTransportCore {
             0x00c => VIRTIO_VENDOR,
             0x010 if self.device_features_sel == 1 => 1,
             0x010 => 0,
-            0x034 => QUEUE_SIZE_MAX,
+            0x034 => super::QUEUE_SIZE_MAX,
             0x044 => self.cur().ready,
             0x060 => self.interrupt_status,
             0x070 => self.status,
@@ -162,10 +161,12 @@ impl VsockTransportCore {
 
     pub(crate) fn take_tx_packets(&mut self) -> Vec<(VsockHdr, Vec<u8>)> {
         let q = self.queues[TX];
-        if q.ready == 0 || q.num == 0 {
+        if q.ready == 0 {
             return Vec::new();
         }
-        let qsz = q.num as u16;
+        let Some(qsz) = super::validated_queue_size(q.num) else {
+            return Vec::new();
+        };
         let avail_idx = self.mem.rd_u16(q.avail + 2);
         let mut last = q.last_avail;
         let mut packets = Vec::new();
@@ -177,7 +178,7 @@ impl VsockTransportCore {
                 let hdr = VsockHdr::from_bytes(&buf[..HDR_LEN]);
                 packets.push((hdr, buf[HDR_LEN..].to_vec()));
             }
-            self.complete(TX, head, 0);
+            self.complete(TX, head, 0, qsz);
             last = last.wrapping_add(1);
         }
         self.queues[TX].last_avail = last;
@@ -236,10 +237,12 @@ impl VsockTransportCore {
 
     pub(crate) fn flush_rx(&mut self) -> bool {
         let q = self.queues[RX];
-        if q.ready == 0 || q.num == 0 || self.pending_rx.is_empty() {
+        if q.ready == 0 || self.pending_rx.is_empty() {
             return false;
         }
-        let qsz = q.num as u16;
+        let Some(qsz) = super::validated_queue_size(q.num) else {
+            return false;
+        };
         let mut last = q.last_avail;
         let mut delivered = false;
         while !self.pending_rx.is_empty() {
@@ -266,7 +269,7 @@ impl VsockTransportCore {
             let mut bytes = hdr.to_bytes().to_vec();
             bytes.extend_from_slice(&payload[..send_len]);
             self.mem.write_bytes(addr, &bytes);
-            self.complete(RX, head, bytes.len() as u32);
+            self.complete(RX, head, bytes.len() as u32, qsz);
             if !remainder.is_empty() {
                 self.pending_rx.insert(0, (hdr, remainder));
             }
@@ -312,9 +315,8 @@ impl VsockTransportCore {
         out
     }
 
-    fn complete(&mut self, q: usize, head: u16, written: u32) {
+    fn complete(&mut self, q: usize, head: u16, written: u32, qsz: u16) {
         let used = self.queues[q].used;
-        let qsz = self.queues[q].num as u16;
         let used_idx = self.mem.rd_u16(used + 2);
         let slot = u64::from(used_idx % qsz);
         self.mem.wr_u16(used + 4 + slot * 8, head);
@@ -405,5 +407,68 @@ mod tests {
         assert_eq!(second_hdr.op, OP_RW);
         assert_eq!(second_hdr.len, 4);
         assert_eq!(&second[HDR_LEN..], b"ghij");
+    }
+
+    /// Program a drainable ring (`RX` or `TX`) whose `avail_idx` is one past
+    /// `last_avail`, so the drain loop body — where the ring is indexed with
+    /// `last % qsz` — is entered. `num` is the raw guest-programmed `QueueNum`.
+    fn program_ring(core: &mut VsockTransportCore, slot: usize, num: u32) {
+        let base = 0x4000_0000;
+        core.queues[slot] = Queue {
+            num,
+            ready: 1,
+            desc: base + 0x100,
+            avail: base + 0x200,
+            used: base + 0x300,
+            last_avail: 0,
+        };
+        core.mem.wr_u16(base + 0x200 + 2, 1);
+    }
+
+    /// Queue sizes a hostile guest can program that are illegal geometry: zero,
+    /// values whose low 16 bits are zero (which truncate to a zero `u16`), and
+    /// sizes that are above the advertised maximum or not a power of two.
+    const ILLEGAL_QUEUE_SIZES: [u32; 6] = [0, 0x1_0000, 0x2_0000, 0xffff_0000, 300, 512];
+
+    #[test]
+    fn take_tx_packets_rejects_queue_size_that_truncates_to_zero() {
+        let mut core = transport();
+        program_ring(&mut core, TX, 0x1_0000);
+        assert!(core.take_tx_packets().is_empty());
+    }
+
+    #[test]
+    fn take_tx_packets_rejects_illegal_queue_geometry() {
+        for num in ILLEGAL_QUEUE_SIZES {
+            let mut core = transport();
+            program_ring(&mut core, TX, num);
+            assert!(
+                core.take_tx_packets().is_empty(),
+                "TX queue size {num:#x} must not be serviced"
+            );
+        }
+    }
+
+    #[test]
+    fn flush_rx_rejects_queue_size_that_truncates_to_zero() {
+        let mut core = transport();
+        program_ring(&mut core, RX, 0x1_0000);
+        core.queue_host_packet(1, 2, OP_RW, b"x");
+        assert!(!core.flush_rx());
+        assert_eq!(core.pending_rx.len(), 1, "packet stays queued, not dropped");
+    }
+
+    #[test]
+    fn flush_rx_rejects_illegal_queue_geometry() {
+        for num in ILLEGAL_QUEUE_SIZES {
+            let mut core = transport();
+            program_ring(&mut core, RX, num);
+            core.queue_host_packet(1, 2, OP_RW, b"x");
+            assert!(
+                !core.flush_rx(),
+                "RX queue size {num:#x} must not be serviced"
+            );
+            assert_eq!(core.pending_rx.len(), 1);
+        }
     }
 }
