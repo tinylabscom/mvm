@@ -257,6 +257,29 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
     decrypt_artifacts_if_encrypted(dir)
         .with_context(|| format!("decrypting snapshot artifacts at {}", dir.display()))?;
 
+    guarded_load_resume(io, dir)?;
+    Ok(sidecar)
+}
+
+/// Load a sealed snapshot at `dir` into a fresh VMM, then run the no-NIC
+/// device-model guard strictly between load and resume — resuming vCPUs only
+/// if the guard passes.
+///
+/// Factored out of [`verify_and_resume_from_dir`] so a caller whose content
+/// integrity is already established by a different mechanism (the fork
+/// restore path verifies a checkpoint's content-address and audit-chain
+/// lineage upstream, not the instance-snapshot HMAC envelope) can reuse the
+/// load → guard → resume ordering without layering a second, wrong integrity
+/// check on top. `verify_and_resume_from_dir` is the only caller that also
+/// runs the HMAC verify + decrypt step first; this function does neither —
+/// callers are responsible for establishing their own content integrity
+/// before calling it.
+///
+/// Fail closed: never resume a NIC-carrying restore. Best-effort tear down
+/// the paused VMM on refusal so it does not linger — the caller's `dir` stays
+/// sealed on disk, so a retry (after e.g. re-sealing a clean snapshot) is
+/// still possible.
+pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
     io.load_snapshot_paused(dir)
         .with_context(|| format!("load_snapshot_paused({})", dir.display()))?;
 
@@ -264,16 +287,11 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
         .restored_device_model()
         .with_context(|| "reading restored device model")?;
     if let Err(e) = crate::microvm::assert_vsock_only_device_model(&model) {
-        // Fail closed: never resume a NIC-carrying restore. Best-effort tear
-        // down the paused VMM so it does not linger — the caller's `dir`
-        // stays sealed on disk, so a retry (after e.g. re-sealing a clean
-        // snapshot) is still possible.
         let _ = io.teardown_paused();
         return Err(e).context("restore refused by device-model guard");
     }
 
-    io.resume().with_context(|| "resume after restore")?;
-    Ok(sidecar)
+    io.resume().with_context(|| "resume after restore")
 }
 
 // ============================================================================
@@ -1146,6 +1164,44 @@ mod tests {
             spy.calls(),
             vec!["load_paused", "restored_device_model", "resume"],
             "the guard must run strictly between load and resume"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // `guarded_load_resume` — the fork-restore path's witness. Fork restore
+    // calls this directly (no HMAC verify — its integrity is established
+    // upstream by the checkpoint lineage's content-address + audit-chain
+    // check), so these exercise the guard reached via that bare entry point
+    // rather than only through `verify_and_resume`.
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_restore_refuses_nic() {
+        let spy = SpyIO::new(true);
+        let dir = tempfile::tempdir().unwrap();
+        let err = guarded_load_resume(&spy, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("device-model guard"), "got: {err}");
+        let calls = spy.calls();
+        assert!(
+            calls.contains(&"teardown_paused"),
+            "a refused restore must tear down the paused VMM: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"resume"),
+            "resume must never run when the guard refuses: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_load_resume_resumes_when_vsock_only() {
+        let spy = SpyIO::new(false);
+        let dir = tempfile::tempdir().unwrap();
+        guarded_load_resume(&spy, dir.path()).expect("a no-NIC restore must resume");
+        let calls = spy.calls();
+        assert_eq!(
+            calls,
+            vec!["load_paused", "restored_device_model", "resume"],
+            "load, guard, then resume — in order"
         );
     }
 
