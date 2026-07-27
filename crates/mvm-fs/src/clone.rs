@@ -84,6 +84,10 @@ pub fn reflink_or_copy(src: &Path, dst: &Path) -> io::Result<CloneStrategy> {
 /// reads back as zeros (POSIX semantics) without ever being allocated on
 /// disk.
 ///
+/// Data-only: `dst` is created with default (umask-derived) permissions,
+/// not `src`'s mode bits — unlike the `std::fs::copy` this replaces, which
+/// copies source permissions onto a freshly created destination.
+///
 /// `dst` must not already exist.
 pub fn sparse_copy(src: &Path, dst: &Path) -> io::Result<()> {
     const BLOCK: usize = 64 * 1024;

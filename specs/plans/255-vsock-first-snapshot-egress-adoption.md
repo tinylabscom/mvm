@@ -197,11 +197,11 @@ Non-goals above — what this plan takes, refuses, and why.
 
 ### Phase 1 — Snapshot-first storage in `mvm-fs`
 
-- [x] Introduce `SnapshotStore` trait in `mvm-fs` with operations `create`,
-      `clone`, `delete`, `list_parents`. Implementation uses reflink when
-      supported, sparse copy fallback otherwise. (The trait and its
-      `FsSnapshotStore` impl pre-existed as `create`/`materialize`/`remove`/
-      `list`; this phase extended it with a sparse-copy fallback in
+- [x] Introduce `SnapshotStore` trait in `mvm-fs` with content-addressed
+      create/materialize/remove/list operations. Implementation uses
+      reflink when supported, sparse copy fallback otherwise. (The trait
+      and its `FsSnapshotStore` impl pre-existed as `create`/`materialize`/
+      `remove`/`list`; this phase extended it with a sparse-copy fallback in
       `clone::reflink_or_copy`, a real content-addressed `create_content_addressed`
       with dedup, and `retain`/`release`/`refcount` reference counting.
       `list_parents` is deliberately not added — reference *counting* is a

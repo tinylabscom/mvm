@@ -5,9 +5,10 @@
 //! file hashing has exactly one implementation in this crate); for a
 //! directory, the hash of a deterministic manifest enumerating every entry.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
@@ -37,19 +38,21 @@ pub fn hash_source(source: &Path) -> io::Result<String> {
 /// `kind` is `f`/`d`/`l` and `payload` is the entry's sha256 hex (`f`),
 /// symlink target (`l`), or empty (`d`). Sorting by relative path (rather
 /// than trusting readdir order, which varies by filesystem) makes the hash
-/// stable across runs and hosts.
+/// stable across runs and hosts. Path/target components are hashed as raw
+/// bytes (see [`os_str_bytes`]) rather than through a lossy UTF-8
+/// conversion, so distinct non-UTF-8 filenames never collide.
 fn hash_dir(root: &Path) -> io::Result<String> {
-    let mut entries: Vec<(String, &'static str, String)> = Vec::new();
-    walk_relative(root, Path::new(""), &mut entries)?;
+    let mut entries: Vec<(Vec<u8>, &'static str, Vec<u8>)> = Vec::new();
+    walk_relative(root, &[], &mut entries)?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = Sha256::new();
     for (relpath, kind, payload) in &entries {
-        hasher.update(relpath.as_bytes());
+        hasher.update(relpath);
         hasher.update(b"\0");
         hasher.update(kind.as_bytes());
         hasher.update(b"\0");
-        hasher.update(payload.as_bytes());
+        hasher.update(payload);
         hasher.update(b"\n");
     }
     Ok(hex::encode(hasher.finalize()))
@@ -57,30 +60,56 @@ fn hash_dir(root: &Path) -> io::Result<String> {
 
 fn walk_relative(
     abs_dir: &Path,
-    rel_dir: &Path,
-    out: &mut Vec<(String, &'static str, String)>,
+    rel_prefix: &[u8],
+    out: &mut Vec<(Vec<u8>, &'static str, Vec<u8>)>,
 ) -> io::Result<()> {
     for entry in fs::read_dir(abs_dir)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let abs_path = entry.path();
-        let rel_path: PathBuf = rel_dir.join(entry.file_name());
-        let rel_str = rel_path.to_string_lossy().into_owned();
+        let rel_bytes = join_relative(rel_prefix, &entry.file_name());
 
         if file_type.is_dir() {
-            out.push((rel_str, "d", String::new()));
-            walk_relative(&abs_path, &rel_path, out)?;
+            out.push((rel_bytes.clone(), "d", Vec::new()));
+            walk_relative(&abs_path, &rel_bytes, out)?;
         } else if file_type.is_file() {
             let digest = compute_file_sha256(&abs_path)?;
-            out.push((rel_str, "f", digest));
+            out.push((rel_bytes, "f", digest.into_bytes()));
         } else if file_type.is_symlink() {
             let target = fs::read_link(&abs_path)?;
-            out.push((rel_str, "l", target.to_string_lossy().into_owned()));
+            out.push((rel_bytes, "l", os_str_bytes(target.as_os_str())));
         }
         // Other inode types (fifo/socket/device) have no stable content to
         // hash and are skipped, mirroring `clone::reflink_or_copy_dir`.
     }
     Ok(())
+}
+
+/// Append one path component (as raw bytes) to a `/`-joined relative path.
+fn join_relative(rel_prefix: &[u8], name: &OsStr) -> Vec<u8> {
+    let name_bytes = os_str_bytes(name);
+    if rel_prefix.is_empty() {
+        return name_bytes;
+    }
+    let mut out = Vec::with_capacity(rel_prefix.len() + 1 + name_bytes.len());
+    out.extend_from_slice(rel_prefix);
+    out.push(b'/');
+    out.extend_from_slice(&name_bytes);
+    out
+}
+
+/// The raw bytes of a path component. On unix this is exact (any byte
+/// sequence is a valid filename); elsewhere there's no such guarantee, so
+/// a lossy UTF-8 conversion is the best available fallback.
+#[cfg(unix)]
+fn os_str_bytes(s: &OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    s.as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn os_str_bytes(s: &OsStr) -> Vec<u8> {
+    s.to_string_lossy().into_owned().into_bytes()
 }
 
 #[cfg(test)]
@@ -128,5 +157,31 @@ mod tests {
             "identical directory trees hash identically"
         );
         assert_ne!(hash_source(&dir1).unwrap(), hash_source(&dir3).unwrap());
+    }
+
+    /// Two distinct non-UTF-8 byte sequences that `to_string_lossy` would
+    /// both mangle to the same U+FFFD-substituted string — proving
+    /// `os_str_bytes` keeps them distinct instead of hashing a lossy
+    /// string that would collide. Exercised in-memory (not via real
+    /// files) because APFS rejects non-UTF-8 filenames outright, so a
+    /// filesystem-backed version of this test wouldn't run on macOS.
+    #[cfg(unix)]
+    #[test]
+    fn os_str_bytes_preserves_non_utf8_sequences_without_lossy_collision() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let a = OsStr::from_bytes(b"f\xFF");
+        let b = OsStr::from_bytes(b"f\xFE");
+
+        assert_eq!(
+            a.to_string_lossy(),
+            b.to_string_lossy(),
+            "precondition: both collide under lossy UTF-8 conversion"
+        );
+        assert_ne!(
+            os_str_bytes(a),
+            os_str_bytes(b),
+            "raw-byte hashing must keep them distinct"
+        );
     }
 }

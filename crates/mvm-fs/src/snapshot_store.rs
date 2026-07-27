@@ -5,11 +5,16 @@
 //! store is intentionally simple — a directory on a reflink-capable
 //! filesystem where each snapshot lives under its opaque id.
 //!
-//! Two layouts are supported:
+//! Two layouts are supported, both keeping snapshot *content* strictly
+//! separate from the `.mvm-snapshot-*` sidecars (meta, refcount) that live
+//! directly under `<root>/<id>/`. `materialize` clones content only, never
+//! the sidecars — so a materialized snapshot contains exactly the original
+//! bytes and re-hashing it via [`crate::hash::hash_source`] reproduces the
+//! same content-addressed id:
 //!
 //! * **Directory snapshot** — the source path was a directory; the store
-//!   keeps it as `<root>/<id>/...` and materializes it with a recursive
-//!   directory clone.
+//!   keeps its contents under `<root>/<id>/content/...` and materializes
+//!   it with a recursive directory clone of `content/` alone.
 //! * **File snapshot** — the source path was a regular file; the store
 //!   keeps it as `<root>/<id>/data` with a `.mvm-snapshot-is-file`
 //!   marker, and materializes it as a single file.
@@ -38,6 +43,8 @@ use crate::hash;
 const FILE_MARKER: &str = ".mvm-snapshot-is-file";
 const META_FILE: &str = ".mvm-snapshot-meta";
 const REFCOUNT_FILE: &str = ".mvm-snapshot-refcount";
+const DATA_FILE: &str = "data";
+const CONTENT_DIR: &str = "content";
 
 /// Opaque identifier for a snapshot stored in a [`SnapshotStore`].
 ///
@@ -237,11 +244,17 @@ impl SnapshotStore for FsSnapshotStore {
 
         let meta = fs::symlink_metadata(source)?;
         if meta.is_dir() {
-            // Directory snapshot: store contents directly under dir/.
+            // Directory snapshot: store contents under dir/content/, kept
+            // apart from the `.mvm-snapshot-*` sidecars written directly
+            // under dir/ below. This lets `materialize` clone content/
+            // alone, so the materialized tree never picks up store
+            // bookkeeping files and re-hashing it reproduces the same id.
+            let content_dir = dir.join(CONTENT_DIR);
+            fs::create_dir_all(&content_dir)?;
             for entry in fs::read_dir(source)? {
                 let entry = entry?;
                 let src = entry.path();
-                let dst = dir.join(entry.file_name());
+                let dst = content_dir.join(entry.file_name());
                 if entry.file_type()?.is_dir() {
                     reflink_or_copy_dir(&src, &dst)?;
                 } else if entry.file_type()?.is_file() {
@@ -259,7 +272,7 @@ impl SnapshotStore for FsSnapshotStore {
             }
         } else if meta.is_file() {
             // File snapshot: store under dir/data with a marker.
-            let data_path = dir.join("data");
+            let data_path = dir.join(DATA_FILE);
             reflink_or_copy(source, &data_path)?;
             fs::write(dir.join(FILE_MARKER), b"")?;
         } else {
@@ -288,10 +301,9 @@ impl SnapshotStore for FsSnapshotStore {
         }
 
         if dir.join(FILE_MARKER).exists() {
-            let data_path = dir.join("data");
-            reflink_or_copy(&data_path, dst)
+            reflink_or_copy(&dir.join(DATA_FILE), dst)
         } else {
-            reflink_or_copy_dir(&dir, dst)
+            reflink_or_copy_dir(&dir.join(CONTENT_DIR), dst)
         }
     }
 
@@ -680,6 +692,55 @@ mod tests {
             fs::read(&restored).unwrap(),
             mem,
             "stored snapshot must be unaffected by instance mutation"
+        );
+    }
+
+    #[test]
+    fn content_addressed_directory_snapshot_materializes_without_sidecars_and_rehashes_to_same_id()
+    {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FsSnapshotStore::new(tmp.path().join("store")).expect("store");
+
+        // A `{vmstate.bin, mem.bin}` memory-snapshot directory, mem.bin
+        // carrying an interior zero run so this also exercises the
+        // sparse-copy path during materialize.
+        let source = tmp.path().join("mem-snap-dir");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("vmstate.bin"), b"vmstate header bytes").unwrap();
+        let mut mem = vec![0xAA_u8; 4096];
+        mem.extend(std::iter::repeat_n(0u8, 65536));
+        mem.extend(vec![0xBB_u8; 4096]);
+        fs::write(source.join("mem.bin"), &mem).unwrap();
+
+        let id = store
+            .create_content_addressed(&source)
+            .expect("store dir snapshot");
+
+        let dst = tmp.path().join("instance-dir");
+        store.materialize(&id, &dst).expect("materialize");
+
+        // (a) no store sidecars leaked into the materialized output.
+        for entry in fs::read_dir(&dst).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.starts_with(".mvm-snapshot"),
+                "materialized dir must not contain store sidecars, found {name}"
+            );
+        }
+        assert_eq!(
+            fs::read(dst.join("vmstate.bin")).unwrap(),
+            b"vmstate header bytes"
+        );
+        assert_eq!(fs::read(dst.join("mem.bin")).unwrap(), mem);
+
+        // (b) round-trip stability: re-hashing the materialized tree
+        // reproduces exactly the stored content-addressed id.
+        let rehashed = hash::hash_source(&dst).expect("rehash materialized dir");
+        assert_eq!(
+            rehashed,
+            id.id(),
+            "materialized directory must re-hash to the same content-addressed id"
         );
     }
 
