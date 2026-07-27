@@ -169,12 +169,9 @@ pub fn warm_restore_instance_from_path(
     // reports `Undelivered`. Skipped for the fork path's no-rotation
     // (all-zero) token: there is nothing to reseed, so no reason to add
     // latency waiting on a probe whose answer wouldn't change anything.
-    let zero_token = [0u8; mvm_core::crypto::vmgenid::GENID_BYTES];
-    if token != zero_token
-        && !should_attempt_reseed_delivery(RESEED_POLL_TIMEOUT, RESEED_POLL_INTERVAL, || {
-            probe_guest_reachable(name)
-        })
-    {
+    if !should_attempt_reseed_delivery(token, RESEED_POLL_TIMEOUT, RESEED_POLL_INTERVAL, || {
+        probe_guest_reachable(name)
+    }) {
         tracing::warn!(
             name,
             timeout = ?RESEED_POLL_TIMEOUT,
@@ -209,42 +206,67 @@ const RESEED_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Delay between reseed-delivery reachability polls.
 const RESEED_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// One reachability probe against the guest agent for `vm_name` — mirrors
-/// [`crate::vm::instance_snapshot::VsockPrimedSignalSource::probe_once`], but
-/// checks basic vsock reachability (`Ping`/`Pong`) rather than the workload's
-/// warmup barrier: reseed delivery only needs to know the agent is back on
-/// vsock, not that the workload has finished warming. Any transport/agent
-/// error is treated as "not yet reachable" (best-effort) so a transient blip
-/// during vsock reattach doesn't end the poll early — the bounded deadline
-/// still applies.
+/// Per-attempt timeout for [`probe_guest_reachable`]'s single connect. Short
+/// on purpose: `wait_for_primed_polling` only re-checks its deadline *after*
+/// a probe call returns, so the probe's own worst case must stay well under
+/// `RESEED_POLL_INTERVAL`'s cadence for the outer deadline to actually bound
+/// total wait time. A generous per-attempt timeout here (or a probe that
+/// itself retries) would let a single stuck attempt blow past the whole
+/// poll's budget.
+const PROBE_CONNECT_TIMEOUT_SECS: u64 = 1;
+
+/// One reachability probe against the guest agent for `vm_name`: a single
+/// attempt (no retry) at the Firecracker vsock CONNECT/OK handshake on the
+/// agent port, bounded by [`PROBE_CONNECT_TIMEOUT_SECS`].
+///
+/// This deliberately does *not* go through
+/// [`crate::vsock_transport::for_vm`]'s `connect()` or
+/// `mvm_agentd::vsock::connect_to_port` — both are built for a patient
+/// initial dial and retry on a timeout (up to `CONNECT_RETRIES` attempts at
+/// `DEFAULT_TIMEOUT_SECS` each), so a single call through either can block far
+/// longer than this poll's own deadline before reporting failure, which is
+/// exactly backwards for a fast readiness probe. `try_connect_once` is the
+/// single-attempt primitive `connect_to_port` itself wraps with retries; this
+/// module is Firecracker-only throughout (see the module doc), so resolving
+/// the instance's own vsock UDS directly — rather than going through the
+/// multi-backend transport dispatcher — matches the rest of the file. Any
+/// error (agent not listening yet, socket missing, timeout) is treated as
+/// "not yet reachable" so a transient miss doesn't abort the poll early; the
+/// bounded deadline in [`wait_for_primed_polling`] still applies.
 fn probe_guest_reachable(vm_name: &str) -> bool {
-    use mvm_agentd::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_unary};
-    let Ok(transport) = crate::vsock_transport::for_vm(vm_name) else {
+    let Ok(instance_dir) = super::resolve_running_vm_dir(vm_name) else {
         return false;
     };
-    let Ok(mut stream) = transport.connect(GUEST_AGENT_PORT) else {
-        return false;
-    };
-    matches!(
-        call_unary(&mut stream, &GuestRequest::Ping),
-        Ok(GuestResponse::Pong)
+    let uds = mvm_agentd::vsock::vsock_uds_path(&instance_dir);
+    mvm_agentd::vsock::try_connect_once(
+        &uds,
+        mvm_agentd::vsock::GUEST_AGENT_PORT,
+        PROBE_CONNECT_TIMEOUT_SECS,
     )
+    .is_ok()
 }
 
-/// Decide whether reseed delivery should proceed: polls `probe` up to
-/// `timeout` (reusing [`wait_for_primed_polling`]'s bounded-poll policy) and
-/// reports whether the guest became reachable in time.
+/// Decide whether reseed delivery should proceed for `token`.
 ///
-/// Pure aside from the clock/sleep inside `wait_for_primed_polling`, so the
-/// "poll until reachable, else give up at the deadline" policy is
-/// unit-tested with a fake probe — no live guest. The caller is responsible
-/// for skipping this entirely on a no-rotation (zero) token; this function
-/// always polls when called.
+/// A no-rotation (all-zero) `token` — the fork path's case — always proceeds
+/// immediately without touching `probe` at all: there is nothing to reseed,
+/// so no reason to add latency waiting on a probe whose answer wouldn't
+/// change anything. Otherwise polls `probe` up to `timeout` (reusing
+/// [`wait_for_primed_polling`]'s bounded-poll policy) and reports whether the
+/// guest became reachable in time.
+///
+/// Pure aside from the clock/sleep inside `wait_for_primed_polling`, so both
+/// the zero-token skip and the "poll until reachable, else give up at the
+/// deadline" policy are unit-tested with a fake probe — no live guest.
 fn should_attempt_reseed_delivery<F: FnMut() -> bool>(
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
     timeout: std::time::Duration,
     interval: std::time::Duration,
     probe: F,
 ) -> bool {
+    if token == [0u8; mvm_core::crypto::vmgenid::GENID_BYTES] {
+        return true;
+    }
     wait_for_primed_polling(timeout, interval, probe) == PrimedOutcome::Primed
 }
 
@@ -541,12 +563,20 @@ mod tests {
     // Reseed-delivery readiness poll — the poll POLICY, no live guest
     // ──────────────────────────────────────────────────────────────
 
+    /// A non-zero token, standing in for the "rotate the CSPRNG" resume case.
+    /// Mirrors the `[1u8; GENID_BYTES]` convention used for the same purpose
+    /// in `mvm_core::crypto::vmgenid`'s own tests.
+    fn non_zero_token() -> [u8; mvm_core::crypto::vmgenid::GENID_BYTES] {
+        [1u8; mvm_core::crypto::vmgenid::GENID_BYTES]
+    }
+
     #[test]
     fn reseed_delivery_proceeds_once_the_probe_becomes_reachable() {
         use std::cell::Cell;
         use std::time::Duration;
         let calls = Cell::new(0u32);
         let should_attempt = should_attempt_reseed_delivery(
+            non_zero_token(),
             Duration::from_secs(5),
             Duration::from_millis(1),
             || {
@@ -562,6 +592,7 @@ mod tests {
     fn reseed_delivery_gives_up_when_the_probe_never_becomes_reachable() {
         use std::time::Duration;
         let should_attempt = should_attempt_reseed_delivery(
+            non_zero_token(),
             Duration::from_millis(15),
             Duration::from_millis(1),
             || false,
@@ -569,6 +600,32 @@ mod tests {
         assert!(
             !should_attempt,
             "an unreachable guest past the deadline must give up, not hang"
+        );
+    }
+
+    #[test]
+    fn reseed_delivery_skips_the_probe_entirely_for_a_zero_token() {
+        use std::cell::Cell;
+        use std::time::Duration;
+        // The fork path's no-rotation token must proceed immediately without
+        // ever invoking the probe — a probe that always fails is here on
+        // purpose, to prove it's never consulted.
+        let probe_calls = Cell::new(0u32);
+        let zero_token = [0u8; mvm_core::crypto::vmgenid::GENID_BYTES];
+        let should_attempt = should_attempt_reseed_delivery(
+            zero_token,
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            || {
+                probe_calls.set(probe_calls.get() + 1);
+                false
+            },
+        );
+        assert!(should_attempt, "a zero token must proceed unconditionally");
+        assert_eq!(
+            probe_calls.get(),
+            0,
+            "a zero token must never invoke the probe"
         );
     }
 }

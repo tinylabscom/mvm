@@ -71,8 +71,14 @@ fn read_connect_response_line(stream: &mut UnixStream) -> std::io::Result<String
     }
 }
 
-/// Single attempt to connect and perform the Firecracker CONNECT handshake.
-fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
+/// Single attempt to connect and perform the Firecracker CONNECT handshake —
+/// no retries, unlike [`connect_to_port`]. `connect_to_port` wraps this with a
+/// patient retry ladder for an initial dial; a caller that instead wants a
+/// fast, bounded reachability probe (e.g. polling for a guest agent to
+/// reattach after a restore) should call this directly with a short
+/// `timeout_secs` so one probe attempt cannot block past the poll's own
+/// deadline.
+pub fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let timeout = Duration::from_secs(timeout_secs);
 
     // Pre-flight: verify the socket file exists and is actually a socket.

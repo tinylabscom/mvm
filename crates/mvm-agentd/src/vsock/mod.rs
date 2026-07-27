@@ -31,7 +31,8 @@ pub use api::{
     start_port_forward_on, workload_is_primed_at,
 };
 pub use connection::{
-    HOST_CID, connect_host_vsock, connect_to, connect_to_port, send_request, vsock_uds_path,
+    HOST_CID, connect_host_vsock, connect_to, connect_to_port, send_request, try_connect_once,
+    vsock_uds_path,
 };
 pub use framing::{
     AuthenticatedSession, handshake_as_guest, handshake_as_host, read_authenticated_frame,
