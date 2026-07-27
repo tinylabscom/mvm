@@ -69,13 +69,13 @@ claim into the restore path. Scenario paths are under `features/suites/`.
 
 | # | Surface | Mitigation | Witness |
 |---|---------|-----------|---------|
-| 1 | Restore executes attacker-influenced memory | HMAC seal via `verify_and_resume`; add AES-GCM confidentiality | NEW `s11_warm_restore/integrity_byteflip_refused.feature` + `instance_snapshot` unit |
+| 1 | Restore executes attacker-influenced memory | HMAC seal via `verify_and_resume`; add AES-GCM confidentiality | NEW `s11_snapshot/integrity_byteflip_refused.feature` + `instance_snapshot` unit |
 | 2 | NIC reintroduction on restore (claim 10 bypass) | snapshot only NIC-less device models; verify no-NIC on *restore* | NEW `s2_egress_vsock/warm_restore_no_nic.feature` |
 | 3 | Fork identity confusion / plan replay | fresh signed+admitted plan per fork; epoch anti-rollback; lineage anchored to audit chain | `s6_admission_audit/fork_identity_replay.feature` (extends claim 8) |
 | 4 | Cross-fork memory residue | snapshot clean pre-workload parents only; priming rootfs-only; per-instance volumes | NEW `s3_secrets_pii/fork_no_residue.feature` |
 | 5 | Priming vs verified boot | prime only the dm-verity sealed rootfs; reject working set outside it | `s4_verified_boot/prime_within_verity_only.feature` (extends claim 3) |
 | 6 | Same-page merging (KSM) cross-VM side channel | confine merging to one fork family / same image; never cross-tenant | NEW `s3_secrets_pii/no_cross_tenant_page_merge.feature` + config gate |
-| 7 | Snapshot at rest — disclosure / rollback | `~/.mvm` 0700; HMAC + AES-GCM; monotonic epoch anti-rollback | `s11_warm_restore/epoch_rollback_refused.feature` |
+| 7 | Snapshot at rest — disclosure / rollback | `~/.mvm` 0700; HMAC + AES-GCM; monotonic epoch anti-rollback | `s11_snapshot/epoch_rollback_refused.feature` |
 | 8 | Warm-pool control UDS untrusted | 0700 sockets; re-verify signed plan on attach (`prelaunch`) | `s6_admission_audit/warm_attach_reverifies_plan.feature` |
 | 9 | Confinement re-application on restore | re-apply seccomp/jailer/uid on every restore | `s5_lifecycle/restore_reapplies_confinement.feature` (extends claim 1) |
 | 10 | Host TCB growth in snapshot-load parser | extend `fuzz_snapshot_frame` to the restore-load metadata; `deny_unknown_fields` | NEW fuzz coverage in `crates/mvm-core/fuzz/fuzz_targets/fuzz_snapshot_frame.rs` |
@@ -142,8 +142,8 @@ checked, NIC-free warm start.
       `crates/mvm-conformance/tests/steps/warm_restore.rs` (new, wired in
       `conformance.rs`):
       - `s2_egress_vsock/warm_restore_no_nic.feature` (surface 2)
-      - `s11_warm_restore/integrity_byteflip_refused.feature` (surface 1)
-      - `s11_warm_restore/epoch_rollback_refused.feature` (surface 7)
+      - `s11_snapshot/integrity_byteflip_refused.feature` (surface 1)
+      - `s11_snapshot/epoch_rollback_refused.feature` (surface 7)
       - `s6_admission_audit/fork_identity_replay.feature` (surface 3)
       - `s6_admission_audit/warm_attach_reverifies_plan.feature` (surface 8)
       - `s3_secrets_pii/fork_no_residue.feature` (surface 4)

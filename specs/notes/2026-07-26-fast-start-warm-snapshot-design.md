@@ -21,7 +21,7 @@ tens of milliseconds, versus today's unoptimized cold boot.
 
 This is not greenfield. Two documents already scope most of the substrate:
 
-- `specs/plans/255-vsock-first-snapshot-egress-adoption.md` (Draft) — the
+- `specs/plans/255-vsock-first-snapshot-egress-adoption.md` (Active; Phase 0–1 merged) — the
   snapshot-first storage model, warm pool of paused clean parents, fork
   identity hygiene, egress enrichment, OCI template path. It is the substrate
   plan and stays so.
