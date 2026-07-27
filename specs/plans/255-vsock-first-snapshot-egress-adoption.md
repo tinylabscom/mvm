@@ -189,7 +189,7 @@ Non-goals above — what this plan takes, refuses, and why.
 - [x] Add a short design note in this plan (above) or in `03-networking.md`
       capturing the "vsock-first adoption boundary": what is adopted, what is
       refused, and why.
-- [ ] File/update a tracking issue for Plan 255 and link it in
+- [x] File/update a tracking issue for Plan 255 (#1851) and link it in
       `specs/SPRINT.md` under the appropriate phase.
 
 **Acceptance gate:** ADR-025 updated and reviewed; no security claim changes;
