@@ -49,27 +49,31 @@ validation of mvm's warm-snapshot, CoW, and host-side-secret-substitution
 direction — a second team reaching the same shape under the same
 constraints — not as a new idea for mvm to adopt.
 
-The same offering also makes the tradeoff this ADR refuses below: its
-pool keeps a released worker's page cache hot by handing it straight back
-without restoring clean snapshot state first, reusing a dirty guest
-across jobs rather than only reusing a warmed template. That is a second,
-independent instance of exactly the "Refuse — cross-workload guest reuse"
-tradeoff, reached by a different team under the same performance
-pressure. It reinforces the refusal rather than calling it into question:
-mvm's warm path forks a paused clean parent into a fresh,
-identity-scrubbed child and never resumes a parent to continue a prior
-workload.
+The same offering is also a second, independent instance of a tradeoff
+this ADR already refuses below: cross-workload guest reuse.
+`specs/plans/255-vsock-first-snapshot-egress-adoption.md`, which surveys
+this offering, lists reusing dirty guests across jobs among the paths it
+demonstrates mvm should refuse. The research reviewed here does not
+document the offering's specific reuse mechanism, so this is not the
+commercial runtime's page-cache-hot, no-restore handback described above
+— only the same outcome, a worker carrying prior-workload state into its
+next job. A second, differently-built system converging on cross-workload
+reuse under the same performance pressure reinforces this refusal rather
+than calling it into question: mvm's warm path forks a paused clean
+parent into a fresh, identity-scrubbed child and never resumes a parent
+to continue a prior workload.
 
 Where the offering goes further than the commercial runtime is its
 egress-policy surface: a first-class L7 proxy in front of every guest,
-with a domain-allowlist UX, scheme/host/SNI/method/path matching, audit
-levels, and header-based credential injection. That policy vocabulary is
-worth borrowing for mvm's own typed-connector policy enrichment. The
-mechanism it rides on is not: the proxy depends on terminating guest TLS
-transparently — a baked root CA that changes the guest's trust model —
-and on a guest-NIC data plane, both refused below under "Refuse —
-transparent host-socket networking" for the same reason mvm already
-refuses a host-socket shortcut.
+enforcing a domain-allowlist with header-based credential injection. That
+proxy is the inspiration, not the source, for mvm's own typed-connector
+policy enrichment — mvm's planned scheme/host/sni/method/path/audit-level
+vocabulary is mvm's own design, not a feature the offering documents. The
+mechanism the offering's proxy rides on is refused either way: it depends
+on terminating guest TLS transparently — a baked root CA that changes the
+guest's trust model — and on a guest-NIC data plane, both refused below
+under "Refuse — transparent host-socket networking" for the same reason
+mvm already refuses a host-socket shortcut.
 
 ## Decision
 
@@ -118,9 +122,9 @@ workload claims don't apply — and even there it is out of scope for this
 ADR, needing its own decision and its own threat-model note if ever
 pursued. It is never available to workload microVMs.
 
-A second, independently-built offering makes the identical dirty-guest-
-reuse tradeoff for the identical performance reason (see `## Context`
-above); that convergence reinforces this refusal, it does not soften it.
+A second, independently-built offering also reuses dirty guests across
+jobs, for the same performance reason (see `## Context` above); that
+convergence reinforces this refusal, it does not soften it.
 
 ### Refuse — transparent host-socket networking
 
@@ -135,13 +139,12 @@ multicast, no TUN/TAP, no ICMP — is cited here as independent supporting
 evidence for the cost mvm already chose to pay by staying on virtio-net,
 not as a reason to reconsider.
 
-A second offering's richer egress-policy vocabulary (scheme, host/sni,
-method, path, audit level, credential injection) is worth borrowing for
-mvm's own typed-connector policy — but not the transparent-TLS-MITM-plus-
-guest-NIC mechanism that vocabulary rides on there. That mechanism is
-refused for the same reason as above: it would move enforcement off the
-vsock seam and change the guest's trust model, exactly what this refusal
-rejects.
+A second offering runs a domain-allowlist egress proxy with header-based
+credential injection — inspiration for mvm's own richer typed-connector
+vocabulary, not its source — but its transparent-TLS-MITM-plus-guest-NIC
+mechanism is refused for the same reason as above: it would move
+enforcement off the vsock seam and change the guest's trust model,
+exactly what this refusal rejects.
 
 ## Out of scope
 
