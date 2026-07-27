@@ -54,6 +54,74 @@ Ed25519+HMAC-aware guard design), reseed retry/poll hardening, a native
 Firecracker API client so the ≤30ms p50 SLO holds without shelling out to
 `curl` per call, density wiring, and the HVF/libkrun backend ports.
 
+## Remaining work (sequenced)
+
+Grouped into workstreams. WS1–WS4 complete the Firecracker fast path + SLO +
+witnesses and carry no cross-epic dependency; WS5 is gated on other epics.
+Recommended order: WS1 → WS2 → WS4's CLI-verb prerequisite (which unlocks the
+WS4 witnesses) → WS3 → WS5. Each item is one implement→review→(live-revalidate)
+cycle.
+
+### WS1 — Finish the FC warm-restore story (no prerequisites)
+
+- [ ] Reseed retry/poll: a bounded guest-readiness poll before the single
+      `signal_post_restore`, so a slow-to-reattach guest does not spuriously
+      report `Undelivered`. Unit-test via the signal-source trait.
+- [ ] Register the new restore-path witnesses in `specs/claims/catalog.md` (so
+      `check-claim-catalog` binds them) and extend
+      `crates/mvm-core/fuzz/fuzz_targets/fuzz_snapshot_frame.rs` to the
+      restore-load manifest/metadata path.
+- [ ] Tear down the paused VMM on the pre-guard error branches
+      (`load_snapshot_paused` / `restored_device_model` errors), not only on
+      guard refusal.
+
+### WS2 — The ≤30 ms p50 SLO (native API + pooled FC — land together)
+
+~60 ms (debug) is dominated by per-call `curl` subprocesses and a fresh
+Firecracker spawn per restore; neither alone reaches the SLO.
+
+- [ ] Native Firecracker API client: hand-rolled HTTP/1.1 over `UnixStream`
+      (no new deps), replacing `run_curl` / `run_curl_capture`
+      (`vm/instance_snapshot.rs`) and `api_put_socket` (`microvm/daemon.rs`).
+      Re-measure via the `@live` harness.
+- [ ] Pre-spawned / pooled Firecracker: wire the existing `standby_pool` /
+      `WarmLease` (default-off + libkrun-only today) into the FC backend so a
+      restore claims a pre-spawned VMM rather than spawning one. Overlaps
+      Plan 255 warm-pool work.
+- [ ] Release-build measurement on the KVM box; record warm p50/p99 here.
+
+### WS3 — Density
+
+- [ ] Boot-time balloon (`VmStartConfig.mem_initial_mib`) on the
+      warm-parent / fresh-boot path; unit-test the commit-vs-cap accounting.
+      (Applies to fresh boot / parent sizing, not the memory-snapshot restore.)
+- [ ] KSM enforcement: a runtime point that consults `PageMergePolicy` before
+      any same-page merge, the host control (`MADV_MERGEABLE` scoped per fork
+      family / a KSM config gate), and the `no_cross_tenant_page_merge` witness.
+
+### WS4 — Witnesses (prerequisite-gated)
+
+- [ ] Prerequisite: wire a `machine` CLI verb that drives the vm_full warm
+      fork/restore — there is no user-facing warm-restore verb today; the number
+      comes only from the Rust `@live` harness.
+- [ ] Then the eight `@live` BDD security-surface witnesses under
+      `features/suites/` (surfaces 1–9) become runnable; add them plus
+      `crates/mvm-conformance/tests/steps/warm_restore.rs`.
+- [ ] Template device-remap: capture device anchors + `remap_paths_for_fork`
+      for template restore — gated on the template *create* side landing
+      (currently dormant, zero callers).
+
+### WS5 — Backend phases (epic-gated; do not block FC completion)
+
+- [ ] Phase 2 (in-house HVF VMM snapshot-fork) — gated on the HVF VMM first
+      getting a root filesystem (it panics at `prepare_namespace` today); that
+      rootfs prerequisite is Plan 214 epic work. Then implement the `SnapshotIO`
+      seam for HVF (vsock-pure, so the no-NIC invariant is free) and re-run the
+      witnesses.
+- [ ] Phase 3 (libkrun adoption) — begins with a spike on whether libkrun
+      supports snapshot/restore at all; then adopt the restore seam through its
+      standby pool.
+
 ## Relationship to existing work
 
 - **Plan 255** (vsock-first snapshot, egress, warm-start adoption) owns the
