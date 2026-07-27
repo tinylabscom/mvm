@@ -143,9 +143,10 @@ pub(in crate::commands) enum AuditAction {
     },
     /// Verify an inclusion proof against a host-signed root — the full
     /// membership check. Verifies the signed root under the trusted host
-    /// key, verifies the proof, and binds the two (root_hash + tree_size
-    /// must match). Nonzero exit naming the failed check on any failure; a
-    /// self-consistent proof over an unsigned root is rejected.
+    /// key, checks it is for `--tenant`, verifies the proof, and binds the
+    /// two (root_hash + tree_size must match). Nonzero exit naming the
+    /// failed check on any failure; a genuinely-signed root for a different
+    /// tenant, or a self-consistent proof over an unsigned root, is rejected.
     VerifyInclusion {
         /// Path to the inclusion-proof JSON, or `-` to read from stdin.
         #[arg(long)]
@@ -159,7 +160,8 @@ pub(in crate::commands) enum AuditAction {
         /// or base64.
         #[arg(long)]
         pubkey: Option<std::path::PathBuf>,
-        /// Tenant whose default root path to use when `--root` is omitted.
+        /// Tenant the signed root must be bound to (and whose default root
+        /// path is used when `--root` is omitted).
         #[arg(long, default_value = "local")]
         tenant: String,
     },
@@ -548,8 +550,8 @@ fn audit_verify_inclusion(
         }
     };
 
-    // 4-6: the composition. Fail closed naming the failed check.
-    let message = run_verify_inclusion(&proof, &signed_root, &vk)?;
+    // 4-7: the composition. Fail closed naming the failed check.
+    let message = run_verify_inclusion(&proof, &signed_root, &vk, tenant)?;
     ui::success(&message);
     Ok(())
 }
@@ -559,20 +561,31 @@ fn audit_verify_inclusion(
 ///
 /// Enforces, in order and fail-closed:
 ///   1. the signed root verifies under the trusted host key;
-///   2. the inclusion proof is internally consistent (folds to its own root);
-///   3. the proof binds to THIS signed root — `root_hash` and `tree_size`
+///   2. the signed root is for the tenant the caller intended
+///      (`signed_root.tenant == expected_tenant`) — a genuinely-signed root
+///      for a different tenant is not evidence for this one;
+///   3. the inclusion proof is internally consistent (folds to its own root);
+///   4. the proof binds to THIS signed root — `root_hash` and `tree_size`
 ///      must match.
 ///
-/// Only when all three hold does it return the success message. A proof that
+/// Only when all hold does it return the success message. A proof that
 /// self-verifies but whose embedded root differs from the host-signed root is
-/// rejected at step 3 — self-consistency is not membership.
+/// rejected at step 4 — self-consistency is not membership.
 fn run_verify_inclusion(
     proof: &InclusionProof,
     signed_root: &SignedAuditRoot,
     vk: &VerifyingKey,
+    expected_tenant: &str,
 ) -> Result<String> {
     verify_signed_root(signed_root, vk)
         .map_err(|e| anyhow::anyhow!("signed-root verification failed: {e}"))?;
+    if signed_root.tenant != expected_tenant {
+        anyhow::bail!(
+            "tenant binding failed: signed root is for tenant '{}', expected '{}'",
+            signed_root.tenant,
+            expected_tenant
+        );
+    }
     verify_inclusion(proof)
         .map_err(|e| anyhow::anyhow!("inclusion-proof verification failed: {e}"))?;
     if proof.root != signed_root.root_hash {
@@ -1384,7 +1397,7 @@ mod merkle_verb_tests {
         let leaves = lines(5);
         let signed = sign_root(&key, "local", &leaves);
         let proof = build_inclusion_proof(&leaves, 2).unwrap();
-        let msg = run_verify_inclusion(&proof, &signed, &vk).unwrap();
+        let msg = run_verify_inclusion(&proof, &signed, &vk, "local").unwrap();
         assert!(msg.contains("index 2 of 5"), "{msg}");
         assert!(msg.contains(&signed.root_hash), "{msg}");
     }
@@ -1405,7 +1418,7 @@ mod merkle_verb_tests {
         assert_eq!(proof.tree_size, signed.tree_size);
         assert_ne!(proof.root, signed.root_hash);
 
-        let err = run_verify_inclusion(&proof, &signed, &vk).unwrap_err();
+        let err = run_verify_inclusion(&proof, &signed, &vk, "local").unwrap_err();
         assert!(
             format!("{err:#}").contains("root binding failed"),
             "{err:#}"
@@ -1422,7 +1435,7 @@ mod merkle_verb_tests {
         let mut signed = sign_root(&key, "local", &leaves);
         let proof = build_inclusion_proof(&leaves, 0).unwrap();
         signed.root_hash = hex::encode([0xabu8; 32]);
-        let err = run_verify_inclusion(&proof, &signed, &vk).unwrap_err();
+        let err = run_verify_inclusion(&proof, &signed, &vk, "local").unwrap_err();
         assert!(
             format!("{err:#}").contains("signed-root verification failed"),
             "{err:#}"
@@ -1437,7 +1450,7 @@ mod merkle_verb_tests {
         let signed = sign_root(&key, "local", &leaves);
         let proof = build_inclusion_proof(&leaves, 1).unwrap();
         let wrong_vk = fresh_key().verifying_key();
-        let err = run_verify_inclusion(&proof, &signed, &wrong_vk).unwrap_err();
+        let err = run_verify_inclusion(&proof, &signed, &wrong_vk, "local").unwrap_err();
         assert!(
             format!("{err:#}").contains("signed-root verification failed"),
             "{err:#}"
@@ -1454,7 +1467,7 @@ mod merkle_verb_tests {
         let signed = sign_root(&key, "local", &leaves);
         let mut proof = build_inclusion_proof(&leaves, 3).unwrap();
         proof.leaf_index = 4;
-        let err = run_verify_inclusion(&proof, &signed, &vk).unwrap_err();
+        let err = run_verify_inclusion(&proof, &signed, &vk, "local").unwrap_err();
         assert!(
             format!("{err:#}").contains("inclusion-proof verification failed"),
             "{err:#}"
@@ -1472,11 +1485,33 @@ mod merkle_verb_tests {
         let leaves = lines(5);
         let proof = build_inclusion_proof(&leaves, 0).unwrap();
         let signed = sign_root_fields(&key, "local", 99, &proof.root);
-        let err = run_verify_inclusion(&proof, &signed, &vk).unwrap_err();
+        let err = run_verify_inclusion(&proof, &signed, &vk, "local").unwrap_err();
         assert!(
             format!("{err:#}").contains("tree-size binding failed"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn composition_rejects_root_for_a_different_tenant() {
+        // A genuinely-signed root+proof for tenant `beta` must NOT count as
+        // evidence for tenant `acme` — the signed `tenant` field is checked
+        // against the caller's intent, fail closed. Same key, same valid
+        // signature: only the tenant binding catches the mix-up.
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let leaves = lines(5);
+        let signed = sign_root(&key, "beta", &leaves);
+        let proof = build_inclusion_proof(&leaves, 2).unwrap();
+
+        let err = run_verify_inclusion(&proof, &signed, &vk, "acme").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("tenant binding failed"), "{msg}");
+        assert!(msg.contains("beta") && msg.contains("acme"), "{msg}");
+
+        // The same root+proof verifies when the intended tenant matches.
+        let ok = run_verify_inclusion(&proof, &signed, &vk, "beta").unwrap();
+        assert!(ok.contains("index 2 of 5"), "{ok}");
     }
 
     // ---- resolve_selector ----
@@ -1580,7 +1615,7 @@ mod merkle_verb_tests {
         assert_eq!(idx, 2);
         let proof = build_inclusion_proof(&leaves, idx).unwrap();
         let signed = sign_root(&key, "local", &leaves);
-        let msg = run_verify_inclusion(&proof, &signed, &key.verifying_key()).unwrap();
+        let msg = run_verify_inclusion(&proof, &signed, &key.verifying_key(), "local").unwrap();
         assert!(msg.contains("index 2 of 4"), "{msg}");
     }
 

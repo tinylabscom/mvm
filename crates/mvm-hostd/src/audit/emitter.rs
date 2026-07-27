@@ -662,16 +662,26 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("path {} has no file name", path.display()))?;
     let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
-    {
+    // Best-effort: if any step before the rename fails, don't leave the
+    // partial temp file behind.
+    let write = (|| -> Result<()> {
         let mut f = std::fs::File::create(&tmp)
             .with_context(|| format!("creating temp file {}", tmp.display()))?;
         f.write_all(bytes)
             .with_context(|| format!("writing temp file {}", tmp.display()))?;
         f.sync_all()
             .with_context(|| format!("fsync temp file {}", tmp.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::from(e))
+            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()));
+    }
     Ok(())
 }
 

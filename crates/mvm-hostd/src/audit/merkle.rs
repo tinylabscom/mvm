@@ -29,13 +29,16 @@ use anyhow::{Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mvm_protocol::merkle::{InclusionProof, build_inclusion_proof, merkle_root};
 
-use crate::audit::{emitter, host_keypair};
-use crate::supervisor::verify_audit_chain;
+use crate::audit::emitter;
+use mvm_protocol::verify::verify_audit_chain_bytes;
 
 /// Read a tenant's audit lines as Merkle leaves, in file order, **after**
-/// verifying the chain is intact. Empty lines are skipped (matching
-/// `verify_audit_chain`), so every returned element is a genuine
-/// `SignedEnvelope` line — the exact bytes the verifier re-hashes.
+/// verifying the chain is intact — from the SAME bytes. The file is read
+/// once into a buffer; the chain is verified over that buffer and the leaves
+/// are derived from it, so the root is provably over exactly the verified
+/// bytes (no read → verify → re-read TOCTOU window). Empty lines are skipped
+/// (matching the chain verifier), so every returned element is a genuine
+/// `SignedEnvelope` line — the exact bytes the inclusion verifier re-hashes.
 ///
 /// Fails closed if the chain does not verify under `vk`: a corrupt log
 /// never yields a root. Public so the CLI `prove` verb can resolve a
@@ -43,14 +46,17 @@ use crate::supervisor::verify_audit_chain;
 /// over (a single reader, so indices can't drift).
 pub fn read_leaves(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Result<Vec<String>> {
     let path = emitter::audit_path_for_tenant(audit_dir, tenant);
-    verify_audit_chain(&path, vk).with_context(|| {
-        format!(
-            "refusing to build a Merkle root over an unverified audit chain at {}",
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading audit chain {}", path.display()))?;
+    // Byte-equivalent to the file-reading `verify_audit_chain` (CI-pinned by
+    // `mvm_verify_matches_supervisor_chain`), run over the buffer we then split
+    // into leaves — one read, one source of truth.
+    verify_audit_chain_bytes(&content, vk).map_err(|e| {
+        anyhow::anyhow!(
+            "refusing to build a Merkle root over an unverified audit chain at {}: {e}",
             path.display()
         )
     })?;
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading audit chain {}", path.display()))?;
     Ok(content
         .lines()
         .filter(|line| !line.is_empty())
@@ -58,37 +64,17 @@ pub fn read_leaves(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Result<
         .collect())
 }
 
-/// Build the Merkle root over `tenant`'s audit chain, returning the root
-/// hash and the number of leaves (`tree_size`). Loads the host signer to
-/// verify the chain first. See [`build_root_in`] for the injectable-dir
-/// test seam.
-pub fn build_root(tenant: &str) -> Result<([u8; 32], u64)> {
-    let signer = host_keypair::load_or_init().context("loading host signer to build audit root")?;
-    build_root_in(&emitter::default_audit_dir()?, tenant, &signer.verifying)
-}
-
-/// [`build_root`] against an explicit audit directory and verifying key.
+/// Build the Merkle root over `tenant`'s audit chain in `audit_dir`,
+/// returning the root hash and the number of leaves (`tree_size`). The chain
+/// is verified under `vk` first; a corrupt log yields no root.
 pub fn build_root_in(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Result<([u8; 32], u64)> {
     let leaves = read_leaves(audit_dir, tenant, vk)?;
     let tree_size = leaves.len() as u64;
     Ok((merkle_root(&leaves), tree_size))
 }
 
-/// Build an inclusion proof for the leaf at `leaf_index` in `tenant`'s
-/// audit chain. Loads the host signer to verify the chain first. See
-/// [`build_inclusion_in`] for the injectable-dir test seam.
-pub fn build_inclusion(tenant: &str, leaf_index: usize) -> Result<InclusionProof> {
-    let signer =
-        host_keypair::load_or_init().context("loading host signer to build inclusion proof")?;
-    build_inclusion_in(
-        &emitter::default_audit_dir()?,
-        tenant,
-        &signer.verifying,
-        leaf_index,
-    )
-}
-
-/// [`build_inclusion`] against an explicit audit directory and verifying key.
+/// Build an inclusion proof for the leaf at `leaf_index` in `tenant`'s audit
+/// chain in `audit_dir`. The chain is verified under `vk` first.
 pub fn build_inclusion_in(
     audit_dir: &Path,
     tenant: &str,

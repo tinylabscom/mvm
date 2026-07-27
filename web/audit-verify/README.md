@@ -55,9 +55,10 @@ whole chain:
   This is only half a membership check.
 - `verify_signed_root(root_json, pubkey_hex)` — checks the root's Ed25519
   signature under the trusted host key.
-- `verify_membership(proof_json, root_json, pubkey_hex)` — the full check:
-  verifies the signed root, verifies the proof, and binds the two
-  (`root` + `tree_size` must match). This is the exact composition
-  `mvmctl trust audit verify-inclusion` enforces host-side, so a
-  self-consistent proof over an unsigned root is rejected. `index.html`
-  wiring for this flow is a follow-up.
+- `verify_membership(proof_json, root_json, pubkey_hex, tenant)` — the full
+  check: verifies the signed root, checks it is for the intended `tenant`,
+  verifies the proof, and binds root + tree_size. This is the exact
+  composition `mvmctl trust audit verify-inclusion` enforces host-side, so a
+  root signed for a different tenant, or a self-consistent proof over an
+  unsigned root, is rejected. `index.html` wiring for this flow is a
+  follow-up.

@@ -95,14 +95,21 @@ pub fn verify_signed_root(root_json: &str, pubkey_hex: &str) -> String {
 /// exact composition `mvmctl trust audit verify-inclusion` enforces
 /// host-side. In order, fail-closed:
 ///   1. the signed root verifies under the trusted host key;
-///   2. the inclusion proof is internally consistent;
-///   3. the proof binds to THIS signed root (`root` + `tree_size` match).
+///   2. the signed root is for the `tenant` the caller intended;
+///   3. the inclusion proof is internally consistent;
+///   4. the proof binds to THIS signed root (`root` + `tree_size` match).
 ///
-/// A self-consistent proof over a different (unsigned) root is rejected at
-/// step 3. Returns `{"ok":true,…}` naming the bound root on success, or
-/// `{"ok":false,"error":"<which check failed>"}`.
+/// A genuinely-signed root for a different tenant is rejected at step 2; a
+/// self-consistent proof over a different (unsigned) root is rejected at
+/// step 4. Returns `{"ok":true,"tenant":..,"leaf_index":..,"tree_size":..,
+/// "root":..}` on success, or `{"ok":false,"error":"<which check failed>"}`.
 #[wasm_bindgen]
-pub fn verify_membership(proof_json: &str, root_json: &str, pubkey_hex: &str) -> String {
+pub fn verify_membership(
+    proof_json: &str,
+    root_json: &str,
+    pubkey_hex: &str,
+    tenant: &str,
+) -> String {
     let outcome = (|| -> Result<InclusionProof, String> {
         let vk = verifying_key_from_hex(pubkey_hex).map_err(|e| e.to_string())?;
         let proof: InclusionProof =
@@ -111,6 +118,12 @@ pub fn verify_membership(proof_json: &str, root_json: &str, pubkey_hex: &str) ->
             serde_json::from_str(root_json).map_err(|e| format!("decode root: {e}"))?;
         merkle_verify_signed_root(&root, &vk)
             .map_err(|e| format!("signed-root verification failed: {e}"))?;
+        if root.tenant != tenant {
+            return Err(format!(
+                "tenant binding failed: signed root is for tenant '{}', expected '{}'",
+                root.tenant, tenant
+            ));
+        }
         merkle_verify_inclusion(&proof)
             .map_err(|e| format!("inclusion-proof verification failed: {e}"))?;
         if proof.root != root.root_hash {
@@ -131,6 +144,7 @@ pub fn verify_membership(proof_json: &str, root_json: &str, pubkey_hex: &str) ->
     match outcome {
         Ok(proof) => serde_json::json!({
             "ok": true,
+            "tenant": tenant,
             "leaf_index": proof.leaf_index,
             "tree_size": proof.tree_size,
             "root": proof.root,
