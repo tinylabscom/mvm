@@ -135,7 +135,7 @@ git -C "$WT" commit -m "feat(light-guest): build guest setpriv static-musl, drop
 
 **Why a build-backed check, not a byte measurement.** Task 1's eval gate proves `setpriv` *references* the static build. This task proves the *actual closure* carries no glibc — the stronger, end-to-end property — and enforces it in CI. A pure `nix eval` cannot see a derivation's runtime closure, so the check must realize the closure; the `ubuntu-latest` Nix runner builds it natively (no sudo, no darwin linux-builder). The exact rootfs byte budget is deferred to WS-6 — `ROOTFS_MAX_BYTES` gates a packed *release* rootfs, not this `lib` output, so it must not be tightened here.
 
-- [ ] **Step 1: Add the check derivation to `nix/flake.nix`**
+- [x] **Step 1: Add the check derivation to `nix/flake.nix`**
 
 Add a `checks` output beside the `packages` output (systems come from the existing `systems` list):
 
@@ -166,7 +166,7 @@ Add a `checks` output beside the `packages` output (systems come from the existi
         });
 ```
 
-- [ ] **Step 2: Verify the check evaluates (local, no build, no sudo)**
+- [x] **Step 2: Verify the check evaluates (local, no build, no sudo)**
 
 ```bash
 cd nix
@@ -176,7 +176,7 @@ nix --extra-experimental-features 'nix-command flakes' eval \
 
 Expected: prints a `/nix/store/…-guest-rootfs-no-glibc.drv` path. Cross-system eval works on macOS; this confirms the derivation and its `closureInfo` input are well-formed. Do NOT `nix build` it here — realizing an `x86_64-linux`/`aarch64-linux` closure on this macOS host needs the sudo-gated linux-builder, which is out of bounds. The build-proof runs in CI (Step 3). Also run the existing loop to confirm no eval regression: `nix flake check --no-build ./` from `nix/`.
 
-- [ ] **Step 3: Build the check in CI**
+- [x] **Step 3: Build the check in CI**
 
 In `.github/workflows/ci.yml`, in the `nix-flake-check` job, add a step after "Eval-check every flake":
 
@@ -190,11 +190,11 @@ In `.github/workflows/ci.yml`, in the `nix-flake-check` job, add a step after "E
 
 The runner is `ubuntu-latest` (x86_64-linux); this realizes the rootfs closure (substituted from cache) and fails the job if glibc appears — the per-PR proof.
 
-- [ ] **Step 4: Leave the size budget; record the deferred gate**
+- [x] **Step 4: Leave the size budget; record the deferred gate**
 
 Do NOT change `xtask/src/perf.rs` `ROOTFS_MAX_BYTES` — it gates a packed release rootfs, a different artifact. Add one line under "## Deferred follow-ups" for WS-6: a mkGuest-rootfs *size* (bytes) budget belongs with the unified footprint ledger; this task lands the *no-glibc* gate, not a byte budget.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 WT=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-light-guest
@@ -212,7 +212,7 @@ Tracked here per the deferred-work convention; each is its own future plan.
 - **WS-3 (lever B):** unify the runtime-overlay binaries on static-musl and drop the glibc loader/`libc.so.6`/`libgcc_s.so.1` bundle from `nix/images/runtime-overlay/flake.nix`; needs a mini-design for moving `libmvm_host_services.so` (the FFI cdylib SDKs dlopen) to an SDK-workload sidecar. Tighten the 32 MiB overlay cap after.
 - **WS-4 (lever D):** add a measured guest-agent RSS gate (≤ ~8 MB); the tokio-free agent already lands most of it.
 - **WS-5 (lever A/E):** rootfs closure minimization — CA-bundle trim, kernel-module audit, rootfs package-count budget; absorbs any residual glibc anchor found in Task 2 Step 1.
-- **WS-6:** fold rootfs/overlay/closure/kernel/RSS budgets into one `xtask perf footprint` ledger; add the mkGuest-rootfs size gate if Task 2 Step 3 deferred it.
+- **WS-6:** fold rootfs/overlay/closure/kernel/RSS budgets into one `xtask perf footprint` ledger; Task 2 landed the no-glibc closure gate only (`checks.<system>.guest-rootfs-no-glibc`) — the mkGuest-rootfs size (bytes) budget stays deferred here, per `xtask/src/perf.rs`'s `ROOTFS_MAX_BYTES` being left untouched.
 
 ## Self-review
 

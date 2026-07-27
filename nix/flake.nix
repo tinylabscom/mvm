@@ -197,5 +197,38 @@
           internal-minimal-runner =
             (mkProfile system "minimal").config.microvm.declaredRunner;
         });
+
+      # ── CI-provable no-glibc closure gate ─────────────────────────
+      #
+      # The guest's `setpriv` is static-musl (`pkgs.pkgsStatic.util-linux`),
+      # which drops glibc from the mkGuest rootfs closure. This check
+      # realizes that closure and fails if glibc re-enters it — a
+      # build-backed guarantee a pure `nix eval` can't provide, since
+      # eval can't see a derivation's runtime closure. Wired into the
+      # `nix-flake-check` CI job.
+      checks = nixpkgs.lib.genAttrs systems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          guest = (libFor { inherit system; }).mkGuest {
+            name = "no-glibc-check";
+            entrypoint.command = [ "/bin/true" ];
+          };
+        in
+        {
+          # The mkGuest rootfs is static-musl only. If any glibc store path
+          # enters its closure, this build fails — the guest privilege-drop
+          # setpriv and every other rootfs binary must stay static.
+          guest-rootfs-no-glibc =
+            pkgs.runCommand "guest-rootfs-no-glibc"
+              { closure = pkgs.closureInfo { rootPaths = [ guest.passthru.rootfsTree ]; }; }
+              ''
+                if grep -Eq -- '-glibc(-|$)' "$closure/store-paths"; then
+                  echo "glibc present in guest rootfs closure:" >&2
+                  grep -- '-glibc' "$closure/store-paths" >&2
+                  exit 1
+                fi
+                echo ok > "$out"
+              '';
+        });
     };
 }
