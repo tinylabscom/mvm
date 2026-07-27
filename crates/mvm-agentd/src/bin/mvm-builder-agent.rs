@@ -1,37 +1,25 @@
+// The vsock leaf (`sys`) is Linux-only, so the accept loop lives behind a
+// Linux `main`; the request-handling helpers stay compiled (but unused) off
+// Linux so the workspace still builds on macOS dev hosts.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use std::io::{BufRead, BufReader, Write};
-use std::mem::size_of;
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::OwnedFd;
 use std::process::{Command, Stdio};
 
 use mvm_agentd::builder_agent::{
     HostVmRequest, HostVmResponse, load_security_policy, validate_build_attr, validate_flake_ref,
 };
+#[cfg(target_os = "linux")]
+use mvm_agentd::vsock::sys;
 
-const AF_VSOCK: i32 = 40;
-const SOCK_STREAM: i32 = 1;
-const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
 const PORT: u32 = mvm_agentd::builder_agent::BUILDER_AGENT_PORT;
 
-#[repr(C)]
-struct SockAddrVm {
-    svm_family: u16,
-    svm_reserved1: u16,
-    svm_port: u32,
-    svm_cid: u32,
-    svm_zero: [u8; 4],
-}
+/// Accept-queue depth for the builder-agent listener.
+const LISTEN_BACKLOG: i32 = 16;
 
-unsafe extern "C" {
-    fn socket(domain: i32, typ: i32, protocol: i32) -> i32;
-    fn bind(sockfd: i32, addr: *const core::ffi::c_void, addrlen: u32) -> i32;
-    fn listen(sockfd: i32, backlog: i32) -> i32;
-    fn accept(sockfd: i32, addr: *mut core::ffi::c_void, addrlen: *mut u32) -> i32;
-    fn close(fd: i32) -> i32;
-}
-
-fn handle_client(fd: RawFd) {
-    // SAFETY: fd comes from accept and is a valid file descriptor owned by this function.
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+fn handle_client(conn: OwnedFd) {
+    let file = std::fs::File::from(conn);
     let mut reader = BufReader::new(file);
     let mut line = String::new();
 
@@ -393,55 +381,27 @@ fn run_build(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn main() {
-    // SAFETY: libc call, arguments are constant values.
-    let fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
-    if fd < 0 {
-        eprintln!("failed to create vsock socket");
-        std::process::exit(1);
-    }
-
-    let addr = SockAddrVm {
-        svm_family: AF_VSOCK as u16,
-        svm_reserved1: 0,
-        svm_port: PORT,
-        svm_cid: VMADDR_CID_ANY,
-        svm_zero: [0; 4],
-    };
-
-    // SAFETY: pointers are valid for the specified size.
-    let bind_rc = unsafe {
-        bind(
-            fd,
-            &addr as *const SockAddrVm as *const core::ffi::c_void,
-            size_of::<SockAddrVm>() as u32,
-        )
-    };
-    if bind_rc != 0 {
-        eprintln!("failed to bind vsock socket");
-        // SAFETY: fd is valid.
-        unsafe {
-            close(fd);
+    let listener = match sys::bind_listen(sys::ANY_CID, PORT, LISTEN_BACKLOG) {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("failed to bind/listen vsock socket: {e}");
+            std::process::exit(1);
         }
-        std::process::exit(1);
-    }
-
-    // SAFETY: fd is valid.
-    if unsafe { listen(fd, 16) } != 0 {
-        eprintln!("failed to listen on vsock socket");
-        // SAFETY: fd is valid.
-        unsafe {
-            close(fd);
-        }
-        std::process::exit(1);
-    }
+    };
 
     loop {
-        // SAFETY: null addr pointers are allowed for accept when peer addr is not needed.
-        let cfd = unsafe { accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
-        if cfd < 0 {
-            continue;
+        match sys::accept(&listener) {
+            Ok(conn) => handle_client(conn),
+            // A transient accept failure is not fatal; keep serving.
+            Err(_) => continue,
         }
-        handle_client(cfd);
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("mvm-builder-agent: Linux-only binary (AF_VSOCK); not buildable on this target");
+    std::process::exit(1);
 }

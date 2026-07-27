@@ -2676,6 +2676,7 @@ dependencies = [
  "libc",
  "mvm-core",
  "mvm-protocol",
+ "nix 0.29.0",
  "rand 0.8.6",
  "schemars",
  "seccompiler",
@@ -3072,6 +3073,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
