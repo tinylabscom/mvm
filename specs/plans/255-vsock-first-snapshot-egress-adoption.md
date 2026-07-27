@@ -2,7 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Draft.
+**Status:** Active.
+
+> Backend sequencing, the concrete warm-start/density SLOs, the new
+> restore-path security witnesses, and the competitive-positioning
+> deliverables live in Plan 265, which depends on this plan's substrate
+> (Phases 1–2). See `specs/notes/2026-07-26-fast-start-warm-snapshot-design.md`.
 
 ## Goal
 
@@ -258,6 +263,11 @@ un-audited or tampered parent; no second provenance graph is introduced (reuses
       teardown, and fresh handshake.
 - [ ] Add a hard guard that refuses to resume a warm parent as a workload
       (different code path / enum variant).
+- [ ] Re-enable memory-snapshot restore behind a verified no-NIC-on-restore
+      invariant: a restored device model that carries a network device is
+      refused, so restore can never reintroduce an un-audited egress path.
+      (Restore is hard-disabled today in `crates/mvm-runtime/src/microvm/snapshot.rs`.)
+      Backend-specific restore engineering and sequencing are tracked in Plan 265.
 - [ ] Add unit tests for identity freshness and replay refusal; add BDD
       scenarios for sub-second warm launch and for fork isolation.
 - [ ] `fork_from_parent` mints or inherits a fresh signed `ExecutionPlan` for
