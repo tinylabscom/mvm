@@ -58,7 +58,7 @@ few categories:
   signed, chain-audited plan rather than started ad hoc.
 - Default-deny egress — network access requires positive admission by policy;
   nothing reaches the network by default.
-- Secrets never enter the guest — credential substitution happens host-side;
+- Secrets never enter the guest — credential substitution happens host-side; <!-- allow(doc-claim:secret-non-leakage): summarizes an existing shipped host-side property -->
   raw secret bytes never cross into guest memory.
 - No interactive access to a sealed production guest — there is no shell into
   a production workload.
