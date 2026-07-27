@@ -355,7 +355,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
         with:
           targets: wasm32-unknown-unknown,wasm32-wasip1
 
@@ -400,7 +400,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
       - name: Write a sample image with the pure-Rust ext4 writer
         run: cargo run -p mvm-fs --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
       - name: Loop-mount read-only and verify the tree on the real kernel
