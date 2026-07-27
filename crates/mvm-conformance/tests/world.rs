@@ -7,6 +7,7 @@ use std::process::Output;
 
 use mvm_core::kernel_advisory::{KernelAdvisory, KernelPin};
 use mvm_core::kernel_format::KernelFormat;
+use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId};
 
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
@@ -42,6 +43,23 @@ pub struct CliWorld {
     pub prior_layer_paths: HashSet<PathBuf>,
     /// The most recent OCI unpack report.
     pub last_unpack_report: Option<mvm_fs::oci::UnpackReport>,
+    /// Scratch directory backing the warm-snapshot scenarios: holds the
+    /// snapshot store root, the synthetic template rootfs artifact, and
+    /// every materialized instance path.
+    pub snapshot_tmp: Option<tempfile::TempDir>,
+    /// The content-addressed snapshot store opened by a warm-snapshot
+    /// `Given` step.
+    pub snapshot_store: Option<FsSnapshotStore>,
+    /// The id returned when the template rootfs artifact was stored.
+    pub snapshot_id: Option<SnapshotId>,
+    /// Path to the synthetic template rootfs artifact, kept so later steps
+    /// can re-store it and assert dedup.
+    pub snapshot_source_path: Option<PathBuf>,
+    /// Bytes of the synthetic template rootfs artifact, for byte-equality
+    /// assertions against materialized instances.
+    pub snapshot_source_bytes: Option<Vec<u8>>,
+    /// Path of the most recently materialized instance.
+    pub snapshot_instance_path: Option<PathBuf>,
 }
 
 impl fmt::Debug for CliWorld {

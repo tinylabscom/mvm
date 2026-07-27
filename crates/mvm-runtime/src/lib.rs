@@ -110,6 +110,11 @@ pub mod vmm;
 /// Shared host-side vsock egress support. Backend-agnostic; every VMM path uses
 /// the same gate/relay substrate while policy remains in the host endpoint.
 pub mod vsock_egress_bridge;
+/// Plugs `mvm_fs`'s content-addressed `SnapshotStore` beneath the existing
+/// checkpoint lineage: stage a checkpoint's bytes into the snapshot store,
+/// then clone them only after the checkpoint's fail-closed lineage
+/// verification (`verify_content` + `verify_lineage`) passes.
+pub mod warm_snapshot;
 /// `WasmBackend` — host-`wasmtime` claim-free portability tier running a
 /// user-supplied WASI module. Always constructible; the real engine only
 /// compiles in behind the opt-in `wasm-backend` feature.

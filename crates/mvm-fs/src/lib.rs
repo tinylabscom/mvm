@@ -13,6 +13,8 @@
 //!   verity-sealed overlay artifact set for one `(version, arch)`.
 //! - [`clone`]: reflink (copy-on-write) file/directory cloning primitives
 //!   used by the runtime to materialize per-instance rootfs copies.
+//! - [`hash`]: content-addressing helpers (file/directory SHA-256) backing
+//!   [`snapshot_store`]'s content-addressed create.
 //! - [`snapshot_store`]: content-addressed snapshot persistence used by the
 //!   warm-parent pool.
 //!
@@ -23,6 +25,7 @@
 
 pub mod clone;
 pub mod ext4;
+pub mod hash;
 pub mod oci;
 /// OCI layer unpack to a staging rootfs directory. Handles whiteouts,
 /// symlinks, hardlinks, ownership, permissions, path traversal, the

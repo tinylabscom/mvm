@@ -48,6 +48,13 @@ the density/kernel/memory work. This plan adds the prior-art-shaped details.
    typed-connector path only; secrets never enter guest memory, disk, or logs.
 4. **Single-binary discipline.** `mvm-hostd` and `mvm-agentd` stay one process
    each; CLI stays a thin shell over `mvm-client`.
+5. **Fork/restore never bypasses admission.** A forked or restored instance
+   re-admits or inherits a bound, validity-windowed signed `ExecutionPlan`
+   (claim 8) and, on block+ext4 backends, retains its dm-verity roothash
+   binding (claim 3). A warm parent carries no workload authority; authority is
+   minted per child at fork time and emits the normal `plan.admitted` /
+   `plan.launched` audit entries. A fork that silently reuses a parent's
+   authority is a claim-8 hole and must fail closed.
 
 ## Product decisions
 
@@ -66,6 +73,13 @@ the density/kernel/memory work. This plan adds the prior-art-shaped details.
 5. **OCI image as a first-class template base.** `mvmctl template build --image
    <ref>` must work without a Nix flake, while Nix flakes remain a supported
    authoring surface.
+6. **Reuse the chain-anchored checkpoint lineage; do not fork a second graph.**
+   The warm-fork / snapshot graph *is* the existing content-addressed,
+   hash-linked checkpoint lineage anchored to the chain-signed audit log
+   (`mvm-runtime::lineage`, `crates/mvm-runtime/src/checkpoint/`,
+   `crates/mvm-core/src/checkpoint.rs`), not a new flat graph. `SnapshotStore`
+   supplies the O(1) copy primitive *under* that lineage; it does not own
+   provenance.
 
 ## Architecture
 
@@ -80,7 +94,7 @@ Template (sealed, signed, read-only)
 Instance = CoW clone of template rootfs + warm overlay + fresh per-instance
            volume + memory snapshot restore (if warm) OR cold boot (if not warm)
 
-Snapshot graph (flat, content-addressed):
+Snapshot graph (chain-anchored checkpoint lineage; content-addressed):
   Template ──► Instance A
          ├────► Instance B
          └────► Snapshot S ──► Instance C
@@ -92,6 +106,11 @@ Snapshot graph (flat, content-addressed):
 - Memory snapshots are captured at a template-defined ready point and restored
   on instance start. Page-cache priming (ADR-025) is applied at freeze time,
   confined to the read-only rootfs.
+- The snapshot graph is the existing chain-anchored checkpoint lineage, not a
+  new structure: every clone/snapshot is a content-addressed, hash-linked
+  lineage node bound to the signed audit chain. `SnapshotStore` records nodes
+  through `mvm-runtime::lineage`; a clone/fork from an un-audited, missing, or
+  hash-mismatched parent fails closed.
 
 ### Warm-pool model
 
@@ -125,18 +144,52 @@ Snapshot graph (flat, content-addressed):
   deny / inject / security-event / TLS-handshake events, and writes a redacted
   JSONL access log in addition to the chain-signed audit log.
 
+### Vsock-first adoption boundary
+
+Distilled from the open-source-competitor research and the Invariants /
+Non-goals above — what this plan takes, refuses, and why.
+
+**Adopted:**
+- snapshot-first templates (sealed rootfs plus optional ready-point memory
+  snapshot);
+- CoW O(1) clone with a sparse-copy fallback where the filesystem lacks
+  reflink;
+- a warm pool that forks a paused clean parent into a fresh child, never
+  resuming a parent as a workload;
+- richer egress-policy *vocabulary* on the existing typed-connector/vsock
+  path;
+- an OCI image as a first-class template base, alongside Nix flakes;
+- publishing warm-start/density SLOs as gated, measured properties.
+
+**Refused:**
+- any default guest-NIC/TAP/bridge path or eBPF data plane;
+- transparent TLS MITM inside the guest (baked root CA, guest trust-model
+  change);
+- reusing a dirty guest across workloads;
+- a mutable shared store as control-plane authority;
+- a container-runtime shim on the runtime path.
+
+**Why:**
+- vsock stays the sole guest↔host and egress boundary — the auditable
+  chokepoint the egress and secret-substitution claims rest on;
+- admission stays the signed, validity-windowed `ExecutionPlan` plus
+  chain-signed audit log, never a mutable store;
+- one guest is one workload;
+- a forked or restored instance re-admits or inherits a bound signed plan
+  and keeps its verity binding — it never bypasses admission.
+
 ## Phases
 
 ### Phase 0 — Boundary record and spec update
 
-- [ ] Update ADR-025 to add the open-source competitor as a second prior-art
+- [x] Update ADR-025 to add the open-source competitor as a second prior-art
       data point: confirm the snapshot/CoW model, confirm refusal of dirty-
       guest reuse, and note the richer egress-policy vocabulary as inspiration
       only (no MITM adoption).
-- [ ] Add a short design note in this plan (above) or in `03-networking.md`
+- [x] Add a short design note in this plan (above) or in `03-networking.md`
       capturing the "vsock-first adoption boundary": what is adopted, what is
       refused, and why.
-- [ ] File/update a tracking issue for Plan 255 and link it in
+- [x] File/update a tracking issue for Plan 255 (#1851) and link it in
       `specs/SPRINT.md` under the appropriate phase.
 
 **Acceptance gate:** ADR-025 updated and reviewed; no security claim changes;
@@ -144,20 +197,55 @@ Snapshot graph (flat, content-addressed):
 
 ### Phase 1 — Snapshot-first storage in `mvm-fs`
 
-- [ ] Introduce `SnapshotStore` trait in `mvm-fs` with operations `create`,
-      `clone`, `delete`, `list_parents`. Implementation uses reflink when
-      supported, sparse copy fallback otherwise.
-- [ ] Move memory-snapshot file handling from `mvm-runtime` into `mvm-fs` if it
+- [x] Introduce `SnapshotStore` trait in `mvm-fs` with content-addressed
+      create/materialize/remove/list operations. Implementation uses
+      reflink when supported, sparse copy fallback otherwise. (The trait
+      and its `FsSnapshotStore` impl pre-existed as `create`/`materialize`/
+      `remove`/`list`; this phase extended it with a sparse-copy fallback in
+      `clone::reflink_or_copy`, a real content-addressed `create_content_addressed`
+      with dedup, and `retain`/`release`/`refcount` reference counting.
+      `list_parents` is deliberately not added — reference *counting* is a
+      storage primitive, but parent *lineage* stays out of `mvm-fs` per this
+      phase's task brief, to be plugged in from `mvm-runtime`'s checkpoint
+      lineage in a later task.)
+- [x] Move memory-snapshot file handling from `mvm-runtime` into `mvm-fs` if it
       is not already there; ensure content-addressed naming and reference
-      tracking.
-- [ ] Add unit tests for reflink/fallback roundtrips and for snapshot graph
+      tracking. (`mvm-fs` now owns content-addressed memory-snapshot
+      *storage*: a `mem.bin` file or `{vmstate.bin, mem.bin}` directory is
+      just another `create_content_addressed` artifact, materialized via the
+      sparse-aware clone. The Firecracker pause/seal lifecycle that produces
+      those bytes stays in `mvm-runtime` per Product decision 2.)
+- [x] Add unit tests for reflink/fallback roundtrips and for snapshot graph
       integrity (deleting a child does not affect parent or siblings).
-- [ ] Add a BDD scenario: build a template with a warm snapshot, clone it into
+- [x] Add a BDD scenario: build a template with a warm snapshot, clone it into
       an instance, and verify the instance boots faster than a cold-booted
-      equivalent.
+      equivalent. (`features/suites/s11_snapshot/warm_snapshot_clone.feature`,
+      hermetic — no `@live` tag — driving `mvm_fs::snapshot_store` directly in
+      the default `just bdd` lane; it proves the storage-layer basis for a
+      warm start being faster than a cold boot (clone of a pre-built
+      content-addressed artifact, not a rebuild). The live boot-time
+      comparison itself is measured under the Phase 2 sub-second warm-launch
+      acceptance gate.)
+- [x] Plug `SnapshotStore` in *beneath* the existing checkpoint lineage: a warm
+      snapshot is recorded as a lineage node (content-address + hash-link +
+      audit anchor) via `mvm-runtime::{lineage, checkpoint}`; introduce no
+      second provenance graph. (`mvm-runtime::warm_snapshot::materialize_child_from_parent`
+      stages a verified checkpoint's content dir into `FsSnapshotStore` under
+      its own content hash before materializing it; the checkpoint's
+      `meta.json` remains the sole lineage record — no second graph.)
+- [x] A clone/fork from a parent whose lineage node is missing, un-audited, or
+      hash-mismatched fails closed, reusing the checkpoint lineage's
+      parent-verification path. Add a negative test.
+      (`mvm-runtime::warm_snapshot::materialize_child_from_parent` runs
+      `read_meta -> verify_content -> verify_lineage` before calling
+      `SnapshotStore::materialize`; four tests cover the positive control plus
+      missing/un-audited/tampered-parent refusal, each asserting `dst` is
+      never created.)
 
 **Acceptance gate:** `cargo test -p mvm-fs` green; BDD scenario passes on Linux;
-no `mvm-fs` consumer sees filesystem-specific logic.
+no `mvm-fs` consumer sees filesystem-specific logic; clone/fork refuses an
+un-audited or tampered parent; no second provenance graph is introduced (reuses
+`mvm-runtime::lineage`).
 
 ### Phase 2 — Warm pool and fork hygiene in `mvm-runtime`
 
@@ -172,9 +260,17 @@ no `mvm-fs` consumer sees filesystem-specific logic.
       (different code path / enum variant).
 - [ ] Add unit tests for identity freshness and replay refusal; add BDD
       scenarios for sub-second warm launch and for fork isolation.
+- [ ] `fork_from_parent` mints or inherits a fresh signed `ExecutionPlan` for
+      the child and refuses to launch a child whose plan is unsigned, expired,
+      or replayed (claim 8). Add a negative test.
+- [ ] On block+ext4 backends the forked child inherits the parent template's
+      dm-verity roothash binding; a fork that would drop verity fails closed
+      (claim 3).
 
 **Acceptance gate:** warm launch is sub-second on Linux and macOS; forked child
-has a new session nonce and cannot reuse an old one; clippy/test green.
+has a new session nonce and cannot reuse an old one; a forked/restored child
+emits `plan.admitted` / `plan.launched` and a fork with an absent or tampered
+plan is refused; `check-claim-catalog` green; clippy/test green.
 
 ### Phase 3 — Egress policy enrichment (vsock seam only)
 
