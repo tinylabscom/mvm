@@ -19,10 +19,11 @@
 
 #![cfg(target_os = "linux")]
 
-use mvm_build::runtime_overlay::{OverlayBuildSpec, build_overlay_with_nix};
+use mvm_build::runtime_overlay::{
+    InstallOptions, OverlayBuildSpec, build_overlay_with_nix, install_overlay_into_cache,
+};
 use mvm_core::arch::GuestArch;
 use mvm_fs::overlay::RuntimeOverlayResolver;
-use std::path::Path;
 use tempfile::TempDir;
 
 fn skip_if_no_nix() -> bool {
@@ -90,32 +91,20 @@ fn build_produces_resolver_compatible_artifact() {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     );
 
-    // The resolver expects a cache layout of
-    // `<cache>/runtime-overlay/<version>/<arch>/{overlay.ext4,
-    // overlay.verity, overlay.roothash, VERSION}`. Stage the
-    // nix-built files into that layout and run the resolver to
-    // prove producer + consumer agree end-to-end.
+    // Populate the cache exactly as production does: install writes the
+    // checksum manifest the resolver's integrity check requires, so this
+    // exercises the real build -> install -> resolve path end-to-end. The
+    // nix build's VERSION sits next to overlay.ext4, which is where
+    // install_overlay_into_cache reads it from.
     let cache = TempDir::new().expect("cache tempdir");
-    let staged = cache
-        .path()
-        .join("runtime-overlay")
-        .join(&artifact.version)
-        .join(arch.to_string());
-    std::fs::create_dir_all(&staged).unwrap();
-    copy_file(&artifact.overlay_ext4, &staged.join("overlay.ext4"));
-    copy_file(&artifact.sidecar, &staged.join("overlay.verity"));
-    copy_file(&artifact.roothash_file, &staged.join("overlay.roothash"));
-    // VERSION file is at the artifact_dir level (next to the
-    // ext4), not duplicated from `roothash_file.parent()`. The
-    // flake produces it as `$out/VERSION` so the resolver sees
-    // it in the same dir.
-    copy_file(&result_link.join("VERSION"), &staged.join("VERSION"));
+    install_overlay_into_cache(&artifact, cache.path(), &InstallOptions::default())
+        .expect("install nix-built overlay into cache");
 
     let resolver =
         RuntimeOverlayResolver::new(cache.path().to_path_buf(), artifact.version.clone());
     let resolved = resolver
         .resolve(&arch.to_string())
-        .expect("resolver must accept the freshly-built artifact");
+        .expect("resolver must accept the freshly-built + installed artifact");
     assert_eq!(resolved.version, artifact.version);
     assert_eq!(resolved.roothash, artifact.roothash);
     assert_eq!(resolved.arch, artifact.arch);
@@ -138,13 +127,25 @@ fn build_produces_verity_sidecar_matching_overlay_block_geometry() {
     let artifact = build_overlay_with_nix(&spec).expect("nix build runtime-overlay");
     let overlay_bytes = std::fs::read(&artifact.overlay_ext4).expect("read overlay.ext4");
     let sidecar_bytes = std::fs::read(&artifact.sidecar).expect("read overlay.verity");
-    let data_blocks = overlay_bytes.len() as u64 / 4096;
-    let expected_sidecar_blocks = verity_tree_block_count(data_blocks, 4096);
+    // Must match nix/images/runtime-overlay/flake.nix: `overlayBlockSize`
+    // (mkfs.ext4 `-b` and veritysetup `--data-block-size`) and
+    // `overlayVerityHashBlockSize` (veritysetup `--hash-block-size`). The
+    // overlay uses 1 KiB data blocks under a 4 KiB verity hash device, so the
+    // data-block count is over 1024, not the hash-block size.
+    const OVERLAY_DATA_BLOCK_SIZE: u64 = 1024;
+    const OVERLAY_VERITY_HASH_BLOCK_SIZE: u64 = 4096;
+    let data_blocks = overlay_bytes.len() as u64 / OVERLAY_DATA_BLOCK_SIZE;
+    // `veritysetup format` (not passed `--no-superblock`) writes a one-block
+    // superblock ahead of the hash tree, so the sidecar is the tree plus one
+    // hash block.
+    let expected_sidecar_blocks =
+        1 + verity_tree_block_count(data_blocks, OVERLAY_VERITY_HASH_BLOCK_SIZE);
 
     assert_eq!(
         sidecar_bytes.len() as u64,
-        expected_sidecar_blocks * 4096,
-        "overlay.verity must encode exactly the dm-verity hash tree for the 4 KiB-block overlay ext4"
+        expected_sidecar_blocks * OVERLAY_VERITY_HASH_BLOCK_SIZE,
+        "overlay.verity must encode exactly the dm-verity hash tree for the \
+         1 KiB-data-block / 4 KiB-hash-block overlay ext4"
     );
 }
 
@@ -189,15 +190,6 @@ fn build_is_byte_deterministic_for_same_workspace() {
         "byte-deterministic invariant: overlay.ext4 must be \
          byte-identical across builds (ADR-018 verity cache)"
     );
-}
-
-fn copy_file(src: &Path, dst: &Path) {
-    let bytes = std::fs::read(src).unwrap_or_else(|e| {
-        panic!("read {src:?}: {e}");
-    });
-    std::fs::write(dst, bytes).unwrap_or_else(|e| {
-        panic!("write {dst:?}: {e}");
-    });
 }
 
 fn verity_tree_block_count(data_blocks: u64, hash_block_size: u64) -> u64 {
