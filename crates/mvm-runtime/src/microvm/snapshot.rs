@@ -12,17 +12,20 @@
 //! and audit-chain checks, so a second verifier here would either be
 //! redundant or fail closed on content it was never meant to see.
 //!
-//! The template restore entry point and the bare `warm_restore_instance`
-//! stay refused. A template snapshot carries its own Ed25519 + HMAC sidecar
-//! (a separate, stronger check) that isn't wired up yet; `warm_restore_instance`
-//! has no caller. Re-enabling either needs a design that keeps its own
-//! integrity check and adds the same guard ordering on top of it.
+//! `restore_from_template_snapshot` runs `verify_snapshot_artifacts` (the
+//! template snapshot's own Ed25519 + HMAC sidecar — a separate, stronger
+//! check than the instance-snapshot HMAC path) before calling
+//! `guarded_load_resume`. See its doc comment for a known device re-bind
+//! limitation this path does not yet close. The bare `warm_restore_instance`
+//! stays refused — it has no caller.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::instrument;
 
 use crate::base::shell::shell_quote;
+#[cfg(test)]
+use crate::vm::instance_snapshot::SpyIO;
 use crate::vm::instance_snapshot::{
     FirecrackerIO, VsockPostRestoreSignal, guarded_load_resume, signal_post_restore,
 };
@@ -30,14 +33,48 @@ use crate::vm::instance_snapshot::{
 use super::daemon::api_put_socket;
 use super::{abs_vms_dir, require_linux_env};
 
-/// Refuse template snapshot restore.
+/// Restore `template_id`'s sealed Firecracker snapshot into a fresh, paused
+/// VMM for `config.name`: verify the template's own Ed25519 + HMAC sidecar
+/// (`crate::base::snapshot_integrity::verify_snapshot_artifacts`) before any
+/// Firecracker work, then run the same load → no-NIC-guard → resume ordering
+/// as the fork restore path via `guarded_load_resume`. Fails closed at either
+/// step: a tampered/unsigned snapshot never reaches Firecracker, and a
+/// NIC-carrying restored device model is torn down and never resumed.
 ///
-/// Snapshots capture complete VMM device state and may contain a network
-/// interface, bypassing the vsock-only egress boundary. Template snapshots
-/// are sealed with their own Ed25519 + HMAC sidecar, a separate mechanism
-/// from the instance-snapshot HMAC path the no-NIC guard is wired behind;
-/// restoring them needs a design that keeps that signature check AND adds
-/// the guard, so this stays refused until that design lands.
+/// This deliberately does NOT route through the instance-snapshot HMAC
+/// verifier (`verify_and_resume`/`verify_and_resume_from_dir`): that path is
+/// the AES-GCM/HMAC envelope `mvmctl pause`/`resume` seals under a
+/// per-tenant DEK, a different mechanism than a template's Ed25519-signed
+/// sidecar. Running it here would either drop the Ed25519 check silently or
+/// fail closed on content it was never meant to see.
+///
+/// # Known limitation: device re-bind
+///
+/// A restored VMM reopens whatever host paths were baked into `vmstate.bin`
+/// at snapshot-creation time — the rootfs drive, the vsock UDS, and so on.
+/// The fork restore path (`FcForkRestorer::restore_fork`) captures those
+/// paths in a `device-anchors.json` sidecar and bind-mounts the new
+/// instance's own device files over them in a private mount namespace
+/// before calling `guarded_load_resume`, so the snapshot's baked-in absolute
+/// paths resolve to the right content for that instance.
+///
+/// Nothing analogous exists for a template snapshot. `allocate_slot` only
+/// reserves a fresh `~/.mvm/vms/<name>/` directory for `config.name` — it
+/// lays down no rootfs/vsock backing files at whatever paths the template's
+/// `vmstate.bin` recorded, and the seal side
+/// (`crate::base::snapshot_integrity::seal_snapshot_artifacts`) captures no
+/// device-anchor sidecar to remap from. Until a template-snapshot
+/// device-anchor-and-remap mechanism lands, a real restore attempt fails
+/// inside `load_snapshot_paused`'s `PUT /snapshot/load` call the moment
+/// Firecracker tries to reopen a drive or vsock path that doesn't exist
+/// under the fresh instance directory — that failure surfaces as an `Err`
+/// before the device-model guard or `resume` ever runs, so this is a clean
+/// refusal rather than a silent wrong-device restore, but it is also not yet
+/// a working end-to-end path. Nothing in the shipped CLI populates a
+/// template revision's `SnapshotInfo` today (`seal_snapshot_artifacts` has no
+/// caller), so wiring the verify+guard ordering here carries no live
+/// regression risk; treat this as scaffolding the create-side wiring still
+/// needs to land on top of.
 #[instrument(skip_all, fields(template_id, name = %config.name))]
 pub fn restore_from_template_snapshot(
     template_id: &str,
@@ -45,11 +82,30 @@ pub fn restore_from_template_snapshot(
     snapshot_dir: &str,
     _snapshot_info: &mvm_core::template::SnapshotInfo,
 ) -> Result<()> {
-    let _ = (template_id, snapshot_dir);
     config.validate()?;
-    anyhow::bail!(
-        "Firecracker template snapshot restore is disabled; use the vsock workload runner"
-    );
+    // Defense in depth: `config.name` is interpolated into shell commands
+    // inside `load_snapshot_paused` (`FirecrackerIO` shells out to stop a
+    // stale paused process and start a fresh one). Re-check at the boundary
+    // so no caller can smuggle shell/JSON metacharacters in.
+    mvm_core::naming::validate_vm_name(&config.name)
+        .with_context(|| format!("template restore refused invalid VM name {:?}", config.name))?;
+    require_linux_env()?;
+
+    crate::base::snapshot_integrity::verify_snapshot_artifacts(snapshot_dir).with_context(
+        || format!("verifying template '{template_id}' snapshot integrity at {snapshot_dir}"),
+    )?;
+
+    let abs_vms = abs_vms_dir();
+    let vm_dir = format!("{}/{}", abs_vms.trim(), config.name);
+    let socket = std::path::PathBuf::from(format!("{vm_dir}/fc.socket"));
+    let io = FirecrackerIO::new(socket);
+
+    guarded_load_resume(&io, std::path::Path::new(snapshot_dir)).with_context(|| {
+        format!(
+            "restoring template '{template_id}' snapshot for '{}' from {snapshot_dir}",
+            config.name
+        )
+    })
 }
 
 /// Refuse the bare live-memory restore entry point.
@@ -213,6 +269,117 @@ mod tests {
         let err = warm_restore_instance("vm", [0u8; mvm_core::crypto::vmgenid::GENID_BYTES])
             .expect_err("legacy restore must refuse");
         assert!(err.to_string().contains("disabled"));
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Template restore — Ed25519 verify + no-NIC guard
+    // ──────────────────────────────────────────────────────────────
+
+    fn test_run_config(name: &str) -> super::super::flake_run::FlakeRunConfig {
+        super::super::flake_run::FlakeRunConfig {
+            name: name.to_string(),
+            slot: crate::base::config::VmSlot::new(name, 0),
+            vmlinux_path: "/k/vmlinux".to_string(),
+            initrd_path: None,
+            rootfs_path: "/k/rootfs.ext4".to_string(),
+            verity_path: None,
+            roothash: None,
+            runtime_overlay_path: None,
+            runtime_overlay_verity_path: None,
+            runtime_overlay_roothash: None,
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            revision_hash: "abc".to_string(),
+            flake_ref: "/p".to_string(),
+            profile: None,
+            cpus: 2,
+            memory: 1024,
+            mem_initial: None,
+            volumes: Vec::new(),
+            config_files: Vec::new(),
+            secret_files: Vec::new(),
+            ports: Vec::new(),
+        }
+    }
+
+    fn test_snapshot_info() -> mvm_core::template::SnapshotInfo {
+        mvm_core::template::SnapshotInfo {
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            vmstate_size_bytes: 1,
+            mem_size_bytes: 1,
+            boot_args: "console=ttyS0".to_string(),
+            vcpus: 1,
+            mem_mib: 128,
+            compatibility: None,
+        }
+    }
+
+    /// Mirrors `fork_restore_refuses_nic` in `crate::vm::instance_snapshot`:
+    /// the template restore path composes on the same `guarded_load_resume`
+    /// ordering, so a NIC-carrying restored device model must refuse, tear
+    /// down the paused VMM, and never resume — regardless of which caller
+    /// (fork or template) established content integrity upstream.
+    #[test]
+    fn template_restore_refuses_nic() {
+        let spy = SpyIO::new(true);
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            guarded_load_resume(&spy, dir.path()).expect_err("a NIC-carrying restore must refuse");
+        assert!(err.to_string().contains("device-model guard"), "got: {err}");
+        let calls = spy.calls();
+        assert!(
+            calls.contains(&"teardown_paused"),
+            "a refused restore must tear down the paused VMM: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"resume"),
+            "resume must never run when the guard refuses: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn template_restore_refuses_tampered_snapshot() {
+        // Hermetic: MVM_HOME points at a tempdir so the HMAC key and Ed25519
+        // signing identity `seal_snapshot_artifacts`/`verify_snapshot_artifacts`
+        // load are test-local, never the real host's.
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let snap_dir = tmp.path().join("snap");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+        std::fs::write(snap_dir.join("vmstate.bin"), b"template-vmstate").unwrap();
+        std::fs::write(snap_dir.join("mem.bin"), b"template-mem").unwrap();
+        let snap_dir_str = snap_dir.to_string_lossy().into_owned();
+
+        crate::base::snapshot_integrity::seal_snapshot_artifacts(&snap_dir_str)
+            .expect("sealing a freshly-written snapshot must succeed");
+
+        // Tamper with the sealed vmstate — the HMAC (and Ed25519 signature)
+        // sidecar no longer matches the bytes on disk.
+        let mut bytes = std::fs::read(snap_dir.join("vmstate.bin")).unwrap();
+        bytes[0] ^= 0xff;
+        std::fs::write(snap_dir.join("vmstate.bin"), &bytes).unwrap();
+
+        let config = test_run_config("tmpl-restore-vm");
+        let info = test_snapshot_info();
+        let err = restore_from_template_snapshot("tmpl-1", &config, &snap_dir_str, &info)
+            .expect_err("a tampered template snapshot must refuse restore");
+        let chained: String = err
+            .chain()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            chained.contains("HMAC verification"),
+            "expected the verify step's own failure, got: {chained}"
+        );
+        assert!(
+            !chained.contains("restoring template"),
+            "verify must fail closed before guarded_load_resume ever runs: {chained}"
+        );
     }
 
     fn device_model_with(network_interfaces: Vec<serde_json::Value>) -> RestoredDeviceModel {

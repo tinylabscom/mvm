@@ -932,6 +932,63 @@ fn run_curl_capture(socket: &Path, method: &str, endpoint: &str) -> Result<Strin
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// `SnapshotIO` double that logs call order and lets a test force a
+/// NIC-carrying restored device model — so the guard's refusal path
+/// (teardown, never resume) and the load→guard→resume ordering are
+/// unit-testable without a live Firecracker. `CannedIO` can't do this: it
+/// always reports a no-NIC model and doesn't observe call order.
+///
+/// Crate-visible (not just `mod tests`-local) so both this module's own
+/// guard-ordering tests and the template-restore tests in
+/// `crate::microvm::snapshot` drive the same double against
+/// `guarded_load_resume`.
+pub struct SpyIO {
+    nic_on_restore: bool,
+    calls: std::cell::RefCell<Vec<&'static str>>,
+}
+
+impl SpyIO {
+    pub fn new(nic_on_restore: bool) -> Self {
+        Self {
+            nic_on_restore,
+            calls: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn calls(&self) -> Vec<&'static str> {
+        self.calls.borrow().clone()
+    }
+}
+
+impl SnapshotIO for SpyIO {
+    fn create_snapshot(&self, dir: &Path) -> Result<()> {
+        std::fs::write(dir.join(VMSTATE_FILENAME), b"spy-vmstate")?;
+        std::fs::write(dir.join(MEM_FILENAME), b"spy-mem")?;
+        Ok(())
+    }
+    fn load_snapshot_paused(&self, _dir: &Path) -> Result<()> {
+        self.calls.borrow_mut().push("load_paused");
+        Ok(())
+    }
+    fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
+        self.calls.borrow_mut().push("restored_device_model");
+        let network_interfaces = if self.nic_on_restore {
+            vec![serde_json::json!({"iface_id": "eth0", "host_dev_name": "tap0"})]
+        } else {
+            Vec::new()
+        };
+        Ok(crate::microvm::RestoredDeviceModel { network_interfaces })
+    }
+    fn resume(&self) -> Result<()> {
+        self.calls.borrow_mut().push("resume");
+        Ok(())
+    }
+    fn teardown_paused(&self) -> Result<()> {
+        self.calls.borrow_mut().push("teardown_paused");
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1066,58 +1123,6 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
     // Device-model guard ordering (load_paused → guard → resume)
     // ──────────────────────────────────────────────────────────────
-
-    /// `SnapshotIO` double that logs call order and lets a test force a
-    /// NIC-carrying restored device model — so the guard's refusal path
-    /// (teardown, never resume) and the load→guard→resume ordering are
-    /// unit-testable without a live Firecracker. `CannedIO` can't do this: it
-    /// always reports a no-NIC model and doesn't observe call order.
-    struct SpyIO {
-        nic_on_restore: bool,
-        calls: std::cell::RefCell<Vec<&'static str>>,
-    }
-
-    impl SpyIO {
-        fn new(nic_on_restore: bool) -> Self {
-            Self {
-                nic_on_restore,
-                calls: std::cell::RefCell::new(Vec::new()),
-            }
-        }
-
-        fn calls(&self) -> Vec<&'static str> {
-            self.calls.borrow().clone()
-        }
-    }
-
-    impl SnapshotIO for SpyIO {
-        fn create_snapshot(&self, dir: &Path) -> Result<()> {
-            std::fs::write(dir.join(VMSTATE_FILENAME), b"spy-vmstate")?;
-            std::fs::write(dir.join(MEM_FILENAME), b"spy-mem")?;
-            Ok(())
-        }
-        fn load_snapshot_paused(&self, _dir: &Path) -> Result<()> {
-            self.calls.borrow_mut().push("load_paused");
-            Ok(())
-        }
-        fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
-            self.calls.borrow_mut().push("restored_device_model");
-            let network_interfaces = if self.nic_on_restore {
-                vec![serde_json::json!({"iface_id": "eth0", "host_dev_name": "tap0"})]
-            } else {
-                Vec::new()
-            };
-            Ok(crate::microvm::RestoredDeviceModel { network_interfaces })
-        }
-        fn resume(&self) -> Result<()> {
-            self.calls.borrow_mut().push("resume");
-            Ok(())
-        }
-        fn teardown_paused(&self) -> Result<()> {
-            self.calls.borrow_mut().push("teardown_paused");
-            Ok(())
-        }
-    }
 
     #[test]
     fn verify_and_resume_refuses_nic_on_restore() {
