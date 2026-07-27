@@ -144,15 +144,49 @@ Snapshot graph (chain-anchored checkpoint lineage; content-addressed):
   deny / inject / security-event / TLS-handshake events, and writes a redacted
   JSONL access log in addition to the chain-signed audit log.
 
+### Vsock-first adoption boundary
+
+Distilled from the open-source-competitor research and the Invariants /
+Non-goals above — what this plan takes, refuses, and why.
+
+**Adopted:**
+- snapshot-first templates (sealed rootfs plus optional ready-point memory
+  snapshot);
+- CoW O(1) clone with a sparse-copy fallback where the filesystem lacks
+  reflink;
+- a warm pool that forks a paused clean parent into a fresh child, never
+  resuming a parent as a workload;
+- richer egress-policy *vocabulary* on the existing typed-connector/vsock
+  path;
+- an OCI image as a first-class template base, alongside Nix flakes;
+- publishing warm-start/density SLOs as gated, measured properties.
+
+**Refused:**
+- any default guest-NIC/TAP/bridge path or eBPF data plane;
+- transparent TLS MITM inside the guest (baked root CA, guest trust-model
+  change);
+- reusing a dirty guest across workloads;
+- a mutable shared store as control-plane authority;
+- a container-runtime shim on the runtime path.
+
+**Why:**
+- vsock stays the sole guest↔host and egress boundary — the auditable
+  chokepoint the egress and secret-substitution claims rest on;
+- admission stays the signed, validity-windowed `ExecutionPlan` plus
+  chain-signed audit log, never a mutable store;
+- one guest is one workload;
+- a forked or restored instance re-admits or inherits a bound signed plan
+  and keeps its verity binding — it never bypasses admission.
+
 ## Phases
 
 ### Phase 0 — Boundary record and spec update
 
-- [ ] Update ADR-025 to add the open-source competitor as a second prior-art
+- [x] Update ADR-025 to add the open-source competitor as a second prior-art
       data point: confirm the snapshot/CoW model, confirm refusal of dirty-
       guest reuse, and note the richer egress-policy vocabulary as inspiration
       only (no MITM adoption).
-- [ ] Add a short design note in this plan (above) or in `03-networking.md`
+- [x] Add a short design note in this plan (above) or in `03-networking.md`
       capturing the "vsock-first adoption boundary": what is adopted, what is
       refused, and why.
 - [ ] File/update a tracking issue for Plan 255 and link it in

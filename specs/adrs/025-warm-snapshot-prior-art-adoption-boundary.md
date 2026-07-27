@@ -34,6 +34,43 @@ through a host-side socket-translation layer that handles ordinary
 TCP/UDP transparently but has no support for raw sockets, multicast,
 TUN/TAP, or ICMP.
 
+A second, independent data point comes from an open-source AI-sandbox
+offering — reviewed in `specs/research/external-sandbox-refactor-lessons.md`
+and referred to here only as the open-source competitor, never by name.
+It is a KVM microVM sandbox for AI agents built on the `rust-vmm`
+community crates plus a self-developed, minimal-device VMM. Independently
+of both mvm and the commercial runtime above, it converged on the same
+warm-path shape: a per-guest kernel with a minimal virtio device set, a
+pre-warmed pool that forks instances by copy-on-write clone from a
+template (O(1) `FICLONE`-style clones, metadata-only/shared-extent
+snapshots, incremental dirty-page memory delta), and host-side credential
+injection so secrets never enter the guest. Read this as independent
+validation of mvm's warm-snapshot, CoW, and host-side-secret-substitution
+direction — a second team reaching the same shape under the same
+constraints — not as a new idea for mvm to adopt.
+
+The same offering also makes the tradeoff this ADR refuses below: its
+pool keeps a released worker's page cache hot by handing it straight back
+without restoring clean snapshot state first, reusing a dirty guest
+across jobs rather than only reusing a warmed template. That is a second,
+independent instance of exactly the "Refuse — cross-workload guest reuse"
+tradeoff, reached by a different team under the same performance
+pressure. It reinforces the refusal rather than calling it into question:
+mvm's warm path forks a paused clean parent into a fresh,
+identity-scrubbed child and never resumes a parent to continue a prior
+workload.
+
+Where the offering goes further than the commercial runtime is its
+egress-policy surface: a first-class L7 proxy in front of every guest,
+with a domain-allowlist UX, scheme/host/SNI/method/path matching, audit
+levels, and header-based credential injection. That policy vocabulary is
+worth borrowing for mvm's own typed-connector policy enrichment. The
+mechanism it rides on is not: the proxy depends on terminating guest TLS
+transparently — a baked root CA that changes the guest's trust model —
+and on a guest-NIC data plane, both refused below under "Refuse —
+transparent host-socket networking" for the same reason mvm already
+refuses a host-socket shortcut.
+
 ## Decision
 
 ### Adopt — page-cache priming at freeze time
@@ -81,6 +118,10 @@ workload claims don't apply — and even there it is out of scope for this
 ADR, needing its own decision and its own threat-model note if ever
 pursued. It is never available to workload microVMs.
 
+A second, independently-built offering makes the identical dirty-guest-
+reuse tradeoff for the identical performance reason (see `## Context`
+above); that convergence reinforces this refusal, it does not soften it.
+
 ### Refuse — transparent host-socket networking
 
 The studied runtime routes guest network I/O through a host-side socket
@@ -93,6 +134,14 @@ own documented limitation list for that approach — no raw sockets, no
 multicast, no TUN/TAP, no ICMP — is cited here as independent supporting
 evidence for the cost mvm already chose to pay by staying on virtio-net,
 not as a reason to reconsider.
+
+A second offering's richer egress-policy vocabulary (scheme, host/sni,
+method, path, audit level, credential injection) is worth borrowing for
+mvm's own typed-connector policy — but not the transparent-TLS-MITM-plus-
+guest-NIC mechanism that vocabulary rides on there. That mechanism is
+refused for the same reason as above: it would move enforcement off the
+vsock seam and change the guest's trust model, exactly what this refusal
+rejects.
 
 ## Out of scope
 
