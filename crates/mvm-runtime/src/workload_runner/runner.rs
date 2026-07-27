@@ -26,6 +26,7 @@ use crate::substitution_spawn::{
     spawn_substitution_endpoint,
 };
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
+use crate::workload_runner::claim::{ClaimGuards, EndpointSpawnInputs};
 use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_no_dir_share_volumes,
@@ -248,26 +249,28 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
 
-        // A secret-free workload speaks raw TCP; a secret-bearing one speaks the
-        // WireRequest substitution protocol so the real secret never enters the guest.
-        let raw_egress = inputs.secrets.is_empty();
-        let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {
-            vm_name: &inputs.config.name,
-            state_dir: &state_dir,
-            tenant: inputs.tenant,
-            secrets: inputs.secrets,
-            redaction: inputs.redaction,
-            network_policy: inputs.network_policy,
-            raw_egress,
-        })?;
-        let mut endpoint_guard = crate::substitution_spawn::EndpointGuard::new(&inputs.config.name);
+        // Spawn the per-child substitution endpoint (the sole egress gate, ALWAYS
+        // spawned — even the no-secret raw path) through the shared `ClaimGuards`,
+        // so a warm claim stands up the identical guarded endpoint a cold boot
+        // does, keyed on this VM's own id.
+        let guards = ClaimGuards::new(&self.spawner);
+        let mut endpoint = guards.spawn_endpoint(
+            &VmId(inputs.config.name.clone()),
+            &EndpointSpawnInputs {
+                state_dir: &state_dir,
+                tenant: inputs.tenant,
+                secrets: inputs.secrets,
+                redaction: inputs.redaction,
+                network_policy: inputs.network_policy,
+            },
+        )?;
 
         let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
             sockets: WorkloadSockets {
                 agent: &socks.agent,
-                egress_gateway: &egress_uds,
+                egress_gateway: endpoint.egress_uds(),
                 exit: &socks.exit,
                 broker: socks.broker.as_deref(),
                 console_data: socks.console_data,
@@ -290,7 +293,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             tenant: inputs.config.tenant_id.as_deref(),
             broker_listen_socket: socks.broker.as_deref(),
         })?;
-        endpoint_guard.defuse();
+        endpoint.defuse();
         broker_guard.defuse();
         Ok(vm)
     }
@@ -335,14 +338,9 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // Admission gate — refuse a rootfs whose parent dir carries no
         // overlay-aware sidecar (no `/mvm/runtime` mount point). Runs before any
         // endpoint/broker spawn or boot, so a refusal leaves no live process
-        // behind. The raw per-backend `start` paths run this; the runner is the
-        // sole path for the drivers behind it, so the gate lives here once.
-        let rootfs = Path::new(&config.rootfs_path);
-        let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_build::builder_vm::admit_runtime_overlay_contract(
-            rootfs_dir,
-            config.runtime_source_policy,
-        )?;
+        // behind. Routed through the shared `ClaimGuards` so a warm claim runs
+        // the identical gate.
+        ClaimGuards::new(&self.spawner).admit_overlay_contract(config)?;
         // Record per-VM runtime metadata (the sidecar accessibility bit + the
         // boot contract) so the `mvmctl console` accessible/sealed gate holds on
         // every runner-launched VM, matching the raw backend start paths.
