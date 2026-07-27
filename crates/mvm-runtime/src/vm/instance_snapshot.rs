@@ -1560,6 +1560,22 @@ mod tests {
         })
     }
 
+    /// Create the parent directory of `<dir>/runtime/v.sock` — the host-side
+    /// UDS `firecracker_vsock_uds_path` names — before it's handed to `PUT
+    /// /vsock` (or to a restore that rebinds it). Firecracker binds that
+    /// socket eagerly and fails the whole `/vsock` PUT with `ENOENT` if the
+    /// parent directory doesn't exist yet; nothing upstream of this (not
+    /// `start_vm_firecracker`, which only `rm -f`s a stale socket file)
+    /// creates it.
+    fn ensure_vsock_parent_dir(dir: &Path) -> Result<()> {
+        let uds = crate::microvm::firecracker_vsock_uds_path(&dir.to_string_lossy());
+        if let Some(parent) = Path::new(&uds).parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating vsock uds parent dir {}", parent.display()))?;
+        }
+        Ok(())
+    }
+
     /// Boot the SOURCE Firecracker VM the live warm-restore tests snapshot:
     /// the four-call API sequence validated live (boot-source, drive, vsock,
     /// InstanceStart), with an optional NIC inserted before InstanceStart so
@@ -1592,6 +1608,7 @@ mod tests {
             "/drives/rootfs",
             &crate::microvm::drive_body("rootfs", &rootfs_copy.to_string_lossy(), true, false),
         )?;
+        ensure_vsock_parent_dir(src_dir)?;
         crate::microvm::api_put_socket(
             &sock,
             "/vsock",
@@ -1662,6 +1679,10 @@ mod tests {
 
         kill_live_vm(&src_dir);
 
+        // The restored VMM rebinds the vsock UDS under the dest dir too —
+        // mirror the same parent-dir guard the source boot needed.
+        ensure_vsock_parent_dir(&dest_dir).expect("vsock uds parent dir for dest VM");
+
         // Time the warm restore — this is the number this test exists to produce.
         let dest_io = FirecrackerIO::new(dest_dir.join("fc.socket"));
         let t = std::time::Instant::now();
@@ -1705,6 +1726,7 @@ mod tests {
 
         kill_live_vm(&src_dir);
 
+        ensure_vsock_parent_dir(&dest_dir).expect("vsock uds parent dir for dest VM");
         let dest_io = FirecrackerIO::new(dest_dir.join("fc.socket"));
         let err =
             guarded_load_resume(&dest_io, &snap_dir).expect_err("NIC restore must be refused");
