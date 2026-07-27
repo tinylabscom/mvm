@@ -4,6 +4,7 @@
 //! audit. This module holds the pure, driver-independent pieces of that mapping
 //! so they are unit-testable without a hypervisor.
 
+pub mod claim;
 pub(crate) mod cmdline;
 pub mod runner;
 pub mod spec_map;
