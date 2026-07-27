@@ -339,11 +339,20 @@ jobs:
             nix flake check --no-build "./$d"
           done
 
+      # This runner is x86_64, so only the x86_64-linux check variant builds
+      # here; the aarch64-linux variant stays defined for parity and for a
+      # future arm64 runner.
       - name: Baked guest rootfs tree is glibc-free (runtime overlay excluded)
         run: |
           set -euo pipefail
           nix build --print-build-logs \
             ./nix#checks.x86_64-linux.guest-rootfs-no-glibc
+
+      - name: Static setpriv honors ambient net_bind_service caps
+        run: |
+          set -euo pipefail
+          nix build --print-build-logs \
+            ./nix#checks.x86_64-linux.setpriv-accepts-ambient-caps
 
   # `mvm-protocol` is `no_std` + `alloc` (the IR, wire protocol, policy/audit
   # DTOs, and the audit-log verifier) so the same logic can run in a browser.

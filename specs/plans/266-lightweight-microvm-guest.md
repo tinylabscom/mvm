@@ -31,7 +31,7 @@
 - Produces: `passthru.setpriv` on every mkGuest derivation — a string, the absolute store path `"${pkgs.pkgsStatic.util-linux}/bin/setpriv"`. Task 2 and the eval test read it.
 - Consumes: nothing new.
 
-- [ ] **Step 1: Write the failing eval check**
+- [x] **Step 1: Write the failing eval check**
 
 In `nix/tests/mk-guest-eval.nix`, add to the returned attrset (sibling to `agent_binary_is_real`):
 
@@ -48,7 +48,7 @@ In `nix/tests/mk-guest-eval.nix`, add to the returned attrset (sibling to `agent
     && commandGuest.setpriv == "${pkgs.pkgsStatic.util-linux}/bin/setpriv";
 ```
 
-- [ ] **Step 2: Run the eval test to verify it fails**
+- [x] **Step 2: Run the eval test to verify it fails**
 
 ```bash
 cd nix && nix --extra-experimental-features 'nix-command flakes' \
@@ -58,7 +58,7 @@ cd nix && nix --extra-experimental-features 'nix-command flakes' \
 
 Expected: FAIL — `error: attribute 'setpriv' missing` (the derivation has no `passthru.setpriv` yet).
 
-- [ ] **Step 3: Implement the swap**
+- [x] **Step 3: Implement the swap**
 
 In `nix/lib/mk-guest.nix`, beside `busybox = pkgs.pkgsStatic.busybox;` (~line 43):
 
@@ -92,7 +92,7 @@ Add to the `passthru` attrset (~line 1385, beside `inherit rootfsTree;`):
     inherit setpriv;
 ```
 
-- [ ] **Step 4: Run the eval test to verify it passes**
+- [x] **Step 4: Run the eval test to verify it passes**
 
 ```bash
 cd nix && nix --extra-experimental-features 'nix-command flakes' \
@@ -102,7 +102,7 @@ cd nix && nix --extra-experimental-features 'nix-command flakes' \
 
 Expected: PASS. Confirm no other check regressed by scanning the JSON for any `false` value.
 
-- [ ] **Step 5: Run the Rust seam + formatting**
+- [x] **Step 5: Run the Rust seam + formatting**
 
 ```bash
 # Root integration test that shells out to the eval file (skips if nix absent).
@@ -112,7 +112,7 @@ rustup run nightly cargo fmt --all -- --check
 
 Expected: the `nix_flake_structure` test passes (or reports skipped without nix); fmt clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 WT=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-light-guest

@@ -236,6 +236,18 @@
                 fi
                 echo ok > "$out"
               '';
+
+          # The static-musl setpriv must still honor the +net_bind_service
+          # inh/ambient cap flags the addon-DNS and egress-client forks pass.
+          # `--help` exits after option parsing but before applying caps, so
+          # this needs no privilege — it fails only if the static build lacks
+          # libcap-ng (the cap flag would be unparsed/unsupported).
+          setpriv-accepts-ambient-caps =
+            pkgs.runCommand "setpriv-accepts-ambient-caps" { } ''
+              ${pkgs.pkgsStatic.util-linux}/bin/setpriv \
+                --inh-caps=+net_bind_service --ambient-caps=+net_bind_service --help >/dev/null
+              echo ok > "$out"
+            '';
         });
     };
 }
