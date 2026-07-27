@@ -553,7 +553,7 @@ mod tests {
         assert!(store.remove(&id).is_err());
     }
 
-    // -- content-addressed create + dedup (work item 2) --
+    // -- content-addressed create + dedup --
 
     #[test]
     fn create_content_addressed_dedups_identical_content() {
@@ -593,7 +593,7 @@ mod tests {
         assert_ne!(id_a.id(), id_b.id());
     }
 
-    // -- reference counting (work item 3) --
+    // -- reference counting --
 
     #[test]
     fn retain_and_release_transition_refcount() {
@@ -659,7 +659,7 @@ mod tests {
         assert!(!store.snapshot_dir(&id).exists());
     }
 
-    // -- content-addressed memory-snapshot storage (work item 4) --
+    // -- content-addressed memory-snapshot storage --
 
     #[test]
     fn content_addressed_memory_snapshot_roundtrips_and_is_independent() {
@@ -744,7 +744,7 @@ mod tests {
         );
     }
 
-    // -- snapshot-graph-integrity (work item 5) --
+    // -- snapshot-graph-integrity --
 
     #[test]
     fn deleting_one_snapshot_does_not_affect_sibling_or_materialized_child() {

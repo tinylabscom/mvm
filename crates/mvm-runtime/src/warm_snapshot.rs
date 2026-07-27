@@ -16,27 +16,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::CheckpointId;
 use mvm_fs::clone::CloneStrategy;
-use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
+use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
 
 use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_content, verify_lineage};
-
-/// Pre-warm a checkpoint's content dir into the content-addressed snapshot
-/// store ahead of time, deduplicating identical bytes with an existing
-/// snapshot. The checkpoint's `meta.json` remains the sole lineage record;
-/// this only moves where its bytes physically live. Purely an optimization:
-/// [`materialize_child_from_parent`] stages idempotently on its own, so
-/// callers never need to call this first — it exists for a future warm-pool
-/// that wants staging to happen off the clone's critical path.
-pub fn stage_warm_snapshot(
-    checkpoint_store: &CheckpointStore,
-    snapshot_store: &FsSnapshotStore,
-    id: &CheckpointId,
-) -> Result<SnapshotId> {
-    let content_dir = checkpoint_store.content_dir(id);
-    snapshot_store
-        .create_content_addressed(&content_dir)
-        .with_context(|| format!("staging checkpoint '{id}' content into the snapshot store"))
-}
 
 /// Materialize `parent_id`'s content at `dst`, but only after it clears the
 /// same fail-closed lineage gate `fork_checkpoint` / `fork_vm_full_fc` use:

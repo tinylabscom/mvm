@@ -41,27 +41,14 @@ It is a KVM microVM sandbox for AI agents built on the `rust-vmm`
 community crates plus a self-developed, minimal-device VMM. Independently
 of both mvm and the commercial runtime above, it converged on the same
 warm-path shape: a per-guest kernel with a minimal virtio device set, a
-pre-warmed pool that forks instances by copy-on-write clone from a
+pre-warmed pool that forks instances by copy-on-write clone from a clean
 template (O(1) `FICLONE`-style clones, metadata-only/shared-extent
 snapshots, incremental dirty-page memory delta), and host-side credential
 injection so secrets never enter the guest. Read this as independent
 validation of mvm's warm-snapshot, CoW, and host-side-secret-substitution
-direction — a second team reaching the same shape under the same
-constraints — not as a new idea for mvm to adopt.
-
-The same offering is also a second, independent instance of a tradeoff
-this ADR already refuses below: cross-workload guest reuse.
-`specs/plans/255-vsock-first-snapshot-egress-adoption.md`, which surveys
-this offering, lists reusing dirty guests across jobs among the paths it
-demonstrates mvm should refuse. The research reviewed here does not
-document the offering's specific reuse mechanism, so this is not the
-commercial runtime's page-cache-hot, no-restore handback described above
-— only the same outcome, a worker carrying prior-workload state into its
-next job. A second, differently-built system converging on cross-workload
-reuse under the same performance pressure reinforces this refusal rather
-than calling it into question: mvm's warm path forks a paused clean
-parent into a fresh, identity-scrubbed child and never resumes a parent
-to continue a prior workload.
+direction, and of the fork-from-a-clean-template approach specifically —
+a second team reaching the same shape under the same constraints — not
+as a new idea for mvm to adopt.
 
 Where the offering goes further than the commercial runtime is its
 egress-policy surface: a first-class L7 proxy in front of every guest,
@@ -122,9 +109,11 @@ workload claims don't apply — and even there it is out of scope for this
 ADR, needing its own decision and its own threat-model note if ever
 pursued. It is never available to workload microVMs.
 
-A second, independently-built offering also reuses dirty guests across
-jobs, for the same performance reason (see `## Context` above); that
-convergence reinforces this refusal, it does not soften it.
+The second, independently-built offering surveyed in `## Context` above
+does not exhibit this refused behavior: its pre-warmed pool forks each
+instance by copy-on-write clone from a clean template, the same
+clean-fork shape mvm's warm path adopts, rather than a reused dirty
+guest.
 
 ### Refuse — transparent host-socket networking
 

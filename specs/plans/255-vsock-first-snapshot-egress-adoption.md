@@ -229,10 +229,10 @@ Non-goals above — what this plan takes, refuses, and why.
 - [x] Plug `SnapshotStore` in *beneath* the existing checkpoint lineage: a warm
       snapshot is recorded as a lineage node (content-address + hash-link +
       audit anchor) via `mvm-runtime::{lineage, checkpoint}`; introduce no
-      second provenance graph. (`mvm-runtime::warm_snapshot::stage_warm_snapshot`
-      stores a checkpoint's content dir into `FsSnapshotStore` under its own
-      content hash; the checkpoint's `meta.json` remains the sole lineage
-      record — no second graph.)
+      second provenance graph. (`mvm-runtime::warm_snapshot::materialize_child_from_parent`
+      stages a verified checkpoint's content dir into `FsSnapshotStore` under
+      its own content hash before materializing it; the checkpoint's
+      `meta.json` remains the sole lineage record — no second graph.)
 - [x] A clone/fork from a parent whose lineage node is missing, un-audited, or
       hash-mismatched fails closed, reusing the checkpoint lineage's
       parent-verification path. Add a negative test.
