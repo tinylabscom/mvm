@@ -275,17 +275,27 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
 /// callers are responsible for establishing their own content integrity
 /// before calling it.
 ///
-/// Fail closed: never resume a NIC-carrying restore. Best-effort tear down
-/// the paused VMM on refusal so it does not linger — the caller's `dir` stays
-/// sealed on disk, so a retry (after e.g. re-sealing a clean snapshot) is
-/// still possible.
+/// Fail closed: never resume a NIC-carrying restore, and never leave a
+/// paused VMM lingering on any error branch. Best-effort tear down runs on
+/// guard refusal *and* on a `load_snapshot_paused`/`restored_device_model`
+/// error — a fresh VMM can exist (and need cleanup) even when reading its
+/// device model fails, so both error paths tear down before propagating —
+/// so the never-resumed VMM does not linger regardless of which step
+/// failed. The caller's `dir` stays sealed on disk either way, so a retry
+/// (after e.g. re-sealing a clean snapshot) is still possible.
 pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
-    io.load_snapshot_paused(dir)
-        .with_context(|| format!("load_snapshot_paused({})", dir.display()))?;
+    if let Err(e) = io.load_snapshot_paused(dir) {
+        let _ = io.teardown_paused();
+        return Err(e).with_context(|| format!("load_snapshot_paused({})", dir.display()));
+    }
 
-    let model = io
-        .restored_device_model()
-        .with_context(|| "reading restored device model")?;
+    let model = match io.restored_device_model() {
+        Ok(model) => model,
+        Err(e) => {
+            let _ = io.teardown_paused();
+            return Err(e).context("reading restored device model");
+        }
+    };
     if let Err(e) = crate::microvm::assert_vsock_only_device_model(&model) {
         let _ = io.teardown_paused();
         return Err(e).context("restore refused by device-model guard");
@@ -347,7 +357,11 @@ pub fn await_primed_barrier<S: PrimedSignalSource + ?Sized>(
 /// `interval` between polls. Pure (the only impurity is the clock + sleep) so
 /// the "stop at first primed, else fail closed on the deadline" policy is
 /// unit-tested with a fake probe (the "mock guest").
-fn wait_for_primed_polling<F: FnMut() -> bool>(
+///
+/// `pub(crate)` (not just module-private) so `microvm::snapshot`'s reseed
+/// delivery reuses the same bounded-poll policy for its own guest-agent
+/// readiness probe rather than duplicating the deadline/sleep loop.
+pub(crate) fn wait_for_primed_polling<F: FnMut() -> bool>(
     timeout: std::time::Duration,
     interval: std::time::Duration,
     mut probe: F,
@@ -852,7 +866,7 @@ impl SnapshotIO for FirecrackerIO {
         self.ensure_socket()?;
         let body = run_curl_capture(&self.socket_path, "GET", "/vm/config")
             .with_context(|| "GET /vm/config")?;
-        serde_json::from_str(&body).with_context(|| "parsing GET /vm/config response")
+        crate::microvm::parse_restored_device_model(&body)
     }
 
     fn resume(&self) -> Result<()> {
@@ -948,6 +962,8 @@ fn run_curl_capture(socket: &Path, method: &str, endpoint: &str) -> Result<Strin
 #[cfg(test)]
 pub struct SpyIO {
     nic_on_restore: bool,
+    load_paused_error: bool,
+    restored_device_model_error: bool,
     calls: std::cell::RefCell<Vec<&'static str>>,
 }
 
@@ -956,8 +972,27 @@ impl SpyIO {
     pub fn new(nic_on_restore: bool) -> Self {
         Self {
             nic_on_restore,
+            load_paused_error: false,
+            restored_device_model_error: false,
             calls: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Builder: make [`load_snapshot_paused`](SnapshotIO::load_snapshot_paused)
+    /// return an error instead of `Ok(())`, so a test can drive
+    /// `guarded_load_resume`'s teardown-on-load-error branch.
+    pub fn with_load_paused_error(mut self) -> Self {
+        self.load_paused_error = true;
+        self
+    }
+
+    /// Builder: make
+    /// [`restored_device_model`](SnapshotIO::restored_device_model) return an
+    /// error instead of `Ok(..)`, so a test can drive
+    /// `guarded_load_resume`'s teardown-on-read-error branch.
+    pub fn with_restored_device_model_error(mut self) -> Self {
+        self.restored_device_model_error = true;
+        self
     }
 
     pub fn calls(&self) -> Vec<&'static str> {
@@ -974,10 +1009,16 @@ impl SnapshotIO for SpyIO {
     }
     fn load_snapshot_paused(&self, _dir: &Path) -> Result<()> {
         self.calls.borrow_mut().push("load_paused");
+        if self.load_paused_error {
+            bail!("spy: injected load_snapshot_paused error");
+        }
         Ok(())
     }
     fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
         self.calls.borrow_mut().push("restored_device_model");
+        if self.restored_device_model_error {
+            bail!("spy: injected restored_device_model error");
+        }
         let network_interfaces = if self.nic_on_restore {
             vec![serde_json::json!({"iface_id": "eth0", "host_dev_name": "tap0"})]
         } else {
@@ -1213,6 +1254,50 @@ mod tests {
             calls,
             vec!["load_paused", "restored_device_model", "resume"],
             "load, guard, then resume — in order"
+        );
+    }
+
+    #[test]
+    fn guarded_load_resume_tears_down_on_load_paused_error() {
+        // A `load_snapshot_paused` error can still leave a fresh VMM process
+        // behind (e.g. `FirecrackerIO` starts a new process before the
+        // `/snapshot/load` call that then fails) — teardown must run on this
+        // error path too, not only on guard refusal.
+        let spy = SpyIO::new(false).with_load_paused_error();
+        let dir = tempfile::tempdir().unwrap();
+        let err = guarded_load_resume(&spy, dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("load_snapshot_paused"),
+            "got: {err}"
+        );
+        let calls = spy.calls();
+        assert!(
+            calls.contains(&"teardown_paused"),
+            "a load_snapshot_paused error must tear down: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"resume"),
+            "resume must never run after a load_snapshot_paused error: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_load_resume_tears_down_on_restored_device_model_error() {
+        let spy = SpyIO::new(false).with_restored_device_model_error();
+        let dir = tempfile::tempdir().unwrap();
+        let err = guarded_load_resume(&spy, dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("reading restored device model"),
+            "got: {err}"
+        );
+        let calls = spy.calls();
+        assert!(
+            calls.contains(&"teardown_paused"),
+            "a restored_device_model error must tear down: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"resume"),
+            "resume must never run after a restored_device_model error: {calls:?}"
         );
     }
 

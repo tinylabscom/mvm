@@ -28,3 +28,14 @@ path = "fuzz_targets/fuse_dispatch.rs"
 test = false
 doc = false
 bench = false
+
+# Restore-load device-model parser. `FirecrackerIO::restored_device_model` reads
+# this JSON body from Firecracker's `GET /vm/config` after a snapshot load, and
+# the no-NIC guard that keeps a restored VMM off the network runs on its output —
+# this target asserts the parse never panics on any input.
+[[bin]]
+name = "restored_device_model"
+path = "fuzz_targets/restored_device_model.rs"
+test = false
+doc = false
+bench = false

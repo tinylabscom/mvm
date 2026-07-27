@@ -479,6 +479,18 @@ jobs:
         # pinned by a unit test.
         run: cargo fuzz run --fuzz-dir fuzz-backend fuse_dispatch -- -max_total_time="$DURATION"
 
+      - name: Fuzz restore-load device-model parser
+        working-directory: crates/mvm-runtime
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # `FirecrackerIO::restored_device_model` parses Firecracker's own
+        # `GET /vm/config` body after a snapshot load, and the no-NIC guard
+        # that keeps a restored VMM off the network runs on its output — a
+        # panic here would crash the resume path instead of failing closed.
+        # This target asserts the parse never panics on any input.
+        run: cargo fuzz run --fuzz-dir fuzz-backend restored_device_model -- -max_total_time="$DURATION"
+
       - name: Upload corpus on failure
         if: failure()
         uses: actions/upload-artifact@v7

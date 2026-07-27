@@ -27,7 +27,8 @@ use crate::base::shell::shell_quote;
 #[cfg(test)]
 use crate::vm::instance_snapshot::SpyIO;
 use crate::vm::instance_snapshot::{
-    FirecrackerIO, VsockPostRestoreSignal, guarded_load_resume, signal_post_restore,
+    FirecrackerIO, PrimedOutcome, VsockPostRestoreSignal, guarded_load_resume, signal_post_restore,
+    wait_for_primed_polling,
 };
 
 use super::daemon::api_put_socket;
@@ -162,13 +163,29 @@ pub fn warm_restore_instance_from_path(
     guarded_load_resume(&io, std::path::Path::new(snapshot_dir))
         .with_context(|| format!("warm-restore of '{name}' from {snapshot_dir}"))?;
 
-    // Delivering the reseed token is best-effort: the guest agent takes a
-    // beat to re-accept on the recreated vsock after the fresh VMM starts, so
-    // a transport failure here must not undo an otherwise-successful
-    // restore — the VM is already up and resumed past the guard. The fork
-    // caller passes an all-zero token (no rotation) and delivers the real
-    // token + verb grant over vsock separately once it observes the agent is
-    // reachable; a zero token's honest outcome is `NotRotated`, not `Rotated`.
+    // Give a freshly-resumed guest a bounded window to reattach its vsock
+    // connection before delivering the reseed signal — without this, a
+    // merely slow-to-reattach guest (not a genuinely broken one) spuriously
+    // reports `Undelivered`. Skipped for the fork path's no-rotation
+    // (all-zero) token: there is nothing to reseed, so no reason to add
+    // latency waiting on a probe whose answer wouldn't change anything.
+    let zero_token = [0u8; mvm_core::crypto::vmgenid::GENID_BYTES];
+    if token != zero_token
+        && !should_attempt_reseed_delivery(RESEED_POLL_TIMEOUT, RESEED_POLL_INTERVAL, || {
+            probe_guest_reachable(name)
+        })
+    {
+        tracing::warn!(
+            name,
+            timeout = ?RESEED_POLL_TIMEOUT,
+            "warm-restore: guest agent unreachable after readiness poll (VM is resumed) — reporting reseed undelivered"
+        );
+        return Ok(mvm_core::vm_backend::ReseedStatus::Undelivered);
+    }
+
+    // Delivering the reseed token is still best-effort past the readiness
+    // poll: a transport failure here must not undo an otherwise-successful
+    // restore — the VM is already up and resumed past the guard.
     let reseed = match signal_post_restore(name, &VsockPostRestoreSignal { token }) {
         Ok(outcome) if outcome.reseeded => mvm_core::vm_backend::ReseedStatus::Rotated,
         Ok(_) => mvm_core::vm_backend::ReseedStatus::NotRotated,
@@ -182,6 +199,53 @@ pub fn warm_restore_instance_from_path(
         }
     };
     Ok(reseed)
+}
+
+/// Bounded deadline for the guest-agent reachability poll that runs before
+/// delivering the reseed signal — generous enough to cover a slow vsock
+/// reattach after a fresh Firecracker VMM starts.
+const RESEED_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Delay between reseed-delivery reachability polls.
+const RESEED_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// One reachability probe against the guest agent for `vm_name` — mirrors
+/// [`crate::vm::instance_snapshot::VsockPrimedSignalSource::probe_once`], but
+/// checks basic vsock reachability (`Ping`/`Pong`) rather than the workload's
+/// warmup barrier: reseed delivery only needs to know the agent is back on
+/// vsock, not that the workload has finished warming. Any transport/agent
+/// error is treated as "not yet reachable" (best-effort) so a transient blip
+/// during vsock reattach doesn't end the poll early — the bounded deadline
+/// still applies.
+fn probe_guest_reachable(vm_name: &str) -> bool {
+    use mvm_agentd::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_unary};
+    let Ok(transport) = crate::vsock_transport::for_vm(vm_name) else {
+        return false;
+    };
+    let Ok(mut stream) = transport.connect(GUEST_AGENT_PORT) else {
+        return false;
+    };
+    matches!(
+        call_unary(&mut stream, &GuestRequest::Ping),
+        Ok(GuestResponse::Pong)
+    )
+}
+
+/// Decide whether reseed delivery should proceed: polls `probe` up to
+/// `timeout` (reusing [`wait_for_primed_polling`]'s bounded-poll policy) and
+/// reports whether the guest became reachable in time.
+///
+/// Pure aside from the clock/sleep inside `wait_for_primed_polling`, so the
+/// "poll until reachable, else give up at the deadline" policy is
+/// unit-tested with a fake probe — no live guest. The caller is responsible
+/// for skipping this entirely on a no-rotation (zero) token; this function
+/// always polls when called.
+fn should_attempt_reseed_delivery<F: FnMut() -> bool>(
+    timeout: std::time::Duration,
+    interval: std::time::Duration,
+    probe: F,
+) -> bool {
+    wait_for_primed_polling(timeout, interval, probe) == PrimedOutcome::Primed
 }
 
 pub fn create_snapshot_files(
@@ -239,6 +303,19 @@ pub fn create_snapshot_files(
 pub struct RestoredDeviceModel {
     #[serde(rename = "network-interfaces", default)]
     pub network_interfaces: Vec<serde_json::Value>,
+}
+
+/// Parse a `GET /vm/config` response body into a [`RestoredDeviceModel`].
+///
+/// A standalone function (rather than inlining `serde_json::from_str` at the
+/// one production call site in [`FirecrackerIO::restored_device_model`])
+/// so it's directly reachable — no live Firecracker needed — for adversarial
+/// testing of this parser: it runs on a Firecracker-controlled response body,
+/// which this crate does not treat as fully trusted input.
+///
+/// [`FirecrackerIO::restored_device_model`]: crate::vm::instance_snapshot::FirecrackerIO::restored_device_model
+pub fn parse_restored_device_model(body: &str) -> Result<RestoredDeviceModel> {
+    serde_json::from_str(body).context("parsing GET /vm/config response")
 }
 
 /// Refuse to restore a snapshot whose device model carries a network
@@ -449,5 +526,49 @@ mod tests {
         let config: RestoredDeviceModel = serde_json::from_str(&raw).unwrap();
         assert!(config.network_interfaces.is_empty());
         assert!(assert_vsock_only_device_model(&config).is_ok());
+    }
+
+    #[test]
+    fn parse_restored_device_model_rejects_malformed_body() {
+        let err = parse_restored_device_model("not json").unwrap_err();
+        assert!(
+            err.to_string().contains("parsing GET /vm/config response"),
+            "got: {err}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Reseed-delivery readiness poll — the poll POLICY, no live guest
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reseed_delivery_proceeds_once_the_probe_becomes_reachable() {
+        use std::cell::Cell;
+        use std::time::Duration;
+        let calls = Cell::new(0u32);
+        let should_attempt = should_attempt_reseed_delivery(
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            || {
+                calls.set(calls.get() + 1);
+                calls.get() >= 3
+            },
+        );
+        assert!(should_attempt, "delivery must proceed once reachable");
+        assert_eq!(calls.get(), 3, "stops polling at the first success");
+    }
+
+    #[test]
+    fn reseed_delivery_gives_up_when_the_probe_never_becomes_reachable() {
+        use std::time::Duration;
+        let should_attempt = should_attempt_reseed_delivery(
+            Duration::from_millis(15),
+            Duration::from_millis(1),
+            || false,
+        );
+        assert!(
+            !should_attempt,
+            "an unreachable guest past the deadline must give up, not hang"
+        );
     }
 }

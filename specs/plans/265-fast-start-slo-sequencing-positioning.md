@@ -78,7 +78,7 @@ claim into the restore path. Scenario paths are under `features/suites/`.
 | 7 | Snapshot at rest — disclosure / rollback | `~/.mvm` 0700; HMAC + AES-GCM; monotonic epoch anti-rollback | `s11_snapshot/epoch_rollback_refused.feature` |
 | 8 | Warm-pool control UDS untrusted | 0700 sockets; re-verify signed plan on attach (`prelaunch`) | `s6_admission_audit/warm_attach_reverifies_plan.feature` |
 | 9 | Confinement re-application on restore | re-apply seccomp/jailer/uid on every restore | `s5_lifecycle/restore_reapplies_confinement.feature` (extends claim 1) |
-| 10 | Host TCB growth in snapshot-load parser | extend `fuzz_snapshot_frame` to the restore-load metadata; `deny_unknown_fields` | NEW fuzz coverage in `crates/mvm-core/fuzz/fuzz_targets/fuzz_snapshot_frame.rs` |
+| 10 | Host TCB growth in snapshot-load parser | fuzz the restore-load device-model parser (`RestoredDeviceModel`, which lives in mvm-runtime — a Firecracker `GET /vm/config` JSON view, not an extension of mvm-core's snapshot-frame format); non-`deny_unknown_fields` by design since it only reads one field of Firecracker's own schema | NEW fuzz coverage in `crates/mvm-runtime/fuzz-backend/fuzz_targets/restored_device_model.rs` (mvm-core's `fuzz_snapshot_frame` is a separate, unrelated type and stays untouched) |
 | 11 | Balloon density DoS (availability only) | existing balloon policy + host memory budget + spawn gate | `s5_lifecycle/density_balloon.feature` |
 
 ---
@@ -214,13 +214,22 @@ refused (witness); density target met and gated; clippy/nextest green.
 
 ## Phase 5 — Security witness consolidation & fuzz
 
-- [ ] Register every NEW witness (surfaces 1, 2, 4, 6, 10) in
-      `specs/claims/catalog.md` so `xtask check-claim-catalog` binds them; keep
-      the claim numbering table consistent (extends claims 1, 3, 8, 10, 13 into
-      the restore path — no new numbered claim, no relaxation).
-- [ ] Extend `crates/mvm-core/fuzz/fuzz_targets/fuzz_snapshot_frame.rs` to cover
-      the restore-load manifest/metadata path (surface 10); confirm every
-      host↔snapshot type carries `#[serde(deny_unknown_fields)]`.
+- [ ] Register every NEW witness (surfaces 1, 2, 4, 6, 10) in the
+      machine-checked ledger embedded in `specs/adrs/001-microvm-security-posture.md`
+      (between the `claims-catalog` markers — there is no longer a standalone
+      `specs/claims/catalog.md`; that content was folded into this ADR) so
+      `xtask check-claim-catalog` binds them; keep the claim numbering table
+      consistent (extends claims 1, 3, 8, 10, 13 into the restore path — no new
+      numbered claim, no relaxation). Surface 2's guard
+      (`fn:assert_vsock_only_device_model`) is registered against claim 10;
+      surfaces 1, 4, 6 remain unregistered.
+- [x] Add fuzz coverage for the restore-load device-model parser (surface 10):
+      `crates/mvm-runtime/fuzz-backend/fuzz_targets/restored_device_model.rs`
+      feeds `RestoredDeviceModel`'s parser arbitrary bytes. This parser turned
+      out to live in mvm-runtime (a Firecracker `GET /vm/config` JSON view),
+      not as an extension of mvm-core's `fuzz_snapshot_frame` (a different
+      type, the sealed vmstate/mem envelope format) — mvm-core's target is
+      untouched.
 - [ ] Re-run the existing claim 3 / 8 / 10 / 13 / 15 witnesses to prove the warm
       path does not regress the threat model.
 
