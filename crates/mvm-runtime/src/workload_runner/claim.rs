@@ -277,6 +277,12 @@ mod tests {
 
     #[test]
     fn claim_guards_spawn_endpoint_keys_the_socket_on_the_given_vm() {
+        // The endpoint socket is `MVM_HOME`-rooted; serialize against tests that
+        // mutate `MVM_HOME` (the warm-claim runner tests) so the spawn and the
+        // expected-path recompute both read one stable home.
+        let _home = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let spawner = FakeSpawner::default();
         let guards = ClaimGuards::new(&spawner);
         let redaction = RedactionPolicy::default();

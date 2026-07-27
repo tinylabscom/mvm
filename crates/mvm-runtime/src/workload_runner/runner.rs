@@ -357,8 +357,15 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<VmId, StandbyError> {
-        // (1) Reserve the parent atomically, then verify it — before any clone.
+        // (1) Reserve the parent atomically, then verify it — before any clone. A
+        // verification failure quarantines the parent inside this call.
         let parent = reserve_and_verify_parent(ctx, handle)?;
+
+        // The parent is now reserved (`Claimed`) and verified healthy. Arm the
+        // release-unless-committed guard: any early return past this point returns
+        // the good parent to claimable (so a failed claim never strands warm
+        // capacity) and removes a partial child dir. Only a booted child commits.
+        let mut cleanup = ClaimCleanup::new(ctx.pool, handle.id.as_str());
 
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
@@ -368,6 +375,8 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // (6a) Fresh, registry-unique identity for the child.
         let child = fresh_child_id(ctx)?;
         let child_dir = vm_state_dir(&child.0);
+        // Track it before materialize so even a partial clone is cleaned up.
+        cleanup.track_child_dir(child_dir.clone());
 
         // (3) Materialize the child's rootfs from the verified parent's own
         // content (self-binding, lineage-anchored copy-on-write clone).
@@ -417,9 +426,74 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             genid,
         })?;
 
-        // The child is up; disarm the endpoint reaper so the stop path owns it.
+        // The child booted: disarm the endpoint reaper (the stop path owns it now)
+        // and commit — the parent stays reserved and the child dir is real state.
         endpoint.defuse();
+        cleanup.commit();
         Ok(child)
+    }
+}
+
+/// Release-unless-committed cleanup for a reserved parent and a partially-built
+/// child. A claim reserves the parent (`mark_claimed`) and then materializes a
+/// child dir; if any later step fails, this guard returns the (verified, healthy)
+/// parent to claimable — so a failed claim never strands warm capacity — and
+/// removes the orphaned child dir. Only a claim that boots the child calls
+/// [`commit`](Self::commit), disarming both. A parent that failed VERIFICATION is
+/// quarantined by removal upstream and never reaches this guard, so releasing
+/// here only ever returns a parent that verified healthy.
+struct ClaimCleanup<'a> {
+    pool: &'a SupervisorStandbyPool,
+    parent_id: &'a str,
+    child_dir: Option<PathBuf>,
+    committed: bool,
+}
+
+impl<'a> ClaimCleanup<'a> {
+    fn new(pool: &'a SupervisorStandbyPool, parent_id: &'a str) -> Self {
+        Self {
+            pool,
+            parent_id,
+            child_dir: None,
+            committed: false,
+        }
+    }
+
+    /// Track the child dir so an early return after materialize removes it.
+    fn track_child_dir(&mut self, dir: PathBuf) {
+        self.child_dir = Some(dir);
+    }
+
+    /// The child booted: disarm. The parent stays `Claimed` (the stop/reaper path
+    /// owns it) and the child dir is real state, not an orphan.
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ClaimCleanup<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Err(e) = self.pool.mark_idle(self.parent_id) {
+            tracing::warn!(
+                parent = %self.parent_id,
+                error = %e,
+                "returning reserved standby parent to claimable after a failed claim"
+            );
+        }
+        if let Some(dir) = &self.child_dir {
+            match std::fs::remove_dir_all(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(
+                    dir = %dir.display(),
+                    error = %e,
+                    "removing orphaned child dir after a failed claim"
+                ),
+            }
+        }
     }
 }
 
@@ -445,6 +519,13 @@ fn map_lineage_refusal(err: &anyhow::Error) -> ClaimRefusal {
 /// claim guard), then verify its sealed content and its content-address against
 /// the signed audit chain. Returns the verified parent meta. Runs before any
 /// clone or boot: an unclaimable, un-audited, or tampered parent fails closed.
+///
+/// A parent that fails verification (or whose sealed record is unreadable) is
+/// **quarantined by removal** — a parent that cannot be verified must never be
+/// reused, so it is dropped from the pool rather than returned to claimable.
+/// Replenish spawns a fresh one in its place. This is the deliberate exception to
+/// the release-on-failure rule the caller's [`ClaimCleanup`] applies to a healthy
+/// reserved parent.
 fn reserve_and_verify_parent(
     ctx: &ClaimContext<'_>,
     handle: &StandbyHandle,
@@ -457,6 +538,7 @@ fn reserve_and_verify_parent(
             .load(&handle.id)
             .map_err(|e| StandbyError::ClaimFailed(format!("load standby {}: {e}", handle.id)))?;
         if !current.state.is_claimable() {
+            // Not yet reserved (no `mark_claimed`), so nothing to release.
             return Err(refuse(ClaimRefusal::ParentNotClaimable));
         }
         ctx.pool.mark_claimed(&handle.id).map_err(|e| {
@@ -464,13 +546,24 @@ fn reserve_and_verify_parent(
         })?;
     }
 
+    // Quarantine (remove) the reserved parent on any verification failure — a
+    // parent we cannot trust must not linger claimable OR stranded `Claimed`.
+    let quarantine = |err: StandbyError| -> StandbyError {
+        let _ = ctx.pool.remove(&handle.id);
+        err
+    };
     let parent = ctx
         .checkpoints
         .read_meta(ctx.parent_checkpoint)
-        .map_err(|e| StandbyError::ClaimFailed(format!("read parent checkpoint: {e}")))?;
-    verify_content(ctx.checkpoints, &parent).map_err(|_| refuse(ClaimRefusal::ParentTampered))?;
+        .map_err(|e| {
+            quarantine(StandbyError::ClaimFailed(format!(
+                "read parent checkpoint: {e}"
+            )))
+        })?;
+    verify_content(ctx.checkpoints, &parent)
+        .map_err(|_| quarantine(refuse(ClaimRefusal::ParentTampered)))?;
     verify_lineage(ctx.checkpoints, ctx.parent_checkpoint, ctx.anchor)
-        .map_err(|e| refuse(map_lineage_refusal(&e)))?;
+        .map_err(|e| quarantine(refuse(map_lineage_refusal(&e))))?;
     Ok(parent)
 }
 
@@ -489,10 +582,15 @@ fn claim_plan_image_sha256(claim: &StandbyClaim) -> std::result::Result<String, 
 /// backstop, never a hot loop.
 const MAX_CHILD_NAME_ATTEMPTS: usize = 8;
 
-/// Mint a fresh, registry-unique child [`VmId`] under the registry lock so a
-/// concurrent claim cannot mint the same name. The child is named by a fresh
-/// random id (never the parent's), which — with the fresh VMGenID and endpoint —
-/// is the identity scrub that stops a fork from inheriting the parent's identity.
+/// Mint a fresh child [`VmId`] that collides with no existing VM registration.
+/// The name is a fresh random id (never the parent's), which — with the fresh
+/// VMGenID and per-child endpoint — is the identity scrub that stops a fork from
+/// inheriting the parent's identity. Uniqueness comes from the random suffix
+/// checked against the registry, not from mutual exclusion: the registry lock
+/// only serializes the read (nothing is persisted under it here — the boot path
+/// registers the name), so two truly-concurrent claims rely on the ~2^64 suffix
+/// space to not collide, which is what makes a re-check-and-redraw a backstop
+/// rather than a race.
 fn fresh_child_id(ctx: &ClaimContext<'_>) -> std::result::Result<VmId, StandbyError> {
     let _lock = acquire_registry_lock(ctx.registry_path)
         .map_err(|e| StandbyError::ClaimFailed(format!("acquire registry lock: {e}")))?;
@@ -1698,6 +1796,14 @@ mod tests {
             verdicts.insert(meta.id.to_string(), meta.compute_meta_digest());
             Self { verdicts }
         }
+
+        /// No signed creation entry for any checkpoint → the lineage gate refuses
+        /// the parent as un-audited.
+        fn unaudited() -> Self {
+            Self {
+                verdicts: std::collections::HashMap::new(),
+            }
+        }
     }
 
     impl CheckpointChainAnchor for ClaimTestAnchor {
@@ -1725,13 +1831,15 @@ mod tests {
         }
     }
 
-    /// Seed a clean, audited, pre-workload parent checkpoint carrying an
-    /// overlay-aware sidecar (so its clone clears the same host gate a cold boot
-    /// runs), and return `(store, snapshots, parent_id, parent_meta)`. The
-    /// `TempDir`s must outlive the returned stores.
+    /// Seed a clean, audited, pre-workload parent checkpoint and return
+    /// `(store, snapshots, parent_id, parent_meta)`. With `with_overlay_sidecar`
+    /// the source rootfs carries an overlay-aware sidecar so its clone clears the
+    /// same host gate a cold boot runs; without it, the child's overlay-contract
+    /// gate refuses — the wiring witness. The `TempDir`s must outlive the stores.
     fn seed_audited_parent(
         store_root: &Path,
         src_root: &Path,
+        with_overlay_sidecar: bool,
     ) -> (
         CheckpointStore,
         FsSnapshotStore,
@@ -1743,11 +1851,13 @@ mod tests {
 
         let rootfs = src_root.join("rootfs.ext4");
         std::fs::write(&rootfs, b"clean-parent-rootfs").unwrap();
-        // runtime_lean=true so the overlay sidecar clears the gate under every
-        // runtime-source policy, exactly like the cold-boot admission tests.
-        mvm_build::builder_vm::GuestSidecar::for_oci_run("warm-parent", false, true)
-            .write_to_dir(src_root)
-            .unwrap();
+        if with_overlay_sidecar {
+            // runtime_lean=true so the overlay sidecar clears the gate under every
+            // runtime-source policy, exactly like the cold-boot admission tests.
+            mvm_build::builder_vm::GuestSidecar::for_oci_run("warm-parent", false, true)
+                .write_to_dir(src_root)
+                .unwrap();
+        }
 
         let parent_id = CheckpointId::new("warm-parent-cp");
         let parent_meta = capture_fs_quick(
@@ -1830,7 +1940,7 @@ mod tests {
         let store_root = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let (checkpoints, snapshots, parent_id, parent_meta) =
-            seed_audited_parent(store_root.path(), src.path());
+            seed_audited_parent(store_root.path(), src.path(), true);
         let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
@@ -1918,5 +2028,156 @@ mod tests {
             StandbyState::Claimed,
             "the parent is reserved so a concurrent claim cannot double-claim it"
         );
+    }
+
+    /// Count child (`vm-*`) dirs left under the VM state root — a failed claim
+    /// must leave none.
+    fn orphan_child_dirs() -> usize {
+        match std::fs::read_dir(vms_dir()) {
+            Ok(rd) => rd
+                .flatten()
+                .filter(|e| e.path().is_dir() && e.file_name().to_string_lossy().starts_with("vm-"))
+                .count(),
+            Err(_) => 0,
+        }
+    }
+
+    /// A post-materialize failure (here: the overlay-contract gate refusing a
+    /// child whose clone carries no overlay sidecar) must return the healthy
+    /// reserved parent to claimable and remove the orphaned child dir — no leaked
+    /// warm capacity, no orphaned state. This ALSO proves the overlay gate is
+    /// wired into `claim_standby`: with the gate deleted, this claim would
+    /// succeed.
+    #[test]
+    fn claim_releases_reserved_parent_and_removes_child_dir_on_overlay_refusal() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        // No overlay sidecar → the child clone fails the overlay-contract gate,
+        // which runs AFTER materialize (so a child dir already exists).
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), false);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+        };
+
+        let err = runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect_err("the overlay-contract gate must refuse a sidecar-less child");
+        assert!(
+            err.to_string().contains("overlay contract")
+                || err.to_string().contains("mvm-meta.json"),
+            "refusal must name the overlay gate: {err}"
+        );
+
+        // The healthy parent is returned to claimable (not stranded `Claimed`).
+        assert_eq!(
+            pool.load("warm-parent").unwrap().state,
+            StandbyState::Idle,
+            "a non-parent-fault failure must return the parent to claimable"
+        );
+        // No child dir orphaned.
+        assert_eq!(
+            orphan_child_dirs(),
+            0,
+            "a failed claim must leave no orphan child dir"
+        );
+        // The fork never ran.
+        assert!(runner.driver.forked_children().is_empty());
+    }
+
+    /// An un-audited parent (no signed creation entry) is quarantined by removal,
+    /// NOT returned to claimable — a parent that cannot be verified must never be
+    /// reused. The failure is caught before any child identity/dir is minted.
+    #[test]
+    fn claim_quarantines_unaudited_parent_without_releasing_it() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        // The chain carries no signed creation entry for this parent.
+        let anchor = ClaimTestAnchor::unaudited();
+
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+        };
+
+        let err = runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect_err("an un-audited parent must be refused");
+        assert!(
+            err.to_string().contains("no signed audit entry"),
+            "refusal must be the un-audited reason: {err}"
+        );
+
+        // Quarantined by removal — NOT returned to claimable.
+        assert!(
+            pool.load("warm-parent").is_err(),
+            "an un-audited parent must be quarantined (removed), never released"
+        );
+        // Nothing was minted or booted.
+        assert_eq!(
+            orphan_child_dirs(),
+            0,
+            "no child dir on a quarantine refusal"
+        );
+        assert!(runner.driver.forked_children().is_empty());
     }
 }
