@@ -48,6 +48,13 @@ the density/kernel/memory work. This plan adds the prior-art-shaped details.
    typed-connector path only; secrets never enter guest memory, disk, or logs.
 4. **Single-binary discipline.** `mvm-hostd` and `mvm-agentd` stay one process
    each; CLI stays a thin shell over `mvm-client`.
+5. **Fork/restore never bypasses admission.** A forked or restored instance
+   re-admits or inherits a bound, validity-windowed signed `ExecutionPlan`
+   (claim 8) and, on block+ext4 backends, retains its dm-verity roothash
+   binding (claim 3). A warm parent carries no workload authority; authority is
+   minted per child at fork time and emits the normal `plan.admitted` /
+   `plan.launched` audit entries. A fork that silently reuses a parent's
+   authority is a claim-8 hole and must fail closed.
 
 ## Product decisions
 
@@ -66,6 +73,13 @@ the density/kernel/memory work. This plan adds the prior-art-shaped details.
 5. **OCI image as a first-class template base.** `mvmctl template build --image
    <ref>` must work without a Nix flake, while Nix flakes remain a supported
    authoring surface.
+6. **Reuse the chain-anchored checkpoint lineage; do not fork a second graph.**
+   The warm-fork / snapshot graph *is* the existing content-addressed,
+   hash-linked checkpoint lineage anchored to the chain-signed audit log
+   (`mvm-runtime::lineage`, `crates/mvm-runtime/src/checkpoint/`,
+   `crates/mvm-core/src/checkpoint.rs`), not a new flat graph. `SnapshotStore`
+   supplies the O(1) copy primitive *under* that lineage; it does not own
+   provenance.
 
 ## Architecture
 
@@ -80,7 +94,7 @@ Template (sealed, signed, read-only)
 Instance = CoW clone of template rootfs + warm overlay + fresh per-instance
            volume + memory snapshot restore (if warm) OR cold boot (if not warm)
 
-Snapshot graph (flat, content-addressed):
+Snapshot graph (chain-anchored checkpoint lineage; content-addressed):
   Template ──► Instance A
          ├────► Instance B
          └────► Snapshot S ──► Instance C
@@ -92,6 +106,11 @@ Snapshot graph (flat, content-addressed):
 - Memory snapshots are captured at a template-defined ready point and restored
   on instance start. Page-cache priming (ADR-025) is applied at freeze time,
   confined to the read-only rootfs.
+- The snapshot graph is the existing chain-anchored checkpoint lineage, not a
+  new structure: every clone/snapshot is a content-addressed, hash-linked
+  lineage node bound to the signed audit chain. `SnapshotStore` records nodes
+  through `mvm-runtime::lineage`; a clone/fork from an un-audited, missing, or
+  hash-mismatched parent fails closed.
 
 ### Warm-pool model
 
@@ -155,9 +174,18 @@ Snapshot graph (flat, content-addressed):
 - [ ] Add a BDD scenario: build a template with a warm snapshot, clone it into
       an instance, and verify the instance boots faster than a cold-booted
       equivalent.
+- [ ] Plug `SnapshotStore` in *beneath* the existing checkpoint lineage: a warm
+      snapshot is recorded as a lineage node (content-address + hash-link +
+      audit anchor) via `mvm-runtime::{lineage, checkpoint}`; introduce no
+      second provenance graph.
+- [ ] A clone/fork from a parent whose lineage node is missing, un-audited, or
+      hash-mismatched fails closed, reusing the checkpoint lineage's
+      parent-verification path. Add a negative test.
 
 **Acceptance gate:** `cargo test -p mvm-fs` green; BDD scenario passes on Linux;
-no `mvm-fs` consumer sees filesystem-specific logic.
+no `mvm-fs` consumer sees filesystem-specific logic; clone/fork refuses an
+un-audited or tampered parent; no second provenance graph is introduced (reuses
+`mvm-runtime::lineage`).
 
 ### Phase 2 — Warm pool and fork hygiene in `mvm-runtime`
 
@@ -172,9 +200,17 @@ no `mvm-fs` consumer sees filesystem-specific logic.
       (different code path / enum variant).
 - [ ] Add unit tests for identity freshness and replay refusal; add BDD
       scenarios for sub-second warm launch and for fork isolation.
+- [ ] `fork_from_parent` mints or inherits a fresh signed `ExecutionPlan` for
+      the child and refuses to launch a child whose plan is unsigned, expired,
+      or replayed (claim 8). Add a negative test.
+- [ ] On block+ext4 backends the forked child inherits the parent template's
+      dm-verity roothash binding; a fork that would drop verity fails closed
+      (claim 3).
 
 **Acceptance gate:** warm launch is sub-second on Linux and macOS; forked child
-has a new session nonce and cannot reuse an old one; clippy/test green.
+has a new session nonce and cannot reuse an old one; a forked/restored child
+emits `plan.admitted` / `plan.launched` and a fork with an absent or tampered
+plan is refused; `check-claim-catalog` green; clippy/test green.
 
 ### Phase 3 — Egress policy enrichment (vsock seam only)
 
