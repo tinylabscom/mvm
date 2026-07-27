@@ -584,6 +584,33 @@ requirements, host architecture, and fail-closed admission posture before
 printing a preview. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
 
+### Lineage / time-travel
+
+`mvmctl machine timeline` / `revert` / `rewind` / `advance` are the advanced
+lineage and time-travel verbs over the checkpoint and image-node stores.
+`timeline` is a read-only navigator; the three restore verbs each launch a
+fresh, **re-admitted** VM at a prior (or adjacent) state rather than mutating
+one in place. Every verb verifies its target against the signed audit chain up
+front and fails closed on an un-audited, tampered, or dangling record — the same
+gate `machine checkpoint verify` and `machine checkpoint fork` enforce. A
+completed checkpoint restore emits a chain-signed `checkpoint.restored` entry
+and an image restore an `image.reverted` entry, each carrying the initiating
+verb (`revert` / `rewind` / `advance`) as its `via` label.
+
+A target is a checkpoint id or a `sha256:<hex>` content-address; a digest may
+name a node in the checkpoint store, the image store, or (rarely) both, in which
+case `--kind checkpoint\|image` disambiguates it. Image nodes have no id — their
+identity is their digest. `--new-id` and `--hypervisor` apply to checkpoint
+restores only; an image restore auto-names its VM and re-runs the node's
+digest-pinned reference through the admitted `machine run` path.
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl machine timeline <id\|digest> [--kind checkpoint\|image] [--json]` | Render a checkpoint or image node's lineage — ancestors back to genesis plus its immediate children — verifying each hop against the signed audit chain. Read-only: no restore, no admission, no boot. A tampered, un-audited, or dangling hop is marked (and the overall verdict fails), but the timeline still renders so it stays usable for navigation. |
+| `mvmctl machine revert <id\|digest> [--kind checkpoint\|image] [--hypervisor <backend>] [--new-id <name>] [--json]` | Restore a prior state: launch a fresh, re-admitted VM at the node the target names. Checkpoint restores fork a new VM identity (`--new-id` names it; `--hypervisor` picks the backend, default `firecracker`); image-node restores re-run the node's digest-pinned reference through the admitted run path and auto-name their VM. |
+| `mvmctl machine rewind <id\|digest> [--kind checkpoint\|image] [--hypervisor <backend>] [--new-id <name>] [--json]` | Restore the target's parent — one step back in the lineage. Same re-admission and fail-closed guarantees as `revert`; refuses a genesis root (no parent) or a structurally broken lineage. |
+| `mvmctl machine advance <id\|digest> [--to <child-digest>] [--kind checkpoint\|image] [--hypervisor <backend>] [--new-id <name>] [--json]` | Restore a child of the target — one step forward. Forward is a tree, so `--to <child-digest>` is required when the target has more than one child (a fork). Same re-admission and fail-closed guarantees as `revert`. |
+
 ## Sandbox State
 
 | Command | Description |
