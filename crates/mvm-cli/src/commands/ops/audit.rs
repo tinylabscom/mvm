@@ -5,11 +5,13 @@ use clap::{Args as ClapArgs, Subcommand};
 
 use crate::ui;
 
+use ed25519_dalek::VerifyingKey;
 use mvm_core::user_config::MvmConfig;
 use mvm_hostd::audit_signer::verify::verify_workload_chain;
 use mvm_hostd::supervisor::{SignedEnvelope, verify_audit_chain};
+use mvm_protocol::merkle::{InclusionProof, SignedAuditRoot, verify_inclusion, verify_signed_root};
 
-use super::super::vm::audit_chain::{audit_path_for_tenant, default_audit_dir};
+use super::super::vm::audit_chain::{AuditEmitter, audit_path_for_tenant, default_audit_dir};
 use super::super::vm::host_signer;
 use super::Cli;
 
@@ -113,6 +115,54 @@ pub(in crate::commands) enum AuditAction {
         #[arg(long)]
         json: bool,
     },
+    /// Build, sign, and publish a Merkle transparency-log root over the
+    /// tenant's chain-signed audit log (host-side). The signed root at
+    /// `~/.mvm/audit/<tenant>.root.json` lets an external auditor pin the
+    /// log's state without replaying the whole chain. The root is only
+    /// built over a chain that verifies clean.
+    PublishRoot {
+        /// Tenant whose chain to publish a root for. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+    },
+    /// Emit an inclusion proof that one audit line is a leaf of the log,
+    /// paired with the current signed root, as JSON. The selector picks the
+    /// line: a numeric 0-based index, a `plan_id`, or `sha256:<hex>` of the
+    /// exact line. A selector matching more than one line is refused as
+    /// ambiguous (fail closed).
+    Prove {
+        /// Line selector: numeric index, a plan_id, or `sha256:<hex>` of the
+        /// exact audit line.
+        selector: String,
+        /// Tenant whose chain to prove against. Defaults to `"local"`.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Emit the proof + current signed root as a JSON object to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify an inclusion proof against a host-signed root — the full
+    /// membership check. Verifies the signed root under the trusted host
+    /// key, verifies the proof, and binds the two (root_hash + tree_size
+    /// must match). Nonzero exit naming the failed check on any failure; a
+    /// self-consistent proof over an unsigned root is rejected.
+    VerifyInclusion {
+        /// Path to the inclusion-proof JSON, or `-` to read from stdin.
+        #[arg(long)]
+        proof: String,
+        /// Path to the signed-root JSON. Defaults to
+        /// `~/.mvm/audit/<tenant>.root.json`.
+        #[arg(long)]
+        root: Option<std::path::PathBuf>,
+        /// Path to the trusted host public key. Defaults to
+        /// `~/.mvm/keys/host-signer.pub`. Accepts the raw 32-byte key, hex,
+        /// or base64.
+        #[arg(long)]
+        pubkey: Option<std::path::PathBuf>,
+        /// Tenant whose default root path to use when `--root` is omitted.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+    },
     /// Opt-in forensic network transcript capture: arm / disarm / list /
     /// export. Off by default; separate from the metadata-only flow audit.
     Transcript {
@@ -149,6 +199,18 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             chain,
             json,
         } => verify_cert(&cert, pubkey.as_deref(), chain.as_deref(), json),
+        AuditAction::PublishRoot { tenant } => audit_publish_root(&tenant),
+        AuditAction::Prove {
+            selector,
+            tenant,
+            json,
+        } => audit_prove(&tenant, &selector, json),
+        AuditAction::VerifyInclusion {
+            proof,
+            root,
+            pubkey,
+            tenant,
+        } => audit_verify_inclusion(&proof, root.as_deref(), pubkey.as_deref(), &tenant),
     }
 }
 
@@ -315,6 +377,269 @@ fn verify_cert(
         );
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Merkle transparency log: publish-root / prove / verify-inclusion
+// ─────────────────────────────────────────────────────────────────
+
+/// Build, sign, and publish a Merkle root over the tenant's audit chain.
+fn audit_publish_root(tenant: &str) -> Result<()> {
+    let signer =
+        host_signer::load_or_init().context("loading host signer to publish audit root")?;
+    let emitter = AuditEmitter::new(signer.signing).context("opening host audit emitter")?;
+    let signed = emitter
+        .publish_root(tenant)
+        .with_context(|| format!("publishing Merkle root for tenant '{tenant}'"))?;
+    let path = mvm_core::config::audit_root_path(tenant);
+    ui::success(&format!(
+        "published Merkle root for tenant '{tenant}': root {root} over {n} entries -> {path}",
+        root = signed.root_hash,
+        n = signed.tree_size,
+        path = path.display(),
+    ));
+    Ok(())
+}
+
+/// Build an inclusion proof for the selector-resolved leaf and print it
+/// (paired with the current signed root) as JSON, or a one-line summary.
+fn audit_prove(tenant: &str, selector: &str, json: bool) -> Result<()> {
+    use mvm_protocol::merkle::build_inclusion_proof;
+
+    let signer =
+        host_signer::load_or_init().context("loading host signer to build inclusion proof")?;
+    let dir = default_audit_dir()?;
+    // Read the verified leaf set once; the selector resolves against exactly
+    // the leaves the proof is built over, so indices can't drift.
+    let leaves = mvm_hostd::audit::merkle::read_leaves(&dir, tenant, &signer.verifying)
+        .with_context(|| format!("reading the verified audit chain for tenant '{tenant}'"))?;
+    let index = resolve_selector(&leaves, selector)?;
+    let proof = build_inclusion_proof(&leaves, index)
+        .map_err(|e| anyhow::anyhow!("building inclusion proof for leaf {index}: {e}"))?;
+
+    // Pair the proof with the currently-published signed root, if any, so a
+    // downstream `verify-inclusion` has both halves of the membership check.
+    let root_path = mvm_core::config::audit_root_path(tenant);
+    let signed_root: Option<SignedAuditRoot> = if root_path.exists() {
+        let raw = std::fs::read_to_string(&root_path)
+            .with_context(|| format!("reading signed root {}", root_path.display()))?;
+        Some(
+            serde_json::from_str(&raw)
+                .with_context(|| format!("decoding signed root {}", root_path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    if json {
+        let out = serde_json::json!({ "proof": proof, "signed_root": signed_root });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        ui::info(&format!(
+            "inclusion proof: leaf {idx} of {n} (root {root})",
+            idx = proof.leaf_index,
+            n = proof.tree_size,
+            root = proof.root,
+        ));
+        if signed_root.is_none() {
+            ui::warn(&format!(
+                "no published root at {}; run `mvmctl trust audit publish-root` first \
+                 so `verify-inclusion` has a signed root to bind against.",
+                root_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a `prove` selector to a 0-based leaf index over `leaves`.
+///
+/// Accepts a numeric line index, a `plan_id`, or `sha256:<hex>` of the exact
+/// audit line. Every non-numeric interpretation is collected across all
+/// lines; a selector matching more than one line is refused as ambiguous so
+/// the resolution is fail-closed.
+fn resolve_selector(leaves: &[String], selector: &str) -> Result<usize> {
+    use sha2::{Digest, Sha256};
+
+    // 1. numeric 0-based line index.
+    if let Ok(idx) = selector.parse::<usize>() {
+        if idx >= leaves.len() {
+            anyhow::bail!(
+                "line index {idx} out of range: the chain has {} entries",
+                leaves.len()
+            );
+        }
+        return Ok(idx);
+    }
+
+    // 2 & 3. a `sha256:<hex>` line hash and/or a plan_id. Collect every match.
+    let line_hash_want = selector
+        .strip_prefix("sha256:")
+        .map(str::to_ascii_lowercase);
+    let mut matches: Vec<usize> = Vec::new();
+    for (i, line) in leaves.iter().enumerate() {
+        let mut matched = false;
+        if let Some(want) = &line_hash_want {
+            let got = hex::encode(Sha256::digest(line.as_bytes()));
+            if &got == want {
+                matched = true;
+            }
+        }
+        if !matched
+            && let Ok(env) = serde_json::from_str::<SignedEnvelope>(line)
+            && env.entry.plan_id.0 == selector
+        {
+            matched = true;
+        }
+        if matched {
+            matches.push(i);
+        }
+    }
+
+    match matches.as_slice() {
+        [] => anyhow::bail!("selector '{selector}' matched no audit line in the chain"),
+        [only] => Ok(*only),
+        many => anyhow::bail!(
+            "selector '{selector}' is ambiguous: it matches {} lines (indices {many:?}); \
+             use a numeric line index or a `sha256:<hex>` line hash to disambiguate",
+            many.len()
+        ),
+    }
+}
+
+/// Verify an inclusion proof against a host-signed root — the full
+/// membership check. Loads the proof, the signed root, and the trusted host
+/// key, then enforces the composition via [`run_verify_inclusion`].
+fn audit_verify_inclusion(
+    proof_arg: &str,
+    root_path: Option<&std::path::Path>,
+    pubkey_path: Option<&std::path::Path>,
+    tenant: &str,
+) -> Result<()> {
+    // 1. load the inclusion proof (file or stdin).
+    let proof_raw = if proof_arg == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .context("reading inclusion proof from stdin")?;
+        buf
+    } else {
+        std::fs::read_to_string(proof_arg)
+            .with_context(|| format!("reading inclusion proof {proof_arg}"))?
+    };
+    let proof: InclusionProof =
+        serde_json::from_str(&proof_raw).context("decoding inclusion-proof JSON")?;
+
+    // 2. load the signed root (default: ~/.mvm/audit/<tenant>.root.json).
+    let root_path = root_path
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| mvm_core::config::audit_root_path(tenant));
+    let root_raw = std::fs::read_to_string(&root_path)
+        .with_context(|| format!("reading signed root {}", root_path.display()))?;
+    let signed_root: SignedAuditRoot =
+        serde_json::from_str(&root_raw).context("decoding signed-root JSON")?;
+
+    // 3. load the trusted host verifying key (default: host-signer.pub).
+    let vk = match pubkey_path {
+        Some(p) => load_verifying_key(p)?,
+        None => {
+            host_signer::load_or_init()
+                .context("loading host signer public key")?
+                .verifying
+        }
+    };
+
+    // 4-6: the composition. Fail closed naming the failed check.
+    let message = run_verify_inclusion(&proof, &signed_root, &vk)?;
+    ui::success(&message);
+    Ok(())
+}
+
+/// The full inclusion-membership check as a pure function, so the security
+/// composition is unit-testable without touching the filesystem.
+///
+/// Enforces, in order and fail-closed:
+///   1. the signed root verifies under the trusted host key;
+///   2. the inclusion proof is internally consistent (folds to its own root);
+///   3. the proof binds to THIS signed root — `root_hash` and `tree_size`
+///      must match.
+///
+/// Only when all three hold does it return the success message. A proof that
+/// self-verifies but whose embedded root differs from the host-signed root is
+/// rejected at step 3 — self-consistency is not membership.
+fn run_verify_inclusion(
+    proof: &InclusionProof,
+    signed_root: &SignedAuditRoot,
+    vk: &VerifyingKey,
+) -> Result<String> {
+    verify_signed_root(signed_root, vk)
+        .map_err(|e| anyhow::anyhow!("signed-root verification failed: {e}"))?;
+    verify_inclusion(proof)
+        .map_err(|e| anyhow::anyhow!("inclusion-proof verification failed: {e}"))?;
+    if proof.root != signed_root.root_hash {
+        anyhow::bail!(
+            "root binding failed: proof root {} does not match the host-signed root {}",
+            proof.root,
+            signed_root.root_hash
+        );
+    }
+    if proof.tree_size != signed_root.tree_size {
+        anyhow::bail!(
+            "tree-size binding failed: proof tree_size {} does not match the host-signed \
+             tree_size {}",
+            proof.tree_size,
+            signed_root.tree_size
+        );
+    }
+    Ok(format!(
+        "verified: entry at index {idx} of {n} is in the host-signed log (root {root})",
+        idx = proof.leaf_index,
+        n = proof.tree_size,
+        root = signed_root.root_hash,
+    ))
+}
+
+/// Load a trusted Ed25519 verifying key from a file. Accepts the raw
+/// 32-byte form (`~/.mvm/keys/host-signer.pub`), 64-char hex, or base64.
+fn load_verifying_key(path: &std::path::Path) -> Result<VerifyingKey> {
+    let raw =
+        std::fs::read(path).with_context(|| format!("reading pubkey file {}", path.display()))?;
+    // Raw 32-byte key half — the on-disk host-signer.pub shape.
+    if raw.len() == 32 {
+        let arr: [u8; 32] = raw.as_slice().try_into().expect("length checked");
+        return VerifyingKey::from_bytes(&arr)
+            .with_context(|| format!("parsing raw pubkey {}", path.display()));
+    }
+    // Otherwise the file is text: hex (64 chars) or base64.
+    let text = String::from_utf8(raw).with_context(|| {
+        format!(
+            "pubkey file {} is neither 32 raw bytes nor UTF-8 text",
+            path.display()
+        )
+    })?;
+    let text = text.trim();
+    let bytes = hex::decode(text)
+        .ok()
+        .filter(|b| b.len() == 32)
+        .or_else(|| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .ok()
+                .or_else(|| {
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(text)
+                        .ok()
+                })
+                .filter(|b| b.len() == 32)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "pubkey file {} did not contain a 32-byte Ed25519 key (raw, hex, or base64)",
+                path.display()
+            )
+        })?;
+    let arr: [u8; 32] = bytes.as_slice().try_into().expect("length checked");
+    VerifyingKey::from_bytes(&arr).with_context(|| format!("parsing pubkey {}", path.display()))
 }
 
 /// Read a chain file and return a map from
@@ -996,5 +1321,298 @@ mod verify_cert_tests {
                 .map(String::as_str),
             Some("fp1")
         );
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Merkle transparency-log verbs: publish-root / prove / verify-inclusion
+// ──────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod merkle_verb_tests {
+    use super::*;
+    use base64::Engine;
+    use ed25519_dalek::{Signer, SigningKey};
+    use mvm_protocol::merkle::{build_inclusion_proof, merkle_root, root_signing_bytes};
+
+    fn fresh_key() -> SigningKey {
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        SigningKey::from_bytes(&seed)
+    }
+
+    fn lines(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!(r#"{{"line":{i}}}"#)).collect()
+    }
+
+    /// Sign a root over `leaves` exactly the way `publish_root` does.
+    fn sign_root(key: &SigningKey, tenant: &str, leaves: &[String]) -> SignedAuditRoot {
+        sign_root_fields(
+            key,
+            tenant,
+            leaves.len() as u64,
+            &hex::encode(merkle_root(leaves)),
+        )
+    }
+
+    /// Sign a root over caller-chosen `tree_size` / `root_hash` (to isolate the
+    /// tree_size-binding check, which needs a validly-signed-but-mismatched root).
+    fn sign_root_fields(
+        key: &SigningKey,
+        tenant: &str,
+        tree_size: u64,
+        root_hash: &str,
+    ) -> SignedAuditRoot {
+        let timestamp = "2026-07-26T00:00:00Z".to_string();
+        let payload = root_signing_bytes(tenant, tree_size, root_hash, &timestamp).unwrap();
+        let sig = key.sign(&payload);
+        SignedAuditRoot {
+            tenant: tenant.to_string(),
+            tree_size,
+            root_hash: root_hash.to_string(),
+            timestamp,
+            signature: base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
+            signer_pubkey: hex::encode(key.verifying_key().to_bytes()),
+        }
+    }
+
+    // ---- run_verify_inclusion composition ----
+
+    #[test]
+    fn composition_accepts_valid_proof_against_signed_root() {
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let leaves = lines(5);
+        let signed = sign_root(&key, "local", &leaves);
+        let proof = build_inclusion_proof(&leaves, 2).unwrap();
+        let msg = run_verify_inclusion(&proof, &signed, &vk).unwrap();
+        assert!(msg.contains("index 2 of 5"), "{msg}");
+        assert!(msg.contains(&signed.root_hash), "{msg}");
+    }
+
+    #[test]
+    fn composition_rejects_self_consistent_proof_over_a_different_root() {
+        // THE CRUX: a proof that self-verifies (verify_inclusion Ok) with the
+        // SAME tree_size as the signed root, but whose embedded root differs.
+        // Self-consistency is not membership — it must be rejected at the
+        // root-binding step.
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let signed = sign_root(&key, "local", &lines(5)); // root A, size 5
+        let foreign_leaves: Vec<String> = (0..5).map(|i| format!(r#"{{"forged":{i}}}"#)).collect(); // root B, size 5
+        let proof = build_inclusion_proof(&foreign_leaves, 2).unwrap();
+        // Sanity: the forged proof self-verifies and its size matches.
+        assert!(verify_inclusion(&proof).is_ok());
+        assert_eq!(proof.tree_size, signed.tree_size);
+        assert_ne!(proof.root, signed.root_hash);
+
+        let err = run_verify_inclusion(&proof, &signed, &vk).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("root binding failed"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn composition_rejects_tampered_signed_root() {
+        // Tamper the signed root's root_hash: the signature no longer covers
+        // it, so verify_signed_root refuses before the proof is even folded.
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let leaves = lines(5);
+        let mut signed = sign_root(&key, "local", &leaves);
+        let proof = build_inclusion_proof(&leaves, 0).unwrap();
+        signed.root_hash = hex::encode([0xabu8; 32]);
+        let err = run_verify_inclusion(&proof, &signed, &vk).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("signed-root verification failed"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn composition_rejects_signed_root_under_wrong_key() {
+        // The signed root is valid, but we hand verify the WRONG trusted key.
+        let key = fresh_key();
+        let leaves = lines(4);
+        let signed = sign_root(&key, "local", &leaves);
+        let proof = build_inclusion_proof(&leaves, 1).unwrap();
+        let wrong_vk = fresh_key().verifying_key();
+        let err = run_verify_inclusion(&proof, &signed, &wrong_vk).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("signed-root verification failed"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn composition_rejects_wrong_entry_proof() {
+        // A proof for a real tree whose leaf_index is re-pointed folds to a
+        // different root → verify_inclusion fails before any binding check.
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let leaves = lines(8);
+        let signed = sign_root(&key, "local", &leaves);
+        let mut proof = build_inclusion_proof(&leaves, 3).unwrap();
+        proof.leaf_index = 4;
+        let err = run_verify_inclusion(&proof, &signed, &vk).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("inclusion-proof verification failed"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn composition_rejects_tree_size_mismatch() {
+        // Isolate the tree_size binding: sign a root that claims the SAME
+        // root_hash the proof folds to, but a different tree_size. The
+        // signature is valid and the proof self-verifies, so only the
+        // tree_size bind can catch it.
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let leaves = lines(5);
+        let proof = build_inclusion_proof(&leaves, 0).unwrap();
+        let signed = sign_root_fields(&key, "local", 99, &proof.root);
+        let err = run_verify_inclusion(&proof, &signed, &vk).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("tree-size binding failed"),
+            "{err:#}"
+        );
+    }
+
+    // ---- resolve_selector ----
+
+    /// Seed a real chain of SignedEnvelope lines via `FileAuditSigner`,
+    /// returning the verified leaf set. `plan_ids` names each entry's plan_id.
+    fn seed_leaves(plan_ids: &[&str]) -> (tempfile::TempDir, Vec<String>) {
+        use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+        use std::collections::BTreeMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        let chain_dir = dir.path().join("audit");
+        std::fs::create_dir_all(&chain_dir).unwrap();
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let signer = FileAuditSigner::open(key, &chain_dir).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (i, plan_id) in plan_ids.iter().enumerate() {
+            let entry = AuditEntry {
+                timestamp: chrono::Utc::now(),
+                tenant: mvm_core::plan::TenantId("local".to_string()),
+                plan_id: mvm_core::plan::PlanId(plan_id.to_string()),
+                plan_version: 1,
+                bundle_id: None,
+                bundle_version: None,
+                image_name: "img".to_string(),
+                image_sha256: "abc".to_string(),
+                event: format!("e-{i}"),
+                labels: BTreeMap::new(),
+            };
+            rt.block_on(signer.sign_and_emit(&entry)).unwrap();
+        }
+        let leaves = mvm_hostd::audit::merkle::read_leaves(&chain_dir, "local", &vk).unwrap();
+        (dir, leaves)
+    }
+
+    #[test]
+    fn resolve_selector_numeric_index() {
+        let leaves = lines(4);
+        assert_eq!(resolve_selector(&leaves, "0").unwrap(), 0);
+        assert_eq!(resolve_selector(&leaves, "3").unwrap(), 3);
+    }
+
+    #[test]
+    fn resolve_selector_numeric_out_of_range_refused() {
+        let leaves = lines(3);
+        let err = resolve_selector(&leaves, "3").unwrap_err();
+        assert!(format!("{err:#}").contains("out of range"), "{err:#}");
+    }
+
+    #[test]
+    fn resolve_selector_line_hash() {
+        use sha2::{Digest, Sha256};
+        let leaves = lines(4);
+        let want = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(leaves[2].as_bytes()))
+        );
+        assert_eq!(resolve_selector(&leaves, &want).unwrap(), 2);
+    }
+
+    #[test]
+    fn resolve_selector_no_match_refused() {
+        let leaves = lines(3);
+        let err = resolve_selector(&leaves, "sha256:deadbeef").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("matched no audit line"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_selector_unique_plan_id() {
+        let (_dir, leaves) = seed_leaves(&["plan-a", "plan-b", "plan-c"]);
+        assert_eq!(resolve_selector(&leaves, "plan-b").unwrap(), 1);
+    }
+
+    #[test]
+    fn resolve_selector_ambiguous_plan_id_refused() {
+        // Two lines carry the same plan_id → the selector is ambiguous and
+        // must be refused (fail closed) rather than silently proving one.
+        let (_dir, leaves) = seed_leaves(&["plan-x", "plan-dup", "plan-dup"]);
+        let err = resolve_selector(&leaves, "plan-dup").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ambiguous"), "{msg}");
+    }
+
+    #[test]
+    fn prove_selector_to_verify_inclusion_round_trip() {
+        // End-to-end over real SignedEnvelope leaves: resolve a plan_id, build
+        // the proof over the exact leaf bytes, sign a matching root, and run
+        // the full composition. The leaf bytes fold to `merkle_root(leaves)`
+        // independent of which key signed the chain, so signing the root with
+        // a fresh key exercises the proof↔root binding faithfully.
+        let (_dir, leaves) = seed_leaves(&["plan-a", "plan-b", "plan-c", "plan-d"]);
+        let key = fresh_key();
+        let idx = resolve_selector(&leaves, "plan-c").unwrap();
+        assert_eq!(idx, 2);
+        let proof = build_inclusion_proof(&leaves, idx).unwrap();
+        let signed = sign_root(&key, "local", &leaves);
+        let msg = run_verify_inclusion(&proof, &signed, &key.verifying_key()).unwrap();
+        assert!(msg.contains("index 2 of 4"), "{msg}");
+    }
+
+    // ---- load_verifying_key ----
+
+    #[test]
+    fn load_verifying_key_raw_32_bytes() {
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host-signer.pub");
+        std::fs::write(&path, vk.to_bytes()).unwrap();
+        let loaded = load_verifying_key(&path).unwrap();
+        assert_eq!(loaded.to_bytes(), vk.to_bytes());
+    }
+
+    #[test]
+    fn load_verifying_key_hex_text() {
+        let key = fresh_key();
+        let vk = key.verifying_key();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pub.hex");
+        std::fs::write(&path, format!("{}\n", hex::encode(vk.to_bytes()))).unwrap();
+        let loaded = load_verifying_key(&path).unwrap();
+        assert_eq!(loaded.to_bytes(), vk.to_bytes());
+    }
+
+    #[test]
+    fn load_verifying_key_rejects_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.pub");
+        std::fs::write(&path, "not-a-key").unwrap();
+        assert!(load_verifying_key(&path).is_err());
     }
 }

@@ -5,4 +5,7 @@
 pub mod bind;
 pub mod emitter;
 pub mod host_keypair;
+/// RFC 6962 Merkle transparency-log root + inclusion-proof builder over a
+/// tenant's chain-signed audit log.
+pub mod merkle;
 pub mod plan_persist;
