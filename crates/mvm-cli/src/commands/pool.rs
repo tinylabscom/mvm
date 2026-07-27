@@ -499,7 +499,10 @@ mod tests {
 
     #[test]
     fn try_warm_claim_refuses_unsupported_backend_instead_of_cold_booting() {
-        let backend = AnyBackend::from_hypervisor("firecracker");
+        // qemu is a dev/test substrate whose runner does not own a warm-claim
+        // path, so it keeps the fail-closed standby default: a configured warm
+        // pool against it must surface a typed error, never a silent cold boot.
+        let backend = AnyBackend::from_hypervisor("qemu");
         let err = try_warm_claim(&backend, &eligible_cfg(), false, None)
             .expect_err("configured warm pool must not silently cold-boot");
         let message = format!("{err:#}");

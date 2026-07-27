@@ -662,6 +662,48 @@ impl AnyBackend {
         self.inner().claim_standby(handle, claim)
     }
 
+    /// Drive a warm-pool claim through the backend's real, context-aware claim
+    /// path — the entry the CLI warm-claim layer assembles a [`ClaimContext`]
+    /// for. The runner-backed workload backends (Firecracker, libkrun, hvf)
+    /// route to the runner's inherent guarded `claim_standby`, which reserves and
+    /// lineage-verifies a clean parent, binds the admitted plan to it, scrubs the
+    /// child identity, and forks a fresh admitted child — gated exactly as
+    /// strictly as a cold boot. The mock lifecycle double routes to its own
+    /// in-memory claim so hermetic tests can drive this path end to end.
+    /// Non-workload backends (qemu, wasm) fail closed.
+    ///
+    /// This is distinct from the parameterless [`claim_standby`](Self::claim_standby)
+    /// accessor, which cannot carry a [`ClaimContext`] — the context reaches the
+    /// checkpoint/snapshot stores and the signed-audit anchor, whose host key
+    /// lives above this crate — and therefore stays the fail-closed default for
+    /// the runner-backed variants. Assembling the context is the caller's job;
+    /// the runner never loads the host key itself.
+    ///
+    /// [`ClaimContext`]: crate::workload_runner::ClaimContext
+    pub fn claim_standby_via_runner(
+        &self,
+        ctx: &crate::workload_runner::ClaimContext<'_>,
+        handle: &mvm_core::vm_backend::StandbyHandle,
+        claim: &mvm_core::vm_backend::StandbyClaim,
+    ) -> std::result::Result<VmId, mvm_core::vm_backend::StandbyError> {
+        match self {
+            AnyBackend::Firecracker(runner) => runner.claim_standby(ctx, handle, claim),
+            AnyBackend::Libkrun(runner) => runner.claim_standby(ctx, handle, claim),
+            AnyBackend::Hvf(runner) => runner.claim_standby(ctx, handle, claim),
+            // The mock is the hermetic lifecycle double the CLI drives through
+            // the admitted path; it has no runner, so it services the claim from
+            // its own in-memory state (the context is a runner detail it ignores).
+            #[cfg(feature = "test-support")]
+            AnyBackend::Mock(backend) => backend.claim_standby(handle, claim),
+            // Not workload-bearing backends — no warm pool, fail closed.
+            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) => {
+                Err(mvm_core::vm_backend::StandbyError::Unsupported {
+                    backend: self.inner().name().to_string(),
+                })
+            }
+        }
+    }
+
     /// Warm-start a VM at (at least) the requested snapshot tier. See
     /// [`VmBackend::warm_start`] — fails closed with a typed error on an
     /// over-request rather than degrading to a cold boot.
@@ -1257,7 +1299,10 @@ mod tests {
     #[test]
     fn recovery_capability_matrix_is_explicit_for_every_selectable_backend() {
         let mut expected = vec![
-            ("firecracker", SnapshotCapability::Unsupported, false),
+            // Firecracker's runner owns the guarded warm-claim path, so it (and
+            // only it, among the non-mock selectable backends) advertises the
+            // standby pool.
+            ("firecracker", SnapshotCapability::Unsupported, true),
             ("hvf", SnapshotCapability::Unsupported, false),
             ("libkrun", SnapshotCapability::Unsupported, false),
             ("qemu", SnapshotCapability::Unsupported, false),
@@ -1508,6 +1553,162 @@ mod tests {
             assert!(
                 !backend.capabilities().production_ssh,
                 "{name} backend must not advertise production SSH"
+            );
+        }
+    }
+
+    /// Routing witnesses for the warm-claim seam: the CLI-facing
+    /// `claim_standby_via_runner` reaches each backend's real claim path — the
+    /// runner's guarded fork for a runner-backed workload backend, the mock's
+    /// lifecycle claim for the hermetic double — and fails closed for a
+    /// non-workload backend. Assembling the `ClaimContext` is the caller's job;
+    /// these build a minimal one and prove the dispatch, not a real fork (which
+    /// needs a live VMM).
+    mod claim_routing {
+        use super::*;
+        use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore};
+        use crate::standby_pool::SupervisorStandbyPool;
+        use crate::workload_runner::ClaimContext;
+        use mvm_core::checkpoint::{CheckpointDigest, CheckpointId, CheckpointMeta};
+        use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbyHandle, StandbyState};
+        use mvm_fs::snapshot_store::FsSnapshotStore;
+
+        /// A lineage anchor that records nothing, so every lookup is `None`. The
+        /// routing tests fail earlier (at the empty-pool reserve) than any
+        /// lineage check, so it only has to satisfy the context type.
+        struct NoAnchor;
+        impl CheckpointChainAnchor for NoAnchor {
+            fn recorded_creation_digest(
+                &self,
+                _meta: &CheckpointMeta,
+            ) -> anyhow::Result<Option<CheckpointDigest>> {
+                Ok(None)
+            }
+        }
+
+        fn idle_handle() -> StandbyHandle {
+            StandbyHandle {
+                id: "warm-parent".into(),
+                control_socket: "/tmp/does-not-exist.sock".into(),
+                pid: 0,
+                kernel_sha256: "a".repeat(64),
+                vcpus: 2,
+                mem_mib: 512,
+                binding_nonce: "b".repeat(64),
+                spawned_unix_secs: 1,
+                state: StandbyState::Idle,
+                image_sha256: None,
+            }
+        }
+
+        fn minimal_claim() -> StandbyClaim {
+            StandbyClaim {
+                start_config: None,
+                rootfs_path: "/vol/rootfs.ext4".into(),
+                tenant_id: "tenant-x".into(),
+                audit_dir: std::path::PathBuf::from("/tmp/audit"),
+                gateway_audit_socket: std::path::PathBuf::from("/tmp/gw.sock"),
+                gateway_events_socket: None,
+                plan_json: String::new(),
+                bundle_json: None,
+                network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
+            }
+        }
+
+        /// The owned pieces a [`ClaimContext`] borrows. Held together so the
+        /// context's borrows outlive the claim call; the temp dir stays alive
+        /// for the store paths.
+        struct Scaffold {
+            pool: SupervisorStandbyPool,
+            checkpoints: CheckpointStore,
+            snapshots: FsSnapshotStore,
+            anchor: NoAnchor,
+            parent: CheckpointId,
+            registry_path: std::path::PathBuf,
+            _tmp: tempfile::TempDir,
+        }
+
+        impl Scaffold {
+            fn new() -> Self {
+                let tmp = tempfile::tempdir().unwrap();
+                let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+                let checkpoints = CheckpointStore::at(tmp.path().join("checkpoints"));
+                let snapshots = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
+                let parent = CheckpointId::new("nonexistent-parent");
+                let registry_path = tmp.path().join("vm-names.json");
+                Self {
+                    pool,
+                    checkpoints,
+                    snapshots,
+                    anchor: NoAnchor,
+                    parent,
+                    registry_path,
+                    _tmp: tmp,
+                }
+            }
+
+            fn ctx(&self) -> ClaimContext<'_> {
+                ClaimContext {
+                    pool: &self.pool,
+                    checkpoints: &self.checkpoints,
+                    snapshots: &self.snapshots,
+                    anchor: &self.anchor,
+                    parent_checkpoint: &self.parent,
+                    registry_path: &self.registry_path,
+                }
+            }
+        }
+
+        #[test]
+        fn routes_firecracker_into_the_runner_not_the_trait_stub() {
+            let s = Scaffold::new();
+            let backend = AnyBackend::from_hypervisor("firecracker");
+            let err = backend
+                .claim_standby_via_runner(&s.ctx(), &idle_handle(), &minimal_claim())
+                .expect_err("an empty pool has no parent to fork");
+            // Reaching the runner's guarded sequence (which fails reserving a
+            // parent from the empty pool) instead of short-circuiting on the
+            // fail-closed trait stub is the proof the fork substrate is reachable.
+            assert!(
+                !matches!(err, StandbyError::Unsupported { .. }),
+                "firecracker must route to the runner, not the Unsupported trait stub: {err}"
+            );
+            assert!(
+                matches!(err, StandbyError::ClaimFailed(_)),
+                "the runner refuses inside its guarded claim sequence: {err}"
+            );
+        }
+
+        #[test]
+        fn fails_closed_for_non_workload_backends() {
+            let s = Scaffold::new();
+            for name in ["qemu", "wasm"] {
+                let backend = AnyBackend::from_hypervisor(name);
+                let err = backend
+                    .claim_standby_via_runner(&s.ctx(), &idle_handle(), &minimal_claim())
+                    .expect_err("a non-workload backend has no warm pool");
+                assert!(
+                    matches!(err, StandbyError::Unsupported { .. }),
+                    "{name} must fail closed: {err}"
+                );
+            }
+        }
+
+        // The mock is only compiled under `test-support`; this witness rides the
+        // workspace suite (where the feature is unified on) and proves the CLI
+        // dispatch reaches a working claim via the hermetic double, not the stub.
+        #[cfg(feature = "test-support")]
+        #[test]
+        fn reaches_the_mock_lifecycle_claim() {
+            let s = Scaffold::new();
+            let backend = AnyBackend::Mock(MockBackend::new().with_standby());
+            let id = backend
+                .claim_standby_via_runner(&s.ctx(), &idle_handle(), &minimal_claim())
+                .expect("the mock services the claim from its own in-memory state");
+            assert_eq!(
+                id,
+                mvm_core::vm_backend::VmId("warm-parent".into()),
+                "the mock boots the claim under the standby id"
             );
         }
     }
