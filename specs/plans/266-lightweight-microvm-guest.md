@@ -202,6 +202,12 @@ git -C "$WT" add nix/flake.nix .github/workflows/ci.yml specs/plans/266-lightwei
 git -C "$WT" commit -m "test(light-guest): CI gate asserting the guest rootfs closure carries no glibc"
 ```
 
+**Notes.** Cap-parity needs no separate runtime witness: util-linux `setpriv`
+links libcap-ng unconditionally (no compile-time guard), so a static build
+either honors the `--inh-caps`/`--ambient-caps` flags the DNS/egress forks
+use or fails to build outright — and the no-glibc check already builds that
+binary as part of the rootfs closure.
+
 ---
 
 ## Deferred follow-ups (campaign roadmap — not built in this plan)

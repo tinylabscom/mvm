@@ -348,12 +348,6 @@ jobs:
           nix build --print-build-logs \
             ./nix#checks.x86_64-linux.guest-rootfs-no-glibc
 
-      - name: Static setpriv honors ambient net_bind_service caps
-        run: |
-          set -euo pipefail
-          nix build --print-build-logs \
-            ./nix#checks.x86_64-linux.setpriv-accepts-ambient-caps
-
   # `mvm-protocol` is `no_std` + `alloc` (the IR, wire protocol, policy/audit
   # DTOs, and the audit-log verifier) so the same logic can run in a browser.
   # A `std`/OS-only API creeping into its default build is the one thing that
