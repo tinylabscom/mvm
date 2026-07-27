@@ -1,6 +1,7 @@
 //! Firecracker snapshot controls that do not alter the runner's device model.
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use tracing::instrument;
 
 use crate::base::shell::shell_quote;
@@ -92,6 +93,40 @@ pub fn create_snapshot_files(
     Ok(())
 }
 
+/// Partial view of Firecracker's own restored-VM configuration (the shape
+/// `GET /vm/config` reports once a snapshot is loaded), carrying only the
+/// `network-interfaces` array.
+///
+/// This is intentionally not `#[serde(deny_unknown_fields)]`: it is a slice
+/// of Firecracker's own config schema (which also carries `boot-source`,
+/// `drives`, `machine-config`, `vsock`, and more), not a host↔snapshot
+/// type mvm controls end to end. Rejecting the fields we don't read would
+/// make this view brittle against upstream additions.
+#[derive(Debug, Deserialize)]
+pub struct RestoredDeviceModel {
+    #[serde(rename = "network-interfaces", default)]
+    pub network_interfaces: Vec<serde_json::Value>,
+}
+
+/// Refuse to restore a snapshot whose device model carries a network
+/// interface.
+///
+/// A restored VMM reconstructs whatever devices the snapshot captured. Any
+/// network interface would let guest traffic reach a device outside the
+/// vsock transport, bypassing the sole auditable egress boundary — so a
+/// non-empty `network-interfaces` list is a hard refusal, not a warning.
+///
+/// Pure: inspects only the passed-in config. No I/O, no VM, no clock.
+pub fn assert_vsock_only_device_model(config: &RestoredDeviceModel) -> Result<()> {
+    let count = config.network_interfaces.len();
+    anyhow::ensure!(
+        count == 0,
+        "restore refused: the snapshot's device model carries {count} network \
+         interface(s) — a network interface would bypass the vsock-only egress boundary"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +136,74 @@ mod tests {
         let err = warm_restore_instance("vm", [0u8; mvm_core::crypto::vmgenid::GENID_BYTES])
             .expect_err("legacy restore must refuse");
         assert!(err.to_string().contains("disabled"));
+    }
+
+    fn device_model_with(network_interfaces: Vec<serde_json::Value>) -> RestoredDeviceModel {
+        RestoredDeviceModel { network_interfaces }
+    }
+
+    #[test]
+    fn restore_refuses_nic_device_model() {
+        let config = device_model_with(vec![serde_json::json!({
+            "iface_id": "eth0",
+            "host_dev_name": "tap0",
+        })]);
+        let err =
+            assert_vsock_only_device_model(&config).expect_err("a NIC in the model must refuse");
+        assert!(
+            err.to_string().contains("vsock-only egress boundary"),
+            "expected the vsock-boundary refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn restore_accepts_vsock_only_device_model() {
+        let config = device_model_with(Vec::new());
+        assert_vsock_only_device_model(&config).expect("no NIC must be admitted");
+    }
+
+    #[test]
+    fn restore_refuses_multiple_nic_device_model() {
+        let config = device_model_with(vec![
+            serde_json::json!({"iface_id": "eth0"}),
+            serde_json::json!({"iface_id": "eth1"}),
+        ]);
+        let err = assert_vsock_only_device_model(&config)
+            .expect_err("multiple NICs in the model must refuse");
+        assert!(err.to_string().contains('2'), "count in message: {err}");
+    }
+
+    #[test]
+    fn restored_device_model_parses_network_interfaces_from_full_vm_config_json() {
+        // Shaped after Firecracker's own `GET /vm/config` response: several
+        // sibling sections this view does not model at all. Deserializing
+        // must succeed and ignore everything but `network-interfaces`.
+        let raw = serde_json::json!({
+            "boot-source": {"kernel_image_path": "/vmlinux", "boot_args": "console=ttyS0"},
+            "drives": [{"drive_id": "rootfs", "path_on_host": "/rootfs.ext4"}],
+            "machine-config": {"vcpu_count": 2, "mem_size_mib": 1024},
+            "network-interfaces": [{"iface_id": "eth0", "host_dev_name": "tap0"}],
+            "vsock": {"vsock_id": "vsock0", "guest_cid": 3, "uds_path": "/v.sock"},
+        })
+        .to_string();
+
+        let config: RestoredDeviceModel = serde_json::from_str(&raw).unwrap();
+        assert_eq!(config.network_interfaces.len(), 1);
+        assert!(assert_vsock_only_device_model(&config).is_err());
+    }
+
+    #[test]
+    fn restored_device_model_defaults_to_empty_when_field_absent() {
+        // Older/minimal config bodies may omit `network-interfaces` entirely
+        // (Firecracker only includes devices that were actually attached);
+        // absence must mean "no NIC", not a deserialization failure.
+        let raw = serde_json::json!({
+            "boot-source": {"kernel_image_path": "/vmlinux", "boot_args": "console=ttyS0"},
+        })
+        .to_string();
+
+        let config: RestoredDeviceModel = serde_json::from_str(&raw).unwrap();
+        assert!(config.network_interfaces.is_empty());
+        assert!(assert_vsock_only_device_model(&config).is_ok());
     }
 }
