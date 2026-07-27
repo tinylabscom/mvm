@@ -217,21 +217,24 @@
         let
           pkgs = import nixpkgs { inherit system; };
           guest = (libFor { inherit system; }).mkGuest {
-            name = "no-glibc-check";
+            name = "lean-rootfs-probe";
             entrypoint.command = [ "/bin/true" ];
           };
         in
         {
-          # The mkGuest rootfs is static-musl only. If any glibc store path
+          # The mkGuest rootfs is static-musl only. If the glibc package
           # enters its closure, this build fails — the guest privilege-drop
-          # setpriv and every other rootfs binary must stay static.
+          # setpriv and every other rootfs binary must stay static. The grep
+          # is hash-anchored (/nix/store/<hash>-glibc…) so it matches only the
+          # glibc package's own store path, never a derivation whose name
+          # merely contains "glibc" (e.g. the probe rootfs tree itself).
           guest-rootfs-no-glibc =
             pkgs.runCommand "guest-rootfs-no-glibc"
               { closure = pkgs.closureInfo { rootPaths = [ guest.passthru.rootfsTree ]; }; }
               ''
-                if grep -Eq -- '-glibc(-|$)' "$closure/store-paths"; then
+                if grep -Eq -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths"; then
                   echo "glibc present in guest rootfs closure:" >&2
-                  grep -E -- '-glibc(-|$)' "$closure/store-paths" >&2
+                  grep -E -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths" >&2
                   exit 1
                 fi
                 echo ok > "$out"
