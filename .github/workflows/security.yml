@@ -867,7 +867,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: env.TARGET_TAG != ''
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
 
       - uses: ./.github/actions/install-zigbuild
         if: env.TARGET_TAG != ''
@@ -1035,7 +1035,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: env.TARGET_TAG != ''
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.96.0
 
       - name: Rebuild the default microVM image from source at the target tag
         if: env.TARGET_TAG != ''
