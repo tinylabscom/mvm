@@ -1299,10 +1299,7 @@ mod tests {
     #[test]
     fn recovery_capability_matrix_is_explicit_for_every_selectable_backend() {
         let mut expected = vec![
-            // Firecracker's runner owns the guarded warm-claim path, so it (and
-            // only it, among the non-mock selectable backends) advertises the
-            // standby pool.
-            ("firecracker", SnapshotCapability::Unsupported, true),
+            ("firecracker", SnapshotCapability::Unsupported, false),
             ("hvf", SnapshotCapability::Unsupported, false),
             ("libkrun", SnapshotCapability::Unsupported, false),
             ("qemu", SnapshotCapability::Unsupported, false),

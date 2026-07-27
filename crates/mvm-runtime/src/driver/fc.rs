@@ -368,17 +368,14 @@ impl VmmDriver for FcDriver {
         // wired through this driver's boot + running-VM handle); live-memory
         // snapshots are dropped, since the runner path is cold-boot only.
         //
-        // `standby_pool` is advertised because the workload runner now owns a
-        // fully guarded warm-claim path (reserve + lineage-verify a clean
-        // parent, bind the admitted plan to it, scrub identity, then fork a
-        // fresh admitted child) — so a warm claim is gated exactly as strictly
-        // as a cold boot. The other selectable drivers keep it off until their
-        // runner owns that path too.
+        // `standby_pool` stays off: the runner owns a guarded warm-claim path,
+        // but the capability means "can actually spawn+claim a warm parent",
+        // which needs the live FC spawn/fork ops. It flips true with that slice.
         VmCapabilities {
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: true,
+            standby_pool: false,
             vsock: true,
             tap_networking: false,
             no_routable_guest_nic: true,
@@ -712,39 +709,25 @@ mod tests {
         );
     }
 
-    /// Only the Firecracker driver advertises the standby (warm) pool: its
-    /// runner owns the guarded warm-claim path. Every other selectable VMM
-    /// driver keeps the fail-closed default until its runner owns that path.
+    /// No selectable backend advertises the standby (warm) pool yet. The runner
+    /// owns a guarded warm-claim path, but the capability means "can actually
+    /// spawn+claim a warm parent"; it flips true per-backend only with that
+    /// backend's live spawn/fork ops. Until then every VMM driver and the
+    /// non-workload backends report it off. (The in-memory `MockBackend` opts
+    /// into it explicitly via `with_standby()` for the hermetic claim tests; the
+    /// `MockDriver` seam here does not.)
     #[test]
-    fn only_fc_driver_advertises_standby_pool() {
+    fn no_selectable_driver_advertises_standby_pool_yet() {
         use crate::driver::{HvfDriver, LibkrunDriver, MockDriver};
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
 
-        assert!(
-            FcDriver::new().capabilities().standby_pool,
-            "the Firecracker driver must advertise the standby pool"
-        );
-        assert!(
-            !LibkrunDriver::new().capabilities().standby_pool,
-            "libkrun stays fail-closed for the standby pool"
-        );
-        assert!(
-            !HvfDriver::new().capabilities().standby_pool,
-            "hvf stays fail-closed for the standby pool"
-        );
-        assert!(
-            !MockDriver::default().capabilities().standby_pool,
-            "the mock driver stays fail-closed for the standby pool"
-        );
-        assert!(
-            !QemuBackend.capabilities().standby_pool,
-            "qemu stays fail-closed for the standby pool"
-        );
-        assert!(
-            !WasmBackend::new().capabilities().standby_pool,
-            "wasm stays fail-closed for the standby pool"
-        );
+        assert!(!FcDriver::new().capabilities().standby_pool);
+        assert!(!LibkrunDriver::new().capabilities().standby_pool);
+        assert!(!HvfDriver::new().capabilities().standby_pool);
+        assert!(!MockDriver::default().capabilities().standby_pool);
+        assert!(!QemuBackend.capabilities().standby_pool);
+        assert!(!WasmBackend::new().capabilities().standby_pool);
     }
 
     #[test]
