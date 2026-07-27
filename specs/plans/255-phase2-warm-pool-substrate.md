@@ -388,9 +388,9 @@ Implement `claim_standby` in the order from the design note "Where each guard ru
 (7) `FcForkRestorer::restore_fork(child_vm_name, child_dir)`.
 (8) `ClaimGuards::spawn_endpoint` (child-keyed, 0700) + `ClaimGuards::admit_overlay_contract`.
 (9) confinement is guest-init-inherited via the forked rootfs (parent snapshot is post-init) — nothing to apply host-side; do not add a host-side confinement path.
-(10) emit `plan.launched` + the fork lineage event.
-(11) `replenish_after_launch`.
-Nothing in 3-11 runs until 1-2 and step 4 pass.
+(10) [CLI caller, after `claim_standby` returns] emit `plan.launched` + the fork lineage event via the `AuditEmitter` (which lives above `mvm-runtime`; the runner cannot emit it — same layer the checkpoint-fork path uses).
+(11) [CLI caller] `replenish_after_launch` / `WarmLease::release`.
+Steps 1-9 run inside `claim_standby` (which takes a `ClaimContext` carrying the pool, checkpoint/snapshot stores, and audit anchor — not reachable from `(handle, claim)` or the runner's fields); nothing in 3-9 runs until 1-2 and step 4 pass. Steps 10-11 are the caller's, after the runner returns the child.
 
 - [ ] **Step 4: Run test to verify it passes**
 

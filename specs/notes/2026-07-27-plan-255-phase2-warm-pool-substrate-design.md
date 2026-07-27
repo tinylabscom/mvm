@@ -108,10 +108,17 @@ checkpoint-fork already uses):
   snapshot is taken at the post-init ready point (parent-cleanliness contract),
   so the child carries the same confinement a cold boot's init applies. There is
   no host-side confinement to re-derive on the runner.
-- **Runner (`claim_standby`)** — owns only the genuinely runner-side, host-side
-  steps: the atomic parent select + lineage gate, the CoW materialize, the
-  plan↔parent bind, identity-scrub, the VMM fork, the per-child substitution
-  endpoint, the overlay-contract gate, and the audit/provenance emit.
+- **Runner (`claim_standby`, taking a `ClaimContext`)** — owns only the genuinely
+  runner-side, host-side steps: the atomic parent select + lineage gate, the CoW
+  materialize, the plan↔parent bind, identity-scrub, the VMM fork, the per-child
+  substitution endpoint, and the overlay-contract gate. The pool, checkpoint/
+  snapshot stores, and audit anchor are injected via `ClaimContext` (they are not
+  reachable from the runner's cold-boot fields; the signed anchor loads the host
+  key, which lives above `mvm-runtime`).
+- **CLI caller** — after `claim_standby` returns, emits the signed audit
+  (`plan.launched` + the fork lineage event) via the `AuditEmitter` and replenishes
+  the pool. The `AuditEmitter` lives above `mvm-runtime`, so the runner cannot emit
+  it; this is the same layer the existing checkpoint-fork path emits from.
 
 ## Claim data-flow (guarded, fail-closed)
 
@@ -158,11 +165,15 @@ every gate passes. Steps are annotated with the layer that owns them:
    contract), so the child carries the same confinement a cold boot's init
    applies. There is no host-side re-derivation on the runner. The runner only
    enforces the overlay-contract gate host-side, identical to cold boot.
-10. **Audit + provenance.** Emit `plan.launched` on the child's chain and the fork
-    lineage event recording the parent, so a claimed child's provenance (which
-    parent + fresh plan) is verifiable — no less auditable than a cold boot.
-11. **Bookkeeping.** `replenish_after_launch` refills a fresh parent (the parent
-    was marked claimed atomically in step 1).
+10. **Audit + provenance [CLI caller].** After `claim_standby` returns, the CLI
+    caller emits `plan.launched` on the child's chain and the fork lineage event
+    recording the parent (via the `AuditEmitter`, which lives above `mvm-runtime`),
+    so a claimed child's provenance (which parent + fresh plan) is verifiable — no
+    less auditable than a cold boot, and the same layer the checkpoint-fork path
+    emits from.
+11. **Bookkeeping [CLI caller].** The caller replenishes a fresh parent
+    (`replenish_after_launch` / `WarmLease::release`); the parent was marked
+    claimed atomically in step 1.
 
 If any gate in steps 1-4 fails, the claim refuses before any boot, endpoint, or
 persisted child side effect — mirroring the Phase-1 clone discipline and the
