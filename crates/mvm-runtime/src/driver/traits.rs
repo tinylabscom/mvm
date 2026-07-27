@@ -6,8 +6,8 @@
 
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmCapabilities,
-    VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
+    StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::driver::spec::VmmSpec;
@@ -35,6 +35,25 @@ pub trait VmmDriver: Send + Sync {
     fn security_profile(&self) -> BackendSecurityProfile;
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
+
+    /// Boot a clean, pre-workload standby parent from `spec` and capture it into
+    /// a claimable resource. The parent runs no entrypoint and holds no secret or
+    /// plan — nothing on this seam (`StandbySpec` in, `StandbyHandle` out) has a
+    /// field to carry one, so a parent is structurally incapable of holding
+    /// workload authority. The driver owns the whole boot-to-ready-plus-capture
+    /// sequence; the role layer above only ever sees the resulting handle and
+    /// never boots a VMM directly for this path.
+    ///
+    /// Fail-closed default: a driver opts in explicitly, mirroring
+    /// `VmBackend::spawn_standby`'s own fail-closed default.
+    fn spawn_standby_parent(
+        &self,
+        _spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        Err(StandbyError::Unsupported {
+            backend: self.name().to_string(),
+        })
+    }
 
     /// The VMM-specific base kernel bootargs (console, earlycon, root/init
     /// selection) for a workload boot with the given root/disk shape. The

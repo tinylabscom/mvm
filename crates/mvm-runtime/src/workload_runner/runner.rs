@@ -15,8 +15,9 @@ use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, StartMode, VmBackend, VmCapabilities,
-    VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyError, StandbyHandle,
+    StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig,
+    VmStatus,
 };
 
 use crate::driver::{RunningVm, VmmDriver};
@@ -328,6 +329,22 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
 
     fn is_available(&self) -> Result<bool> {
         self.driver.is_available()
+    }
+
+    /// Spawn a clean, pre-workload standby parent — a factory, never a
+    /// workload. `StandbySpec` carries no plan/secret/entrypoint field, so a
+    /// parent is structurally incapable of holding workload authority (the
+    /// never-promote-a-parent guard is made unrepresentable here, not merely
+    /// checked). The runner therefore never spawns the per-child substitution
+    /// endpoint for a parent — that is a workload-only step
+    /// (`ClaimGuards::spawn_endpoint`, called from `start_workload`) — and
+    /// delegates the entire boot-to-ready-plus-capture sequence to the driver,
+    /// which knows nothing about admission.
+    fn spawn_standby(
+        &self,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        self.driver.spawn_standby_parent(spec)
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
@@ -1364,6 +1381,77 @@ mod tests {
             spec.vsock.len(),
             3,
             "sealed prod boot must carry no console listeners"
+        );
+    }
+
+    fn sample_standby_spec(id: &str, vm_state_dir: &Path) -> mvm_core::vm_backend::StandbySpec {
+        mvm_core::vm_backend::StandbySpec {
+            id: id.to_string(),
+            kernel_path: "/img/kernel".into(),
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 512,
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "b".repeat(64),
+            control_socket: vm_state_dir.join("control.sock").display().to_string(),
+            vm_state_dir: vm_state_dir.display().to_string(),
+            image_path: None,
+            image_sha256: None,
+        }
+    }
+
+    /// `spawn_standby` on the `WorkloadRunner` records a clean, pre-workload
+    /// parent: no plan authority (`StandbySpec`/`StandbyHandle`/`VmmSpec` have
+    /// no field that could carry one), and — the invariant this test actually
+    /// exercises — no substitution endpoint is ever spawned for it, unlike
+    /// every real workload boot on this runner.
+    #[test]
+    fn spawn_standby_records_pre_workload_parent_with_no_secrets_endpoint() {
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = sample_standby_spec("standby-test", &tmp.path().join("vm"));
+
+        let handle = runner
+            .spawn_standby(&spec)
+            .expect("spawn_standby succeeds through the mock driver");
+
+        // Record + list through the real pool — the same round-trip the CLI's
+        // warm_to_target caller runs after a successful spawn_standby.
+        let pool = crate::standby_pool::SupervisorStandbyPool::at(tmp.path().join("pool"));
+        pool.record(&handle).unwrap();
+        let recorded = pool.list().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(matches!(
+            recorded[0].state,
+            mvm_core::vm_backend::StandbyState::Idle
+        ));
+
+        // The parent's boot recipe carries no cmdline (no entrypoint, no plan,
+        // no verb grant) and no vsock channel at all (no egress/broker port) —
+        // a factory has no workload authority and no secrets endpoint.
+        let booted = runner.driver.booted_specs();
+        assert_eq!(booted.len(), 1);
+        assert!(
+            booted[0].cmdline.is_empty(),
+            "parent boot must carry no cmdline: {}",
+            booted[0].cmdline
+        );
+        assert!(
+            booted[0].vsock.is_empty(),
+            "parent boot must carry no vsock channel (no egress/broker endpoint)"
+        );
+
+        // No substitution endpoint was spawned for the parent: the endpoint
+        // spawner was never invoked, unlike every real `start_workload` call.
+        assert!(
+            runner.spawner.seen.lock().unwrap().is_none(),
+            "a standby parent must never get a substitution endpoint"
         );
     }
 }

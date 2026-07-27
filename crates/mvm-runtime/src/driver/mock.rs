@@ -10,11 +10,13 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    SnapshotCapability, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmCapabilities,
+    VmExitStatus, VmId, VmStatus,
 };
 
-use crate::driver::spec::VmmSpec;
+use crate::driver::spec::{ConsoleCapture, KernelImage, VmmSpec};
 use crate::driver::traits::{DuplexStream, RunningVm, VmmDriver};
+use crate::standby_pool::now_unix_secs;
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
 
@@ -107,6 +109,49 @@ impl VmmDriver for MockDriver {
         }))
     }
 
+    fn spawn_standby_parent(
+        &self,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        // A clean parent boot: no cmdline, no volumes, no vsock channels — the
+        // recipe itself has no field that could carry a plan, a secret, or an
+        // egress/broker endpoint. Routed through `boot()` (not pushed directly)
+        // so a test can observe it the same way it observes a real workload
+        // boot, via `booted_specs()`.
+        let parent = VmmSpec {
+            name: spec.id.clone(),
+            kernel: KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: u32::from(spec.vcpus),
+            memory_mib: spec.mem_mib,
+            mem_initial_mib: None,
+            blocks: Vec::new(),
+            vsock: Vec::new(),
+            console: ConsoleCapture {
+                log_path: std::path::PathBuf::from(&spec.vm_state_dir).join("console.log"),
+            },
+            trusted_builder: false,
+        };
+        self.boot(&parent)
+            .map_err(|e| StandbyError::SpawnFailed(e.to_string()))?;
+        // No live process backs a mocked capture — pid=0 mirrors the saved-state
+        // convention (`StandbyHandle::is_saved_state`) already used for a
+        // captured-not-running standby.
+        Ok(StandbyHandle {
+            id: spec.id.clone(),
+            control_socket: spec.control_socket.clone(),
+            pid: 0,
+            kernel_sha256: spec.kernel_sha256.clone(),
+            vcpus: spec.vcpus,
+            mem_mib: spec.mem_mib,
+            binding_nonce: spec.binding_nonce.clone(),
+            spawned_unix_secs: now_unix_secs(),
+            state: StandbyState::Idle,
+            image_sha256: spec.image_sha256.clone(),
+        })
+    }
+
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
         Ok(Box::new(MockRunningVm {
             id: id.clone(),
@@ -175,7 +220,6 @@ impl RunningVm for MockRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::spec::{ConsoleCapture, KernelImage, VmmSpec};
 
     fn sample_spec(name: &str) -> VmmSpec {
         VmmSpec {
