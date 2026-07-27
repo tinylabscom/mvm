@@ -1,4 +1,21 @@
-//! Firecracker snapshot controls that do not alter the runner's device model.
+//! Firecracker snapshot controls, gated on the device-model guard below.
+//!
+//! `verify_and_resume` / `verify_and_resume_from_dir` in
+//! `crate::vm::instance_snapshot` run the no-NIC guard strictly between
+//! loading a snapshot paused and resuming it — see there for the full
+//! ordering. That path backs the live `mvmctl pause`/`resume` cycle today.
+//!
+//! The template and fork restore entry points below stay refused. Neither
+//! one's sealed content is verified by that same instance-HMAC path: a
+//! template snapshot carries its own Ed25519 + HMAC sidecar (a stronger,
+//! separate check), and a forked checkpoint is content-addressed and
+//! audit-chain-verified upstream of these calls (see the checkpoint lineage
+//! module) rather than instance-HMAC-sealed. Routing either through the
+//! instance verifier would either silently drop a check it currently gets or
+//! fail closed on content that verifier was never meant to see. Re-enabling
+//! them needs a design that keeps each path's own integrity check and adds
+//! the same load-paused → read-device-model → guard → resume ordering on top
+//! of it.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -11,9 +28,12 @@ use super::{abs_vms_dir, require_linux_env};
 
 /// Refuse template snapshot restore.
 ///
-/// Snapshots capture complete VMM device state and may contain the retired
-/// Firecracker NIC. The runner's cold-boot path is the only admitted workload
-/// launch path.
+/// Snapshots capture complete VMM device state and may contain a network
+/// interface, bypassing the vsock-only egress boundary. Template snapshots
+/// are sealed with their own Ed25519 + HMAC sidecar, a separate mechanism
+/// from the instance-snapshot HMAC path the no-NIC guard is wired behind;
+/// restoring them needs a design that keeps that signature check AND adds
+/// the guard, so this stays refused until that design lands.
 #[instrument(skip_all, fields(template_id, name = %config.name))]
 pub fn restore_from_template_snapshot(
     template_id: &str,
@@ -30,8 +50,14 @@ pub fn restore_from_template_snapshot(
 
 /// Refuse live-memory restore entry points.
 ///
-/// A restored VMM can reintroduce devices captured in an older snapshot, so
-/// Firecracker memory restore is unavailable on the vsock-only workload path.
+/// A restored VMM can reintroduce devices captured in an older snapshot. The
+/// fork path's checkpoint content is content-addressed and audit-chain
+/// verified upstream of this call (the checkpoint lineage module), not
+/// sealed by the instance-snapshot HMAC envelope the no-NIC guard runs
+/// behind — so warm restore stays refused here until a fork-restore design
+/// runs that same guard ordering (load paused, read the restored device
+/// model, refuse on a NIC, only then resume) against the lineage's own
+/// content-address / audit-chain integrity instead of the instance verifier.
 pub fn warm_restore_instance(
     name: &str,
     _token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
