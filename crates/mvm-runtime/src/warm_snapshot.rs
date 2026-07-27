@@ -20,11 +20,13 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 
 use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_content, verify_lineage};
 
-/// Store a checkpoint's content dir into the content-addressed snapshot
-/// store, deduplicating identical bytes with an existing snapshot. The
-/// checkpoint's `meta.json` remains the sole lineage record; this only moves
-/// where its bytes physically live so a later clone can materialize via
-/// reflink/sparse CoW instead of per-blob copies.
+/// Pre-warm a checkpoint's content dir into the content-addressed snapshot
+/// store ahead of time, deduplicating identical bytes with an existing
+/// snapshot. The checkpoint's `meta.json` remains the sole lineage record;
+/// this only moves where its bytes physically live. Purely an optimization:
+/// [`materialize_child_from_parent`] stages idempotently on its own, so
+/// callers never need to call this first — it exists for a future warm-pool
+/// that wants staging to happen off the clone's critical path.
 pub fn stage_warm_snapshot(
     checkpoint_store: &CheckpointStore,
     snapshot_store: &FsSnapshotStore,
@@ -36,16 +38,24 @@ pub fn stage_warm_snapshot(
         .with_context(|| format!("staging checkpoint '{id}' content into the snapshot store"))
 }
 
-/// Materialize a staged warm snapshot at `dst`, but only after `parent_id`
-/// clears the same fail-closed lineage gate `fork_checkpoint` /
-/// `fork_vm_full_fc` use: `read_meta -> verify_content -> verify_lineage`.
-/// Nothing is cloned until all three succeed — a missing, un-audited, or
-/// hash-mismatched parent leaves `dst` uncreated and the error propagates.
+/// Materialize `parent_id`'s content at `dst`, but only after it clears the
+/// same fail-closed lineage gate `fork_checkpoint` / `fork_vm_full_fc` use:
+/// `read_meta -> verify_content -> verify_lineage`. Nothing is cloned until
+/// all three succeed — a missing, un-audited, or hash-mismatched parent
+/// leaves `dst` uncreated and the error propagates.
+///
+/// The snapshot id materialized is derived from the JUST-VERIFIED parent's
+/// own content dir (`create_content_addressed` is idempotent — it stages on
+/// first call, dedups on every later one), never taken from a caller-supplied
+/// id. Accepting an arbitrary `SnapshotId` parameter here would let a caller
+/// pass lineage verification against an audited parent and then materialize
+/// unrelated, unaudited bytes at `dst` — a claim-8 authority-substitution
+/// hole. Deriving it internally makes the materialized bytes provably the
+/// verified parent's content.
 pub fn materialize_child_from_parent(
     checkpoint_store: &CheckpointStore,
     snapshot_store: &FsSnapshotStore,
     parent_id: &CheckpointId,
-    staged: &SnapshotId,
     anchor: &dyn CheckpointChainAnchor,
     dst: &Path,
 ) -> Result<CloneStrategy> {
@@ -53,8 +63,13 @@ pub fn materialize_child_from_parent(
     verify_content(checkpoint_store, &parent)?;
     verify_lineage(checkpoint_store, parent_id, anchor)?;
 
+    let content_dir = checkpoint_store.content_dir(parent_id);
+    let staged = snapshot_store
+        .create_content_addressed(&content_dir)
+        .with_context(|| format!("staging verified parent '{parent_id}' content"))?;
+
     snapshot_store
-        .materialize(staged, dst)
+        .materialize(&staged, dst)
         .with_context(|| format!("materializing staged snapshot at {}", dst.display()))
 }
 
@@ -134,7 +149,6 @@ mod tests {
         let snapshot_store = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
 
         let parent = seed_parent(&checkpoint_store, tmp.path(), "warm-1");
-        let staged = stage_warm_snapshot(&checkpoint_store, &snapshot_store, &parent.id).unwrap();
 
         let anchor = MockAnchor::default().audited(&parent);
         let dst = tmp.path().join("instance-rootfs-dir");
@@ -142,7 +156,6 @@ mod tests {
             &checkpoint_store,
             &snapshot_store,
             &parent.id,
-            &staged,
             &anchor,
             &dst,
         )
@@ -155,7 +168,7 @@ mod tests {
         assert_eq!(
             std::fs::read(dst.join("rootfs.ext4")).unwrap(),
             b"warm-parent-rootfs-bytes",
-            "materialized bytes must byte-equal the staged content"
+            "materialized bytes must byte-equal the parent's content"
         );
     }
 
@@ -165,9 +178,8 @@ mod tests {
         let checkpoint_store = CheckpointStore::at(tmp.path().join("checkpoints"));
         let snapshot_store = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
 
-        // Never seeded: read_meta must fail before any staged snapshot exists.
+        // Never seeded: read_meta must fail before anything is staged or cloned.
         let missing_id = CheckpointId::new("does-not-exist");
-        let bogus_staged = SnapshotId::new("irrelevant");
         let anchor = MockAnchor::default();
         let dst = tmp.path().join("instance-dir");
 
@@ -175,7 +187,6 @@ mod tests {
             &checkpoint_store,
             &snapshot_store,
             &missing_id,
-            &bogus_staged,
             &anchor,
             &dst,
         )
@@ -190,7 +201,6 @@ mod tests {
         let snapshot_store = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
 
         let parent = seed_parent(&checkpoint_store, tmp.path(), "warm-2");
-        let staged = stage_warm_snapshot(&checkpoint_store, &snapshot_store, &parent.id).unwrap();
 
         let anchor = MockAnchor::default().unaudited(&parent.id);
         let dst = tmp.path().join("instance-dir");
@@ -199,7 +209,6 @@ mod tests {
             &checkpoint_store,
             &snapshot_store,
             &parent.id,
-            &staged,
             &anchor,
             &dst,
         )
@@ -221,7 +230,6 @@ mod tests {
         let snapshot_store = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
 
         let parent = seed_parent(&checkpoint_store, tmp.path(), "warm-3");
-        let staged = stage_warm_snapshot(&checkpoint_store, &snapshot_store, &parent.id).unwrap();
 
         // The anchor still agrees with the ORIGINAL sealed digest — modeling a
         // signed chain that was never re-signed for the tampered record — but
@@ -237,7 +245,6 @@ mod tests {
             &checkpoint_store,
             &snapshot_store,
             &parent.id,
-            &staged,
             &anchor,
             &dst,
         )
@@ -247,5 +254,46 @@ mod tests {
             "expected a meta_digest drift message, got: {err}"
         );
         assert!(!dst.exists(), "a tampered parent must leave dst uncreated");
+    }
+
+    /// Binding-attack test: an unrelated "evil" blob is staged into the SAME
+    /// snapshot store the legit parent uses, modeling a caller that has
+    /// attacker-controlled content sitting around in the store. Materializing
+    /// from the legit, audited parent must produce ONLY the parent's own
+    /// content — proving a caller cannot substitute a different blob by
+    /// controlling what else is staged, since the function derives the
+    /// snapshot id from the verified parent itself rather than trusting a
+    /// caller-supplied one.
+    #[test]
+    fn materialize_ignores_unrelated_staged_snapshot_and_uses_verified_parent_content_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkpoint_store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let snapshot_store = FsSnapshotStore::new(tmp.path().join("snapshots")).unwrap();
+
+        // Stage attacker-controlled bytes into the store, unrelated to any
+        // checkpoint's content dir.
+        let evil_dir = tmp.path().join("evil-payload");
+        std::fs::create_dir(&evil_dir).unwrap();
+        std::fs::write(evil_dir.join("rootfs.ext4"), b"attacker-controlled-bytes").unwrap();
+        snapshot_store.create_content_addressed(&evil_dir).unwrap();
+
+        let parent = seed_parent(&checkpoint_store, tmp.path(), "warm-4");
+        let anchor = MockAnchor::default().audited(&parent);
+        let dst = tmp.path().join("instance-dir");
+
+        materialize_child_from_parent(
+            &checkpoint_store,
+            &snapshot_store,
+            &parent.id,
+            &anchor,
+            &dst,
+        )
+        .expect("legit audited parent must materialize");
+
+        assert_eq!(
+            std::fs::read(dst.join("rootfs.ext4")).unwrap(),
+            b"warm-parent-rootfs-bytes",
+            "materialized bytes must be the verified parent's content, never the staged evil blob"
+        );
     }
 }
