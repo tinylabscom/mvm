@@ -17,18 +17,19 @@
 //!
 //! Backend scope: v1 measures libkrun, HVF, and Firecracker.
 
-mod harness;
-mod probes;
-mod regression;
-mod report;
-mod stats;
+pub mod harness;
+pub mod probe;
+pub mod probes;
+pub mod regression;
+pub mod report;
+pub mod stats;
 
 // `BootMarks` and the boot-timing-sidecar writer are the only bench-internal
-// items another file (`bench_probe.rs`, under `libkrun-live`) reaches through
+// items another file (`probe.rs`, under `libkrun-live`) reaches through
 // this module's path — everything else submodules need from each other they
 // reach directly via `super::<submodule>`.
 #[cfg(feature = "libkrun-live")]
-pub(in crate::commands::ops) use probes::write_boot_timing_sidecar;
+pub(crate) use probes::write_boot_timing_sidecar;
 #[cfg(feature = "libkrun-live")]
 pub use stats::BootMarks;
 
@@ -55,16 +56,14 @@ use report::{
     read_density_report, read_launch_distribution_report, read_report, write_json_report,
 };
 
-use super::Cli;
-
 #[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct Args {
+pub(crate) struct Args {
     #[command(subcommand)]
     pub action: BenchAction,
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(in crate::commands) enum BenchAction {
+pub(crate) enum BenchAction {
     /// Measure cold runtime-microvm launch latency end-to-end.
     MicrovmLaunch(MicrovmLaunchArgs),
     /// Measure held-live runtime-microvm supervisor/VMM footprint.
@@ -72,7 +71,7 @@ pub(in crate::commands) enum BenchAction {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct MicrovmLaunchArgs {
+pub(crate) struct MicrovmLaunchArgs {
     /// Number of measured iterations.
     #[arg(long, default_value_t = 20)]
     pub runs: u32,
@@ -117,7 +116,7 @@ pub(in crate::commands) struct MicrovmLaunchArgs {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct MicrovmDensityArgs {
+pub(crate) struct MicrovmDensityArgs {
     /// Number of admitted instances to boot and hold live while sampling footprint.
     #[arg(long, default_value_t = 4)]
     pub count: u32,
@@ -149,7 +148,7 @@ pub(in crate::commands) struct MicrovmDensityArgs {
 // CLI entry.
 // ──────────────────────────────────────────────────────────────────
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(crate) fn run(args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.action {
         BenchAction::MicrovmLaunch(a) => run_microvm_launch(a),
         BenchAction::MicrovmDensity(a) => run_microvm_density(a),
@@ -168,7 +167,7 @@ fn timestamp_for_report_path() -> String {
     mvm_core::time::utc_now().replace([':', '+', '.'], "-")
 }
 
-pub(super) fn write_report_with_latest<T: Serialize>(
+pub fn write_report_with_latest<T: Serialize>(
     report: &T,
     out: Option<PathBuf>,
     kind: &str,
@@ -479,7 +478,7 @@ fn run_libkrun_density(count: u32, max_count: u32) -> Result<DensityReport> {
     for i in 0..count {
         let name = format!("mvm-density-{i}");
         held.push(
-            crate::commands::ops::bench_probe::boot_hold_once(&name)
+            crate::bench::probe::boot_hold_once(&name)
                 .with_context(|| format!("density boot {name}"))?,
         );
     }

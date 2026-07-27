@@ -1,6 +1,7 @@
 // mvm-cli: Clap commands, UI, bootstrap
 // Depends on mvm-core, mvm, mvm-build
 
+pub mod bench;
 pub mod bootstrap;
 pub mod commands;
 pub mod config_watcher;

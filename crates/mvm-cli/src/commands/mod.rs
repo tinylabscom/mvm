@@ -5,7 +5,7 @@ mod catalog;
 mod cmd_audit;
 mod deps;
 mod dispatch;
-mod env;
+pub(crate) mod env;
 mod image;
 mod machine;
 mod manifest;

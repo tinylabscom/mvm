@@ -51,7 +51,7 @@ impl LaunchProbe for LibkrunProbe {
             // the cold start of run N+1.
             self.iter += 1;
             let name = format!("{}-{}", self.name_prefix, self.iter);
-            let marks = crate::commands::ops::bench_probe::boot_measure_once(&name)?;
+            let marks = super::probe::boot_measure_once(&name)?;
             Ok(marks.to_timing())
         }
         #[cfg(not(feature = "libkrun-live"))]
@@ -71,11 +71,9 @@ impl LaunchProbe for LibkrunProbe {
         // compare across a kernel swap (a faster/slower kernel must
         // invalidate the baseline, not silently mis-compare). Resolved
         // from the same default-microvm image the probe boots.
-        let kernel_sha256 = crate::commands::ops::bench_probe::resolve_probe_image()
-            .ok()
-            .and_then(|img| {
-                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
-            });
+        let kernel_sha256 = super::probe::resolve_probe_image().ok().and_then(|img| {
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
+        });
         HostDescriptor {
             os: self.os.clone(),
             arch: self.arch.clone(),
@@ -127,11 +125,9 @@ impl LaunchProbe for HvfProbe {
     }
 
     fn host_descriptor(&self) -> HostDescriptor {
-        let kernel_sha256 = crate::commands::ops::bench_probe::resolve_probe_image()
-            .ok()
-            .and_then(|img| {
-                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
-            });
+        let kernel_sha256 = super::probe::resolve_probe_image().ok().and_then(|img| {
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
+        });
         HostDescriptor {
             os: self.os.clone(),
             arch: self.arch.clone(),
@@ -179,13 +175,9 @@ pub(super) fn boot_hvf_hold_once(vm_name: &str) -> Result<HeldHvfVm> {
 
     use mvm_hostd::plan_admission::populate_audit_substrate;
 
-    let img = crate::commands::ops::bench_probe::resolve_probe_image()?;
-    let admitted = crate::commands::ops::bench_probe::admit_probe_plan(
-        std::path::Path::new(&img.rootfs),
-        vm_name,
-        "hvf",
-        None,
-    )?;
+    let img = super::probe::resolve_probe_image()?;
+    let admitted =
+        super::probe::admit_probe_plan(std::path::Path::new(&img.rootfs), vm_name, "hvf", None)?;
 
     let mut cfg = VmStartConfig {
         name: vm_name.to_string(),
@@ -322,11 +314,9 @@ impl LaunchProbe for FirecrackerProbe {
     }
 
     fn host_descriptor(&self) -> HostDescriptor {
-        let kernel_sha256 = crate::commands::ops::bench_probe::resolve_probe_image()
-            .ok()
-            .and_then(|img| {
-                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
-            });
+        let kernel_sha256 = super::probe::resolve_probe_image().ok().and_then(|img| {
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&img.kernel)).ok()
+        });
         HostDescriptor {
             os: self.os.clone(),
             arch: self.arch.clone(),
@@ -377,8 +367,8 @@ pub(super) fn boot_firecracker_hold_once(
 
     use mvm_hostd::plan_admission::populate_audit_substrate;
 
-    let img = crate::commands::ops::bench_probe::resolve_probe_image()?;
-    let admitted = crate::commands::ops::bench_probe::admit_probe_plan(
+    let img = super::probe::resolve_probe_image()?;
+    let admitted = super::probe::admit_probe_plan(
         std::path::Path::new(&img.rootfs),
         vm_name,
         "firecracker",
@@ -458,7 +448,7 @@ fn wait_for_firecracker_pid(abs_dir: &str) -> Result<(u32, std::time::Instant)> 
 /// The host-clock report remains the regression metric; this sidecar audits the
 /// guest's own phase timing without mixing clock domains.
 #[cfg(any(feature = "libkrun-live", target_os = "macos"))]
-pub(in crate::commands::ops) fn write_boot_timing_sidecar(
+pub(crate) fn write_boot_timing_sidecar(
     vm_name: &str,
     boot_millis: &mvm_agentd::vsock::BootTimingReport,
 ) -> Result<()> {

@@ -11,7 +11,8 @@ use mvm_core::user_config::MvmConfig;
 use super::Cli;
 #[cfg(feature = "mcp")]
 use super::mcp;
-use super::{bench, config, metrics};
+use super::{config, metrics};
+use crate::bench;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -62,7 +63,7 @@ impl OpsCmd {
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
         OpsCmd::Metrics(a) => metrics::run(cli, a, cfg),
-        OpsCmd::Bench(a) => bench::run(cli, a, cfg),
+        OpsCmd::Bench(a) => bench::run(a, cfg),
         OpsCmd::Config(a) => config::run(cli, a, cfg),
         #[cfg(feature = "mcp")]
         OpsCmd::Mcp(a) => mcp::run(cli, a, cfg),
