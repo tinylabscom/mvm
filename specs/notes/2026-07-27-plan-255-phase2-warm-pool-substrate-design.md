@@ -73,14 +73,31 @@ slice backs the FC parent with the existing checkpoint fork (disk restore via
 `FcForkRestorer` + the Phase-1 clone). Plan 265 upgrades the same seam to
 live-memory restore; the resident-paused density model arrives with it, not here.
 
+## Parent cleanliness contract
+
+The pool's safety rests on the parent being a factory captured strictly before
+any workload runs. A warm parent snapshot must be taken:
+
+- before the entrypoint or any workload code executes;
+- before any secret material exists in the guest — secrets are host-side
+  substitution only, so the guest never holds them, and the parent must have made
+  no substitution call;
+- before any tenant- or instance-specific state is written.
+
+A parent is one image's clean ready point (agent up, read-only rootfs primed) and
+nothing more. If "ready" ever advances past this line, every child inherits the
+residue — memory, filesystem, and open state. This precondition is what the
+cross-fork-residue and shared-entropy mitigations below rely on.
+
 ## Claim data-flow (guarded, fail-closed)
 
 `claim_standby(handle, claim)` runs this order; nothing clones or boots until
 every gate passes:
 
-1. **Parent state + lineage gate.** Parent must be `Idle`/`Parked` (not already
-   claimed); its checkpoint must pass `verify_content` + `verify_lineage`
-   (un-audited or tampered parent refuses). Runs before any clone.
+1. **Parent state + lineage gate.** Parent must be `Idle`/`Parked`, selected and
+   marked claimed atomically under the name-registry lock (no double-claim); its
+   checkpoint must pass `verify_content` + `verify_lineage` (un-audited or
+   tampered parent refuses). Runs before any clone.
 2. **Re-admit the child plan (claim 8).** The child's signed `ExecutionPlan`
    (minted fresh at the CLI with a fresh nonce and the child's own `vm_name`) is
    re-verified at attach through the existing `prelaunch` path: `verify_plan` →
@@ -88,25 +105,40 @@ every gate passes:
    (replay). This is the shared cold-boot admission, not a parallel copy.
 3. **Materialize child rootfs.** `materialize_child_from_parent` — self-binding,
    lineage-anchored CoW clone from the verified parent's own content.
-4. **Verity inherit (claim 3).** Resolve `verity_path`/`roothash` from the cloned
+4. **Bind the plan to the parent (claim 8 integrity).** Verify the admitted
+   plan's bound image digest equals the materialized parent rootfs
+   content-address. A mismatch refuses — the audit-recorded plan must describe
+   exactly what boots, so a claim can never pair a plan with a different parent's
+   rootfs. This is the warm-pool analog of the Phase-1 self-binding clone, applied
+   to authority.
+5. **Verity inherit (claim 3).** Resolve `verity_path`/`roothash` from the cloned
    rootfs sidecars into the child `VmStartConfig`; the sidecars ride the clone.
-5. **Identity-scrub.** Fresh registry-unique `VmId`, the plan's fresh nonce, a
-   fresh VMGenID token delivered on resume (forces guest CSPRNG reseed + session
-   drop), and the child's own substitution-endpoint socket. CID stays 3 — the
-   child is its own FC VMM (one guest per VMM), so no per-instance CID is needed.
-6. **Driver fork.** `FcForkRestorer` boots a fresh FC VMM from the parent into
-   the child dir. Plan 265 replaces this with fast live-memory restore behind the
-   same seam.
-7. **Endpoint + gateway.** Spawn the per-VM host-side substitution endpoint +
-   gateway; secrets stay host-side.
-8. **Re-apply confinement.** Seccomp + jailer + per-service uid, from the same
-   helper cold boot uses.
-9. **Audit + bookkeeping.** Emit `plan.launched` on the child's chain;
-   `mark_claimed`; `replenish_after_launch` refills a fresh parent.
+6. **Identity-scrub.** Fresh registry-unique `VmId`, the plan's fresh nonce, and a
+   fresh VMGenID token. The token must be delivered and acted on (guest CSPRNG
+   reseed + session drop) before any guest randomness consumer runs — otherwise
+   forks share the parent's RNG state. The clean-parent contract bounds the
+   consumers to init + the agent; Plan 265 owns the reseed mechanics, this
+   substrate owns the trigger and the ordering. CID stays 3 — the child is its own
+   FC VMM (one guest per VMM), so no per-instance CID is needed.
+7. **Driver fork.** `FcForkRestorer` boots a fresh FC VMM from the parent into the
+   child dir. Plan 265 replaces this with fast live-memory restore behind the same
+   seam.
+8. **Per-child endpoint + gateway.** Spawn the child's own substitution endpoint,
+   keyed on the fresh `VmId`, socket mode 0700, never reusing a sibling's; the
+   factory parent has no substitution endpoint at all. Secrets stay host-side.
+9. **Re-apply confinement from a known baseline.** Seccomp + jailer + per-service
+   uid re-derived on the child, not assumed-inherited — a fork starts from the
+   parent's namespaces/cgroups/fds, so the guards must override, and no parent fd
+   or namespace may leak in. Same helper, same result as cold boot.
+10. **Audit + provenance.** Emit `plan.launched` on the child's chain and the fork
+    lineage event recording the parent, so a claimed child's provenance (which
+    parent + fresh plan) is verifiable — no less auditable than a cold boot.
+11. **Bookkeeping.** `replenish_after_launch` refills a fresh parent (the parent
+    was marked claimed atomically in step 1).
 
-If any gate in 1-2 (and the clone in 3) fails, the claim refuses before any boot,
-endpoint, or child directory side effect — mirroring the Phase-1 clone discipline
-and the cold-boot admission order.
+If any gate in steps 1-4 fails, the claim refuses before any boot, endpoint, or
+persisted child side effect — mirroring the Phase-1 clone discipline and the
+cold-boot admission order.
 
 ## Never-promote-a-parent guard
 
@@ -118,14 +150,29 @@ Made unrepresentable, not merely checked:
 - The runner's workload entry refuses a `VmId` that is registered as a standby
   parent.
 
-Steps 2 and 8 execute the exact guard code a cold boot uses, via a single shared
+Steps 2 and 9 execute the exact guard code a cold boot uses, via a single shared
 `ClaimGuards` builder, so a warm claim can never diverge to a weaker posture.
+
+## Security surfaces → mitigation → witness
+
+Each surface this claim path opens or widens, with the witness that covers it.
+
+| # | Surface | Mitigation | Witness (unit unless noted) |
+|---|---------|-----------|------------------------------|
+| 1 | Plan/parent confusion — audit records image X, guest boots parent image Y | Fail-closed bind: admitted plan image digest == materialized parent rootfs content-address (claim-flow step 4) | `claim_refuses_plan_parent_image_mismatch` |
+| 2 | Cross-fork residue from a dirty parent | Parent cleanliness contract: snapshot strictly pre-workload / pre-secret / pre-tenant | `parent_snapshot_is_pre_workload`; satisfies Plan 265 fork-no-residue |
+| 3 | Shared CSPRNG state across forks | Fresh VMGenID delivered + acted on before any randomness consumer; clean parent bounds consumers to init+agent | `fork_delivers_fresh_genid_before_workload` (trigger + ordering); Plan 265 owns reseed |
+| 4 | Weaker confinement via inherited parent state | Re-derive seccomp/jailer/uid from a known baseline; byte-identical to cold + no leaked fd/namespace | `claimed_child_confinement_equals_cold` |
+| 5 | Cross-workload secrets endpoint access | Per-child endpoint keyed on fresh `VmId`, 0700, no reuse; factory parent has none | `child_endpoint_isolated_parent_has_none` |
+| 6 | Un-audited / tampered parent forked | Phase-1 `verify_content` + `verify_lineage` gate before clone | `claim_refuses_unaudited_and_tampered_parent` |
+| 7 | Replayed claim / stale plan | prelaunch re-verify: `check_window` + nonce ledger | `claim_refuses_expired_and_replayed_plan` |
+| 8 | Double-claim race on one parent | Atomic select + mark-claimed under the registry lock | `concurrent_claims_do_not_double_claim` |
 
 ## Best-practice shape
 
-- A `ClaimGuards` builder carrying the shared admission + verity + endpoint +
-  confinement steps, called by both cold boot and warm claim — divergence is
-  unrepresentable.
+- A `ClaimGuards` builder carrying the shared admission + plan/parent bind +
+  verity + endpoint + confinement steps, called by both cold boot and warm claim
+  — divergence is unrepresentable.
 - `StandbyState` (exists) drives the state machine; a `ClaimOutcome` enum for
   results; typed fail-closed error enums (thiserror in mvm-core, anyhow in
   mvm-runtime, per crate convention).
@@ -146,23 +193,36 @@ Steps 2 and 8 execute the exact guard code a cold boot uses, via a single shared
 - Admission: `admit_plan_for_boot` (CLI mint), the `prelaunch` attach re-verify,
   `NonceStore` / `check_window` (`crates/mvm-core/src/plan/validity.rs`).
 - Clone: `materialize_child_from_parent` (`crates/mvm-runtime/src/warm_snapshot.rs`).
-- Verity inherit: `populate_fork_rootfs_verity` /
-  `probe_verity_sidecar`; the guest sidecar propagation on clone.
+- Verity inherit: `populate_fork_rootfs_verity` / `probe_verity_sidecar`; the
+  guest sidecar propagation on clone.
 - Fork VMM op: `FcForkRestorer` (`crates/mvm-runtime/src/firecracker.rs`).
 - Identity: `fresh_generation_token` (`crates/mvm-core/src/crypto/vmgenid.rs`),
   the name registry.
+- Concurrency: `acquire_registry_lock` (`crates/mvm-runtime/src/vm/name_registry.rs`).
 
 ## Testing
 
-Unit (mock backend + fakes, no live VM):
+Unit (mock backend + fakes, no live VM) — one focused test per security surface
+plus the identity and capability paths:
 
-- Fresh identity: child nonce + VMGenID token + `VmId` all differ from the
-  parent; a replayed child plan is refused by the nonce ledger.
-- Fail-closed matrix: un-audited parent, drift-tampered parent, expired child
-  plan, replayed nonce — each asserts no child directory, no boot, no endpoint.
-- Never-promote guard: running a workload directly on a parent handle is refused.
-- Confinement parity: a claimed child carries the same seccomp profile + uid as a
-  cold boot (assert against the shared `ClaimGuards` output).
+- Fresh identity: child nonce + VMGenID token + `VmId` all differ from the parent.
+- Surface 1: a claim whose plan image digest differs from the parent rootfs
+  content-address refuses (`claim_refuses_plan_parent_image_mismatch`).
+- Surface 2: the parent snapshot is taken at the pre-workload ready point
+  (`parent_snapshot_is_pre_workload`).
+- Surface 3: the fork delivers a fresh VMGenID before any workload randomness
+  consumer runs (`fork_delivers_fresh_genid_before_workload`).
+- Surface 4: a claimed child's seccomp profile + uid equal a cold boot's, with no
+  leaked parent fd/namespace (`claimed_child_confinement_equals_cold`).
+- Surface 5: the child endpoint is keyed on its fresh `VmId`, 0700, and the parent
+  has none (`child_endpoint_isolated_parent_has_none`).
+- Surface 6: un-audited and drift-tampered parents refuse, with no child dir/boot
+  (`claim_refuses_unaudited_and_tampered_parent`).
+- Surface 7: expired plan and replayed nonce refuse
+  (`claim_refuses_expired_and_replayed_plan`).
+- Surface 8: two concurrent claims never double-claim one parent
+  (`concurrent_claims_do_not_double_claim`).
+- Never-promote guard: running a workload directly on a parent handle refuses.
 - Capability: `standby_pool` is true only for the FC driver; other drivers keep
   the fail-closed default.
 
@@ -175,8 +235,20 @@ Coordination: this substrate lands only the runner-seam units + that one
 admission-audit scenario. It does not add or modify any `.feature` file the
 fast-start branch is introducing (restore / no-NIC / SLO / attach-reverify
 witnesses belong to Plan 265). `check-claim-catalog` stays green with no catalog
-edits — this reinforces claims 8 and 3 on the warm path; Plan 265 registers the
-new witnesses.
+edits — this reinforces claims 8, 3, and 1 on the warm path; Plan 265 registers
+the new numbered witnesses.
+
+## Tracked risks (beyond the witnessed surfaces)
+
+- **Nonce-ledger persistence.** The replay ledger is in-memory and resets on
+  restart — a pre-existing property shared with cold boot, not worsened here, but
+  noted because a pool spans many claims over a long-lived process. A persistent
+  replay store is broader hardening, out of scope for this slice.
+- **Parent freshness / revocation.** A warm parent can be staler than a fresh cold
+  boot: an image revoked (e.g., a CVE found) after the parent was spawned is still
+  served until its pool TTL. The lineage gate catches on-disk tampering but not
+  policy revocation. TTL-bounded; tighter re-check-at-claim is a policy concern
+  shared with Plan 265, not this slice.
 
 ## Verification gates
 
@@ -194,19 +266,21 @@ new witnesses.
 In this slice:
 
 - `spawn_standby` / `claim_standby` on the `WorkloadRunner`, FC-only capability
-  flip, the shared `ClaimGuards`, identity-scrub, the never-promote guard, and
-  the Phase-1 clone beneath, with the unit + one hermetic BDD witness.
+  flip, the shared `ClaimGuards`, the plan/parent bind, identity-scrub, the
+  never-promote guard, and the Phase-1 clone beneath, with the unit witnesses
+  above and one hermetic BDD scenario.
 
 Deferred to Plan 255 Phase 2 slice two:
 
 - Pool lifecycle polish beyond what exists: spawn/maintain/evict tuning by TTL /
-  memory budget, `mvmctl pool` UX, replenish policy refinement.
+  memory budget, `mvmctl pool` UX, replenish policy refinement, a persistent
+  replay store.
 
 Owned by Plan 265 (not here):
 
-- Live-memory fast restore, no-NIC-on-restore invariant, page-cache priming,
-  same-page-merge confinement, density, SLO gates, and the restore security
-  witnesses.
+- Live-memory fast restore, no-NIC-on-restore invariant, page-cache priming, the
+  reseed mechanics, same-page-merge confinement, density, SLO gates, and the
+  restore security witnesses.
 
 Out of scope entirely:
 
