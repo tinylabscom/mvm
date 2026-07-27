@@ -64,6 +64,11 @@ pub mod pack_cache;
 pub mod pack_revocation;
 pub mod pack_trust;
 pub mod packs;
+/// Same-page-merge confinement policy: whether two guest-memory merge
+/// candidates (tenant + sealed image + fork family) may be host-wide
+/// same-page merged. Pure decision only, fails closed to `Refuse`; no
+/// kernel/`madvise` enforcement lives here.
+pub mod page_merge;
 /// Compiled-in release-signing identity: the OIDC issuer and identity
 /// templates a stock binary trusts for its own release packs, with
 /// version interpolation.
