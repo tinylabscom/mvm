@@ -31,6 +31,7 @@ use crate::libkrun_builder::{
     BuilderEndpointTransport, BuilderShellJob, BuilderShellResult, BuilderVsockEgressEndpoint,
     builder_runtime_overlay_attachment, require_runtime_overlay_ext4,
 };
+use mvm_core::config::DEFAULT_MVM_HOME_DIR_NAME;
 
 /// QEMU-backed builder VM (Linux). Constructed with `::default()`; no I/O at
 /// construction — the first I/O is in `run_stage0`.
@@ -121,7 +122,7 @@ pub(crate) const WORK_TREE_EXCLUDE_DIRS: &[&str] = &[
     ".git",
     ".claude",
     "node_modules",
-    ".mvm",
+    DEFAULT_MVM_HOME_DIR_NAME,
     ".mvm-test",
 ];
 
@@ -527,10 +528,10 @@ fn dir_stats(dir: &Path) -> DirStats {
 #[cfg(test)]
 mod tests {
     use super::{
-        DirStats, QEMU_STAGE0_OUT_ARTIFACT_NAMES, QEMU_STAGE0_VSOCK_GUEST_MODULES,
-        WORK_EXT4_DIR_OVERHEAD_BYTES, WORK_EXT4_FILE_OVERHEAD_BYTES,
-        WORK_EXT4_FIXED_HEADROOM_BYTES, WORK_TREE_EXCLUDE_DIRS, copy_tree_filtered, dir_stats,
-        locate_qemu_vsock_module,
+        DEFAULT_MVM_HOME_DIR_NAME, DirStats, QEMU_STAGE0_OUT_ARTIFACT_NAMES,
+        QEMU_STAGE0_VSOCK_GUEST_MODULES, WORK_EXT4_DIR_OVERHEAD_BYTES,
+        WORK_EXT4_FILE_OVERHEAD_BYTES, WORK_EXT4_FIXED_HEADROOM_BYTES, WORK_TREE_EXCLUDE_DIRS,
+        copy_tree_filtered, dir_stats, locate_qemu_vsock_module,
     };
     use std::fs;
 
@@ -585,7 +586,7 @@ mod tests {
         let source = tempfile::tempdir().expect("tempdir");
         let destination = tempfile::tempdir().expect("tempdir");
         fs::write(source.path().join("README"), b"workspace").expect("workspace file");
-        for state_dir in [".mvm", ".mvm-test"] {
+        for state_dir in [DEFAULT_MVM_HOME_DIR_NAME, ".mvm-test"] {
             fs::create_dir_all(source.path().join(state_dir).join("cache"))
                 .expect("state directory");
             fs::write(
@@ -602,7 +603,7 @@ mod tests {
             fs::read(destination.path().join("README")).expect("read workspace file"),
             b"workspace"
         );
-        assert!(!destination.path().join(".mvm").exists());
+        assert!(!destination.path().join(DEFAULT_MVM_HOME_DIR_NAME).exists());
         assert!(!destination.path().join(".mvm-test").exists());
     }
 
