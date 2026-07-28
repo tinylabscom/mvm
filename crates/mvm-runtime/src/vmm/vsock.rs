@@ -310,6 +310,60 @@ impl Drop for VirtioVsock {
     }
 }
 
+/// Fuzz-only driver over the vsock [`VsockTransportCore`].
+///
+/// Exposes exactly the untrusted-guest entry points — MMIO register programming
+/// and the queue-notify service paths — so a fuzz harness can drive hostile
+/// virtqueue geometry and descriptor tables against the device without a live
+/// hypervisor or the host-I/O handlers. It is not part of the device's supported
+/// API: hidden from docs, and only reachable by the workspace-excluded fuzz
+/// crate. Everything it wraps stays crate-private.
+#[doc(hidden)]
+pub struct FuzzTransportDriver(VsockTransportCore);
+
+#[doc(hidden)]
+impl FuzzTransportDriver {
+    /// # Safety
+    /// `ram` must point to `ram_size` writable bytes mapped at `ram_base` and
+    /// stay valid (unmoved, unfreed) for the lifetime of the returned driver.
+    pub unsafe fn new(ram: *mut u8, ram_base: u64, ram_size: usize) -> Self {
+        // SAFETY: forwarded to the caller's contract.
+        Self(unsafe { VsockTransportCore::new(ram, ram_base, ram_size) })
+    }
+
+    /// Apply one MMIO register write. A write to the queue-notify register drives
+    /// the same TX/RX service dispatch the vCPU MMIO exit path runs.
+    pub fn write_register(&mut self, offset: u64, value: u64) {
+        match self.0.write_register(offset, value) {
+            RegisterWrite::None => {}
+            RegisterWrite::Notify(queue) => self.notify(queue),
+        }
+    }
+
+    /// Drive the queue-notify service paths directly (queue `1` is TX). Mirrors
+    /// the device's on-notify dispatch minus the packet handlers, which are out
+    /// of scope for the queue-geometry / descriptor-table surface.
+    pub fn notify(&mut self, queue: u32) {
+        if queue == 1 {
+            let _ = self.0.take_tx_packets();
+        }
+        let _ = self.0.flush_rx();
+    }
+
+    /// Pre-queue a host→guest packet so the RX flush path has work to service
+    /// (the RX arm of the queue-geometry divide-by-zero only runs with a
+    /// non-empty pending-RX buffer).
+    pub fn queue_host_packet(&mut self, src_port: u32, dst_port: u32, op: u16, payload: &[u8]) {
+        self.0.queue_host_packet(src_port, dst_port, op, payload);
+    }
+
+    /// Number of host→guest packets still queued — the accumulating buffer the
+    /// fuzz target observes to prove RX servicing never grows it without bound.
+    pub fn pending_rx_len(&self) -> usize {
+        self.0.pending_rx.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

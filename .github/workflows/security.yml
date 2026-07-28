@@ -479,6 +479,21 @@ jobs:
         # pinned by a unit test.
         run: cargo fuzz run --fuzz-dir fuzz-backend fuse_dispatch -- -max_total_time="$DURATION"
 
+      - name: Fuzz virtqueue geometry (virtio-vsock ring walk)
+        working-directory: crates/mvm-runtime
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # The guest programs the virtio-vsock queue size, ring base addresses, and
+        # descriptor table through untrusted MMIO writes + guest RAM. A hostile
+        # geometry (a QueueNum whose low 16 bits are zero, truncating to a zero
+        # modulus) or a hostile descriptor chain (cyclic next links, oversized
+        # lengths) must not panic the host VMM or drive it into unbounded
+        # allocation — both are guest-triggerable host DoS. This target is the
+        # regression guard for the validated-geometry gate and the bounded
+        # descriptor walk; it stays green once those hold.
+        run: cargo fuzz run --fuzz-dir fuzz-backend fuzz_virtqueue_geometry -- -max_total_time="$DURATION"
+
       - name: Upload corpus on failure
         if: failure()
         uses: actions/upload-artifact@v7
