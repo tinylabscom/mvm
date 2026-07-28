@@ -408,7 +408,7 @@ The runner has already verified the parent, minted a fresh `VmId` + VMGenID, and
 - Consumes: `ChildForkRequest<'a> { child_vm_name: &'a str, child_dir: &'a Path, genid: GenerationToken }` (`driver/traits.rs:22-31`); `FcForkRestorer` (`firecracker.rs`).
 - Produces: `FcDriver::fork_standby_child(&self, req: &ChildForkRequest<'_>) -> std::result::Result<(), StandbyError>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 /// The runner materializes the CoW clone before forking. An absent dir means
@@ -457,12 +457,12 @@ fn fork_standby_child_refuses_a_clone_without_saved_memory() {
 
 Write `sample_generation_token()` building `GenerationToken { token: [0u8; GENID_BYTES], content_hash: "test-content-hash".into() }`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-runtime driver::fc`
 Expected: FAIL — the inherited default returns `StandbyError::Unsupported`.
 
-- [ ] **Step 3: Implement the override**
+- [x] **Step 3: Implement the override**
 
 ```rust
     fn fork_standby_child(
@@ -505,12 +505,12 @@ Expected: FAIL — the inherited default returns `StandbyError::Unsupported`.
 
 Deliver `req.genid` by the same mechanism the existing fork path uses: `restore_fork` passes an all-zero token to `warm_restore_instance_from_path` and expects the caller to deliver the real token over vsock once the agent answers. The post-restore handshake is **fail-closed on three flags** — `acknowledged`, `reseeded`, and `clock_resynced` (`mvm-agentd/src/vsock/api.rs:160-183`) — so a child is not usable until the guest answers all three. Follow that contract rather than inventing a second delivery path; the existing checkpoint-fork CLI does it around `mvm-cli/src/commands/vm/checkpoint.rs:1053`. Decide and state in your report whether the handshake belongs in this driver override or in the runner's claim (the runner already owns the child's identity), and keep it in exactly one place.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-runtime driver::fc`
 Expected: PASS.
 
-- [ ] **Step 5: Full gates + commit**
+- [x] **Step 5: Full gates + commit**
 
 ```bash
 cargo fmt --all
@@ -728,7 +728,7 @@ Two gaps close here. `warm_to_target` never passes a rootfs (`WarmParams.image` 
 - Consumes: `AnyBackend::spawn_standby_via_runner` + `SpawnContext` (Task 4); `AnyBackend::claim_standby_via_runner` + `ClaimContext` (already on `main`); `StandbyHandle.parent_checkpoint` (Task 1).
 - Produces: `mvm_core::config::snapshots_dir() -> PathBuf`; `warm_to_target` and `claim_or_cold` taking `&AnyBackend`; a live `ClaimContext` per claim.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 /// A parent that was never captured has no checkpoint to verify content and
@@ -749,16 +749,16 @@ fn claim_refuses_a_parent_without_a_checkpoint() {
 
 Introduce `parent_checkpoint_for(handle: &StandbyHandle) -> Result<CheckpointId>` resolving the handle's `parent_checkpoint` and failing closed when it is `None`. Keep it a separate function so it is unit-testable without a VM.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo nextest run -p mvm-cli commands::pool`
 Expected: FAIL — the helper does not exist.
 
-- [ ] **Step 3: Add the `snapshots_dir` config helper**
+- [x] **Step 3: Add the `snapshots_dir` config helper**
 
 `FsSnapshotStore` has no production call site yet and `mvm-core::config` has no snapshots path. Add one beside `checkpoints_dir()` (`config.rs:641`), following that function's exact style so it honors `MVM_HOME`, plus a test asserting it sits under `mvm_home()`.
 
-- [ ] **Step 4: Thread the rootfs into the warm path**
+- [x] **Step 4: Thread the rootfs into the warm path**
 
 Change `WarmParams.backend` from `&'a dyn VmBackend` to `&'a AnyBackend`. Populate `WarmParams.image` from the launch's rootfs (`VmStartConfig.rootfs_path`) at the `replenish_after_launch` call site — a Firecracker parent cannot boot without it. Correct the `image` doc comment, which currently claims it is always `None`. In `warm_to_target`, replace `p.backend.spawn_standby(&spec)` with:
 
@@ -772,7 +772,7 @@ Change `WarmParams.backend` from `&'a dyn VmBackend` to `&'a AnyBackend`. Popula
 
 Record the returned handle (now carrying `parent_checkpoint`) exactly as before.
 
-- [ ] **Step 5: Route the claim through the runner**
+- [x] **Step 5: Route the claim through the runner**
 
 Change `claim_or_cold`'s `backend` parameter to `&AnyBackend`, and update `try_warm_claim` to pass `backend` directly instead of `backend.as_vm_backend()`. Replace the `backend.claim_standby(&handle, &claim)` call (pool.rs:268) with:
 
@@ -802,12 +802,12 @@ Change `claim_or_cold`'s `backend` parameter to `&AnyBackend`, and update `try_w
     match backend.claim_standby_via_runner(&ctx, &handle, &claim) {
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-cli commands::pool && cargo nextest run -p mvm-core config`
 Expected: PASS.
 
-- [ ] **Step 7: Full gates + commit**
+- [x] **Step 7: Full gates + commit**
 
 ```bash
 cargo fmt --all
@@ -830,7 +830,7 @@ Last, and only now: the capability means "can actually spawn+claim a warm parent
 - Consumes: Tasks 2-5.
 - Produces: `FcDriver::capabilities().standby_pool == true`.
 
-- [ ] **Step 1: Update the guard test to assert the new boundary**
+- [x] **Step 1: Update the guard test to assert the new boundary**
 
 `no_selectable_driver_advertises_standby_pool_yet` asserts *every* driver is off. Firecracker now supports it, so rename the test and pin the real split:
 
@@ -853,23 +853,23 @@ fn only_firecracker_advertises_the_standby_pool() {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo nextest run -p mvm-runtime driver::fc`
 Expected: FAIL on the first assertion.
 
-- [ ] **Step 3: Flip `standby_pool` and correct the comment**
+- [x] **Step 3: Flip `standby_pool` and correct the comment**
 
 Set `standby_pool: true` and replace the stale "stays off … flips true with that slice" comment with one describing the shipped behavior.
 
 **Do not blanket-flip the neighbouring flags.** `snapshots`, `snapshot_capability`, and `fs_quick_checkpoint` gate other surfaces (user-facing snapshot verbs). This driver now performs `vm_full` captures for the pool, which may or may not be what those flags mean. Check what each actually gates before changing it, change only what is now genuinely true, and state your reasoning in your report.
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `cargo nextest run --workspace`
 Expected: PASS. Other tests may assert the old capability shape — find and update each.
 
-- [ ] **Step 5: Full gates + commit**
+- [x] **Step 5: Full gates + commit**
 
 ```bash
 cargo fmt --all
