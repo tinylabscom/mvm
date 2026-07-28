@@ -2996,6 +2996,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "vm-memory",
  "wasmtime",
  "wasmtime-wasi",
  "which",
@@ -5489,6 +5490,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vm-memory"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
+dependencies = [
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "vmm-sys-util"
