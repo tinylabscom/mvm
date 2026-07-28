@@ -27,7 +27,7 @@ use super::Cli;
 use super::shared::clap_vm_name;
 use crate::ui;
 
-mod lineage;
+pub(crate) mod lineage;
 mod revert;
 mod timeline;
 pub(in crate::commands) use lineage::SignedChainAnchor;

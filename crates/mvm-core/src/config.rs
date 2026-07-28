@@ -645,6 +645,12 @@ pub fn checkpoints_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("checkpoints")
 }
 
+/// Content-addressed snapshot store: `<mvm_home>/snapshots/`. Backs the O(1)
+/// copy-on-write materialize a warm claim forks its child from.
+pub fn snapshots_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("snapshots")
+}
+
 /// Immutable image version-lineage store: `<mvm_home>/images/`. Each node is a
 /// subdirectory `<node-digest>/` holding `node.json`.
 pub fn images_dir() -> std::path::PathBuf {
@@ -1042,6 +1048,16 @@ mod tests {
         env.set("MVM_HOME", temp.path());
         let dir = checkpoints_dir();
         assert_eq!(dir, temp.path().join("checkpoints"));
+        env.remove("MVM_HOME");
+    }
+
+    #[test]
+    fn snapshots_dir_is_under_data_dir() {
+        let mut env = TestEnv::new();
+        let temp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", temp.path());
+        let dir = snapshots_dir();
+        assert_eq!(dir, temp.path().join("snapshots"));
         env.remove("MVM_HOME");
     }
 

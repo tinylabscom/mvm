@@ -65,6 +65,9 @@ pub struct MockBackend {
     /// Test knob: make `stop` fail, to exercise error-surfacing paths
     /// (e.g. `WarmLease::release` vs the swallowing `Drop`).
     fail_stop: bool,
+    /// Test knob: make `spawn_standby` fail, to exercise the warm-pool's
+    /// spawn-failure accounting without a real VM.
+    fail_spawn: bool,
 }
 
 impl MockBackend {
@@ -83,6 +86,13 @@ impl MockBackend {
     /// Test builder: make every `stop` return an error.
     pub fn with_failing_stop(mut self) -> Self {
         self.fail_stop = true;
+        self
+    }
+
+    /// Test builder: make every `spawn_standby` return an error, so the warm
+    /// path's failure accounting can be exercised without a real VM.
+    pub fn with_failing_spawn(mut self) -> Self {
+        self.fail_spawn = true;
         self
     }
 
@@ -185,6 +195,36 @@ impl VmBackend for MockBackend {
 
     fn supports_standby_pool(&self) -> bool {
         self.supports_standby
+    }
+
+    fn spawn_standby(
+        &self,
+        spec: &mvm_core::vm_backend::StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        if !self.supports_standby {
+            return Err(StandbyError::Unsupported {
+                backend: "mock".to_string(),
+            });
+        }
+        if self.fail_spawn {
+            return Err(StandbyError::ClaimFailed("injected spawn failure".into()));
+        }
+        // No process backs a mocked parent, so it wears the saved-state pid
+        // sentinel; everything else mirrors the spec it was spawned from.
+        Ok(StandbyHandle {
+            id: spec.id.clone(),
+            template_id: spec.template_id.clone(),
+            control_socket: spec.control_socket.clone(),
+            pid: 0,
+            kernel_sha256: spec.kernel_sha256.clone(),
+            vcpus: spec.vcpus,
+            mem_mib: spec.mem_mib,
+            binding_nonce: spec.binding_nonce.clone(),
+            spawned_unix_secs: crate::standby_pool::now_unix_secs(),
+            state: mvm_core::vm_backend::StandbyState::Idle,
+            image_sha256: spec.image_sha256.clone(),
+            parent_checkpoint: None,
+        })
     }
 
     fn claim_standby(

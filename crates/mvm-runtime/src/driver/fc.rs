@@ -419,14 +419,18 @@ impl VmmDriver for FcDriver {
         // wired through this driver's boot + running-VM handle); live-memory
         // snapshots are dropped, since the runner path is cold-boot only.
         //
-        // `standby_pool` stays off: the runner owns a guarded warm-claim path,
-        // but the capability means "can actually spawn+claim a warm parent",
-        // which needs the live FC spawn/fork ops. It flips true with that slice.
+        // `standby_pool` is on: this driver boots a real parent, captures its
+        // whole state, and restores a forked child from that saved memory —
+        // which is exactly what the capability claims, "can actually spawn+claim
+        // a warm parent". `snapshots` / `snapshot_capability` /
+        // `fs_quick_checkpoint` stay off on purpose: they gate the user-facing
+        // snapshot verbs, which this path does not wire, and the pool's captures
+        // are internal to a spawn.
         VmCapabilities {
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: false,
+            standby_pool: true,
             vsock: true,
             tap_networking: false,
             no_routable_guest_nic: true,
@@ -878,20 +882,20 @@ mod tests {
         );
     }
 
-    /// No selectable backend advertises the standby (warm) pool yet. The runner
-    /// owns a guarded warm-claim path, but the capability means "can actually
-    /// spawn+claim a warm parent"; it flips true per-backend only with that
-    /// backend's live spawn/fork ops. Until then every VMM driver and the
-    /// non-workload backends report it off. (The in-memory `MockBackend` opts
-    /// into it explicitly via `with_standby()` for the hermetic claim tests; the
-    /// `MockDriver` seam here does not.)
+    /// Firecracker owns a live spawn+capture+fork path, so it advertises the
+    /// standby (warm) pool. The capability means "can actually spawn+claim a
+    /// warm parent", so it flips true per-backend only with that backend's live
+    /// ops — every other VMM driver and the non-workload backends stay off until
+    /// they grow them. (The in-memory `MockBackend` opts in explicitly via
+    /// `with_standby()` for the hermetic tests; the `MockDriver` seam here does
+    /// not.)
     #[test]
-    fn no_selectable_driver_advertises_standby_pool_yet() {
+    fn only_firecracker_advertises_the_standby_pool() {
         use crate::driver::{HvfDriver, LibkrunDriver, MockDriver};
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
 
-        assert!(!FcDriver::new().capabilities().standby_pool);
+        assert!(FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
         assert!(!HvfDriver::new().capabilities().standby_pool);
         assert!(!MockDriver::default().capabilities().standby_pool);

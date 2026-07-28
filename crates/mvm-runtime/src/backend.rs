@@ -1332,7 +1332,9 @@ mod tests {
     #[test]
     fn recovery_capability_matrix_is_explicit_for_every_selectable_backend() {
         let mut expected = vec![
-            ("firecracker", SnapshotCapability::Unsupported, false),
+            // Firecracker spawns, captures, and forks a warm parent for real, so
+            // it is the one selectable backend advertising the pool.
+            ("firecracker", SnapshotCapability::Unsupported, true),
             ("hvf", SnapshotCapability::Unsupported, false),
             ("libkrun", SnapshotCapability::Unsupported, false),
             ("qemu", SnapshotCapability::Unsupported, false),

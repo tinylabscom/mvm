@@ -261,7 +261,8 @@ mod tests {
             ("wasm".to_string(), "unsupported"),
         ];
         let mut expected_standby_pool = vec![
-            ("firecracker".to_string(), false),
+            // Firecracker is the one backend with a live spawn+capture+fork path.
+            ("firecracker".to_string(), true),
             ("hvf".to_string(), false),
             ("libkrun".to_string(), false),
             ("qemu".to_string(), false),
@@ -278,7 +279,9 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        assert_eq!(r.standby_pool.get("firecracker"), Some(&false));
+        // Firecracker spawns, captures, and forks a warm parent; the others have
+        // no live path yet, so the pool stays off for them.
+        assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
         assert_eq!(r.standby_pool.get("libkrun"), Some(&false));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
