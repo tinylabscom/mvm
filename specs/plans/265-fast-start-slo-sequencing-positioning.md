@@ -80,10 +80,18 @@ cycle.
 ~60 ms (debug) is dominated by per-call `curl` subprocesses and a fresh
 Firecracker spawn per restore; neither alone reaches the SLO.
 
-- [ ] Native Firecracker API client: hand-rolled HTTP/1.1 over `UnixStream`
+- [~] Native Firecracker API client: hand-rolled HTTP/1.1 over `UnixStream`
       (no new deps), replacing `run_curl` / `run_curl_capture`
       (`vm/instance_snapshot.rs`) and `api_put_socket` (`microvm/daemon.rs`).
       Re-measure via the `@live` harness.
+      *(`microvm/fc_api.rs` landed and is wired into all four `FirecrackerIO`
+      calls — the pause/create/read-device-model/resume sequence on the warm
+      path is now subprocess-free. `api_put_socket` still shells out: it runs
+      `sudo curl` inside `run_in_vm`, so moving it native needs the socket's
+      privilege context checked on a live KVM host first — the direct client
+      connects as the calling uid, which is exactly why the `FirecrackerIO`
+      calls could switch without a permission change. `@live` re-measure is
+      pending KVM-box access.)*
 - [ ] Pre-spawned / pooled Firecracker: wire the existing `standby_pool` /
       `WarmLease` (default-off + libkrun-only today) into the FC backend so a
       restore claims a pre-spawned VMM rather than spawning one. Overlaps
