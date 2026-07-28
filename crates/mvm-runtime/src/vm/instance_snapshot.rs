@@ -282,7 +282,28 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
 pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
     io.load_snapshot_paused(dir)
         .with_context(|| format!("load_snapshot_paused({})", dir.display()))?;
+    guard_and_resume(io)
+}
 
+/// Fork variant of [`guarded_load_resume`].
+///
+/// A forked child's device paths are already bind-mounted into its private
+/// mount namespace, so its load must not re-create the host vsock socket the
+/// way a plain instance restore does. Only the load differs — the guard and the
+/// resume are the same, so a fork cannot reach userspace unchecked or stay
+/// paused forever.
+pub(crate) fn guarded_fork_load_resume(io: &FirecrackerIO, dir: &Path) -> Result<()> {
+    io.load_snapshot_for_fork(dir)
+        .with_context(|| format!("load_snapshot_for_fork({})", dir.display()))?;
+    guard_and_resume(io)
+}
+
+/// Shared tail: read the restored device model, refuse anything carrying a NIC
+/// (tearing down the paused VMM on refusal), and only then resume vCPUs.
+///
+/// Every load path funnels through here, so adding a new way to load a snapshot
+/// cannot silently bypass the guard.
+fn guard_and_resume<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
     let model = io
         .restored_device_model()
         .with_context(|| "reading restored device model")?;

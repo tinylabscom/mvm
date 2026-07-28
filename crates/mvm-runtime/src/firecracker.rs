@@ -489,9 +489,13 @@ impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
         // path while Firecracker loads the cloned VM state. The CLI delivers
         // the real generation token and optional grant after the guest agent
         // becomes reachable.
+        //
+        // The load leaves vCPUs paused, so the no-NIC device-model guard runs
+        // before the child executes anything and the resume happens here — a
+        // fork inherits its parent's device model and gets the same check every
+        // other restore does.
         let io = crate::vm::instance_snapshot::FirecrackerIO::new(child_dir.join("fc.socket"));
-        io.load_snapshot_for_fork(child_dir)
-            .map(|_| ())
+        crate::vm::instance_snapshot::guarded_fork_load_resume(&io, child_dir)
             .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
     }
 }
