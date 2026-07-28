@@ -1,0 +1,4 @@
+# Invalid: image reference must not be empty.
+image = ""
+cpus = 1
+mem = "256M"

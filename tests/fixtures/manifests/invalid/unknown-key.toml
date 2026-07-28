@@ -1,0 +1,5 @@
+# Invalid: typo key is rejected by deny_unknown_fields.
+flake = "."
+cpus = 2
+mem = "1024M"
+netwrok = "off"

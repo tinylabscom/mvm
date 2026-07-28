@@ -339,6 +339,15 @@ jobs:
             nix flake check --no-build "./$d"
           done
 
+      # This runner is x86_64, so only the x86_64-linux check variant builds
+      # here; the aarch64-linux variant stays defined for parity and for a
+      # future arm64 runner.
+      - name: Baked guest rootfs tree is glibc-free (runtime overlay excluded)
+        run: |
+          set -euo pipefail
+          nix build --print-build-logs \
+            ./nix#checks.x86_64-linux.guest-rootfs-no-glibc
+
   # `mvm-protocol` is `no_std` + `alloc` (the IR, wire protocol, policy/audit
   # DTOs, and the audit-log verifier) so the same logic can run in a browser.
   # A `std`/OS-only API creeping into its default build is the one thing that
@@ -390,6 +399,40 @@ jobs:
 
       - name: mvm-protocol tests run under wasm (wasm32-wasip1, via wasmtime)
         run: cargo test -p mvm-protocol --target wasm32-wasip1
+
+  # A bare-metal `*-none-*` target is a stricter no_std proof than wasm32:
+  # wasm32-unknown-unknown still ships a partial `std`, so a stray `std::` path
+  # can slip through there, whereas a `-none-elf` target has no `std` to leak
+  # into at all — only `core` + `alloc`. This gate is what lets the verifier
+  # (chain-signed audit log + Merkle inclusion proofs) run on a
+  # microcontroller-class device that provides no operating system. riscv32imac
+  # is the closest mainline target to the RISC-V microcontrollers this is aimed
+  # at and needs no out-of-tree toolchain, so the gate stays hermetic. A
+  # lib-only build (rlib, no final link) needs no cross-linker, keeping the
+  # check fast and dependency-light.
+  baremetal-no-std-boundary:
+    name: mvm-protocol bare-metal no_std boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: riscv32imac-unknown-none-elf
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-baremetal-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-baremetal-
+
+      - name: mvm-protocol builds no_std + alloc on riscv32imac-unknown-none-elf
+        run: cargo build -p mvm-protocol --lib --target riscv32imac-unknown-none-elf
 
   # The pure-Rust `mvm-ext4` writer (Plan 221) must produce an image the real
   # Linux kernel mounts — the strongest correctness oracle, beyond the in-process

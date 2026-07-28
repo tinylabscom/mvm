@@ -107,7 +107,7 @@ pure-mkfs = ["mvm-build/pure-mkfs"]
 # libkrun headers. Builds that run the native libkrun path can enable it
 # on hosts where libkrunfw is installed.
 libkrun-sys = ["libkrun-sys/libkrun-sys"]
-# Opt-in lane for the `bench microvm-launch` live probe
+# Opt-in lane for the interaction-latency gate's live libkrun probe
 # test + its boot orchestration. Off by default so `cargo test
 # --workspace` on stock CI stays VM-free (hosted macOS runners lack
 # Hypervisor.framework nested virt for a libkrun guest). Enabled on a dev

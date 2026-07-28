@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** In progress.
+**Status:** Active.
 
 > Backend sequencing, the concrete warm-start/density SLOs, the new
 > restore-path security witnesses, and the competitive-positioning
@@ -254,57 +254,60 @@ un-audited or tampered parent; no second provenance graph is introduced (reuses
 
 ### Phase 2 — Warm pool and fork hygiene in `mvm-runtime`
 
-- [x] Thread the stable registered-template identity through `VmStartConfig`,
-      `StandbySpec`, persisted `StandbyHandle` records, and warm-claim
-      compatibility. Template-bound parents can only satisfy launches for the
-      same template; legacy records without the field remain image-agnostic.
-- [x] Make warm-parent reservation atomic: selecting a compatible idle parent
-      and persisting its `Claimed` state now share the pool claim lock, and the
-      lease path consumes that reservation directly. Add coverage for
-      double-claim prevention and cross-template refusal.
-- [x] Implement paused-parent pool keyed by template id in `mvm-runtime`:
-      create and maintain parents with the existing TTL reaper, and evict the
-      oldest idle/parked parents per template when their recorded memory
-      footprint exceeds the target budget. Claimed parents are protected.
-- [~] Implement `fork_from_parent`: the verified checkpoint content is now
-      CoW-cloned into a distinct child state directory and the Firecracker
-      snapshot is loaded into a fresh VMM. Fresh CID/boot-id/session isolation
-      and per-instance secret rotation still need to be completed.
-- [~] Implement post-resume hygiene: fork restore now always delivers a fresh
-      generation token, a host epoch, and the guest remount/restart hook through
-      `PostRestore`; the CLI now fails closed and stops the child unless the
-      guest acknowledges, reports reseeding, and confirms clock resync. The
-      guest agent applies the epoch through its agent-only `CAP_SYS_TIME`
-      capability; workload processes receive no clock-setting capability.
-      Explicit vsock flow teardown and the fresh handshake contract are covered
-      by the guest's one-operational-request connection lifetime and a regression
-      test proving a replied-to authenticated stream cannot be reused. Dedicated
-      live builder/guest coverage remains.
-- [x] Add a hard guard that refuses to fork from a live parent or reuse the
-      parent's checkpoint id or VM name. The child must enter through the
-      distinct fork path; direct warm-parent resume remains unavailable.
-- [~] Add unit tests for identity freshness and replay refusal; focused
-      coverage now includes independent VMGenID clone reseeding, snapshot
-      epoch replay refusal, atomic warm-parent claims, template isolation,
-      fork identity guards, and post-request authenticated-session teardown.
-      Dedicated live warm-launch and fork-isolation BDD scenarios remain for
-      the builder/KVM test environment.
-- [~] `fork_from_parent` now requires a child admission envelope at the
-      vm_full runtime boundary and refuses missing, malformed, tenant-mismatched,
-      stale, or incorrectly content-addressed plans before cloning/restoring.
-      The CLI mints the fresh signed plan; cryptographic trust and nonce replay
-      checks remain in the admission supervisor, with negative coverage for
-      absent, malformed, tenant-mismatched, and expired admission.
-- [~] The Firecracker block-rooted fork now requires `device-anchors.json`,
-      preserves paired `rootfs.verity`/`rootfs.roothash` sidecars, and refuses
-      an incomplete binding before starting the child. Equivalent enforcement
-      for any future block+ext4 backend remains to be added.
-- [x] Prove the QEMU Stage 0 raw-egress path on the FC host: concurrent
-      `cache.nixos.org` and `cdn.kernel.org` flows now cross the guest SOCKS5
-      client, AF_VSOCK listener, host admission gate, and upstream splice;
-      bootstrap completed with `vsock_egress_ready: true`. Add a Linux
-      regression test that keeps one raw connection open while a second
-      connection is admitted and handled independently.
+> **Slice one landed** (branch `feat/plan-255-phase2-warm-pool`,
+> `specs/plans/255-phase2-warm-pool-substrate.md`): the runner-side guarded
+> `claim_standby` fork substrate — CoW fork + fresh identity, the fail-closed
+> plan↔parent bind (claim 8) + verity-inherit consumption (claim 3), a structural
+> never-promote guard, pool release/quarantine, a dependency-clean reachable seam,
+> and a hermetic BDD witness. Deferred to the live FC follow-up slice: FC parent
+> spawn/capture + fork + the capability flip + live wiring. Post-resume hygiene and
+> the sub-second SLO are Plan 265.
+
+- [ ] Implement paused-parent pool keyed by template id in `mvm-runtime`:
+      create, maintain, and evict parents based on TTL / memory budget.
+      *(pool store + reserve/`mark_idle` release/quarantine landed; live FC
+      spawn/maintain/evict is the follow-up slice.)*
+- [x] Implement `fork_from_parent` that performs the CoW clone and assigns fresh
+      identity (CID, `boot_id`, `session_nonce`, generation id, per-instance
+      secrets disk). *(runner-side `claim_standby`: CoW materialize + fresh `VmId`
+      + fresh VMGenID; CID is structurally 3 per one-VM-per-VMM; live FC fork `@live`.)*
+- [ ] Implement post-resume hygiene: entropy reseed, clock resync, vsock flow
+      teardown, and fresh handshake. *(the VMGenID reseed token is delivered with the
+      fork; the guest-side reseed/clock/vsock re-handshake are Plan 265.)*
+- [x] Add a hard guard that refuses to resume a warm parent as a workload
+      (different code path / enum variant). *(structural: parents and workloads live
+      in disjoint namespaces, a parent carries no plan by type, and `claim_standby`
+      always forks a fresh child — no promote path exists to guard.)*
+- [x] Re-enable memory-snapshot restore behind a verified no-NIC-on-restore
+      invariant: a restored device model that carries a network device is
+      refused, so restore can never reintroduce an un-audited egress path.
+      *(landed via Plan 265: `warm_restore_instance_from_path` loads the snapshot
+      paused, runs the device-model guard, then resumes — `guarded_load_resume`
+      in `crates/mvm-runtime/src/vm/instance_snapshot.rs`. The bare
+      `warm_restore_instance` and the template-snapshot entry point stay refused,
+      each pending its own integrity check.)* Backend-specific restore
+      engineering and sequencing continue in Plan 265.
+- [ ] Add unit tests for identity freshness and replay refusal; add BDD
+      scenarios for sub-second warm launch and for fork isolation. *(identity-freshness
+      unit tests + the fork-isolation hermetic BDD (`s12_warm_claim`) landed; replay
+      refusal is the supervisor's attach re-verify; sub-second warm launch is Plan 265
+      `@live`.)*
+- [x] `fork_from_parent` mints or inherits a fresh signed `ExecutionPlan` for
+      the child and refuses to launch a child whose plan is unsigned, expired,
+      or replayed (claim 8). Add a negative test. *(the runner binds the admitted plan
+      to the verified parent's rootfs and fails closed on mismatch/un-audited/tampered
+      parent, with negative tests; the fresh-plan mint is CLI-layer via
+      `admit_plan_for_boot`; expired/replayed is the supervisor's attach re-verify.)*
+- [ ] On block+ext4 backends the forked child inherits the parent template's
+      dm-verity roothash binding; a fork that would drop verity fails closed
+      (claim 3).
+- [x] Prove the QEMU Stage 0 raw-egress path on a live Linux/KVM host:
+      concurrent `cache.nixos.org` and `cdn.kernel.org` flows cross the guest
+      SOCKS5 client, the AF_VSOCK listener, the host admission gate, and the
+      upstream splice; bootstrap completes with `vsock_egress_ready: true`.
+      Host AF_VSOCK raw-egress handling is concurrent, with a Linux regression
+      test holding one raw connection open while a second is admitted and
+      served independently, so a long-lived flow cannot starve later ones.
 
 **Acceptance gate:** warm launch is sub-second on Linux and macOS; forked child
 has a new session nonce and cannot reuse an old one; a forked/restored child

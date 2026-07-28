@@ -1,0 +1,347 @@
+//! Warm-pool claim guards: the fail-closed refusal set and bind gate, plus
+//! [`ClaimGuards`] — the runner-side, host-side steps (overlay-contract gate +
+//! per-child substitution endpoint) a warm claim shares verbatim with a cold
+//! boot so it can never be less-guarded.
+//!
+//! The refusal set is kept separate from the crate-wide `anyhow::Result`
+//! convention: refusals are a closed set the caller must exhaustively handle
+//! (audit, retry, or surface to the operator), not an open-ended error bag.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+
+use mvm_core::checkpoint::CheckpointMeta;
+use mvm_core::plan::SecretBinding;
+use mvm_core::policy::RedactionPolicy;
+use mvm_core::policy::network_policy::NetworkPolicy;
+use mvm_core::vm_backend::{VmId, VmStartConfig};
+
+use crate::substitution_spawn::EndpointGuard;
+use crate::workload_runner::runner::{EndpointSpawnRequest, EndpointSpawner};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClaimRefusal {
+    #[error("parent is not in a claimable state")]
+    ParentNotClaimable,
+    #[error("parent has no signed audit entry; refusing to fork an un-audited parent")]
+    ParentUnaudited,
+    #[error("parent record drifted from its sealed content; refusing a tampered parent")]
+    ParentTampered,
+    #[error("claim carries no admitted plan; refusing to fork without claim-8 authority")]
+    PlanMissing,
+    #[error("plan image digest {expected} does not match parent rootfs digest {got}")]
+    PlanParentMismatch { expected: String, got: String },
+}
+
+/// Name of the [`mvm_core::checkpoint::ContentBlob`] holding the parent's
+/// sealed rootfs image. `verify_content` (run earlier in the claim) already
+/// proved this blob's `sha256` equals the file on disk, so comparing a plan's
+/// image digest against it transitively binds the plan to the exact bytes
+/// that boot.
+const ROOTFS_BLOB_NAME: &str = "rootfs.ext4";
+
+/// The parent checkpoint's verified rootfs digest (bare 64-hex, no `sha256:`
+/// prefix), or a refusal if the parent carries no `rootfs.ext4` blob.
+pub fn parent_rootfs_digest(meta: &CheckpointMeta) -> Result<&str, ClaimRefusal> {
+    meta.content
+        .iter()
+        .find(|b| b.name == ROOTFS_BLOB_NAME)
+        .map(|b| b.sha256.as_str())
+        .ok_or_else(|| ClaimRefusal::PlanParentMismatch {
+            expected: String::new(),
+            got: String::from("<parent carries no rootfs.ext4 blob>"),
+        })
+}
+
+/// Binds an admitted plan's image digest to the verified parent's actual
+/// rootfs so the audit-recorded plan always describes exactly what boots.
+/// `plan_image_sha256` is `plan.image.sha256` — bare 64-hex, compared
+/// directly against the parent's bare-hex blob digest.
+pub fn bind_plan_to_parent(
+    plan_image_sha256: &str,
+    meta: &CheckpointMeta,
+) -> Result<(), ClaimRefusal> {
+    let parent = parent_rootfs_digest(meta)?;
+    if parent == plan_image_sha256 {
+        Ok(())
+    } else {
+        Err(ClaimRefusal::PlanParentMismatch {
+            expected: plan_image_sha256.to_string(),
+            got: parent.to_string(),
+        })
+    }
+}
+
+/// The per-VM substitution-endpoint spawn inputs a warm claim and a cold boot
+/// both thread, minus the VM identity: the id is supplied to
+/// [`ClaimGuards::spawn_endpoint`] separately so the socket is always keyed on
+/// the child's own [`VmId`], never a sibling's. `raw_egress` is derived here,
+/// not passed — a secret-free workload speaks raw TCP, a secret-bearing one the
+/// substitution protocol.
+pub struct EndpointSpawnInputs<'a> {
+    pub state_dir: &'a Path,
+    pub tenant: &'a str,
+    pub secrets: &'a [SecretBinding],
+    pub redaction: &'a RedactionPolicy,
+    pub network_policy: &'a NetworkPolicy,
+}
+
+/// A spawned per-VM substitution endpoint: the host UDS the guest's `EGRESS_PORT`
+/// relays to (the sole gate off the box), plus the RAII reaper that tears the
+/// endpoint down on an early return until the VM is fully up ([`Self::defuse`]).
+pub struct EndpointHandle {
+    egress_uds: PathBuf,
+    guard: EndpointGuard,
+}
+
+impl EndpointHandle {
+    /// The host-side egress UDS, wired into the spec's `EGRESS_PORT` channel.
+    pub fn egress_uds(&self) -> &Path {
+        &self.egress_uds
+    }
+
+    /// Disarm the reaper: the VM is up and the `stop` path now owns teardown.
+    pub fn defuse(&mut self) {
+        self.guard.defuse();
+    }
+}
+
+/// The runner-side, host-side steps a warm claim shares with a cold boot, in one
+/// place so a claim can never run a weaker version than the cold path.
+///
+/// Admission (signed-plan re-verify), verity inherit, and per-service confinement
+/// are enforced at their own layers — the CLI + supervisor, the CLI, and guest
+/// init respectively — not here; a fork inherits confinement by construction from
+/// a clean parent. This bundle owns only the two steps the runner itself performs
+/// on the start path: the overlay-contract admission gate and the per-child
+/// substitution endpoint. Both cold boot and the warm claim call it, so the two
+/// cannot diverge to a weaker posture.
+pub struct ClaimGuards<'a> {
+    spawner: &'a dyn EndpointSpawner,
+}
+
+impl<'a> ClaimGuards<'a> {
+    pub fn new(spawner: &'a dyn EndpointSpawner) -> Self {
+        Self { spawner }
+    }
+
+    /// Refuse a rootfs whose parent dir carries no overlay-aware sidecar (no
+    /// `/mvm/runtime` mount point) before any endpoint spawn or boot — the same
+    /// gate the raw backends run, so a claim admits exactly what a cold boot does.
+    pub fn admit_overlay_contract(&self, cfg: &VmStartConfig) -> Result<()> {
+        let rootfs = Path::new(&cfg.rootfs_path);
+        let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
+        mvm_build::builder_vm::admit_runtime_overlay_contract(rootfs_dir, cfg.runtime_source_policy)
+    }
+
+    /// Spawn the per-child substitution endpoint keyed on `vm`'s own id — 0700,
+    /// never a sibling's socket — and return its egress UDS plus the reaper. The
+    /// endpoint is ALWAYS spawned (even the no-secret raw path); it is the sole
+    /// egress gate.
+    pub fn spawn_endpoint(
+        &self,
+        vm: &VmId,
+        inputs: &EndpointSpawnInputs<'_>,
+    ) -> Result<EndpointHandle> {
+        let raw_egress = inputs.secrets.is_empty();
+        let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {
+            vm_name: &vm.0,
+            state_dir: inputs.state_dir,
+            tenant: inputs.tenant,
+            secrets: inputs.secrets,
+            redaction: inputs.redaction,
+            network_policy: inputs.network_policy,
+            raw_egress,
+        })?;
+        Ok(EndpointHandle {
+            egress_uds,
+            guard: EndpointGuard::new(&vm.0),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::checkpoint::{CheckpointClass, CheckpointId, ContentBlob};
+
+    fn fake_meta_with_rootfs(hex: String) -> CheckpointMeta {
+        CheckpointMeta::builder(
+            CheckpointId::new("cp-test"),
+            CheckpointClass::FsQuick,
+            "vm-test",
+        )
+        .content(vec![ContentBlob {
+            name: ROOTFS_BLOB_NAME.to_string(),
+            sha256: hex,
+        }])
+        .build()
+    }
+
+    fn fake_meta_without_rootfs() -> CheckpointMeta {
+        CheckpointMeta::builder(
+            CheckpointId::new("cp-test"),
+            CheckpointClass::FsQuick,
+            "vm-test",
+        )
+        .build()
+    }
+
+    #[test]
+    fn bind_accepts_matching_and_rejects_mismatched_rootfs() {
+        let meta = fake_meta_with_rootfs("aa".repeat(32));
+        // matching
+        assert!(bind_plan_to_parent(&"aa".repeat(32), &meta).is_ok());
+        // mismatch -> PlanParentMismatch
+        let err = bind_plan_to_parent(&"bb".repeat(32), &meta).unwrap_err();
+        assert!(matches!(err, ClaimRefusal::PlanParentMismatch { .. }));
+    }
+
+    #[test]
+    fn parent_without_rootfs_blob_refuses() {
+        let meta = fake_meta_without_rootfs();
+        assert!(matches!(
+            bind_plan_to_parent(&"aa".repeat(32), &meta),
+            Err(ClaimRefusal::PlanParentMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn refusal_reasons_are_distinct_and_described() {
+        let m = ClaimRefusal::PlanParentMismatch {
+            expected: "sha256:aa".into(),
+            got: "sha256:bb".into(),
+        };
+        assert!(m.to_string().contains("sha256:aa"));
+        assert!(m.to_string().contains("sha256:bb"));
+        // Distinct variants must not compare equal.
+        assert_ne!(
+            ClaimRefusal::ParentUnaudited.to_string(),
+            ClaimRefusal::ParentTampered.to_string()
+        );
+    }
+
+    // ---- ClaimGuards: the runner-side shared host steps ----
+
+    use crate::workload_runner::runner::{EndpointSpawnRequest, EndpointSpawner};
+    use mvm_core::policy::RedactionPolicy;
+    use mvm_core::policy::network_policy::NetworkPolicy;
+    use mvm_core::vm_backend::VmStartConfig;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// An `EndpointSpawner` double: records the `vm_name` it was handed and,
+    /// mirroring `RealEndpointSpawner`, returns the per-VM socket keyed on that
+    /// name — so a test can prove `ClaimGuards` threads the child's own id
+    /// through and never reuses a sibling's socket, with no real endpoint process.
+    #[derive(Default)]
+    struct FakeSpawner {
+        seen_vm: Mutex<Option<String>>,
+    }
+
+    impl EndpointSpawner for FakeSpawner {
+        fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> anyhow::Result<PathBuf> {
+            *self.seen_vm.lock().unwrap() = Some(req.vm_name.to_string());
+            Ok(mvm_core::config::vm_substitution_endpoint_socket(
+                req.vm_name,
+            ))
+        }
+    }
+
+    fn endpoint_inputs<'a>(
+        state_dir: &'a std::path::Path,
+        redaction: &'a RedactionPolicy,
+        policy: &'a NetworkPolicy,
+    ) -> EndpointSpawnInputs<'a> {
+        EndpointSpawnInputs {
+            state_dir,
+            tenant: "tenant-x",
+            secrets: &[],
+            redaction,
+            network_policy: policy,
+        }
+    }
+
+    #[test]
+    fn claim_guards_spawn_endpoint_keys_the_socket_on_the_given_vm() {
+        // The endpoint socket is `MVM_HOME`-rooted; serialize against tests that
+        // mutate `MVM_HOME` (the warm-claim runner tests) so the spawn and the
+        // expected-path recompute both read one stable home.
+        let _home = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let spawner = FakeSpawner::default();
+        let guards = ClaimGuards::new(&spawner);
+        let redaction = RedactionPolicy::default();
+        let policy = NetworkPolicy::deny_all();
+        let state = tempfile::tempdir().unwrap();
+
+        let mut child = guards
+            .spawn_endpoint(
+                &VmId("child-a".into()),
+                &endpoint_inputs(state.path(), &redaction, &policy),
+            )
+            .expect("spawn_endpoint succeeds against the fake spawner");
+
+        // The endpoint socket is keyed on child-a's own id — private to it, and
+        // provably not a sibling's socket (no cross-workload reuse).
+        assert_eq!(
+            child.egress_uds(),
+            mvm_core::config::vm_substitution_endpoint_socket("child-a")
+        );
+        assert_ne!(
+            child.egress_uds(),
+            mvm_core::config::vm_substitution_endpoint_socket("child-b")
+        );
+        assert!(
+            child.egress_uds().to_string_lossy().contains("child-a"),
+            "socket path must name the child vm: {}",
+            child.egress_uds().display()
+        );
+        // The fresh id was threaded to the spawner, not a parent/shared name.
+        assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), Some("child-a"));
+
+        // Disarm the reaper so drop doesn't chase a nonexistent endpoint.
+        child.defuse();
+    }
+
+    #[test]
+    fn claim_guards_admit_overlay_contract_matches_cold_boot() {
+        let spawner = FakeSpawner::default();
+        let guards = ClaimGuards::new(&spawner);
+
+        // A rootfs whose dir carries an overlay-aware sidecar is admitted —
+        // exactly what the cold-boot start gate accepts.
+        let ok_dir = tempfile::tempdir().unwrap();
+        let ok_rootfs = ok_dir.path().join("rootfs.ext4");
+        std::fs::write(&ok_rootfs, b"rootfs").unwrap();
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("cg-valid", false, true)
+            .write_to_dir(ok_dir.path())
+            .unwrap();
+        let valid = VmStartConfig {
+            name: "cg-valid".into(),
+            rootfs_path: ok_rootfs.display().to_string(),
+            ..Default::default()
+        };
+        assert!(guards.admit_overlay_contract(&valid).is_ok());
+
+        // A rootfs whose dir carries no sidecar is refused — same message the
+        // cold-boot gate emits.
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare_rootfs = bare_dir.path().join("rootfs.ext4");
+        std::fs::write(&bare_rootfs, b"rootfs").unwrap();
+        let invalid = VmStartConfig {
+            name: "cg-invalid".into(),
+            rootfs_path: bare_rootfs.display().to_string(),
+            ..Default::default()
+        };
+        let err = guards
+            .admit_overlay_contract(&invalid)
+            .expect_err("a rootfs with no overlay-aware sidecar must be refused");
+        assert!(
+            err.to_string().contains("mvm-meta.json"),
+            "refusal must name the missing sidecar: {err}"
+        );
+    }
+}

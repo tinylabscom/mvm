@@ -30,9 +30,11 @@ All three are rust-vmm crates under the `rust-vmm/vm-virtio` and
   equivalent of the in-repo `GuestMem`. It can wrap an externally-owned mapping
   via `MmapRegion`'s raw-pointer constructor, which is required here because the
   RAM pointer is owned by the HVF/KVM mapping, not allocated by vm-memory.
-- **`virtio-vsock` 0.11.0** — `VsockPacket`, parsed from a TX/RX descriptor chain
+- **`virtio-vsock` 0.12.0** — `VsockPacket`, parsed from a TX/RX descriptor chain
   (stream sockets only), header + optional data represented as `VolatileSlice`s.
   Replaces the hand-rolled 44-byte `VsockHdr::from_bytes/to_bytes` and `HDR_LEN`.
+  Tracks the 0.18 `vm-memory`/`virtio-queue` line (ADR-033 realigned the note's
+  original 0.11 pin, which pulled duplicate `vm-memory`/`virtio-queue` majors).
 
 **Oracle, not a dependency:** a sibling in-house virtio-vsock reference
 implementation (the "arcbox" oracle named in the tasking) is used only to
@@ -213,5 +215,5 @@ follow the same TX/RX queue migration once the vsock path proves the pattern.
   — `ttl` + `next_index >= queue_size` guard.
 - [vm-memory on docs.rs](https://docs.rs/crate/vm-memory/latest) — 0.18.0.
 - [virtio-vsock on crates.io](https://crates.io/crates/virtio-vsock) /
-  [docs.rs](https://docs.rs/virtio-vsock) — 0.11.0 (`VsockPacket`).
+  [docs.rs](https://docs.rs/virtio-vsock) — 0.12.0 (`VsockPacket`).
 - [rust-vmm/vm-virtio](https://github.com/rust-vmm/vm-virtio).

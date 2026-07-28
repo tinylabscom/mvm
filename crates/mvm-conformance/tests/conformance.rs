@@ -27,32 +27,49 @@ use std::path::{Path, PathBuf};
 
 use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
+use mvm_conformance::{RuntimeCaps, scenario_should_run};
 use world::CliWorld;
-
-const PENDING_TAG: &str = "wip";
-
-/// Scenarios that boot a real microVM and reach the network; opt in with
-/// `MVM_BDD_LIVE=1` (skipped in the default hermetic lane).
-const LIVE_TAG: &str = "live";
 
 #[tokio::main]
 async fn main() {
     CliWorld::filter_run(features_dir(), should_run).await;
 }
 
-/// Keep a scenario unless it is pending-implementation (`@wip`) or a live
-/// scenario (`@live`) that must be opted into. A `@live` scenario boots a real
-/// microVM and reaches the network, so it can't run in the default hermetic
-/// lane — set `MVM_BDD_LIVE=1` on a host with a working backend to include it.
+/// Decide whether a scenario runs from its tags and the host's probed
+/// capabilities. The tag semantics live in the crate lib (`scenario_should_run`)
+/// so they can be unit-tested without a cucumber runner; this wrapper only
+/// supplies the real host capabilities. An absent required capability yields a
+/// clean skip, never a failure — so the suite stays green on hosts without KVM
+/// (GitHub-hosted ARM runners, or any dev box lacking `/dev/kvm`).
 fn should_run(_feature: &Feature, _rule: Option<&Rule>, scenario: &Scenario) -> bool {
-    let tags = &scenario.tags;
-    if tags.iter().any(|tag| tag == PENDING_TAG) {
-        return false;
+    scenario_should_run(&scenario.tags, probe_caps())
+}
+
+/// Probe the host for the capabilities the tag gates require. Re-run per
+/// scenario by cucumber's filter callback; the syscalls are cheap.
+fn probe_caps() -> RuntimeCaps {
+    RuntimeCaps {
+        live_opted_in: std::env::var_os("MVM_BDD_LIVE").is_some(),
+        firecracker_bootable: kvm_openable() && firecracker_on_path(),
     }
-    if tags.iter().any(|tag| tag == LIVE_TAG) && std::env::var_os("MVM_BDD_LIVE").is_none() {
-        return false;
-    }
-    true
+}
+
+/// `/dev/kvm` exists and this process can open it read-write — the mode a real
+/// KVM user (Firecracker) needs, and the meaningful check since the node can be
+/// present but group-gated.
+fn kvm_openable() -> bool {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+        .is_ok()
+}
+
+/// A `firecracker` binary is resolvable on `PATH`.
+fn firecracker_on_path() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("firecracker").is_file()))
+        .unwrap_or(false)
 }
 
 /// `features/suites/` lives at the repo root, two levels above this crate's

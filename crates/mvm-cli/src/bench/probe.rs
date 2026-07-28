@@ -1,4 +1,4 @@
-//! Live boot orchestration for `mvmctl bench microvm-launch`. Kept
+//! Live boot orchestration for the interaction-latency gate. Kept
 //! out of `bench.rs` so the pure stats/schema substrate stays
 //! VM-free.
 
@@ -97,7 +97,7 @@ pub fn admit_probe_plan(
 // ──────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "libkrun-live")]
-use crate::commands::ops::bench::BootMarks;
+use super::stats::BootMarks;
 
 /// A live probe VM held only long enough for density sampling. Drop is
 /// best-effort teardown so a sampling error cannot leak the supervisor.
@@ -116,6 +116,11 @@ impl HeldProbeVm {
 
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// The four boot marks captured for this VM (`BootMarks` is `Copy`).
+    pub fn marks(&self) -> BootMarks {
+        self.marks
     }
 }
 
@@ -264,7 +269,7 @@ fn wait_for_ready(vm_name: &str) -> Result<(std::time::Instant, std::time::Insta
 fn record_boot_timing_report(vm_name: &str) -> Result<()> {
     let report = crate::commands::vm::wait::fetch_readiness(vm_name)
         .with_context(|| format!("fetching readiness report for {vm_name}"))?;
-    super::bench::write_boot_timing_sidecar(vm_name, &report.boot_millis)
+    super::write_boot_timing_sidecar(vm_name, &report.boot_millis)
 }
 
 #[cfg(test)]

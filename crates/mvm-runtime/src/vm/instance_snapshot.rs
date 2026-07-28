@@ -101,17 +101,47 @@ pub fn files_for(vm_name: &str) -> SnapshotFiles {
 }
 
 /// Trait the pause/resume orchestrator uses to talk to Firecracker.
-/// Production wires `FirecrackerIO`; tests use `MemoryIO` which
+/// Production wires `FirecrackerIO`; tests use `CannedIO` which
 /// just writes canned bytes into the snapshot files.
+///
+/// `load_snapshot` used to load the bytes AND resume vCPUs in one call. It is
+/// split into [`load_snapshot_paused`](Self::load_snapshot_paused) and
+/// [`resume`](Self::resume) so the device-model guard
+/// (`assert_vsock_only_device_model`) can run against the restored VMM's
+/// config in the gap between the two — after the snapshot's devices exist to
+/// inspect, but before vCPUs execute a single instruction. A restored VMM
+/// reconstructs whatever devices the snapshot captured; if that includes a
+/// network interface, resuming it would bypass the vsock-only egress
+/// boundary. See
+/// [`crate::vm::instance_snapshot::verify_and_resume_from_dir`] for where the
+/// three calls are sequenced.
 pub trait SnapshotIO {
     /// Quiesce the running VM, write `vmstate.bin` + `mem.bin` into
     /// `dir`, leave the VM in a paused-and-shutdown state.
     fn create_snapshot(&self, dir: &Path) -> Result<()>;
 
-    /// Load the bytes at `<dir>/{vmstate,mem}.bin` into a fresh VM
-    /// and resume vCPUs. The agent's `PostRestore` path takes care
-    /// of vsock auth re-establishment after this returns.
-    fn load_snapshot(&self, dir: &Path) -> Result<()>;
+    /// Load the sealed snapshot at `<dir>/{vmstate,mem}.bin` into a
+    /// fresh VMM, leaving vCPUs PAUSED. The caller must inspect
+    /// [`restored_device_model`](Self::restored_device_model) and run
+    /// the device-model guard before calling
+    /// [`resume`](Self::resume).
+    fn load_snapshot_paused(&self, dir: &Path) -> Result<()>;
+
+    /// The restored VM's device model, read after load, before
+    /// resume — the input to `assert_vsock_only_device_model`.
+    fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel>;
+
+    /// Resume vCPUs. Only called after the device-model guard passes;
+    /// calling this before the guard runs would let a NIC-carrying
+    /// restore execute.
+    fn resume(&self) -> Result<()>;
+
+    /// Best-effort teardown of a VMM left paused by
+    /// [`load_snapshot_paused`](Self::load_snapshot_paused) — used
+    /// when the device-model guard refuses the restore, so the
+    /// never-resumed VMM does not linger. Errors here are swallowed
+    /// by the caller; this exists to clean up, not to report status.
+    fn teardown_paused(&self) -> Result<()>;
 }
 
 /// Pause + seal one VM's snapshot. Returns the sealed sidecar so
@@ -158,9 +188,11 @@ pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result
     Ok(sidecar)
 }
 
-/// Verify + load one VM's snapshot. Honours
-/// `MVM_ALLOW_STALE_SNAPSHOT=1` for both the version-mismatch and
-/// the epoch-rollback branches; refuses both by default.
+/// Verify + load one VM's own instance snapshot (`~/.mvm/instances/<vm-name>/snapshot/`).
+/// Thin wrapper around [`verify_and_resume_from_dir`] for the common case
+/// where the sealed envelope lives at the canonical per-VM path; the fork and
+/// template-restore paths hold their sealed envelope elsewhere and call
+/// [`verify_and_resume_from_dir`] directly.
 ///
 /// Returns the verified sidecar so the caller can audit it before
 /// resuming Firecracker.
@@ -169,6 +201,27 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
     io: &IO,
 ) -> Result<IntegritySidecar> {
     let dir = snapshot_dir(vm_name);
+    verify_and_resume_from_dir(&dir, io)
+}
+
+/// Verify + load a sealed snapshot at a caller-supplied `dir`, then run the
+/// device-model guard before resuming vCPUs.
+///
+/// Honours `MVM_ALLOW_STALE_SNAPSHOT=1` for both the version-mismatch and the
+/// epoch-rollback branches; refuses both by default.
+///
+/// Ordering is the security property this function exists to enforce:
+/// verify the HMAC envelope → decrypt → load the snapshot PAUSED → read the
+/// restored device model → refuse (and tear down) on any NIC → only then
+/// resume vCPUs. A NIC-carrying snapshot must never execute a single guest
+/// instruction, so `resume` is reachable only past the guard.
+///
+/// Returns the verified sidecar so the caller can audit it before
+/// resuming Firecracker.
+pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
+    dir: &Path,
+    io: &IO,
+) -> Result<IntegritySidecar> {
     if !dir.exists() {
         bail!(
             "no instance snapshot directory at {} — pause the VM first",
@@ -179,7 +232,7 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
         mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_home()));
     let key = load_or_init_key(&key_path)
         .with_context(|| format!("loading HMAC key {}", key_path.display()))?;
-    let files = files_in(&dir);
+    let files = files_in(dir);
     let mvmctl_version = env!("CARGO_PKG_VERSION");
     let allow_stale = std::env::var("MVM_ALLOW_STALE_SNAPSHOT").as_deref() == Ok("1");
 
@@ -187,7 +240,7 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
     let min_epoch = store.load();
 
     let sidecar = match verify(
-        &dir,
+        dir,
         &files,
         min_epoch,
         mvmctl_version,
@@ -195,18 +248,50 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
         allow_stale,
     ) {
         Ok(s) => s,
-        Err(e) => return Err(map_verify_error(e, &dir)),
+        Err(e) => return Err(map_verify_error(e, dir)),
     };
 
     // HMAC verify passed → the artifacts on disk are the bytes that
     // were sealed. If they're AES-GCM-encrypted (MVSE magic),
     // decrypt them in place before handing to Firecracker.
-    decrypt_artifacts_if_encrypted(&dir)
+    decrypt_artifacts_if_encrypted(dir)
         .with_context(|| format!("decrypting snapshot artifacts at {}", dir.display()))?;
 
-    io.load_snapshot(&dir)
-        .with_context(|| format!("Firecracker load_snapshot({})", dir.display()))?;
+    guarded_load_resume(io, dir)?;
     Ok(sidecar)
+}
+
+/// Load a sealed snapshot at `dir` into a fresh VMM, then run the no-NIC
+/// device-model guard strictly between load and resume — resuming vCPUs only
+/// if the guard passes.
+///
+/// Factored out of [`verify_and_resume_from_dir`] so a caller whose content
+/// integrity is already established by a different mechanism (the fork
+/// restore path verifies a checkpoint's content-address and audit-chain
+/// lineage upstream, not the instance-snapshot HMAC envelope) can reuse the
+/// load → guard → resume ordering without layering a second, wrong integrity
+/// check on top. `verify_and_resume_from_dir` is the only caller that also
+/// runs the HMAC verify + decrypt step first; this function does neither —
+/// callers are responsible for establishing their own content integrity
+/// before calling it.
+///
+/// Fail closed: never resume a NIC-carrying restore. Best-effort tear down
+/// the paused VMM on refusal so it does not linger — the caller's `dir` stays
+/// sealed on disk, so a retry (after e.g. re-sealing a clean snapshot) is
+/// still possible.
+pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
+    io.load_snapshot_paused(dir)
+        .with_context(|| format!("load_snapshot_paused({})", dir.display()))?;
+
+    let model = io
+        .restored_device_model()
+        .with_context(|| "reading restored device model")?;
+    if let Err(e) = crate::microvm::assert_vsock_only_device_model(&model) {
+        let _ = io.teardown_paused();
+        return Err(e).context("restore refused by device-model guard");
+    }
+
+    io.resume().with_context(|| "resume after restore")
 }
 
 // ============================================================================
@@ -659,7 +744,11 @@ fn map_verify_error(err: VerifyError, dir: &Path) -> anyhow::Error {
 
 /// `SnapshotIO` impl that just writes canned bytes. Used by the
 /// unit tests below and by integration tests that want to exercise
-/// the seal/verify flow without a live Firecracker.
+/// the seal/verify flow without a live Firecracker. Always reports a
+/// vsock-only (no-NIC) restored device model — tests that need to
+/// drive the guard's refusal path use the `SpyIO` double instead,
+/// since exercising the refuse/teardown/no-resume ordering needs
+/// call-order observation `CannedIO` doesn't provide.
 pub struct CannedIO {
     pub vmstate_bytes: Vec<u8>,
     pub mem_bytes: Vec<u8>,
@@ -671,7 +760,18 @@ impl SnapshotIO for CannedIO {
         std::fs::write(dir.join(MEM_FILENAME), &self.mem_bytes)?;
         Ok(())
     }
-    fn load_snapshot(&self, _dir: &Path) -> Result<()> {
+    fn load_snapshot_paused(&self, _dir: &Path) -> Result<()> {
+        Ok(())
+    }
+    fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
+        Ok(crate::microvm::RestoredDeviceModel {
+            network_interfaces: Vec::new(),
+        })
+    }
+    fn resume(&self) -> Result<()> {
+        Ok(())
+    }
+    fn teardown_paused(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -709,34 +809,12 @@ impl FirecrackerIO {
     pub(crate) fn load_snapshot_for_fork(&self, dir: &Path) -> Result<()> {
         self.load_snapshot_inner(dir, false)
     }
-}
 
-impl SnapshotIO for FirecrackerIO {
-    fn create_snapshot(&self, dir: &Path) -> Result<()> {
-        self.ensure_socket()?;
-        // Pause vCPUs first (Firecracker requires a paused VM
-        // before /snapshot/create). PATCH /vm.
-        run_curl(&self.socket_path, "PATCH", "/vm", r#"{"state":"Paused"}"#)
-            .with_context(|| "PATCH /vm Paused")?;
-
-        let payload = format!(
-            r#"{{"snapshot_type":"Full","snapshot_path":"{}/{}","mem_file_path":"{}/{}"}}"#,
-            dir.display(),
-            VMSTATE_FILENAME,
-            dir.display(),
-            MEM_FILENAME,
-        );
-        run_curl(&self.socket_path, "PUT", "/snapshot/create", &payload)
-            .with_context(|| "PUT /snapshot/create")?;
-        Ok(())
-    }
-
-    fn load_snapshot(&self, dir: &Path) -> Result<()> {
-        self.load_snapshot_inner(dir, true)
-    }
-}
-
-impl FirecrackerIO {
+    /// Load a sealed snapshot into a fresh VMM, leaving vCPUs paused.
+    ///
+    /// `clean_vsock` selects the launcher: a plain instance restore starts a
+    /// VMM that re-creates the host vsock socket, while a fork restore keeps
+    /// the paths its private mount namespace already remapped.
     fn load_snapshot_inner(&self, dir: &Path, clean_vsock: bool) -> Result<()> {
         let vm_dir = self
             .socket_path
@@ -765,17 +843,78 @@ impl FirecrackerIO {
         start(&vm_dir.to_string_lossy(), &socket_str)
             .with_context(|| "starting fresh Firecracker for snapshot restore")?;
 
+        // `resume_vm: false` — vCPUs stay paused so the device-model guard in
+        // `verify_and_resume_from_dir` can inspect `GET /vm/config` before
+        // anything executes.
         let body = serde_json::json!({
             "snapshot_path": format!("{}/{}", dir.display(), VMSTATE_FILENAME),
             "mem_backend": {
                 "backend_type": "File",
                 "backend_path": format!("{}/{}", dir.display(), MEM_FILENAME),
             },
-            "resume_vm": true,
+            "resume_vm": false,
         })
         .to_string();
         crate::microvm::api_put_socket(&socket_str, "/snapshot/load", &body)
             .with_context(|| "PUT /snapshot/load")?;
+        Ok(())
+    }
+}
+
+impl SnapshotIO for FirecrackerIO {
+    fn create_snapshot(&self, dir: &Path) -> Result<()> {
+        self.ensure_socket()?;
+        // Pause vCPUs first (Firecracker requires a paused VM
+        // before /snapshot/create). PATCH /vm.
+        run_curl(&self.socket_path, "PATCH", "/vm", r#"{"state":"Paused"}"#)
+            .with_context(|| "PATCH /vm Paused")?;
+
+        let payload = format!(
+            r#"{{"snapshot_type":"Full","snapshot_path":"{}/{}","mem_file_path":"{}/{}"}}"#,
+            dir.display(),
+            VMSTATE_FILENAME,
+            dir.display(),
+            MEM_FILENAME,
+        );
+        run_curl(&self.socket_path, "PUT", "/snapshot/create", &payload)
+            .with_context(|| "PUT /snapshot/create")?;
+        Ok(())
+    }
+
+    fn load_snapshot_paused(&self, dir: &Path) -> Result<()> {
+        self.load_snapshot_inner(dir, true)
+    }
+
+    fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
+        self.ensure_socket()?;
+        let body = run_curl_capture(&self.socket_path, "GET", "/vm/config")
+            .with_context(|| "GET /vm/config")?;
+        serde_json::from_str(&body).with_context(|| "parsing GET /vm/config response")
+    }
+
+    fn resume(&self) -> Result<()> {
+        self.ensure_socket()?;
+        run_curl(&self.socket_path, "PATCH", "/vm", r#"{"state":"Resumed"}"#)
+            .with_context(|| "PATCH /vm Resumed")?;
+        Ok(())
+    }
+
+    fn teardown_paused(&self) -> Result<()> {
+        // Best-effort: this restore attempt's fresh FC process must not
+        // linger paused once the guard has refused it — a NIC-carrying VMM
+        // sitting paused is exactly the state this guard exists to prevent
+        // from ever resuming. Never surfaced to the caller (`verify_and_resume_from_dir`
+        // discards this `Result`), so any failure here is logged, not propagated.
+        let Some(vm_dir) = self.socket_path.parent() else {
+            return Ok(());
+        };
+        let pid_file = vm_dir.join("fc.pid");
+        if !pid_file.exists() {
+            return Ok(());
+        }
+        let pid_file_str = pid_file.to_string_lossy();
+        let q_pid = shell_quote(&pid_file_str);
+        let _ = run_in_vm(&format!("sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null"));
         Ok(())
     }
 }
@@ -803,6 +942,31 @@ fn run_curl(socket: &Path, method: &str, endpoint: &str, body: &str) -> Result<(
         );
     }
     Ok(())
+}
+
+/// Like [`run_curl`] but returns the captured response body instead of
+/// discarding it. `run_curl` only asserts the request succeeded; the
+/// device-model guard needs the actual `GET /vm/config` body to parse a
+/// [`crate::microvm::RestoredDeviceModel`] out of.
+fn run_curl_capture(socket: &Path, method: &str, endpoint: &str) -> Result<String> {
+    use std::process::Command;
+    let url = format!("http://localhost{endpoint}");
+    let out = Command::new("curl")
+        .arg("--unix-socket")
+        .arg(socket)
+        .arg("-fsS")
+        .arg("-X")
+        .arg(method)
+        .arg(&url)
+        .output()
+        .with_context(|| format!("invoking curl for {method} {endpoint}"))?;
+    if !out.status.success() {
+        bail!(
+            "{method} {endpoint} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]
@@ -934,6 +1098,148 @@ mod tests {
         let _g = DataDirGuard::new();
         let err = verify_and_resume("nope", &canned()).unwrap_err();
         assert!(err.to_string().contains("no instance snapshot directory"));
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Device-model guard ordering (load_paused → guard → resume)
+    // ──────────────────────────────────────────────────────────────
+
+    /// `SnapshotIO` double that logs call order and lets a test force a
+    /// NIC-carrying restored device model — so the guard's refusal path
+    /// (teardown, never resume) and the load→guard→resume ordering are
+    /// unit-testable without a live Firecracker. `CannedIO` can't do this: it
+    /// always reports a no-NIC model and doesn't observe call order.
+    struct SpyIO {
+        nic_on_restore: bool,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl SpyIO {
+        fn new(nic_on_restore: bool) -> Self {
+            Self {
+                nic_on_restore,
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl SnapshotIO for SpyIO {
+        fn create_snapshot(&self, dir: &Path) -> Result<()> {
+            std::fs::write(dir.join(VMSTATE_FILENAME), b"spy-vmstate")?;
+            std::fs::write(dir.join(MEM_FILENAME), b"spy-mem")?;
+            Ok(())
+        }
+        fn load_snapshot_paused(&self, _dir: &Path) -> Result<()> {
+            self.calls.borrow_mut().push("load_paused");
+            Ok(())
+        }
+        fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
+            self.calls.borrow_mut().push("restored_device_model");
+            let network_interfaces = if self.nic_on_restore {
+                vec![serde_json::json!({"iface_id": "eth0", "host_dev_name": "tap0"})]
+            } else {
+                Vec::new()
+            };
+            Ok(crate::microvm::RestoredDeviceModel { network_interfaces })
+        }
+        fn resume(&self) -> Result<()> {
+            self.calls.borrow_mut().push("resume");
+            Ok(())
+        }
+        fn teardown_paused(&self) -> Result<()> {
+            self.calls.borrow_mut().push("teardown_paused");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn verify_and_resume_refuses_nic_on_restore() {
+        let _g = DataDirGuard::new();
+        pause_and_seal("vm-nic", &canned()).unwrap();
+        let spy = SpyIO::new(true);
+        let err = verify_and_resume("vm-nic", &spy).unwrap_err();
+        assert!(err.to_string().contains("device-model guard"), "got: {err}");
+        let calls = spy.calls();
+        assert!(
+            calls.contains(&"teardown_paused"),
+            "a refused restore must tear down the paused VMM: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"resume"),
+            "resume must never run when the guard refuses: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn verify_and_resume_resumes_vsock_only_restore() {
+        let _g = DataDirGuard::new();
+        pause_and_seal("vm-clean", &canned()).unwrap();
+        let spy = SpyIO::new(false);
+        verify_and_resume("vm-clean", &spy).expect("a no-NIC restore must resume");
+        let calls = spy.calls();
+        assert!(
+            calls.contains(&"resume"),
+            "a clean restore must resume: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"teardown_paused"),
+            "a clean restore must not tear down: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn load_guard_resume_ordering() {
+        let _g = DataDirGuard::new();
+        pause_and_seal("vm-order", &canned()).unwrap();
+        let spy = SpyIO::new(false);
+        verify_and_resume("vm-order", &spy).unwrap();
+        assert_eq!(
+            spy.calls(),
+            vec!["load_paused", "restored_device_model", "resume"],
+            "the guard must run strictly between load and resume"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // `guarded_load_resume` — the fork-restore path's witness. Fork restore
+    // calls this directly (no HMAC verify — its integrity is established
+    // upstream by the checkpoint lineage's content-address + audit-chain
+    // check), so these exercise the guard reached via that bare entry point
+    // rather than only through `verify_and_resume`.
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_restore_refuses_nic() {
+        let spy = SpyIO::new(true);
+        let dir = tempfile::tempdir().unwrap();
+        let err = guarded_load_resume(&spy, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("device-model guard"), "got: {err}");
+        let calls = spy.calls();
+        assert!(
+            calls.contains(&"teardown_paused"),
+            "a refused restore must tear down the paused VMM: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"resume"),
+            "resume must never run when the guard refuses: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_load_resume_resumes_when_vsock_only() {
+        let spy = SpyIO::new(false);
+        let dir = tempfile::tempdir().unwrap();
+        guarded_load_resume(&spy, dir.path()).expect("a no-NIC restore must resume");
+        let calls = spy.calls();
+        assert_eq!(
+            calls,
+            vec!["load_paused", "restored_device_model", "resume"],
+            "load, guard, then resume — in order"
+        );
     }
 
     #[test]
@@ -1263,5 +1569,201 @@ mod tests {
                 false
             });
         assert_eq!(outcome, PrimedOutcome::TimedOut);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Live warm-restore timing harness
+    //
+    // Boots a real Firecracker VM against a real KVM host, snapshots it, and
+    // times `guarded_load_resume` — the warm-restore path this module owns —
+    // so the reported number measures the actual restore code instead of a
+    // full CLI boot chase. A second test proves the guard refuses a
+    // NIC-carrying restore end-to-end. Both are `#[ignore]`d and gated on
+    // `MVM_LIVE_KERNEL`/`MVM_LIVE_ROOTFS` + `/dev/kvm`: unset or absent, the
+    // test prints a skip note and returns — a clean no-op everywhere except a
+    // KVM host with the env wired up (the controller runs these, not CI).
+    // ──────────────────────────────────────────────────────────────
+
+    /// Kernel + rootfs paths for the live warm-restore tests, read from
+    /// `MVM_LIVE_KERNEL`/`MVM_LIVE_ROOTFS`.
+    struct LiveImages {
+        kernel: PathBuf,
+        rootfs: PathBuf,
+    }
+
+    /// Env gate for the live warm-restore tests: both path env vars set AND
+    /// `/dev/kvm` present. Prints a skip note and returns `None` otherwise, so
+    /// an accidental `--ignored` run on a non-KVM host is a clean pass rather
+    /// than a failure.
+    fn live_images() -> Option<LiveImages> {
+        let kernel = std::env::var("MVM_LIVE_KERNEL").ok();
+        let rootfs = std::env::var("MVM_LIVE_ROOTFS").ok();
+        if kernel.is_none() || rootfs.is_none() || !Path::new("/dev/kvm").exists() {
+            eprintln!(
+                "skip: live warm-restore test needs MVM_LIVE_KERNEL + MVM_LIVE_ROOTFS + \
+                 /dev/kvm — not present here"
+            );
+            return None;
+        }
+        Some(LiveImages {
+            kernel: PathBuf::from(kernel.expect("checked above")),
+            rootfs: PathBuf::from(rootfs.expect("checked above")),
+        })
+    }
+
+    /// Boot the SOURCE Firecracker VM the live warm-restore tests snapshot:
+    /// the API sequence validated live (boot-source, drive, InstanceStart),
+    /// with an optional NIC inserted before InstanceStart so
+    /// `warm_restore_refuses_nic_live` can snapshot a genuinely NIC-carrying
+    /// VM. Sleeps ~1s after InstanceStart for the instance to come up.
+    ///
+    /// Deliberately no vsock device: a restored VMM must re-bind a vsock
+    /// device's recorded host-side UDS path, and remapping that path is the
+    /// production fork-restore path's job (a mount-namespace remap), not
+    /// this timing/guard harness's — the memory-load/resume cost this test
+    /// measures doesn't depend on vsock being present.
+    fn boot_live_source_vm(
+        images: &LiveImages,
+        src_dir: &Path,
+        rootfs_copy: &Path,
+        tap: Option<&str>,
+    ) -> Result<()> {
+        let src_sock = src_dir.join("fc.socket");
+        crate::microvm::start_vm_firecracker(
+            &src_dir.to_string_lossy(),
+            &src_sock.to_string_lossy(),
+        )?;
+        let sock = src_sock.to_string_lossy();
+
+        crate::microvm::api_put_socket(
+            &sock,
+            "/boot-source",
+            &crate::microvm::boot_source_body(
+                &images.kernel.to_string_lossy(),
+                "console=ttyS0 pci=off",
+                None,
+            ),
+        )?;
+        crate::microvm::api_put_socket(
+            &sock,
+            "/drives/rootfs",
+            &crate::microvm::drive_body("rootfs", &rootfs_copy.to_string_lossy(), true, false),
+        )?;
+        if let Some(tap) = tap {
+            crate::microvm::api_put_socket(
+                &sock,
+                "/network-interfaces/eth0",
+                &format!(r#"{{"iface_id":"eth0","host_dev_name":"{tap}"}}"#),
+            )?;
+        }
+        crate::microvm::api_put_socket(&sock, "/actions", r#"{"action_type":"InstanceStart"}"#)?;
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        Ok(())
+    }
+
+    /// Best-effort: kill the Firecracker process in `vm_dir` (by its
+    /// `fc.pid` file) so a live test doesn't leave a paused VMM running.
+    /// Mirrors `FirecrackerIO::teardown_paused`.
+    fn kill_live_vm(vm_dir: &Path) {
+        let pid_file = vm_dir.join("fc.pid");
+        if !pid_file.exists() {
+            return;
+        }
+        let pid_file_str = pid_file.to_string_lossy();
+        let q_pid = shell_quote(&pid_file_str);
+        let _ = run_in_vm(&format!(
+            "sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null; sleep 1"
+        ));
+    }
+
+    #[test]
+    #[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS"]
+    fn warm_restore_latency_live() {
+        let Some(images) = live_images() else {
+            return;
+        };
+
+        let base = std::env::temp_dir().join(format!("mvm-warmtest-{}", std::process::id()));
+        let src_dir = base.join("src");
+        let dest_dir = base.join("dest");
+        let snap_dir = base.join("snap");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+        std::fs::create_dir_all(&snap_dir).expect("create snap dir");
+
+        let rootfs_copy = src_dir.join("rootfs.ext4");
+        std::fs::copy(&images.rootfs, &rootfs_copy).expect("copy rootfs into writable src dir");
+
+        boot_live_source_vm(&images, &src_dir, &rootfs_copy, None).expect("boot source FC VM");
+
+        let src_sock = src_dir.join("fc.socket");
+        FirecrackerIO::new(src_sock)
+            .create_snapshot(&snap_dir)
+            .expect("create_snapshot on source VM");
+        assert!(
+            snap_dir.join(VMSTATE_FILENAME).exists(),
+            "vmstate.bin must exist after snapshot"
+        );
+        assert!(
+            snap_dir.join(MEM_FILENAME).exists(),
+            "mem.bin must exist after snapshot"
+        );
+
+        kill_live_vm(&src_dir);
+
+        // Time the warm restore — this is the number this test exists to produce.
+        let dest_io = FirecrackerIO::new(dest_dir.join("fc.socket"));
+        let t = std::time::Instant::now();
+        guarded_load_resume(&dest_io, &snap_dir).expect("warm restore must resume");
+        let ms = t.elapsed().as_millis();
+        println!("WARM_RESTORE_MS={ms}");
+
+        kill_live_vm(&dest_dir);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS/TAP"]
+    fn warm_restore_refuses_nic_live() {
+        let Some(images) = live_images() else {
+            return;
+        };
+        let Ok(tap) = std::env::var("MVM_LIVE_TAP") else {
+            eprintln!("skip: MVM_LIVE_TAP not set — NIC-refusal live test is a no-op here");
+            return;
+        };
+
+        let base = std::env::temp_dir().join(format!("mvm-warmtest-nic-{}", std::process::id()));
+        let src_dir = base.join("src");
+        let dest_dir = base.join("dest");
+        let snap_dir = base.join("snap");
+        std::fs::create_dir_all(&src_dir).expect("create src dir");
+        std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+        std::fs::create_dir_all(&snap_dir).expect("create snap dir");
+
+        let rootfs_copy = src_dir.join("rootfs.ext4");
+        std::fs::copy(&images.rootfs, &rootfs_copy).expect("copy rootfs into writable src dir");
+
+        boot_live_source_vm(&images, &src_dir, &rootfs_copy, Some(&tap))
+            .expect("boot NIC-carrying source FC VM");
+
+        let src_sock = src_dir.join("fc.socket");
+        FirecrackerIO::new(src_sock)
+            .create_snapshot(&snap_dir)
+            .expect("create_snapshot on NIC-carrying source VM");
+
+        kill_live_vm(&src_dir);
+
+        let dest_io = FirecrackerIO::new(dest_dir.join("fc.socket"));
+        let err =
+            guarded_load_resume(&dest_io, &snap_dir).expect_err("NIC restore must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("device-model guard") || msg.contains("network"),
+            "expected a device-model-guard refusal, got: {msg}"
+        );
+
+        kill_live_vm(&dest_dir);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

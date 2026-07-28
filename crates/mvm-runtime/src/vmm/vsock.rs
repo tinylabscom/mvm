@@ -130,8 +130,11 @@ impl VsockShared {
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
                 ctx.record_received(&payload[..n]);
-                ctx.add_recv(&hdr, n as u32);
-                ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                if ctx.try_add_recv(&hdr, n as u32) {
+                    ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                } else {
+                    ctx.queue_reply(&hdr, OP_RST, &[]);
+                }
             }
             super::vsock_transport::OP_CREDIT_REQUEST => {
                 ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[])
@@ -147,6 +150,12 @@ impl VsockShared {
     pub(super) fn service_host_io(&mut self) -> bool {
         let mut ctx = VsockHandlerContext::new(&mut self.transport, &mut self.lifecycle);
         self.handlers.service_host_io(&mut ctx)
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.handlers.cancel();
+        self.transport.recv_cnt.clear();
+        self.transport.pending_rx.clear();
     }
 
     pub(super) fn poll_fds(&self) -> Vec<std::os::fd::RawFd> {
@@ -257,6 +266,7 @@ impl VirtioVsock {
         if let Some(io) = self.io.take() {
             io.stop();
         }
+        self.lock().cancel();
     }
 
     pub fn received(&self) -> Vec<u8> {
@@ -307,14 +317,69 @@ impl Drop for VirtioVsock {
     }
 }
 
+/// Fuzz-only driver over the vsock [`VsockTransportCore`].
+///
+/// Exposes exactly the untrusted-guest entry points — MMIO register programming
+/// and the queue-notify service paths — so a fuzz harness can drive hostile
+/// virtqueue geometry and descriptor tables against the device without a live
+/// hypervisor or the host-I/O handlers. It is not part of the device's supported
+/// API: hidden from docs, and only reachable by the workspace-excluded fuzz
+/// crate. Everything it wraps stays crate-private.
+#[doc(hidden)]
+pub struct FuzzTransportDriver(VsockTransportCore);
+
+#[doc(hidden)]
+impl FuzzTransportDriver {
+    /// # Safety
+    /// `ram` must point to `ram_size` writable bytes mapped at `ram_base` and
+    /// stay valid (unmoved, unfreed) for the lifetime of the returned driver.
+    pub unsafe fn new(ram: *mut u8, ram_base: u64, ram_size: usize) -> Self {
+        // SAFETY: forwarded to the caller's contract.
+        Self(unsafe { VsockTransportCore::new(ram, ram_base, ram_size) })
+    }
+
+    /// Apply one MMIO register write. A write to the queue-notify register drives
+    /// the same TX/RX service dispatch the vCPU MMIO exit path runs.
+    pub fn write_register(&mut self, offset: u64, value: u64) {
+        match self.0.write_register(offset, value) {
+            RegisterWrite::None => {}
+            RegisterWrite::Notify(queue) => self.notify(queue),
+        }
+    }
+
+    /// Drive the queue-notify service paths directly (queue `1` is TX). Mirrors
+    /// the device's on-notify dispatch minus the packet handlers, which are out
+    /// of scope for the queue-geometry / descriptor-table surface.
+    pub fn notify(&mut self, queue: u32) {
+        if queue == 1 {
+            let _ = self.0.take_tx_packets();
+        }
+        let _ = self.0.flush_rx();
+    }
+
+    /// Pre-queue a host→guest packet so the RX flush path has work to service
+    /// (the RX arm of the queue-geometry divide-by-zero only runs with a
+    /// non-empty pending-RX buffer).
+    pub fn queue_host_packet(&mut self, src_port: u32, dst_port: u32, op: u16, payload: &[u8]) {
+        self.0.queue_host_packet(src_port, dst_port, op, payload);
+    }
+
+    /// Number of host→guest packets still queued — the accumulating buffer the
+    /// fuzz target observes to prove RX servicing never grows it without bound.
+    pub fn pending_rx_len(&self) -> usize {
+        self.0.pending_rx.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
+    use crate::vmm::vsock_transport::MAX_CONNECTIONS;
 
     fn dev() -> VsockShared {
-        let ram = vec![0u8; 0x1000].leak();
-        // SAFETY: leaked for the test.
+        let ram = crate::test_support::page_aligned_ram(0x1000);
+        // SAFETY: page-aligned, zeroed, leaked for the test process lifetime.
         unsafe { VsockShared::new(49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
     }
 
@@ -380,6 +445,46 @@ mod tests {
         };
         d.handle_packet(rw, b"hello");
         assert_eq!(d.lifecycle.received, b"hello");
+    }
+
+    #[test]
+    fn guest_stream_cap_returns_reset_for_a_new_identity() {
+        let mut d = dev();
+        for src_port in 0..MAX_CONNECTIONS as u32 {
+            d.handle_packet(
+                VsockHdr {
+                    src_cid: GUEST_CID,
+                    dst_cid: HOST_CID,
+                    src_port,
+                    dst_port: mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+                    len: 1,
+                    typ: TYPE_STREAM,
+                    op: OP_RW,
+                    ..Default::default()
+                },
+                b"x",
+            );
+        }
+
+        d.handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: MAX_CONNECTIONS as u32,
+                dst_port: mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+                len: 1,
+                typ: TYPE_STREAM,
+                op: OP_RW,
+                ..Default::default()
+            },
+            b"x",
+        );
+
+        assert_eq!(d.transport.pending_rx.len(), MAX_CONNECTIONS + 1);
+        assert_eq!(
+            d.transport.pending_rx.back().map(|(hdr, _)| hdr.op),
+            Some(OP_RST)
+        );
     }
 
     #[test]
@@ -463,6 +568,31 @@ mod tests {
         d.handle_packet(rw, b"93.184.216.34:80");
         assert!(d.lifecycle.received.is_empty());
         assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+    }
+
+    #[test]
+    fn teardown_cancellation_clears_vsock_state() {
+        let mut d = dev();
+        d.handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: 2000,
+                dst_port: mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+                len: 1,
+                op: OP_RW,
+                typ: TYPE_STREAM,
+                ..Default::default()
+            },
+            b"x",
+        );
+        assert!(!d.transport.recv_cnt.is_empty());
+        assert!(!d.transport.pending_rx.is_empty());
+
+        d.cancel();
+
+        assert!(d.transport.recv_cnt.is_empty());
+        assert!(d.transport.pending_rx.is_empty());
     }
 
     #[test]
@@ -694,7 +824,7 @@ mod tests {
         let mut hdr = None;
         for _ in 0..200 {
             let _ = d.service_host_io();
-            if let Some((h, _)) = d.transport.pending_rx.first() {
+            if let Some((h, _)) = d.transport.pending_rx.front() {
                 hdr = Some(*h);
                 break;
             }
@@ -754,7 +884,7 @@ mod tests {
         let mut hdr = None;
         for _ in 0..200 {
             let _ = d.service_host_io();
-            if let Some((h, _)) = d.transport.pending_rx.first() {
+            if let Some((h, _)) = d.transport.pending_rx.front() {
                 hdr = Some(*h);
                 break;
             }

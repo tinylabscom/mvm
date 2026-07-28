@@ -44,6 +44,11 @@ const ALLOWLIST: &[&str] = &[
     "rand_core",
     "thiserror",
     "thiserror-impl",
+    // The in-house VMM's rust-vmm virtio stack (virtio-queue) resolves
+    // vmm-sys-util 0.15 while the Linux KVM stack (kvm-bindings/kvm-ioctls)
+    // pins 0.12.1; the two rust-vmm families track different vmm-sys-util
+    // majors until they converge.
+    "vmm-sys-util",
     "windows-core",
     "windows-sys",
 ];

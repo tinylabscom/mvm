@@ -14,4 +14,4 @@ pub use hvf::HvfDriver;
 pub use libkrun::LibkrunDriver;
 pub use mock::{MockDriver, MockRunningVm};
 pub use spec::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
-pub use traits::{DuplexStream, RunningVm, VmmDriver};
+pub use traits::{ChildForkRequest, DuplexStream, RunningVm, VmmDriver};

@@ -15,6 +15,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3"
+arbitrary = "1"
 
 [dependencies.mvm-runtime]
 path = ".."
@@ -25,6 +26,18 @@ path = ".."
 [[bin]]
 name = "fuse_dispatch"
 path = "fuzz_targets/fuse_dispatch.rs"
+test = false
+doc = false
+bench = false
+
+# virtio-vsock queue-geometry + descriptor-table hardening guard. Feeds a random
+# RAM image plus a random register-programming sequence into the vsock transport
+# and asserts no panic / no unbounded allocation — the regression guard for the
+# validated queue-geometry gate (hostile `QueueNum` truncating to a zero
+# modulus) and the descriptor-chain bound (cyclic / oversized chains).
+[[bin]]
+name = "fuzz_virtqueue_geometry"
+path = "fuzz_targets/fuzz_virtqueue_geometry.rs"
 test = false
 doc = false
 bench = false

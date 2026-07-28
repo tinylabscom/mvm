@@ -46,7 +46,24 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// deleting the hand-rolled `sockaddr_vm` + raw-`libc`
 /// socket/connect/bind/listen/accept boilerplate — nix exposes no AF_VSOCK API
 /// without the `socket` feature. Lower it freely as deps drop.
-const CLOSURE_BUDGET: usize = 267;
+///
+/// 268 (was 267): adopting the audited `vm-memory` crate behind the in-house
+/// VMM's `GuestMem` seam (the accepted rust-vmm primitives migration). Only
+/// `vm-memory` itself is new on the default closure — its `libc`/`thiserror`
+/// tree is already present — so the measured delta is +1. Lower it freely as
+/// deps drop.
+///
+/// 271 (was 268): adopting the audited `virtio-queue` crate for the in-house
+/// VMM's virtio-vsock TX ring walk. The measured delta is +3 — `virtio-queue`,
+/// its `virtio-bindings` binding crate, and `vmm-sys-util` 0.15 (the KVM path's
+/// `vmm-sys-util` 0.12.1 stays, so the closure target counts both) — while
+/// `vm-memory`/`log` are already present. Lower it freely as deps drop.
+///
+/// 272 (was 271): adopting the audited `virtio-vsock` crate for the in-house
+/// VMM's typed vsock packet header parse/format. The measured delta is +1 —
+/// `virtio-vsock` itself — since its `virtio-bindings`/`virtio-queue`/`vm-memory`
+/// tree is already present. Lower it freely as deps drop.
+const CLOSURE_BUDGET: usize = 272;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

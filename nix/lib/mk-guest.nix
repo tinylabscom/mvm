@@ -42,6 +42,12 @@ let
   # (which alone saves ~10ms vs a glibc-linked init).
   busybox = pkgs.pkgsStatic.busybox;
 
+  # Static-musl util-linux setpriv. busybox's stripped setpriv applet lacks
+  # --reuid/--regid/--clear-groups, so /init needs the full util-linux binary
+  # to drop privilege before exec. The *static* build's runtime closure is the
+  # binary itself — no glibc — so it does not drag glibc into the rootfs.
+  setpriv = "${pkgs.pkgsStatic.util-linux}/bin/setpriv";
+
   classifyEntrypoint = ep:
     let
       hasShell    = ep ? shell;
@@ -279,9 +285,9 @@ let
   # `--regid`, and `--clear-groups` come from util-linux's full
   # setpriv binary. Invoking `/bin/busybox setpriv --reuid=…`
   # fails with `setpriv: unrecognized option: reuid=…`, killing
-  # /init at stage 2.5 before the guest agent ever forks. The
-  # Nix store path to util-linux's setpriv is baked in at build
-  # time and shipped in the rootfs's `/nix/store` closure.
+  # /init at stage 2.5 before the guest agent ever forks. We use the
+  # static-musl build (see `setpriv` above) so pulling in the full
+  # binary doesn't also pull glibc into the rootfs closure.
   #
   # The flag set is --reuid + --regid + --clear-groups + --no-new-privs.
   # uid==0 short-circuits to the bare command — no point setpriv-ing
@@ -291,7 +297,7 @@ let
     else
       # No exec: PID 1 runs the workload as a child so /init can capture $?.
       # Persistent services exec `sleep infinity` inside and never return.
-      "${pkgs.util-linux}/bin/setpriv "
+      "${setpriv} "
       + "--reuid=${toString uid} --regid=${toString uid} "
       + "--clear-groups --no-new-privs -- ${cmd}";
 
@@ -690,7 +696,7 @@ let
       /bin/busybox chmod 0644 /run/mvm/resolv.conf
       /bin/busybox mount --bind /run/mvm/resolv.conf /etc/resolv.conf
 
-      /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
+      /bin/busybox setsid ${setpriv} \
         --reuid=${toString agentUid} --regid=${toString agentUid} \
         --clear-groups --no-new-privs \
         --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
@@ -754,7 +760,7 @@ let
       else
         /bin/busybox cp /run/mvm/resolv.conf /etc/resolv.conf
       fi
-      /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
+      /bin/busybox setsid ${setpriv} \
         --reuid=${toString agentUid} --regid=${toString agentUid} \
         --clear-groups --no-new-privs \
         --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
@@ -810,11 +816,11 @@ let
       echo "mvm-init: no guest agent resolved from /mvm/runtime and no baked fallback"
       exit 1
     fi
-    # util-linux setpriv — busybox setpriv lacks --reuid /
-    # --regid / --clear-groups; see `setprivWrap` above for
-    # the full reasoning. Without this fix the agent never
-    # forks and vsock port 5252 stays unbound.
-    /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
+    # Static-musl util-linux setpriv — busybox setpriv lacks --reuid /
+    # --regid / --clear-groups; see `setprivWrap` above for the full
+    # reasoning. Without this fix the agent never forks and vsock port
+    # 5252 stays unbound. The static build keeps glibc out of the closure.
+    /bin/busybox setsid ${setpriv} \
       --reuid=${toString agentUid} --regid=${toString agentUid} \
       --clear-groups --securebits=keep-caps \
       --inh-caps=+sys_time --ambient-caps=+sys_time --no-new-privs \
@@ -1384,6 +1390,7 @@ rootfsImage.overrideAttrs (old: {
   passthru = (old.passthru or { }) // {
     mvm = mvmMeta;
     inherit rootfsTree;
+    inherit setpriv;
     # Surface the chosen hypervisor + resource defaults at the top
     # of passthru so `nix eval` is sufficient for mvmctl to drive
     # the runtime — no NixOS evaluation needed.

@@ -1,0 +1,9 @@
+# Manifest for the audit-probe example.
+# This sealed workload emits audit entries over host.audit.v1; the
+# backend's per-VM audit signer records them in ~/.mvm/audit/.
+flake = "."
+profile = "default"
+cpus = 1
+mem = "256M"
+data_disk = "0"
+net = false

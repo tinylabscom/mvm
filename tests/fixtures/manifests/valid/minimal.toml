@@ -1,0 +1,6 @@
+# Minimal valid flake-backed manifest.
+flake = "."
+profile = "default"
+cpus = 2
+mem = "1024M"
+data_disk = "0"

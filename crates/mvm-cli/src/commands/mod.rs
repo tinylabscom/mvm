@@ -5,7 +5,7 @@ mod catalog;
 mod cmd_audit;
 mod deps;
 mod dispatch;
-mod env;
+pub(crate) mod env;
 mod image;
 mod machine;
 mod manifest;
@@ -141,7 +141,7 @@ pub(in crate::commands) enum Commands {
     /// Print shell configuration (completions + dev aliases) to stdout
     #[command(hide = true)]
     ShellInit(env::shell_init::Args),
-    /// Operational / observability commands (metrics, bench, config, mcp)
+    /// Operational / observability commands (metrics, config, mcp)
     #[command(hide = true)]
     Ops(ops::group::Args),
     /// Manage named dev networks

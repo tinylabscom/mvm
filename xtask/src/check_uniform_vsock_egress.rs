@@ -86,7 +86,7 @@ const FORBIDDEN_ENUM_ARMS: &[&str] = &[
 /// `microvm/egress_bridge.rs` + `egress_redirect.rs` (held live by the hostd
 /// supervisor + Firecracker standby fleet path), the endpoint definition
 /// (`substitution_spawn.rs`) + the `mvm-hostd` supervisor + the substitution
-/// endpoint binary, and `bench_probe`.
+/// endpoint binary, and `bench/probe.rs`.
 const GUARDED_PATHS: &[&str] = &["crates/mvm-runtime/src/driver"];
 
 /// Raw egress-spawn tokens. Any of these on the guarded driver surface means a

@@ -86,11 +86,6 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "pool build substrate: backend selection",
     ),
     (
-        "commands/ops/bench/probes.rs",
-        &[Rule::AnyBackend],
-        "benchmarking substrate: backend selection",
-    ),
-    (
         "commands/build/build.rs",
         &[Rule::AnyBackend],
         "build substrate: backend selection",

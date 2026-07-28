@@ -5,9 +5,13 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::Output;
 
+use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::kernel_advisory::{KernelAdvisory, KernelPin};
 use mvm_core::kernel_format::KernelFormat;
+use mvm_core::vm_backend::StandbyHandle;
 use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId};
+use mvm_runtime::checkpoint::CheckpointStore;
+use mvm_runtime::standby_pool::SupervisorStandbyPool;
 
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
@@ -60,6 +64,57 @@ pub struct CliWorld {
     pub snapshot_source_bytes: Option<Vec<u8>>,
     /// Path of the most recently materialized instance.
     pub snapshot_instance_path: Option<PathBuf>,
+    /// Root tempdir backing the warm-claim scenario's checkpoint + snapshot
+    /// stores and standby pool. Kept alive for the scenario's duration.
+    pub warm_claim_store_root: Option<tempfile::TempDir>,
+    /// Tempdir holding the seeded parent's source rootfs + overlay sidecar.
+    pub warm_claim_src: Option<tempfile::TempDir>,
+    /// Content-addressed checkpoint store the seeded parent lives in.
+    pub warm_claim_checkpoints: Option<CheckpointStore>,
+    /// Snapshot store backing the child's copy-on-write rootfs materialize.
+    pub warm_claim_snapshots: Option<FsSnapshotStore>,
+    /// The seeded parent's checkpoint id + captured, sealed metadata.
+    pub warm_claim_parent_id: Option<CheckpointId>,
+    pub warm_claim_parent_meta: Option<CheckpointMeta>,
+    /// Whether the claim's `CheckpointChainAnchor` should report the seeded
+    /// parent as carrying a signed audit-chain creation entry.
+    pub warm_claim_parent_audited: bool,
+    /// The standby pool the seeded parent is recorded in.
+    pub warm_claim_pool: Option<SupervisorStandbyPool>,
+    /// The seeded parent's idle standby handle.
+    pub warm_claim_handle: Option<StandbyHandle>,
+    /// VM-name registry path serializing the parent reserve + child mint.
+    pub warm_claim_registry_path: Option<PathBuf>,
+    /// The outcome of the most recent `claim_standby` call.
+    pub warm_claim_outcome: Option<WarmClaimOutcome>,
+}
+
+/// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`
+/// call — either the fresh child identity a guarded fork produced, or the
+/// fail-closed refusal message, so `Then` steps assert on plain, `Send`
+/// data rather than holding VM-runner types across step boundaries.
+#[derive(Debug, Clone)]
+pub enum WarmClaimOutcome {
+    Claimed(WarmClaimWitness),
+    Refused {
+        message: String,
+        /// Whether the driver's `fork_standby_child` ran before the refusal —
+        /// must be `false` for every refusal: a fail-closed gate refuses
+        /// before any clone or boot side effect.
+        any_fork_occurred: bool,
+    },
+}
+
+/// The observable, runner-owned facts a successful guarded fork produces:
+/// a fresh child identity distinct from the parent, its cloned rootfs, and
+/// the fresh generation token delivered with the fork.
+#[derive(Debug, Clone)]
+pub struct WarmClaimWitness {
+    pub child_id: String,
+    pub child_dir_has_sidecar: bool,
+    pub child_dir_has_rootfs: bool,
+    pub fork_genid_nonzero: bool,
+    pub fork_genid_content_hash_matches_parent: bool,
 }
 
 impl fmt::Debug for CliWorld {

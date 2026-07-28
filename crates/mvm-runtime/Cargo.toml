@@ -88,6 +88,23 @@ tokio = { workspace = true, features = ["fs"] }
 fs2.workspace = true
 # DEK held in `EncryptedStorage` is zeroized on drop.
 zeroize.workspace = true
+# Audited rust-vmm guest-memory primitive behind the in-house VMM's `GuestMem`
+# seam (host-side, std-only). `VolatileSlice` wraps the externally-owned HVF/KVM
+# RAM pointer for byte access, and `backend-mmap` supplies `MmapRegion` /
+# `GuestMemoryMmap` so the validated `virtio-queue` ring walk has a `GuestMemory`
+# built (non-owning) from that same pointer. `backend-mmap` adds only `libc`,
+# which is already in the tree.
+vm-memory = { version = "0.18", default-features = false, features = ["backend-mmap"] }
+# Audited rust-vmm split-virtqueue primitive: the validated `Queue` + the
+# `ttl`/bounds-guarded `DescriptorChain` iterator drive the in-house VMM's
+# virtio-vsock TX ring walk (host-side, std-only).
+virtio-queue = "0.18"
+# Audited rust-vmm virtio-vsock primitive: the typed `VsockPacket` over the
+# `ByteValued`, little-endian `PacketHeader` layout supplies the wire-level
+# 44-byte packet header parse/format for the in-house VMM's vsock device
+# (host-side, std-only). Tracks the same 0.18 `virtio-queue`/`vm-memory` line
+# already vendored.
+virtio-vsock = "0.12"
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
