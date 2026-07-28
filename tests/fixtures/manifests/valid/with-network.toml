@@ -1,0 +1,9 @@
+# Flake-backed manifest with egress narrowing.
+flake = "."
+profile = "default"
+cpus = 1
+mem = "256M"
+net = true
+
+[network]
+allow_hosts = ["pypi.org:443", "example.com"]

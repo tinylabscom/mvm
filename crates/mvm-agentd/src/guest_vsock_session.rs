@@ -7,19 +7,29 @@
 //! host stays responsible for all admission/policy decisions.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
-
-#[cfg(target_os = "linux")]
-use std::os::fd::FromRawFd;
 
 use mvm_core::guest_netd::ConnectAck;
+
+/// Guest→host vsock stream. A native async AF_VSOCK stream on Linux guests
+/// (the only place a microVM ever runs), and a never-constructed stand-in on
+/// other hosts so the addon helper bins still `cargo check` during macOS
+/// development — there `connect` fails closed with `Unsupported` and this type
+/// is a signature placeholder that is never built.
+#[cfg(target_os = "linux")]
+pub type HostVsockStream = tokio_vsock::VsockStream;
+#[cfg(not(target_os = "linux"))]
+pub type HostVsockStream = tokio::net::TcpStream;
+
+/// CID of the host end of an AF_VSOCK link, as seen from inside a guest.
+#[cfg(target_os = "linux")]
+const HOST_CID: u32 = 2;
 
 /// One guest-initiated session to a host AF_VSOCK port.
 pub struct HostVsockSession<U> {
     upstream: U,
 }
 
-impl HostVsockSession<TcpStream> {
+impl HostVsockSession<HostVsockStream> {
     /// Dial a host AF_VSOCK stream to `port`.
     pub async fn connect(port: u32) -> std::io::Result<Self> {
         Ok(Self {
@@ -71,51 +81,30 @@ where
     }
 }
 
-/// Open a stream to the host over AF_VSOCK.
-pub async fn connect_host_vsock(port: u32) -> std::io::Result<TcpStream> {
-    tokio::task::spawn_blocking(move || connect_host_vsock_blocking(port))
-        .await
-        .map_err(|e| std::io::Error::other(format!("vsock dial task failed: {e}")))?
-}
-
+/// Open a native async AF_VSOCK stream to the host.
+///
+/// The error is left with its OS `ErrorKind` intact — a caller can still tell
+/// connect-refused / timed-out / reset apart — and carries the host CID+port as
+/// context.
 #[cfg(target_os = "linux")]
-fn connect_host_vsock_blocking(port: u32) -> std::io::Result<TcpStream> {
-    const VMADDR_CID_HOST: u32 = 2;
+pub async fn connect_host_vsock(port: u32) -> std::io::Result<HostVsockStream> {
+    use tokio_vsock::{VsockAddr, VsockStream};
 
-    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    let addr = libc::sockaddr_vm {
-        svm_family: libc::AF_VSOCK as libc::sa_family_t,
-        svm_reserved1: 0,
-        svm_port: port,
-        svm_cid: VMADDR_CID_HOST,
-        svm_zero: [0; 4],
-    };
-    let rc = unsafe {
-        libc::connect(
-            fd,
-            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
-            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
-        )
-    };
-    if rc < 0 {
-        let err = std::io::Error::last_os_error();
-        unsafe {
-            libc::close(fd);
-        }
-        return Err(err);
-    }
-
-    let stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
-    stream.set_nonblocking(true)?;
-    TcpStream::from_std(stream)
+    VsockStream::connect(VsockAddr::new(HOST_CID, port))
+        .await
+        .map_err(|err| {
+            std::io::Error::new(
+                err.kind(),
+                format!("AF_VSOCK dial to host cid={HOST_CID} port={port} failed: {err}"),
+            )
+        })
 }
 
+/// Non-Linux hosts have no AF_VSOCK guest endpoint. Fail closed so the addon
+/// helper bins compile during macOS development but never pretend to reach a
+/// host.
 #[cfg(not(target_os = "linux"))]
-fn connect_host_vsock_blocking(_port: u32) -> std::io::Result<TcpStream> {
+pub async fn connect_host_vsock(_port: u32) -> std::io::Result<HostVsockStream> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "AF_VSOCK guest dialing is only available on Linux guests",
@@ -160,5 +149,29 @@ mod tests {
         drop(client_side);
         drop(upstream_side);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_connect_ack_maps_host_byte() {
+        let (mut host_side, guest_bridge) = tokio::io::duplex(8);
+        let mut session = HostVsockSession::new(guest_bridge);
+
+        host_side
+            .write_all(&[ConnectAck::Ok.as_byte()])
+            .await
+            .unwrap();
+        assert_eq!(session.read_connect_ack().await, ConnectAck::Ok);
+
+        host_side.write_all(&[0xFF]).await.unwrap();
+        assert_eq!(session.read_connect_ack().await, ConnectAck::Fail);
+    }
+
+    #[tokio::test]
+    async fn read_connect_ack_treats_eof_as_fail() {
+        let (host_side, guest_bridge) = tokio::io::duplex(8);
+        let mut session = HostVsockSession::new(guest_bridge);
+
+        drop(host_side);
+        assert_eq!(session.read_connect_ack().await, ConnectAck::Fail);
     }
 }

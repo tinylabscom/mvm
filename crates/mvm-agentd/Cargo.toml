@@ -156,7 +156,7 @@ schema = ["dep:schemars", "mvm-core/schema"]
 # async runtime. The helper bins are separate processes launched by
 # `/init`, never linked into `mvm-guest-agent`, so gating them here costs
 # the sealed agent nothing.
-addons = ["dep:tokio", "dep:hickory-proto"]
+addons = ["dep:tokio", "dep:hickory-proto", "dep:tokio-vsock"]
 
 [dependencies]
 mvm-core.workspace = true
@@ -207,6 +207,18 @@ ipnet.workspace = true
 # async runtime. Nothing extra is needed here.
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = { workspace = true }
+# Native async AF_VSOCK stream for the guest→host dial in the addon/egress
+# helper bins. Linux-only (AF_VSOCK is a Linux guest facility) and optional so
+# it enters only the `addons` closure — the sealed agent's default tree stays
+# tokio-free. Reuses the workspace tokio.
+tokio-vsock = { version = "0.7", optional = true }
+# AF_VSOCK socket primitives for the guest's synchronous vsock leaf
+# (`vsock/sys.rs`): the forward-proxy dial, the one-shot exit reporter, and
+# the builder agent's listener share one nix-backed path instead of three
+# hand-rolled `sockaddr_vm` + raw-`libc` sites. Same 0.29 the runtime and
+# build crates already vendor; its `socket` feature pulls one small transitive
+# (`memoffset`), accounted for in the closure budget.
+nix = { version = "0.29", features = ["socket"] }
 
 [dev-dependencies]
 tempfile.workspace = true

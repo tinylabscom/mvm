@@ -50,8 +50,13 @@ fn should_retry_connect_error(err: &(dyn std::error::Error + 'static)) -> bool {
         .is_some_and(is_transient_connect_error)
 }
 
-fn read_connect_response_line(stream: &mut UnixStream) -> std::io::Result<String> {
-    const MAX_CONNECT_RESPONSE_LEN: usize = 128;
+/// Hard cap on the Firecracker `CONNECT` acknowledgement line, including its
+/// terminating newline. A well-formed `OK <port>\n` is a handful of bytes; a
+/// response that never terminates within this bound is treated as hostile or
+/// broken and refused rather than read unboundedly.
+const MAX_CONNECT_RESPONSE_LEN: usize = 128;
+
+fn read_connect_response_line<R: Read>(stream: &mut R) -> std::io::Result<String> {
     let mut response = Vec::with_capacity(16);
     let mut byte = [0_u8; 1];
 
@@ -69,6 +74,58 @@ fn read_connect_response_line(stream: &mut UnixStream) -> std::io::Result<String
             ));
         }
     }
+}
+
+/// Why a Firecracker hybrid-vsock `CONNECT` acknowledgement line was rejected.
+///
+/// A malformed acknowledgement is a definitive protocol violation, never a
+/// transient establishment hiccup, so it must fail closed with no retry — the
+/// bytes already read cannot be safely replayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+enum ConnectAckError {
+    #[error("acknowledgement line was not newline-terminated")]
+    MissingNewline,
+    #[error("acknowledgement did not start with the 'OK ' prefix")]
+    MissingOkPrefix,
+    #[error("acknowledgement carried no port number")]
+    EmptyPort,
+    #[error("port field was not a bare decimal number")]
+    PortNotDecimal,
+    #[error("port number did not fit in a u32")]
+    PortOverflow,
+}
+
+/// Parse and validate the multiplexer's `CONNECT` acknowledgement line.
+///
+/// The Firecracker vsock device answers a successful host→guest `CONNECT` with
+/// exactly `OK <port>\n`, where `<port>` is the decimal port the device
+/// assigns to the *host* end of the tunnel. That number is deliberately not
+/// the guest port we requested, so equality is not — and must not be —
+/// enforced; requiring it would reject every real acknowledgement. The
+/// returned value is the host-assigned port.
+///
+/// Every other shape is refused so a malformed or adversarial line can never
+/// be mistaken for a live tunnel: a missing `OK ` prefix, an absent port, a
+/// signed or non-decimal or overflowing number, a trailing extra token, any
+/// embedded control byte or NUL, or a line with no terminating newline. The
+/// digit scan runs before the numeric parse precisely because the standard
+/// unsigned parser would otherwise accept a leading `+` and a `-0`.
+fn parse_connect_ack(line: &str) -> Result<u32, ConnectAckError> {
+    let body = line
+        .strip_suffix('\n')
+        .ok_or(ConnectAckError::MissingNewline)?;
+    let port_field = body
+        .strip_prefix("OK ")
+        .ok_or(ConnectAckError::MissingOkPrefix)?;
+    if port_field.is_empty() {
+        return Err(ConnectAckError::EmptyPort);
+    }
+    if !port_field.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ConnectAckError::PortNotDecimal);
+    }
+    port_field
+        .parse::<u32>()
+        .map_err(|_| ConnectAckError::PortOverflow)
 }
 
 /// Single attempt to connect and perform the Firecracker CONNECT handshake.
@@ -116,13 +173,16 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
         }
     })?;
 
-    if !response_line.starts_with("OK ") {
-        bail!(
-            "Vsock CONNECT failed: expected 'OK {}', got '{}'",
-            GUEST_AGENT_PORT,
-            response_line.trim()
-        );
-    }
+    // A malformed acknowledgement means we have already exchanged application
+    // bytes with something that is not the multiplexer; fail closed here rather
+    // than admit the stream. `ConnectAckError` is not an `io::Error`, so
+    // `should_retry_connect_error` classifies it as non-transient and the
+    // caller does not retry (which would replay the CONNECT after those bytes).
+    parse_connect_ack(&response_line).map_err(|reason| {
+        anyhow::Error::new(reason).context(format!(
+            "Vsock CONNECT to port {port} was refused by the multiplexer: {response_line:?}"
+        ))
+    })?;
 
     Ok(stream)
 }
@@ -196,58 +256,10 @@ pub const HOST_CID: u32 = 2;
 /// length-prefixed frame helpers ([`read_frame`]/[`write_frame`]) work over it
 /// unchanged.
 pub fn connect_host_vsock(port: u32, timeout_secs: u64) -> Result<UnixStream> {
-    use std::os::fd::FromRawFd;
-
-    const AF_VSOCK: libc::c_int = 40;
-    // Kernel uapi `struct sockaddr_vm`: family u16 + reserved u16 + port u32 +
-    // cid u32 + 4-byte pad = 16 (== sizeof(struct sockaddr)).
-    #[repr(C)]
-    struct SockaddrVm {
-        svm_family: libc::sa_family_t,
-        svm_reserved1: u16,
-        svm_port: u32,
-        svm_cid: u32,
-        svm_zero: [u8; 4],
-    }
-    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
-
     let mut last_err = None;
     let mut stream = None;
     for attempt in 0..CONNECT_RETRIES {
-        // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; `addr` is fully
-        // initialized and sized exactly. The fd is adopted by `UnixStream` on
-        // success (closed on its drop) or closed explicitly on the error path.
-        let connect_result = unsafe {
-            let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
-            if fd < 0 {
-                Err(anyhow::Error::from(std::io::Error::last_os_error())
-                    .context("AF_VSOCK socket()"))
-            } else {
-                let addr = SockaddrVm {
-                    svm_family: AF_VSOCK as libc::sa_family_t,
-                    svm_reserved1: 0,
-                    svm_port: port,
-                    svm_cid: HOST_CID,
-                    svm_zero: [0; 4],
-                };
-                let rc = libc::connect(
-                    fd,
-                    std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
-                    std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
-                );
-                if rc < 0 {
-                    let err = std::io::Error::last_os_error();
-                    libc::close(fd);
-                    Err(anyhow::Error::from(err).context(format!(
-                        "AF_VSOCK connect to host CID {HOST_CID} port {port}"
-                    )))
-                } else {
-                    Ok(UnixStream::from_raw_fd(fd))
-                }
-            }
-        };
-
-        match connect_result {
+        match dial_host_once(port) {
             Ok(open_stream) => {
                 stream = Some(open_stream);
                 break;
@@ -277,6 +289,23 @@ pub fn connect_host_vsock(port: u32, timeout_secs: u64) -> Result<UnixStream> {
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
     Ok(stream)
+}
+
+/// One guest→host AF_VSOCK dial attempt, wrapping the leaf's owned fd as a
+/// [`UnixStream`]. The `anyhow` context carries the io::Error as its root
+/// cause so [`connect_host_vsock`]'s transient-error classifier keys on it.
+#[cfg(target_os = "linux")]
+fn dial_host_once(port: u32) -> Result<UnixStream> {
+    let fd = crate::vsock::sys::dial(HOST_CID, port)
+        .with_context(|| format!("AF_VSOCK connect to host CID {HOST_CID} port {port}"))?;
+    Ok(UnixStream::from(fd))
+}
+
+/// The guest→host vsock path is Linux-only; the workspace still compiles on
+/// macOS dev hosts, where this direction is never dialed.
+#[cfg(not(target_os = "linux"))]
+fn dial_host_once(port: u32) -> Result<UnixStream> {
+    bail!("guest→host AF_VSOCK dial to port {port} is Linux-only")
 }
 
 /// Connect to the guest vsock agent via the fleet-mode instance directory convention.
@@ -494,5 +523,203 @@ mod tests {
         stream.read_exact(&mut sentinel).unwrap();
         assert_eq!(&sentinel, b"sentinel");
         worker.join().unwrap();
+    }
+
+    /// A `Read` that hands back preconfigured chunks, then reports EOF once
+    /// drained. Lets the CONNECT read helper be exercised across arbitrary
+    /// fragmentation without a live socket.
+    struct ChunkReader {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl ChunkReader {
+        fn new<I>(chunks: I) -> Self
+        where
+            I: IntoIterator<Item = Vec<u8>>,
+        {
+            Self {
+                chunks: chunks.into_iter().collect(),
+            }
+        }
+    }
+
+    impl Read for ChunkReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some(mut chunk) = self.chunks.pop_front() else {
+                return Ok(0);
+            };
+            let n = chunk.len().min(buf.len());
+            buf[..n].copy_from_slice(&chunk[..n]);
+            if n < chunk.len() {
+                self.chunks.push_front(chunk.split_off(n));
+            }
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn parse_connect_ack_accepts_host_assigned_port() {
+        // The device answers with a *host*-assigned port, not the guest port we
+        // asked for, so any well-formed decimal is accepted on its own terms.
+        assert_eq!(parse_connect_ack("OK 12345\n"), Ok(12345));
+        assert_eq!(parse_connect_ack("OK 5252\n"), Ok(5252));
+    }
+
+    #[test]
+    fn parse_connect_ack_accepts_port_boundaries() {
+        assert_eq!(parse_connect_ack("OK 0\n"), Ok(0));
+        assert_eq!(
+            parse_connect_ack("OK 4294967295\n"),
+            Ok(u32::MAX),
+            "u32::MAX must parse"
+        );
+    }
+
+    #[test]
+    fn parse_connect_ack_rejects_missing_newline() {
+        assert_eq!(
+            parse_connect_ack("OK 5252"),
+            Err(ConnectAckError::MissingNewline)
+        );
+    }
+
+    #[test]
+    fn parse_connect_ack_rejects_missing_prefix() {
+        assert_eq!(
+            parse_connect_ack("NO 5252\n"),
+            Err(ConnectAckError::MissingOkPrefix)
+        );
+        // Case- and spacing-strict: neither variant is the literal `OK ` prefix.
+        assert_eq!(
+            parse_connect_ack("ok 5252\n"),
+            Err(ConnectAckError::MissingOkPrefix)
+        );
+        assert_eq!(
+            parse_connect_ack("OK5252\n"),
+            Err(ConnectAckError::MissingOkPrefix)
+        );
+    }
+
+    #[test]
+    fn parse_connect_ack_rejects_empty_port() {
+        assert_eq!(parse_connect_ack("OK \n"), Err(ConnectAckError::EmptyPort));
+    }
+
+    #[test]
+    fn parse_connect_ack_rejects_signed_values() {
+        // The standard unsigned parser tolerates a leading `+` and a `-0`; the
+        // digit scan must reject both before we ever reach it.
+        assert_eq!(
+            parse_connect_ack("OK -1\n"),
+            Err(ConnectAckError::PortNotDecimal)
+        );
+        assert_eq!(
+            parse_connect_ack("OK +5\n"),
+            Err(ConnectAckError::PortNotDecimal)
+        );
+        assert_eq!(
+            parse_connect_ack("OK -0\n"),
+            Err(ConnectAckError::PortNotDecimal)
+        );
+    }
+
+    #[test]
+    fn parse_connect_ack_rejects_overflow() {
+        // u32::MAX + 1, and a value far beyond any integer width.
+        assert_eq!(
+            parse_connect_ack("OK 4294967296\n"),
+            Err(ConnectAckError::PortOverflow)
+        );
+        assert_eq!(
+            parse_connect_ack("OK 99999999999999999999\n"),
+            Err(ConnectAckError::PortOverflow)
+        );
+    }
+
+    #[test]
+    fn parse_connect_ack_rejects_non_decimal() {
+        assert_eq!(
+            parse_connect_ack("OK abc\n"),
+            Err(ConnectAckError::PortNotDecimal)
+        );
+        assert_eq!(
+            parse_connect_ack("OK 0x10\n"),
+            Err(ConnectAckError::PortNotDecimal)
+        );
+    }
+
+    #[test]
+    fn parse_connect_ack_rejects_trailing_garbage() {
+        assert_eq!(
+            parse_connect_ack("OK 5252 6\n"),
+            Err(ConnectAckError::PortNotDecimal)
+        );
+        assert_eq!(
+            parse_connect_ack("OK 5252x\n"),
+            Err(ConnectAckError::PortNotDecimal)
+        );
+    }
+
+    #[test]
+    fn parse_connect_ack_rejects_embedded_control_bytes() {
+        assert_eq!(
+            parse_connect_ack("OK 52\u{0}4\n"),
+            Err(ConnectAckError::PortNotDecimal),
+            "embedded NUL"
+        );
+        assert_eq!(
+            parse_connect_ack("OK 52\t4\n"),
+            Err(ConnectAckError::PortNotDecimal),
+            "embedded tab"
+        );
+        assert_eq!(
+            parse_connect_ack("OK 5\r\n"),
+            Err(ConnectAckError::PortNotDecimal),
+            "carriage return before newline"
+        );
+    }
+
+    #[test]
+    fn read_connect_response_line_reassembles_across_reads() {
+        let mut reader = ChunkReader::new([b"OK ".to_vec(), b"525".to_vec(), b"2\n".to_vec()]);
+        let line = read_connect_response_line(&mut reader).unwrap();
+        assert_eq!(line, "OK 5252\n");
+        assert_eq!(parse_connect_ack(&line), Ok(5252));
+    }
+
+    #[test]
+    fn read_connect_response_line_reassembles_one_byte_at_a_time() {
+        let chunks = b"OK 5252\n".iter().map(|b| vec![*b]);
+        let mut reader = ChunkReader::new(chunks);
+        let line = read_connect_response_line(&mut reader).unwrap();
+        assert_eq!(line, "OK 5252\n");
+        assert_eq!(parse_connect_ack(&line), Ok(5252));
+    }
+
+    #[test]
+    fn read_connect_response_line_errors_on_eof_before_newline() {
+        let mut reader = ChunkReader::new([b"OK 52".to_vec()]);
+        let err = read_connect_response_line(&mut reader).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn read_connect_response_line_accepts_line_at_length_limit() {
+        // A line whose terminating newline lands exactly on the cap is admitted.
+        let mut line = vec![b'x'; MAX_CONNECT_RESPONSE_LEN - 1];
+        line.push(b'\n');
+        assert_eq!(line.len(), MAX_CONNECT_RESPONSE_LEN);
+        let mut reader = ChunkReader::new([line.clone()]);
+        let got = read_connect_response_line(&mut reader).unwrap();
+        assert_eq!(got.len(), MAX_CONNECT_RESPONSE_LEN);
+    }
+
+    #[test]
+    fn read_connect_response_line_rejects_line_over_length_limit() {
+        // The cap is reached by non-newline bytes before any terminator.
+        let over = vec![b'x'; MAX_CONNECT_RESPONSE_LEN];
+        let mut reader = ChunkReader::new([over]);
+        let err = read_connect_response_line(&mut reader).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

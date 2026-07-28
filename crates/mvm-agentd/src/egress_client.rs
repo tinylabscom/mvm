@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
-use crate::guest_vsock_session::HostVsockSession;
+use crate::guest_vsock_session::{HostVsockSession, HostVsockStream};
 use mvm_core::guest_netd::ConnectAck;
 use mvm_core::socks5_udp::{self, Datagram};
 
@@ -541,7 +541,9 @@ where
     Ok(body)
 }
 
-async fn connect_to_host_egress(target: &str) -> std::io::Result<HostVsockSession<TcpStream>> {
+async fn connect_to_host_egress(
+    target: &str,
+) -> std::io::Result<HostVsockSession<HostVsockStream>> {
     let target_line = format!("{target}\n");
     HostVsockSession::connect(configured_egress_vsock_port())
         .await?

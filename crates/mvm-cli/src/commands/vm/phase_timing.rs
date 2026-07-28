@@ -119,6 +119,49 @@ impl RunPhaseTimings {
     }
 }
 
+/// p50 latency budget for a warm-started run's hot-start window (backend
+/// boot + boot-to-agent-reachable). Tighter than [`DISPATCH_BAR_MS`], which
+/// bounds dispatch-window regressions on any run regardless of warm/cold
+/// origin — this is the target a claimed warm start must clear.
+///
+/// Unused outside this module's tests until the warm-start measurement
+/// harness that consumes it lands.
+#[allow(dead_code)]
+pub const WARM_START_P50_BUDGET_MS: u64 = 30;
+
+/// Comparison of a warm-started run's hot-start latency against a cold
+/// run's: whether the warm run clears the [`WARM_START_P50_BUDGET_MS`]
+/// budget, and how much faster it was.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+pub struct WarmVsColdReport {
+    pub warm_hot_ms: u64,
+    pub cold_hot_ms: u64,
+    pub clears_slo: bool,
+    pub speedup: f64,
+}
+
+/// Compare a warm-started run's hot-start latency against a cold run's.
+/// Hot-start latency is [`RunPhaseTimings::dispatch_window_ms`] — backend
+/// boot plus boot-to-agent-reachable, the part a warm start improves.
+/// Pure: reads only the two timings, no clock or I/O.
+#[allow(dead_code)]
+pub fn warm_vs_cold(warm: &RunPhaseTimings, cold: &RunPhaseTimings) -> WarmVsColdReport {
+    let warm_hot_ms = warm.dispatch_window_ms().round() as u64;
+    let cold_hot_ms = cold.dispatch_window_ms().round() as u64;
+    let speedup = if warm_hot_ms == 0 {
+        f64::INFINITY
+    } else {
+        cold_hot_ms as f64 / warm_hot_ms as f64
+    };
+    WarmVsColdReport {
+        warm_hot_ms,
+        cold_hot_ms,
+        clears_slo: warm_hot_ms <= WARM_START_P50_BUDGET_MS,
+        speedup,
+    }
+}
+
 /// Whether phase timing is enabled, pure over the raw env value so the gate
 /// is testable without mutating process env.
 fn timing_enabled_from(value: Option<&str>) -> bool {
@@ -278,5 +321,38 @@ mod tests {
         assert!(!timing_enabled_from(Some("")));
         assert!(!timing_enabled_from(Some("yes")));
         assert!(!timing_enabled_from(None));
+    }
+
+    #[test]
+    fn warm_vs_cold_clears_slo_when_hot_under_budget() {
+        let warm = timings_with_dispatch_window(15.0, 10.0); // hot = 25ms
+        let cold = timings_with_dispatch_window(370.0, 30.0); // hot = 400ms
+        let report = warm_vs_cold(&warm, &cold);
+        assert_eq!(report.warm_hot_ms, 25);
+        assert_eq!(report.cold_hot_ms, 400);
+        assert!(
+            report.clears_slo,
+            "25ms warm hot-start must clear the 30ms budget"
+        );
+        approx(report.speedup, 16.0);
+    }
+
+    #[test]
+    fn warm_vs_cold_fails_slo_when_hot_over_budget() {
+        let warm = timings_with_dispatch_window(45.0, 0.0); // hot = 45ms
+        let cold = timings_with_dispatch_window(370.0, 30.0);
+        let report = warm_vs_cold(&warm, &cold);
+        assert!(
+            !report.clears_slo,
+            "45ms warm hot-start must miss the 30ms budget"
+        );
+    }
+
+    #[test]
+    fn warm_vs_cold_speedup_infinite_when_warm_zero() {
+        let warm = timings_with_dispatch_window(0.0, 0.0); // hot = 0ms
+        let cold = timings_with_dispatch_window(370.0, 30.0);
+        let report = warm_vs_cold(&warm, &cold);
+        assert!(report.speedup.is_infinite());
     }
 }

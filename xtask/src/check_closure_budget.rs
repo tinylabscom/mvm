@@ -38,7 +38,15 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// `x25519-dalek` for ephemeral host↔guest key agreement; the three-crate
 /// increase is the measured cost of keeping that security boundary in the
 /// default control path.
-const CLOSURE_BUDGET: usize = 266;
+///
+/// 267 (was 266): consolidating the guest's three hand-rolled AF_VSOCK sites
+/// onto one `nix::sys::socket` leaf enables nix's `socket` feature, whose lone
+/// build-time transitive (`memoffset`, an `offset_of!` helper with no further
+/// deps) enters the default Linux closure. That one crate is the cost of
+/// deleting the hand-rolled `sockaddr_vm` + raw-`libc`
+/// socket/connect/bind/listen/accept boilerplate — nix exposes no AF_VSOCK API
+/// without the `socket` feature. Lower it freely as deps drop.
+const CLOSURE_BUDGET: usize = 267;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

@@ -1,0 +1,12 @@
+# Valid image-backed manifest with dev overrides.
+image = "alpine:3.20"
+cpus = 2
+mem = "512M"
+net = true
+
+[network]
+allow_hosts = ["api.example.com:443"]
+
+[dev]
+volumes = ["./src:/work/src:ro"]
+init = ["echo ready"]

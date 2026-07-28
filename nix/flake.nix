@@ -197,5 +197,48 @@
           internal-minimal-runner =
             (mkProfile system "minimal").config.microvm.declaredRunner;
         });
+
+      # ── CI-provable no-glibc closure gate ─────────────────────────
+      #
+      # The guest's `setpriv` is static-musl (`pkgs.pkgsStatic.util-linux`),
+      # which drops glibc from the mkGuest rootfs closure. This check
+      # realizes that closure and fails if glibc re-enters it — a
+      # build-backed guarantee a pure `nix eval` can't provide, since
+      # eval can't see a derivation's runtime closure. Wired into the
+      # `nix-flake-check` CI job.
+      #
+      # Scope: this covers only the baked rootfs tree that ships inside
+      # the guest image (busybox, init, setpriv, and friends). It does
+      # not cover the runtime overlay that gets bind-mounted into the
+      # guest at boot, which still carries its own glibc today; that
+      # gets addressed separately. A green result here means the baked
+      # tree is glibc-free, not the whole running guest.
+      checks = nixpkgs.lib.genAttrs systems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          guest = (libFor { inherit system; }).mkGuest {
+            name = "lean-rootfs-probe";
+            entrypoint.command = [ "/bin/true" ];
+          };
+        in
+        {
+          # The mkGuest rootfs is static-musl only. If the glibc package
+          # enters its closure, this build fails — the guest privilege-drop
+          # setpriv and every other rootfs binary must stay static. The grep
+          # is hash-anchored (/nix/store/<hash>-glibc…) so it matches only the
+          # glibc package's own store path, never a derivation whose name
+          # merely contains "glibc" (e.g. the probe rootfs tree itself).
+          guest-rootfs-no-glibc =
+            pkgs.runCommand "guest-rootfs-no-glibc"
+              { closure = pkgs.closureInfo { rootPaths = [ guest.passthru.rootfsTree ]; }; }
+              ''
+                if grep -Eq -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths"; then
+                  echo "glibc present in guest rootfs closure:" >&2
+                  grep -E -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths" >&2
+                  exit 1
+                fi
+                echo ok > "$out"
+              '';
+        });
     };
 }

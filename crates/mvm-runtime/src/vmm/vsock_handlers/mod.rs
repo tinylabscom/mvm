@@ -1,8 +1,9 @@
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::os::fd::RawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
 use super::agent_bridge::AgentBridge;
@@ -45,8 +46,8 @@ impl<'a> VsockHandlerContext<'a> {
         }
     }
 
-    pub(crate) fn add_recv(&mut self, inbound: &VsockHdr, n: u32) {
-        self.transport.add_recv(inbound, n);
+    pub(crate) fn try_add_recv(&mut self, inbound: &VsockHdr, n: u32) -> bool {
+        self.transport.try_add_recv(inbound, n)
     }
 
     pub(crate) fn remove_recv(&mut self, host_port: u32, guest_port: u32) {
@@ -303,8 +304,11 @@ impl GuestPortHandler for WorkloadExitHandler {
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
                 ctx.record_workload_exit(&payload[..n]);
-                ctx.add_recv(&hdr, n as u32);
-                ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                if ctx.try_add_recv(&hdr, n as u32) {
+                    ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                } else {
+                    ctx.queue_reply(&hdr, OP_RST, &[]);
+                }
             }
             OP_CREDIT_REQUEST => ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]),
             OP_SHUTDOWN => {
@@ -340,17 +344,23 @@ impl GuestPortHandler for StreamRelayHandler {
             OP_REQUEST => ctx.queue_reply(&hdr, OP_RESPONSE, &[]),
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
+                if !ctx.try_add_recv(&hdr, n as u32) {
+                    self.bridge.close_connection(hdr.src_port);
+                    self.headers.remove(&hdr.src_port);
+                    ctx.queue_reply(&hdr, OP_RST, &[]);
+                    return;
+                }
                 match self.bridge.relay_guest_bytes(hdr.src_port, &payload[..n]) {
                     EndpointRelayAction::Relayed => {
                         self.headers.insert(hdr.src_port, hdr);
                         ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
                     }
                     EndpointRelayAction::Refused => {
+                        ctx.remove_recv(hdr.dst_port, hdr.src_port);
                         self.headers.remove(&hdr.src_port);
                         ctx.queue_reply(&hdr, OP_RST, &[]);
                     }
                 }
-                ctx.add_recv(&hdr, n as u32);
             }
             OP_CREDIT_REQUEST => ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]),
             OP_SHUTDOWN => {
@@ -411,8 +421,12 @@ impl HostInitiatedHandler for AgentVsockHandler {
             OP_RESPONSE => self.bridge.on_established(hdr.dst_port),
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
+                if !ctx.try_add_recv(&hdr, n as u32) {
+                    self.bridge.close(hdr.dst_port);
+                    ctx.queue_reply(&hdr, OP_RST, &[]);
+                    return;
+                }
                 self.bridge.write_to_host(hdr.dst_port, &payload[..n]);
-                ctx.add_recv(&hdr, n as u32);
                 ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
             }
             OP_SHUTDOWN | OP_RST => {
@@ -486,8 +500,12 @@ impl HostInitiatedHandler for ConsoleVsockHandler {
             OP_RESPONSE => self.bridge.on_established(hdr.dst_port),
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
+                if !ctx.try_add_recv(&hdr, n as u32) {
+                    self.bridge.close(hdr.dst_port);
+                    ctx.queue_reply(&hdr, OP_RST, &[]);
+                    return;
+                }
                 self.bridge.write_to_host(hdr.dst_port, &payload[..n]);
-                ctx.add_recv(&hdr, n as u32);
                 ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
             }
             OP_SHUTDOWN | OP_RST => {
@@ -514,15 +532,25 @@ impl HostInitiatedHandler for ConsoleVsockHandler {
     }
 }
 
+/// Resolved `MVM_HVF_AGENT_DEBUG` trace-file path, read from the environment once
+/// and cached — the per-packet drain path must not take the process-global env
+/// lock on every call.
+fn agent_debug_path() -> Option<&'static Path> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os("MVM_HVF_AGENT_DEBUG").map(PathBuf::from))
+        .as_deref()
+}
+
 fn agent_dbg(msg: &str) {
-    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") {
-        use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(f, "[agent-bridge] {msg}");
-        }
+    let Some(path) = agent_debug_path() else {
+        return;
+    };
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[agent-bridge] {msg}");
     }
 }

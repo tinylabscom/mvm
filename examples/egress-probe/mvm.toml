@@ -1,0 +1,10 @@
+# Manifest for the egress-probe example.
+# This one-shot sealed workload probes outbound TCP connectivity.
+# Networking is enabled because the probe's whole purpose is to test
+# egress allow/deny enforcement.
+flake = "."
+profile = "default"
+cpus = 1
+mem = "256M"
+data_disk = "0"
+net = true

@@ -1,0 +1,9 @@
+# Manifest for the sleeper example.
+# This is a sealed (prod) workload that never exits, useful for live-VM
+# validation (checkpoint / fork / pause / resume / guest-agent probes).
+flake = "."
+profile = "default"
+cpus = 1
+mem = "256M"
+data_disk = "0"
+net = false

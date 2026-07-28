@@ -12,8 +12,17 @@
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use super::guest_mem::GuestMem;
+
+/// Whether the per-descriptor virtio trace is enabled (`MVM_HVF_VIRTIO_DEBUG`).
+/// Read from the environment once and cached — the request/descriptor hot path
+/// must not take the process-global env lock per descriptor.
+fn virtio_debug() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MVM_HVF_VIRTIO_DEBUG").is_some())
+}
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt"
 const VIRTIO_VERSION: u32 = 2;
@@ -46,7 +55,6 @@ const R_QUEUE_DEVICE_HI: u64 = 0x0a4;
 const R_CONFIG: u64 = 0x100; // block config: capacity (u64 sectors) at +0
 
 const MMIO_LEN: u64 = 0x200;
-const QUEUE_SIZE_MAX: u32 = 256;
 const SECTOR: u64 = 512;
 
 const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -263,7 +271,7 @@ impl VirtioBlk {
             R_DEVICE_FEATURES if self.device_features_sel == 1 => 1,
             R_DEVICE_FEATURES if self.disk.read_only() => VIRTIO_BLK_F_RO,
             R_DEVICE_FEATURES => 0,
-            R_QUEUE_NUM_MAX => QUEUE_SIZE_MAX,
+            R_QUEUE_NUM_MAX => super::QUEUE_SIZE_MAX,
             R_QUEUE_READY => self.queue_ready,
             R_INTERRUPT_STATUS => self.interrupt_status,
             R_STATUS => self.status,
@@ -302,12 +310,14 @@ impl VirtioBlk {
     /// Drain the available ring, servicing each block request. Returns whether
     /// any request completed (and thus the guest needs an interrupt).
     fn process_queue(&mut self) -> bool {
-        if self.queue_ready == 0 || self.queue_num == 0 {
+        if self.queue_ready == 0 {
             return false;
         }
-        let qsz = self.queue_num as u16;
+        let Some(qsz) = super::validated_queue_size(self.queue_num) else {
+            return false;
+        };
         let avail_idx = self.rd_u16(self.avail + 2);
-        let debug = std::env::var_os("MVM_HVF_VIRTIO_DEBUG").is_some();
+        let debug = virtio_debug();
         if debug {
             eprintln!(
                 "virtio: notify qsz={qsz} ready={} avail_idx={avail_idx} last_avail={} desc={:#x} avail={:#x} used={:#x}",
@@ -350,7 +360,7 @@ impl VirtioBlk {
         // request header: type u32 @0, reserved u32 @4, sector u64 @8.
         let req_type = self.rd_u32(hdr_addr);
         let mut sector = self.rd_u64(hdr_addr + 8);
-        if std::env::var_os("MVM_HVF_VIRTIO_DEBUG").is_some() {
+        if virtio_debug() {
             eprintln!("virtio:   req hdr@{hdr_addr:#x} type={req_type} sector={sector}");
         }
 
@@ -371,7 +381,7 @@ impl VirtioBlk {
             let addr = self.rd_u64(da);
             let len = self.rd_u32(da + 8);
             let dflags = self.rd_u16(da + 12);
-            if std::env::var_os("MVM_HVF_VIRTIO_DEBUG").is_some() {
+            if virtio_debug() {
                 eprintln!("virtio:     desc[{next}] addr={addr:#x} len={len} flags={dflags:#x}");
             }
             if dflags & VIRTQ_DESC_F_NEXT == 0 {
@@ -544,7 +554,7 @@ impl VirtioFs {
             // Only VIRTIO_F_VERSION_1 (high feature word); no low-word features.
             R_DEVICE_FEATURES if self.device_features_sel == 1 => 1,
             R_DEVICE_FEATURES => 0,
-            R_QUEUE_NUM_MAX => QUEUE_SIZE_MAX,
+            R_QUEUE_NUM_MAX => super::QUEUE_SIZE_MAX,
             R_QUEUE_READY => self.q().ready,
             R_INTERRUPT_STATUS => self.interrupt_status,
             R_STATUS => self.status,
@@ -605,10 +615,12 @@ impl VirtioFs {
             return false;
         }
         let q = self.queues[qidx];
-        if q.ready == 0 || q.num == 0 {
+        if q.ready == 0 {
             return false;
         }
-        let qsz = q.num as u16;
+        let Some(qsz) = super::validated_queue_size(q.num) else {
+            return false;
+        };
         let avail_idx = self.mem.rd_u16(q.avail + 2);
         let mut last_avail = q.last_avail;
         let mut serviced = false;
@@ -953,5 +965,86 @@ mod tests {
         let mut w = dev(vec![0u8; 512]);
         w.write(R_DEVICE_FEATURES_SEL, 0);
         assert_eq!(w.read(R_DEVICE_FEATURES) as u32, 0);
+    }
+
+    /// Queue sizes a hostile guest can program that are illegal geometry: zero,
+    /// values whose low 16 bits are zero (which truncate to a zero `u16`), and
+    /// sizes above the advertised maximum or not a power of two.
+    const ILLEGAL_QUEUE_SIZES: [u32; 6] = [0, 0x1_0000, 0x2_0000, 0xffff_0000, 300, 512];
+
+    /// Program a virtio-blk request queue with raw `QueueNum` and an `avail_idx`
+    /// of 1 (so the drain loop body, which indexes with `last % qsz`, runs), then
+    /// notify. Returns whether the device signalled an interrupt (serviced the
+    /// ring). Must never panic.
+    fn blk_notify_with_queue_num(num: u32) -> bool {
+        const BASE: u64 = 0x4000_0000;
+        let mut ram = vec![0u8; 0x10000];
+        ram[0x2002..0x2004].copy_from_slice(&1u16.to_le_bytes());
+        // SAFETY: ram outlives the device for the duration of this call.
+        let mut d = unsafe {
+            VirtioBlk::new(
+                0x0a00_0000,
+                48,
+                ram.as_mut_ptr(),
+                BASE,
+                ram.len(),
+                DiskImage::mem(vec![0u8; 4096]),
+            )
+        };
+        d.write(R_QUEUE_NUM, u64::from(num));
+        d.write(R_QUEUE_DESC_LO, (BASE + 0x1000) & 0xffff_ffff);
+        d.write(R_QUEUE_DRIVER_LO, (BASE + 0x2000) & 0xffff_ffff);
+        d.write(R_QUEUE_DEVICE_LO, (BASE + 0x3000) & 0xffff_ffff);
+        d.write(R_QUEUE_READY, 1);
+        d.write(R_QUEUE_NOTIFY, 0)
+    }
+
+    #[test]
+    fn virtio_blk_rejects_queue_size_that_truncates_to_zero() {
+        assert!(!blk_notify_with_queue_num(0x1_0000));
+    }
+
+    #[test]
+    fn virtio_blk_rejects_illegal_queue_geometry() {
+        for num in ILLEGAL_QUEUE_SIZES {
+            assert!(
+                !blk_notify_with_queue_num(num),
+                "blk queue size {num:#x} must not be serviced"
+            );
+        }
+    }
+
+    /// Program the virtio-fs request queue (index 1) with raw `QueueNum` and an
+    /// `avail_idx` of 1, then notify. Returns whether an interrupt was signalled.
+    /// Must never panic.
+    fn fs_notify_with_queue_num(num: u32) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ram = vec![0u8; 0x10000];
+        ram[0x2002..0x2004].copy_from_slice(&1u16.to_le_bytes());
+        let ptr = ram.as_mut_ptr();
+        // SAFETY: ram outlives fs for the duration of this call.
+        let mut fs = unsafe { VirtioFs::new(0, 5, ptr, 0, ram.len(), dir.path().to_path_buf()) };
+        fs.write(R_QUEUE_SEL, 1);
+        fs.write(R_QUEUE_NUM, u64::from(num));
+        fs.write(R_QUEUE_DESC_LO, 0x1000);
+        fs.write(R_QUEUE_DRIVER_LO, 0x2000);
+        fs.write(R_QUEUE_DEVICE_LO, 0x3000);
+        fs.write(R_QUEUE_READY, 1);
+        fs.write(R_QUEUE_NOTIFY, 1)
+    }
+
+    #[test]
+    fn virtio_fs_rejects_queue_size_that_truncates_to_zero() {
+        assert!(!fs_notify_with_queue_num(0x1_0000));
+    }
+
+    #[test]
+    fn virtio_fs_rejects_illegal_queue_geometry() {
+        for num in ILLEGAL_QUEUE_SIZES {
+            assert!(
+                !fs_notify_with_queue_num(num),
+                "fs queue size {num:#x} must not be serviced"
+            );
+        }
     }
 }

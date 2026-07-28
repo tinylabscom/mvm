@@ -19,6 +19,10 @@ mod request_policy;
 mod response;
 mod response_payloads;
 mod rpc;
+/// AF_VSOCK socket primitives shared by the guest's synchronous vsock sites
+/// (forward-proxy dial, exit reporter, builder-agent listener). Linux-only;
+/// an empty module elsewhere. Public so the one-shot guest bins can reach it.
+pub mod sys;
 mod verb_grant;
 
 pub use api::{
