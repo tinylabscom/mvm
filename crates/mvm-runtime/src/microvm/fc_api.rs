@@ -6,14 +6,15 @@
 //! critical section, which is a meaningful share of the restore latency budget.
 //!
 //! This talks to the socket directly. The wire format is small enough to build
-//! and parse by hand, so it costs no dependency: one request per connection
-//! with `Connection: close`, which means the response body is "everything until
-//! EOF" and no keep-alive or chunked-transfer state machine is needed.
+//! and parse by hand, so it costs no dependency: one request per connection.
+//! Firecracker replies with `Connection: keep-alive` even when asked to close,
+//! so the response body is read using `Content-Length` (or treated as empty for
+//! 204 responses) rather than waiting for EOF.
 //!
 //! Request building and response parsing are pure functions so the wire format
 //! is unit-testable without a live VMM.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -44,8 +45,9 @@ impl FcResponse {
 
 /// Serialize a request. `body` is sent as JSON when present.
 ///
-/// `Connection: close` is deliberate — it lets the reader treat EOF as the end
-/// of the body rather than tracking keep-alive framing.
+/// `Connection: close` is sent to discourage keep-alive, but Firecracker
+/// currently replies with `Connection: keep-alive` anyway, so the reader
+/// must parse `Content-Length` rather than rely on EOF delimiting.
 fn build_request(method: &str, path: &str, body: Option<&str>) -> Vec<u8> {
     let mut req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n"
@@ -66,17 +68,11 @@ fn build_request(method: &str, path: &str, body: Option<&str>) -> Vec<u8> {
 
 /// Parse a raw HTTP/1.1 response into its status and body.
 ///
-/// Tolerates a body that is absent (204 and most Firecracker PUTs) and does not
-/// require `Content-Length`, since the connection close delimits the body.
-fn parse_response(raw: &[u8]) -> Result<FcResponse> {
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .context("malformed HTTP response: no header/body separator")?;
-    let head = std::str::from_utf8(&raw[..split])
-        .context("malformed HTTP response: headers are not valid UTF-8")?;
-    let body = String::from_utf8_lossy(&raw[split + 4..]).into_owned();
-
+/// Tolerates a body that is absent (204 and most Firecracker PUTs). When a
+/// `Content-Length` header is present the caller reads exactly that many body
+/// bytes; when it is absent the body is treated as empty. Firecracker keeps the
+/// connection alive even after a 204, so EOF cannot be used as a delimiter.
+fn parse_response(head: &str, body: &[u8]) -> Result<FcResponse> {
     let status_line = head
         .lines()
         .next()
@@ -89,7 +85,47 @@ fn parse_response(raw: &[u8]) -> Result<FcResponse> {
         .parse()
         .with_context(|| format!("malformed HTTP response: bad status line {status_line:?}"))?;
 
+    let body = String::from_utf8_lossy(body).into_owned();
     Ok(FcResponse { status, body })
+}
+
+/// Read the response head up to and including the terminal `\r\n\r\n`.
+fn read_head(reader: &mut impl BufRead) -> Result<String> {
+    let mut head = Vec::new();
+    reader
+        .read_until(b'\n', &mut head)
+        .with_context(|| "reading Firecracker response status line")?;
+    if head.is_empty() {
+        bail!("Firecracker closed connection before sending a response");
+    }
+    loop {
+        let mut line = Vec::new();
+        reader
+            .read_until(b'\n', &mut line)
+            .with_context(|| "reading Firecracker response header")?;
+        if line.is_empty() {
+            bail!("Firecracker closed connection while reading headers");
+        }
+        head.extend_from_slice(&line);
+        if line == b"\r\n" || line == b"\n" {
+            break;
+        }
+    }
+    String::from_utf8(head).context("Firecracker response headers are not valid UTF-8")
+}
+
+/// Extract the `Content-Length` value from a response header block, if present.
+fn content_length(head: &str) -> Option<usize> {
+    head.lines().find_map(|line| {
+        let mut parts = line.splitn(2, ':');
+        let name = parts.next()?;
+        if name.eq_ignore_ascii_case("Content-Length") {
+            let value = parts.next()?.trim();
+            value.parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// Send one request to the Firecracker API socket and read the response.
@@ -111,12 +147,28 @@ fn round_trip(socket: &Path, method: &str, path: &str, body: Option<&str>) -> Re
         .flush()
         .with_context(|| format!("flushing {method} {path} to Firecracker"))?;
 
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .with_context(|| format!("reading Firecracker response to {method} {path}"))?;
+    // Firecracker keeps connections alive even when asked to close them, so the
+    // response must be framed by its headers rather than by EOF. A bodied
+    // response always carries `Content-Length`; a 204 has no body. If neither
+    // applies, fall back to reading until the server closes the connection.
+    let mut reader = BufReader::new(stream);
+    let head = read_head(&mut reader)
+        .with_context(|| format!("reading Firecracker response headers to {method} {path}"))?;
+    let body_len = content_length(&head);
+    let mut body_buf = Vec::new();
+    if let Some(len) = body_len {
+        body_buf.resize(len, 0);
+        reader
+            .read_exact(&mut body_buf)
+            .with_context(|| format!("reading Firecracker response body to {method} {path}"))?;
+    } else if parse_response(&head, &[])?.status != 204 {
+        reader
+            .read_to_end(&mut body_buf)
+            .with_context(|| format!("reading Firecracker response body to {method} {path}"))?;
+    }
 
-    parse_response(&raw).with_context(|| format!("parsing Firecracker response to {method} {path}"))
+    parse_response(&head, &body_buf)
+        .with_context(|| format!("parsing Firecracker response to {method} {path}"))
 }
 
 /// Call the Firecracker API, failing on any non-2xx status.
@@ -182,16 +234,18 @@ mod tests {
 
     #[test]
     fn parse_response_reads_status_and_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"vcpu_count\":2}";
-        let resp = parse_response(raw).unwrap();
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
+        let body = br#"{\"vcpu_count\":2}"#;
+        let resp = parse_response(head, body).unwrap();
         assert_eq!(resp.status, 200);
-        assert_eq!(resp.body, r#"{"vcpu_count":2}"#);
+        assert_eq!(resp.body, r#"{\"vcpu_count\":2}"#);
     }
 
     /// Firecracker answers most PUT/PATCH calls with an empty 204.
     #[test]
     fn parse_response_handles_empty_body() {
-        let resp = parse_response(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap();
+        let head = "HTTP/1.1 204 No Content\r\n\r\n";
+        let resp = parse_response(head, &[]).unwrap();
         assert_eq!(resp.status, 204);
         assert_eq!(resp.body, "");
         assert!(resp.is_success());
@@ -199,23 +253,31 @@ mod tests {
 
     #[test]
     fn parse_response_surfaces_error_status() {
-        let raw = b"HTTP/1.1 400 Bad Request\r\n\r\n{\"fault_message\":\"nope\"}";
-        let resp = parse_response(raw).unwrap();
+        let head = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        let body = br#"{\"fault_message\":\"nope\"}"#;
+        let resp = parse_response(head, body).unwrap();
         assert_eq!(resp.status, 400);
         assert!(!resp.is_success());
     }
 
     #[test]
     fn parse_response_rejects_garbage() {
-        assert!(parse_response(b"not http at all").is_err());
+        assert!(parse_response("not http at all", &[]).is_err());
         assert!(
-            parse_response(b"HTTP/1.1\r\n\r\n").is_err(),
+            parse_response("HTTP/1.1\r\n\r\n", &[]).is_err(),
             "no status code"
         );
     }
 
-    /// Serve one canned response on a real Unix socket, so the client is
-    /// exercised end to end — connect, write, read, parse — without a VMM.
+    #[test]
+    fn content_length_parses_header_case_insensitively() {
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\n";
+        assert_eq!(content_length(head), Some(17));
+        let head_lower = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
+        assert_eq!(content_length(head_lower), Some(0));
+        let head_missing = "HTTP/1.1 204 No Content\r\n\r\n";
+        assert_eq!(content_length(head_missing), None);
+    }
     fn serve_once(
         dir: &Path,
         response: &'static str,
