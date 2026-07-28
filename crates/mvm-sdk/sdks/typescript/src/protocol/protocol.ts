@@ -665,9 +665,9 @@ not_after: string
 plan_nonce: Nonce
 session_id: string
 /**
- * Raw Ed25519 signature bytes (64) over signing_bytes(); serialized as a JSON array.
+ * Raw Ed25519 signature bytes (64) over signing_bytes(), serialized as base64. A `Vec<u8>` would otherwise render as a JSON array of 64 decimal numbers — roughly 230 characters against base64's 88 — and this grant rides the guest kernel cmdline, where the budget is finite and silently enforced. `sig` is excluded from `signing_bytes`, so how it is encoded cannot affect signature validity.
  */
-sig: number[]
+sig: string
 verbs: VerbId[]
 }
 /**
