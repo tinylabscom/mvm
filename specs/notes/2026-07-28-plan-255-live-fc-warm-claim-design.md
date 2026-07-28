@@ -13,26 +13,45 @@ checkpoint; `claim_standby` forks a fresh, admitted, audited child that
 actually boots on real Firecracker. Backend order is FC now, then HVF, then
 libkrun.
 
-## Non-goals (explicit)
+## CORRECTION (2026-07-28) — this note's original scoping was wrong
 
-- **Sub-second restore.** The child is a **cold boot** from the CoW-cloned
-  parent rootfs, not a memory restore. Firecracker memory restore is
-  hard-disabled (`microvm/snapshot.rs`: `warm_restore_instance*`,
-  `restore_from_template_snapshot` all `bail!`) pending Plan 265's re-enable
-  behind the no-NIC + VMGenID guards. See "Convergence to sub-second" below.
-- **HVF / libkrun live forks.** Separate follow-on slices.
-- **Any change to the guarded-claim core.** Admission, lineage verify, CoW
-  rootfs, identity minting, and audit emit are unchanged from the substrate.
+The sections below were written against a **stale checkout** and asserted that
+Firecracker memory restore was hard-disabled. It is not. Commit `5bfe4c426`
+landed the restore un-bail *before* this branch was created:
 
-## Why cold-boot first is honest about value
+- `warm_restore_instance_from_path` (`microvm/snapshot.rs:87`) is **live** —
+  validates the VM name, runs `guarded_load_resume` (which enforces the no-NIC
+  device-model guard between load and resume), and delivers the VMGenID reseed.
+- `capture_vm_full` (`checkpoint/mod.rs:545`) and `fork_vm_full_fc` (`:406`)
+  are live; `FcForkRestorer` (`firecracker.rs:436`) wires the rename +
+  device-anchor remap.
+- Only `restore_from_template_snapshot` and the bare `warm_restore_instance`
+  remain refused, each needing its own signature/HMAC design.
 
-For a read-only dm-verity rootfs (already content-addressed and cached), a
-cold-boot warm claim is ~equivalent to a cached cold boot — the child re-runs
-the whole boot either way. The value of this slice is **de-risking, not
-speed**: it runs the entire admission-safe fork chain against a real VMM for
-the first time (the substrate has only run against the mock backend), and it
-lays the exact seam Plan 265 upgrades to memory restore. Nobody should read
-this slice as "the warm pool is fast now."
+**Consequence:** this slice does memory restore, not a cold boot. The child
+skips kernel boot, init, and agent startup. The authoritative scoping is
+`specs/plans/255-live-fc-warm-claim.md`; the two sections below are retained
+only to record the superseded reasoning.
+
+## Non-goals (superseded — see the correction above)
+
+- ~~**Sub-second restore.** The child is a **cold boot** from the CoW-cloned
+  parent rootfs, not a memory restore.~~ Superseded: restore is live and this
+  slice uses it.
+- **HVF / libkrun live forks.** Still out of scope — separate follow-on slices.
+- **Any change to the guarded-claim core.** Still true: admission, lineage
+  verify, CoW rootfs, identity minting, and audit emit are unchanged from the
+  substrate.
+- **The pre-spawned-VMM optimization, page-cache priming, density, and the
+  CI-gated SLO.** These remain Plan 265's; each claim here still starts a fresh
+  Firecracker and loads the snapshot into it.
+
+## Why cold-boot first was believed honest (superseded)
+
+The original reasoning: for a read-only dm-verity rootfs a cold-boot claim is
+~equivalent to a cached cold boot, so the slice's value was framed as
+de-risking rather than speed. That framing was a consequence of the stale read
+— with restore live, the slice delivers the actual speedup as well.
 
 ## The five pieces
 
@@ -94,33 +113,39 @@ under `/root` — avoid the prior sessions' `/root/mvm`, `/root/mvm-plan265`,
 - `ClaimCleanup` behaves: a healthy reserved parent returns claimable, a
   tampered one is quarantined, a partial child dir is removed.
 
-## Convergence to sub-second (the documented hook for Plan 265)
+## How the speed actually arrives (corrected)
 
-Sub-second is a **localized two-function swap** on top of this slice; nothing
-between capture and fork changes. The capture side is already live; the
-restore side is stubbed but pre-wired with the identity + no-NIC hooks.
+Not a future swap — the machinery is live and this slice calls it:
 
-| Seam | This slice (cold boot) | After Plan 265 (memory restore) |
-|---|---|---|
-| `spawn_standby_parent` | `capture_fs_quick` (rootfs-only) | pause + `create_snapshot_files` (Full: vmstate + guest memory, already live) + memory-carrying checkpoint |
-| `fork_standby_child` | cold-boot from CoW rootfs | `warm_restore_instance_from_path` (today `bail!`) behind the three guards below |
-| `parent_checkpoint` | the fs_quick checkpoint | the memory-carrying checkpoint |
+| Seam | What this slice does |
+|---|---|
+| `spawn_standby_parent` | boot a clean parent to agent-ready, leave it running |
+| runner capture | `capture_vm_full` — pause → save memory → clone rootfs in the pause window → resume, writing `device-anchors.json`; then release the parent |
+| `parent_checkpoint` | the `vm_full` checkpoint (`rootfs.ext4` + `memory.bin` + `vmstate.bin` + anchors) |
+| `fork_standby_child` | delegate to `FcForkRestorer::restore_fork` → `warm_restore_instance_from_path` |
 
-Three guards Plan 265 must satisfy before un-disabling restore — each already
-has its hook in the code:
+The child restores a fully-booted guest's memory, so it skips kernel boot,
+init, and agent startup — that is where the time goes, not the rootfs clone.
 
-1. **No NIC on restore** — `assert_vsock_only_device_model` (live, pure) must
-   gate the snapshot load; a captured NIC would bypass the vsock-only egress
-   boundary.
-2. **Fresh identity** — the restore entry points already take a `vmgenid`
-   token (`GENID_BYTES`) and return `ReseedStatus`; on resume the guest kernel
-   sees a new VM-generation-ID and reseeds RNG/crypto so children are not
-   twins (plus fresh machine-id/hostname).
-3. **Post-resume hygiene** — drop stale in-memory connections, re-prime caches
-   (Plan 265's other workstreams).
+The three guards are already enforced, not pending:
 
-The same admitted, audited claim then yields a ~30–60ms restore instead of a
-cold boot — no change to the admission, lineage, identity, or audit machinery.
+1. **No NIC on restore** — `assert_vsock_only_device_model` runs inside
+   `guarded_load_resume`, between load and resume, so a snapshot carrying a
+   network interface is refused before any vCPU executes.
+2. **Fresh identity** — the restore path takes a `vmgenid` token and returns
+   `ReseedStatus`; `restore_fork` passes an all-zero token and the caller
+   delivers the real one over vsock once the agent answers.
+3. **Device-anchor remap** — `capture_vm_full` writes `device-anchors.json` and
+   copies the referenced anchor files, so a restored child binds its **own**
+   copies rather than the parent's absolute paths.
+
+**Density model:** snapshot-and-release — the parent is captured then killed,
+so a pool slot costs disk, not RAM. The resident-paused model is Plan 265's.
+
+**Still Plan 265's, deliberately not done here:** the pre-spawned-VMM
+optimization (its WS2 item self-flags the overlap with this warm-pool work),
+page-cache priming, density, and the CI-gated SLO. Each claim here starts a
+fresh Firecracker; this slice measures that cost so 265 has a real baseline.
 
 ## Invariants honored
 
