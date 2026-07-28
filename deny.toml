@@ -155,6 +155,13 @@ skip = [
     # Not new duplicates — pre-existing, now documented.
     "rand",
     "rand_core",
+
+    # vmm-sys-util 0.12.1 (Linux KVM: kvm-bindings 0.11 / kvm-ioctls 0.21)
+    # vs 0.15.0 (the rust-vmm virtio primitives vm-memory / virtio-queue on the
+    # in-house VMM path). The two rust-vmm families track different vmm-sys-util
+    # majors; this pair can only collapse once kvm-bindings / kvm-ioctls bump to
+    # vmm-sys-util 0.15. Shrink when they do.
+    "vmm-sys-util",
 ]
 skip-tree = []
 

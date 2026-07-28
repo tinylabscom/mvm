@@ -7,13 +7,17 @@
 //! and the out-of-range semantics (read → zero-fill, write → no-op) are preserved
 //! byte-for-byte, so callers are unaffected.
 //!
-//! `VolatileSlice::new` is used rather than `MmapRegion::build_raw` because the
-//! latter hard-requires a page-aligned pointer, whereas this view also wraps the
-//! `Vec`-backed scratch RAM the device unit tests build; the volatile slice is
-//! `vm-memory`'s raw-pointer access primitive and imposes no alignment
-//! constraint.
+//! Scalar/byte access goes through `VolatileSlice::new`, which imposes no
+//! alignment constraint. Separately, [`GuestMem::guest_memory`] builds a real
+//! [`GuestMemoryMmap`] over the same mapping via [`MmapRegion::build_raw`] so the
+//! validated `virtio-queue` ring walk has a `GuestMemory` to iterate. `build_raw`
+//! hard-requires a **page-aligned** pointer and creates a **non-owning** region
+//! (`owned = false`), so vm-memory never unmaps the externally-owned HVF/KVM
+//! mapping. Production RAM is page-aligned; the device unit tests allocate their
+//! scratch RAM at page granularity (see `crate::test_support::page_aligned_ram`)
+//! so the same construction works for prod and tests.
 
-use vm_memory::VolatileSlice;
+use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion, VolatileSlice};
 
 /// A view onto guest RAM mapped at `base .. base+size` via host pointer `ram`.
 #[derive(Clone, Copy)]
@@ -60,6 +64,32 @@ impl GuestMem {
         // SAFETY: `off + len` are within the mapped region by `offset`'s checks.
         self.offset(gpa, len)
             .map(|off| unsafe { self.ram.add(off) })
+    }
+
+    /// Build a non-owning [`GuestMemoryMmap`] over this mapping so the audited
+    /// `virtio-queue` `Queue`/`DescriptorChain` iterator can walk the ring with a
+    /// real `GuestMemory`. Returns `None` when the backing pointer is not
+    /// page-aligned (which [`MmapRegion::build_raw`] rejects) or the region is
+    /// otherwise unrepresentable, in which case the caller services nothing —
+    /// mirroring the existing "illegal geometry → left unserviced" early outs.
+    pub(super) fn guest_memory(&self) -> Option<GuestMemoryMmap> {
+        // SAFETY: `self.ram` addresses `self.size` bytes of guest RAM valid for as
+        // long as this `GuestMem` is used (the `new` contract). `build_raw` takes
+        // ownership of nothing — it constructs a region with `owned = false`, so
+        // dropping the returned `GuestMemoryMmap` never unmaps the mapping the
+        // hypervisor owns. The `prot`/`flags` are recorded metadata only; no mmap
+        // syscall runs for a raw-pointer region.
+        let region = unsafe {
+            MmapRegion::build_raw(
+                self.ram,
+                self.size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+            )
+        }
+        .ok()?;
+        let region = GuestRegionMmap::new(region, GuestAddress(self.base))?;
+        GuestMemoryMmap::from_regions(vec![region]).ok()
     }
 
     /// A [`VolatileSlice`] over an in-range `[gpa, gpa+len)`, or `None` when the

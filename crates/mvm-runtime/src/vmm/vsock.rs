@@ -378,8 +378,8 @@ mod tests {
     use crate::vmm::vsock_transport::MAX_CONNECTIONS;
 
     fn dev() -> VsockShared {
-        let ram = vec![0u8; 0x1000].leak();
-        // SAFETY: leaked for the test.
+        let ram = crate::test_support::page_aligned_ram(0x1000);
+        // SAFETY: page-aligned, zeroed, leaked for the test process lifetime.
         unsafe { VsockShared::new(49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
     }
 
