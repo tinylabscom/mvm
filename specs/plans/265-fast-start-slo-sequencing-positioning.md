@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Draft.
+**Status:** Active — see "Status (in progress)" below.
 
 **Goal:** Drive mvm workload start-up to a warm-start latency and memory
 density where latency is no longer the deciding factor against the no-OS /
@@ -21,6 +21,106 @@ security/compatibility comparison.
 (`crates/mvm-runtime/src/vmm/` + `hvf/`); libkrun standby pool; cucumber-rs BDD
 (`crates/mvm-conformance`, `features/suites/`); cargo-fuzz; the `phase_timing`
 harness.
+
+## Status (in progress)
+
+Landed: the Phase 0 `warm_vs_cold` phase-timing assertion helper; the Phase 1
+no-NIC-on-restore device-model guard (`assert_vsock_only_device_model`) with
+unit coverage; the real `FirecrackerIO` `SnapshotIO` implementation; the
+un-bailed pause/resume (`verify_and_resume_from_dir`) and fork-restore
+(`warm_restore_instance_from_path`) paths, both gated behind the guard; a live,
+`#[ignore]`d, KVM-gated timing harness (`warm_restore_latency_live`) that
+measures warm restore end to end on the KVM box and lands in the tens of
+milliseconds; the Phase 4 same-page-merge confinement decision as a pure
+policy type (`crates/mvm-core/src/page_merge.rs`); and the Phase 6 comparison
+doc (`public/src/content/docs/reference/isolation-tiers.md`).
+
+Pending, honestly: the bare (callerless) `warm_restore_instance` entry point
+and template-snapshot restore stay intentionally refused pending a design that
+layers the guard on their own integrity checks; page-cache priming,
+identity-scrub-on-fork, and confinement-re-application-on-restore are not
+implemented; none of the new BDD security witnesses exist yet, and neither
+does the `warm_faster_than_cold` cucumber scenario — the only measurement
+today is the Rust-level live harness, not a gated scenario; the
+same-page-merge policy type has no enforcement wiring (no KSM config gate, no
+`.feature` witness) and no balloon/density work has started; HVF (Phase 2) and
+libkrun (Phase 3) backend sequencing have not started; the reproducible
+`benches/warm_start/` harness does not exist (only the in-crate `@live` timing
+tests above); and Phase 5's claim-catalog registration and fuzz extension have
+not started.
+
+Follow-ups tracked, not yet done: un-bailing template restore (needs its own
+Ed25519+HMAC-aware guard design), reseed retry/poll hardening, a native
+Firecracker API client so the ≤30ms p50 SLO holds without shelling out to
+`curl` per call, density wiring, and the HVF/libkrun backend ports.
+
+## Remaining work (sequenced)
+
+Grouped into workstreams. WS1–WS4 complete the Firecracker fast path + SLO +
+witnesses and carry no cross-epic dependency; WS5 is gated on other epics.
+Recommended order: WS1 → WS2 → WS4's CLI-verb prerequisite (which unlocks the
+WS4 witnesses) → WS3 → WS5. Each item is one implement→review→(live-revalidate)
+cycle.
+
+### WS1 — Finish the FC warm-restore story (no prerequisites)
+
+- [ ] Reseed retry/poll: a bounded guest-readiness poll before the single
+      `signal_post_restore`, so a slow-to-reattach guest does not spuriously
+      report `Undelivered`. Unit-test via the signal-source trait.
+- [ ] Register the new restore-path witnesses in `specs/claims/catalog.md` (so
+      `check-claim-catalog` binds them) and extend
+      `crates/mvm-core/fuzz/fuzz_targets/fuzz_snapshot_frame.rs` to the
+      restore-load manifest/metadata path.
+- [ ] Tear down the paused VMM on the pre-guard error branches
+      (`load_snapshot_paused` / `restored_device_model` errors), not only on
+      guard refusal.
+
+### WS2 — The ≤30 ms p50 SLO (native API + pooled FC — land together)
+
+~60 ms (debug) is dominated by per-call `curl` subprocesses and a fresh
+Firecracker spawn per restore; neither alone reaches the SLO.
+
+- [ ] Native Firecracker API client: hand-rolled HTTP/1.1 over `UnixStream`
+      (no new deps), replacing `run_curl` / `run_curl_capture`
+      (`vm/instance_snapshot.rs`) and `api_put_socket` (`microvm/daemon.rs`).
+      Re-measure via the `@live` harness.
+- [ ] Pre-spawned / pooled Firecracker: wire the existing `standby_pool` /
+      `WarmLease` (default-off + libkrun-only today) into the FC backend so a
+      restore claims a pre-spawned VMM rather than spawning one. Overlaps
+      Plan 255 warm-pool work.
+- [ ] Release-build measurement on the KVM box; record warm p50/p99 here.
+
+### WS3 — Density
+
+- [ ] Boot-time balloon (`VmStartConfig.mem_initial_mib`) on the
+      warm-parent / fresh-boot path; unit-test the commit-vs-cap accounting.
+      (Applies to fresh boot / parent sizing, not the memory-snapshot restore.)
+- [ ] KSM enforcement: a runtime point that consults `PageMergePolicy` before
+      any same-page merge, the host control (`MADV_MERGEABLE` scoped per fork
+      family / a KSM config gate), and the `no_cross_tenant_page_merge` witness.
+
+### WS4 — Witnesses (prerequisite-gated)
+
+- [ ] Prerequisite: wire a `machine` CLI verb that drives the vm_full warm
+      fork/restore — there is no user-facing warm-restore verb today; the number
+      comes only from the Rust `@live` harness.
+- [ ] Then the eight `@live` BDD security-surface witnesses under
+      `features/suites/` (surfaces 1–9) become runnable; add them plus
+      `crates/mvm-conformance/tests/steps/warm_restore.rs`.
+- [ ] Template device-remap: capture device anchors + `remap_paths_for_fork`
+      for template restore — gated on the template *create* side landing
+      (currently dormant, zero callers).
+
+### WS5 — Backend phases (epic-gated; do not block FC completion)
+
+- [ ] Phase 2 (in-house HVF VMM snapshot-fork) — gated on the HVF VMM first
+      getting a root filesystem (it panics at `prepare_namespace` today); that
+      rootfs prerequisite is Plan 214 epic work. Then implement the `SnapshotIO`
+      seam for HVF (vsock-pure, so the no-NIC invariant is free) and re-run the
+      witnesses.
+- [ ] Phase 3 (libkrun adoption) — begins with a spike on whether libkrun
+      supports snapshot/restore at all; then adopt the restore seam through its
+      standby pool.
 
 ## Relationship to existing work
 
@@ -92,40 +192,63 @@ Establish the number we are beating before optimizing anything.
       record `resolve_ms/drives_ms/admit_ms/backend_start_ms/vsock_wait_ms` for
       Firecracker into the benchmark fixture (`benches/` or the harness in
       Phase 6). Document the baseline in this plan.
-- [ ] Add a `warm_vs_cold` assertion helper to `phase_timing` that, given a
+- [x] Add a `warm_vs_cold` assertion helper to `phase_timing` that, given a
       warm and a cold run, asserts warm `backend_start_ms + vsock_wait_ms`
       clears the SLO. Unit-test it with canned timings (no VM).
+      **Status:** landed — `crates/mvm-cli/src/commands/vm/phase_timing.rs`
+      (`warm_vs_cold`), with `warm_vs_cold_clears_slo_when_hot_under_budget` /
+      `warm_vs_cold_fails_slo_when_hot_over_budget` /
+      `warm_vs_cold_speedup_infinite_when_warm_zero` unit tests.
 - [ ] Add `features/suites/s5_lifecycle/warm_faster_than_cold.feature` tagged
       `@live @wip` (implemented in Phase 1) asserting warm start beats cold on
       the same image.
 
 **Acceptance gate:** baseline recorded; `warm_vs_cold` helper unit-tested;
 `cargo nextest run -p mvm-cli` green; new `@wip` scenario parses under
-`just bdd`.
+`just bdd`. Baseline capture and the `@wip` scenario are still outstanding.
 
 ## Phase 1 — Firecracker vsock-safe warm restore (hero path, KVM box)
 
 The load-bearing phase. Turns the disabled restore into a gated, integrity-
 checked, NIC-free warm start.
 
-- [ ] **No-NIC-on-restore invariant.** In `crates/mvm-runtime/src/microvm/snapshot.rs`,
+- [x] **No-NIC-on-restore invariant.** In `crates/mvm-runtime/src/microvm/snapshot.rs`,
       add `fn assert_vsock_only_device_model(&SnapshotManifest) -> Result<()>`
       that refuses any restored device model carrying a network device. Write
       the failing unit test first (`restore_refuses_nic_device_model`), verify
       red, implement, verify green.
-- [ ] **Real `FirecrackerIO`.** Implement `SnapshotIO::create_snapshot` /
+      **Status:** landed — `assert_vsock_only_device_model` in
+      `crates/mvm-runtime/src/microvm/snapshot.rs`, with
+      `restore_refuses_nic_device_model` /
+      `restore_accepts_vsock_only_device_model` /
+      `restore_refuses_multiple_nic_device_model` unit coverage.
+- [x] **Real `FirecrackerIO`.** Implement `SnapshotIO::create_snapshot` /
       `load_snapshot` for `FirecrackerIO` in
       `crates/mvm-runtime/src/vm/instance_snapshot.rs` (today the seam exists;
       the FC API calls are stubbed) using the Firecracker snapshot HTTP API,
       driven through the existing microVM driver. Unit-test create/load against
       a `CannedIO` fake for the state-machine, and behind a `@live` scenario for
       the real API.
-- [ ] **Un-bail warm restore.** Replace the `bail!` bodies of
+      **Status:** landed — `impl SnapshotIO for FirecrackerIO` drives the real
+      `/snapshot/create`, `/snapshot/load`, `/vm/config`, and `PATCH /vm`
+      calls; the `CannedIO` fake backs the state-machine unit tests and the
+      `#[ignore]`d `warm_restore_latency_live` / `warm_restore_refuses_nic_live`
+      tests exercise the real API against a live Firecracker.
+- [x] **Un-bail warm restore.** Replace the `bail!` bodies of
       `warm_restore_instance` / `warm_restore_instance_from_path`
       (`microvm/snapshot.rs`) with a path that calls `verify_and_resume`
       (HMAC + monotonic epoch, already in `instance_snapshot.rs`) then
       `assert_vsock_only_device_model` before resuming. Integrity/rollback
       refusal is reused, not reinvented.
+      **Status:** landed for the paths that have a caller — the pause/resume
+      path (`verify_and_resume_from_dir`) and the fork-restore path
+      (`warm_restore_instance_from_path`) both go through
+      `guarded_load_resume` (load paused → guard → resume). The bare,
+      callerless `warm_restore_instance` and `restore_from_template_snapshot`
+      stay intentionally refused — they each need their own integrity-check
+      design (a template's Ed25519+HMAC sidecar, and a design for the
+      instance-snapshot path when it gains a direct caller) layered under the
+      same guard before they can un-bail.
 - [ ] **Page-cache priming (rootfs-only).** At freeze in the warm-parent
       producer, touch the template's declared working set confined to the
       verity-sealed read-only rootfs; reject a working-set path resolving
@@ -149,9 +272,16 @@ checked, NIC-free warm start.
       - `s3_secrets_pii/fork_no_residue.feature` (surface 4)
       - `s4_verified_boot/prime_within_verity_only.feature` (surface 5)
       - `s5_lifecycle/restore_reapplies_confinement.feature` (surface 9)
-- [ ] **First warm-start number.** Un-`@wip` the `warm_faster_than_cold`
+- [x] **First warm-start number.** Un-`@wip` the `warm_faster_than_cold`
       scenario, run it `@live` on the KVM box, record warm p50/p99 against the
       SLO in this plan.
+      **Status:** a number exists, but not via the cucumber scenario — the
+      `warm_faster_than_cold` feature file itself does not exist yet. The
+      measurement came from the `#[ignore]`d `warm_restore_latency_live` Rust
+      test in `instance_snapshot.rs`, run on the KVM box: warm restore
+      (`guarded_load_resume`) lands in the tens of milliseconds, clearing the
+      SLO order of magnitude. Promoting this to the gated cucumber scenario
+      with a recorded p50/p99 is still outstanding.
 
 **Acceptance gate:** FC warm restore works on the KVM box; every surface-1..9
 witness above passes (negative paths refuse, positive path boots); warm start
@@ -204,6 +334,13 @@ clippy/nextest/doctests green.
       family / same image and refuses cross-tenant / cross-image merging.
       Wire the config gate so host-wide KSM cannot be enabled across tenants.
       Add `features/suites/s3_secrets_pii/no_cross_tenant_page_merge.feature`.
+      **Status:** the pure decision half has landed —
+      `crates/mvm-core/src/page_merge.rs` (`PageMergeScope`, `MergeDecision`,
+      `may_merge`) decides same-tenant/same-image/same-fork-family merge
+      eligibility, fail-closed by default, with unit coverage. Left un-ticked
+      because the runtime enforcement (the host-wide KSM config gate) and the
+      `.feature` witness are not wired up yet — this module deliberately does
+      not touch the kernel merge knob.
 - [ ] **Density SLO gate.** Extend `crates/mvm-core/src/memory_budget.rs`
       reporting so a same-image fork family reports guests-per-GB from measured
       resident; add `features/suites/s5_lifecycle/density_balloon.feature`
@@ -235,10 +372,18 @@ witnesses still pass.
       start vs mvm's own cold-boot baseline (Phase 0), and emits a JSON result
       for tracking. It must be honest about the no-OS tier — report the tier
       difference, do not present an apples-to-oranges number.
-- [ ] **Comparison doc** at `public/src/content/docs/reference/isolation-tiers.md`:
+      **Status:** not landed as described. A partial, in-crate `@live` timing
+      harness exists (`warm_restore_latency_live` /
+      `warm_restore_refuses_nic_live` in
+      `crates/mvm-runtime/src/vm/instance_snapshot.rs`) — it measures
+      `guarded_load_resume` directly and prints `WARM_RESTORE_MS`, but it is
+      not a `benches/warm_start/` harness, does not compare against a recorded
+      cold-boot baseline, and emits no JSON result.
+- [x] **Comparison doc** at `public/src/content/docs/reference/isolation-tiers.md`:
       the machine-checked security-claim matrix + workload-compatibility (any
       unmodified OCI image) vs the no-OS tier, referring to that tier obliquely.
       This is the "default choice" evidence.
+      **Status:** landed.
 - [ ] Update `public/src/content/docs/**` for warm start, snapshots, and the
       density knobs; ensure the doc-guard Rust tests
       (`tests/nix_flake_structure.rs` heading asserts) stay green if touched.

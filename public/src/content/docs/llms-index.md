@@ -69,6 +69,7 @@ template: doc
 - [Security and isolation](/architecture/security-isolation/): build, launch, runtime, policy, audit, and SDK boundaries.
 - [Networking and storage](/architecture/networking-storage/): egress, ports, files, volumes, and snapshots.
 - [Architecture reference](/reference/architecture/): crates, backends, builder VM, supervisor layers.
+- [Isolation tiers](/reference/isolation-tiers/): full-OS microVM vs the no-OS / no-kernel function-sandbox tier — compatibility, security posture, and latency tradeoff.
 - [Platform support](/reference/platform-support/): host, backend, architecture, and support status matrix.
 - [Guest agent](/reference/guest-agent/): guest protocol and readiness.
 

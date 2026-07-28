@@ -220,6 +220,7 @@ export default defineConfig({
             { label: "CLI Commands", slug: "reference/cli-commands" },
             { label: "Programmatic Use", slug: "reference/programmatic-use" },
             { label: "Architecture", slug: "reference/architecture" },
+            { label: "Isolation Tiers", slug: "reference/isolation-tiers" },
             { label: "Platform Support", slug: "reference/platform-support" },
             { label: "Filesystem & Drives", slug: "reference/filesystem" },
             { label: "Guest Agent", slug: "reference/guest-agent" },
