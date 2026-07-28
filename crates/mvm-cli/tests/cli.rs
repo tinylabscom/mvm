@@ -175,3 +175,20 @@ fn machine_reconfigure_help_lists_patch_flags() {
         assert!(text.contains(flag), "help missing {flag}");
     }
 }
+
+/// Regression guard: the `ops bench` verb was removed — benchmarking is a
+/// dev/CI concern, not a shipped end-user command.
+#[test]
+fn ops_help_no_longer_lists_bench() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["ops", "--help"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains("bench"),
+        "ops help still lists the removed bench verb:\n{text}"
+    );
+}

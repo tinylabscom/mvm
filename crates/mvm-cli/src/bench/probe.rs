@@ -1,4 +1,4 @@
-//! Live boot orchestration for `mvmctl bench microvm-launch`. Kept
+//! Live boot orchestration for the interaction-latency gate. Kept
 //! out of `bench.rs` so the pure stats/schema substrate stays
 //! VM-free.
 

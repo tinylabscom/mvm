@@ -1,6 +1,6 @@
 //! `mvmctl ops <sub>` — operational / observability commands.
 //!
-//! `metrics`, `bench`, `config`, `mcp` collapse under one `ops`
+//! `metrics`, `config`, `mcp` collapse under one `ops`
 //! namespace. Leaf modules are unchanged.
 
 use anyhow::Result;
@@ -12,7 +12,6 @@ use super::Cli;
 #[cfg(feature = "mcp")]
 use super::mcp;
 use super::{config, metrics};
-use crate::bench;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -24,8 +23,6 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) enum OpsCmd {
     /// Show runtime metrics (Prometheus text format by default)
     Metrics(metrics::Args),
-    /// Benchmark microVM operations (e.g. cold launch latency)
-    Bench(bench::Args),
     /// Read or write global operator config (~/.mvm/config.toml)
     Config(config::Args),
     /// Expose mvmctl over Model Context Protocol
@@ -38,7 +35,6 @@ impl OpsCmd {
     pub(in crate::commands) fn verb_name(&self) -> &'static str {
         match self {
             OpsCmd::Metrics(_) => "metrics",
-            OpsCmd::Bench(_) => "bench",
             OpsCmd::Config(_) => "config",
             #[cfg(feature = "mcp")]
             OpsCmd::Mcp(_) => "mcp",
@@ -63,7 +59,6 @@ impl OpsCmd {
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
         OpsCmd::Metrics(a) => metrics::run(cli, a, cfg),
-        OpsCmd::Bench(a) => bench::run(a, cfg),
         OpsCmd::Config(a) => config::run(cli, a, cfg),
         #[cfg(feature = "mcp")]
         OpsCmd::Mcp(a) => mcp::run(cli, a, cfg),
