@@ -143,6 +143,25 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         (None, None) => None,
     };
 
+    // The runtime refuses to boot a rootfs whose `mvm-meta.json` sidecar is
+    // missing, so a bundle exported without it is unbootable on arrival —
+    // `bundle install` succeeds and the failure only surfaces at admission on
+    // the target host. Carry it, and fail here if the template hasn't got one.
+    let sidecar_src = sidecar_path_for_rootfs(&rootfs)?;
+    let sidecar_bytes = std::fs::read(&sidecar_src).with_context(|| {
+        format!(
+            "reading guest sidecar at {} — rebuild the template before exporting",
+            sidecar_src.display()
+        )
+    })?;
+    push(
+        &mut artifacts,
+        &mut payload,
+        mvm_build::builder_vm::SIDECAR_FILENAME,
+        ArtifactRole::Other,
+        sidecar_bytes,
+    );
+
     // Bake the template's declared resources into the bundle so
     // `mvmctl up <bundle-sha>` on another host gets sensible
     // defaults without re-discovering them. CLI `--cpus` /
@@ -188,4 +207,31 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     );
 
     Ok(())
+}
+
+/// The guest sidecar the runtime admission gate looks for sits beside the
+/// rootfs image the template resolved to.
+fn sidecar_path_for_rootfs(rootfs: &str) -> Result<std::path::PathBuf> {
+    std::path::Path::new(rootfs)
+        .parent()
+        .map(|dir| dir.join(mvm_build::builder_vm::SIDECAR_FILENAME))
+        .ok_or_else(|| anyhow::anyhow!("rootfs path {rootfs} has no parent directory"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_resolves_beside_the_rootfs() {
+        assert_eq!(
+            sidecar_path_for_rootfs("/slots/abc/artifacts/rootfs.ext4").unwrap(),
+            std::path::Path::new("/slots/abc/artifacts/mvm-meta.json")
+        );
+    }
+
+    #[test]
+    fn rootfs_without_a_parent_directory_is_refused() {
+        assert!(sidecar_path_for_rootfs("/").is_err());
+    }
 }

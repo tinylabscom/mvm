@@ -4,7 +4,7 @@
 //! was retired with the raw launch path. These tokens remain shared by the
 //! runner-backed libkrun, HVF, and QEMU command-line builders.
 
-/// The `mvm.verb_grant=<hex>` kernel-cmdline token for `vm_name`.
+/// The `mvm.verb_grant=<base64>` kernel-cmdline token for `vm_name`.
 pub(crate) fn verb_grant_cmdline_token(vm_name: &str) -> Option<String> {
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
     let bytes = std::fs::read(&path).ok()?;

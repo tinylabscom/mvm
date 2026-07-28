@@ -31,6 +31,28 @@
       #1876 and #1878; tracked in
       `specs/plans/266-vsock-overload-hardening.md`.
 
+- [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
+      admit → boot chain now runs end to end on aarch64, delivered through
+      #1888 (ARM64 `Image` kernels reach Firecracker), #1891 (guest reads the
+      host-signer pubkey off the cmdline when no config drive is attached),
+      #1893 (`bundle export` carries the guest sidecar) and #1894 (fail-closed
+      kernel-cmdline guard). The guest boots and its agent pins its grant.
+      **Outstanding:** the host↔agent readiness handshake cannot be witnessed
+      under nested KVM on a dev Mac — proven not to be an mvm defect, since the
+      same handshake succeeds on bare-metal x86_64 KVM with the identical
+      Firecracker build. One run on non-nested aarch64 hardware closes it;
+      tracked in
+      `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
+
+- [ ] **Backend shim removal — invert the driver/backend relationship.** The
+      `VmmDriver` seam still wraps the older direct `VmBackend` impls rather
+      than owning the VMM mechanics, so `FirecrackerBackend` / `LibkrunBackend`
+      / `HvfBackend` remain live in the production path. Plan drafted at
+      `specs/plans/269-backend-shim-removal.md`; it carries a "Status and known
+      gaps" section covering the blanket-impl seam that does not exist yet, the
+      unaccounted-for `WasmBackend`, and the QEMU contradiction in §2.5 below
+      that Task 5 depends on. Not started.
+
 ---
 
 ## 1. Why
