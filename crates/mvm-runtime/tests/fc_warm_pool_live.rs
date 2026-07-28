@@ -123,16 +123,27 @@ fn fc_warm_pool_spawn_and_claim() {
     }
 
     let t_claim = Instant::now();
-    driver
-        .fork_standby_child(&ChildForkRequest {
-            child_vm_name: &child_id,
-            child_dir: &child_dir,
-            genid: GenerationToken {
-                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-                content_hash: parent_checkpoint.into(),
-            },
-        })
-        .expect("fork Firecracker standby child");
+    let fork_result = driver.fork_standby_child(&ChildForkRequest {
+        child_vm_name: &child_id,
+        child_dir: &child_dir,
+        genid: GenerationToken {
+            token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            content_hash: parent_checkpoint.into(),
+        },
+    });
+    if let Err(ref e) = fork_result {
+        eprintln!("fork failed: {e:#}");
+        for name in ["firecracker.log", "console.log"] {
+            let path = child_dir.join(name);
+            if path.exists() {
+                eprintln!("--- {name} ---");
+                if let Ok(bytes) = std::fs::read(&path) {
+                    eprintln!("{}", String::from_utf8_lossy(&bytes));
+                }
+            }
+        }
+    }
+    fork_result.expect("fork Firecracker standby child");
     let claim_ms = t_claim.elapsed().as_millis();
 
     let child_vsock =
