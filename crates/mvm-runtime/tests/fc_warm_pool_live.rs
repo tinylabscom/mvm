@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use mvm_agentd::vsock::connect_to;
 use mvm_core::crypto::vmgenid::GenerationToken;
-use mvm_core::vm_backend::{StandbySpec, StandbyState, VmBackend};
+use mvm_core::vm_backend::{StandbySpec, StandbyState};
 use mvm_runtime::driver::fc::FcDriver;
 use mvm_runtime::driver::{ChildForkRequest, VmmDriver};
 
@@ -87,7 +87,7 @@ fn fc_warm_pool_spawn_and_claim() {
     };
 
     let driver = FcDriver::new();
-    assert!(driver.supports_standby_pool());
+    assert!(driver.capabilities().standby_pool);
 
     let t_spawn = Instant::now();
     let handle = driver
