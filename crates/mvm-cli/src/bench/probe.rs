@@ -117,6 +117,11 @@ impl HeldProbeVm {
     pub fn pid(&self) -> u32 {
         self.pid
     }
+
+    /// The four boot marks captured for this VM (`BootMarks` is `Copy`).
+    pub fn marks(&self) -> BootMarks {
+        self.marks
+    }
 }
 
 #[cfg(feature = "libkrun-live")]

@@ -70,6 +70,109 @@ pub fn build_instant_loop_report(
     }
 }
 
+/// Sample counts for one interaction measurement.
+#[cfg(feature = "libkrun-live")]
+#[derive(Debug, Clone, Copy)]
+pub struct InteractionRunCfg {
+    /// Fresh dial+handshake+Ping sessions (cold RPC); median reported.
+    pub cold_samples: u32,
+    /// Warm Pings discarded before measuring, to settle the held session.
+    pub warmup: u32,
+    /// Measured warm Pings over the held session.
+    pub samples: u32,
+}
+
+#[cfg(feature = "libkrun-live")]
+impl Default for InteractionRunCfg {
+    fn default() -> Self {
+        Self {
+            cold_samples: 10,
+            warmup: 20,
+            samples: 200,
+        }
+    }
+}
+
+/// Open a fresh authenticated session, issue one Ping, and confirm Pong.
+/// Used both as the cold-RPC sample and to seed the warm loop.
+#[cfg(feature = "libkrun-live")]
+fn ping_once_cold(vm_name: &str) -> anyhow::Result<f64> {
+    use std::time::Instant;
+
+    use mvm_agentd::vsock::{ControlSession, GUEST_AGENT_PORT, GuestRequest, GuestResponse};
+
+    let t = Instant::now();
+    // Mirror the backend-agnostic dial used by `mvmctl fs`/`proc`/`diff`:
+    // `mvm_runtime::vsock_transport::for_vm(name)?.connect(GUEST_AGENT_PORT)?`.
+    let mut stream = mvm_runtime::vsock_transport::for_vm(vm_name)?.connect(GUEST_AGENT_PORT)?;
+    let mut session = ControlSession::open(&mut stream)?;
+    let resp = session.call_unary(&mut stream, &GuestRequest::Ping)?;
+    anyhow::ensure!(
+        matches!(resp, GuestResponse::Pong),
+        "cold ping: expected Pong"
+    );
+    Ok(t.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// Measure cold and warm interaction RTT against an already-booted VM.
+#[cfg(feature = "libkrun-live")]
+pub fn measure_interaction(
+    vm_name: &str,
+    cfg: &InteractionRunCfg,
+) -> anyhow::Result<InteractionTimings> {
+    use std::time::Instant;
+
+    use mvm_agentd::vsock::{ControlSession, GUEST_AGENT_PORT, GuestRequest, GuestResponse};
+
+    let mut cold = Vec::with_capacity(cfg.cold_samples as usize);
+    for _ in 0..cfg.cold_samples {
+        cold.push(ping_once_cold(vm_name)?);
+    }
+
+    // Warm: one held session, timer around each call_unary write→read.
+    let mut stream = mvm_runtime::vsock_transport::for_vm(vm_name)?.connect(GUEST_AGENT_PORT)?;
+    let mut session = ControlSession::open(&mut stream)?;
+    for _ in 0..cfg.warmup {
+        let _ = session.call_unary(&mut stream, &GuestRequest::Ping)?;
+    }
+    let mut warm = Vec::with_capacity(cfg.samples as usize);
+    for _ in 0..cfg.samples {
+        let t = Instant::now();
+        let resp = session.call_unary(&mut stream, &GuestRequest::Ping)?;
+        anyhow::ensure!(
+            matches!(resp, GuestResponse::Pong),
+            "warm ping: expected Pong"
+        );
+        warm.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    Ok(InteractionTimings {
+        cold_rtt_ms: cold,
+        warm_rtt_ms: warm,
+    })
+}
+
+/// Boot one VM, capture its cold-boot start timing, measure interaction RTT,
+/// tear it down, and assemble the report.
+#[cfg(feature = "libkrun-live")]
+pub fn run_instant_loop(
+    vm_name: &str,
+    cfg: &InteractionRunCfg,
+    budget_ms: f64,
+) -> anyhow::Result<InstantLoopReport> {
+    use crate::bench::harness::LaunchProbe;
+    use crate::bench::probes::LibkrunProbe;
+
+    let host = LibkrunProbe::new_with_prefix(format!("{vm_name}-host"))?.host_descriptor();
+    let held = crate::bench::probe::boot_hold_once(vm_name)?;
+    let start_boot = held.marks().to_timing();
+    let timings = measure_interaction(vm_name, cfg)?;
+    drop(held); // RAII teardown
+    Ok(build_instant_loop_report(
+        host, start_boot, &timings, budget_ms,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
