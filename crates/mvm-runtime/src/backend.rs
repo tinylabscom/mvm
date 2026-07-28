@@ -662,24 +662,16 @@ impl AnyBackend {
         self.inner().claim_standby(handle, claim)
     }
 
-    /// Drive a warm-pool claim through the backend's real, context-aware claim
-    /// path — the entry the CLI warm-claim layer assembles a [`ClaimContext`]
-    /// for. The runner-backed workload backends (Firecracker, libkrun, hvf)
-    /// route to the runner's inherent guarded `claim_standby`, which reserves and
-    /// lineage-verifies a clean parent, binds the admitted plan to it, scrubs the
-    /// child identity, and forks a fresh admitted child — gated exactly as
-    /// strictly as a cold boot. The mock lifecycle double routes to its own
-    /// in-memory claim so hermetic tests can drive this path end to end.
-    /// Non-workload backends (qemu, wasm) fail closed.
-    ///
-    /// This is distinct from the parameterless [`claim_standby`](Self::claim_standby)
-    /// accessor, which cannot carry a [`ClaimContext`] — the context reaches the
-    /// checkpoint/snapshot stores and the signed-audit anchor, whose host key
-    /// lives above this crate — and therefore stays the fail-closed default for
-    /// the runner-backed variants. Assembling the context is the caller's job;
-    /// the runner never loads the host key itself.
-    ///
-    /// [`ClaimContext`]: crate::workload_runner::ClaimContext
+    /// Fill the warm pool through the backend's real spawn-and-capture path: boot
+    /// a clean factory parent, capture its whole live state into the caller's
+    /// checkpoint store, and release it, so a pool slot costs disk rather than a
+    /// resident VM. Routes exactly like
+    /// [`claim_standby_via_runner`](Self::claim_standby_via_runner) — the
+    /// runner-backed workload backends (Firecracker, libkrun, hvf) reach the
+    /// runner, the mock lifecycle double services it in memory, and non-workload
+    /// backends (qemu, wasm) fail closed. Refusing the same backends both halves
+    /// refuse is what keeps a pool from being filled for a backend that could
+    /// never claim from it.
     pub fn spawn_standby_via_runner(
         &self,
         ctx: &crate::workload_runner::SpawnContext<'_>,
@@ -703,6 +695,24 @@ impl AnyBackend {
         }
     }
 
+    /// Drive a warm-pool claim through the backend's real, context-aware claim
+    /// path — the entry the CLI warm-claim layer assembles a [`ClaimContext`]
+    /// for. The runner-backed workload backends (Firecracker, libkrun, hvf)
+    /// route to the runner's inherent guarded `claim_standby`, which reserves and
+    /// lineage-verifies a clean parent, binds the admitted plan to it, scrubs the
+    /// child identity, and forks a fresh admitted child — gated exactly as
+    /// strictly as a cold boot. The mock lifecycle double routes to its own
+    /// in-memory claim so hermetic tests can drive this path end to end.
+    /// Non-workload backends (qemu, wasm) fail closed.
+    ///
+    /// This is distinct from the parameterless [`claim_standby`](Self::claim_standby)
+    /// accessor, which cannot carry a [`ClaimContext`] — the context reaches the
+    /// checkpoint/snapshot stores and the signed-audit anchor, whose host key
+    /// lives above this crate — and therefore stays the fail-closed default for
+    /// the runner-backed variants. Assembling the context is the caller's job;
+    /// the runner never loads the host key itself.
+    ///
+    /// [`ClaimContext`]: crate::workload_runner::ClaimContext
     pub fn claim_standby_via_runner(
         &self,
         ctx: &crate::workload_runner::ClaimContext<'_>,

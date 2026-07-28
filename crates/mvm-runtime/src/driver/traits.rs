@@ -7,26 +7,32 @@
 use std::path::Path;
 
 use anyhow::Result;
-use mvm_core::crypto::vmgenid::GenerationToken;
+use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
     StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::driver::spec::VmmSpec;
+use crate::vm::instance_snapshot::PostRestoreOutcome;
 
 /// What a driver needs to fork a materialized standby parent into a fresh child
-/// VMM. Grouped so the seam takes one value instead of a positional list, and so
-/// the generation-token delivery rides the fork call itself — the token is
-/// delivered as the child boots, before any guest randomness consumer runs.
+/// VMM. Grouped so the seam takes one value instead of a positional list.
 pub struct ChildForkRequest<'a> {
     /// The child's fresh, registry-unique name (its `~/.mvm/vms/<name>` key).
     pub child_vm_name: &'a str,
     /// The child's state dir, already holding the copy-on-write clone of the
     /// verified parent's own content.
     pub child_dir: &'a Path,
-    /// Fresh VMGenID token, bound to the child's content-address, delivered as
-    /// the child boots so its CSPRNG diverges from the parent's.
+    /// Fresh VMGenID token, bound to the child's content-address, that the
+    /// child must adopt so its CSPRNG diverges from the parent's.
+    ///
+    /// A fork restores a *running* guest out of saved memory rather than
+    /// booting one, so there is no boot to hand the token to: the fork brings
+    /// the child up carrying the parent's random state, and the role layer
+    /// above closes that window by delivering this token over vsock through
+    /// [`VmmDriver::deliver_child_identity`] before the claim is admissible.
+    /// The request carries it so both halves read the same value.
     pub genid: GenerationToken,
 }
 
@@ -75,11 +81,17 @@ pub trait VmmDriver: Send + Sync {
 
     /// Fork a clean standby parent — already materialized into `req.child_dir` as
     /// a copy-on-write clone of its verified content — into a fresh child VMM
-    /// identity, delivering `req.genid` as the boot-time reseed token so the
-    /// child's CSPRNG diverges from the parent's before any guest randomness
-    /// consumer runs. The driver owns the VMM fork/restore mechanics only: the
-    /// role layer above has already admitted the plan, bound it to the parent,
-    /// materialized the rootfs, and scrubbed the identity.
+    /// identity, resumed from the parent's saved memory. The driver owns the VMM
+    /// fork/restore mechanics only: the role layer above has already admitted the
+    /// plan, bound it to the parent, materialized the rootfs, and scrubbed the
+    /// identity.
+    ///
+    /// The child comes back **still carrying the parent's random state**: a
+    /// restore has no boot at which to seed it, and the guest is not reachable
+    /// until it is running. Delivering `req.genid` is therefore a separate step
+    /// the caller runs immediately afterwards, through
+    /// [`deliver_child_identity`](Self::deliver_child_identity), and a child that
+    /// cannot prove it adopted the token is never admitted.
     ///
     /// Fail-closed default: a driver opts in explicitly, mirroring
     /// [`spawn_standby_parent`](Self::spawn_standby_parent).
@@ -90,6 +102,31 @@ pub trait VmmDriver: Send + Sync {
         Err(StandbyError::Unsupported {
             backend: self.name().to_string(),
         })
+    }
+
+    /// Hand a freshly forked child its own generation token and report, verbatim,
+    /// what the guest agent says it did with it — whether it acknowledged the
+    /// signal, rotated its generation identity (reseeding its CSPRNG off the
+    /// parent's cloned state), and resynchronized its wall clock off the host's.
+    ///
+    /// The reported flags are the guest's own claims, not a verdict: judging them
+    /// is the role layer's job, so a driver never decides whether a child is
+    /// admissible.
+    ///
+    /// The default is the real host→guest RPC over the backend-agnostic vsock
+    /// dispatcher, so every VMM shares one delivery path and inherits its connect
+    /// retry and read deadline — a guest that never answers surfaces as an error
+    /// rather than an unbounded wait. A driver overrides this only to run
+    /// hypervisor-free.
+    fn deliver_child_identity(
+        &self,
+        child_vm_name: &str,
+        token: [u8; GENID_BYTES],
+    ) -> Result<PostRestoreOutcome> {
+        crate::vm::instance_snapshot::signal_post_restore(
+            child_vm_name,
+            &crate::vm::instance_snapshot::VsockPostRestoreSignal { token },
+        )
     }
 
     /// Backend-specific control over a running VM named `vm_name` that lets the

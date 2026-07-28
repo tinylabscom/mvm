@@ -34,6 +34,7 @@ use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
     spawn_substitution_endpoint,
 };
+use crate::vm::instance_snapshot::PostRestoreOutcome;
 use crate::vm::name_registry::{VmNameRegistry, acquire_registry_lock, generate_vm_name};
 use crate::warm_snapshot::materialize_child_from_parent;
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
@@ -353,8 +354,9 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     /// exactly what boots); mint a fresh, registry-unique identity; materialize
     /// the child's rootfs from the parent's own verified content; run the
     /// host-side overlay-contract gate and spawn the child's own 0700
-    /// substitution endpoint keyed on its fresh id; then fork the VMM, delivering
-    /// a fresh VMGenID at boot so the child's CSPRNG diverges from the parent's.
+    /// substitution endpoint keyed on its fresh id; then fork the VMM and require
+    /// the restored guest to prove it adopted a fresh VMGenID before the claim
+    /// commits, so the child's CSPRNG diverges from the parent's.
     ///
     /// Layering the runner does NOT own (enforced at their own layers, mirroring
     /// a cold boot): claim-8 admission of the child plan (CLI mint + supervisor
@@ -427,22 +429,58 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             )
             .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e}")))?;
 
-        // (6b) + (7) Mint a fresh VMGenID bound to the child's content-address and
-        // deliver it WITH the fork, so it reaches the guest at boot — before any
-        // guest randomness consumer runs, forcing the child's CSPRNG to diverge.
+        // (6b) Mint a fresh VMGenID bound to the child's content-address and fork
+        // the VMM. A fork restores a running guest out of the parent's saved
+        // memory, so the child comes back holding the parent's CSPRNG state and
+        // the parent's wall clock — nothing is scrubbed yet at this point.
         let content_hash = parent_rootfs_digest(&parent).map_err(refuse)?.to_string();
         let genid = fresh_generation_token(content_hash);
+        let token = genid.token;
         self.driver.fork_standby_child(&ChildForkRequest {
             child_vm_name: &child.0,
             child_dir: &child_dir,
             genid,
         })?;
 
-        // The child booted: disarm the endpoint reaper (the stop path owns it now)
-        // and commit — the parent stays reserved and the child dir is real state.
+        // (7) Close that window before the claim commits: deliver the token to
+        // the now-reachable guest and make it prove, on its own report, that it
+        // rotated its generation identity and took the host's clock. Two children
+        // of one parent that skipped this would draw identical randomness, which
+        // is the whole reason a warm child needs a fresh identity — so a child
+        // that cannot prove it is never admitted.
+        if let Err(refusal) = self.take_fresh_child_identity(&child.0, token) {
+            // The child is live and still carrying its parent's random state.
+            // Unwinding alone would leave running exactly the VM this refusal
+            // exists to prevent, so stop it before returning.
+            self.force_stop(&child.0, "refused forked standby child");
+            return Err(refusal);
+        }
+
+        // The child booted and proved a fresh identity: disarm the endpoint reaper
+        // (the stop path owns it now) and commit — the parent stays reserved and
+        // the child dir is real state.
         endpoint.defuse();
         cleanup.commit();
         Ok(child)
+    }
+
+    /// Deliver `token` to the forked child's guest agent and judge what it
+    /// reports. The driver owns the transport; the verdict is the claim's.
+    fn take_fresh_child_identity(
+        &self,
+        child_vm_name: &str,
+        token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    ) -> std::result::Result<(), StandbyError> {
+        let outcome = self
+            .driver
+            .deliver_child_identity(child_vm_name, token)
+            .map_err(|e| {
+                StandbyError::ClaimFailed(format!(
+                    "forked child '{child_vm_name}' never answered the post-restore identity \
+                     handshake: {e}"
+                ))
+            })?;
+        require_fresh_child_identity(child_vm_name, &outcome)
     }
 
     /// Boot a standby parent, capture its whole live state, and release it.
@@ -485,7 +523,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // Release either way: the checkpoint carries the parent's full state, so
         // a pool slot costs disk rather than a resident VM, and a failed capture
         // must not strand the guest.
-        self.release_standby_parent(&spec.id);
+        self.force_stop(&spec.id, "captured standby parent");
 
         let meta = captured
             .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e}")))?;
@@ -497,16 +535,19 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         Ok(handle)
     }
 
-    /// Stop a captured standby parent. A parent that cannot be reaped must not
-    /// fail an otherwise-good capture, but it must stay visible.
-    fn release_standby_parent(&self, vm_name: &str) {
+    /// Force-stop a VM the warm-pool path is done with, naming its `role` for the
+    /// log. Failure is logged, never propagated: the callers are already on their
+    /// way out (a captured parent, a refused child) and have nothing better to do
+    /// about it, but a VM that outlives its owner must stay visible.
+    fn force_stop(&self, vm_name: &str, role: &str) {
         let id = VmId(vm_name.to_string());
         match self.driver.attach(&id).and_then(|vm| vm.kill()) {
             Ok(()) => {}
             Err(e) => tracing::warn!(
                 vm = vm_name,
+                role,
                 error = %e,
-                "releasing captured standby parent failed; it may still be running"
+                "stopping a warm-pool VM failed; it may still be running"
             ),
         }
     }
@@ -573,6 +614,36 @@ impl Drop for ClaimCleanup<'_> {
             }
         }
     }
+}
+
+/// Judge a forked child's own report of what it did with its fresh generation
+/// token. Every flag must hold: `acknowledged` says the guest answered at all,
+/// `reseeded` says it rotated its generation identity (and so reseeded the CSPRNG
+/// it inherited from the parent's memory image), and `clock_resynced` says it
+/// took the host's wall clock instead of the parent's frozen one.
+///
+/// Pure, so the fail-closed verdict is unit-tested on its own. Any false flag is
+/// a refusal rather than a warning: a restored child that cannot prove it left
+/// the parent's random state behind is indistinguishable from a sibling that
+/// will produce the same "random" values, which is precisely what a fresh
+/// identity exists to rule out.
+fn require_fresh_child_identity(
+    child_vm_name: &str,
+    outcome: &PostRestoreOutcome,
+) -> std::result::Result<(), StandbyError> {
+    let unproven = if !outcome.acknowledged {
+        "did not acknowledge the post-restore signal"
+    } else if !outcome.reseeded {
+        "acknowledged without rotating its generation identity"
+    } else if !outcome.clock_resynced {
+        "acknowledged without resynchronizing its wall clock"
+    } else {
+        return Ok(());
+    };
+    Err(StandbyError::ClaimFailed(format!(
+        "forked child '{child_vm_name}' {unproven}; refusing to admit a child that cannot prove \
+         it left its parent's random state and clock behind"
+    )))
 }
 
 /// Map a fail-closed [`ClaimRefusal`] onto the transport-agnostic
@@ -1827,6 +1898,14 @@ mod tests {
             "the capture must carry saved memory, got: {:?}",
             meta.content.iter().map(|b| &b.name).collect::<Vec<_>>()
         );
+        // The parent is released once captured — a pool slot costs disk, not a
+        // resident VM — and the handle says so.
+        assert_eq!(handle.pid, 0, "a captured parent backs no live process");
+        assert!(
+            runner.driver.killed_vms().contains(&spec.id),
+            "the captured parent must be stopped, got: {:?}",
+            runner.driver.killed_vms()
+        );
     }
 
     fn sample_standby_spec(id: &str, vm_state_dir: &Path) -> mvm_core::vm_backend::StandbySpec {
@@ -2135,6 +2214,15 @@ mod tests {
             "the fresh token is bound to the child's content-address"
         );
 
+        // The fork alone only resumes the child on the parent's saved memory, so
+        // the claim also handed that same token to the child's guest agent and
+        // committed only once the guest reported it had rotated onto it.
+        assert_eq!(
+            runner.driver.delivered_child_identities(),
+            vec![(child.0.clone(), forks[0].genid.token)],
+            "the claim delivers the forked token to the child's own guest agent, exactly once"
+        );
+
         // The runner-side overlay-contract gate ran on the materialized child:
         // its dir carries the overlay sidecar the clone rode plus the rootfs.
         let child_dir = mvm_core::config::vm_state_dir(&child.0);
@@ -2167,6 +2255,191 @@ mod tests {
                 .filter(|e| e.path().is_dir() && e.file_name().to_string_lossy().starts_with("vm-"))
                 .count(),
             Err(_) => 0,
+        }
+    }
+
+    /// What a claim driven against a scripted post-restore answer left behind.
+    struct HandshakeClaimOutcome {
+        result: std::result::Result<VmId, StandbyError>,
+        /// The driver the claim ran on — an `Arc`-shared clone, so the fork,
+        /// delivery, and kill records survive the runner it was moved into.
+        driver: MockDriver,
+        parent_state: StandbyState,
+        orphan_child_dirs: usize,
+    }
+
+    /// Drive one full claim over a clean audited parent against `driver`, whose
+    /// `deliver_child_identity` answer the caller has scripted. Everything the
+    /// claim touches (MVM_HOME, stores, pool, registry) is fresh per call, so the
+    /// handshake outcomes are independent of each other.
+    fn claim_with_scripted_handshake(driver: MockDriver) -> HandshakeClaimOutcome {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+
+        let probe = driver.clone();
+        let runner = WorkloadRunner::new(
+            driver,
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+        };
+
+        let result = runner.claim_standby(&ctx, &handle, &claim);
+        HandshakeClaimOutcome {
+            result,
+            driver: probe,
+            parent_state: pool.load("warm-parent").unwrap().state,
+            orphan_child_dirs: orphan_child_dirs(),
+        }
+    }
+
+    /// A forked child comes back resumed on its parent's saved memory, so until
+    /// it answers the identity handshake it is still drawing on the parent's
+    /// CSPRNG and reading the parent's frozen clock. Every way that proof can
+    /// fail — the guest never answers, answers without acknowledging, without
+    /// rotating, or without resynchronizing its clock — must refuse the claim,
+    /// stop the live child, return the healthy parent to claimable, and leave no
+    /// child dir. Admitting on any of them would hand out a VM whose "random"
+    /// values match every sibling forked from the same parent.
+    #[test]
+    fn claim_refuses_a_child_that_cannot_prove_a_fresh_identity() {
+        let unproven = |acknowledged: bool, reseeded: bool, clock_resynced: bool| {
+            MockDriver::default().with_child_identity(PostRestoreOutcome {
+                acknowledged,
+                detail: None,
+                reseeded,
+                clock_resynced,
+            })
+        };
+        let cases = [
+            (
+                "guest never answered",
+                MockDriver::default().with_unreachable_child_agent(),
+            ),
+            ("guest did not acknowledge", unproven(false, true, true)),
+            ("guest did not reseed", unproven(true, false, true)),
+            (
+                "guest did not resync its clock",
+                unproven(true, true, false),
+            ),
+        ];
+
+        for (label, driver) in cases {
+            let out = claim_with_scripted_handshake(driver);
+            let err = out
+                .result
+                .expect_err(&format!("{label}: the claim must fail closed"));
+            assert!(
+                matches!(err, StandbyError::ClaimFailed(_)),
+                "{label}: refusal must be a ClaimFailed: {err}"
+            );
+
+            // The refusal lands AFTER the fork — the child really was live — and
+            // the child was stopped rather than left running unproven.
+            let forks = out.driver.forked_children();
+            assert_eq!(forks.len(), 1, "{label}: the child was forked first");
+            assert!(
+                out.driver.killed_vms().contains(&forks[0].child_vm_name),
+                "{label}: the refused child must be stopped, not left resumed: killed {:?}",
+                out.driver.killed_vms()
+            );
+            assert_eq!(
+                out.parent_state,
+                StandbyState::Idle,
+                "{label}: a child-side failure must return the healthy parent to claimable"
+            );
+            assert_eq!(
+                out.orphan_child_dirs, 0,
+                "{label}: a refused claim must leave no orphan child dir"
+            );
+        }
+    }
+
+    /// The delivered token reaches the child's agent even on the refusal path —
+    /// the claim refuses on what the guest reported, not by skipping the ask.
+    #[test]
+    fn claim_delivers_the_token_before_judging_the_child() {
+        let out = claim_with_scripted_handshake(MockDriver::default().with_child_identity(
+            PostRestoreOutcome {
+                acknowledged: true,
+                detail: None,
+                reseeded: false,
+                clock_resynced: true,
+            },
+        ));
+        assert!(out.result.is_err());
+        let delivered = out.driver.delivered_child_identities();
+        let forks = out.driver.forked_children();
+        assert_eq!(delivered.len(), 1, "the token is delivered exactly once");
+        assert_eq!(delivered[0].0, forks[0].child_vm_name);
+        assert_eq!(
+            delivered[0].1, forks[0].genid.token,
+            "the delivered token is the one the fork minted"
+        );
+    }
+
+    /// The verdict itself, without a claim around it: every flag is required, and
+    /// the refusal names which one the guest failed to prove.
+    #[test]
+    fn fresh_child_identity_requires_every_flag() {
+        let proven = PostRestoreOutcome {
+            acknowledged: true,
+            detail: None,
+            reseeded: true,
+            clock_resynced: true,
+        };
+        assert!(require_fresh_child_identity("vm-a", &proven).is_ok());
+
+        for (mutate, expected) in [
+            (
+                (|o: &mut PostRestoreOutcome| o.acknowledged = false)
+                    as fn(&mut PostRestoreOutcome),
+                "did not acknowledge",
+            ),
+            (
+                |o: &mut PostRestoreOutcome| o.reseeded = false,
+                "without rotating its generation identity",
+            ),
+            (
+                |o: &mut PostRestoreOutcome| o.clock_resynced = false,
+                "without resynchronizing its wall clock",
+            ),
+        ] {
+            let mut outcome = proven.clone();
+            mutate(&mut outcome);
+            let err = require_fresh_child_identity("vm-a", &outcome)
+                .expect_err("a false flag must refuse");
+            assert!(
+                err.to_string().contains(expected),
+                "refusal must name the unproven flag ({expected}): {err}"
+            );
         }
     }
 

@@ -15,13 +15,34 @@ use mvm_core::vm_backend::{
     VmExitStatus, VmId, VmStatus,
 };
 
-use mvm_core::crypto::vmgenid::GenerationToken;
+use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 
 use crate::driver::spec::{ConsoleCapture, KernelImage, VmmSpec};
 use crate::driver::traits::{ChildForkRequest, DuplexStream, RunningVm, VmmDriver};
 use crate::standby_pool::now_unix_secs;
+use crate::vm::instance_snapshot::PostRestoreOutcome;
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
+
+/// What a `MockDriver` reports from `deliver_child_identity`. `None` scripts a
+/// guest that never answered inside the RPC deadline (the shape a real
+/// transport error takes); `Some` scripts the flags a live agent would report.
+type ScriptedChildIdentity = Option<PostRestoreOutcome>;
+
+/// One `(child_vm_name, token)` pair `deliver_child_identity` was handed.
+type DeliveredIdentity = (String, [u8; GENID_BYTES]);
+
+/// A clean post-restore answer: the guest acknowledged, rotated its generation
+/// identity off the delivered token, and took the host's wall clock. The
+/// `MockDriver` default, so an ordinary claim test needs no extra setup.
+fn rotated_child_identity() -> PostRestoreOutcome {
+    PostRestoreOutcome {
+        acknowledged: true,
+        detail: None,
+        reseeded: true,
+        clock_resynced: true,
+    }
+}
 
 /// A recorded `fork_standby_child` call: the child's fresh name plus the
 /// generation token the fork delivered, so a test can prove a claim delivered a
@@ -50,6 +71,17 @@ pub struct MockDriver {
     /// `vm_full_calls()` regardless of which `vm_full_control()` call produced
     /// the control that was driven.
     vm_full_calls: Arc<Mutex<Vec<&'static str>>>,
+    /// The post-restore answer `deliver_child_identity` reports for a forked
+    /// child, so a test can drive the claim's fresh-identity gate — including
+    /// the refusal arms — with no live guest.
+    child_identity: ScriptedChildIdentity,
+    /// Every `(child, token)` this driver was asked to deliver, so a test can
+    /// prove the claim handed the guest the same token it forked with.
+    delivered_identities: Arc<Mutex<Vec<DeliveredIdentity>>>,
+    /// Names of the VMs killed through any handle this driver produced, so a
+    /// test can prove a refused claim actually tore its child down instead of
+    /// leaving it resumed.
+    killed: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for MockDriver {
@@ -69,6 +101,9 @@ impl MockDriver {
             guest_ends: Arc::new(Mutex::new(HashMap::new())),
             vm_full_rootfs: PathBuf::from("/mock/rootfs.ext4"),
             vm_full_calls: Arc::new(Mutex::new(Vec::new())),
+            child_identity: Some(rotated_child_identity()),
+            delivered_identities: Arc::new(Mutex::new(Vec::new())),
+            killed: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -111,6 +146,32 @@ impl MockDriver {
     pub fn vm_full_calls(&self) -> Vec<&'static str> {
         self.vm_full_calls.lock().unwrap().clone()
     }
+
+    /// Script the flags a forked child's guest agent reports back — e.g. an
+    /// acknowledgement that did not rotate the generation identity.
+    pub fn with_child_identity(mut self, outcome: PostRestoreOutcome) -> Self {
+        self.child_identity = Some(outcome);
+        self
+    }
+
+    /// Script a forked child whose guest agent never answers, the shape a real
+    /// transport failure or a blown RPC deadline takes.
+    pub fn with_unreachable_child_agent(mut self) -> Self {
+        self.child_identity = None;
+        self
+    }
+
+    /// Every `(child_vm_name, token)` handed to `deliver_child_identity`, in
+    /// order.
+    pub fn delivered_child_identities(&self) -> Vec<DeliveredIdentity> {
+        self.delivered_identities.lock().unwrap().clone()
+    }
+
+    /// Names of the VMs killed through any handle this driver produced, in
+    /// order.
+    pub fn killed_vms(&self) -> Vec<String> {
+        self.killed.lock().unwrap().clone()
+    }
 }
 
 impl VmmDriver for MockDriver {
@@ -151,6 +212,7 @@ impl VmmDriver for MockDriver {
             exit: self.exit,
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
+            killed: Arc::clone(&self.killed),
         }))
     }
 
@@ -228,7 +290,22 @@ impl VmmDriver for MockDriver {
             exit: self.exit,
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
+            killed: Arc::clone(&self.killed),
         }))
+    }
+
+    fn deliver_child_identity(
+        &self,
+        child_vm_name: &str,
+        token: [u8; GENID_BYTES],
+    ) -> Result<PostRestoreOutcome> {
+        self.delivered_identities
+            .lock()
+            .unwrap()
+            .push((child_vm_name.to_string(), token));
+        self.child_identity.clone().ok_or_else(|| {
+            anyhow!("mock guest agent for '{child_vm_name}' did not answer the post-restore signal")
+        })
     }
 
     fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
@@ -264,6 +341,7 @@ pub struct MockRunningVm {
     exit: VmExitStatus,
     status: VmStatus,
     guest_ends: GuestEnds,
+    killed: Arc<Mutex<Vec<String>>>,
 }
 
 impl RunningVm for MockRunningVm {
@@ -274,6 +352,7 @@ impl RunningVm for MockRunningVm {
         Ok(self.exit)
     }
     fn kill(&self) -> Result<()> {
+        self.killed.lock().unwrap().push(self.id.0.clone());
         Ok(())
     }
     fn pause(&self) -> Result<()> {
