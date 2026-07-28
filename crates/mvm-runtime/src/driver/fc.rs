@@ -21,17 +21,22 @@ use mvm_agentd::vsock::{
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
+    StandbyHandle, StandbySpec, StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId,
+    VmStatus,
 };
 
 use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
-use crate::driver::{BlockDev, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection};
+use crate::driver::{
+    BlockDev, ConsoleCapture, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection,
+};
 use crate::microvm::{
     FirecrackerGuard, api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
-    firecracker_vsock_uds_path, logger_body, machine_config_body, start_vm_firecracker, vsock_body,
+    firecracker_vsock_uds_path, logger_body, machine_config_body, read_firecracker_pid,
+    start_vm_firecracker, vsock_body,
 };
+use crate::standby_pool::now_unix_secs;
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
 /// `connect_to_port` retries the CONNECT handshake internally within this bound.
@@ -314,6 +319,15 @@ fn fc_sudo_signal(pid_file: &str, signal: FcStopSignal) {
     }
 }
 
+/// Read the pid `boot` recorded for the VM whose state dir is `vm_state_dir`.
+/// `boot` only returns once the guest agent has answered, so the pid file is
+/// already on disk by the time a caller reaches for it; a read failure is not
+/// fatal to a standby spawn (the parent is already running), so this reports
+/// `None` rather than erroring.
+fn read_fc_pid(vm_state_dir: &str) -> Option<u32> {
+    read_firecracker_pid(vm_state_dir).ok()
+}
+
 /// SIGTERM → grace → SIGKILL escalation against a Firecracker process, mirroring
 /// the raw stop path's shutdown escalation. The liveness probe, signal
 /// delivery, clock, and sleep are injected so the decision — "did the process
@@ -392,6 +406,75 @@ impl VmmDriver for FcDriver {
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
         fc_base_bootargs(virtiofs_root, has_disk)
+    }
+
+    fn spawn_standby_parent(
+        &self,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        // A factory parent carries no plan, no volumes, no broker endpoint and
+        // no guest NIC — nothing that could bind it to one workload. It exists
+        // only to be captured and cloned.
+        let image = spec.image_path.as_deref().ok_or_else(|| {
+            StandbyError::SpawnFailed(format!("standby '{}' has no rootfs image to boot", spec.id))
+        })?;
+
+        let parent = VmmSpec {
+            name: spec.id.clone(),
+            kernel: KernelImage::Path(PathBuf::from(&spec.kernel_path)),
+            initramfs: None,
+            cmdline: self.workload_base_bootargs(false, true),
+            vcpus: u32::from(spec.vcpus),
+            memory_mib: spec.mem_mib,
+            mem_initial_mib: None,
+            blocks: vec![BlockDev {
+                source: PathBuf::from(image),
+                // The parent's rootfs is the shared base image: never writable,
+                // so one parent cannot alter what every child clones.
+                read_only: true,
+                ephemeral: false,
+                slot: 0,
+            }],
+            vsock: Vec::new(),
+            console: ConsoleCapture {
+                log_path: PathBuf::from(&spec.vm_state_dir).join("console.log"),
+            },
+            trusted_builder: false,
+        };
+
+        // `boot` returns only once the guest agent answered over vsock, so the
+        // memory captured next is of a fully-booted, ready guest — that is what
+        // lets a restored child skip boot entirely.
+        let vm = self
+            .boot(&parent)
+            .map_err(|e| StandbyError::SpawnFailed(format!("boot standby parent: {e}")))?;
+
+        // Deliberately left running: the caller captures its live memory, and
+        // Firecracker outlives this handle.
+        let pid = read_fc_pid(&spec.vm_state_dir).unwrap_or(0);
+        drop(vm);
+
+        Ok(StandbyHandle {
+            id: spec.id.clone(),
+            // Propagate the template identity: a parent bound to one template
+            // must never be claimable by a launch of another.
+            template_id: spec.template_id.clone(),
+            control_socket: spec.control_socket.clone(),
+            pid,
+            kernel_sha256: spec.kernel_sha256.clone(),
+            vcpus: spec.vcpus,
+            mem_mib: spec.mem_mib,
+            binding_nonce: spec.binding_nonce.clone(),
+            spawned_unix_secs: now_unix_secs(),
+            state: StandbyState::Idle,
+            image_sha256: spec.image_sha256.clone(),
+            // The caller captures the parent and stamps this.
+            parent_checkpoint: None,
+        })
+    }
+
+    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+        Some(Box::new(crate::firecracker::FcVmFullControl::new(vm_name)))
     }
 
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
@@ -1268,5 +1351,44 @@ mod tests {
             refused.contains("supports only the agent port"),
             "an out-of-range port must be refused by the allow-list: {refused}"
         );
+    }
+
+    fn standby_spec_without_image() -> StandbySpec {
+        StandbySpec {
+            id: "standby-1".into(),
+            template_id: Some("tmpl-a".into()),
+            kernel_path: "/img/vmlinux".into(),
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 512,
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "b".repeat(64),
+            control_socket: "/state/standby-1/control.sock".into(),
+            vm_state_dir: "/state/standby-1".into(),
+            image_path: None,
+            image_sha256: None,
+        }
+    }
+
+    /// A parent with no rootfs cannot be booted, so it is refused up front
+    /// rather than yielding a handle no claim could ever use.
+    #[test]
+    fn spawn_standby_parent_refuses_a_spec_without_an_image() {
+        let spec = standby_spec_without_image();
+
+        let err = FcDriver::new().spawn_standby_parent(&spec).unwrap_err();
+
+        assert!(
+            matches!(err, StandbyError::SpawnFailed(ref m) if m.contains("rootfs")),
+            "expected a SpawnFailed naming the missing rootfs, got: {err:?}"
+        );
+    }
+
+    /// Capturing a parent's memory needs a backend-specific control; Firecracker
+    /// has one, so it must offer it rather than falling through to the default.
+    #[test]
+    fn fc_offers_a_vm_full_capture_control() {
+        assert!(FcDriver::new().vm_full_control("any-vm").is_some());
     }
 }

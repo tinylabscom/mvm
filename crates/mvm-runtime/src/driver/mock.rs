@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
@@ -40,6 +41,15 @@ pub struct MockDriver {
     booted: Arc<Mutex<Vec<VmmSpec>>>,
     forked: Arc<Mutex<Vec<MockChildFork>>>,
     guest_ends: GuestEnds,
+    /// The rootfs path `vm_full_control`'s returned control reports from
+    /// `rootfs_path()` — a test seeds this to a file it already wrote so the
+    /// capture orchestration has something real to clone.
+    vm_full_rootfs: PathBuf,
+    /// Shared with every `MockVmFullControl` this driver hands out, so a test
+    /// can read back the pause/save_memory/resume call order via
+    /// `vm_full_calls()` regardless of which `vm_full_control()` call produced
+    /// the control that was driven.
+    vm_full_calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl Default for MockDriver {
@@ -57,6 +67,8 @@ impl MockDriver {
             booted: Arc::new(Mutex::new(Vec::new())),
             forked: Arc::new(Mutex::new(Vec::new())),
             guest_ends: Arc::new(Mutex::new(HashMap::new())),
+            vm_full_rootfs: PathBuf::from("/mock/rootfs.ext4"),
+            vm_full_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -85,6 +97,19 @@ impl MockDriver {
             .lock()
             .unwrap()
             .remove(&(vm.0.clone(), guest_port))
+    }
+
+    /// Seed the rootfs path a subsequent `vm_full_control()` call's control
+    /// reports via `rootfs_path()`.
+    pub fn with_vm_full_rootfs(mut self, rootfs: impl Into<PathBuf>) -> Self {
+        self.vm_full_rootfs = rootfs.into();
+        self
+    }
+
+    /// The `pause`/`save_memory`/`resume` calls recorded so far against any
+    /// control this driver's `vm_full_control()` has handed out, in order.
+    pub fn vm_full_calls(&self) -> Vec<&'static str> {
+        self.vm_full_calls.lock().unwrap().clone()
     }
 }
 
@@ -206,6 +231,14 @@ impl VmmDriver for MockDriver {
         }))
     }
 
+    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+        let _ = vm_name;
+        Some(Box::new(MockVmFullControl {
+            rootfs: self.vm_full_rootfs.clone(),
+            calls: Arc::clone(&self.vm_full_calls),
+        }))
+    }
+
     fn guest_channel_info(&self, _id: &VmId) -> Result<GuestChannelInfo> {
         bail!("mock driver does not provide guest channel info")
     }
@@ -259,6 +292,49 @@ impl RunningVm for MockRunningVm {
             .unwrap()
             .insert((self.id.0.clone(), guest_port), guest);
         Ok(Box::new(host))
+    }
+}
+
+/// Hypervisor-free [`crate::checkpoint::VmFullControl`] test double: no real
+/// pause/resume happens, `save_memory` writes a small deterministic file
+/// instead of a real machine-memory image, and `rootfs_path`/`device_anchors`
+/// report the path a test seeded on the owning `MockDriver`. Every call is
+/// recorded (shared with the driver via `calls`) so a capture test can assert
+/// the pause-then-save-then-resume ordering without a live hypervisor.
+struct MockVmFullControl {
+    rootfs: PathBuf,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl crate::checkpoint::VmFullControl for MockVmFullControl {
+    fn pause(&self) -> Result<()> {
+        self.calls.lock().unwrap().push("pause");
+        Ok(())
+    }
+
+    fn resume(&self) -> Result<()> {
+        self.calls.lock().unwrap().push("resume");
+        Ok(())
+    }
+
+    fn save_memory(&self, memory_path: &Path) -> Result<()> {
+        self.calls.lock().unwrap().push("save_memory");
+        std::fs::write(memory_path, b"mock-memory-state")
+            .map_err(|e| anyhow!("writing mock memory file {}: {e}", memory_path.display()))
+    }
+
+    fn rootfs_path(&self) -> Result<PathBuf> {
+        Ok(self.rootfs.clone())
+    }
+
+    fn device_anchors(&self) -> Result<crate::checkpoint::DeviceAnchors> {
+        Ok(crate::checkpoint::DeviceAnchors {
+            rootfs: self.rootfs.clone(),
+            rootfs_verity: None,
+            config: None,
+            secrets: None,
+            vsock: PathBuf::from("/mock/vsock"),
+        })
     }
 }
 
@@ -377,5 +453,40 @@ mod tests {
         let mut back = [0u8; 4];
         host.read_exact(&mut back).unwrap();
         assert_eq!(&back, b"pong");
+    }
+
+    #[test]
+    fn mock_driver_offers_a_vm_full_capture_control() {
+        assert!(MockDriver::default().vm_full_control("any-vm").is_some());
+    }
+
+    #[test]
+    fn mock_vm_full_control_records_calls_and_reports_seeded_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fake-rootfs").unwrap();
+
+        let driver = MockDriver::default().with_vm_full_rootfs(&rootfs);
+        let control = driver.vm_full_control("standby-1").unwrap();
+
+        control.pause().unwrap();
+        let memory_path = tmp.path().join("memory.bin");
+        control.save_memory(&memory_path).unwrap();
+        control.resume().unwrap();
+
+        assert_eq!(control.rootfs_path().unwrap(), rootfs);
+        assert!(
+            std::fs::read(&memory_path)
+                .unwrap()
+                .starts_with(b"mock-memory")
+        );
+        assert_eq!(
+            driver.vm_full_calls(),
+            vec!["pause", "save_memory", "resume"]
+        );
+
+        let anchors = control.device_anchors().unwrap();
+        assert_eq!(anchors.rootfs, rootfs);
+        assert!(anchors.rootfs_verity.is_none());
     }
 }

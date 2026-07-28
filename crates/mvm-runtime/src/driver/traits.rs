@@ -92,6 +92,17 @@ pub trait VmmDriver: Send + Sync {
         })
     }
 
+    /// Backend-specific control over a running VM named `vm_name` that lets the
+    /// caller pause it, save its live memory, and resume it — the mechanics
+    /// [`crate::checkpoint::capture_vm_full`] needs to capture a spawned standby
+    /// parent. `None` by default: a backend that cannot pause-and-save-memory
+    /// cannot back a warm pool, so it simply has nothing to offer here rather
+    /// than a control whose methods would all fail.
+    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+        let _ = vm_name;
+        None
+    }
+
     /// The VMM-specific base kernel bootargs (console, earlycon, root/init
     /// selection) for a workload boot with the given root/disk shape. The
     /// shared cmdline assembler (`workload_runner::cmdline`) layers every
