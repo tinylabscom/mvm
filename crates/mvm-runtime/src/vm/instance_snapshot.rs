@@ -810,7 +810,8 @@ impl SnapshotIO for CannedIO {
 }
 
 /// `SnapshotIO` impl that talks to a live Firecracker over its
-/// Unix socket. Pause shells out to `curl`'s `PATCH /vm` (state =
+/// Unix socket, speaking HTTP/1.1 to the API directly rather than
+/// spawning a process per call. Pause issues `PATCH /vm` (state =
 /// Paused) followed by `PUT /snapshot/create`; resume runs `PUT
 /// /snapshot/load` then `PATCH /vm` (state = Resumed).
 ///
@@ -893,8 +894,13 @@ impl SnapshotIO for FirecrackerIO {
         self.ensure_socket()?;
         // Pause vCPUs first (Firecracker requires a paused VM
         // before /snapshot/create). PATCH /vm.
-        run_curl(&self.socket_path, "PATCH", "/vm", r#"{"state":"Paused"}"#)
-            .with_context(|| "PATCH /vm Paused")?;
+        crate::microvm::call(
+            &self.socket_path,
+            "PATCH",
+            "/vm",
+            Some(r#"{"state":"Paused"}"#),
+        )
+        .with_context(|| "PATCH /vm Paused")?;
 
         let payload = format!(
             r#"{{"snapshot_type":"Full","snapshot_path":"{}/{}","mem_file_path":"{}/{}"}}"#,
@@ -903,7 +909,7 @@ impl SnapshotIO for FirecrackerIO {
             dir.display(),
             MEM_FILENAME,
         );
-        run_curl(&self.socket_path, "PUT", "/snapshot/create", &payload)
+        crate::microvm::call(&self.socket_path, "PUT", "/snapshot/create", Some(&payload))
             .with_context(|| "PUT /snapshot/create")?;
         Ok(())
     }
@@ -918,15 +924,20 @@ impl SnapshotIO for FirecrackerIO {
 
     fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
         self.ensure_socket()?;
-        let body = run_curl_capture(&self.socket_path, "GET", "/vm/config")
+        let body = crate::microvm::call(&self.socket_path, "GET", "/vm/config", None)
             .with_context(|| "GET /vm/config")?;
         serde_json::from_str(&body).with_context(|| "parsing GET /vm/config response")
     }
 
     fn resume(&self) -> Result<()> {
         self.ensure_socket()?;
-        run_curl(&self.socket_path, "PATCH", "/vm", r#"{"state":"Resumed"}"#)
-            .with_context(|| "PATCH /vm Resumed")?;
+        crate::microvm::call(
+            &self.socket_path,
+            "PATCH",
+            "/vm",
+            Some(r#"{"state":"Resumed"}"#),
+        )
+        .with_context(|| "PATCH /vm Resumed")?;
         Ok(())
     }
 
@@ -948,56 +959,6 @@ impl SnapshotIO for FirecrackerIO {
         let _ = run_in_vm(&format!("sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null"));
         Ok(())
     }
-}
-
-fn run_curl(socket: &Path, method: &str, endpoint: &str, body: &str) -> Result<()> {
-    use std::process::Command;
-    let url = format!("http://localhost{endpoint}");
-    let out = Command::new("curl")
-        .arg("--unix-socket")
-        .arg(socket)
-        .arg("-fsS")
-        .arg("-X")
-        .arg(method)
-        .arg("-H")
-        .arg("Content-Type: application/json")
-        .arg("-d")
-        .arg(body)
-        .arg(&url)
-        .output()
-        .with_context(|| format!("invoking curl for {method} {endpoint}"))?;
-    if !out.status.success() {
-        bail!(
-            "{method} {endpoint} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(())
-}
-
-/// Like [`run_curl`] but returns the captured response body instead of
-/// discarding it. `run_curl` only asserts the request succeeded; the
-/// device-model guard needs the actual `GET /vm/config` body to parse a
-/// [`crate::microvm::RestoredDeviceModel`] out of.
-fn run_curl_capture(socket: &Path, method: &str, endpoint: &str) -> Result<String> {
-    use std::process::Command;
-    let url = format!("http://localhost{endpoint}");
-    let out = Command::new("curl")
-        .arg("--unix-socket")
-        .arg(socket)
-        .arg("-fsS")
-        .arg("-X")
-        .arg(method)
-        .arg(&url)
-        .output()
-        .with_context(|| format!("invoking curl for {method} {endpoint}"))?;
-    if !out.status.success() {
-        bail!(
-            "{method} {endpoint} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]
