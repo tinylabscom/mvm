@@ -316,6 +316,7 @@ mod tests {
             spawned_unix_secs: 1,
             state,
             image_sha256: None,
+            parent_checkpoint: None,
         }
     }
 
@@ -559,6 +560,7 @@ mod tests {
             spawned_unix_secs: 1,
             state,
             image_sha256: Some(image.into()),
+            parent_checkpoint: None,
         }
     }
 

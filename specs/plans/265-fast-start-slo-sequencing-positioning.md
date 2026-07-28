@@ -99,10 +99,14 @@ Release alone also misses the SLO; pooled Firecracker still needs to close
       path chowns the socket to the jailer uid/gid with mode `srwxr-xr-x`, so a
       non-root uid *can* connect there; moving `api_put_socket` native is
       therefore conditional on the production spawn path using the jailer.)*
-- [ ] Pre-spawned / pooled Firecracker: wire the existing `standby_pool` /
+- [x] Pre-spawned / pooled Firecracker: wire the existing `standby_pool` /
       `WarmLease` (default-off + libkrun-only today) into the FC backend so a
       restore claims a pre-spawned VMM rather than spawning one. Overlaps
       Plan 255 warm-pool work.
+      *(Implemented `FcDriver::spawn_standby_parent` / `fork_standby_child`,
+      flipped `standby_pool` capability, fixed CLI dispatch to use
+      `claim_standby_via_runner`, and added unit tests. Live end-to-end still
+      needs a KVM box run.)*
 - [x] Release-build measurement on the KVM box; record warm p50/p99 here.
       *(release, native client, N=10: p50=45 ms, p99=49 ms; SLO gap = 15 ms
       for pooled FC to close.)*

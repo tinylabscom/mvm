@@ -718,6 +718,10 @@ pub struct StandbySpec {
     pub image_path: Option<String>,
     /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
     pub image_sha256: Option<String>,
+    /// Content-addressed checkpoint id the standby parent was captured as. Saved-state
+    /// (disk-based) standbys carry this so a warm claim can lineage-verify and materialize
+    /// the parent; live standbys leave it `None`.
+    pub parent_checkpoint: Option<String>,
 }
 
 /// The base-compat key — everything a standby fixes at spawn and must therefore match the
@@ -763,6 +767,10 @@ pub struct StandbyHandle {
     /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for HVF saved-standbys.
     #[serde(default)]
     pub image_sha256: Option<String>,
+    /// Content-addressed checkpoint id the standby parent was captured as. Saved-state
+    /// standbys carry this so a warm claim can lineage-verify and materialize the parent.
+    #[serde(default)]
+    pub parent_checkpoint: Option<String>,
 }
 
 impl StandbyHandle {
@@ -1034,6 +1042,7 @@ mod tests {
             spawned_unix_secs: 1_700_000_000,
             state: StandbyState::Idle,
             image_sha256: None,
+            parent_checkpoint: None,
         };
         let json = serde_json::to_string(&h).unwrap();
         let back: StandbyHandle = serde_json::from_str(&json).unwrap();
@@ -1063,6 +1072,7 @@ mod tests {
         // HVF image sha must match exactly: Some(a) ≠ None, Some(a) ≠ Some(b).
         let hvf_handle = StandbyHandle {
             image_sha256: Some("c".repeat(64)),
+            parent_checkpoint: None,
             ..h.clone()
         };
         let hvf_want = StandbyCompat {
@@ -1145,6 +1155,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: Some("dd".repeat(32)),
+            parent_checkpoint: None,
         };
         assert!(saved.is_saved_state());
         // serde roundtrip preserves the image sha and pid=0.

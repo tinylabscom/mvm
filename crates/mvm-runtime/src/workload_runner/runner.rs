@@ -1730,6 +1730,7 @@ mod tests {
             vm_state_dir: vm_state_dir.display().to_string(),
             image_path: None,
             image_sha256: None,
+            parent_checkpoint: None,
         }
     }
 
@@ -1915,6 +1916,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: None,
+            parent_checkpoint: None,
         }
     }
 

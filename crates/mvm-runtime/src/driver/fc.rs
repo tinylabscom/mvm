@@ -21,17 +21,27 @@ use mvm_agentd::vsock::{
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
+    StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 
 use crate::backend::FirecrackerBackend;
+use crate::base::runtime_meta::record_from_rootfs;
+use crate::checkpoint::{
+    CaptureVmFullParams, CheckpointStore, ForkVmFullRestorer, capture_vm_full,
+};
 use crate::driver::spec::KernelImage;
-use crate::driver::{BlockDev, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection};
+use crate::driver::{
+    BlockDev, ChildForkRequest, ConsoleCapture, DuplexStream, RunningVm, VmmDriver, VmmSpec,
+    VsockDirection,
+};
 use crate::microvm::{
     FirecrackerGuard, api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
     firecracker_vsock_uds_path, logger_body, machine_config_body, start_vm_firecracker, vsock_body,
 };
+use crate::standby_pool::now_unix_secs;
+use mvm_core::checkpoint::CheckpointId;
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
 /// `connect_to_port` retries the CONNECT handshake internally within this bound.
@@ -375,7 +385,7 @@ impl VmmDriver for FcDriver {
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: false,
+            standby_pool: true,
             vsock: true,
             tap_networking: false,
             no_routable_guest_nic: true,
@@ -422,6 +432,12 @@ impl VmmDriver for FcDriver {
                     kernel_path.display()
                 )
             })?;
+
+        // Record the rootfs path so checkpoint capture can resolve it later.
+        if let Some(rootfs) = spec.blocks.iter().find(|b| b.slot == 0) {
+            record_from_rootfs(&spec.name, StartMode::Detached, &rootfs.source)
+                .context("recording standby parent rootfs path")?;
+        }
 
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = format!("{abs_dir}/fc.socket");
@@ -508,6 +524,107 @@ impl VmmDriver for FcDriver {
 
     fn guest_channel_info(&self, id: &VmId) -> Result<GuestChannelInfo> {
         self.backend.guest_channel_info(id)
+    }
+
+    fn spawn_standby_parent(
+        &self,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let image_path = spec.image_path.as_deref().ok_or_else(|| {
+            StandbyError::SpawnFailed(format!(
+                "Firecracker saved-state standby '{}' requires an image-bound rootfs",
+                spec.id
+            ))
+        })?;
+
+        let console_log = vm_state_dir(&spec.id).join("console.log");
+        let parent_spec = VmmSpec {
+            name: spec.id.clone(),
+            kernel: KernelImage::Path(PathBuf::from(&spec.kernel_path)),
+            initramfs: None,
+            cmdline: fc_base_bootargs(false, true),
+            vcpus: u32::from(spec.vcpus),
+            memory_mib: spec.mem_mib,
+            mem_initial_mib: None,
+            blocks: vec![BlockDev {
+                source: PathBuf::from(image_path),
+                read_only: true,
+                ephemeral: false,
+                slot: 0,
+            }],
+            vsock: vec![],
+            console: ConsoleCapture {
+                log_path: console_log,
+            },
+            trusted_builder: false,
+        };
+
+        self.boot(&parent_spec).map_err(|e| {
+            StandbyError::SpawnFailed(format!(
+                "boot Firecracker standby parent '{}': {:#}",
+                spec.id, e
+            ))
+        })?;
+
+        let control = crate::firecracker::FcVmFullControl::new(&spec.id);
+        let store = CheckpointStore::open();
+        let checkpoint_id =
+            CheckpointId::new(format!("fc-standby-{}-{}", spec.id, now_unix_secs()));
+        let created_unix = now_unix_secs();
+        let _capture = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: checkpoint_id.clone(),
+                vm_name: spec.id.clone(),
+                supervisor_config_digest: String::new(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
+                supervisor_config_src: None,
+                tag: Some("fc-standby-parent".into()),
+                created_unix,
+            },
+            &control,
+        )
+        .map_err(|e| {
+            StandbyError::SpawnFailed(format!(
+                "capture Firecracker standby parent '{}': {:#}",
+                spec.id, e
+            ))
+        })?;
+
+        // Saved-state standbys stop the parent after capture; the pool's
+        // resource is the checkpoint, not a running process.
+        let _ = crate::microvm::stop_vm(&spec.id);
+        let _ = std::fs::remove_dir_all(vm_state_dir(&spec.id));
+
+        Ok(StandbyHandle {
+            id: spec.id.clone(),
+            template_id: spec.template_id.clone(),
+            control_socket: spec.control_socket.clone(),
+            pid: 0,
+            kernel_sha256: spec.kernel_sha256.clone(),
+            vcpus: spec.vcpus,
+            mem_mib: spec.mem_mib,
+            binding_nonce: spec.binding_nonce.clone(),
+            spawned_unix_secs: created_unix,
+            state: StandbyState::Idle,
+            image_sha256: spec.image_sha256.clone(),
+            parent_checkpoint: Some(checkpoint_id.to_string()),
+        })
+    }
+
+    fn fork_standby_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        crate::firecracker::FcForkRestorer
+            .restore_fork(req.child_vm_name, req.child_dir)
+            .map_err(|e| {
+                StandbyError::ClaimFailed(format!(
+                    "Firecracker fork into child '{}': {:#}",
+                    req.child_vm_name, e
+                ))
+            })
     }
 }
 
@@ -722,7 +839,7 @@ mod tests {
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
 
-        assert!(!FcDriver::new().capabilities().standby_pool);
+        assert!(FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
         assert!(!HvfDriver::new().capabilities().standby_pool);
         assert!(!MockDriver::default().capabilities().standby_pool);
@@ -1267,6 +1384,54 @@ mod tests {
         assert!(
             refused.contains("supports only the agent port"),
             "an out-of-range port must be refused by the allow-list: {refused}"
+        );
+    }
+
+    #[test]
+    fn spawn_standby_parent_refuses_missing_image_path() {
+        let spec = StandbySpec {
+            id: "standby-no-image".into(),
+            template_id: None,
+            kernel_path: "/k/vmlinux".into(),
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 512,
+            signing_key_path: "/k/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "n".into(),
+            control_socket: "/tmp/standby-no-image.sock".into(),
+            vm_state_dir: "/tmp/standby-no-image".into(),
+            image_path: None,
+            image_sha256: None,
+            parent_checkpoint: None,
+        };
+        let err = FcDriver::new()
+            .spawn_standby_parent(&spec)
+            .expect_err("image-less spec must fail before booting")
+            .to_string();
+        assert!(
+            err.contains("requires an image-bound rootfs"),
+            "error must explain the missing rootfs: {err}"
+        );
+    }
+
+    #[test]
+    fn fork_standby_child_reports_restore_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = FcDriver::new()
+            .fork_standby_child(&ChildForkRequest {
+                child_vm_name: "child-x",
+                child_dir: tmp.path(),
+                genid: mvm_core::crypto::vmgenid::GenerationToken {
+                    token: [0u8; 16],
+                    content_hash: "h".into(),
+                },
+            })
+            .expect_err("empty child dir must fail to restore")
+            .to_string();
+        assert!(
+            err.contains("FC warm-restore for forked child") || err.contains("device anchors"),
+            "error must report the restore failure: {err}"
         );
     }
 }

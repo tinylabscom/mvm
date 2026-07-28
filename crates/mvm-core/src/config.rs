@@ -235,6 +235,12 @@ pub fn mvm_deps_volumes_dir() -> String {
     format!("{}/volumes/deps", mvm_home())
 }
 
+/// Snapshot store for copy-on-write warm-parent materialization:
+/// `<mvm_home>/snapshots`.
+pub fn mvm_snapshots_dir() -> String {
+    format!("{}/snapshots", mvm_home())
+}
+
 /// Custom volume specs from the `MVM_VOLUMES` env var: a comma-separated
 /// list of `--volume` specs (e.g. `~/src:/work:ro,data.img:/data:10G`).
 /// Whitespace around each entry is trimmed and empty entries dropped;
