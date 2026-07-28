@@ -1,0 +1,5 @@
+# Invalid: schema version is higher than this mvmctl supports.
+schema_version = 99
+flake = "."
+cpus = 1
+mem = "256M"
