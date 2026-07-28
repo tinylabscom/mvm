@@ -881,6 +881,8 @@ cargo build --release --bin mvmctl
 
 Release matters: the only prior figure (~60 ms) was a debug build and is explicitly attributed to `curl`-subprocess and fresh-spawn overhead, not the restore itself.
 
+**Validation goes through `mvmctl machine run`, not a `checkpoint` verb.** The spike confirmed the CLI exposes no `checkpoint` / `pool` / `trust` verbs — `commands/vm/checkpoint.rs` is internal machinery. The reachable entry point is `machine run`'s transient path, which calls `try_warm_claim` (`exec.rs`). Anything not reachable that way needs a Rust harness test in the style of `warm_restore_latency_live`. Findings: `specs/notes/2026-07-28-plan-255-live-fc-spike-findings.md`.
+
 - [ ] **Step 3: Drive spawn → claim and capture the evidence**
 
 Populate a pool of one, then launch a workload that claims it. Record verbatim:
@@ -896,6 +898,13 @@ Record, in release, with several repetitions (report median and spread, not a si
 - cold boot to agent-ready (the baseline);
 - warm claim to agent-ready (the headline);
 - the split between fresh-Firecracker-spawn cost and snapshot-load cost, if separable — this is the baseline Plan 265 WS2's pre-spawned-VMM work will optimize against.
+
+Context from the spike: the bare restore mechanism measures **60 ms on a release
+build**, the same as the previously-recorded debug figure — so that overhead is
+structural (`curl` subprocesses + a fresh Firecracker spawn per restore), not
+compilation. Expect a warm claim to land at roughly that plus the claim's own
+verify/clone/admit work, and do **not** treat missing the ≤30 ms SLO as a defect
+of this slice — closing that gap is Plan 265 WS2's.
 
 - [ ] **Step 5: Prove the fail-closed paths on the live host**
 
