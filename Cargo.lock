@@ -2997,6 +2997,7 @@ dependencies = [
  "tracing",
  "uuid",
  "virtio-queue",
+ "virtio-vsock",
  "vm-memory",
  "wasmtime",
  "wasmtime-wasi",
@@ -5509,6 +5510,17 @@ dependencies = [
  "virtio-bindings",
  "vm-memory",
  "vmm-sys-util 0.15.0",
+]
+
+[[package]]
+name = "virtio-vsock"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79123315dc0bad0a2923891c0cdf76269cc64f553548e7b090c2676776ea6baf"
+dependencies = [
+ "virtio-bindings",
+ "virtio-queue",
+ "vm-memory",
 ]
 
 [[package]]

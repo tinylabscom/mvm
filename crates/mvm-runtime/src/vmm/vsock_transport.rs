@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use virtio_queue::{Queue as SplitQueue, QueueOwnedT, QueueT};
+use virtio_vsock::packet::{PKT_HEADER_SIZE, VsockPacket};
 
 use super::guest_mem::GuestMem;
 
@@ -14,7 +15,10 @@ pub(crate) const NUM_QUEUES: usize = 3;
 const RX: usize = 0;
 const TX: usize = 1;
 
-pub(crate) const HDR_LEN: usize = 44;
+/// Wire size of a virtio-vsock stream packet header. Anchored to the audited
+/// `virtio-vsock` header layout so the device's buffer/descriptor sizing math and
+/// the typed header parse/format share one source of truth (both are 44 bytes).
+pub(crate) const HDR_LEN: usize = PKT_HEADER_SIZE;
 pub(crate) const HOST_CID: u64 = 2;
 pub(crate) const GUEST_CID: u64 = 3;
 pub(crate) const HOST_BUF_ALLOC: u32 = 256 * 1024;
@@ -58,36 +62,56 @@ pub(crate) struct VsockHdr {
 }
 
 impl VsockHdr {
+    /// Serialize into the 44-byte little-endian wire header through the audited
+    /// `virtio-vsock` typed packet, whose `Le64`/`Le32`/`Le16` field setters land
+    /// each field at the spec offset — byte-identical to a hand-rolled LE encode.
     pub(crate) fn to_bytes(self) -> [u8; HDR_LEN] {
-        let mut b = [0u8; HDR_LEN];
-        b[0..8].copy_from_slice(&self.src_cid.to_le_bytes());
-        b[8..16].copy_from_slice(&self.dst_cid.to_le_bytes());
-        b[16..20].copy_from_slice(&self.src_port.to_le_bytes());
-        b[20..24].copy_from_slice(&self.dst_port.to_le_bytes());
-        b[24..28].copy_from_slice(&self.len.to_le_bytes());
-        b[28..30].copy_from_slice(&self.typ.to_le_bytes());
-        b[30..32].copy_from_slice(&self.op.to_le_bytes());
-        b[32..36].copy_from_slice(&self.flags.to_le_bytes());
-        b[36..40].copy_from_slice(&self.buf_alloc.to_le_bytes());
-        b[40..44].copy_from_slice(&self.fwd_cnt.to_le_bytes());
-        b
+        let mut bytes = [0u8; HDR_LEN];
+        // SAFETY: `bytes` is a live 44-byte stack buffer that outlives `pkt`. The
+        // `VolatileSlice` `pkt` wraps over it is the only other alias, and every
+        // access is single-threaded: the field setters write through the slice,
+        // then the plain read of `bytes` at return observes those writes. This
+        // satisfies `VsockPacket::new`'s "buffer alive for the wrapper's lifetime,
+        // volatile-only access" contract.
+        let mut pkt = unsafe { VsockPacket::new(&mut bytes, None) }.expect("44-byte header buffer");
+        pkt.set_src_cid(self.src_cid)
+            .set_dst_cid(self.dst_cid)
+            .set_src_port(self.src_port)
+            .set_dst_port(self.dst_port)
+            .set_len(self.len)
+            .set_type(self.typ)
+            .set_op(self.op)
+            .set_flags(self.flags)
+            .set_buf_alloc(self.buf_alloc)
+            .set_fwd_cnt(self.fwd_cnt);
+        bytes
     }
 
+    /// Parse a 44-byte little-endian wire header through the audited
+    /// `virtio-vsock` typed packet. `set_header_from_raw` reparses the bytes into
+    /// the typed `PacketHeader`; the accessors return each field host-endian,
+    /// byte-identical to a hand-rolled LE decode. Panics on a short input, exactly
+    /// as the previous fixed-offset decode did.
     pub(crate) fn from_bytes(b: &[u8]) -> Self {
-        let u64a = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().expect("hdr u64"));
-        let u32a = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().expect("hdr u32"));
-        let u16a = |o: usize| u16::from_le_bytes(b[o..o + 2].try_into().expect("hdr u16"));
+        let mut scratch = [0u8; HDR_LEN];
+        // SAFETY: `scratch` outlives `pkt`; the wrapping `VolatileSlice` is the only
+        // other alias and all access is single-threaded, honouring the same
+        // "buffer alive, volatile-only" contract as `to_bytes`.
+        let mut pkt =
+            unsafe { VsockPacket::new(&mut scratch, None) }.expect("44-byte header buffer");
+        pkt.set_header_from_raw(&b[..HDR_LEN])
+            .expect("44-byte header slice");
         Self {
-            src_cid: u64a(0),
-            dst_cid: u64a(8),
-            src_port: u32a(16),
-            dst_port: u32a(20),
-            len: u32a(24),
-            typ: u16a(28),
-            op: u16a(30),
-            flags: u32a(32),
-            buf_alloc: u32a(36),
-            fwd_cnt: u32a(40),
+            src_cid: pkt.src_cid(),
+            dst_cid: pkt.dst_cid(),
+            src_port: pkt.src_port(),
+            dst_port: pkt.dst_port(),
+            len: pkt.len(),
+            typ: pkt.type_(),
+            op: pkt.op(),
+            flags: pkt.flags(),
+            buf_alloc: pkt.buf_alloc(),
+            fwd_cnt: pkt.fwd_cnt(),
         }
     }
 }
@@ -520,6 +544,115 @@ mod tests {
                 .wr_u16(avail + 4 + (index as u64 * 2), index as u16);
         }
         buffers
+    }
+
+    // ---- virtio-vsock typed header parse/format: byte-identity oracle -------
+
+    /// Byte-for-byte copy of the pre-migration hand-rolled 44-byte little-endian
+    /// header encode, kept as the differential oracle. The `virtio-vsock`-backed
+    /// `VsockHdr::to_bytes` must reproduce its bytes exactly.
+    fn reference_hdr_to_bytes(h: VsockHdr) -> [u8; HDR_LEN] {
+        let mut b = [0u8; HDR_LEN];
+        b[0..8].copy_from_slice(&h.src_cid.to_le_bytes());
+        b[8..16].copy_from_slice(&h.dst_cid.to_le_bytes());
+        b[16..20].copy_from_slice(&h.src_port.to_le_bytes());
+        b[20..24].copy_from_slice(&h.dst_port.to_le_bytes());
+        b[24..28].copy_from_slice(&h.len.to_le_bytes());
+        b[28..30].copy_from_slice(&h.typ.to_le_bytes());
+        b[30..32].copy_from_slice(&h.op.to_le_bytes());
+        b[32..36].copy_from_slice(&h.flags.to_le_bytes());
+        b[36..40].copy_from_slice(&h.buf_alloc.to_le_bytes());
+        b[40..44].copy_from_slice(&h.fwd_cnt.to_le_bytes());
+        b
+    }
+
+    /// Byte-for-byte copy of the pre-migration hand-rolled fixed-offset decode.
+    fn reference_hdr_from_bytes(b: &[u8]) -> VsockHdr {
+        let u64a = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().expect("hdr u64"));
+        let u32a = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().expect("hdr u32"));
+        let u16a = |o: usize| u16::from_le_bytes(b[o..o + 2].try_into().expect("hdr u16"));
+        VsockHdr {
+            src_cid: u64a(0),
+            dst_cid: u64a(8),
+            src_port: u32a(16),
+            dst_port: u32a(20),
+            len: u32a(24),
+            typ: u16a(28),
+            op: u16a(30),
+            flags: u32a(32),
+            buf_alloc: u32a(36),
+            fwd_cnt: u32a(40),
+        }
+    }
+
+    /// Every op the device dispatches, plus `0` and `u16::MAX` as out-of-range
+    /// wire values a hostile guest can still frame.
+    const ALL_OPS: [u16; 9] = [
+        0,
+        OP_REQUEST,
+        OP_RESPONSE,
+        OP_RST,
+        OP_SHUTDOWN,
+        OP_RW,
+        OP_CREDIT_UPDATE,
+        OP_CREDIT_REQUEST,
+        u16::MAX,
+    ];
+
+    #[test]
+    fn hdr_framing_is_byte_identical_to_the_reference_over_all_ops_and_boundaries() {
+        // Boundary values for the wide fields: min, a mid value, and the type max.
+        let cids = [0u64, HOST_CID, GUEST_CID, u64::MAX];
+        let ports = [0u32, 1234, u32::MAX];
+        let lens = [0u32, 1, u32::MAX];
+        let buf_allocs = [0u32, HOST_BUF_ALLOC, u32::MAX];
+        let fwd_cnts = [0u32, 7, u32::MAX];
+        // Both virtio-vsock shutdown flag bits, independently and together.
+        let flags = [0u32, 1, 2, 3];
+        let types = [0u16, TYPE_STREAM];
+
+        for &op in &ALL_OPS {
+            for &flag in &flags {
+                for &typ in &types {
+                    for (i, &src_cid) in cids.iter().enumerate() {
+                        // Index-pair the boundary arrays so the matrix stays
+                        // representative without exploding combinatorially: each
+                        // op × flag × type is exercised against the min / mid / max
+                        // field sets, and every boundary value appears.
+                        let h = VsockHdr {
+                            src_cid,
+                            dst_cid: cids[cids.len() - 1 - i],
+                            src_port: ports[i % ports.len()],
+                            dst_port: ports[(i + 1) % ports.len()],
+                            len: lens[i % lens.len()],
+                            typ,
+                            op,
+                            flags: flag,
+                            buf_alloc: buf_allocs[i % buf_allocs.len()],
+                            fwd_cnt: fwd_cnts[i % fwd_cnts.len()],
+                        };
+
+                        // 1. Framing is byte-identical to the hand-rolled encode.
+                        let framed = h.to_bytes();
+                        assert_eq!(
+                            framed,
+                            reference_hdr_to_bytes(h),
+                            "framing differs for {h:?}"
+                        );
+
+                        // 2. Parse recovers every field identically to the
+                        //    hand-rolled decode and round-trips to the original.
+                        let parsed = VsockHdr::from_bytes(&framed);
+                        assert_eq!(
+                            parsed,
+                            reference_hdr_from_bytes(&framed),
+                            "parse differs for {h:?}"
+                        );
+                        assert_eq!(parsed, h, "round-trip lost a field for {h:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
