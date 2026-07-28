@@ -19,6 +19,30 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::vm_backend::VmStartConfig;
 
+/// Bytes the guest kernel reserves for its command line (`COMMAND_LINE_SIZE`,
+/// 2048 on both x86_64 and arm64), including the trailing NUL.
+const KERNEL_CMDLINE_LIMIT: usize = 2048;
+
+/// `Some(reason)` when `cmdline` would not reach the guest intact.
+///
+/// The kernel copies at most `COMMAND_LINE_SIZE` bytes and drops the rest
+/// without a diagnostic. Truncation takes whatever was appended last, and the
+/// tokens appended last here are the security-bearing ones — the verb grant,
+/// its enforcement assertion, the host-signer trust anchor, the egress knob. A
+/// guest can therefore come up silently missing its trust anchor or its egress
+/// policy, and the only visible symptom is an unrelated-looking readiness
+/// timeout. Callers refuse the boot instead.
+pub(crate) fn cmdline_overflow(cmdline: &str) -> Option<String> {
+    (cmdline.len() + 1 > KERNEL_CMDLINE_LIMIT).then(|| {
+        format!(
+            "assembled kernel cmdline is {} bytes, past the guest kernel's \
+             {KERNEL_CMDLINE_LIMIT}-byte command line; the kernel would truncate it \
+             and silently drop the trailing security tokens",
+            cmdline.len()
+        )
+    })
+}
+
 /// Kernel cmdline token that turns on the in-guest vsock egress client.
 /// Emitted only when the run actually allows outbound egress and the workload
 /// carries no bound secrets, so the raw SOCKS path never contends with the
@@ -173,6 +197,28 @@ pub(crate) fn runner_cmdline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmdline_within_the_kernel_limit_is_accepted() {
+        assert_eq!(cmdline_overflow("console=ttyS0 root=/dev/vda"), None);
+        // Exactly fills the buffer alongside its NUL.
+        assert_eq!(
+            cmdline_overflow(&"a".repeat(KERNEL_CMDLINE_LIMIT - 1)),
+            None
+        );
+    }
+
+    #[test]
+    fn cmdline_past_the_kernel_limit_is_refused() {
+        // One byte more than the buffer can hold with its NUL.
+        let over = "a".repeat(KERNEL_CMDLINE_LIMIT);
+        let reason = cmdline_overflow(&over).expect("oversized cmdline must be refused");
+        assert!(
+            reason.contains(&KERNEL_CMDLINE_LIMIT.to_string()),
+            "{reason}"
+        );
+        assert!(reason.contains(&over.len().to_string()), "{reason}");
+    }
 
     #[test]
     fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {

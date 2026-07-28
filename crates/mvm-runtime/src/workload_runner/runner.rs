@@ -707,15 +707,20 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
                 ),
             };
 
+        let cmdline = cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
+            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        });
+        if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
+            anyhow::bail!("refusing to start VM {}: {problem}", config.name);
+        }
+
         let inputs = WorkloadLaunchInputs {
             config,
             tenant,
             secrets,
             redaction,
             network_policy: &config.network_policy,
-            cmdline: cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
-                self.driver.workload_base_bootargs(virtiofs_root, has_disk)
-            }),
+            cmdline,
         };
         // The supervisor + endpoint are detached/disk-backed; the live handle is
         // reconstructed by id via `attach`, so the boot handle is dropped here.
