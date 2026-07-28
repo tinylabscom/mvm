@@ -19,9 +19,9 @@
 
 import { createRequire } from "node:module";
 
-/** Where mkGuest bakes the shared object inside the runtime overlay. */
+/** Where the SDK sidecar is mounted for a workload. */
 const LIB_PATH_ENV = "MVM_HOST_SERVICES_LIB";
-const DEFAULT_LIB_PATH = "/mvm/runtime/lib/libmvm_host_services.so";
+const DEFAULT_LIB_PATH = "/mvm/sdk/lib/libmvm_host_services.so";
 
 const DEFAULT_TIMEOUT_SECS = 5;
 

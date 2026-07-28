@@ -215,7 +215,10 @@ binary as part of the rootfs closure.
 Tracked here per the deferred-work convention; each is its own future plan.
 
 - **WS-2 (lever E):** custom `mvm-setpriv` static-musl helper in `mvm-agentd`, built through `crates/mvm-build/src/guest_agent_build.rs` beside `seccomp-apply`/`netinit`/`verity-init`; decided on WS-1's measured numbers (build only if the ~1 MiB + reduced attack surface justifies owning a privilege primitive).
-- **WS-3 (lever B):** unify the runtime-overlay binaries on static-musl and drop the glibc loader/`libc.so.6`/`libgcc_s.so.1` bundle from `nix/images/runtime-overlay/flake.nix`; needs a mini-design for moving `libmvm_host_services.so` (the FFI cdylib SDKs dlopen) to an SDK-workload sidecar. Tighten the 32 MiB overlay cap after.
+- **WS-3 (lever B):** the static-musl runtime-overlay cut and separate SDK sidecar
+  packaging are complete; automatic runtime attachment for workloads using the
+  SDK host-service verbs remains. Tighten the 32 MiB overlay cap after measuring
+  the new image.
 - **WS-4 (lever D):** add a measured guest-agent RSS gate (≤ ~8 MB); the tokio-free agent already lands most of it.
 - **WS-5 (lever A/E):** rootfs closure minimization — CA-bundle trim, kernel-module audit, rootfs package-count budget; absorbs any residual glibc anchor found in Task 2 Step 1.
 - **WS-6:** fold rootfs/overlay/closure/kernel/RSS budgets into one `xtask perf footprint` ledger; Task 2 landed the no-glibc closure gate only (`checks.<system>.guest-rootfs-no-glibc`) — the mkGuest-rootfs size (bytes) budget stays deferred here, per `xtask/src/perf.rs`'s `ROOTFS_MAX_BYTES` being left untouched.
@@ -225,3 +228,17 @@ Tracked here per the deferred-work convention; each is its own future plan.
 - **Spec coverage:** WS-1's two deliverables (the swap + eval gate; the measurement + budget) map to Task 1 and Task 2. Guardrails are Global Constraints. WS-2..6 are the roadmap, explicitly out of this plan.
 - **Placeholder scan:** the only value left to the executor is `ROOTFS_MAX_BYTES`, which is derived from a Step-2 measurement, not a guess — the edit locations and the derivation rule are exact.
 - **Type consistency:** `passthru.setpriv` is produced in Task 1 and consumed by name in the eval test and Task 2; the string value `"${pkgs.pkgsStatic.util-linux}/bin/setpriv"` is identical at both the guest and the test (same nixpkgs input + system).
+
+## WS-3 handoff
+
+The static runtime-overlay cut is implemented in the follow-up worktree:
+
+- [x] Instantiate all overlay guest executables through `pkgs.pkgsStatic`.
+- [x] Remove the loader, `libc.so.6`, `libgcc_s.so.1`, and `patchelf` from the
+  runtime overlay staging step.
+- [x] Publish the glibc `libmvm_host_services.so` artifact separately as
+  `packages.<system>.sdk-sidecar` (including its matching loader, libc, and
+  libgcc); both language SDKs default to `/mvm/sdk/lib`.
+- [ ] Wire runtime attachment so a workload that uses host-service verbs is
+  automatically opted into the SDK sidecar. The default static overlay
+  intentionally does not carry the SDK FFI or its glibc closure.

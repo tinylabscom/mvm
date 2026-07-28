@@ -1,10 +1,10 @@
 # Lightweight microVM campaign — design
 
 **Date:** 2026-07-27
-**Status:** approved design; WS-1 ready to plan
+**Status:** approved design; WS-1 and the static overlay cut implemented
 **Scope:** shrink the workload-guest footprint across four dimensions, gated so it
-cannot silently regrow. First workstream (WS-1) implemented from this spec; WS-2..6
-are named + sequenced roadmap, not built this pass.
+cannot silently regrow. WS-1 and the static runtime-overlay cut are implemented;
+WS-2 and WS-4..6 remain named + sequenced follow-ups.
 
 ## Problem
 
@@ -116,6 +116,21 @@ decide whether WS-2 (a custom helper) is worth building.
   rootfs package-count budget.
 - **WS-6.** Fold the scattered budgets (rootfs / overlay / closure / kernel / RSS) into one
   `xtask perf footprint` ledger + a single doc.
+
+## WS-3 — static runtime overlay
+
+The runtime-overlay flake now instantiates every guest executable from
+`pkgs.pkgsStatic` (including the runner, addon DNS, egress client, and exit reporter).
+The ext4 staging step therefore copies self-contained musl binaries directly and no
+longer runs `patchelf` or carries a dynamic loader, `libc.so.6`, or `libgcc_s.so.1`.
+
+The SDK FFI is deliberately not linked into those binaries. It remains a glibc
+`cdylib`, so the flake publishes it as `packages.<system>.sdk-sidecar`, containing
+the FFI plus its matching loader, libc, and libgcc under `/mvm/sdk/lib`. Python
+and TypeScript SDK defaults point at that sidecar mount, while
+`MVM_HOST_SERVICES_LIB` remains the override for custom arrangements. The runtime-overlay attachment path must mount
+the sidecar only for workloads that use host services; until that attachment is
+selected, a workload must not call the SDK host-service verbs.
 
 ## Deliverables of this spec's implementation (WS-1 only)
 

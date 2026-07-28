@@ -1,8 +1,8 @@
 # `libmvm_host_services.so` — the in-guest host-services FFI shared object.
 #
-# Built from `crates/mvm-host-services-ffi` (crate-type `cdylib`). Baked into
-# the runtime overlay at `/mvm/runtime/lib/` and loaded via `ctypes` / `koffi`
-# by the in-guest language SDKs (`mvm.audit.emit`, `mvm.host.time()`, ...).
+# Built from `crates/mvm-host-services-ffi` (crate-type `cdylib`). Packaged in
+# the SDK sidecar at `/mvm/sdk/lib/` and loaded via `ctypes` / `koffi` by the
+# in-guest language SDKs (`mvm.audit.emit`, `mvm.host.time()`, ...).
 # It is the single JSON-in/JSON-out C ABI over `mvm_agentd::host_{audit,time,
 # cost}`, so every language SDK is a thin shim over this one object.
 #

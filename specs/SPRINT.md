@@ -61,6 +61,11 @@
       gaps" section covering the blanket-impl seam that does not exist yet, the
       unaccounted-for `WasmBackend`, and the QEMU contradiction in §2.5 below
       that Task 5 depends on. Not started.
+- [x] Lightweight guest WS-3: runtime-overlay guest executables now build
+      static-musl without the shared loader bundle; the glibc SDK FFI is
+      published as a separate `sdk-sidecar` output with an explicit
+      `/mvm/sdk/lib` contract. Sidecar attachment remains opt-in for workloads
+      that use host-service verbs.
 
 ---
 

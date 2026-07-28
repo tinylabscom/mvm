@@ -867,6 +867,73 @@ fn runtime_overlay_flake_stages_egress_client_binary() {
 }
 
 #[test]
+fn runtime_overlay_guest_packages_use_static_musl_and_have_no_loader_bundle() {
+    let path = nix_dir()
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+    let runtime = content
+        .split("mkRuntimeOverlay = system:")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    in\n    {").next())
+        .expect("runtime-overlay derivation body");
+
+    assert!(
+        content.contains("pkgs = pkgs.pkgsStatic;"),
+        "all runtime-overlay guest package recipes must be instantiated from pkgsStatic"
+    );
+    assert!(
+        content.contains("staticPkgs.rustPlatform.buildRustPackage"),
+        "the runner must use the static-musl Rust platform too"
+    );
+    for forbidden in [
+        "runtimeLoaderFor",
+        "runtimeLibcFor",
+        "runtimeLibgccFor",
+        "relocate_runtime_exe",
+        "patchelf",
+        "libc.so.6",
+        "libgcc_s.so.1",
+        "hostsvc",
+    ] {
+        assert!(
+            !runtime.contains(forbidden),
+            "static runtime-overlay body must not carry the dynamic loader bundle or SDK FFI: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn runtime_overlay_exposes_sdk_sidecar_separately() {
+    let path = nix_dir()
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+
+    assert!(
+        content.contains("mkSdkSidecar = system:"),
+        "the glibc SDK FFI must have a distinct sidecar derivation"
+    );
+    assert!(
+        content.contains("sdk-sidecar = mkSdkSidecar system;"),
+        "the runtime-overlay flake must publish the SDK sidecar output"
+    );
+    assert!(
+        content.contains("/mvm/sdk/lib"),
+        "the sidecar must use the stable /mvm/sdk mount contract"
+    );
+    assert!(
+        content.contains("sdkRuntimeLoaderFor")
+            && content.contains("--set-interpreter /mvm/sdk/lib/"),
+        "the sidecar must carry and target its matching glibc loader"
+    );
+}
+
+#[test]
 fn mk_guest_accepts_compact_and_legacy_egress_ca_cmdline_tokens() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)

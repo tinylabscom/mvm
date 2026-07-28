@@ -9,11 +9,9 @@
   # agent, the per-service seccomp shim, the function-workload
   # runner, `mvm-guest-netinit` which installs kernel blackhole
   # routes for `MANDATORY_DENY_RANGES` so OCI-imported workloads
-  # get Layer 1 network defense too) plus a
-  # placeholder for the per-language SDK runtime libraries the
-  # vsock substitution depends on (the libraries
-  # themselves land later; this flake reserves the
-  # directory layout today so the boot path is stable).
+  # get Layer 1 network defense too) plus the pure-Python SDK
+  # source. The glibc host-services cdylib is a separate SDK
+  # sidecar because it is workload-facing, not an agent runtime.
   #
   # The flake produces, per supported system, a `$out/` containing:
   #
@@ -133,7 +131,7 @@
           pkgs = import nixpkgs { inherit system; };
         in
         import (workspace + "/nix/packages/mvm-guest-agent.nix") {
-          inherit pkgs;
+          pkgs = pkgs.pkgsStatic;
           lib = pkgs.lib;
           mvmSrc = workspace;
           # No interactive — the overlay ships the production agent.
@@ -147,7 +145,7 @@
           pkgs = import nixpkgs { inherit system; };
         in
         import (workspace + "/nix/packages/mvm-guest-agent.nix") {
-          inherit pkgs;
+          pkgs = pkgs.pkgsStatic;
           lib = pkgs.lib;
           mvmSrc = workspace;
           withInteractive = true;
@@ -160,8 +158,9 @@
       mvmRunnerFor = system:
         let
           pkgs = import nixpkgs { inherit system; };
+          staticPkgs = pkgs.pkgsStatic;
         in
-        pkgs.rustPlatform.buildRustPackage {
+        staticPkgs.rustPlatform.buildRustPackage {
           pname = "mvm-runner";
           version = overlayVersion;
           src = workspace;
@@ -181,7 +180,7 @@
           pkgs = import nixpkgs { inherit system; };
         in
         import (workspace + "/nix/packages/mvm-egress-client.nix") {
-          inherit pkgs;
+          pkgs = pkgs.pkgsStatic;
           lib = pkgs.lib;
           mvmSrc = workspace;
         };
@@ -191,7 +190,7 @@
           pkgs = import nixpkgs { inherit system; };
         in
         import (workspace + "/nix/packages/mvm-addon-dns.nix") {
-          inherit pkgs;
+          pkgs = pkgs.pkgsStatic;
           lib = pkgs.lib;
           mvmSrc = workspace;
         };
@@ -201,7 +200,7 @@
           pkgs = import nixpkgs { inherit system; };
         in
         import (workspace + "/nix/packages/mvm-exit-report.nix") {
-          inherit pkgs;
+          pkgs = pkgs.pkgsStatic;
           lib = pkgs.lib;
           mvmSrc = workspace;
         };
@@ -221,17 +220,13 @@
           mvmSrc = workspace;
         };
 
-      # The runtime overlay is mounted into arbitrary guest userspaces,
-      # including OCI rootfs imports that do not carry `/nix/store` or a glibc
-      # loader at the host build path. Bundle the loader + minimal runtime
-      # libs the overlay executables need, then rewrite those executables to
-      # point at `/mvm/runtime/lib/*` so `/mvm/runtime/{agent,netinit,
-      # seccomp-apply,runner,egress-client}` stays launchable regardless of the
-      # rootfs image's own libc layout.
-      runtimeLoaderFor = pkgs: pkgs.stdenv.cc.bintools.dynamicLinker;
-      runtimeLoaderBaseFor = pkgs: builtins.baseNameOf (runtimeLoaderFor pkgs);
-      runtimeLibcFor = pkgs: "${pkgs.glibc.out}/lib/libc.so.6";
-      runtimeLibgccFor = pkgs: "${pkgs.lib.getLib pkgs.stdenv.cc.cc}/lib/libgcc_s.so.1";
+      # The SDK FFI remains a glibc cdylib because Python and Node load it from
+      # the workload process. It is packaged separately from the static-musl
+      # runtime overlay so its loader and libc are not part of every guest.
+      sdkRuntimeLoaderFor = pkgs: pkgs.stdenv.cc.bintools.dynamicLinker;
+      sdkRuntimeLoaderBaseFor = pkgs: builtins.baseNameOf (sdkRuntimeLoaderFor pkgs);
+      sdkRuntimeLibcFor = pkgs: "${pkgs.glibc.out}/lib/libc.so.6";
+      sdkRuntimeLibgccFor = pkgs: "${pkgs.lib.getLib pkgs.stdenv.cc.cc}/lib/libgcc_s.so.1";
 
       # Pinned-for-determinism flags. MUST mirror:
       #
@@ -277,6 +272,42 @@
       # libraries without re-allocating the ext4 each release.
       overlaySizeBytes = 32 * 1024 * 1024;
 
+      mkSdkSidecar = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          hostsvc = mvmHostServicesFfiFor system;
+        in
+        pkgs.runCommand "mvm-sdk-sidecar-${system}"
+          {
+            nativeBuildInputs = [ pkgs.patchelf ];
+            passthru = {
+              inherit hostsvc;
+              version = overlayVersion;
+            };
+          }
+          ''
+            set -euo pipefail
+
+            mkdir -p "$out/lib"
+            cp ${sdkRuntimeLoaderFor pkgs} "$out/lib/${sdkRuntimeLoaderBaseFor pkgs}"
+            cp ${hostsvc}/lib/libmvm_host_services.so \
+              "$out/lib/libmvm_host_services.so"
+            cp ${sdkRuntimeLibcFor pkgs} "$out/lib/libc.so.6"
+            cp ${sdkRuntimeLibgccFor pkgs} "$out/lib/libgcc_s.so.1"
+            chmod u+w "$out/lib/libmvm_host_services.so"
+            patchelf \
+              --set-interpreter /mvm/sdk/lib/${sdkRuntimeLoaderBaseFor pkgs} \
+              --set-rpath /mvm/sdk/lib \
+              "$out/lib/libmvm_host_services.so"
+            chmod 0555 "$out/lib"/*
+            echo "${overlayVersion}" > "$out/VERSION"
+            cat > "$out/README" <<'EOF'
+            This read-only sidecar supplies the glibc SDK host-services cdylib.
+            Attach it at /mvm/sdk for workloads that use mvm.audit or mvm.host.
+            EOF
+            chmod 0444 "$out/VERSION" "$out/README"
+          '';
+
       mkRuntimeOverlay = system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -286,7 +317,6 @@
           egressClient = mvmEgressClientFor system;
           addonDns = mvmAddonDnsFor system;
           exitReport = mvmExitReportFor system;
-          hostsvc = mvmHostServicesFfiFor system;
         in
         pkgs.runCommand "mvm-runtime-overlay-${system}"
           {
@@ -294,10 +324,10 @@
               pkgs.e2fsprogs
               (pinnedCryptsetupFor pkgs) # provides pinned veritysetup
               pkgs.coreutils
-              pkgs.patchelf
             ];
             passthru = {
-              inherit guest guestDev runner hostsvc;
+              inherit guest guestDev runner;
+              sdkSidecar = mkSdkSidecar system;
               version = overlayVersion;
               dataBlockSize = overlayBlockSize;
               verityHashAlgorithm = overlayVerityHashAlgorithm;
@@ -313,24 +343,7 @@
             # /egress-client, /addon-dns, /exit-report, /sdk-py/,
             # /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"
-            mkdir -p "$staging" "$staging/lib"
-
-            relocate_runtime_exe() {
-              chmod u+w "$1"
-              patchelf \
-                --set-interpreter /mvm/runtime/lib/${runtimeLoaderBaseFor pkgs} \
-                --set-rpath /mvm/runtime/lib \
-                "$1"
-              chmod 0555 "$1"
-            }
-
-            cp ${runtimeLoaderFor pkgs} "$staging/lib/${runtimeLoaderBaseFor pkgs}"
-            cp ${runtimeLibcFor pkgs} "$staging/lib/libc.so.6"
-            cp ${runtimeLibgccFor pkgs} "$staging/lib/libgcc_s.so.1"
-            chmod 0555 \
-              "$staging/lib/${runtimeLoaderBaseFor pkgs}" \
-              "$staging/lib/libc.so.6" \
-              "$staging/lib/libgcc_s.so.1"
+            mkdir -p "$staging"
 
             cp ${guest}/bin/mvm-guest-agent "$staging/agent"
             cp ${guestDev}/bin/mvm-guest-agent "$staging/agent-interactive"
@@ -340,31 +353,12 @@
             cp ${egressClient}/bin/mvm-egress-client "$staging/egress-client"
             cp ${addonDns}/bin/mvm-addon-dns "$staging/addon-dns"
             cp ${exitReport}/bin/mvm-exit-report "$staging/exit-report"
-            relocate_runtime_exe "$staging/agent"
-            relocate_runtime_exe "$staging/agent-interactive"
-            relocate_runtime_exe "$staging/seccomp-apply"
-            relocate_runtime_exe "$staging/netinit"
-            relocate_runtime_exe "$staging/runner"
-            relocate_runtime_exe "$staging/egress-client"
-            relocate_runtime_exe "$staging/addon-dns"
-            relocate_runtime_exe "$staging/exit-report"
-
-            # In-guest host-services FFI shared object. The language SDKs
-            # (mvm.audit / mvm.host) dlopen this via ctypes/koffi; it is the
-            # one JSON-in/JSON-out C ABI over the broker clients. The Python
-            # ctypes loader (mvm._hostsvc) defaults to this exact path.
-            cp ${hostsvc}/lib/libmvm_host_services.so \
-              "$staging/lib/libmvm_host_services.so"
-            chmod u+w "$staging/lib/libmvm_host_services.so"
-            patchelf --set-rpath /mvm/runtime/lib \
-              "$staging/lib/libmvm_host_services.so"
-            chmod 0555 "$staging/lib/libmvm_host_services.so"
 
             # In-guest Python runtime SDK. PYTHONPATH points at
             # /mvm/runtime/sdk-py (see mk-guest.nix), so the `mvm` package
-            # lands at /mvm/runtime/sdk-py/mvm and a booted workload's
-            # `import mvm; mvm.audit.emit(...)` resolves against the one
-            # cdylib above. Pure Python, copied from the workspace source.
+            # lands at /mvm/runtime/sdk-py/mvm. Host-services calls load the
+            # separately attached SDK sidecar at /mvm/sdk/lib. Pure Python,
+            # copied from the workspace source.
             mkdir -p "$staging/sdk-py"
             cp -r ${workspace}/crates/mvm-sdk/sdks/python/mvm "$staging/sdk-py/mvm"
             find "$staging/sdk-py" -name '__pycache__' -type d -prune \
@@ -455,6 +449,7 @@
       packages = forAllSystems (system: {
         default = mkRuntimeOverlay system;
         runtime-overlay = mkRuntimeOverlay system;
+        sdk-sidecar = mkSdkSidecar system;
       });
     };
 }
