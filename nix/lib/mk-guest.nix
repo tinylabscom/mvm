@@ -115,6 +115,7 @@ in
 , memory_mib     ? 256
 , dev            ? null
 , uids           ? null   # { agent = <int>; entrypoint = <int>; } — see below
+, builderUid     ? null   # optional uid used by an in-guest build daemon
 , extraFiles     ? { }
 # Whether to bake the `mvm-audit-probe` binary into the rootfs at
 # `/usr/local/bin/audit-probe`. Off by default — it is a test fixture, not a
@@ -1157,6 +1158,9 @@ let
       mkdir -p "$out/home/mvm-worker"
       chmod 0755 "$out/home/mvm-worker"
     fi
+    ${lib.optionalString (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid) ''
+      printf 'mvm-builder:x:${toString builderUid}:${toString builderUid}:mvm build worker:/tmp:/bin/sh\n' >> "$out/etc/passwd"
+    ''}
     chmod 0644 "$out/etc/passwd"
 
     cat > "$out/etc/group" <<EOF
@@ -1168,6 +1172,9 @@ let
     if [ "${toString entrypointUid}" != "0" ] && [ "${toString entrypointUid}" != "${toString agentUid}" ]; then
       printf 'mvm-worker:x:${toString entrypointUid}:\n' >> "$out/etc/group"
     fi
+    ${lib.optionalString (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid) ''
+      printf 'mvm-builder:x:${toString builderUid}:\n' >> "$out/etc/group"
+    ''}
     chmod 0644 "$out/etc/group"
 
     # Default /etc/resolv.conf and CA cert bundle — needed for any
@@ -1376,6 +1383,7 @@ let
       agent = agentUid;
       entrypoint = entrypointUid;
     };
+    inherit builderUid;
     rootlessEntrypoint = entrypointUid != 0;
     # Agent binary kind: "real" — the cross-compiled Rust binary.
     # The previous "stub" value flagged a placeholder sh script.

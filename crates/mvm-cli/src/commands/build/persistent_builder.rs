@@ -83,6 +83,9 @@ pub struct StartArgs {
     /// Defaults to the current working directory.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
+    /// Guest memory in MiB for the persistent Nix builder.
+    #[arg(long, default_value_t = 4096)]
+    pub memory_mib: u32,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -222,7 +225,7 @@ fn run_start(args: StartArgs) -> Result<()> {
     };
 
     let record = match backend {
-        PersistentBackend::Libkrun => start_libkrun_persistent(workspace)?,
+        PersistentBackend::Libkrun => start_libkrun_persistent(workspace, args.memory_mib)?,
     };
     write_session_record(&record)?;
 
@@ -233,8 +236,8 @@ fn run_start(args: StartArgs) -> Result<()> {
 }
 
 /// Spawn the libkrun persistent builder and build its session record.
-fn start_libkrun_persistent(workspace: PathBuf) -> Result<SessionRecord> {
-    let vm = LibkrunPersistentHostVm::new(&workspace);
+fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
+    let vm = LibkrunPersistentHostVm::new(&workspace).with_memory_mib(memory_mib);
     let handle = vm
         .start()
         .context("spawning persistent builder VM (LibkrunPersistentHostVm::start)")?;
@@ -460,10 +463,33 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
     let script = format!(
         "#!/bin/sh\n\
          set -eu\n\
+         # The builder rootfs is read-only and the dispatched command runs\n\
+         # under the unprivileged builder uid. Keep Nix's user caches on the\n\
+         # writable tmpfs / persistent store locations.\n\
+         export HOME=/tmp\n\
+         export MVM_WORKSPACE_PATH=/work\n\
+         export XDG_CACHE_HOME=/nix-store/.cache\n\
+         export XDG_STATE_HOME=/tmp/.local/state\n\
+         export NIX_CONFIG='experimental-features = nix-command flakes\n\
+         sandbox = false\n\
+         build-users-group =\n\
+         max-jobs = 1\n\
+         cores = 1\n\
+         auto-optimise-store = false\n\
+         substituters = https://cache.nixos.org/\n\
+         trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=\n\
+         fallback = true\n\
+         download-attempts = 3\n\
+         http-connections = 8\n\
+         connect-timeout = 15\n\
+         stalled-download-timeout = 90'\n\
+         mkdir -p \"$XDG_CACHE_HOME\" \"$XDG_STATE_HOME\"\n\
+         nix() {{ env HOME=\"$HOME\" XDG_CACHE_HOME=\"$XDG_CACHE_HOME\" XDG_STATE_HOME=\"$XDG_STATE_HOME\" /sbin/nix \"$@\"; }}\n\
          OUT_DIR='/job/{job_id}/{artifact_subdir}'\n\
          mkdir -p \"$OUT_DIR\"\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
+             --impure --no-write-lock-file \\\n\
              {flake_ref}#{attr})\n\
          echo \"store-path=$STORE_PATH\"\n\
          # mkGuest layout: $STORE_PATH/{{vmlinux,rootfs.ext4}}.\n\
@@ -484,7 +510,14 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          # for flakes that don't emit it.\n\
          if [ -f \"$STORE_PATH/manifest.json\" ]; then\n\
              cp -L \"$STORE_PATH/manifest.json\" \"$OUT_DIR/manifest.json\"\n\
-         fi\n",
+         fi\n\
+         # Production image sidecars — retain the dm-verity payload and\n\
+         # admission metadata emitted by the Nix image flake.\n\
+         for sidecar in rootfs.verity rootfs.roothash mvm-meta.json; do\n\
+             if [ -f \"$STORE_PATH/$sidecar\" ]; then\n\
+                 cp -L \"$STORE_PATH/$sidecar\" \"$OUT_DIR/$sidecar\"\n\
+             fi\n\
+         done\n",
         artifact_subdir = ARTIFACT_SUBDIR,
         flake_ref = shell_escape(flake_ref),
         attr = shell_escape(attr),
@@ -697,6 +730,14 @@ mod tests {
         // (`/job/<relpath>/out`) so the bytes the guest writes are
         // visible at the host's `artifact_dir_for` path.
         let body = std::fs::read_to_string(job_dir.join(&relpath).join("cmd.sh")).expect("read");
+        assert!(body.contains("export HOME=/tmp"));
+        assert!(body.contains("export MVM_WORKSPACE_PATH=/work"));
+        assert!(body.contains("export XDG_CACHE_HOME=/nix-store/.cache"));
+        assert!(body.contains("export NIX_CONFIG="));
+        assert!(body.contains("fallback = true"));
+        assert!(body.contains("export XDG_STATE_HOME=/tmp/.local/state"));
+        assert!(body.contains("nix() { env HOME=\"$HOME\""));
+        assert!(body.contains("--impure --no-write-lock-file"));
         let expected_guest_path = format!("/job/{relpath}/out");
         assert!(
             body.contains(&expected_guest_path),
@@ -704,6 +745,9 @@ mod tests {
         );
         assert!(body.contains("vmlinux"), "{body}");
         assert!(body.contains("rootfs.ext4"), "{body}");
+        assert!(body.contains("rootfs.verity"), "{body}");
+        assert!(body.contains("rootfs.roothash"), "{body}");
+        assert!(body.contains("mvm-meta.json"), "{body}");
         // `cp -L` (not just `cp`) so the host gets real bytes,
         // not store-path symlinks that don't resolve.
         assert!(body.contains("cp -L"), "must use cp -L: {body}");

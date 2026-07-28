@@ -2834,8 +2834,41 @@ mod linux {
         if let Err(e) = load_seeded_nix_db(timings, anchor) {
             eprintln!("mvm-host-vm-init: load_seeded_nix_db warning (non-fatal): {e}");
         }
+        prepare_builder_nix_permissions()?;
 
         Ok(())
+    }
+
+    /// Make the persistent single-user Nix database writable by the
+    /// unprivileged dispatch uid while keeping seeded store paths owned
+    /// by root and readable.
+    fn prepare_builder_nix_permissions() -> Result<(), String> {
+        for (program, args) in builder_nix_permission_commands() {
+            let status = Command::new(program)
+                .args(args)
+                .status()
+                .map_err(|e| format!("spawn {program}: {e}"))?;
+            if !status.success() {
+                return Err(format!(
+                    "{program} {} exited {}",
+                    args.join(" "),
+                    status.code().unwrap_or(-1)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn builder_nix_permission_commands() -> [(&'static str, &'static [&'static str]); 4] {
+        [
+            ("/bin/chown", &["-R", "902:902", "/nix/var/nix"]),
+            ("/bin/chown", &["0:902", "/nix/store"]),
+            ("/bin/chmod", &["0775", "/nix/store"]),
+            (
+                "/bin/find",
+                &["/nix/store", "-maxdepth", "1", "-name", "*.lock", "-delete"],
+            ),
+        ]
     }
 
     /// Import [`CLOSURE_SEED_NAR`] into the persistent Nix store when
@@ -4142,6 +4175,22 @@ mod linux {
         fn nix_store_needs_seed_when_path_missing() {
             let base = tempfile::tempdir().expect("tempdir");
             assert!(nix_store_needs_seed(&base.path().join("does-not-exist")));
+        }
+
+        #[test]
+        fn builder_nix_permissions_keep_store_root_owned_and_group_writable() {
+            assert_eq!(
+                builder_nix_permission_commands(),
+                [
+                    ("/bin/chown", &["-R", "902:902", "/nix/var/nix"][..]),
+                    ("/bin/chown", &["0:902", "/nix/store"][..]),
+                    ("/bin/chmod", &["0775", "/nix/store"][..]),
+                    (
+                        "/bin/find",
+                        &["/nix/store", "-maxdepth", "1", "-name", "*.lock", "-delete"][..],
+                    ),
+                ]
+            );
         }
 
         #[test]

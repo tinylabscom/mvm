@@ -156,6 +156,16 @@ in
     (meta g).uids.agent == 5000
     && (meta g).uids.entrypoint == 1000;  # default unaffected
 
+  builder_uid_round_trips =
+    let
+      g = mkGuest {
+        name = "builder-uid";
+        entrypoint.shell = "/bin/sh";
+        builderUid = 902;
+      };
+    in
+    (meta g).builderUid == 902;
+
   # ── Agent supervision invariants ─────────────────────────────
   #
   # Every mkGuest output advertises whether the bundled
