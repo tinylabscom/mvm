@@ -8,6 +8,9 @@ rustPlatform.buildRustPackage {
 
   src = mvmSrc;
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
+  # Stage 0 runs Nix without its normal sandbox. Keep Cargo from creating
+  # Nix's sentinel home directory in the shared build root.
+  HOME = "/tmp";
   cargoBuildFlags = [
     "--package" "mvm-agentd"
     "--bin" "mvm-setpriv"

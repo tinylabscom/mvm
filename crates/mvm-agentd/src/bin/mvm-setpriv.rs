@@ -187,7 +187,13 @@ fn set_only_net_bind_service_capability() -> Result<(), String> {
         pid: 0,
     };
     let mut data = [CapData::default(); 2];
-    let rc = unsafe { libc::capget(&mut header, data.as_mut_ptr()) };
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_capget,
+            &mut header as *mut CapHeader,
+            data.as_mut_ptr(),
+        )
+    };
     if rc != 0 {
         return last_error("capget failed");
     }
@@ -199,7 +205,7 @@ fn set_only_net_bind_service_capability() -> Result<(), String> {
         inheritable: net_bind_service,
     };
     data[1] = CapData::default();
-    let rc = unsafe { libc::capset(&header, data.as_ptr()) };
+    let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
     if rc != 0 {
         return last_error("capset(CAP_NET_BIND_SERVICE) failed");
     }
@@ -213,7 +219,7 @@ fn drop_all_capabilities() -> Result<(), String> {
         pid: 0,
     };
     let data = [CapData::default(); 2];
-    let rc = unsafe { libc::capset(&header, data.as_ptr()) };
+    let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
     if rc != 0 {
         return last_error("capset(drop all) failed");
     }

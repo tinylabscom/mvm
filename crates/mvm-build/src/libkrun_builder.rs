@@ -120,7 +120,9 @@ pub use crate::builder_vm_runtime::{DEFAULT_BUILDER_STORE_GC_GIB, builder_store_
 
 /// Where the workspace gets mounted inside the builder VM
 /// (read-only virtio-fs).
-pub const GUEST_WORK_DIR: &str = "/work";
+/// Explicit path URL prevents Nix from treating the mounted checkout as a
+/// Git flake and reaching for host-side worktree metadata that is not mounted.
+pub const GUEST_WORK_DIR: &str = "path:/work";
 
 /// Where artifacts get extracted inside the builder VM (read-write
 /// virtio-fs).
