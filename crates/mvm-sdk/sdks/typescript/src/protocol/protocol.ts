@@ -641,9 +641,9 @@ mode: number
 path: string
 }
 /**
- * Envelope carried in the `mvm.verb_grant=<hex(JSON)>` kernel-cmdline token.
+ * Envelope carried in the `mvm.verb_grant=<base64(JSON)>` kernel-cmdline token.
  * 
- * The host hex-encodes the JSON so the value is a single space/newline-free token that `/proc/cmdline` round-trips without quoting. The guest decodes the hex, parses the JSON with `deny_unknown_fields`, then passes the inner `VerbGrant` to `pin_verb_grant` for signature verification before use.
+ * The host base64-encodes the JSON so the value is a single space/newline-free token that `/proc/cmdline` round-trips without quoting. base64 rather than hex because this is the largest token on the cmdline and the kernel silently drops anything past `COMMAND_LINE_SIZE`. The guest decodes it, parses the JSON with `deny_unknown_fields`, then passes the inner `VerbGrant` to `pin_verb_grant` for signature verification before use.
  * 
  * `pubkey_hex` is the 32-byte Ed25519 verifying key in lowercase hex. `plan_nonce_hex` is the `Nonce::as_hex()` of the plan nonce the grant was issued under — the guest uses it as the `plan_nonce` argument to `VerbGrant::verify`. Fixed-field-order struct: `serde_json::to_vec` output is byte-deterministic with no external canonicalizer.
  */
