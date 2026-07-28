@@ -491,50 +491,30 @@ git commit -m "feat(runtime): advertise standby_pool for Firecracker and route w
 
 ---
 
-## Task 8: Hermetic BDD witness — warm claim fresh identity + replay refused
+## Task 8: Hermetic BDD witness — warm claim guarded fork + unaudited refusal
+
+**Scope correction:** the runner does not emit the signed audit
+(`plan.admitted`/`plan.launched`) or re-verify the plan window/nonce — those
+are the CLI caller and the supervisor's attach re-verify, both layers above
+`mvm-runtime` (see the design note's "Where each guard runs"). The scenario
+below witnesses what `claim_standby` itself genuinely does: fork a clean,
+chain-verified parent into a fresh child, and refuse a parent the chain does
+not attest to.
 
 **Files:**
-- Create: `features/suites/s6_admission_audit/warm_claim_fresh_identity.feature`
+- Create: `features/suites/s12_warm_claim/warm_claim_guarded_fork.feature`
 - Create: `crates/mvm-conformance/tests/steps/warm_claim.rs`
-- Modify: `crates/mvm-conformance/tests/steps/mod.rs` (`mod warm_claim;`), `crates/mvm-conformance/tests/world.rs` (fields as needed)
+- Modify: `crates/mvm-conformance/tests/steps/mod.rs` (`mod warm_claim;`), `crates/mvm-conformance/tests/world.rs` (fields as needed), `crates/mvm-conformance/Cargo.toml` (`mvm-build`, `ed25519-dalek`, `anyhow` dev-deps)
 - Test: `just bdd`.
 
 **Interfaces:**
-- Consumes: the runner `claim_standby` seam + the mock backend (no live VM).
+- Consumes: `WorkloadRunner::claim_standby` driven against `mvm_runtime::driver::mock::MockDriver` (no live VM).
 
-- [ ] **Step 1: Write the failing scenario**
-
-```gherkin
-Feature: Warm-claim admission
-  A warm claim forks a clean parent into a fresh, admitted child and refuses a replay.
-
-  Scenario: a warm claim admits a fresh identity and refuses a replayed claim
-    Given a clean warm parent recorded in the pool
-    When the parent is claimed with a fresh signed plan
-    Then the claim emits a launched audit entry with a fresh nonce
-    And re-submitting the identical claim is refused
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `just bdd`
-Expected: FAIL — steps for the `warm_claim` scenario are undefined.
-
-- [ ] **Step 3: Implement the step module**
-
-In `steps/warm_claim.rs`, drive the runner `claim_standby` seam with the mock backend: the `Given` records a clean parent; the `When` claims with a fresh signed plan; the `Then`s assert a `plan.launched` entry with a fresh nonce and that a second identical claim is refused. Add `mod warm_claim;` to `steps/mod.rs`; add any `CliWorld` fields (`Option`, `None`-default). No `@live` tag.
-
-- [ ] **Step 4: Run to verify it passes**
-
-Run: `just bdd`
-Expected: PASS (the new scenario + the whole suite).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add features/suites/s6_admission_audit/warm_claim_fresh_identity.feature crates/mvm-conformance/tests/steps/warm_claim.rs crates/mvm-conformance/tests/steps/mod.rs crates/mvm-conformance/tests/world.rs
-git commit -m "test(conformance): hermetic warm-claim fresh-identity + replay-refused witness"
-```
+- [x] **Step 1: Write the failing scenario**
+- [x] **Step 2: Run to verify it fails** (steps undefined before Step 3 landed)
+- [x] **Step 3: Implement the step module** — `steps/warm_claim.rs` seeds a clean parent checkpoint + idle standby handle, then drives `WorkloadRunner::claim_standby` (real `mvm-runtime` claim path, `MockDriver` + local `EndpointSpawner`/`CheckpointChainAnchor` test doubles): one scenario covers both a chain-verified parent (fresh child id, cloned rootfs, fresh non-zero generation token bound to the parent) and an unaudited parent (refused before any fork, `any_fork_occurred == false`). Added `mod warm_claim;` to `steps/mod.rs`; no `@live` tag.
+- [x] **Step 4: Run to verify it passes** — `just bdd`: 10 features, 37 scenarios (37 passed), 187 steps (187 passed), including the new "Warm-claim guarded fork" scenario.
+- [x] **Step 5: Commit**
 
 ---
 

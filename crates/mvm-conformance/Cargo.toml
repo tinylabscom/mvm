@@ -43,6 +43,20 @@ serde_json.workspace = true
 mvm-runtime = { workspace = true, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }
 mvm-fs = { workspace = true }
+# The overlay-aware guest sidecar (`GuestSidecar`) the warm-claim scenario
+# writes next to its synthetic parent rootfs, so the runner's overlay-contract
+# gate admits the cloned child exactly like a cold boot would. Same feature
+# set mvm-runtime already builds it with, so this adds no new closure.
+mvm-build = { workspace = true, default-features = false, features = [
+    "builder-vm",
+    "pure-mkfs",
+] }
+# Signs the warm-claim scenario's synthetic child `ExecutionPlan` the same way
+# `admit_plan_for_boot` does in production.
+ed25519-dalek.workspace = true
+# Result type for the warm-claim scenario's `CheckpointChainAnchor` /
+# `EndpointSpawner` test doubles, matching the runner's own error convention.
+anyhow.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 
