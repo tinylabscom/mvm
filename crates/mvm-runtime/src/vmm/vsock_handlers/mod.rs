@@ -54,6 +54,14 @@ impl<'a> VsockHandlerContext<'a> {
         self.transport.remove_recv(host_port, guest_port);
     }
 
+    pub(crate) fn evict_idle_recv(&mut self) -> Vec<(u32, u32)> {
+        self.transport
+            .evict_idle_recv()
+            .into_iter()
+            .map(|key| (key.host_port, key.guest_port))
+            .collect()
+    }
+
     pub(crate) fn queue_reply(&mut self, inbound: &VsockHdr, op: u16, payload: &[u8]) {
         self.transport.queue_reply(inbound, op, payload);
     }
@@ -242,6 +250,10 @@ impl VsockHandlerRegistry {
         for handler in self.guest_ports.values_mut() {
             delivered |= handler.drain(ctx).is_some();
         }
+        for (host_port, guest_port) in ctx.evict_idle_recv() {
+            ctx.queue_host_packet(host_port, guest_port, OP_RST, &[]);
+            delivered = true;
+        }
         delivered
     }
 
@@ -385,7 +397,10 @@ impl GuestPortHandler for StreamRelayHandler {
             }
         }
         for conn_id in drained.closed {
-            self.headers.remove(&conn_id);
+            if let Some(hdr) = self.headers.remove(&conn_id) {
+                ctx.remove_recv(hdr.dst_port, hdr.src_port);
+                ctx.queue_reply(&hdr, OP_RST, &[]);
+            }
         }
         if ctx.flush_rx() { Some(0) } else { None }
     }
@@ -464,6 +479,7 @@ impl HostInitiatedHandler for AgentVsockHandler {
         }
         for conn_id in self.bridge.take_host_closed() {
             agent_dbg(&format!("host closed stream {conn_id} → OP_RST to guest"));
+            ctx.remove_recv(conn_id, mvm_agentd::vsock::GUEST_AGENT_PORT);
             ctx.queue_host_packet(conn_id, mvm_agentd::vsock::GUEST_AGENT_PORT, OP_RST, &[]);
         }
         if ctx.flush_rx() { Some(0) } else { None }
@@ -523,6 +539,10 @@ impl HostInitiatedHandler for ConsoleVsockHandler {
         }
         for (conn_id, guest_port, bytes) in self.bridge.drain_host() {
             ctx.queue_host_packet(conn_id, guest_port, OP_RW, &bytes);
+        }
+        for (conn_id, guest_port) in self.bridge.take_host_closed() {
+            ctx.remove_recv(conn_id, guest_port);
+            ctx.queue_host_packet(conn_id, guest_port, OP_RST, &[]);
         }
         if ctx.flush_rx() { Some(0) } else { None }
     }

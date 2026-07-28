@@ -15,7 +15,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
+use crate::vmm::vsock_transport::CONNECTION_IDLE_TIMEOUT;
 use crate::vmm::vsock_transport::MAX_CONNECTIONS;
 
 /// Per-drain read budget per endpoint connection.
@@ -65,10 +67,15 @@ pub(crate) struct SubstitutionBridge {
     /// Per-VM `mvm-substitution-endpoint` socket. `None` ⇒ no endpoint, fail-closed.
     endpoint: Option<PathBuf>,
     /// Open endpoint connections keyed by the guest vsock `src_port`.
-    conns: HashMap<u32, UnixStream>,
+    conns: HashMap<u32, EndpointConn>,
     /// Open-connection count, published for the run loop heartbeat so it keeps
     /// waking an idle guest while there's an endpoint reply to deliver.
     active: Option<Arc<AtomicUsize>>,
+}
+
+struct EndpointConn {
+    stream: UnixStream,
+    last_activity: Instant,
 }
 
 impl SubstitutionBridge {
@@ -99,19 +106,38 @@ impl SubstitutionBridge {
             }
         }
     }
+
+    fn evict_idle_at(&mut self, now: Instant) -> Vec<u32> {
+        let mut expired = Vec::new();
+        self.conns.retain(|conn_id, conn| {
+            let keep = now.saturating_duration_since(conn.last_activity) < CONNECTION_IDLE_TIMEOUT;
+            if !keep {
+                expired.push(*conn_id);
+            }
+            keep
+        });
+        for _ in &expired {
+            self.bump(-1);
+        }
+        expired
+    }
 }
 
 impl SubstitutionBridge {
     /// Fds the host-I/O thread should watch for endpoint replies.
     pub fn poll_fds(&self) -> Vec<RawFd> {
-        self.conns.values().map(AsRawFd::as_raw_fd).collect()
+        self.conns
+            .values()
+            .map(|conn| conn.stream.as_raw_fd())
+            .collect()
     }
 }
 
 impl GuestEndpointRelay for SubstitutionBridge {
     fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction {
-        if let Some(up) = self.conns.get_mut(&conn_id) {
-            write_nonblocking(up, payload);
+        if let Some(conn) = self.conns.get_mut(&conn_id) {
+            write_nonblocking(&mut conn.stream, payload);
+            conn.last_activity = Instant::now();
             return EndpointRelayAction::Relayed;
         }
         if self.conns.len() >= MAX_CONNECTIONS {
@@ -123,8 +149,12 @@ impl GuestEndpointRelay for SubstitutionBridge {
         match UnixStream::connect(&path) {
             Ok(stream) => {
                 let _ = stream.set_nonblocking(true);
-                let up = self.conns.entry(conn_id).or_insert(stream);
-                write_nonblocking(up, payload);
+                let conn = self.conns.entry(conn_id).or_insert(EndpointConn {
+                    stream,
+                    last_activity: Instant::now(),
+                });
+                write_nonblocking(&mut conn.stream, payload);
+                conn.last_activity = Instant::now();
                 self.bump(1);
                 EndpointRelayAction::Relayed
             }
@@ -134,13 +164,14 @@ impl GuestEndpointRelay for SubstitutionBridge {
 
     fn drain_endpoint_bytes(&mut self) -> EndpointRelayDrain {
         let mut ready = Vec::new();
-        let mut closed = Vec::new();
-        for (conn_id, up) in self.conns.iter_mut() {
+        let mut closed = self.evict_idle_at(Instant::now());
+        for (conn_id, conn) in self.conns.iter_mut() {
             let mut buf = vec![0u8; READ_CHUNK];
-            match up.read(&mut buf) {
+            match conn.stream.read(&mut buf) {
                 Ok(0) => closed.push(*conn_id),
                 Ok(n) => {
                     buf.truncate(n);
+                    conn.last_activity = Instant::now();
                     ready.push((*conn_id, buf));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -205,7 +236,13 @@ mod tests {
         let mut peers = Vec::with_capacity(MAX_CONNECTIONS);
         for conn_id in 0..MAX_CONNECTIONS as u32 {
             let (stream, peer) = UnixStream::pair().unwrap();
-            b.conns.insert(conn_id, stream);
+            b.conns.insert(
+                conn_id,
+                EndpointConn {
+                    stream,
+                    last_activity: Instant::now(),
+                },
+            );
             peers.push(peer);
         }
 
@@ -332,5 +369,26 @@ mod tests {
         bridge.close_connection(7);
         assert!(bridge.poll_fds().is_empty());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn idle_endpoint_stream_is_evicted_and_activity_drops() {
+        let mut b = SubstitutionBridge::new();
+        let active = Arc::new(AtomicUsize::new(1));
+        b.set_activity(active.clone());
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        b.conns.insert(
+            7,
+            EndpointConn {
+                stream,
+                last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+            },
+        );
+
+        let expired = b.evict_idle_at(Instant::now());
+
+        assert_eq!(expired, vec![7]);
+        assert!(!b.is_active());
+        assert_eq!(active.load(Ordering::Relaxed), 0);
     }
 }

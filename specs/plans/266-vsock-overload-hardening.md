@@ -19,8 +19,11 @@ remain NIC-less; the authenticated vsock seam is the primary enforcement point.
 - [x] Bound substitution, host-agent, and dev-console bridge connection sets
       to the same per-device ceiling; refuse before opening another host socket.
 - [x] Add focused cap, slot-reuse, existing-stream, and bridge refusal tests.
-- [ ] Add idle timestamps and deterministic eviction for inactive bridge and
-      credit-table entries, with `OP_RST` cleanup for the guest side.
+- [x] Add idle timestamps and deterministic eviction for inactive bridge and
+      credit-table entries, with `OP_RST` cleanup for the guest side. The fixed
+      60-second window covers substitution, agent, console, and transport-credit
+      state; host-side EOF and idle expiry both remove the credit identity before
+      the reset is queued.
 - [ ] Add per-workload concurrent-stream and byte-rate budgets around raw,
       SOCKS5, DNS, and substitution egress, preserving kernel backpressure.
 - [ ] Cancel active egress sessions as part of VM teardown and prove that a
@@ -38,3 +41,12 @@ resource-exhaustion primitive. The cap is fail-closed: a new identity gets an
 `OP_RST`, an existing identity continues to make progress, and `OP_SHUTDOWN`
 releases the slot. No raw packet forwarding or host NIC is introduced.
 
+## Idle eviction slice
+
+Each tracked stream records monotonic last activity. The host bridges expire
+inactive Unix sockets before accepting more work and surface the closed
+connection to the handler, which removes the matching receive-credit identity
+and sends one `OP_RST` to the guest. The transport credit table runs the same
+idle sweep at the end of host-I/O service, so guest-selected identities cannot
+remain allocated after their bridge state disappears. Tests use injected
+`Instant` values at the timeout boundary rather than wall-clock sleeps.
