@@ -728,7 +728,7 @@ Two gaps close here. `warm_to_target` never passes a rootfs (`WarmParams.image` 
 - Consumes: `AnyBackend::spawn_standby_via_runner` + `SpawnContext` (Task 4); `AnyBackend::claim_standby_via_runner` + `ClaimContext` (already on `main`); `StandbyHandle.parent_checkpoint` (Task 1).
 - Produces: `mvm_core::config::snapshots_dir() -> PathBuf`; `warm_to_target` and `claim_or_cold` taking `&AnyBackend`; a live `ClaimContext` per claim.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 /// A parent that was never captured has no checkpoint to verify content and
@@ -749,16 +749,16 @@ fn claim_refuses_a_parent_without_a_checkpoint() {
 
 Introduce `parent_checkpoint_for(handle: &StandbyHandle) -> Result<CheckpointId>` resolving the handle's `parent_checkpoint` and failing closed when it is `None`. Keep it a separate function so it is unit-testable without a VM.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo nextest run -p mvm-cli commands::pool`
 Expected: FAIL — the helper does not exist.
 
-- [ ] **Step 3: Add the `snapshots_dir` config helper**
+- [x] **Step 3: Add the `snapshots_dir` config helper**
 
 `FsSnapshotStore` has no production call site yet and `mvm-core::config` has no snapshots path. Add one beside `checkpoints_dir()` (`config.rs:641`), following that function's exact style so it honors `MVM_HOME`, plus a test asserting it sits under `mvm_home()`.
 
-- [ ] **Step 4: Thread the rootfs into the warm path**
+- [x] **Step 4: Thread the rootfs into the warm path**
 
 Change `WarmParams.backend` from `&'a dyn VmBackend` to `&'a AnyBackend`. Populate `WarmParams.image` from the launch's rootfs (`VmStartConfig.rootfs_path`) at the `replenish_after_launch` call site — a Firecracker parent cannot boot without it. Correct the `image` doc comment, which currently claims it is always `None`. In `warm_to_target`, replace `p.backend.spawn_standby(&spec)` with:
 
@@ -772,7 +772,7 @@ Change `WarmParams.backend` from `&'a dyn VmBackend` to `&'a AnyBackend`. Popula
 
 Record the returned handle (now carrying `parent_checkpoint`) exactly as before.
 
-- [ ] **Step 5: Route the claim through the runner**
+- [x] **Step 5: Route the claim through the runner**
 
 Change `claim_or_cold`'s `backend` parameter to `&AnyBackend`, and update `try_warm_claim` to pass `backend` directly instead of `backend.as_vm_backend()`. Replace the `backend.claim_standby(&handle, &claim)` call (pool.rs:268) with:
 
@@ -802,12 +802,12 @@ Change `claim_or_cold`'s `backend` parameter to `&AnyBackend`, and update `try_w
     match backend.claim_standby_via_runner(&ctx, &handle, &claim) {
 ```
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-cli commands::pool && cargo nextest run -p mvm-core config`
 Expected: PASS.
 
-- [ ] **Step 7: Full gates + commit**
+- [x] **Step 7: Full gates + commit**
 
 ```bash
 cargo fmt --all
