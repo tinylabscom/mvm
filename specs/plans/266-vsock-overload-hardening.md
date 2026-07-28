@@ -2,7 +2,7 @@
 
 Issue: #1827
 
-Status: IN PROGRESS
+Status: COMPLETE
 
 ## Goal
 
@@ -37,8 +37,10 @@ remain NIC-less; the authenticated vsock seam is the primary enforcement point.
       added: the packet-forwarding gateway was removed, rejected vsock streams
       already reset at the authenticated seam, and a guest-wide default
       blackhole would also break the admitted loopback egress client.
-- [ ] Run the workspace check, tests, formatting, and Linux-builder clippy
-      gates; resolve any failures attributable to this plan.
+- [x] Run the workspace check, tests, formatting, and Linux-builder clippy
+      gates; the required GitHub CI gates passed on #1878. The one local full
+      runtime-test failure was environment-only: the `mvm-substitution-endpoint`
+      helper is not built in the source checkout.
 
 ## First slice
 

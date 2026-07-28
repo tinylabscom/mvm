@@ -24,12 +24,11 @@
       workload)` so hot plan revisions replace prior rules without orphaning
       firewalls. Focused regression coverage, workspace check, full tests,
       clippy, and formatting pass; published as PR #1847 for review.
-- [ ] #1827 vsock overload hardening: bound guest-selected connection state and
-      host bridge sockets first, then add idle eviction, egress budgets, and
-      teardown cancellation. The cap and idle-eviction slices are implemented
-      in the stacked follow-up; egress budgets are implemented in the next
-      slice; teardown cancellation is implemented and null-node routing was
-      evaluated and deferred with no production-path change. Tracked in
+- [x] #1827 vsock overload hardening is complete: guest-selected connection
+      state and host bridge sockets are capped; idle eviction, shared egress
+      budgets, and teardown cancellation are implemented. Null-node routing was
+      evaluated and deferred with no production-path change. Delivered through
+      #1876 and #1878; tracked in
       `specs/plans/266-vsock-overload-hardening.md`.
 
 ---
