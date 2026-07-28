@@ -24,6 +24,18 @@ pub fn is_elf(bytes: &[u8]) -> bool {
     bytes.starts_with(ELF_MAGIC)
 }
 
+/// The ARM64 Linux boot `Image` carries the ASCII magic `ARM\x64` at byte
+/// offset 56 (`Documentation/arch/arm64/booting.rst`). Firecracker's aarch64
+/// loader consumes this flat `Image` directly, so it needs no ELF extraction.
+const ARM64_IMAGE_MAGIC: &[u8] = b"ARM\x64";
+const ARM64_IMAGE_MAGIC_OFFSET: usize = 56;
+
+/// Whether `bytes` is an ARM64 boot `Image` (magic `ARM\x64` at offset 56).
+pub fn is_arm64_image(bytes: &[u8]) -> bool {
+    let end = ARM64_IMAGE_MAGIC_OFFSET + ARM64_IMAGE_MAGIC.len();
+    bytes.len() >= end && &bytes[ARM64_IMAGE_MAGIC_OFFSET..end] == ARM64_IMAGE_MAGIC
+}
+
 /// Extract the embedded ELF `vmlinux` from a bzImage by locating its gzip
 /// payload and decompressing it. Already-ELF input is returned verbatim. A
 /// bzImage can contain incidental `1f 8b 08` byte runs, so every gzip-magic
@@ -53,6 +65,11 @@ pub fn extract_vmlinux(image: &[u8]) -> Result<Vec<u8>> {
 /// Idempotent: a valid cached sibling short-circuits the re-extract.
 pub fn ensure_fc_loadable_kernel(path: &Path) -> Result<PathBuf> {
     if file_starts_with_elf(path)? {
+        return Ok(path.to_path_buf());
+    }
+    // aarch64 ships a flat `Image` that Firecracker loads directly — no ELF
+    // extraction, so hand the path back unchanged.
+    if file_is_arm64_image(path)? {
         return Ok(path.to_path_buf());
     }
 
@@ -88,6 +105,19 @@ fn file_starts_with_elf(path: &Path) -> Result<bool> {
         .read(&mut head)
         .with_context(|| format!("read kernel magic {}", path.display()))?;
     Ok(n == 4 && is_elf(&head))
+}
+
+/// Read the ARM64 `Image` header magic (offset 56) to detect a flat aarch64
+/// kernel Firecracker loads directly. A too-short file is not an Image.
+fn file_is_arm64_image(path: &Path) -> Result<bool> {
+    let mut f =
+        std::fs::File::open(path).with_context(|| format!("open kernel {}", path.display()))?;
+    let mut head = [0u8; ARM64_IMAGE_MAGIC_OFFSET + 4];
+    match f.read_exact(&mut head) {
+        Ok(()) => Ok(is_arm64_image(&head)),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("read kernel header {}", path.display())),
+    }
 }
 
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
@@ -126,6 +156,19 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::io::Write;
+
+    #[test]
+    fn arm64_image_magic_detected_not_extracted() {
+        let mut img = vec![0u8; 64];
+        img[ARM64_IMAGE_MAGIC_OFFSET..ARM64_IMAGE_MAGIC_OFFSET + ARM64_IMAGE_MAGIC.len()]
+            .copy_from_slice(ARM64_IMAGE_MAGIC);
+        assert!(is_arm64_image(&img));
+        assert!(!is_elf(&img));
+        // A buffer too short to hold the offset-56 magic is not an Image.
+        assert!(!is_arm64_image(&img[..40]));
+        // And a flat Image is (correctly) not extractable as an x86 vmlinux.
+        assert!(extract_vmlinux(&img).is_err());
+    }
 
     /// A stand-in "vmlinux": ELF magic + filler so it's clearly the ELF, not a
     /// coincidental match.
