@@ -1586,6 +1586,7 @@ mod tests {
         fn idle_handle() -> StandbyHandle {
             StandbyHandle {
                 id: "warm-parent".into(),
+                template_id: None,
                 control_socket: "/tmp/does-not-exist.sock".into(),
                 pid: 0,
                 kernel_sha256: "a".repeat(64),

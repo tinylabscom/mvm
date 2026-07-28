@@ -278,11 +278,15 @@ un-audited or tampered parent; no second provenance graph is introduced (reuses
       (different code path / enum variant). *(structural: parents and workloads live
       in disjoint namespaces, a parent carries no plan by type, and `claim_standby`
       always forks a fresh child — no promote path exists to guard.)*
-- [ ] Re-enable memory-snapshot restore behind a verified no-NIC-on-restore
+- [x] Re-enable memory-snapshot restore behind a verified no-NIC-on-restore
       invariant: a restored device model that carries a network device is
       refused, so restore can never reintroduce an un-audited egress path.
-      (Restore is hard-disabled today in `crates/mvm-runtime/src/microvm/snapshot.rs`.)
-      Backend-specific restore engineering and sequencing are tracked in Plan 265.
+      *(landed via Plan 265: `warm_restore_instance_from_path` loads the snapshot
+      paused, runs the device-model guard, then resumes — `guarded_load_resume`
+      in `crates/mvm-runtime/src/vm/instance_snapshot.rs`. The bare
+      `warm_restore_instance` and the template-snapshot entry point stay refused,
+      each pending its own integrity check.)* Backend-specific restore
+      engineering and sequencing continue in Plan 265.
 - [ ] Add unit tests for identity freshness and replay refusal; add BDD
       scenarios for sub-second warm launch and for fork isolation. *(identity-freshness
       unit tests + the fork-isolation hermetic BDD (`s12_warm_claim`) landed; replay
@@ -297,6 +301,13 @@ un-audited or tampered parent; no second provenance graph is introduced (reuses
 - [ ] On block+ext4 backends the forked child inherits the parent template's
       dm-verity roothash binding; a fork that would drop verity fails closed
       (claim 3).
+- [x] Prove the QEMU Stage 0 raw-egress path on a live Linux/KVM host:
+      concurrent `cache.nixos.org` and `cdn.kernel.org` flows cross the guest
+      SOCKS5 client, the AF_VSOCK listener, the host admission gate, and the
+      upstream splice; bootstrap completes with `vsock_egress_ready: true`.
+      Host AF_VSOCK raw-egress handling is concurrent, with a Linux regression
+      test holding one raw connection open while a second is admitted and
+      served independently, so a long-lived flow cannot starve later ones.
 
 **Acceptance gate:** warm launch is sub-second on Linux and macOS; forked child
 has a new session nonce and cannot reuse an old one; a forked/restored child

@@ -282,7 +282,28 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
 pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
     io.load_snapshot_paused(dir)
         .with_context(|| format!("load_snapshot_paused({})", dir.display()))?;
+    guard_and_resume(io)
+}
 
+/// Fork variant of [`guarded_load_resume`].
+///
+/// A forked child's device paths are already bind-mounted into its private
+/// mount namespace, so its load must not re-create the host vsock socket the
+/// way a plain instance restore does. Only the load differs — the guard and the
+/// resume are the same, so a fork cannot reach userspace unchecked or stay
+/// paused forever.
+pub(crate) fn guarded_fork_load_resume(io: &FirecrackerIO, dir: &Path) -> Result<()> {
+    io.load_snapshot_for_fork(dir)
+        .with_context(|| format!("load_snapshot_for_fork({})", dir.display()))?;
+    guard_and_resume(io)
+}
+
+/// Shared tail: read the restored device model, refuse anything carrying a NIC
+/// (tearing down the paused VMM on refusal), and only then resume vCPUs.
+///
+/// Every load path funnels through here, so adding a new way to load a snapshot
+/// cannot silently bypass the guard.
+fn guard_and_resume<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
     let model = io
         .restored_device_model()
         .with_context(|| "reading restored device model")?;
@@ -422,6 +443,9 @@ pub struct PostRestoreOutcome {
     /// generation token changed (a fresh clone of the snapshot). `false` for a
     /// plain wake or a no-rotation (zero-token) restore.
     pub reseeded: bool,
+    /// `true` iff the guest applied the host wall-clock epoch before
+    /// acknowledging the restore.
+    pub clock_resynced: bool,
 }
 
 /// Sends the `PostRestore` signal to a resumed guest so it finishes coming
@@ -459,6 +483,12 @@ pub fn signal_post_restore<S: PostRestoreSignal + ?Sized>(
              — config/secrets drives may be unmounted; re-run `mvmctl resume`"
         );
     }
+    if !outcome.clock_resynced {
+        bail!(
+            "VM {vm_name} resumed but the guest did not resynchronize its wall clock — \
+             refusing to report post-restore readiness"
+        );
+    }
     Ok(outcome)
 }
 
@@ -490,6 +520,12 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
             &mut stream,
             &GuestRequest::PostRestore {
                 token: self.token,
+                host_epoch_secs: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .context("reading host wall clock for post-restore")?
+                        .as_secs(),
+                ),
                 grant_envelope: None,
             },
         )? {
@@ -497,10 +533,12 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
                 success,
                 detail,
                 reseeded,
+                clock_resynced,
             } => Ok(PostRestoreOutcome {
                 acknowledged: success,
                 detail,
                 reseeded,
+                clock_resynced,
             }),
             other => bail!("unexpected response to PostRestore: {other:?}"),
         }
@@ -786,6 +824,62 @@ impl FirecrackerIO {
         }
         Ok(())
     }
+
+    /// Load a forked snapshot after its recorded device paths have been
+    /// remapped in the child's private mount namespace.
+    pub(crate) fn load_snapshot_for_fork(&self, dir: &Path) -> Result<()> {
+        self.load_snapshot_inner(dir, false)
+    }
+
+    /// Load a sealed snapshot into a fresh VMM, leaving vCPUs paused.
+    ///
+    /// `clean_vsock` selects the launcher: a plain instance restore starts a
+    /// VMM that re-creates the host vsock socket, while a fork restore keeps
+    /// the paths its private mount namespace already remapped.
+    fn load_snapshot_inner(&self, dir: &Path, clean_vsock: bool) -> Result<()> {
+        let vm_dir = self
+            .socket_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
+        let socket_str = self.socket_path.to_string_lossy();
+        let pid_file = vm_dir.join("fc.pid");
+        let pid_file_str = pid_file.to_string_lossy();
+
+        // Firecracker refuses `/snapshot/load` on a VMM that has already
+        // started a microVM. If a previous pause left the process alive, stop
+        // it; if it already exited, just start a fresh blank VMM. Either way
+        // resume from the sealed snapshot rather than assuming a live API.
+        if crate::firecracker::is_vm_running(&pid_file_str)? {
+            let q_pid = shell_quote(&pid_file_str);
+            run_in_vm(&format!(
+                "sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null; sleep 1"
+            ))
+            .with_context(|| "stopping paused Firecracker before snapshot restore")?;
+        }
+        let start = if clean_vsock {
+            crate::microvm::start_vm_firecracker
+        } else {
+            crate::microvm::start_vm_firecracker_for_snapshot
+        };
+        start(&vm_dir.to_string_lossy(), &socket_str)
+            .with_context(|| "starting fresh Firecracker for snapshot restore")?;
+
+        // `resume_vm: false` — vCPUs stay paused so the device-model guard in
+        // `verify_and_resume_from_dir` can inspect `GET /vm/config` before
+        // anything executes.
+        let body = serde_json::json!({
+            "snapshot_path": format!("{}/{}", dir.display(), VMSTATE_FILENAME),
+            "mem_backend": {
+                "backend_type": "File",
+                "backend_path": format!("{}/{}", dir.display(), MEM_FILENAME),
+            },
+            "resume_vm": false,
+        })
+        .to_string();
+        crate::microvm::api_put_socket(&socket_str, "/snapshot/load", &body)
+            .with_context(|| "PUT /snapshot/load")?;
+        Ok(())
+    }
 }
 
 impl SnapshotIO for FirecrackerIO {
@@ -809,43 +903,7 @@ impl SnapshotIO for FirecrackerIO {
     }
 
     fn load_snapshot_paused(&self, dir: &Path) -> Result<()> {
-        let vm_dir = self
-            .socket_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
-        let socket_str = self.socket_path.to_string_lossy();
-        let pid_file = vm_dir.join("fc.pid");
-        let pid_file_str = pid_file.to_string_lossy();
-
-        // Firecracker refuses `/snapshot/load` on a VMM that has already
-        // started a microVM. If a previous pause left the process alive, stop
-        // it; if it already exited, just start a fresh blank VMM. Either way
-        // resume from the sealed snapshot rather than assuming a live API.
-        if crate::firecracker::is_vm_running(&pid_file_str)? {
-            let q_pid = shell_quote(&pid_file_str);
-            run_in_vm(&format!(
-                "sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null; sleep 1"
-            ))
-            .with_context(|| "stopping paused Firecracker before snapshot restore")?;
-        }
-        crate::microvm::start_vm_firecracker(&vm_dir.to_string_lossy(), &socket_str)
-            .with_context(|| "starting fresh Firecracker for snapshot restore")?;
-
-        // `resume_vm: false` — vCPUs stay paused so the device-model guard in
-        // `verify_and_resume_from_dir` can inspect `GET /vm/config` before
-        // anything executes.
-        let body = serde_json::json!({
-            "snapshot_path": format!("{}/{}", dir.display(), VMSTATE_FILENAME),
-            "mem_backend": {
-                "backend_type": "File",
-                "backend_path": format!("{}/{}", dir.display(), MEM_FILENAME),
-            },
-            "resume_vm": false,
-        })
-        .to_string();
-        crate::microvm::api_put_socket(&socket_str, "/snapshot/load", &body)
-            .with_context(|| "PUT /snapshot/load")?;
-        Ok(())
+        self.load_snapshot_inner(dir, true)
     }
 
     fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
@@ -1423,6 +1481,7 @@ mod tests {
             acknowledged: true,
             detail: Some("post-restore signal sent to init".into()),
             reseeded: true,
+            clock_resynced: true,
         }));
         let outcome = signal_post_restore("vm-1", &signal).unwrap();
         assert!(outcome.acknowledged);
@@ -1437,11 +1496,24 @@ mod tests {
             acknowledged: false,
             detail: Some("kill failed: no such process".into()),
             reseeded: false,
+            clock_resynced: false,
         }));
         let err = signal_post_restore("vm-1", &signal).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("did not acknowledge"), "got: {msg}");
         assert!(msg.contains("kill failed"), "detail must surface: {msg}");
+    }
+
+    #[test]
+    fn signal_post_restore_errors_when_clock_is_not_resynced() {
+        let signal = MockSignal(Ok(PostRestoreOutcome {
+            acknowledged: true,
+            detail: Some("post-restore signal sent to init".into()),
+            reseeded: true,
+            clock_resynced: false,
+        }));
+        let err = signal_post_restore("vm-1", &signal).unwrap_err();
+        assert!(err.to_string().contains("wall clock"));
     }
 
     #[test]

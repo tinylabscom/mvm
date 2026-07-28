@@ -1228,6 +1228,15 @@
                     }
                   ]
                 },
+                "host_epoch_secs": {
+                  "description": "Host wall-clock epoch seconds to apply before the init restart hook. Omitted by legacy callers that do not request clock sync.",
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint64",
+                  "minimum": 0.0
+                },
                 "token": {
                   "default": [
                     0,
@@ -2433,6 +2442,10 @@
                 "success"
               ],
               "properties": {
+                "clock_resynced": {
+                  "description": "`true` iff the guest applied the host-provided restore epoch before signaling init. Defaults to `false` for older agents.",
+                  "type": "boolean"
+                },
                 "detail": {
                   "type": [
                     "string",

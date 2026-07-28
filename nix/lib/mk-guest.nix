@@ -822,7 +822,8 @@ let
     # 5252 stays unbound. The static build keeps glibc out of the closure.
     /bin/busybox setsid ${setpriv} \
       --reuid=${toString agentUid} --regid=${toString agentUid} \
-      --clear-groups --no-new-privs \
+      --clear-groups --securebits=keep-caps \
+      --inh-caps=+sys_time --ambient-caps=+sys_time --no-new-privs \
       -- "$MVM_AGENT_BIN" &
 
     # Stage 3 — hostname + console. /dev/console is what the

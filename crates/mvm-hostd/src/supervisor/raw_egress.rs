@@ -251,14 +251,43 @@ pub async fn serve_raw_egress_vsock(
                 return;
             }
         };
-        if let Err(e) = handle_raw_conn_blocking(
-            conn_fd,
-            &gate,
-            recorder.clone(),
-            Arc::clone(&rate_guard),
-            timeout,
-        ) {
-            tracing::warn!(error = %e, "raw egress vsock connection failed");
+        let gate = Arc::clone(&gate);
+        let recorder = recorder.clone();
+        let rate_guard = Arc::clone(&rate_guard);
+        if let Err(e) = spawn_raw_egress_connection(conn_fd, gate, recorder, rate_guard, timeout) {
+            tracing::warn!(error = %e, "raw egress vsock connection thread failed to start");
+        }
+    }
+}
+
+/// Start one blocking raw-egress handler without holding up the AF_VSOCK
+/// accept loop. The returned handle is intentionally detached by production
+/// callers; tests may join it to await handler cleanup.
+#[cfg(target_os = "linux")]
+fn spawn_raw_egress_connection(
+    conn_fd: std::os::fd::RawFd,
+    gate: Arc<EgressGate>,
+    recorder: Option<Arc<Recorder>>,
+    rate_guard: Arc<dns_handler::DnsRateGuard>,
+    timeout: Duration,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let spawn = std::thread::Builder::new()
+        .name("mvm-raw-egress-vsock".to_string())
+        .spawn(move || {
+            if let Err(e) = handle_raw_conn_blocking(conn_fd, &gate, recorder, rate_guard, timeout)
+            {
+                tracing::warn!(error = %e, "raw egress vsock connection failed");
+            }
+        });
+    match spawn {
+        Ok(handle) => Ok(handle),
+        Err(error) => {
+            // The connection fd is still owned by this thread when thread
+            // creation fails; adopt it so the failed connection is closed.
+            unsafe {
+                drop(OwnedFd::from_raw_fd(conn_fd));
+            }
+            Err(error)
         }
     }
 }
@@ -747,7 +776,13 @@ mod tests {
     use hickory_proto::rr::{Name, Record};
     use mvm_core::policy::network_policy::NetworkPolicy;
     #[cfg(target_os = "linux")]
+    use std::io::{Read, Write};
+    #[cfg(target_os = "linux")]
     use std::net::{Ipv4Addr, Ipv6Addr};
+    #[cfg(target_os = "linux")]
+    use std::os::fd::IntoRawFd;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::net::UnixStream;
     #[cfg(target_os = "linux")]
     use tempfile::tempdir;
     use tokio::io::AsyncWriteExt;
@@ -1058,6 +1093,45 @@ mod tests {
         client.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
         splicer.await.unwrap().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn raw_vsock_handlers_run_concurrently() {
+        let (mut first_client, first_server) = UnixStream::pair().unwrap();
+        let (mut second_client, second_server) = UnixStream::pair().unwrap();
+        let gate = Arc::new(EgressGate::default_deny());
+        let rate_guard = Arc::new(dns_handler::DnsRateGuard::default());
+
+        let first = spawn_raw_egress_connection(
+            first_server.into_raw_fd(),
+            Arc::clone(&gate),
+            None,
+            Arc::clone(&rate_guard),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let second = spawn_raw_egress_connection(
+            second_server.into_raw_fd(),
+            gate,
+            None,
+            rate_guard,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        // Keep the first handler blocked reading its target line. The second
+        // handler must still run and reject its target instead of waiting for
+        // the first connection to finish.
+        first_client.write_all(b"blocked").unwrap();
+        second_client.write_all(b"example.com:443\n").unwrap();
+        let mut ack = [0_u8; 1];
+        second_client.read_exact(&mut ack).unwrap();
+        assert_eq!(ack[0], ConnectAck::Fail.as_byte());
+
+        drop(first_client);
+        first.join().unwrap();
+        second.join().unwrap();
     }
 
     #[cfg(target_os = "linux")]

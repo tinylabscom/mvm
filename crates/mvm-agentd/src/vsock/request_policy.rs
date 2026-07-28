@@ -253,6 +253,7 @@ mod tests {
             },
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                host_epoch_secs: None,
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
@@ -529,6 +530,7 @@ mod tests {
             GuestRequest::Wake,
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                host_epoch_secs: None,
                 grant_envelope: None,
             },
             GuestRequest::UpdateIdleTimeout { secs: 600 },

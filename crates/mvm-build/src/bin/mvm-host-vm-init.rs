@@ -542,15 +542,19 @@ fn resolve_agent_binary(
 
 /// Build the `setpriv` command that forks the guest agent under the agent
 /// uid. Mirrors the workload `/init` invocation in `nix/lib/mk-guest.nix`:
-/// `setpriv --reuid --regid --clear-groups --no-new-privs -- <agent>`. No
-/// `--bounding-set=-all` — unlike a build step the agent keeps the default
-/// bounding set (we do not strip it here).
+/// `setpriv --reuid --regid --clear-groups --securebits=keep-caps
+/// --inh-caps=+sys_time --ambient-caps=+sys_time --no-new-privs -- <agent>`.
+/// The agent receives only `CAP_SYS_TIME` so PostRestore can correct a
+/// restored wall clock; no workload process inherits this capability.
 #[cfg(any(target_os = "linux", test))]
 fn agent_spawn_command(agent_bin: &Path) -> Command {
     let mut c = Command::new("setpriv");
     c.arg(format!("--reuid={AGENT_UID}"))
         .arg(format!("--regid={AGENT_UID}"))
         .arg("--clear-groups")
+        .arg("--securebits=keep-caps")
+        .arg("--inh-caps=+sys_time")
+        .arg("--ambient-caps=+sys_time")
         .arg("--no-new-privs")
         .arg("--")
         .arg(agent_bin);
@@ -608,6 +612,9 @@ mod tests {
                 "--reuid=990",
                 "--regid=990",
                 "--clear-groups",
+                "--securebits=keep-caps",
+                "--inh-caps=+sys_time",
+                "--ambient-caps=+sys_time",
                 "--no-new-privs",
                 "--",
                 "/usr/local/bin/mvm-guest-agent",

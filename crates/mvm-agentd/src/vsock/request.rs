@@ -126,6 +126,10 @@ pub enum GuestRequest {
     PostRestore {
         #[serde(default)]
         token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+        /// Host wall-clock epoch seconds to apply before the init restart
+        /// hook. Omitted by legacy callers that do not request clock sync.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_epoch_secs: Option<u64>,
         /// Host-minted verb-grant envelope to re-pin after restore. When
         /// the plan changes across a snapshot boundary the host delivers a
         /// fresh envelope here so the guest updates its pinned grant without
@@ -523,6 +527,7 @@ mod tests {
             },
             GuestRequest::PostRestore {
                 token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                host_epoch_secs: None,
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
@@ -643,11 +648,19 @@ mod tests {
         // A non-zero generation token survives the JSON round-trip intact.
         let req = GuestRequest::PostRestore {
             token: [9u8; GENID_BYTES],
+            host_epoch_secs: Some(1_717_000_000),
             grant_envelope: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         match serde_json::from_str::<GuestRequest>(&json).unwrap() {
-            GuestRequest::PostRestore { token, .. } => assert_eq!(token, [9u8; GENID_BYTES]),
+            GuestRequest::PostRestore {
+                token,
+                host_epoch_secs,
+                ..
+            } => {
+                assert_eq!(token, [9u8; GENID_BYTES]);
+                assert_eq!(host_epoch_secs, Some(1_717_000_000));
+            }
             other => panic!("expected PostRestore, got {other:?}"),
         }
 
@@ -1108,6 +1121,7 @@ mod tests {
             (
                 GuestRequest::PostRestore {
                     token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                    host_epoch_secs: None,
                     grant_envelope: None,
                 },
                 "post-restore",

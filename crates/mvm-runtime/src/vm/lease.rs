@@ -67,10 +67,8 @@ impl WarmLease {
         replenish: Option<ReplenishFn>,
     ) -> Result<Self> {
         if backend.supports_standby_pool()
-            && let Some(handle) = pool.select_idle_compatible(&spec.want)?
+            && let Some(handle) = pool.claim_idle_compatible(&spec.want)?
         {
-            pool.mark_claimed(&handle.id)
-                .with_context(|| format!("reserving standby {}", handle.id))?;
             let claimed = backend.claim_standby(&handle, &spec.claim);
             pool.remove(&handle.id)
                 .with_context(|| format!("removing claimed standby {}", handle.id))?;
@@ -166,6 +164,7 @@ mod tests {
 
     fn compat() -> StandbyCompat {
         StandbyCompat {
+            template_id: None,
             kernel_sha256: "kern-abc".to_string(),
             vcpus: 2,
             mem_mib: 512,
@@ -177,6 +176,7 @@ mod tests {
         let c = compat();
         StandbyHandle {
             id: id.to_string(),
+            template_id: None,
             control_socket: "/tmp/unused.sock".to_string(),
             pid: 0,
             kernel_sha256: c.kernel_sha256,

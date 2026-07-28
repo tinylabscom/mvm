@@ -57,6 +57,9 @@ pub fn fc_version_short() -> String {
     }
 }
 
+/// Basename used by the default host-state root.
+pub const DEFAULT_MVM_HOME_DIR_NAME: &str = ".mvm";
+
 /// The single root directory for ALL host-side mvm state.
 ///
 /// Resolution order:

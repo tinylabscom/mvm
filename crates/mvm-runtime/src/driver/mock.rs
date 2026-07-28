@@ -160,6 +160,7 @@ impl VmmDriver for MockDriver {
         // captured-not-running standby.
         Ok(StandbyHandle {
             id: spec.id.clone(),
+            template_id: spec.template_id.clone(),
             control_socket: spec.control_socket.clone(),
             pid: 0,
             kernel_sha256: spec.kernel_sha256.clone(),

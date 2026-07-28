@@ -147,8 +147,8 @@ pub struct ForkParams {
     /// Serialized `SignedExecutionPlan` JSON for the child's own claim-8
     /// admission. When `Some`, the spawner injects it into the child's
     /// `SupervisorConfig.plan` so the supervisor re-verifies it at start.
-    /// `None` is accepted for test/dev use but skips claim-8 enforcement
-    /// (the spawner receives no plan to verify).
+    /// `None` is accepted for fs_quick materialization and test-only paths;
+    /// vm_full restore refuses it before starting the child VMM.
     pub child_plan_json: Option<String>,
     /// Tenant id for the admitted child plan (mirrors `child_plan_json`).
     /// The supervisor uses this to derive the audit-substrate paths.
@@ -311,12 +311,11 @@ pub fn checkpoint_children(
     crate::lineage::verified_children(&CheckpointGraph(store), parent_digest, anchor)
 }
 
-/// The fork's source is the sealed checkpoint content (cloned at capture
-/// time), never the parent's live disks, so a running parent races nothing.
-/// The child duplicates the parent's machine-id and MAC by construction —
-/// the restored memory embodies them — which is collision-free because every
-/// VM runs behind its own per-VM network with no shared L2 segment.
-const FORK_ALLOW_PARENT_RUNNING: bool = true;
+/// A fork restores captured memory into a new runtime identity. Refuse a live
+/// parent because its captured device state can still refer to active host
+/// resources, and because the child must never become a second owner of those
+/// resources while the parent is running.
+const FORK_ALLOW_PARENT_RUNNING: bool = false;
 
 /// Boots a forked child from its staged snapshot files. Abstracted so
 /// `fork_vm_full_fc` is testable without a live hypervisor; the FC impl
@@ -416,6 +415,19 @@ pub fn fork_vm_full_fc(
             parent.id
         );
     }
+    if params.child_id == parent.id {
+        anyhow::bail!(
+            "cannot fork checkpoint '{}': child checkpoint id must differ from the parent",
+            parent.id
+        );
+    }
+    if params.child_vm_name == parent.vm_name {
+        anyhow::bail!(
+            "cannot fork checkpoint '{}': child VM name must differ from the parent '{}'",
+            parent.id,
+            parent.vm_name
+        );
+    }
     verify_content(store, &parent)?;
     // Same fail-closed posture as fork_checkpoint: the parent's sealed record
     // must still match the digest the host signed at creation before we clone.
@@ -429,6 +441,8 @@ pub fn fork_vm_full_fc(
         );
     }
 
+    validate_child_fork_plan(&params)?;
+
     // Clone the captured triple into the child's state dir, then boot the child
     // from its OWN copies — never the parent's live blobs.
     std::fs::create_dir_all(&params.dest_dir)
@@ -441,6 +455,8 @@ pub fn fork_vm_full_fc(
         )
         .with_context(|| format!("cloning checkpoint blob {}", blob.name))?;
     }
+
+    validate_fork_verity_binding(&parent, &params.dest_dir)?;
 
     restorer.restore_fork(&params.child_vm_name, &params.dest_dir)?;
 
@@ -460,19 +476,108 @@ pub fn fork_vm_full_fc(
     Ok(child)
 }
 
-/// Liveness probe for a VM by name: a non-stale `vz.pid` whose process still
-/// exists. Mirrors the host-side pid-file convention the now-removed Vz
-/// backend wrote; unreachable while [`FORK_ALLOW_PARENT_RUNNING`] is `true`.
+/// Ensure a cloned FC checkpoint keeps the complete dm-verity binding and the
+/// device-path metadata needed to remap snapshot references to child files.
+fn validate_fork_verity_binding(parent: &CheckpointMeta, child_dir: &Path) -> Result<()> {
+    let has_verity = parent
+        .content
+        .iter()
+        .any(|blob| blob.name == "rootfs.verity");
+    let has_roothash = parent
+        .content
+        .iter()
+        .any(|blob| blob.name == "rootfs.roothash");
+    anyhow::ensure!(
+        has_verity == has_roothash,
+        "FC checkpoint '{}' has an incomplete dm-verity sidecar set",
+        parent.id
+    );
+
+    let anchors_path = child_dir.join("device-anchors.json");
+    anyhow::ensure!(
+        anchors_path.is_file(),
+        "FC checkpoint '{}' is missing device-anchors.json",
+        parent.id
+    );
+    let anchors: DeviceAnchors = serde_json::from_slice(
+        &std::fs::read(&anchors_path)
+            .with_context(|| format!("reading {}", anchors_path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", anchors_path.display()))?;
+
+    if has_verity {
+        anyhow::ensure!(
+            anchors.rootfs_verity.is_some()
+                && child_dir.join("rootfs.verity").is_file()
+                && child_dir.join("rootfs.roothash").is_file(),
+            "FC checkpoint '{}' would drop its dm-verity binding during fork",
+            parent.id
+        );
+    } else {
+        anyhow::ensure!(
+            anchors.rootfs_verity.is_none(),
+            "FC checkpoint '{}' has a verity device anchor without sidecars",
+            parent.id
+        );
+    }
+    Ok(())
+}
+
+/// Validate the child admission envelope before a vm_full restore starts a VMM.
+/// The trusted-key signature check happens in the admission supervisor; this
+/// boundary still refuses missing, malformed, tenant-mismatched, stale, and
+/// incorrectly content-addressed envelopes before any child bytes are cloned.
+fn validate_child_fork_plan(params: &ForkParams) -> Result<()> {
+    let plan_json = params
+        .child_plan_json
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("vm_full fork requires an admitted child plan"))?;
+    let tenant_id = params
+        .child_tenant_id
+        .as_deref()
+        .filter(|tenant| !tenant.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("vm_full fork requires an admitted child tenant"))?;
+    let signed: mvm_core::plan::SignedExecutionPlan = serde_json::from_str(plan_json)
+        .context("decoding the admitted child SignedExecutionPlan")?;
+    anyhow::ensure!(
+        signed.0.signature.len() == 64,
+        "admitted child plan signature must be 64 bytes"
+    );
+    anyhow::ensure!(
+        !signed.0.signer_id.trim().is_empty(),
+        "admitted child plan signer id must not be empty"
+    );
+    let plan: mvm_core::plan::ExecutionPlan = serde_json::from_slice(&signed.0.payload)
+        .context("decoding the admitted child ExecutionPlan payload")?;
+    mvm_core::plan::verify_plan_id(&plan).context("validating the admitted child plan id")?;
+    anyhow::ensure!(
+        plan.tenant.0 == tenant_id,
+        "admitted child plan tenant '{}' does not match '{}',",
+        plan.tenant.0,
+        tenant_id
+    );
+    let now = chrono::Utc::now();
+    anyhow::ensure!(
+        plan.valid_from <= now && now < plan.valid_until,
+        "admitted child plan is outside its validity window"
+    );
+    Ok(())
+}
+
+/// Liveness probe for a VM by name: any backend pid marker whose process still
+/// exists. Missing or malformed markers are treated as stopped.
 fn vm_is_running(vm_name: &str) -> bool {
-    let pid_file = mvm_core::config::vm_state_dir(vm_name).join("vz.pid");
-    let Ok(s) = std::fs::read_to_string(&pid_file) else {
-        return false;
-    };
-    let Ok(pid) = s.trim().parse::<i32>() else {
-        return false;
-    };
-    // kill(pid, 0) → 0 if the process exists, -1/ESRCH if not.
-    unsafe { libc::kill(pid, 0) == 0 }
+    ["fc.pid", "vz.pid"].into_iter().any(|marker| {
+        let pid_file = mvm_core::config::vm_state_dir(vm_name).join(marker);
+        let Ok(s) = std::fs::read_to_string(pid_file) else {
+            return false;
+        };
+        let Ok(pid) = s.trim().parse::<libc::pid_t>() else {
+            return false;
+        };
+        // kill(pid, 0) → 0 if the process exists, -1/ESRCH if not.
+        unsafe { libc::kill(pid, 0) == 0 }
+    })
 }
 
 /// Host-side control over a running VM's memory + disk, abstracted so the
@@ -962,6 +1067,7 @@ pub fn capture_fs_quick(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
     use mvm_core::checkpoint::{
         CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
     };
@@ -1956,6 +2062,103 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fork_vm_full_fc_rejects_parent_identity_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fc-identity-parent");
+
+        let same_checkpoint = fork_vm_full_fc(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: parent.id.clone(),
+                child_vm_name: "new-child".into(),
+                dest_dir: tmp.path().join("same-checkpoint"),
+                created_unix: 2,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &MockRestorer {
+                seen: RefCell::new(None),
+            },
+            &AgreeingAnchor,
+        )
+        .unwrap_err();
+        assert!(same_checkpoint.to_string().contains("child checkpoint id"));
+
+        let same_vm = fork_vm_full_fc(
+            &store,
+            ForkParams {
+                checkpoint: parent.id.clone(),
+                child_id: CheckpointId::new("new-child-checkpoint"),
+                child_vm_name: parent.vm_name.clone(),
+                dest_dir: tmp.path().join("same-vm"),
+                created_unix: 2,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &MockRestorer {
+                seen: RefCell::new(None),
+            },
+            &AgreeingAnchor,
+        )
+        .unwrap_err();
+        assert!(same_vm.to_string().contains("child VM name"));
+    }
+
+    #[test]
+    fn vm_is_running_detects_firecracker_and_legacy_pid_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+        let state = mvm_core::config::vm_state_dir("pid-check");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("fc.pid"), std::process::id().to_string()).unwrap();
+        assert!(vm_is_running("pid-check"));
+
+        std::fs::remove_file(state.join("fc.pid")).unwrap();
+        std::fs::write(state.join("vz.pid"), std::process::id().to_string()).unwrap();
+        assert!(vm_is_running("pid-check"));
+    }
+
+    #[test]
+    fn fork_verity_binding_requires_sidecars_and_anchor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let mut parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fc-verity");
+        parent.content.push(ContentBlob {
+            name: "rootfs.verity".into(),
+            sha256: "a".repeat(64),
+        });
+        parent.content.push(ContentBlob {
+            name: "rootfs.roothash".into(),
+            sha256: "b".repeat(64),
+        });
+
+        let child_dir = tmp.path().join("child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let anchors = DeviceAnchors {
+            rootfs: child_dir.join("rootfs.ext4"),
+            rootfs_verity: Some(child_dir.join("rootfs.verity")),
+            config: None,
+            secrets: None,
+            vsock: child_dir.join("runtime/v.sock"),
+        };
+        std::fs::write(
+            child_dir.join("device-anchors.json"),
+            serde_json::to_vec(&anchors).unwrap(),
+        )
+        .unwrap();
+
+        let err = validate_fork_verity_binding(&parent, &child_dir).unwrap_err();
+        assert!(err.to_string().contains("drop its dm-verity binding"));
+
+        std::fs::write(child_dir.join("rootfs.verity"), b"verity").unwrap();
+        std::fs::write(child_dir.join("rootfs.roothash"), b"roothash").unwrap();
+        validate_fork_verity_binding(&parent, &child_dir).unwrap();
+    }
+
     // ── fork_vm_full_fc ─────────────────────────────────────────────────────
 
     /// Seeds an FC-shaped vm_full checkpoint: {rootfs.ext4, memory.bin,
@@ -1993,6 +2196,19 @@ mod tests {
         .unwrap()
     }
 
+    fn admitted_child_plan() -> (String, String) {
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .workload("fc-childvm")
+            .build();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[91u8; 32]);
+        let signed = mvm_core::plan::sign_plan(&plan, &signer, "test-signer");
+        (
+            serde_json::to_string(&signed).unwrap(),
+            plan.tenant.0.to_string(),
+        )
+    }
+
     struct MockRestorer {
         seen: RefCell<Option<(String, PathBuf)>>,
     }
@@ -2008,6 +2224,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv1");
+        let (child_plan_json, child_tenant_id) = admitted_child_plan();
 
         let dest = tmp.path().join("childvm-state");
         let restorer = MockRestorer {
@@ -2021,8 +2238,8 @@ mod tests {
                 child_vm_name: "fc-childvm".into(),
                 dest_dir: dest.clone(),
                 created_unix: 2,
-                child_plan_json: None,
-                child_tenant_id: None,
+                child_plan_json: Some(child_plan_json),
+                child_tenant_id: Some(child_tenant_id),
             },
             &restorer,
             &AgreeingAnchor,
@@ -2046,6 +2263,76 @@ mod tests {
         let (seen_name, seen_dir) = restorer.seen.borrow().clone().unwrap();
         assert_eq!(seen_name, "fc-childvm");
         assert_eq!(seen_dir, dest);
+    }
+
+    #[test]
+    fn fork_vm_full_fc_refuses_missing_child_admission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fc_vm_full_checkpoint(&store, tmp.path(), "fcv-missing-plan");
+        let restorer = MockRestorer {
+            seen: RefCell::new(None),
+        };
+        let err = fork_vm_full_fc(
+            &store,
+            ForkParams {
+                checkpoint: parent.id,
+                child_id: CheckpointId::new("fc-missing-plan-child"),
+                child_vm_name: "fc-missing-plan-child".into(),
+                dest_dir: tmp.path().join("missing-plan-child-state"),
+                created_unix: 2,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &restorer,
+            &AgreeingAnchor,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("requires an admitted child plan"));
+        assert!(restorer.seen.borrow().is_none());
+    }
+
+    #[test]
+    fn child_admission_rejects_malformed_tenant_mismatch_and_expiry() {
+        let params = |child_plan_json, child_tenant_id| ForkParams {
+            checkpoint: CheckpointId::new("parent"),
+            child_id: CheckpointId::new("child"),
+            child_vm_name: "child-vm".into(),
+            dest_dir: PathBuf::from("/tmp/child-state"),
+            created_unix: 2,
+            child_plan_json,
+            child_tenant_id,
+        };
+
+        let err = validate_child_fork_plan(&params(
+            Some("not-json".to_string()),
+            Some("local".to_string()),
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("decoding the admitted child"));
+
+        let (valid_json, _) = admitted_child_plan();
+        let err =
+            validate_child_fork_plan(&params(Some(valid_json), Some("wrong-tenant".to_string())))
+                .unwrap_err();
+        assert!(err.to_string().contains("does not match"));
+
+        let expired = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .workload("expired-child")
+            .validity(
+                Utc::now() - Duration::minutes(2),
+                Utc::now() - Duration::minutes(1),
+            )
+            .build();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[92u8; 32]);
+        let signed = mvm_core::plan::sign_plan(&expired, &signer, "test-signer");
+        let err = validate_child_fork_plan(&params(
+            Some(serde_json::to_string(&signed).unwrap()),
+            Some("local".to_string()),
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("outside its validity window"));
     }
 
     #[test]

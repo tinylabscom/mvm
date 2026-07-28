@@ -73,6 +73,7 @@ fn main() -> Result<()> {
 /// What a standby must match to be claimable (kernel + fixed resources + image).
 fn standby_compat() -> StandbyCompat {
     StandbyCompat {
+        template_id: None,
         kernel_sha256: "kernel-sha-placeholder".to_string(),
         vcpus: 2,
         mem_mib: 512,

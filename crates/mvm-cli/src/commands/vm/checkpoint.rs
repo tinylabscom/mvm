@@ -1019,6 +1019,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
     }
 
     // Verify the parent against the signed audit chain before cloning/restoring.
+    let parent_meta = p.store.read_meta(p.checkpoint)?;
     let anchor = SignedChainAnchor::load()
         .context("loading the signed audit chain to verify the fork parent")?;
     let restorer = mvm_runtime::firecracker::FcForkRestorer;
@@ -1045,64 +1046,34 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
     bind_checkpoint_forked(p.checkpoint, &meta, &p.child_vm_name, p.store)?;
     super::up::emit_launched_if(&admission, "firecracker", true);
 
-    // Best-effort: deliver the freshly-minted grant to the restored child
-    // agent over the FC vsock UDS, re-pinning it to the child's plan instead
-    // of running class-gate-only. `FcForkRestorer::restore_fork` already
-    // resumed the VMM with a zero VMGenID token before returning; this is the
-    // real token + grant delivery, mirroring the former Vz backend's fork path and
-    // `warm_restore_instance_from_path`'s own post-restore signal.
-    if let Some(mut grant_env) = read_grant_envelope_for(&p.child_vm_name) {
-        if let Some(parent_vm_name) = p.store.read_meta(p.checkpoint).ok().map(|m| m.vm_name)
-            && let Some((session_id, plan_nonce)) = grant_predecessor_from_vm_name(&parent_vm_name)
-        {
-            grant_env.predecessor_session_id = Some(session_id);
-            grant_env.predecessor_plan_nonce_hex = Some(plan_nonce.as_hex().to_string());
-        }
-        match mvm_runtime::microvm::resolve_running_vm_dir(&p.child_vm_name) {
-            Ok(vm_dir) => {
-                let vsock_path_str = mvm_runtime::microvm::firecracker_vsock_uds_path(&vm_dir);
-                const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
-                let mut agent_ready = false;
-                for _ in 0..POLL_ATTEMPTS {
-                    if mvm_agentd::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
-                        agent_ready = true;
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-                if agent_ready {
-                    let token =
-                        mvm_core::crypto::vmgenid::fresh_generation_token(&p.child_vm_name).token;
-                    match mvm_agentd::vsock::post_restore_with_grant_at(
-                        &vsock_path_str,
-                        token,
-                        Some(grant_env),
-                    ) {
-                        Ok(r) if r.acknowledged => tracing::info!(
-                            "FC fork post-restore grant delivered to '{}'",
-                            p.child_vm_name
-                        ),
-                        Ok(_) => tracing::warn!(
-                            "FC fork post-restore grant delivery returned failure for '{}'",
-                            p.child_vm_name
-                        ),
-                        Err(e) => tracing::warn!(
-                            "FC fork post-restore grant delivery failed for '{}': {e}",
-                            p.child_vm_name
-                        ),
-                    }
-                } else {
-                    tracing::warn!(
-                        "FC fork post-restore: agent not reachable for '{}'; grant not delivered (VM is running)",
-                        p.child_vm_name
-                    );
-                }
-            }
-            Err(e) => tracing::warn!(
-                "FC fork post-restore: could not resolve VM dir for '{}' to deliver grant: {e}",
+    // Deliver the fresh generation token to every restored child. A grant is
+    // optional for dev/test forks, but identity rotation is not: the token is
+    // bound to the child's recorded snapshot identity, not its human-readable
+    // VM name. When a grant exists, re-pin it in the same PostRestore RPC.
+    let mut grant_env = read_grant_envelope_for(&p.child_vm_name);
+    if let Some(grant) = grant_env.as_mut()
+        && let Some(parent_vm_name) = p.store.read_meta(p.checkpoint).ok().map(|m| m.vm_name)
+        && let Some((session_id, plan_nonce)) = grant_predecessor_from_vm_name(&parent_vm_name)
+    {
+        grant.predecessor_session_id = Some(session_id);
+        grant.predecessor_plan_nonce_hex = Some(plan_nonce.as_hex().to_string());
+    }
+    if let Err(error) = deliver_fc_fork_post_restore(
+        &p.child_vm_name,
+        parent_meta.meta_digest.as_str(),
+        grant_env,
+    ) {
+        let stop_result = mvm_runtime::microvm::stop_vm(&p.child_vm_name);
+        return match stop_result {
+            Ok(()) => Err(error.context(format!(
+                "stopped forked child '{}' after post-restore hygiene failure",
                 p.child_vm_name
-            ),
-        }
+            ))),
+            Err(stop_error) => Err(error.context(format!(
+                "post-restore hygiene failed for '{}' and stopping the child also failed: {}",
+                p.child_vm_name, stop_error
+            ))),
+        };
     }
 
     if p.json {
@@ -1122,6 +1093,55 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
             p.child_vm_name
         ));
     }
+    Ok(())
+}
+
+fn deliver_fc_fork_post_restore(
+    child_vm_name: &str,
+    parent_snapshot_digest: &str,
+    grant_env: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+) -> Result<()> {
+    let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(child_vm_name)
+        .with_context(|| format!("resolving VM dir for '{child_vm_name}'"))?;
+    let vsock_path_str = mvm_runtime::microvm::firecracker_vsock_uds_path(&vm_dir);
+    const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
+    for _ in 0..POLL_ATTEMPTS {
+        if mvm_agentd::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
+            let token =
+                mvm_core::crypto::vmgenid::fresh_generation_token(parent_snapshot_digest).token;
+            let host_epoch_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("reading host wall clock for fork PostRestore")?
+                .as_secs();
+            let reply = mvm_agentd::vsock::post_restore_with_grant_and_clock_at(
+                &vsock_path_str,
+                token,
+                grant_env,
+                Some(host_epoch_secs),
+            )
+            .with_context(|| format!("sending PostRestore to '{child_vm_name}'"))?;
+            require_fork_post_restore_success(reply)?;
+            tracing::info!(
+                "FC fork post-restore identity rotation acknowledged for '{}'",
+                child_vm_name
+            );
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    anyhow::bail!("guest agent not reachable for '{child_vm_name}' after fork restore")
+}
+
+fn require_fork_post_restore_success(reply: mvm_agentd::vsock::PostRestoreReply) -> Result<()> {
+    anyhow::ensure!(reply.acknowledged, "guest did not acknowledge PostRestore");
+    anyhow::ensure!(
+        reply.reseeded,
+        "guest acknowledged PostRestore without rotating its generation identity"
+    );
+    anyhow::ensure!(
+        reply.clock_resynced,
+        "guest acknowledged PostRestore without resynchronizing its wall clock"
+    );
     Ok(())
 }
 
@@ -1452,6 +1472,40 @@ mod tests {
         assert!(validated_checkpoint_id("").is_err());
         assert!(validated_checkpoint_id("a\0b").is_err());
         assert!(validated_checkpoint_id("a\nb").is_err());
+    }
+
+    #[test]
+    fn fork_post_restore_requires_acknowledgement_and_reseed() {
+        let acknowledged = mvm_agentd::vsock::PostRestoreReply {
+            acknowledged: true,
+            reseeded: true,
+            clock_resynced: true,
+        };
+        assert!(require_fork_post_restore_success(acknowledged).is_ok());
+
+        let not_reseeded = mvm_agentd::vsock::PostRestoreReply {
+            acknowledged: true,
+            reseeded: false,
+            clock_resynced: true,
+        };
+        let err = require_fork_post_restore_success(not_reseeded).unwrap_err();
+        assert!(err.to_string().contains("without rotating"));
+
+        let not_acknowledged = mvm_agentd::vsock::PostRestoreReply {
+            acknowledged: false,
+            reseeded: false,
+            clock_resynced: false,
+        };
+        let err = require_fork_post_restore_success(not_acknowledged).unwrap_err();
+        assert!(err.to_string().contains("did not acknowledge"));
+
+        let not_clock_resynced = mvm_agentd::vsock::PostRestoreReply {
+            acknowledged: true,
+            reseeded: true,
+            clock_resynced: false,
+        };
+        let err = require_fork_post_restore_success(not_clock_resynced).unwrap_err();
+        assert!(err.to_string().contains("wall clock"));
     }
 
     #[test]

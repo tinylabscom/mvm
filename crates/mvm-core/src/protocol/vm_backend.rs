@@ -96,6 +96,13 @@ pub fn select_runtime_source_policy(
 pub struct VmStartConfig {
     /// VM name (user-provided or auto-generated).
     pub name: String,
+    /// Stable registered-template identity for warm-parent compatibility.
+    ///
+    /// `None` is reserved for image-agnostic launches. A warm parent carrying
+    /// a template identity may only be claimed by a child of that same
+    /// template; filesystem paths are not identities and must not be used for
+    /// this comparison.
+    pub template_id: Option<String>,
     /// Absolute path to the root filesystem (ext4 image).
     pub rootfs_path: String,
     /// When set, boot from a read-only **virtiofs root** serving this host
@@ -608,6 +615,7 @@ mod tests {
     fn sample_standby_spec() -> StandbySpec {
         StandbySpec {
             id: "standby-x".into(),
+            template_id: None,
             kernel_path: "/k/vmlinux".into(),
             kernel_sha256: "a".repeat(64),
             vcpus: 2,
@@ -648,6 +656,7 @@ mod tests {
         match b.claim_standby(
             &StandbyHandle {
                 id: "s".into(),
+                template_id: None,
                 control_socket: "/p/s.sock".into(),
                 pid: 1,
                 kernel_sha256: "a".repeat(64),

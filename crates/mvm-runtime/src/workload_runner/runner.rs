@@ -1713,6 +1713,7 @@ mod tests {
     fn sample_standby_spec(id: &str, vm_state_dir: &Path) -> mvm_core::vm_backend::StandbySpec {
         mvm_core::vm_backend::StandbySpec {
             id: id.to_string(),
+            template_id: None,
             kernel_path: "/img/kernel".into(),
             kernel_sha256: "a".repeat(64),
             vcpus: 2,
@@ -1899,6 +1900,7 @@ mod tests {
     fn idle_parent_handle(id: &str, control_socket: &Path) -> StandbyHandle {
         StandbyHandle {
             id: id.to_string(),
+            template_id: None,
             control_socket: control_socket.display().to_string(),
             pid: 0,
             kernel_sha256: "k".repeat(64),

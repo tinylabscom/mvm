@@ -833,6 +833,7 @@ mod tests {
             GuestRequest::PostRestore {
                 token,
                 grant_envelope,
+                ..
             } => {
                 assert_eq!(token, [0u8; GENID_BYTES]);
                 assert!(grant_envelope.is_none());

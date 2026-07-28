@@ -1324,6 +1324,7 @@ fn build_start_config(
 
     VmStartConfig {
         name: vm_name.to_string(),
+        template_id: resolved.template_id.clone(),
         rootfs_path: resolved.rootfs.clone(),
         virtiofs_root: boot.virtiofs_root.clone(),
         kernel_path: Some(resolved.vmlinux.clone()),

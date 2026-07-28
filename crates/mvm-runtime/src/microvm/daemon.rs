@@ -27,13 +27,27 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 /// Start a Firecracker daemon in a per-VM directory with its own socket.
 #[instrument(skip_all)]
 pub(crate) fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
+    start_vm_firecracker_inner(abs_dir, abs_socket, true)
+}
+
+/// Start Firecracker without unlinking a mounted child vsock UDS.
+pub(crate) fn start_vm_firecracker_for_snapshot(abs_dir: &str, abs_socket: &str) -> Result<()> {
+    start_vm_firecracker_inner(abs_dir, abs_socket, false)
+}
+
+fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, clean_vsock: bool) -> Result<()> {
     ui::info("Starting Firecracker...");
     let vsock = firecracker_vsock_uds_path(abs_dir);
+    let vsock_cleanup = if clean_vsock {
+        format!("rm -f {vsock} {abs_dir}/v.sock")
+    } else {
+        String::new()
+    };
     run_in_vm_visible(&format!(
         r#"
         mkdir -p {dir}
         sudo rm -f {socket}
-        rm -f {vsock} {dir}/v.sock
+        {vsock_cleanup}
         touch {dir}/console.log {dir}/firecracker.log
         sudo bash -c 'nohup setsid firecracker --api-sock {socket} --enable-pci \
             </dev/null >{dir}/console.log 2>{dir}/firecracker.log &
@@ -53,6 +67,7 @@ pub(crate) fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()
         "#,
         socket = abs_socket,
         dir = abs_dir,
+        vsock_cleanup = vsock_cleanup,
     ))
 }
 
