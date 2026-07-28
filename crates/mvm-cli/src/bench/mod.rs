@@ -18,6 +18,7 @@
 //! Backend scope: v1 measures libkrun, HVF, and Firecracker.
 
 pub mod harness;
+pub mod interaction;
 pub mod probe;
 pub mod probes;
 pub mod regression;
