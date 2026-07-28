@@ -183,11 +183,17 @@ cold-boot admission order.
 
 Made unrepresentable, not merely checked:
 
-- A standby parent carries no admitted workload plan by construction.
+- A standby parent carries no admitted workload plan by construction
+  (`StandbySpec`/`StandbyHandle` have no plan/secret field).
 - The standby handle exposes only `claim` (which yields a fresh child `VmId`),
   never a workload `run`.
-- The runner's workload entry refuses a `VmId` that is registered as a standby
-  parent.
+- The runner's workload `start` path never consults the standby pool, and
+  parents (`~/.mvm/pool/`) and workloads (`~/.mvm/vms/`) live in disjoint
+  namespaces — so there is no code path that runs an existing parent's `VmId` as
+  a workload. The guarantee is therefore structural (verified, no runtime guard
+  needed) and is scoped to *this* fork substrate; the older single-use
+  `LibkrunBackend::claim_standby` (which reuses a standby's own id and removes it
+  from the pool on claim) is a separate predecessor model, not covered here.
 
 A warm claim can never diverge to a weaker posture because each guard reuses the
 cold-boot mechanism at its own layer: the same `admit_plan_for_boot` admission

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement `spawn_standby` / `claim_standby` on the `WorkloadRunner` so a warm claim forks a clean parent into a fresh, signed, admitted child gated identically to a cold boot, and enable the `standby_pool` capability for Firecracker only.
+**Goal:** Implement `spawn_standby` / `claim_standby` on the `WorkloadRunner` so a warm claim forks a clean parent into a fresh, signed, admitted child gated identically to a cold boot, and make that substrate reachable from the CLI via a dependency-clean seam. (The Firecracker `standby_pool` capability flip is *deferred* to the live follow-up slice — advertising it before the `@live` FC spawn/fork lands would regress a configured warm pool to a silent cold boot; see "Deferred to the live FC follow-up slice" below.)
 
 **Architecture:** Three layers — the `WorkloadRunner` owns authority + guards (new `spawn_standby`/`claim_standby`, a shared `ClaimGuards` sequence, and a never-promote rule); the FC driver owns VMM spawn/fork (clean-parent boot + `FcForkRestorer`); `SupervisorStandbyPool` owns bookkeeping. The Phase-1 `materialize_child_from_parent` is the CoW substrate. The parent seam is tier-agnostic (checkpoint-backed now; Plan 265 upgrades restore to live-memory).
 
@@ -445,7 +445,9 @@ git commit -m "feat(runtime): never-promote-a-parent guard + remaining fail-clos
 
 ---
 
-## Task 7: Enable the `standby_pool` capability for Firecracker
+## Task 7: Reachable claim seam (FC capability flip DEFERRED)
+
+DELIVERED: the `AnyBackend::claim_standby_via_runner` seam that routes runner-backed variants into the guarded `claim_standby` (proven by the `claim_routing::*` witnesses to reach the runner, not the fail-closed stub), fails closed for qemu/wasm. The FC `standby_pool` capability flip was reverted and DEFERRED to the live follow-up slice — flipping it before FC can populate the pool (spawn/fork are `@live`) regresses a configured warm pool to a silent cold boot plus per-launch replenish `warn` noise. The step text below is retained for history; the capability-flip steps ship with the live FC slice.
 
 **Files:**
 - Modify: `crates/mvm-runtime/src/driver/fc.rs` (capabilities `standby_pool = true`)
@@ -524,9 +526,9 @@ not attest to.
 - Modify: `specs/plans/255-vsock-first-snapshot-egress-adoption.md` (tick the Phase 2 items this slice satisfies; leave slice-two items unticked)
 - Modify: `specs/SPRINT.md` (note Phase 2 slice one landed)
 
-- [ ] **Step 1:** Tick the Plan 255 Phase 2 checkboxes covered by this slice: paused-parent pool keyed by template (via the standby pool + FC spawn), `fork_from_parent` (via `claim_standby`), the fresh-signed-`ExecutionPlan`-per-fork item (claim 8), the verity-inherit item (claim 3), and the hard-guard item. Leave post-resume-hygiene refinement and the sub-second-launch acceptance (Plan 265) unticked with a one-line note.
-- [ ] **Step 2:** Update `specs/SPRINT.md` under the warm-start bullets.
-- [ ] **Step 3: Commit**
+- [x] **Step 1:** Tick the Plan 255 Phase 2 checkboxes covered by this slice: `fork_from_parent` (via `claim_standby`), the fresh-signed-`ExecutionPlan`-per-fork item (claim 8, runner binds the admitted plan + fails closed; mint is CLI-layer), and the hard-guard item (structural). Left unticked with notes: the paused-parent pool lifecycle, post-resume hygiene, sub-second-launch, and verity-fail-closed-on-drop — deferred to the live FC follow-up + Plan 265.
+- [x] **Step 2:** Update `specs/SPRINT.md` under the warm-start bullets.
+- [x] **Step 3: Commit**
 
 ```bash
 git add specs/plans/255-vsock-first-snapshot-egress-adoption.md specs/SPRINT.md
@@ -534,6 +536,18 @@ git commit -m "docs(plan-255): tick Phase 2 slice-one checkboxes (warm-pool clai
 ```
 
 ---
+
+## Deferred to the live FC follow-up slice
+
+This slice landed the runner-side substrate + a reachable seam, all hermetically tested. The live Firecracker warm pool is a follow-up slice (gated on Firecracker snapshot/fork, which needs a real VMM — `@live`):
+
+- **FC `spawn_standby_parent` capture** — boot a clean parent to its post-init ready point and capture its checkpoint (`@live`; the `VmmDriver` default is fail-closed today, only `MockDriver` overrides it).
+- **`parent_checkpoint` on `StandbyHandle`** — so a pooled parent carries the checkpoint id the claim path materializes from (the missing `ClaimContext` field that keeps the live wiring inert today).
+- **FC `fork_standby_child`** — the real `FcForkRestorer`-backed fork (`@live`).
+- **The live `try_warm_claim` → `claim_standby_via_runner` call** — assemble the `ClaimContext` at the CLI and drive the seam, once the pool can be populated.
+- **The FC `standby_pool` capability flip** — ships *with* the above, not before (advertising it while the pool is unpopulated regresses a configured warm pool to a silent cold boot + per-launch replenish `warn` noise).
+
+Owned by Plan 265 (not this substrate at all): live-memory fast restore, page-cache priming, post-resume hygiene (entropy/clock/vsock re-handshake), density/same-page-merge, and the sub-second warm-start SLO.
 
 ## Self-review (author checklist — completed)
 
