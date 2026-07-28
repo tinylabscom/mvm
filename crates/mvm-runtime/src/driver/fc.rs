@@ -29,7 +29,8 @@ use mvm_core::vm_backend::{
 use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
 use crate::driver::{
-    BlockDev, ConsoleCapture, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection,
+    BlockDev, ChildForkRequest, ConsoleCapture, DuplexStream, RunningVm, VmmDriver, VmmSpec,
+    VsockDirection,
 };
 use crate::microvm::{
     FirecrackerGuard, api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
@@ -525,6 +526,41 @@ impl VmmDriver for FcDriver {
 
     fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
         Some(Box::new(crate::firecracker::FcVmFullControl::new(vm_name)))
+    }
+
+    fn fork_standby_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        if !req.child_dir.exists() {
+            return Err(StandbyError::ClaimFailed(format!(
+                "fork child '{}': child dir {} was never materialized",
+                req.child_vm_name,
+                req.child_dir.display()
+            )));
+        }
+        // The restorer renames `memory.bin` to Firecracker's canonical load
+        // name, so accept either — but require one. Without saved memory this
+        // would quietly become a cold boot, losing the whole point of the pool.
+        if !req.child_dir.join("memory.bin").exists() && !req.child_dir.join("mem.bin").exists() {
+            return Err(StandbyError::ClaimFailed(format!(
+                "fork child '{}': clone at {} carries no saved memory image",
+                req.child_vm_name,
+                req.child_dir.display()
+            )));
+        }
+
+        // Restore the parent's saved memory into a fresh VMM under the child's
+        // own identity. The device-model guard between load and resume refuses
+        // any snapshot carrying a network interface, so a restored child cannot
+        // reintroduce a path off the box that bypasses vsock.
+        crate::checkpoint::ForkVmFullRestorer::restore_fork(
+            &crate::firecracker::FcForkRestorer,
+            req.child_vm_name,
+            req.child_dir,
+        )
+        .map_err(|e| StandbyError::ClaimFailed(format!("restore forked child: {e}")))?;
+        Ok(())
     }
 
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
@@ -1483,6 +1519,56 @@ mod tests {
         assert_eq!(
             resolve_standby_parent_pid("standby-x", || Some(4242)).unwrap(),
             4242
+        );
+    }
+
+    fn sample_generation_token() -> mvm_core::crypto::vmgenid::GenerationToken {
+        mvm_core::crypto::vmgenid::GenerationToken {
+            token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            content_hash: "test-content-hash".into(),
+        }
+    }
+
+    /// The runner materializes the CoW clone before forking. An absent dir means
+    /// the clone never landed, so restoring would load something other than the
+    /// verified parent's content — refuse instead.
+    #[test]
+    fn fork_standby_child_refuses_an_unmaterialized_child_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("never-materialized");
+        let req = ChildForkRequest {
+            child_vm_name: "child-vm-1",
+            child_dir: &missing,
+            genid: sample_generation_token(),
+        };
+
+        let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
+
+        assert!(
+            matches!(err, StandbyError::ClaimFailed(ref m) if m.contains("child-vm-1")),
+            "expected a ClaimFailed naming the child, got: {err:?}"
+        );
+    }
+
+    /// A memory restore needs the parent's saved memory. A clone carrying only a
+    /// rootfs would silently cold-boot instead of restoring, so it is refused.
+    #[test]
+    fn fork_standby_child_refuses_a_clone_without_saved_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let child_dir = tmp.path().join("child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(child_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        let req = ChildForkRequest {
+            child_vm_name: "child-vm-2",
+            child_dir: &child_dir,
+            genid: sample_generation_token(),
+        };
+
+        let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
+
+        assert!(
+            matches!(err, StandbyError::ClaimFailed(ref m) if m.contains("memory")),
+            "expected a ClaimFailed naming the missing memory image, got: {err:?}"
         );
     }
 }
