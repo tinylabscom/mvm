@@ -336,7 +336,14 @@ Add `vm_full_control` to `VmmDriver` in `driver/traits.rs` with the `None` defau
 
         // Deliberately left running: the caller captures its live memory, and
         // Firecracker outlives this handle.
-        let pid = read_fc_pid(&spec.vm_state_dir).unwrap_or(0);
+        //
+        // A pid read failure is a real error, not a benign default: `boot`
+        // has already proven the guest is up, and pid 0 is the sentinel the
+        // pool reads as "no live process" (`StandbyHandle::is_saved_state`).
+        // Defaulting to it would hide a running VMM from eviction and reaping,
+        // leaking the process. Propagate instead.
+        let pid = read_fc_pid(&spec.vm_state_dir)
+            .map_err(|e| StandbyError::SpawnFailed(format!("read standby parent pid: {e}")))?;
         drop(vm);
 
         Ok(StandbyHandle {
@@ -364,6 +371,8 @@ Add `vm_full_control` to `VmmDriver` in `driver/traits.rs` with the `None` defau
 ```
 
 For `read_fc_pid`, reuse the existing pid-file helper in `fc.rs` (`fc_pid_path` plus the crate's existing pid read) rather than writing a new one; if no read helper exists, read the `fc.pid` file the boot path already writes. Reuse the same `now_unix_secs` import `mock.rs` uses.
+
+**`FcVmFullControl` needs metadata `boot` does not write.** `FcVmFullControl::rootfs_path()` (and `device_anchors()`, which calls it) resolves the VM's rootfs through `runtime_meta::read` → `<vm_state_dir>/mode.json`. That file is written by the `workload_runner` / `VmBackend::start` orchestration, **not** by the raw `FcDriver::boot` this task calls — so a parent spawned here would boot fine but fail the next task's capture with "no mode.json found". Persist the metadata `rootfs_path()` needs before returning (or give the control a resolution path that does not depend on `workload_runner`-only bookkeeping), keeping the recorded rootfs bound to the image the spec actually booted. Cover it with a test that does not require KVM.
 
 - [ ] **Step 5: Give `MockDriver` a capture control**
 
