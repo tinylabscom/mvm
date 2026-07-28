@@ -2,14 +2,23 @@
 
 ## Status
 
-Accepted. This ADR is the gate: it records the decision to adopt three
-rust-vmm crates on the host VMM path and the supply-chain sign-off that
-adoption requires. Acceptance landed with Slice 2 (`vm-memory` behind the
-`GuestMem` seam); the remaining slices adopt `virtio-queue` and
-`virtio-vsock` on the same terms.
-The staged implementation lives in
+Accepted, and **fully landed** on the vsock device. This ADR is the gate:
+it records the decision to adopt three rust-vmm crates on the host VMM
+path and the supply-chain sign-off that adoption requires. Acceptance
+landed with Slice 2 (`vm-memory` behind the `GuestMem` seam); Slices 3–4
+adopted `virtio-queue` for the vsock TX then RX ring walk; Slice 5 adopted
+`virtio-vsock`'s typed packet for the 44-byte header parse/format
+(`VsockHdr::{to_bytes,from_bytes}` now frame through `VsockPacket`, and
+`HDR_LEN` is anchored to `PKT_HEADER_SIZE`). The migration is now complete:
+F1/F3/F4 are eliminated by construction, and F5's writable-descriptor
+validation / "no RX buffer → leave queued" handling (Slice 4) is preserved
+unchanged by the header swap — the packet round-trips byte-identically to
+the hand-rolled encode/decode across every op and boundary value. The
+staged implementation lives in
 `specs/notes/2026-07-27-vsock-device-hardening-plan.md`; the audit that
 motivates it in `specs/notes/2026-07-27-vsock-device-audit-findings.md`.
+The block/fs device migrations (which reuse the same `vm-memory` seam and
+`Queue` gate) remain out of scope here.
 
 ## Context
 
