@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use super::guest_mem::GuestMem;
 
@@ -103,7 +103,7 @@ pub(crate) struct VsockTransportCore {
     pub(crate) queues: [Queue; NUM_QUEUES],
     pub(crate) interrupt_status: u32,
     pub(crate) recv_cnt: HashMap<VsockConnectionKey, u32>,
-    pub(crate) pending_rx: Vec<(VsockHdr, Vec<u8>)>,
+    pub(crate) pending_rx: VecDeque<(VsockHdr, Vec<u8>)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -125,7 +125,7 @@ impl VsockTransportCore {
             queues: [Queue::default(); NUM_QUEUES],
             interrupt_status: 0,
             recv_cnt: HashMap::new(),
-            pending_rx: Vec::new(),
+            pending_rx: VecDeque::new(),
         }
     }
 
@@ -234,7 +234,7 @@ impl VsockTransportCore {
             buf_alloc: HOST_BUF_ALLOC,
             fwd_cnt: self.fwd_cnt_for(src_port, dst_port),
         };
-        self.pending_rx.push((hdr, payload.to_vec()));
+        self.pending_rx.push_back((hdr, payload.to_vec()));
     }
 
     pub(crate) fn queue_reply(&mut self, inbound: &VsockHdr, op: u16, payload: &[u8]) {
@@ -250,7 +250,7 @@ impl VsockTransportCore {
             buf_alloc: HOST_BUF_ALLOC,
             fwd_cnt: self.fwd_cnt_for(inbound.dst_port, inbound.src_port),
         };
-        self.pending_rx.push((reply, payload.to_vec()));
+        self.pending_rx.push_back((reply, payload.to_vec()));
     }
 
     pub(crate) fn flush_rx(&mut self) -> bool {
@@ -268,7 +268,10 @@ impl VsockTransportCore {
             if last == avail_idx {
                 break;
             }
-            let (mut hdr, payload) = self.pending_rx.remove(0);
+            let (hdr, payload) = self
+                .pending_rx
+                .pop_front()
+                .expect("loop guard checked non-empty");
             let slot = last % qsz;
             let head = self.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
             let da = q.desc + u64::from(head) * 16;
@@ -277,19 +280,26 @@ impl VsockTransportCore {
             let payload_cap = match cap.checked_sub(HDR_LEN) {
                 Some(payload_cap) if payload_cap > 0 || payload.is_empty() => payload_cap,
                 _ => {
-                    self.pending_rx.insert(0, (hdr, payload));
+                    self.pending_rx.push_front((hdr, payload));
                     break;
                 }
             };
             let send_len = payload.len().min(payload_cap);
-            let remainder = payload[send_len..].to_vec();
-            hdr.len = send_len as u32;
-            let mut bytes = hdr.to_bytes().to_vec();
+            let mut framed = hdr;
+            framed.len = send_len as u32;
+            let mut bytes = framed.to_bytes().to_vec();
             bytes.extend_from_slice(&payload[..send_len]);
-            self.mem.write_bytes(addr, &bytes);
+            if self.mem.write_bytes(addr, &bytes) == 0 {
+                // Out-of-range RX descriptor addr: nothing was delivered. Leave the
+                // packet queued and stop instead of advancing the used ring for a
+                // packet the guest never received (mirrors the too-small-buffer path).
+                self.pending_rx.push_front((hdr, payload));
+                break;
+            }
             self.complete(RX, head, bytes.len() as u32, qsz);
+            let remainder = &payload[send_len..];
             if !remainder.is_empty() {
-                self.pending_rx.insert(0, (hdr, remainder));
+                self.pending_rx.push_front((framed, remainder.to_vec()));
             }
             last = last.wrapping_add(1);
             delivered = true;
@@ -331,7 +341,11 @@ impl VsockTransportCore {
             if flags & VIRTQ_DESC_F_NEXT == 0 || guard > u32::from(qsz) {
                 break;
             }
-            idx = self.mem.rd_u16(da + 14);
+            let next = self.mem.rd_u16(da + 14);
+            if next >= qsz {
+                break;
+            }
+            idx = next;
         }
         out
     }
@@ -412,7 +426,7 @@ mod tests {
             buf_alloc: HOST_BUF_ALLOC,
             fwd_cnt: 12,
         };
-        core.pending_rx.push((hdr, b"abcdefghij".to_vec()));
+        core.pending_rx.push_back((hdr, b"abcdefghij".to_vec()));
 
         assert!(core.flush_rx());
         assert!(core.pending_rx.is_empty());
@@ -491,6 +505,45 @@ mod tests {
             );
             assert_eq!(core.pending_rx.len(), 1);
         }
+    }
+
+    #[test]
+    fn flush_rx_leaves_packet_queued_on_out_of_range_rx_descriptor() {
+        let mut core = transport();
+        let base = 0x4000_0000;
+        let desc = base + 0x100;
+        let avail = base + 0x200;
+        let used = base + 0x300;
+        core.queues[RX] = Queue {
+            num: 1,
+            ready: 1,
+            desc,
+            avail,
+            used,
+            last_avail: 0,
+        };
+        core.mem.wr_u16(avail + 2, 1);
+        core.mem.wr_u16(avail + 4, 0); // ring[0] = head 0
+        // Head descriptor addr points past the mapped RAM region; the capacity is
+        // large enough to pass the buffer-size check, so the write is attempted and
+        // delivers 0 bytes.
+        let bogus = base + 0x1_0000;
+        core.mem.write_bytes(desc, &bogus.to_le_bytes());
+        core.mem
+            .write_bytes(desc + 8, &((HDR_LEN + 8) as u32).to_le_bytes());
+        core.queue_host_packet(1, 2, OP_RW, b"payload!");
+
+        assert!(!core.flush_rx(), "bogus addr delivers nothing");
+        assert_eq!(core.pending_rx.len(), 1, "packet left queued, not dropped");
+        assert_eq!(core.mem.rd_u16(used + 2), 0, "used ring not advanced");
+
+        // Repointing the descriptor at valid RAM delivers the same packet and now
+        // advances the used ring.
+        let good = base + 0x400;
+        core.mem.write_bytes(desc, &good.to_le_bytes());
+        assert!(core.flush_rx());
+        assert!(core.pending_rx.is_empty());
+        assert_eq!(core.mem.rd_u16(used + 2), 1, "valid path advances used");
     }
 
     #[test]

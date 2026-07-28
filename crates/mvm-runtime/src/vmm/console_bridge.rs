@@ -27,8 +27,9 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::agent_bridge::write_nonblocking;
@@ -248,18 +249,28 @@ impl ConsoleBridge {
     }
 }
 
+/// Resolved `MVM_HVF_AGENT_DEBUG` trace-file path, read from the environment once
+/// and cached so the bind/accept path never takes the process-global env lock per
+/// call.
+fn debug_path() -> Option<&'static Path> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os("MVM_HVF_AGENT_DEBUG").map(PathBuf::from))
+        .as_deref()
+}
+
 /// Debug trace gated on `MVM_HVF_AGENT_DEBUG` (a file path), mirroring the agent
 /// bridge's tracer. Silent in normal operation.
 fn dbg_log(msg: &str) {
-    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") {
-        use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(f, "[console-bridge] {msg}");
-        }
+    let Some(path) = debug_path() else {
+        return;
+    };
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[console-bridge] {msg}");
     }
 }
 
