@@ -224,9 +224,9 @@ Each surface this claim path opens or widens, with the witness that covers it.
   — called by both cold boot and warm claim. Admission (CLI/supervisor), verity
   (CLI), and confinement (guest init) are reused at their own layers, not
   re-implemented in the runner.
-- `StandbyState` (exists) drives the state machine; a `ClaimOutcome` enum for
-  results; typed fail-closed error enums (thiserror in mvm-core, anyhow in
-  mvm-runtime, per crate convention).
+- `StandbyState` (exists) drives the state machine; `claim_standby` returns
+  `Result<VmId, StandbyError>`, with a typed fail-closed `ClaimRefusal` (thiserror)
+  carrying the distinct refusal reasons the runner actually raises.
 - Many small single-purpose functions, each unit-testable with fakes; exhaustive
   matches on `StandbyState` and backend; no `#[allow(clippy::...)]`; no spec/PR
   references in code comments.

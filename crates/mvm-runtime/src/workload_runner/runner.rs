@@ -549,7 +549,13 @@ fn reserve_and_verify_parent(
     // Quarantine (remove) the reserved parent on any verification failure — a
     // parent we cannot trust must not linger claimable OR stranded `Claimed`.
     let quarantine = |err: StandbyError| -> StandbyError {
-        let _ = ctx.pool.remove(&handle.id);
+        if let Err(e) = ctx.pool.remove(&handle.id) {
+            tracing::warn!(
+                parent = %handle.id,
+                error = %e,
+                "failed to quarantine an untrusted reserved parent; it stays claimed (unclaimable) until the pool reaper"
+            );
+        }
         err
     };
     let parent = ctx

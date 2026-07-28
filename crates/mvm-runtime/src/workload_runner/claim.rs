@@ -30,20 +30,8 @@ pub enum ClaimRefusal {
     ParentTampered,
     #[error("claim carries no admitted plan; refusing to fork without claim-8 authority")]
     PlanMissing,
-    #[error("child plan is outside its validity window")]
-    PlanExpired,
-    #[error("child plan nonce was already seen; refusing a replayed claim")]
-    PlanReplayed,
     #[error("plan image digest {expected} does not match parent rootfs digest {got}")]
     PlanParentMismatch { expected: String, got: String },
-    #[error("refusing to run a workload directly on a warm parent")]
-    ParentPromotionRefused,
-}
-
-#[derive(Debug)]
-pub enum ClaimOutcome {
-    Claimed(VmId),
-    Refused(ClaimRefusal),
 }
 
 /// Name of the [`mvm_core::checkpoint::ContentBlob`] holding the parent's
