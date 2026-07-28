@@ -10,13 +10,27 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    SnapshotCapability, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmCapabilities,
+    VmExitStatus, VmId, VmStatus,
 };
 
-use crate::driver::spec::VmmSpec;
-use crate::driver::traits::{DuplexStream, RunningVm, VmmDriver};
+use mvm_core::crypto::vmgenid::GenerationToken;
+
+use crate::driver::spec::{ConsoleCapture, KernelImage, VmmSpec};
+use crate::driver::traits::{ChildForkRequest, DuplexStream, RunningVm, VmmDriver};
+use crate::standby_pool::now_unix_secs;
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
+
+/// A recorded `fork_standby_child` call: the child's fresh name plus the
+/// generation token the fork delivered, so a test can prove a claim delivered a
+/// fresh, content-bound token to the fork (and thus before the child's workload
+/// ran).
+#[derive(Clone)]
+pub struct MockChildFork {
+    pub child_vm_name: String,
+    pub genid: GenerationToken,
+}
 
 /// Hypervisor-free `VmmDriver` test double.
 #[derive(Clone)]
@@ -24,6 +38,7 @@ pub struct MockDriver {
     exit: VmExitStatus,
     status: VmStatus,
     booted: Arc<Mutex<Vec<VmmSpec>>>,
+    forked: Arc<Mutex<Vec<MockChildFork>>>,
     guest_ends: GuestEnds,
 }
 
@@ -40,6 +55,7 @@ impl MockDriver {
             exit,
             status: VmStatus::Running,
             booted: Arc::new(Mutex::new(Vec::new())),
+            forked: Arc::new(Mutex::new(Vec::new())),
             guest_ends: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -54,6 +70,12 @@ impl MockDriver {
     /// The specs this driver has booted, in order.
     pub fn booted_specs(&self) -> Vec<VmmSpec> {
         self.booted.lock().unwrap().clone()
+    }
+
+    /// The standby-child forks this driver has performed, in order — each with
+    /// the fresh generation token the fork delivered.
+    pub fn forked_children(&self) -> Vec<MockChildFork> {
+        self.forked.lock().unwrap().clone()
     }
 
     /// Take the guest end of the loopback a prior `vsock_connect` opened, to
@@ -105,6 +127,72 @@ impl VmmDriver for MockDriver {
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
         }))
+    }
+
+    fn spawn_standby_parent(
+        &self,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        // A clean parent boot: no cmdline, no volumes, no vsock channels — the
+        // recipe itself has no field that could carry a plan, a secret, or an
+        // egress/broker endpoint. Routed through `boot()` (not pushed directly)
+        // so a test can observe it the same way it observes a real workload
+        // boot, via `booted_specs()`.
+        let parent = VmmSpec {
+            name: spec.id.clone(),
+            kernel: KernelImage::Bundled,
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: u32::from(spec.vcpus),
+            memory_mib: spec.mem_mib,
+            mem_initial_mib: None,
+            blocks: Vec::new(),
+            vsock: Vec::new(),
+            console: ConsoleCapture {
+                log_path: std::path::PathBuf::from(&spec.vm_state_dir).join("console.log"),
+            },
+            trusted_builder: false,
+        };
+        self.boot(&parent)
+            .map_err(|e| StandbyError::SpawnFailed(e.to_string()))?;
+        // No live process backs a mocked capture — pid=0 mirrors the saved-state
+        // convention (`StandbyHandle::is_saved_state`) already used for a
+        // captured-not-running standby.
+        Ok(StandbyHandle {
+            id: spec.id.clone(),
+            control_socket: spec.control_socket.clone(),
+            pid: 0,
+            kernel_sha256: spec.kernel_sha256.clone(),
+            vcpus: spec.vcpus,
+            mem_mib: spec.mem_mib,
+            binding_nonce: spec.binding_nonce.clone(),
+            spawned_unix_secs: now_unix_secs(),
+            state: StandbyState::Idle,
+            image_sha256: spec.image_sha256.clone(),
+        })
+    }
+
+    fn fork_standby_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        // A hypervisor-free fork: record the child's fresh name + the delivered
+        // generation token so a test can prove the claim scrubbed identity and
+        // delivered a fresh, content-bound token to the fork (i.e. at boot,
+        // before the child's workload ran). The runner has already materialized
+        // the CoW clone into `req.child_dir`; the mock needs nothing on disk.
+        if !req.child_dir.exists() {
+            return Err(StandbyError::ClaimFailed(format!(
+                "fork child '{}': child dir {} was never materialized",
+                req.child_vm_name,
+                req.child_dir.display()
+            )));
+        }
+        self.forked.lock().unwrap().push(MockChildFork {
+            child_vm_name: req.child_vm_name.to_string(),
+            genid: req.genid.clone(),
+        });
+        Ok(())
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -175,7 +263,6 @@ impl RunningVm for MockRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::spec::{ConsoleCapture, KernelImage, VmmSpec};
 
     fn sample_spec(name: &str) -> VmmSpec {
         VmmSpec {

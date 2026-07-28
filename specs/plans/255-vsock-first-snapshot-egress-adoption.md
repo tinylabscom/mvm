@@ -254,25 +254,46 @@ un-audited or tampered parent; no second provenance graph is introduced (reuses
 
 ### Phase 2 — Warm pool and fork hygiene in `mvm-runtime`
 
+> **Slice one landed** (branch `feat/plan-255-phase2-warm-pool`,
+> `specs/plans/255-phase2-warm-pool-substrate.md`): the runner-side guarded
+> `claim_standby` fork substrate — CoW fork + fresh identity, the fail-closed
+> plan↔parent bind (claim 8) + verity-inherit consumption (claim 3), a structural
+> never-promote guard, pool release/quarantine, a dependency-clean reachable seam,
+> and a hermetic BDD witness. Deferred to the live FC follow-up slice: FC parent
+> spawn/capture + fork + the capability flip + live wiring. Post-resume hygiene and
+> the sub-second SLO are Plan 265.
+
 - [ ] Implement paused-parent pool keyed by template id in `mvm-runtime`:
       create, maintain, and evict parents based on TTL / memory budget.
-- [ ] Implement `fork_from_parent` that performs the CoW clone and assigns fresh
+      *(pool store + reserve/`mark_idle` release/quarantine landed; live FC
+      spawn/maintain/evict is the follow-up slice.)*
+- [x] Implement `fork_from_parent` that performs the CoW clone and assigns fresh
       identity (CID, `boot_id`, `session_nonce`, generation id, per-instance
-      secrets disk).
+      secrets disk). *(runner-side `claim_standby`: CoW materialize + fresh `VmId`
+      + fresh VMGenID; CID is structurally 3 per one-VM-per-VMM; live FC fork `@live`.)*
 - [ ] Implement post-resume hygiene: entropy reseed, clock resync, vsock flow
-      teardown, and fresh handshake.
-- [ ] Add a hard guard that refuses to resume a warm parent as a workload
-      (different code path / enum variant).
+      teardown, and fresh handshake. *(the VMGenID reseed token is delivered with the
+      fork; the guest-side reseed/clock/vsock re-handshake are Plan 265.)*
+- [x] Add a hard guard that refuses to resume a warm parent as a workload
+      (different code path / enum variant). *(structural: parents and workloads live
+      in disjoint namespaces, a parent carries no plan by type, and `claim_standby`
+      always forks a fresh child — no promote path exists to guard.)*
 - [ ] Re-enable memory-snapshot restore behind a verified no-NIC-on-restore
       invariant: a restored device model that carries a network device is
       refused, so restore can never reintroduce an un-audited egress path.
       (Restore is hard-disabled today in `crates/mvm-runtime/src/microvm/snapshot.rs`.)
       Backend-specific restore engineering and sequencing are tracked in Plan 265.
 - [ ] Add unit tests for identity freshness and replay refusal; add BDD
-      scenarios for sub-second warm launch and for fork isolation.
-- [ ] `fork_from_parent` mints or inherits a fresh signed `ExecutionPlan` for
+      scenarios for sub-second warm launch and for fork isolation. *(identity-freshness
+      unit tests + the fork-isolation hermetic BDD (`s12_warm_claim`) landed; replay
+      refusal is the supervisor's attach re-verify; sub-second warm launch is Plan 265
+      `@live`.)*
+- [x] `fork_from_parent` mints or inherits a fresh signed `ExecutionPlan` for
       the child and refuses to launch a child whose plan is unsigned, expired,
-      or replayed (claim 8). Add a negative test.
+      or replayed (claim 8). Add a negative test. *(the runner binds the admitted plan
+      to the verified parent's rootfs and fails closed on mismatch/un-audited/tampered
+      parent, with negative tests; the fresh-plan mint is CLI-layer via
+      `admit_plan_for_boot`; expired/replayed is the supervisor's attach re-verify.)*
 - [ ] On block+ext4 backends the forked child inherits the parent template's
       dm-verity roothash binding; a fork that would drop verity fails closed
       (claim 3).

@@ -2793,8 +2793,11 @@ dependencies = [
 name = "mvm-conformance"
 version = "0.18.0"
 dependencies = [
+ "anyhow",
  "assert_cmd",
  "cucumber",
+ "ed25519-dalek",
+ "mvm-build",
  "mvm-core",
  "mvm-fs",
  "mvm-runtime",

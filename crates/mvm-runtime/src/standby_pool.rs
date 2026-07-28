@@ -120,6 +120,19 @@ impl SupervisorStandbyPool {
         self.record(&h)
     }
 
+    /// Return a `Claimed` standby to `Idle` (claimable). The inverse of
+    /// [`mark_claimed`](Self::mark_claimed): a launch that reserved a healthy warm
+    /// parent but then failed for a reason that is NOT the parent's fault must put
+    /// it back in rotation, rather than strand it `Claimed` until the TTL reaper
+    /// deletes it — which would shrink warm capacity on every failed claim. A
+    /// tampered or un-audited parent is quarantined by [`remove`](Self::remove)
+    /// instead; it must never be released back here.
+    pub fn mark_idle(&self, id: &str) -> Result<()> {
+        let mut h = self.load(id)?;
+        h.state = StandbyState::Idle;
+        self.record(&h)
+    }
+
     /// Remove a standby's dir (after claim/boot, or when reaping a dead one).
     pub fn remove(&self, id: &str) -> Result<()> {
         let dir = self.root.join(id);
@@ -304,6 +317,22 @@ mod tests {
         assert!(tmp.path().join("s1").exists());
         pool.remove("s1").unwrap();
         assert!(!tmp.path().join("s1").exists());
+    }
+
+    #[test]
+    fn mark_idle_returns_a_claimed_standby_to_claimable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        pool.record(&handle("s1", "aa", StandbyState::Idle))
+            .unwrap();
+        pool.mark_claimed("s1").unwrap();
+        assert_eq!(pool.load("s1").unwrap().state, StandbyState::Claimed);
+        // A failed claim that is not the parent's fault releases it back to Idle,
+        // so a later launch can claim it again instead of losing warm capacity.
+        pool.mark_idle("s1").unwrap();
+        let released = pool.load("s1").unwrap();
+        assert_eq!(released.state, StandbyState::Idle);
+        assert!(released.state.is_claimable());
     }
 
     #[test]
