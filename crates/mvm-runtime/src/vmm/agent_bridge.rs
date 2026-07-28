@@ -23,8 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
-use super::vsock_transport::MAX_CONNECTIONS;
+use super::vsock_transport::{CONNECTION_IDLE_TIMEOUT, MAX_CONNECTIONS};
 
 /// Per-drain read budget per host connection.
 const READ_CHUNK: usize = 16 * 1024;
@@ -37,6 +38,7 @@ struct AgentConn {
     stream: UnixStream,
     /// The guest accepted (`OP_RESPONSE` seen); only then do we read host bytes.
     established: bool,
+    last_activity: Instant,
 }
 
 /// Host→guest agent stream bridge for one guest: a Unix listener plus the open
@@ -121,6 +123,7 @@ impl AgentBridge {
     /// Returns the new conn ids — the device sends an `OP_REQUEST` to the guest
     /// agent (dst_port [`GUEST_AGENT_PORT`]) for each. No-op without a listener.
     pub fn accept_new(&mut self) -> Vec<u32> {
+        self.evict_idle_at(Instant::now());
         let mut opened = Vec::new();
         let Some(listener) = &self.listener else {
             dbg_log("accept_new: no listener bound on this bridge");
@@ -142,6 +145,7 @@ impl AgentBridge {
                         AgentConn {
                             stream,
                             established: false,
+                            last_activity: Instant::now(),
                         },
                     );
                     self.bump(1);
@@ -160,6 +164,7 @@ impl AgentBridge {
     pub fn on_established(&mut self, conn_id: u32) {
         if let Some(c) = self.conns.get_mut(&conn_id) {
             c.established = true;
+            c.last_activity = Instant::now();
         }
     }
 
@@ -167,6 +172,7 @@ impl AgentBridge {
     /// `(conn_id, bytes)` for the device to `OP_RW` to the guest. A peer EOF/error
     /// closes that stream in place (dropping it from the open set).
     pub fn drain_host(&mut self) -> Vec<(u32, Vec<u8>)> {
+        self.evict_idle_at(Instant::now());
         let mut ready = Vec::new();
         let mut closed = Vec::new();
         for (conn_id, c) in self.conns.iter_mut() {
@@ -178,6 +184,7 @@ impl AgentBridge {
                 Ok(0) => closed.push(*conn_id),
                 Ok(n) => {
                     buf.truncate(n);
+                    c.last_activity = Instant::now();
                     ready.push((*conn_id, buf));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -196,6 +203,7 @@ impl AgentBridge {
     pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) {
         if let Some(c) = self.conns.get_mut(&conn_id) {
             write_nonblocking(&mut c.stream, payload);
+            c.last_activity = Instant::now();
         }
     }
 
@@ -203,6 +211,29 @@ impl AgentBridge {
     pub fn close(&mut self, conn_id: u32) {
         if self.conns.remove(&conn_id).is_some() {
             self.bump(-1);
+        }
+    }
+
+    pub fn close_all(&mut self) {
+        let conn_ids: Vec<u32> = self.conns.keys().copied().collect();
+        for conn_id in conn_ids {
+            self.close(conn_id);
+        }
+        self.host_closed.clear();
+    }
+
+    fn evict_idle_at(&mut self, now: Instant) {
+        let expired: Vec<u32> = self
+            .conns
+            .iter()
+            .filter(|(_, conn)| {
+                now.saturating_duration_since(conn.last_activity) >= CONNECTION_IDLE_TIMEOUT
+            })
+            .map(|(&conn_id, _)| conn_id)
+            .collect();
+        for conn_id in expired {
+            self.close(conn_id);
+            self.host_closed.push(conn_id);
         }
     }
 
@@ -425,5 +456,25 @@ mod tests {
         bridge.on_established(conn_id);
         let after_established = bridge.poll_fds();
         assert_eq!(after_established.len(), 2, "listener plus established conn");
+    }
+
+    #[test]
+    fn idle_agent_stream_is_surfaced_for_guest_reset() {
+        let mut bridge = AgentBridge::new();
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let conn_id = FIRST_HOST_PORT;
+        bridge.conns.insert(
+            conn_id,
+            AgentConn {
+                stream,
+                established: true,
+                last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+            },
+        );
+
+        bridge.drain_host();
+
+        assert_eq!(bridge.take_host_closed(), vec![conn_id]);
+        assert!(!bridge.is_agent_stream(conn_id));
     }
 }

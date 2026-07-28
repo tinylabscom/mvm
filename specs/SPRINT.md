@@ -26,7 +26,11 @@
       clippy, and formatting pass; published as PR #1847 for review.
 - [ ] #1827 vsock overload hardening: bound guest-selected connection state and
       host bridge sockets first, then add idle eviction, egress budgets, and
-      teardown cancellation. Tracked in `specs/plans/266-vsock-overload-hardening.md`.
+      teardown cancellation. The cap and idle-eviction slices are implemented
+      in the stacked follow-up; egress budgets are implemented in the next
+      slice; teardown cancellation is implemented and null-node routing was
+      evaluated and deferred with no production-path change. Tracked in
+      `specs/plans/266-vsock-overload-hardening.md`.
 
 ---
 

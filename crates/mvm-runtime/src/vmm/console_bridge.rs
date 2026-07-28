@@ -31,9 +31,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use super::agent_bridge::write_nonblocking;
-use super::vsock_transport::MAX_CONNECTIONS;
+use super::vsock_transport::{CONNECTION_IDLE_TIMEOUT, MAX_CONNECTIONS};
 
 /// Per-drain read budget per host connection.
 const READ_CHUNK: usize = 16 * 1024;
@@ -51,6 +52,7 @@ struct ConsoleConn {
     guest_port: u32,
     /// The guest accepted (`OP_RESPONSE` seen); only then do we read host bytes.
     established: bool,
+    last_activity: Instant,
 }
 
 /// Host→guest console stream bridge for one guest: a per-guest-port set of Unix
@@ -68,6 +70,8 @@ pub(crate) struct ConsoleBridge {
     /// console stream keeps the loop waking an idle guest (the same counter the
     /// agent/substitution paths use).
     active: Option<Arc<AtomicUsize>>,
+    /// Host-side EOF/error/idle closures waiting for a guest `OP_RST`.
+    host_closed: Vec<(u32, u32)>,
 }
 
 impl ConsoleBridge {
@@ -77,6 +81,7 @@ impl ConsoleBridge {
             conns: HashMap::new(),
             next_port: FIRST_CONSOLE_HOST_PORT,
             active: None,
+            host_closed: Vec::new(),
         }
     }
 
@@ -149,6 +154,7 @@ impl ConsoleBridge {
     /// each — the device sends an `OP_REQUEST` to the guest console listener on
     /// `guest_port`. No-op when no listeners are bound (sealed prod).
     pub fn accept_new(&mut self) -> Vec<(u32, u32)> {
+        self.evict_idle_at(Instant::now());
         // Two phases: first drain every listener to `WouldBlock` (borrows only
         // `self.listeners`), then register the accepted streams (borrows
         // `self.conns` / `self.next_port`) — the split keeps the borrow checker
@@ -180,6 +186,7 @@ impl ConsoleBridge {
                     stream,
                     guest_port,
                     established: false,
+                    last_activity: Instant::now(),
                 },
             );
             self.bump(1);
@@ -194,6 +201,7 @@ impl ConsoleBridge {
     pub fn on_established(&mut self, conn_id: u32) {
         if let Some(c) = self.conns.get_mut(&conn_id) {
             c.established = true;
+            c.last_activity = Instant::now();
         }
     }
 
@@ -201,6 +209,7 @@ impl ConsoleBridge {
     /// `(conn_id, guest_port, bytes)` for the device to `OP_RW` to the guest on the
     /// right console port. A peer EOF/error closes that stream in place.
     pub fn drain_host(&mut self) -> Vec<(u32, u32, Vec<u8>)> {
+        self.evict_idle_at(Instant::now());
         let mut ready = Vec::new();
         let mut closed = Vec::new();
         for (conn_id, c) in self.conns.iter_mut() {
@@ -209,17 +218,19 @@ impl ConsoleBridge {
             }
             let mut buf = vec![0u8; READ_CHUNK];
             match c.stream.read(&mut buf) {
-                Ok(0) => closed.push(*conn_id),
+                Ok(0) => closed.push((*conn_id, c.guest_port)),
                 Ok(n) => {
                     buf.truncate(n);
+                    c.last_activity = Instant::now();
                     ready.push((*conn_id, c.guest_port, buf));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(_) => closed.push(*conn_id),
+                Err(_) => closed.push((*conn_id, c.guest_port)),
             }
         }
-        for conn_id in closed {
+        for (conn_id, guest_port) in closed {
             self.close(conn_id);
+            self.host_closed.push((conn_id, guest_port));
         }
         ready
     }
@@ -228,13 +239,42 @@ impl ConsoleBridge {
     pub fn write_to_host(&mut self, conn_id: u32, payload: &[u8]) {
         if let Some(c) = self.conns.get_mut(&conn_id) {
             write_nonblocking(&mut c.stream, payload);
+            c.last_activity = Instant::now();
         }
+    }
+
+    /// Drain host-side closures so the device can reset the guest stream.
+    pub fn take_host_closed(&mut self) -> Vec<(u32, u32)> {
+        std::mem::take(&mut self.host_closed)
     }
 
     /// Close a stream (guest `OP_SHUTDOWN`/`OP_RST`, or a host EOF/error).
     pub fn close(&mut self, conn_id: u32) {
         if self.conns.remove(&conn_id).is_some() {
             self.bump(-1);
+        }
+    }
+
+    pub fn close_all(&mut self) {
+        let conn_ids: Vec<u32> = self.conns.keys().copied().collect();
+        for conn_id in conn_ids {
+            self.close(conn_id);
+        }
+        self.host_closed.clear();
+    }
+
+    fn evict_idle_at(&mut self, now: Instant) {
+        let expired: Vec<(u32, u32)> = self
+            .conns
+            .iter()
+            .filter(|(_, conn)| {
+                now.saturating_duration_since(conn.last_activity) >= CONNECTION_IDLE_TIMEOUT
+            })
+            .map(|(&conn_id, conn)| (conn_id, conn.guest_port))
+            .collect();
+        for (conn_id, guest_port) in expired {
+            self.close(conn_id);
+            self.host_closed.push((conn_id, guest_port));
         }
     }
 
@@ -492,5 +532,26 @@ mod tests {
         bridge.bind_ports([]).unwrap();
         assert!(bridge.accept_new().is_empty());
         assert!(!bridge.is_console_stream(FIRST_CONSOLE_HOST_PORT));
+    }
+
+    #[test]
+    fn idle_console_stream_is_surfaced_for_guest_reset() {
+        let mut bridge = ConsoleBridge::new();
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let conn_id = FIRST_CONSOLE_HOST_PORT;
+        bridge.conns.insert(
+            conn_id,
+            ConsoleConn {
+                stream,
+                guest_port: 20_001,
+                established: true,
+                last_activity: Instant::now() - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+            },
+        );
+
+        bridge.drain_host();
+
+        assert_eq!(bridge.take_host_closed(), vec![(conn_id, 20_001)]);
+        assert!(!bridge.is_console_stream(conn_id));
     }
 }

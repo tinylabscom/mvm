@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use super::guest_mem::GuestMem;
 
@@ -21,6 +22,7 @@ pub(crate) const HOST_BUF_ALLOC: u32 = 256 * 1024;
 /// device. A guest can choose the source port, so this is a host resource
 /// boundary rather than a protocol limit.
 pub(crate) const MAX_CONNECTIONS: usize = 256;
+pub(crate) const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) const OP_REQUEST: u16 = 1;
 pub(crate) const OP_RESPONSE: u16 = 2;
@@ -102,14 +104,19 @@ pub(crate) struct VsockTransportCore {
     pub(crate) queue_sel: u32,
     pub(crate) queues: [Queue; NUM_QUEUES],
     pub(crate) interrupt_status: u32,
-    pub(crate) recv_cnt: HashMap<VsockConnectionKey, u32>,
+    pub(crate) recv_cnt: HashMap<VsockConnectionKey, RecvCredit>,
     pub(crate) pending_rx: VecDeque<(VsockHdr, Vec<u8>)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct VsockConnectionKey {
-    host_port: u32,
-    guest_port: u32,
+    pub(crate) host_port: u32,
+    pub(crate) guest_port: u32,
+}
+
+pub(crate) struct RecvCredit {
+    bytes: u32,
+    last_activity: Instant,
 }
 
 impl VsockTransportCore {
@@ -196,6 +203,10 @@ impl VsockTransportCore {
     }
 
     pub(crate) fn try_add_recv(&mut self, inbound: &VsockHdr, n: u32) -> bool {
+        self.try_add_recv_at(inbound, n, Instant::now())
+    }
+
+    fn try_add_recv_at(&mut self, inbound: &VsockHdr, n: u32, now: Instant) -> bool {
         let key = VsockConnectionKey {
             host_port: inbound.dst_port,
             guest_port: inbound.src_port,
@@ -203,9 +214,30 @@ impl VsockTransportCore {
         if !self.recv_cnt.contains_key(&key) && self.recv_cnt.len() >= MAX_CONNECTIONS {
             return false;
         }
-        let entry = self.recv_cnt.entry(key).or_default();
-        *entry = entry.saturating_add(n);
+        let entry = self.recv_cnt.entry(key).or_insert(RecvCredit {
+            bytes: 0,
+            last_activity: now,
+        });
+        entry.bytes = entry.bytes.saturating_add(n);
+        entry.last_activity = now;
         true
+    }
+
+    pub(crate) fn evict_idle_recv(&mut self) -> Vec<VsockConnectionKey> {
+        self.evict_idle_recv_at(Instant::now())
+    }
+
+    fn evict_idle_recv_at(&mut self, now: Instant) -> Vec<VsockConnectionKey> {
+        let mut expired = Vec::new();
+        self.recv_cnt.retain(|key, credit| {
+            let keep =
+                now.saturating_duration_since(credit.last_activity) < CONNECTION_IDLE_TIMEOUT;
+            if !keep {
+                expired.push(*key);
+            }
+            keep
+        });
+        expired
     }
 
     pub(crate) fn remove_recv(&mut self, host_port: u32, guest_port: u32) {
@@ -323,7 +355,7 @@ impl VsockTransportCore {
                 host_port,
                 guest_port,
             })
-            .copied()
+            .map(|credit| credit.bytes)
             .unwrap_or(0)
     }
 
@@ -591,5 +623,30 @@ mod tests {
         }
         assert_eq!(core.recv_cnt.len(), MAX_CONNECTIONS);
         assert!(core.try_add_recv(&existing, 1));
+    }
+
+    #[test]
+    fn idle_recv_credit_is_evicted_and_releases_identity() {
+        let mut core = transport();
+        let now = Instant::now();
+        let hdr = VsockHdr {
+            dst_port: 9000,
+            src_port: 7,
+            ..Default::default()
+        };
+        core.try_add_recv_at(
+            &hdr,
+            1,
+            now - CONNECTION_IDLE_TIMEOUT - Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            core.evict_idle_recv_at(now),
+            vec![VsockConnectionKey {
+                host_port: 9000,
+                guest_port: 7,
+            }]
+        );
+        assert!(core.recv_cnt.is_empty());
     }
 }

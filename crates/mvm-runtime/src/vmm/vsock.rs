@@ -152,6 +152,12 @@ impl VsockShared {
         self.handlers.service_host_io(&mut ctx)
     }
 
+    pub(super) fn cancel(&mut self) {
+        self.handlers.cancel();
+        self.transport.recv_cnt.clear();
+        self.transport.pending_rx.clear();
+    }
+
     pub(super) fn poll_fds(&self) -> Vec<std::os::fd::RawFd> {
         self.handlers.poll_fds()
     }
@@ -260,6 +266,7 @@ impl VirtioVsock {
         if let Some(io) = self.io.take() {
             io.stop();
         }
+        self.lock().cancel();
     }
 
     pub fn received(&self) -> Vec<u8> {
@@ -561,6 +568,31 @@ mod tests {
         d.handle_packet(rw, b"93.184.216.34:80");
         assert!(d.lifecycle.received.is_empty());
         assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+    }
+
+    #[test]
+    fn teardown_cancellation_clears_vsock_state() {
+        let mut d = dev();
+        d.handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: 2000,
+                dst_port: mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+                len: 1,
+                op: OP_RW,
+                typ: TYPE_STREAM,
+                ..Default::default()
+            },
+            b"x",
+        );
+        assert!(!d.transport.recv_cnt.is_empty());
+        assert!(!d.transport.pending_rx.is_empty());
+
+        d.cancel();
+
+        assert!(d.transport.recv_cnt.is_empty());
+        assert!(d.transport.pending_rx.is_empty());
     }
 
     #[test]
