@@ -200,6 +200,7 @@ pub struct VirtioBlk {
     avail: u64,
     used: u64,
     last_avail: u16,
+    next_used: u16,
     interrupt_status: u32,
 }
 
@@ -230,6 +231,7 @@ impl VirtioBlk {
             avail: 0,
             used: 0,
             last_avail: 0,
+            next_used: 0,
             interrupt_status: 0,
         }
     }
@@ -291,8 +293,24 @@ impl VirtioBlk {
             R_DRIVER_FEATURES => {} // accept whatever the driver acks
             R_QUEUE_SEL => {}       // single queue (0)
             R_QUEUE_NUM => self.queue_num = v,
-            R_QUEUE_READY => self.queue_ready = v,
-            R_STATUS => self.status = v,
+            R_QUEUE_READY => {
+                if v != 0 && self.queue_ready == 0 {
+                    // The driver must zero the used ring before enabling the
+                    // queue. Reset the device-owned ring indexes so a stale
+                    // value cannot survive across a disable/enable cycle.
+                    self.last_avail = 0;
+                    self.next_used = 0;
+                }
+                self.queue_ready = v;
+            }
+            R_STATUS => {
+                if v == 0 {
+                    // Device reset: reinitialize queue state.
+                    self.last_avail = 0;
+                    self.next_used = 0;
+                }
+                self.status = v;
+            }
             R_INTERRUPT_ACK => self.interrupt_status &= !v,
             R_QUEUE_DESC_LO => self.desc = (self.desc & !0xffff_ffff) | u64::from(v),
             R_QUEUE_DESC_HI => self.desc = (self.desc & 0xffff_ffff) | (u64::from(v) << 32),
@@ -327,10 +345,6 @@ impl VirtioBlk {
         let Some(mut queue) = build_split_queue(self.ring(), qsz) else {
             return false;
         };
-        // Preserve the pre-migration used-ring behaviour, which read the completion
-        // index from guest RAM. Seed the now device-owned `next_used` from it so the
-        // used entries land at byte-identical slots for a conformant guest.
-        queue.set_next_used(self.rd_u16(self.used + 2));
 
         let debug = virtio_debug();
         if debug {
@@ -377,6 +391,7 @@ impl VirtioBlk {
             let _ = queue.add_used(&mem, head, written);
         }
         self.last_avail = queue.next_avail();
+        self.next_used = queue.next_used();
         if serviced {
             self.interrupt_status |= 1; // used-buffer notification
         }
@@ -391,6 +406,7 @@ impl VirtioBlk {
             avail: self.avail,
             used: self.used,
             next_avail: self.last_avail,
+            next_used: self.next_used,
         }
     }
 
@@ -510,6 +526,7 @@ struct FsQueue {
     avail: u64,
     used: u64,
     last_avail: u16,
+    next_used: u16,
 }
 
 impl FsQueue {
@@ -521,6 +538,7 @@ impl FsQueue {
             avail: self.avail,
             used: self.used,
             next_avail: self.last_avail,
+            next_used: self.next_used,
         }
     }
 }
@@ -621,8 +639,27 @@ impl VirtioFs {
             R_DRIVER_FEATURES_SEL | R_DRIVER_FEATURES => {}
             R_QUEUE_SEL => self.queue_sel = v,
             R_QUEUE_NUM => self.q_mut().num = v,
-            R_QUEUE_READY => self.q_mut().ready = v,
-            R_STATUS => self.status = v,
+            R_QUEUE_READY => {
+                let q = self.q_mut();
+                if v != 0 && q.ready == 0 {
+                    // The driver must zero the used ring before enabling the
+                    // queue. Reset the device-owned ring indexes so a stale
+                    // value cannot survive across a disable/enable cycle.
+                    q.last_avail = 0;
+                    q.next_used = 0;
+                }
+                q.ready = v;
+            }
+            R_STATUS => {
+                if v == 0 {
+                    // Device reset: reinitialize every queue's ring state.
+                    for q in &mut self.queues {
+                        q.last_avail = 0;
+                        q.next_used = 0;
+                    }
+                }
+                self.status = v;
+            }
             R_INTERRUPT_ACK => self.interrupt_status &= !v,
             R_QUEUE_DESC_LO => {
                 let d = self.q().desc;
@@ -676,9 +713,6 @@ impl VirtioFs {
         let Some(mut queue) = build_split_queue(q.ring(), qsz) else {
             return false;
         };
-        // Seed the now device-owned used index from guest RAM so the used entries
-        // land at byte-identical slots for a conformant guest.
-        queue.set_next_used(self.mem.rd_u16(q.used + 2));
 
         let mut completed: Vec<(u16, u32)> = Vec::new();
         {
@@ -711,6 +745,7 @@ impl VirtioFs {
             let _ = queue.add_used(&mem, head, written);
         }
         self.queues[qidx].last_avail = queue.next_avail();
+        self.queues[qidx].next_used = queue.next_used();
         if serviced {
             self.interrupt_status |= 1;
         }
@@ -1643,6 +1678,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         (avail, used)
     }
@@ -1780,5 +1816,364 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- device-owned used index: lifecycle and cross-drain witnesses -----
+
+    /// Build a minimal virtio-blk request at `desc_head` whose data lands in
+    /// `(hdr, data, status)` and whose status byte lands at `status`. The tuple
+    /// keeps the helper under the clippy argument limit.
+    fn blk_put_request(
+        ram: &mut [u8],
+        base: u64,
+        desc: u64,
+        desc_head: u16,
+        gpa: (u64, u64, u64),
+        sector: u64,
+    ) {
+        let put = |ram: &mut [u8], gpa: u64, bytes: &[u8]| {
+            let off = (gpa - base) as usize;
+            ram[off..off + bytes.len()].copy_from_slice(bytes);
+        };
+        let (hdr_gpa, data_gpa, status_gpa) = gpa;
+        let mk = |addr: u64, len: u32, flags: u16, next: u16| {
+            let mut d = [0u8; 16];
+            d[0..8].copy_from_slice(&addr.to_le_bytes());
+            d[8..12].copy_from_slice(&len.to_le_bytes());
+            d[12..14].copy_from_slice(&flags.to_le_bytes());
+            d[14..16].copy_from_slice(&next.to_le_bytes());
+            d
+        };
+        let d0 = desc + u64::from(desc_head) * 16;
+        put(ram, d0, &mk(hdr_gpa, 16, DESC_F_NEXT, desc_head + 1));
+        put(
+            ram,
+            d0 + 16,
+            &mk(data_gpa, 512, DESC_F_NEXT | DESC_F_WRITE, desc_head + 2),
+        );
+        put(ram, d0 + 32, &mk(status_gpa, 1, DESC_F_WRITE, 0));
+        put(ram, hdr_gpa, &VIRTIO_BLK_T_IN.to_le_bytes());
+        put(ram, hdr_gpa + 8, &sector.to_le_bytes());
+    }
+
+    #[test]
+    fn blk_next_used_resets_on_queue_ready() {
+        const BASE: u64 = 0x4000_0000;
+        let mut ram = vec![0u8; 0x10000];
+        let put = |ram: &mut [u8], gpa: u64, bytes: &[u8]| {
+            let off = (gpa - BASE) as usize;
+            ram[off..off + bytes.len()].copy_from_slice(bytes);
+        };
+
+        let (desc, avail, used) = (BASE + 0x1000, BASE + 0x2000, BASE + 0x3000);
+        let (hdr, data, status) = (BASE + 0x4000, BASE + 0x5000, BASE + 0x6000);
+        blk_put_request(&mut ram, BASE, desc, 0, (hdr, data, status), 0);
+        put(&mut ram, avail + 2, &1u16.to_le_bytes());
+        put(&mut ram, avail + 4, &0u16.to_le_bytes());
+        // Hostile/synthetic driver pre-seeds a non-zero used index. Enabling the
+        // queue must reset the device-owned counter so completions start at 0.
+        put(&mut ram, used + 2, &7u16.to_le_bytes());
+
+        let mut disk = vec![0u8; 4096];
+        disk[..11].copy_from_slice(b"DISK-BYTES!");
+        let mut d = unsafe {
+            VirtioBlk::new(
+                0x0a00_0000,
+                48,
+                ram.as_mut_ptr(),
+                BASE,
+                ram.len(),
+                DiskImage::mem(disk),
+            )
+        };
+        d.write(R_QUEUE_NUM, 4);
+        d.write(R_QUEUE_DESC_LO, desc & 0xffff_ffff);
+        d.write(R_QUEUE_DRIVER_LO, avail & 0xffff_ffff);
+        d.write(R_QUEUE_DEVICE_LO, used & 0xffff_ffff);
+        d.write(R_QUEUE_READY, 1);
+
+        assert!(d.write(R_QUEUE_NOTIFY, 0));
+        assert_eq!(
+            u16::from_le_bytes(
+                ram[(used - BASE) as usize + 2..(used - BASE) as usize + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            1,
+            "QueueReady must reset next_used to 0"
+        );
+    }
+
+    #[test]
+    fn blk_next_used_resets_on_device_reset() {
+        const BASE: u64 = 0x4000_0000;
+        let mut ram = vec![0u8; 0x10000];
+        let put = |ram: &mut [u8], gpa: u64, bytes: &[u8]| {
+            let off = (gpa - BASE) as usize;
+            ram[off..off + bytes.len()].copy_from_slice(bytes);
+        };
+
+        let (desc, avail, used) = (BASE + 0x1000, BASE + 0x2000, BASE + 0x3000);
+        let (hdr, data, status) = (BASE + 0x4000, BASE + 0x5000, BASE + 0x6000);
+        blk_put_request(&mut ram, BASE, desc, 0, (hdr, data, status), 0);
+        put(&mut ram, avail + 2, &1u16.to_le_bytes());
+        put(&mut ram, avail + 4, &0u16.to_le_bytes());
+
+        let disk = vec![0u8; 4096];
+        let mut d = unsafe {
+            VirtioBlk::new(
+                0x0a00_0000,
+                48,
+                ram.as_mut_ptr(),
+                BASE,
+                ram.len(),
+                DiskImage::mem(disk),
+            )
+        };
+        d.write(R_QUEUE_NUM, 4);
+        d.write(R_QUEUE_DESC_LO, desc & 0xffff_ffff);
+        d.write(R_QUEUE_DRIVER_LO, avail & 0xffff_ffff);
+        d.write(R_QUEUE_DEVICE_LO, used & 0xffff_ffff);
+        d.write(R_QUEUE_READY, 1);
+        assert!(d.write(R_QUEUE_NOTIFY, 0));
+        assert_eq!(
+            u16::from_le_bytes(
+                ram[(used - BASE) as usize + 2..(used - BASE) as usize + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+
+        // Device reset must reinitialize the device-owned used index.
+        d.write(R_STATUS, 0);
+        put(&mut ram, used + 2, &42u16.to_le_bytes());
+        assert!(d.write(R_QUEUE_NOTIFY, 0));
+        assert_eq!(
+            u16::from_le_bytes(
+                ram[(used - BASE) as usize + 2..(used - BASE) as usize + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            1,
+            "device reset must reset next_used to 0"
+        );
+    }
+
+    #[test]
+    fn blk_next_used_is_device_owned_across_drains() {
+        const BASE: u64 = 0x4000_0000;
+        let mut ram = vec![0u8; 0x10000];
+        let put = |ram: &mut [u8], gpa: u64, bytes: &[u8]| {
+            let off = (gpa - BASE) as usize;
+            ram[off..off + bytes.len()].copy_from_slice(bytes);
+        };
+        let get16 = |ram: &[u8], gpa: u64| {
+            let off = (gpa - BASE) as usize;
+            u16::from_le_bytes(ram[off..off + 2].try_into().unwrap())
+        };
+
+        let (desc, avail, used) = (BASE + 0x1000, BASE + 0x2000, BASE + 0x3000);
+        let (hdr0, data0, status0) = (BASE + 0x4000, BASE + 0x5000, BASE + 0x6000);
+        let (hdr1, data1, status1) = (BASE + 0x7000, BASE + 0x8000, BASE + 0x9000);
+        blk_put_request(&mut ram, BASE, desc, 0, (hdr0, data0, status0), 0);
+        blk_put_request(&mut ram, BASE, desc, 3, (hdr1, data1, status1), 1);
+        put(&mut ram, avail + 2, &1u16.to_le_bytes());
+        put(&mut ram, avail + 4, &0u16.to_le_bytes());
+        // First drain starts from the device-owned 0, ignoring the guest seed.
+        put(&mut ram, used + 2, &5u16.to_le_bytes());
+
+        let mut disk = vec![0u8; 8192];
+        disk[..512].copy_from_slice(&[0xAA; 512]);
+        disk[512..1024].copy_from_slice(&[0xBB; 512]);
+        let mut d = unsafe {
+            VirtioBlk::new(
+                0x0a00_0000,
+                48,
+                ram.as_mut_ptr(),
+                BASE,
+                ram.len(),
+                DiskImage::mem(disk),
+            )
+        };
+        d.write(R_QUEUE_NUM, 8);
+        d.write(R_QUEUE_DESC_LO, desc & 0xffff_ffff);
+        d.write(R_QUEUE_DRIVER_LO, avail & 0xffff_ffff);
+        d.write(R_QUEUE_DEVICE_LO, used & 0xffff_ffff);
+        d.write(R_QUEUE_READY, 1);
+
+        assert!(d.write(R_QUEUE_NOTIFY, 0));
+        assert_eq!(get16(&ram, used + 2), 1, "first drain lands at slot 0");
+        assert_eq!(get16(&ram, used + 4), 0, "first used id is head 0");
+
+        // After the first drain the guest rewrites used.idx. The next completion
+        // must continue at the device's own next slot, not the guest's value.
+        put(&mut ram, used + 2, &99u16.to_le_bytes());
+        put(&mut ram, avail + 2, &2u16.to_le_bytes());
+        put(&mut ram, avail + 6, &3u16.to_le_bytes());
+        assert!(d.write(R_QUEUE_NOTIFY, 0));
+        assert_eq!(
+            get16(&ram, used + 2),
+            2,
+            "second drain ignores bogus used idx"
+        );
+        assert_eq!(
+            get16(&ram, used + 4 + 8),
+            3,
+            "second used id is head 3 at slot 1"
+        );
+    }
+
+    fn fs_put_init_request(ram: &mut [u8], req_gpa: u64, unique: u64) {
+        let put32 = |r: &mut [u8], o: usize, v: u32| r[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let put64 = |r: &mut [u8], o: usize, v: u64| r[o..o + 8].copy_from_slice(&v.to_le_bytes());
+        let off = req_gpa as usize;
+        let req = &mut ram[off..off + 40 + 16];
+        put32(req, 0, (40 + 16) as u32); // len
+        put32(req, 4, 26); // opcode = FUSE_INIT
+        put64(req, 8, unique); // unique
+        put32(req, 40, 7); // init_in.major
+        put32(req, 44, 31); // init_in.minor
+    }
+
+    #[test]
+    fn fs_next_used_resets_on_queue_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ram = vec![0u8; 0x10000];
+        fs_put_init_request(&mut ram, 0x4000, 1);
+
+        // desc[0] readable -> request @0x4000; desc[1] writable -> reply @0x5000.
+        ram[0x1000..0x1008].copy_from_slice(&0x4000u64.to_le_bytes());
+        ram[0x1008..0x100c].copy_from_slice(&56u32.to_le_bytes());
+        ram[0x100c..0x100e].copy_from_slice(&DESC_F_NEXT.to_le_bytes());
+        ram[0x100e..0x1010].copy_from_slice(&1u16.to_le_bytes());
+        ram[0x1010..0x1018].copy_from_slice(&0x5000u64.to_le_bytes());
+        ram[0x1018..0x101c].copy_from_slice(&256u32.to_le_bytes());
+        ram[0x101c..0x101e].copy_from_slice(&DESC_F_WRITE.to_le_bytes());
+        ram[0x2002..0x2004].copy_from_slice(&1u16.to_le_bytes());
+        ram[0x2004..0x2006].copy_from_slice(&0u16.to_le_bytes());
+        // Pre-seed a bogus used index; QueueReady must reset it.
+        ram[0x3002..0x3004].copy_from_slice(&7u16.to_le_bytes());
+
+        let ptr = ram.as_mut_ptr();
+        let mut fs = unsafe { VirtioFs::new(0, 5, ptr, 0, ram.len(), dir.path().to_path_buf()) };
+        fs.write(R_QUEUE_SEL, 1);
+        fs.write(R_QUEUE_NUM, 4);
+        fs.write(R_QUEUE_DESC_LO, 0x1000);
+        fs.write(R_QUEUE_DRIVER_LO, 0x2000);
+        fs.write(R_QUEUE_DEVICE_LO, 0x3000);
+        fs.write(R_QUEUE_READY, 1);
+        assert!(fs.write(R_QUEUE_NOTIFY, 1));
+        assert_eq!(
+            u16::from_le_bytes(ram[0x3002..0x3004].try_into().unwrap()),
+            1
+        );
+    }
+
+    #[test]
+    fn fs_next_used_resets_on_device_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ram = vec![0u8; 0x10000];
+        fs_put_init_request(&mut ram, 0x4000, 1);
+
+        ram[0x1000..0x1008].copy_from_slice(&0x4000u64.to_le_bytes());
+        ram[0x1008..0x100c].copy_from_slice(&56u32.to_le_bytes());
+        ram[0x100c..0x100e].copy_from_slice(&DESC_F_NEXT.to_le_bytes());
+        ram[0x100e..0x1010].copy_from_slice(&1u16.to_le_bytes());
+        ram[0x1010..0x1018].copy_from_slice(&0x5000u64.to_le_bytes());
+        ram[0x1018..0x101c].copy_from_slice(&256u32.to_le_bytes());
+        ram[0x101c..0x101e].copy_from_slice(&DESC_F_WRITE.to_le_bytes());
+        ram[0x2002..0x2004].copy_from_slice(&1u16.to_le_bytes());
+        ram[0x2004..0x2006].copy_from_slice(&0u16.to_le_bytes());
+
+        let ptr = ram.as_mut_ptr();
+        let mut fs = unsafe { VirtioFs::new(0, 5, ptr, 0, ram.len(), dir.path().to_path_buf()) };
+        fs.write(R_QUEUE_SEL, 1);
+        fs.write(R_QUEUE_NUM, 4);
+        fs.write(R_QUEUE_DESC_LO, 0x1000);
+        fs.write(R_QUEUE_DRIVER_LO, 0x2000);
+        fs.write(R_QUEUE_DEVICE_LO, 0x3000);
+        fs.write(R_QUEUE_READY, 1);
+        assert!(fs.write(R_QUEUE_NOTIFY, 1));
+        assert_eq!(
+            u16::from_le_bytes(ram[0x3002..0x3004].try_into().unwrap()),
+            1
+        );
+
+        fs.write(R_STATUS, 0);
+        ram[0x3002..0x3004].copy_from_slice(&42u16.to_le_bytes());
+        assert!(fs.write(R_QUEUE_NOTIFY, 1));
+        assert_eq!(
+            u16::from_le_bytes(ram[0x3002..0x3004].try_into().unwrap()),
+            1,
+            "device reset must reset next_used to 0"
+        );
+    }
+
+    #[test]
+    fn fs_next_used_is_device_owned_across_drains() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ram = vec![0u8; 0x10000];
+        fs_put_init_request(&mut ram, 0x4000, 1);
+        fs_put_init_request(&mut ram, 0x6000, 2);
+
+        // Two descriptor chains: head 0 -> reply @0x5000, head 2 -> reply @0x7000.
+        ram[0x1000..0x1008].copy_from_slice(&0x4000u64.to_le_bytes());
+        ram[0x1008..0x100c].copy_from_slice(&56u32.to_le_bytes());
+        ram[0x100c..0x100e].copy_from_slice(&DESC_F_NEXT.to_le_bytes());
+        ram[0x100e..0x1010].copy_from_slice(&1u16.to_le_bytes());
+        ram[0x1010..0x1018].copy_from_slice(&0x5000u64.to_le_bytes());
+        ram[0x1018..0x101c].copy_from_slice(&256u32.to_le_bytes());
+        ram[0x101c..0x101e].copy_from_slice(&DESC_F_WRITE.to_le_bytes());
+
+        ram[0x1020..0x1028].copy_from_slice(&0x6000u64.to_le_bytes());
+        ram[0x1028..0x102c].copy_from_slice(&56u32.to_le_bytes());
+        ram[0x102c..0x102e].copy_from_slice(&DESC_F_NEXT.to_le_bytes());
+        ram[0x102e..0x1030].copy_from_slice(&3u16.to_le_bytes());
+        ram[0x1030..0x1038].copy_from_slice(&0x7000u64.to_le_bytes());
+        ram[0x1038..0x103c].copy_from_slice(&256u32.to_le_bytes());
+        ram[0x103c..0x103e].copy_from_slice(&DESC_F_WRITE.to_le_bytes());
+
+        ram[0x2002..0x2004].copy_from_slice(&1u16.to_le_bytes());
+        ram[0x2004..0x2006].copy_from_slice(&0u16.to_le_bytes());
+        // Pre-seed a bogus used index; the first drain must still start at 0.
+        ram[0x3002..0x3004].copy_from_slice(&5u16.to_le_bytes());
+
+        let ptr = ram.as_mut_ptr();
+        let mut fs = unsafe { VirtioFs::new(0, 5, ptr, 0, ram.len(), dir.path().to_path_buf()) };
+        fs.write(R_QUEUE_SEL, 1);
+        fs.write(R_QUEUE_NUM, 4);
+        fs.write(R_QUEUE_DESC_LO, 0x1000);
+        fs.write(R_QUEUE_DRIVER_LO, 0x2000);
+        fs.write(R_QUEUE_DEVICE_LO, 0x3000);
+        fs.write(R_QUEUE_READY, 1);
+
+        assert!(fs.write(R_QUEUE_NOTIFY, 1));
+        assert_eq!(
+            u16::from_le_bytes(ram[0x3002..0x3004].try_into().unwrap()),
+            1,
+            "first drain lands at slot 0"
+        );
+        assert_eq!(
+            u16::from_le_bytes(ram[0x3004..0x3006].try_into().unwrap()),
+            0,
+            "first used id is head 0"
+        );
+
+        // Guest rewrites used.idx between drains; the device must keep its own counter.
+        ram[0x3002..0x3004].copy_from_slice(&99u16.to_le_bytes());
+        ram[0x2002..0x2004].copy_from_slice(&2u16.to_le_bytes());
+        ram[0x2006..0x2008].copy_from_slice(&2u16.to_le_bytes());
+        assert!(fs.write(R_QUEUE_NOTIFY, 1));
+        assert_eq!(
+            u16::from_le_bytes(ram[0x3002..0x3004].try_into().unwrap()),
+            2,
+            "second drain ignores bogus used idx"
+        );
+        assert_eq!(
+            u16::from_le_bytes(ram[0x300c..0x300e].try_into().unwrap()),
+            2,
+            "second used id is head 2 at slot 1"
+        );
     }
 }

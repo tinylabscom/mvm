@@ -46,6 +46,7 @@ pub(crate) struct Queue {
     pub(crate) avail: u64,
     pub(crate) used: u64,
     pub(crate) last_avail: u16,
+    pub(crate) next_used: u16,
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,8 +187,27 @@ impl VsockTransportCore {
             0x024 | 0x020 => {}
             0x030 => self.queue_sel = v,
             0x038 => self.cur_mut().num = v,
-            0x044 => self.cur_mut().ready = v,
-            0x070 => self.status = v,
+            0x044 => {
+                let q = self.cur_mut();
+                if v != 0 && q.ready == 0 {
+                    // The driver must zero the used ring before enabling the
+                    // queue. Reset the device-owned ring indexes so a stale
+                    // value cannot survive across a disable/enable cycle.
+                    q.last_avail = 0;
+                    q.next_used = 0;
+                }
+                q.ready = v;
+            }
+            0x070 => {
+                if v == 0 {
+                    // Device reset: reinitialize every queue's ring state.
+                    for q in &mut self.queues {
+                        q.last_avail = 0;
+                        q.next_used = 0;
+                    }
+                }
+                self.status = v;
+            }
             0x064 => self.interrupt_status &= !v,
             0x080 => set_lo(&mut self.cur_mut().desc, v),
             0x084 => set_hi(&mut self.cur_mut().desc, v),
@@ -221,10 +241,6 @@ impl VsockTransportCore {
         let Some(mut queue) = build_split_queue(&q, qsz) else {
             return Vec::new();
         };
-        // Preserve the pre-migration used-ring behaviour, which read the completion
-        // index from guest RAM. Seed the now device-owned `next_used` from it so the
-        // used entries land at byte-identical slots for a conformant guest.
-        queue.set_next_used(self.mem.rd_u16(q.used + 2));
 
         let mut packets = Vec::new();
         let mut completed = Vec::new();
@@ -259,6 +275,7 @@ impl VsockTransportCore {
             self.interrupt_status |= 1;
         }
         self.queues[TX].last_avail = queue.next_avail();
+        self.queues[TX].next_used = queue.next_used();
         packets
     }
 
@@ -362,9 +379,6 @@ impl VsockTransportCore {
         let Some(mut queue) = build_split_queue(&q, qsz) else {
             return false;
         };
-        // Seed the now device-owned used index from guest RAM so the used entries
-        // land at byte-identical slots for a conformant guest (mirrors the TX path).
-        queue.set_next_used(self.mem.rd_u16(q.used + 2));
 
         let mut completed = Vec::new();
         let mut delivered = false;
@@ -430,6 +444,7 @@ impl VsockTransportCore {
             self.interrupt_status |= 1;
         }
         self.queues[RX].last_avail = queue.next_avail();
+        self.queues[RX].next_used = queue.next_used();
         delivered
     }
 
@@ -483,6 +498,7 @@ fn build_split_queue(q: &Queue, qsz: u16) -> Option<SplitQueue> {
             avail: q.avail,
             used: q.used,
             next_avail: q.last_avail,
+            next_used: q.next_used,
         },
         qsz,
     )
@@ -523,6 +539,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         core.mem.wr_u16(avail + 2, caps.len() as u16);
         for (index, cap) in caps.iter().enumerate() {
@@ -696,6 +713,7 @@ mod tests {
             avail: base + 0x200,
             used: base + 0x300,
             last_avail: 0,
+            next_used: 0,
         };
         core.mem.wr_u16(base + 0x200 + 2, 1);
     }
@@ -761,6 +779,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         core.mem.wr_u16(avail + 2, 1);
         core.mem.wr_u16(avail + 4, 0); // ring[0] = head 0
@@ -961,6 +980,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         let mut desc_idx: u16 = 0;
         let mut buf_off: u64 = 0;
@@ -1104,6 +1124,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         // 0 -> 1 -> 0 -> 1 -> ... with F_NEXT set on both: a cycle a 65535-hop
         // hand-rolled walk would have followed.
@@ -1145,6 +1166,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         // Head descriptor claims a `next` index past the ring; the validated walk
         // must stop after the head rather than follow the out-of-range link (the
@@ -1360,6 +1382,7 @@ mod tests {
                 avail,
                 used,
                 last_avail: 0,
+                next_used: 0,
             };
             core.mem.wr_u16(avail + 2, 1);
             core.mem.wr_u16(avail + 4, 0);
@@ -1391,5 +1414,164 @@ mod tests {
             "last_avail not advanced past the un-consumed entry"
         );
         assert_eq!(core_new.queues[RX].last_avail, 0);
+    }
+
+    // ---- device-owned used index: lifecycle and cross-drain witnesses -----
+
+    #[test]
+    fn take_tx_packets_ignores_guest_used_index() {
+        let base = 0x4000_0000u64;
+        let mut core = transport_with_ram(0x10000);
+        let chains = vec![single_chain(1000, b"hello")];
+        let used = program_tx_queue(&mut core, base, 4, &chains);
+        // Hostile/synthetic driver pre-seeds a non-zero used index. The device
+        // must still start its own counter at 0.
+        core.mem.wr_u16(used + 2, 7);
+
+        let packets = core.take_tx_packets();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            1,
+            "device-owned next_used starts at 0"
+        );
+    }
+
+    #[test]
+    fn take_tx_packets_device_owned_across_drains() {
+        let base = 0x4000_0000u64;
+        let qsz = 4u16;
+        let mut core = transport_with_ram(0x10000);
+        let used = program_tx_queue(&mut core, base, qsz, &[single_chain(1000, b"first")]);
+
+        let packets1 = core.take_tx_packets();
+        assert_eq!(packets1.len(), 1);
+        assert_eq!(core.mem.rd_u16(used + 2), 1, "first drain lands at slot 0");
+        assert_eq!(core.mem.rd_u16(used + 4), 0, "first used id is head 0");
+
+        // Guest rewrites used.idx between drains; the device must keep its own counter.
+        core.mem.wr_u16(used + 2, 99);
+        let desc = base + 0x1000;
+        let avail = base + 0x4000;
+        let buf_base = base + 0x6000;
+        let mut seg = tx_hdr(1001, 6).to_bytes().to_vec();
+        seg.extend_from_slice(b"second");
+        let addr = buf_base + 0x100;
+        core.mem.write_bytes(desc + 16, &addr.to_le_bytes());
+        core.mem
+            .write_bytes(desc + 24, &(seg.len() as u32).to_le_bytes());
+        core.mem.wr_u16(desc + 28, 0); // no NEXT
+        core.mem.write_bytes(addr, &seg);
+        core.mem.wr_u16(avail + 4 + 2, 1); // ring[1] = head 1
+        core.mem.wr_u16(avail + 2, 2);
+
+        let packets2 = core.take_tx_packets();
+        assert_eq!(packets2.len(), 1);
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            2,
+            "second drain ignores bogus used idx"
+        );
+        assert_eq!(
+            core.mem.rd_u16(used + 4 + 8),
+            1,
+            "second used id is head 1 at slot 1"
+        );
+    }
+
+    #[test]
+    fn flush_rx_ignores_guest_used_index() {
+        let mut core = transport();
+        let _buffers = configure_rx_buffers(&mut core, &[HDR_LEN + 8]);
+        let used = core.queues[RX].used;
+        core.mem.wr_u16(used + 2, 7);
+        core.queue_host_packet(1, 2, OP_RW, b"payload!");
+
+        assert!(core.flush_rx());
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            1,
+            "device-owned next_used starts at 0"
+        );
+    }
+
+    #[test]
+    fn flush_rx_device_owned_across_drains() {
+        let mut core = transport();
+        let buffers = configure_rx_buffers(&mut core, &[HDR_LEN + 8, HDR_LEN + 8]);
+        let used = core.queues[RX].used;
+
+        core.queue_host_packet(1, 2, OP_RW, b"first!");
+        assert!(core.flush_rx());
+        assert_eq!(core.mem.rd_u16(used + 2), 1, "first drain lands at slot 0");
+
+        // Guest rewrites used.idx between drains; the device must keep its own counter.
+        core.mem.wr_u16(used + 2, 99);
+        core.queue_host_packet(1, 2, OP_RW, b"second!");
+        assert!(core.flush_rx());
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            2,
+            "second drain ignores bogus used idx"
+        );
+
+        let second = core.mem.read_bytes(buffers[1], HDR_LEN + 8);
+        let hdr = VsockHdr::from_bytes(&second[..HDR_LEN]);
+        assert_eq!(hdr.op, OP_RW);
+        assert_eq!(hdr.len, 7);
+        assert_eq!(&second[HDR_LEN..HDR_LEN + 7], b"second!");
+    }
+
+    #[test]
+    fn vsock_next_used_resets_on_queue_ready() {
+        let base = 0x4000_0000u64;
+        let mut core = transport_with_ram(0x10000);
+        let (desc, avail, used, buf) = (base + 0x1000, base + 0x2000, base + 0x3000, base + 0x4000);
+
+        core.write_register(0x030, TX as u64); // QueueSel = TX
+        core.write_register(0x038, 1); // QueueNum
+        core.write_register(0x080, desc & 0xffff_ffff); // desc_lo
+        core.write_register(0x090, avail & 0xffff_ffff); // avail_lo
+        core.write_register(0x0a0, used & 0xffff_ffff); // used_lo
+
+        let mut seg = tx_hdr(1000, 5).to_bytes().to_vec();
+        seg.extend_from_slice(b"hello");
+        core.mem.write_bytes(desc, &buf.to_le_bytes());
+        core.mem
+            .write_bytes(desc + 8, &(seg.len() as u32).to_le_bytes());
+        core.mem.write_bytes(buf, &seg);
+        core.mem.wr_u16(avail + 4, 0); // ring[0] = head 0
+        core.mem.wr_u16(avail + 2, 1); // avail_idx = 1
+        core.mem.wr_u16(used + 2, 7); // bogus used index
+
+        core.write_register(0x044, 1); // QueueReady = 1
+        let packets = core.take_tx_packets();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            1,
+            "QueueReady must reset next_used to 0"
+        );
+    }
+
+    #[test]
+    fn vsock_next_used_resets_on_device_reset() {
+        let base = 0x4000_0000u64;
+        let mut core = transport_with_ram(0x10000);
+        let used = program_tx_queue(&mut core, base, 4, &[single_chain(1000, b"hello")]);
+
+        let packets1 = core.take_tx_packets();
+        assert_eq!(packets1.len(), 1);
+        assert_eq!(core.mem.rd_u16(used + 2), 1);
+
+        core.write_register(0x070, 0); // Status = 0 (device reset)
+        core.mem.wr_u16(used + 2, 42); // bogus used index
+        let packets2 = core.take_tx_packets();
+        assert_eq!(packets2.len(), 1);
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            1,
+            "device reset must reset next_used to 0"
+        );
     }
 }
