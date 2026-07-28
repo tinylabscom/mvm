@@ -1,6 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use virtio_queue::{Queue as SplitQueue, QueueOwnedT, QueueT};
+
 use super::guest_mem::GuestMem;
 
 pub(crate) const VIRTIO_MAGIC: u32 = 0x7472_6976;
@@ -11,8 +13,6 @@ pub(crate) const VIRTIO_VENDOR: u32 = 0x4d56_4d76;
 pub(crate) const NUM_QUEUES: usize = 3;
 const RX: usize = 0;
 const TX: usize = 1;
-
-const VIRTQ_DESC_F_NEXT: u16 = 1;
 
 pub(crate) const HDR_LEN: usize = 44;
 pub(crate) const HOST_CID: u64 = 2;
@@ -43,7 +43,7 @@ pub(crate) struct Queue {
     pub(crate) last_avail: u16,
 }
 
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VsockHdr {
     pub(crate) src_cid: u64,
     pub(crate) dst_cid: u64,
@@ -181,24 +181,59 @@ impl VsockTransportCore {
         if q.ready == 0 {
             return Vec::new();
         }
+        // Keep the existing geometry gate ahead of the queue build: an illegal
+        // guest-programmed `QueueNum` is left unserviced exactly as before, and a
+        // valid size is also what the validated `Queue` accepts.
         let Some(qsz) = super::validated_queue_size(q.num) else {
             return Vec::new();
         };
-        let avail_idx = self.mem.rd_u16(q.avail + 2);
-        let mut last = q.last_avail;
+        // The `virtio-queue` walk needs a real `GuestMemory` built over the same
+        // externally-owned RAM. If it can't be constructed (e.g. a non-page-aligned
+        // mapping), service nothing — mirroring the illegal-geometry early outs.
+        let Some(mem) = self.mem.guest_memory() else {
+            return Vec::new();
+        };
+        let Some(mut queue) = build_tx_queue(&q, qsz) else {
+            return Vec::new();
+        };
+        // Preserve the pre-migration used-ring behaviour, which read the completion
+        // index from guest RAM. Seed the now device-owned `next_used` from it so the
+        // used entries land at byte-identical slots for a conformant guest.
+        queue.set_next_used(self.mem.rd_u16(q.used + 2));
+
         let mut packets = Vec::new();
-        while last != avail_idx {
-            let slot = last % qsz;
-            let head = self.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
-            let buf = self.read_chain(q.desc, head, qsz);
-            if buf.len() >= HDR_LEN {
-                let hdr = VsockHdr::from_bytes(&buf[..HDR_LEN]);
-                packets.push((hdr, buf[HDR_LEN..].to_vec()));
+        let mut completed = Vec::new();
+        {
+            // `DescriptorChain::next` seeds `ttl` from the validated queue size and
+            // stops once `ttl == 0 || next_index >= queue_size`, so the chain walk
+            // is bounded and range-checked — no hand-rolled counter, no missing
+            // `next < qsz` guard.
+            let Ok(avail) = queue.iter(&mem) else {
+                return Vec::new();
+            };
+            for chain in avail {
+                let head = chain.head_index();
+                let mut buf = Vec::new();
+                for desc in chain.readable() {
+                    // Gather buffer bytes through the same bounds-checked `GuestMem`
+                    // (out-of-range → zero bytes), byte-identical to the old walk.
+                    buf.extend_from_slice(&self.mem.read_bytes(desc.addr().0, desc.len() as usize));
+                }
+                if buf.len() >= HDR_LEN {
+                    let hdr = VsockHdr::from_bytes(&buf[..HDR_LEN]);
+                    packets.push((hdr, buf[HDR_LEN..].to_vec()));
+                }
+                completed.push(head);
             }
-            self.complete(TX, head, 0, qsz);
-            last = last.wrapping_add(1);
         }
-        self.queues[TX].last_avail = last;
+        for head in completed {
+            // `head` came from a validated avail-ring slot (`< qsz`); `add_used`
+            // re-checks the bound and writes the same 8-byte used element + used
+            // index the old `complete(TX, head, 0, qsz)` wrote.
+            let _ = queue.add_used(&mem, head, 0);
+            self.interrupt_status |= 1;
+        }
+        self.queues[TX].last_avail = queue.next_avail();
         packets
     }
 
@@ -359,29 +394,6 @@ impl VsockTransportCore {
             .unwrap_or(0)
     }
 
-    fn read_chain(&self, desc: u64, head: u16, qsz: u16) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut idx = head;
-        let mut guard = 0u32;
-        loop {
-            let da = desc + u64::from(idx) * 16;
-            let addr = self.mem.rd_u64(da);
-            let len = self.mem.rd_u32(da + 8) as usize;
-            let flags = self.mem.rd_u16(da + 12);
-            out.extend_from_slice(&self.mem.read_bytes(addr, len));
-            guard += 1;
-            if flags & VIRTQ_DESC_F_NEXT == 0 || guard > u32::from(qsz) {
-                break;
-            }
-            let next = self.mem.rd_u16(da + 14);
-            if next >= qsz {
-                break;
-            }
-            idx = next;
-        }
-        out
-    }
-
     fn complete(&mut self, q: usize, head: u16, written: u32, qsz: u16) {
         let used = self.queues[q].used;
         let used_idx = self.mem.rd_u16(used + 2);
@@ -394,6 +406,25 @@ impl VsockTransportCore {
         self.mem.wr_u16(used + 2, used_idx.wrapping_add(1));
         self.interrupt_status |= 1;
     }
+}
+
+/// Build a validated `virtio-queue` split [`SplitQueue`] from the device's
+/// guest-programmed TX ring geometry. `qsz` is the already-validated ring size
+/// (power of two ≤ [`super::QUEUE_SIZE_MAX`]); `next_avail` resumes from the
+/// device-owned `last_avail` so iteration continues exactly where the previous
+/// drain stopped. Returns `None` if a ring address breaks virtio's alignment
+/// rules — `set_*_address` silently keeps the prior value in that case, so we
+/// refuse to service a geometry we could not faithfully program.
+fn build_tx_queue(q: &Queue, qsz: u16) -> Option<SplitQueue> {
+    let mut queue = SplitQueue::new(super::QUEUE_SIZE_MAX as u16).ok()?;
+    queue.set_size(qsz);
+    queue.set_ready(true);
+    queue.set_desc_table_address(Some(q.desc as u32), Some((q.desc >> 32) as u32));
+    queue.set_avail_ring_address(Some(q.avail as u32), Some((q.avail >> 32) as u32));
+    queue.set_used_ring_address(Some(q.used as u32), Some((q.used >> 32) as u32));
+    queue.set_next_avail(q.last_avail);
+    (queue.desc_table() == q.desc && queue.avail_ring() == q.avail && queue.used_ring() == q.used)
+        .then_some(queue)
 }
 
 fn set_lo(v: &mut u64, lo: u32) {
@@ -409,8 +440,12 @@ mod tests {
     use super::*;
 
     fn transport() -> VsockTransportCore {
-        let ram = vec![0u8; 0x1000].leak();
-        // SAFETY: leaked for the test.
+        transport_with_ram(0x1000)
+    }
+
+    fn transport_with_ram(size: usize) -> VsockTransportCore {
+        let ram = crate::test_support::page_aligned_ram(size);
+        // SAFETY: page-aligned, zeroed, leaked for the test process lifetime.
         unsafe { VsockTransportCore::new(ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
     }
 
@@ -648,5 +683,313 @@ mod tests {
             }]
         );
         assert!(core.recv_cnt.is_empty());
+    }
+
+    // ---- TX virtio-queue migration: differential equivalence ----------------
+
+    const DESC_F_NEXT: u16 = 1;
+
+    /// One guest→host TX descriptor chain: its bytes split across N buffers.
+    type Chain = Vec<Vec<u8>>;
+
+    fn tx_hdr(src_port: u32, len: u32) -> VsockHdr {
+        VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port,
+            dst_port: 2000,
+            len,
+            typ: TYPE_STREAM,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: HOST_BUF_ALLOC,
+            fwd_cnt: 7,
+        }
+    }
+
+    /// Single-descriptor chain: 44-byte header + payload, contiguous.
+    fn single_chain(src_port: u32, payload: &[u8]) -> Chain {
+        let mut seg = tx_hdr(src_port, payload.len() as u32).to_bytes().to_vec();
+        seg.extend_from_slice(payload);
+        vec![seg]
+    }
+
+    /// Header in one descriptor, payload in the next (multi-descriptor chain).
+    fn split_chain(src_port: u32, payload: &[u8]) -> Chain {
+        vec![
+            tx_hdr(src_port, payload.len() as u32).to_bytes().to_vec(),
+            payload.to_vec(),
+        ]
+    }
+
+    /// Header split across a descriptor boundary (first 40 bytes, then the rest):
+    /// exercises byte gathering across descriptors, mid-header.
+    fn boundary_chain(src_port: u32, payload: &[u8]) -> Chain {
+        let mut full = tx_hdr(src_port, payload.len() as u32).to_bytes().to_vec();
+        full.extend_from_slice(payload);
+        let tail = full.split_off(40);
+        vec![full, tail]
+    }
+
+    /// A chain whose gathered bytes are shorter than a header: no packet emitted,
+    /// but the head is still completed on the used ring.
+    fn short_chain() -> Chain {
+        vec![vec![0x11; 20]]
+    }
+
+    /// Representative TX layouts for `qsz`: single + multi-descriptor chains,
+    /// empty + full payloads, a mid-header boundary split, and a dropped-short
+    /// chain — all within `qsz` descriptors/chains.
+    fn layouts_for(qsz: u16) -> Vec<(&'static str, Vec<Chain>)> {
+        match qsz {
+            1 => vec![
+                ("single-full", vec![single_chain(1000, b"abcdef")]),
+                ("single-empty", vec![single_chain(1001, b"")]),
+            ],
+            2 => vec![
+                ("split-hdr-payload", vec![split_chain(1000, b"hello123")]),
+                ("boundary", vec![boundary_chain(1000, b"xyz")]),
+            ],
+            _ => vec![
+                (
+                    "mixed",
+                    vec![
+                        single_chain(1000, b"first payload"),
+                        split_chain(1001, b"second-body"),
+                        single_chain(1002, b""),
+                        boundary_chain(1003, b"cross-boundary-data"),
+                        short_chain(),
+                    ],
+                ),
+                ("bulk", vec![single_chain(2000, &[0xAB; 100])]),
+            ],
+        }
+    }
+
+    /// Lay `chains` out as a TX split-virtqueue in `core`'s RAM at `base`, program
+    /// `core.queues[TX]`, and return the used-ring address. Descriptors are
+    /// assigned sequentially; each chain links its segments with F_NEXT.
+    fn program_tx_queue(
+        core: &mut VsockTransportCore,
+        base: u64,
+        qsz: u16,
+        chains: &[Chain],
+    ) -> u64 {
+        let desc = base + 0x1000;
+        let avail = base + 0x4000;
+        let used = base + 0x5000;
+        let buf_base = base + 0x6000;
+        core.queues[TX] = Queue {
+            num: u32::from(qsz),
+            ready: 1,
+            desc,
+            avail,
+            used,
+            last_avail: 0,
+        };
+        let mut desc_idx: u16 = 0;
+        let mut buf_off: u64 = 0;
+        for (chain_no, chain) in chains.iter().enumerate() {
+            let head = desc_idx;
+            for (seg_no, seg) in chain.iter().enumerate() {
+                let da = desc + u64::from(desc_idx) * 16;
+                let addr = buf_base + buf_off;
+                core.mem.write_bytes(da, &addr.to_le_bytes());
+                core.mem
+                    .write_bytes(da + 8, &(seg.len() as u32).to_le_bytes());
+                let last = seg_no + 1 == chain.len();
+                core.mem.wr_u16(da + 12, if last { 0 } else { DESC_F_NEXT });
+                core.mem
+                    .wr_u16(da + 14, if last { 0 } else { desc_idx + 1 });
+                core.mem.write_bytes(addr, seg);
+                // Keep buffers separated and 16-aligned; empty segments still stride.
+                buf_off += (seg.len().max(1) as u64 + 15) & !15;
+                desc_idx += 1;
+            }
+            core.mem.wr_u16(avail + 4 + (chain_no as u64) * 2, head);
+        }
+        core.mem.wr_u16(avail + 2, chains.len() as u16);
+        used
+    }
+
+    /// Faithful copy of the pre-migration hand-rolled TX walk (drain loop +
+    /// `read_chain` + `complete`), kept as the differential oracle. The migrated
+    /// `take_tx_packets` must reproduce its packets and used-ring writes exactly.
+    fn reference_take_tx_packets(
+        core: &VsockTransportCore,
+        qsz: u16,
+    ) -> (Vec<(VsockHdr, Vec<u8>)>, u16, bool) {
+        let mem = &core.mem;
+        let q = core.queues[TX];
+        let avail_idx = mem.rd_u16(q.avail + 2);
+        let mut last = q.last_avail;
+        let mut packets = Vec::new();
+        let mut interrupt = false;
+        while last != avail_idx {
+            let slot = last % qsz;
+            let head = mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
+            let buf = reference_read_chain(core, q.desc, head, qsz);
+            if buf.len() >= HDR_LEN {
+                let hdr = VsockHdr::from_bytes(&buf[..HDR_LEN]);
+                packets.push((hdr, buf[HDR_LEN..].to_vec()));
+            }
+            reference_complete(core, q.used, head, 0, qsz);
+            interrupt = true;
+            last = last.wrapping_add(1);
+        }
+        (packets, last, interrupt)
+    }
+
+    fn reference_read_chain(core: &VsockTransportCore, desc: u64, head: u16, qsz: u16) -> Vec<u8> {
+        let mem = &core.mem;
+        let mut out = Vec::new();
+        let mut idx = head;
+        let mut guard = 0u32;
+        loop {
+            let da = desc + u64::from(idx) * 16;
+            let addr = mem.rd_u64(da);
+            let len = mem.rd_u32(da + 8) as usize;
+            let flags = mem.rd_u16(da + 12);
+            out.extend_from_slice(&mem.read_bytes(addr, len));
+            guard += 1;
+            if flags & DESC_F_NEXT == 0 || guard > u32::from(qsz) {
+                break;
+            }
+            let next = mem.rd_u16(da + 14);
+            if next >= qsz {
+                break;
+            }
+            idx = next;
+        }
+        out
+    }
+
+    fn reference_complete(core: &VsockTransportCore, used: u64, head: u16, written: u32, qsz: u16) {
+        let mem = &core.mem;
+        let used_idx = mem.rd_u16(used + 2);
+        let slot = u64::from(used_idx % qsz);
+        mem.wr_u16(used + 4 + slot * 8, head);
+        mem.wr_u16(used + 6 + slot * 8, 0);
+        mem.wr_u16(used + 8 + slot * 8, written as u16);
+        mem.wr_u16(used + 10 + slot * 8, (written >> 16) as u16);
+        mem.wr_u16(used + 2, used_idx.wrapping_add(1));
+    }
+
+    #[test]
+    fn take_tx_packets_matches_reference_walk_byte_for_byte() {
+        let base = 0x4000_0000u64;
+        for qsz in [1u16, 2, 128, 256] {
+            for (label, chains) in layouts_for(qsz) {
+                // Run the pre-migration oracle over one RAM image...
+                let mut core_ref = transport_with_ram(0x10000);
+                let used = program_tx_queue(&mut core_ref, base, qsz, &chains);
+                let (packets_ref, last_ref, int_ref) = reference_take_tx_packets(&core_ref, qsz);
+
+                // ...and the migrated path over a byte-identical RAM image.
+                let mut core_new = transport_with_ram(0x10000);
+                program_tx_queue(&mut core_new, base, qsz, &chains);
+                let packets_new = core_new.take_tx_packets();
+
+                assert_eq!(
+                    packets_new, packets_ref,
+                    "packet list differs for qsz={qsz} layout={label}"
+                );
+                assert_eq!(
+                    core_new.queues[TX].last_avail, last_ref,
+                    "last_avail differs for qsz={qsz} layout={label}"
+                );
+                assert_eq!(
+                    core_new.interrupt_status & 1,
+                    u32::from(int_ref),
+                    "interrupt_status differs for qsz={qsz} layout={label}"
+                );
+                let used_len = 4 + usize::from(qsz) * 8;
+                assert_eq!(
+                    core_new.mem.read_bytes(used, used_len),
+                    core_ref.mem.read_bytes(used, used_len),
+                    "used-ring bytes differ for qsz={qsz} layout={label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn take_tx_packets_bounds_a_cyclic_descriptor_chain() {
+        let base = 0x4000_0000u64;
+        let qsz = 4u16;
+        let mut core = transport_with_ram(0x10000);
+        let desc = base + 0x1000;
+        let avail = base + 0x4000;
+        let used = base + 0x5000;
+        let buf = base + 0x6000;
+        core.queues[TX] = Queue {
+            num: u32::from(qsz),
+            ready: 1,
+            desc,
+            avail,
+            used,
+            last_avail: 0,
+        };
+        // 0 -> 1 -> 0 -> 1 -> ... with F_NEXT set on both: a cycle a 65535-hop
+        // hand-rolled walk would have followed.
+        for (idx, next) in [(0u16, 1u16), (1, 0)] {
+            let da = desc + u64::from(idx) * 16;
+            core.mem.write_bytes(da, &buf.to_le_bytes());
+            core.mem.write_bytes(da + 8, &64u32.to_le_bytes());
+            core.mem.wr_u16(da + 12, DESC_F_NEXT);
+            core.mem.wr_u16(da + 14, next);
+        }
+        core.mem.write_bytes(buf, &[0xAA; 64]);
+        core.mem.wr_u16(avail + 4, 0);
+        core.mem.wr_u16(avail + 2, 1);
+
+        let packets = core.take_tx_packets();
+        // `ttl` seeded from the queue size caps the walk at `qsz` hops, so at most
+        // `qsz * 64` bytes are gathered — bounded, no panic, no runaway allocation.
+        assert!(packets.len() <= 1);
+        if let Some((_, payload)) = packets.first() {
+            assert!(payload.len() <= usize::from(qsz) * 64);
+        }
+        assert_eq!(core.mem.rd_u16(used + 2), 1, "head completed exactly once");
+        assert_eq!(core.queues[TX].last_avail, 1);
+    }
+
+    #[test]
+    fn take_tx_packets_stops_at_out_of_range_next_index() {
+        let base = 0x4000_0000u64;
+        let qsz = 4u16;
+        let mut core = transport_with_ram(0x10000);
+        let desc = base + 0x1000;
+        let avail = base + 0x4000;
+        let used = base + 0x5000;
+        let buf = base + 0x6000;
+        core.queues[TX] = Queue {
+            num: u32::from(qsz),
+            ready: 1,
+            desc,
+            avail,
+            used,
+            last_avail: 0,
+        };
+        // Head descriptor claims a `next` index past the ring; the validated walk
+        // must stop after the head rather than follow the out-of-range link (the
+        // missing `next < qsz` bound the hand-rolled walk lacked).
+        core.mem.write_bytes(desc, &buf.to_le_bytes());
+        core.mem
+            .write_bytes(desc + 8, &((HDR_LEN + 6) as u32).to_le_bytes());
+        core.mem.wr_u16(desc + 12, DESC_F_NEXT);
+        core.mem.wr_u16(desc + 14, 99);
+        core.mem.write_bytes(buf, &[0xCD; HDR_LEN + 6]);
+        core.mem.wr_u16(avail + 4, 0);
+        core.mem.wr_u16(avail + 2, 1);
+
+        let packets = core.take_tx_packets();
+        assert_eq!(packets.len(), 1);
+        assert_eq!(
+            packets[0].1.len(),
+            6,
+            "only the head descriptor was gathered"
+        );
+        assert_eq!(core.mem.rd_u16(used + 2), 1);
     }
 }

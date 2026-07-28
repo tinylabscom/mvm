@@ -52,7 +52,13 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// `vm-memory` itself is new on the default closure — its `libc`/`thiserror`
 /// tree is already present — so the measured delta is +1. Lower it freely as
 /// deps drop.
-const CLOSURE_BUDGET: usize = 268;
+///
+/// 271 (was 268): adopting the audited `virtio-queue` crate for the in-house
+/// VMM's virtio-vsock TX ring walk. The measured delta is +3 — `virtio-queue`,
+/// its `virtio-bindings` binding crate, and `vmm-sys-util` 0.15 (the KVM path's
+/// `vmm-sys-util` 0.12.1 stays, so the closure target counts both) — while
+/// `vm-memory`/`log` are already present. Lower it freely as deps drop.
+const CLOSURE_BUDGET: usize = 271;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;
