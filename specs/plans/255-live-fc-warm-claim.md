@@ -117,7 +117,7 @@ A claim must find the checkpoint its parent was captured as. `StandbySpec` has n
 - Consumes: nothing (first task).
 - Produces: `StandbyHandle.parent_checkpoint: Option<String>` — the checkpoint id as a plain string, because `mvm-protocol` cannot see `mvm-core`'s `CheckpointId`. Task 4 constructs it; Task 5 reads it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `#[cfg(test)]` module in `crates/mvm-runtime/src/standby_pool.rs`:
 
@@ -163,12 +163,12 @@ fn handle_without_parent_checkpoint_loads_as_none() {
 
 If no `sample_handle` helper exists in that module, write one building a `StandbyHandle` with every field populated and `parent_checkpoint: None`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-runtime standby_pool`
 Expected: FAIL — `no field 'parent_checkpoint' on type 'StandbyHandle'`.
 
-- [ ] **Step 3: Add the field**
+- [x] **Step 3: Add the field**
 
 In `crates/mvm-protocol/src/protocol/vm_backend.rs`, immediately after `image_sha256`:
 
@@ -184,18 +184,18 @@ In `crates/mvm-protocol/src/protocol/vm_backend.rs`, immediately after `image_sh
     pub parent_checkpoint: Option<String>,
 ```
 
-- [ ] **Step 4: Fix every construction site**
+- [x] **Step 4: Fix every construction site**
 
 Run: `cargo build --workspace --all-targets 2>&1 | grep -A3 'missing field'`
 
 Known site: `crates/mvm-runtime/src/driver/mock.rs:163` → `parent_checkpoint: None`, plus test fixtures. Add the field explicitly at each site (do **not** use `..Default::default()`). Task 4 populates it for real.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-runtime standby_pool`
 Expected: PASS.
 
-- [ ] **Step 6: Full gates + commit**
+- [x] **Step 6: Full gates + commit**
 
 ```bash
 cargo fmt --all
@@ -249,7 +249,7 @@ pub struct VmmSpec {
 }
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 A full boot needs KVM, so unit-test the fail-closed precondition and the control seam — both hold on every host:
 
@@ -278,16 +278,16 @@ fn fc_offers_a_vm_full_capture_control() {
 
 Write `standby_spec_without_image()` building a `StandbySpec` with `image_path: None` and every other field populated plausibly.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-runtime driver::fc`
 Expected: FAIL — the inherited defaults return `StandbyError::Unsupported` and `None`.
 
-- [ ] **Step 3: Add the trait method**
+- [x] **Step 3: Add the trait method**
 
 Add `vm_full_control` to `VmmDriver` in `driver/traits.rs` with the `None` default shown above, documenting *why* the default is `None` (a backend that cannot pause-and-save-memory cannot back a warm pool).
 
-- [ ] **Step 4: Implement both overrides on `FcDriver`**
+- [x] **Step 4: Implement both overrides on `FcDriver`**
 
 ```rust
     fn spawn_standby_parent(
@@ -374,16 +374,16 @@ For `read_fc_pid`, reuse the existing pid-file helper in `fc.rs` (`fc_pid_path` 
 
 **`FcVmFullControl` needs metadata `boot` does not write.** `FcVmFullControl::rootfs_path()` (and `device_anchors()`, which calls it) resolves the VM's rootfs through `runtime_meta::read` → `<vm_state_dir>/mode.json`. That file is written by the `workload_runner` / `VmBackend::start` orchestration, **not** by the raw `FcDriver::boot` this task calls — so a parent spawned here would boot fine but fail the next task's capture with "no mode.json found". Persist the metadata `rootfs_path()` needs before returning (or give the control a resolution path that does not depend on `workload_runner`-only bookkeeping), keeping the recorded rootfs bound to the image the spec actually booted. Cover it with a test that does not require KVM.
 
-- [ ] **Step 5: Give `MockDriver` a capture control**
+- [x] **Step 5: Give `MockDriver` a capture control**
 
 Task 4's test needs a driver whose `vm_full_control` returns something without KVM. Add a `MockVmFullControl` implementing `VmFullControl` — `pause`/`resume` record the call, `save_memory` writes a small deterministic file, `rootfs_path` returns a path the test seeded, `device_anchors` returns an empty/default `DeviceAnchors`. Have `MockDriver::vm_full_control` return it.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-runtime driver`
 Expected: PASS.
 
-- [ ] **Step 7: Full gates + commit**
+- [x] **Step 7: Full gates + commit**
 
 ```bash
 cargo fmt --all
