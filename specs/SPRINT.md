@@ -66,6 +66,9 @@
       published as a separate `sdk-sidecar` output with an explicit
       `/mvm/sdk/lib` contract. Sidecar attachment remains opt-in for workloads
       that use host-service verbs.
+- [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
+      binary with the dedicated static-musl `mvm-setpriv` helper, including
+      UID/GID, group, no-new-privileges, and optional loopback capability paths.
 - [x] Lightweight guest WS-5/WS-6 slice: the Nix-built rootfs keeps only the
       kernel module dependency index, the runtime overlay allocation is capped
       at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars against

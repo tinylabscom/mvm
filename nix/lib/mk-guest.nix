@@ -42,12 +42,6 @@ let
   # (which alone saves ~10ms vs a glibc-linked init).
   busybox = pkgs.pkgsStatic.busybox;
 
-  # Static-musl util-linux setpriv. busybox's stripped setpriv applet lacks
-  # --reuid/--regid/--clear-groups, so /init needs the full util-linux binary
-  # to drop privilege before exec. The *static* build's runtime closure is the
-  # binary itself — no glibc — so it does not drag glibc into the rootfs.
-  setpriv = "${pkgs.pkgsStatic.util-linux}/bin/setpriv";
-
   classifyEntrypoint = ep:
     let
       hasShell    = ep ? shell;
@@ -236,6 +230,17 @@ let
     inherit mvmSrc withInteractive;
   };
 
+  # Static-musl privilege-drop helper. It replaces the much larger
+  # util-linux setpriv closure while preserving the exact privilege flags
+  # emitted by the generated init script.
+  setprivPkg = import ../packages/mvm-setpriv.nix {
+    rustPlatform = pkgs.pkgsStatic.rustPlatform;
+    lib = pkgs.lib;
+    inherit mvmSrc;
+  };
+  setpriv = "${setprivPkg}/bin/mvm-setpriv";
+  setprivHelperName = "mvm-setpriv";
+
   # In-guest host.audit.v1 driver — test fixture, baked only when
   # `withAuditProbe`. Compiled lazily (Nix only evaluates this when the
   # bake below references it) so the default path adds no build cost.
@@ -279,15 +284,11 @@ let
 
   # Wrap a command-line in `setpriv` when the target uid is non-zero.
   #
-  # **util-linux's setpriv, not busybox's.** `pkgsStatic.busybox`
-  # ships a stripped setpriv applet that only knows the bare
-  # `-d / --nnp / --inh-caps / --ambient-caps` flags — `--reuid`,
-  # `--regid`, and `--clear-groups` come from util-linux's full
-  # setpriv binary. Invoking `/bin/busybox setpriv --reuid=…`
-  # fails with `setpriv: unrecognized option: reuid=…`, killing
-  # /init at stage 2.5 before the guest agent ever forks. We use the
-  # static-musl build (see `setpriv` above) so pulling in the full
-  # binary doesn't also pull glibc into the rootfs closure.
+  # **mvm-setpriv, not busybox's setpriv applet.** `pkgsStatic.busybox`
+  # only supports the bare `-d / --nnp / --inh-caps / --ambient-caps`
+  # flags. The dedicated static helper implements the numeric uid/gid,
+  # group clearing, no-new-privileges, and loopback capability operations
+  # needed by this init without pulling util-linux into the rootfs.
   #
   # The flag set is --reuid + --regid + --clear-groups + --no-new-privs.
   # uid==0 short-circuits to the bare command — no point setpriv-ing
@@ -828,10 +829,9 @@ let
       echo "mvm-init: no guest agent resolved from /mvm/runtime and no baked fallback"
       exit 1
     fi
-    # Static-musl util-linux setpriv — busybox setpriv lacks --reuid /
-    # --regid / --clear-groups; see `setprivWrap` above for the full
-    # reasoning. Without this fix the agent never forks and vsock port
-    # 5252 stays unbound. The static build keeps glibc out of the closure.
+    # Static-musl mvm-setpriv — the helper applies the uid/gid, group, and
+    # no-new-privileges drop before the agent exec. Without this step the
+    # agent never forks and vsock port 5252 stays unbound.
     /bin/busybox setsid ${setpriv} \
       --reuid=${toString agentUid} --regid=${toString agentUid} \
       --clear-groups --securebits=keep-caps \
@@ -1382,6 +1382,7 @@ let
     # `mvmctl status` reads this;
     # production deployments should refuse to boot a "stub" image.
     agentBinary = "real";
+    setprivHelperName = setprivHelperName;
     # The rootfs carries a `/mvm/runtime`
     # bind-mount target and the /init script prefers the overlay
     # agent at `/mvm/runtime/agent` over the baked-in
@@ -1401,7 +1402,7 @@ rootfsImage.overrideAttrs (old: {
   passthru = (old.passthru or { }) // {
     mvm = mvmMeta;
     inherit rootfsTree;
-    inherit setpriv;
+    inherit setprivHelperName;
     # Surface the chosen hypervisor + resource defaults at the top
     # of passthru so `nix eval` is sufficient for mvmctl to drive
     # the runtime — no NixOS evaluation needed.

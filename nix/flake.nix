@@ -200,8 +200,8 @@
 
       # ── CI-provable no-glibc closure gate ─────────────────────────
       #
-      # The guest's `setpriv` is static-musl (`pkgs.pkgsStatic.util-linux`),
-      # which drops glibc from the mkGuest rootfs closure. This check
+      # The guest's `mvm-setpriv` is static-musl, which drops the
+      # util-linux and glibc closures from the mkGuest rootfs. This check
       # realizes that closure and fails if glibc re-enters it — a
       # build-backed guarantee a pure `nix eval` can't provide, since
       # eval can't see a derivation's runtime closure. Wired into the

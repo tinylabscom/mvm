@@ -1124,3 +1124,24 @@ fn mk_guest_copies_only_module_dependency_metadata() {
         "mkGuest must not copy unused kernel module indexes into the rootfs"
     );
 }
+
+#[test]
+fn mk_guest_uses_the_static_custom_privilege_helper() {
+    let path = nix_dir().join("lib/mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("import ../packages/mvm-setpriv.nix")
+            && content.contains("rustPlatform = pkgs.pkgsStatic.rustPlatform"),
+        "mkGuest must build the privilege helper through the static package set"
+    );
+    assert!(
+        content.contains("setprivPkg") && content.contains("/bin/mvm-setpriv"),
+        "mkGuest init must resolve the dedicated helper, not util-linux"
+    );
+    assert!(
+        !content.contains("pkgs.pkgsStatic.util-linux"),
+        "mkGuest must not retain the util-linux setpriv closure"
+    );
+}

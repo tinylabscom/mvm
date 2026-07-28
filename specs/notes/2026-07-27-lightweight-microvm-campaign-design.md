@@ -3,8 +3,8 @@
 **Date:** 2026-07-27
 **Status:** approved design; WS-1, the static overlay cut, and the first WS-5/WS-6 gates implemented
 **Scope:** shrink the workload-guest footprint across four dimensions, gated so it
-cannot silently regrow. WS-1 and the static runtime-overlay cut are implemented;
-WS-2 and the remaining WS-4..6 measurements remain named + sequenced follow-ups.
+cannot silently regrow. WS-1, WS-2, the static runtime-overlay cut, and the first
+WS-5/WS-6 gates are implemented; the remaining WS-4..6 measurements stay sequenced.
 
 ## Problem
 
@@ -68,10 +68,9 @@ regression, not a win.
 
 ## WS-1 — static setpriv, glibc out of the rootfs (implemented from this spec)
 
-**Change.** Swap `pkgs.util-linux` → `pkgs.pkgsStatic.util-linux` at the four `setpriv`
-references in `nix/lib/mk-guest.nix` (the `setprivWrap` helper plus the agent / addon-DNS /
-egress-client fork sites). The static-musl `setpriv` binary's runtime closure is just
-itself — no glibc — so glibc garbage-collects out of the rootfs closure.
+**Change.** The first cut swapped `pkgs.util-linux` → `pkgs.pkgsStatic.util-linux` at
+the four `setpriv` references in `nix/lib/mk-guest.nix`. WS-2 replaces that baseline
+with the smaller static-musl `mvm-setpriv` helper.
 
 **Faithful capability surface.** The replacement is the same `setpriv`, static-linked, so
 the flag surface is preserved by construction:
@@ -93,18 +92,15 @@ the flag surface is preserved by construction:
 plus the new closure assertion. WS-1 does not touch the security semantics — only the
 provenance of the `setpriv` binary.
 
-**Measurement seeds the campaign.** The before/after numbers populate the scoreboard and
-decide whether WS-2 (a custom helper) is worth building.
+**Measurement seeds the campaign.** The before/after numbers populated the scoreboard and
+justified replacing util-linux with the custom helper in WS-2.
 
 ## Roadmap (named + sequenced)
 
-- **WS-2 (lever E follow-up).** Custom `mvm-setpriv` static-musl helper in `mvm-agentd`,
-  built through the existing guest-helper pipeline (`guest_agent_build.rs`, sibling to
-  `seccomp-apply` / `netinit` / `verity-init`): implements exactly the flags above via
-  `setresuid` / `setresgid` / `setgroups([])` / `prctl(NO_NEW_PRIVS)` / ambient-cap raise,
-  then `execvp`. ~400 KiB, minimal attack surface, no `util-linux` build dep. Decided on
-  WS-1's measurements — build it only if shaving ~1 MiB and removing setpriv's other code
-  paths is worth owning a security primitive.
+- **WS-2 (lever E).** The static-musl `mvm-setpriv` helper is implemented as a dedicated
+  `mvm-agentd` binary and Nix package. It implements the exact generated flag surface via
+  `setresuid` / `setresgid` / `setgroups([])` / `prctl(NO_NEW_PRIVS)` / ambient-cap
+  raise, then `execvp`, with no `util-linux` build dependency.
 - **WS-3 (lever B).** Unify the overlay binaries on static-musl; drop the glibc loader /
   `libc.so.6` / `libgcc_s.so.1` bundle from `nix/images/runtime-overlay/flake.nix` `lib/`.
   Snag: `libmvm_host_services.so` (the FFI cdylib language SDKs dlopen) is glibc-built and
@@ -138,16 +134,16 @@ selected, a workload must not call the SDK host-service verbs.
 - The `mk-guest.nix` setpriv swap.
 - A no-glibc / no-dynamic-util-linux rootfs closure test under `nix/tests/`.
 - Rootfs before/after measurement + `ROOTFS_MAX_BYTES` tighten/extend.
-- WS-2..6 tracked as deferred follow-ups in the implementation plan.
+- Remaining WS-3..6 work is tracked as deferred follow-ups in the implementation plan.
 
 ## Risks / open questions
 
-- **`pkgsStatic.util-linux` build.** `setpriv` builds and runs static under musl (Alpine
-  ships full util-linux on musl); confirm the derivation evaluates and the ambient-cap flags
-  behave identically to the glibc build during WS-1.
-- **Glibc anchor completeness.** WS-1 assumes `util-linux setpriv` is the sole glibc anchor
-  in the rootfs. The closure test proves or disproves this; if another store path pulls
-  glibc, it surfaces as a WS-5 item.
+- **`mvm-setpriv` static build.** The dedicated helper must cross-build with musl and retain
+  the ambient-cap behavior used by the DNS and egress helpers; the Linux execution tests
+  and builder-backed Nix build are the witnesses.
+- **Glibc anchor completeness.** WS-1 removed the original util-linux anchor and WS-2 removes
+  the remaining util-linux dependency from the workload rootfs. The closure test proves or
+  disproves that another store path pulls glibc, surfacing any remainder as a WS-5 item.
 - **Gate scope beyond `minimal`.** Extending `rootfs-size` past the `minimal` template must
   not penalize workloads that legitimately bundle large app deps — the gate targets the
   mvm-owned base, not user payload; decide the boundary during WS-1.

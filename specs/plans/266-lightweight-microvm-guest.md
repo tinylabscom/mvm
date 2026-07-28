@@ -4,14 +4,14 @@
 
 **Goal:** Drop the glibc closure from the mkGuest workload rootfs by building `setpriv` static-musl, and lock the win with an eval-level regression gate plus a measured rootfs budget.
 
-**Architecture:** `nix/lib/mk-guest.nix` currently references the glibc `pkgs.util-linux` `setpriv` at four privilege-drop sites — the sole glibc anchor in the busybox-PID-1 rootfs. Swap those to `pkgs.pkgsStatic.util-linux` (static-musl, closure = the binary itself), surface the chosen `setpriv` path in `passthru`, and assert its provenance in the existing pure-Nix eval test. Then measure the closure delta and set the rootfs budget from the number.
+**Architecture:** WS-1 replaced the glibc `pkgs.util-linux` `setpriv` at the four privilege-drop sites with the static-musl build. WS-2 now replaces that baseline with the smaller `mvm-agentd` `mvm-setpriv` binary, built by a dedicated static-musl Nix package; the eval metadata, structural Nix test, and Linux execution tests lock its identity and security behavior. The remaining closure and byte measurements continue through the footprint ledger.
 
 **Tech Stack:** Nix (nixpkgs `pkgsStatic`), the `nix/tests/mk-guest-eval.nix` pure-eval harness (shelled out by root `tests/nix_flake_structure.rs` when `nix` is on PATH), Rust `xtask perf` budget.
 
 ## Global Constraints
 
 - Work in the existing worktree `feat/lightweight-microvm-guest` (`../.worktrees/mvm-light-guest`); git via `git -C <wt-abs>`; edit with worktree absolute paths.
-- The `setpriv` flag surface is preserved **exactly** — `--reuid --regid --clear-groups --no-new-privs` at all sites, plus `--inh-caps=+net_bind_service --ambient-caps=+net_bind_service` at the addon-DNS and egress-client sites. Static-musl util-linux ships the same full `setpriv`; only the link mode changes.
+- The generated privilege-drop flag surface is preserved **exactly** — `--reuid --regid --clear-groups --no-new-privs` at all sites, plus `--inh-caps=+net_bind_service --ambient-caps=+net_bind_service` at the addon-DNS and egress-client sites. The custom helper implements only that required surface.
 - Security witnesses stay green: setpriv uid / no-new-privs drops (host-fs confinement, no uid-0 elevation), dm-verity roothash seal, prod agent with no `do_exec`/console. A lightness change that flips a claim is a regression.
 - No `Plan N` / `ADR-\d+` / `#NNNN` / `W\d.` tokens in code or code comments (CI `check-no-spec-refs`); reword to the concept. Spec docs may reference them; code may not.
 - DRY: one `let`-bound `setpriv` path, not four inline store-path expressions.
@@ -202,11 +202,11 @@ git -C "$WT" add nix/flake.nix .github/workflows/ci.yml specs/plans/266-lightwei
 git -C "$WT" commit -m "test(light-guest): CI gate asserting the guest rootfs closure carries no glibc"
 ```
 
-**Notes.** Cap-parity needs no separate runtime witness: util-linux `setpriv`
-links libcap-ng unconditionally (no compile-time guard), so a static build
-either honors the `--inh-caps`/`--ambient-caps` flags the DNS/egress forks
-use or fails to build outright — and the no-glibc check already builds that
-binary as part of the rootfs closure.
+**Notes.** The custom helper makes capability handling explicit: it keeps only
+`CAP_NET_BIND_SERVICE` in the effective, permitted, and inheritable sets when
+requested, raises that capability ambiently, and otherwise clears all capability
+sets. Linux execution tests cover both branches; the builder-backed Nix build
+still proves the guest binary is statically linked for the target.
 
 ---
 
@@ -214,7 +214,9 @@ binary as part of the rootfs closure.
 
 Tracked here per the deferred-work convention; each is its own future plan.
 
-- **WS-2 (lever E):** custom `mvm-setpriv` static-musl helper in `mvm-agentd`, built through `crates/mvm-build/src/guest_agent_build.rs` beside `seccomp-apply`/`netinit`/`verity-init`; decided on WS-1's measured numbers (build only if the ~1 MiB + reduced attack surface justifies owning a privilege primitive).
+- **WS-2 (lever E):** the custom static-musl `mvm-setpriv` helper is complete as a
+  dedicated `mvm-agentd` binary and Nix package; the generated `mkGuest` init now
+  uses it instead of util-linux.
 - **WS-3 (lever B):** the static-musl runtime-overlay cut and separate SDK sidecar
   packaging are complete; automatic runtime attachment for workloads using the
   SDK host-service verbs remains. The overlay allocation is now capped at 16 MiB,
@@ -228,9 +230,9 @@ Tracked here per the deferred-work convention; each is its own future plan.
 
 ## Self-review
 
-- **Spec coverage:** WS-1's two deliverables (the swap + eval gate; the measurement + budget) map to Task 1 and Task 2. Guardrails are Global Constraints. WS-2..6 are the roadmap, explicitly out of this plan.
+- **Spec coverage:** WS-1's two deliverables (the static baseline + eval gate; the measurement + budget) map to Task 1 and Task 2. WS-2 and the later footprint slices are tracked in the handoff sections below.
 - **Placeholder scan:** the only value left to the executor is `ROOTFS_MAX_BYTES`, which is derived from a Step-2 measurement, not a guess — the edit locations and the derivation rule are exact.
-- **Type consistency:** `passthru.setpriv` is produced in Task 1 and consumed by name in the eval test and Task 2; the string value `"${pkgs.pkgsStatic.util-linux}/bin/setpriv"` is identical at both the guest and the test (same nixpkgs input + system).
+- **Type consistency:** `passthru.mvm.setprivHelperName` records the generated init's helper identity without forcing the target derivation during pure eval; the structural test checks the actual `/bin/mvm-setpriv` path wiring.
 
 ## WS-3 handoff
 
@@ -245,6 +247,17 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
 - [ ] Wire runtime attachment so a workload that uses host-service verbs is
   automatically opted into the SDK sidecar. The default static overlay
   intentionally does not carry the SDK FFI or its glibc closure.
+
+## WS-2 handoff
+
+- [x] Add the narrow `mvm-setpriv` parser and exec binary to `mvm-agentd`.
+- [x] Implement numeric uid/gid replacement, supplementary-group clearing,
+  no-new-privileges, full capability dropping, and the optional
+  `CAP_NET_BIND_SERVICE` inheritable/ambient path.
+- [x] Build the helper through a dedicated static-musl Nix package and use it
+  from every generated `mkGuest` privilege-drop site.
+- [x] Add parser tests and a structural Nix test proving the util-linux path is
+  no longer part of `mkGuest`.
 
 ## WS-5/WS-6 handoff
 
