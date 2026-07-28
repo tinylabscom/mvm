@@ -200,6 +200,7 @@ pub struct VirtioBlk {
     avail: u64,
     used: u64,
     last_avail: u16,
+    next_used: u16,
     interrupt_status: u32,
 }
 
@@ -230,6 +231,7 @@ impl VirtioBlk {
             avail: 0,
             used: 0,
             last_avail: 0,
+            next_used: 0,
             interrupt_status: 0,
         }
     }
@@ -291,8 +293,18 @@ impl VirtioBlk {
             R_DRIVER_FEATURES => {} // accept whatever the driver acks
             R_QUEUE_SEL => {}       // single queue (0)
             R_QUEUE_NUM => self.queue_num = v,
-            R_QUEUE_READY => self.queue_ready = v,
-            R_STATUS => self.status = v,
+            R_QUEUE_READY => {
+                self.queue_ready = v;
+                if v == 0 {
+                    self.rewind_ring_cursors();
+                }
+            }
+            R_STATUS => {
+                self.status = v;
+                if v == 0 {
+                    self.rewind_ring_cursors();
+                }
+            }
             R_INTERRUPT_ACK => self.interrupt_status &= !v,
             R_QUEUE_DESC_LO => self.desc = (self.desc & !0xffff_ffff) | u64::from(v),
             R_QUEUE_DESC_HI => self.desc = (self.desc & 0xffff_ffff) | (u64::from(v) << 32),
@@ -327,10 +339,6 @@ impl VirtioBlk {
         let Some(mut queue) = build_split_queue(self.ring(), qsz) else {
             return false;
         };
-        // Preserve the pre-migration used-ring behaviour, which read the completion
-        // index from guest RAM. Seed the now device-owned `next_used` from it so the
-        // used entries land at byte-identical slots for a conformant guest.
-        queue.set_next_used(self.rd_u16(self.used + 2));
 
         let debug = virtio_debug();
         if debug {
@@ -377,6 +385,7 @@ impl VirtioBlk {
             let _ = queue.add_used(&mem, head, written);
         }
         self.last_avail = queue.next_avail();
+        self.next_used = queue.next_used();
         if serviced {
             self.interrupt_status |= 1; // used-buffer notification
         }
@@ -391,7 +400,23 @@ impl VirtioBlk {
             avail: self.avail,
             used: self.used,
             next_avail: self.last_avail,
+            next_used: self.next_used,
         }
+    }
+
+    /// Rewind both device-owned ring cursors to the start of a fresh ring.
+    ///
+    /// The cursors are zero at construction and are re-zeroed on exactly the two
+    /// register writes by which a driver hands the device a newly-programmed
+    /// ring: detaching the queue (`QueueReady` ← 0, after which the driver frees
+    /// the ring and any later activation programs zeroed memory) and resetting
+    /// the device (`Status` ← 0, after which the driver re-runs the whole
+    /// initialization sequence). Every other register write leaves them alone, so
+    /// a redundant `QueueReady` ← 1 on a live queue cannot rewind the device onto
+    /// used slots the driver still owns.
+    fn rewind_ring_cursors(&mut self) {
+        self.last_avail = 0;
+        self.next_used = 0;
     }
 
     /// Service one virtio-blk request, given its chain's device-readable and
@@ -510,6 +535,7 @@ struct FsQueue {
     avail: u64,
     used: u64,
     last_avail: u16,
+    next_used: u16,
 }
 
 impl FsQueue {
@@ -521,7 +547,17 @@ impl FsQueue {
             avail: self.avail,
             used: self.used,
             next_avail: self.last_avail,
+            next_used: self.next_used,
         }
+    }
+
+    /// Rewind both device-owned ring cursors to the start of a fresh ring, on the
+    /// same two transitions as [`VirtioBlk::rewind_ring_cursors`]: this queue
+    /// being detached (`QueueReady` ← 0) and the device being reset
+    /// (`Status` ← 0).
+    fn rewind_cursors(&mut self) {
+        self.last_avail = 0;
+        self.next_used = 0;
     }
 }
 
@@ -621,8 +657,21 @@ impl VirtioFs {
             R_DRIVER_FEATURES_SEL | R_DRIVER_FEATURES => {}
             R_QUEUE_SEL => self.queue_sel = v,
             R_QUEUE_NUM => self.q_mut().num = v,
-            R_QUEUE_READY => self.q_mut().ready = v,
-            R_STATUS => self.status = v,
+            R_QUEUE_READY => {
+                let q = self.q_mut();
+                q.ready = v;
+                if v == 0 {
+                    q.rewind_cursors();
+                }
+            }
+            R_STATUS => {
+                self.status = v;
+                if v == 0 {
+                    // A device reset returns every queue to its pre-init state, not
+                    // just the one currently selected.
+                    self.queues.iter_mut().for_each(FsQueue::rewind_cursors);
+                }
+            }
             R_INTERRUPT_ACK => self.interrupt_status &= !v,
             R_QUEUE_DESC_LO => {
                 let d = self.q().desc;
@@ -676,9 +725,6 @@ impl VirtioFs {
         let Some(mut queue) = build_split_queue(q.ring(), qsz) else {
             return false;
         };
-        // Seed the now device-owned used index from guest RAM so the used entries
-        // land at byte-identical slots for a conformant guest.
-        queue.set_next_used(self.mem.rd_u16(q.used + 2));
 
         let mut completed: Vec<(u16, u32)> = Vec::new();
         {
@@ -711,6 +757,7 @@ impl VirtioFs {
             let _ = queue.add_used(&mem, head, written);
         }
         self.queues[qidx].last_avail = queue.next_avail();
+        self.queues[qidx].next_used = queue.next_used();
         if serviced {
             self.interrupt_status |= 1;
         }
@@ -1227,6 +1274,14 @@ mod tests {
     /// used-ring completion, kept as the differential oracle. The migrated
     /// `process_queue` must reproduce its guest-RAM writes, disk writes,
     /// used-ring bytes, used index, `last_avail`, and interrupt bit exactly.
+    ///
+    /// The oracle re-reads `used.idx` from guest RAM before every completion
+    /// where the migrated path uses its own cursor. The two stay in lockstep for
+    /// every layout here because each fixture starts from a zeroed used ring
+    /// that no guest buffer aliases — exactly the conformant case. A fixture
+    /// that pre-seeds a non-zero `used.idx`, or aims a device-writable buffer at
+    /// the used ring, is expected to diverge; those cases are asserted as
+    /// device-owned wins by the ring-cursor tests below.
     fn reference_blk_process_queue(d: &mut VirtioBlk) -> bool {
         if d.queue_ready == 0 {
             return false;
@@ -1446,6 +1501,160 @@ mod tests {
         );
     }
 
+    // ---- device-owned ring cursors: cross-drain + lifecycle -----------------
+
+    /// Two conformant single-payload read chains. Laid out by
+    /// [`program_blk_queue`], chain 0 takes descriptors 0..3 (head 0) and
+    /// chain 1 takes 3..6 (head 3).
+    fn blk_two_read_chains() -> Vec<BlkChain> {
+        (0..2)
+            .map(|sector| BlkChain {
+                req_type: VIRTIO_BLK_T_IN,
+                sector,
+                data: vec![512],
+                status: true,
+            })
+            .collect()
+    }
+
+    /// A block device carrying [`blk_two_read_chains`], drained once — so both
+    /// device-owned cursors sit at 1 with one chain still unpublished. Returns
+    /// the device and its (available ring, used ring) addresses.
+    fn blk_drained_once(qsz: u16) -> (VirtioBlk, u64, u64) {
+        let mut d = blk_dev(blk_disk());
+        let (avail, used) = program_blk_queue(&mut d, qsz, &blk_two_read_chains());
+        d.mem.wr_u16(avail + 2, 1);
+        assert!(d.process_queue(), "first drain services one chain");
+        (d, avail, used)
+    }
+
+    /// The used cursor is device state **across** drains, not just within one:
+    /// the device never recovers it from the guest-writable used ring. A guest
+    /// that rewrites `used.idx` between two notifies cannot make the next
+    /// completion overwrite a record it has not consumed.
+    #[test]
+    fn blk_used_index_is_device_owned_across_drains() {
+        let qsz = 8u16;
+        let (mut d, avail, used) = blk_drained_once(qsz);
+        assert_eq!(d.mem.rd_u16(used + 2), 1, "first drain published index 1");
+        assert_eq!(d.mem.rd_u32(used + 4), 0, "slot 0 records the first head");
+
+        // Between drains the guest scribbles its own value into `used.idx`,
+        // aiming the next completion back at slot 0.
+        d.mem.wr_u16(used + 2, 0);
+
+        d.mem.wr_u16(avail + 2, 2);
+        assert!(d.process_queue(), "second drain services the second chain");
+        assert_eq!(
+            d.mem.rd_u16(used + 2),
+            2,
+            "the device republished its own count, not the guest's"
+        );
+        assert_eq!(
+            d.mem.rd_u32(used + 4),
+            0,
+            "slot 0 still holds the first completion"
+        );
+        assert_eq!(
+            d.mem.rd_u32(used + 12),
+            3,
+            "the second completion landed at the device's next slot"
+        );
+        assert_eq!(d.next_used, 2, "device cursor counted both completions");
+
+        // The pre-migration walk re-read the index from guest RAM per
+        // completion, so the same scribble steered its second completion on top
+        // of the first.
+        let mut d_ref = blk_dev(blk_disk());
+        program_blk_queue(&mut d_ref, qsz, &blk_two_read_chains());
+        d_ref.mem.wr_u16(avail + 2, 1);
+        assert!(reference_blk_process_queue(&mut d_ref));
+        d_ref.mem.wr_u16(used + 2, 0);
+        d_ref.mem.wr_u16(avail + 2, 2);
+        assert!(reference_blk_process_queue(&mut d_ref));
+        assert_eq!(
+            d_ref.mem.rd_u16(used + 2),
+            1,
+            "the retired walk followed the guest's index"
+        );
+        assert_eq!(
+            d_ref.mem.rd_u32(used + 4),
+            3,
+            "and overwrote slot 0 with the second head"
+        );
+    }
+
+    #[test]
+    fn blk_queue_ready_zero_rewinds_the_ring_cursors() {
+        let (mut d, avail, used) = blk_drained_once(8);
+        assert_eq!(
+            (d.last_avail, d.next_used),
+            (1, 1),
+            "one chain consumed and completed"
+        );
+
+        d.write(R_QUEUE_READY, 0);
+        assert_eq!(d.queue_ready, 0);
+        assert_eq!(
+            (d.last_avail, d.next_used),
+            (0, 0),
+            "detaching the queue rewinds both cursors"
+        );
+
+        // The driver reactivates with a freshly-zeroed ring: the first chain is
+        // serviced again and its completion lands at used slot 0.
+        d.mem.wr_u16(used + 2, 0);
+        d.mem.wr_u16(avail + 2, 0);
+        d.write(R_QUEUE_READY, 1);
+        d.mem.wr_u16(avail + 2, 1);
+        assert!(d.process_queue());
+        assert_eq!(d.mem.rd_u16(used + 2), 1, "completion published at index 1");
+        assert_eq!(d.mem.rd_u32(used + 4), 0, "and recorded at slot 0");
+    }
+
+    #[test]
+    fn blk_device_reset_rewinds_the_ring_cursors() {
+        let (mut d, _avail, _used) = blk_drained_once(8);
+        assert_eq!((d.last_avail, d.next_used), (1, 1));
+
+        // A driver walking the status bits up to DRIVER_OK must not be rewound.
+        d.write(R_STATUS, 0xf);
+        assert_eq!(
+            (d.last_avail, d.next_used),
+            (1, 1),
+            "a non-zero status write leaves the cursors alone"
+        );
+
+        d.write(R_STATUS, 0);
+        assert_eq!(
+            (d.last_avail, d.next_used),
+            (0, 0),
+            "a device reset rewinds both cursors"
+        );
+    }
+
+    #[test]
+    fn blk_redundant_queue_ready_write_does_not_rewind_a_live_ring() {
+        let (mut d, avail, used) = blk_drained_once(8);
+
+        d.write(R_QUEUE_READY, 1);
+        assert_eq!(
+            (d.last_avail, d.next_used),
+            (1, 1),
+            "re-arming an already-ready queue must not rewind it"
+        );
+
+        // The next drain resumes at the second chain and the device's next slot.
+        d.mem.wr_u16(avail + 2, 2);
+        assert!(d.process_queue());
+        assert_eq!(d.mem.rd_u16(used + 2), 2);
+        assert_eq!(
+            d.mem.rd_u32(used + 12),
+            3,
+            "slot 1 records the second chain's head"
+        );
+    }
+
     // ---- virtio-fs queue migration: differential equivalence ----------------
 
     const FUSE_LOOKUP: u32 = 1;
@@ -1643,12 +1852,15 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         (avail, used)
     }
 
     /// Faithful copy of the pre-migration hand-rolled virtio-fs drain loop and
-    /// used-ring completion, kept as the differential oracle.
+    /// used-ring completion, kept as the differential oracle. Byte-identity with
+    /// the migrated path holds under the same precondition as the block oracle:
+    /// a zeroed, un-aliased used ring.
     fn reference_fs_process_queue(fs: &mut VirtioFs, qidx: usize) -> bool {
         if qidx >= FS_NUM_QUEUES {
             return false;
@@ -1780,5 +1992,184 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The virtio-fs request queue (queue 0 is hiprio).
+    const FS_REQ_QIDX: usize = 1;
+
+    /// Two conformant FUSE INIT chains, each a request descriptor plus a reply
+    /// buffer. Chain 0 takes descriptors 0..2 (head 0), chain 1 takes 2..4
+    /// (head 2).
+    fn fs_two_init_chains() -> Vec<FsChain> {
+        let init = fuse_request(FUSE_INIT, 1, 0, &init_body());
+        vec![
+            FsChain {
+                req: vec![init.clone()],
+                reply: vec![256],
+            },
+            FsChain {
+                req: vec![init],
+                reply: vec![256],
+            },
+        ]
+    }
+
+    /// A virtio-fs device carrying [`fs_two_init_chains`] on its request queue,
+    /// drained once — so both device-owned cursors sit at 1 with one chain still
+    /// unpublished. Returns the device and its (available ring, used ring)
+    /// addresses.
+    fn fs_drained_once(root: &Path, qsz: u16) -> (VirtioFs, u64, u64) {
+        let mut fs = fs_dev(root);
+        let (avail, used) = program_fs_queue(&mut fs, FS_REQ_QIDX, qsz, &fs_two_init_chains());
+        fs.mem.wr_u16(avail + 2, 1);
+        assert!(
+            fs.process_queue(FS_REQ_QIDX),
+            "first drain services one chain"
+        );
+        (fs, avail, used)
+    }
+
+    /// Select the request queue, so the `QueueNum`/`QueueReady`/address register
+    /// writes that follow apply to it.
+    fn fs_select_request_queue(fs: &mut VirtioFs) {
+        fs.write(R_QUEUE_SEL, FS_REQ_QIDX as u64);
+    }
+
+    /// Cross-drain witness: a guest that rewrites `used.idx` between two
+    /// notifies cannot steer where the fs device records its next completion.
+    #[test]
+    fn fs_used_index_is_device_owned_across_drains() {
+        let dir = tempfile::tempdir().unwrap();
+        let qsz = 8u16;
+        let (mut fs, avail, used) = fs_drained_once(dir.path(), qsz);
+        assert_eq!(fs.mem.rd_u16(used + 2), 1, "first drain published index 1");
+        assert_eq!(fs.mem.rd_u32(used + 4), 0, "slot 0 records the first head");
+
+        fs.mem.wr_u16(used + 2, 0);
+
+        fs.mem.wr_u16(avail + 2, 2);
+        assert!(fs.process_queue(FS_REQ_QIDX));
+        assert_eq!(
+            fs.mem.rd_u16(used + 2),
+            2,
+            "the device republished its own count, not the guest's"
+        );
+        assert_eq!(
+            fs.mem.rd_u32(used + 4),
+            0,
+            "slot 0 still holds the first completion"
+        );
+        assert_eq!(
+            fs.mem.rd_u32(used + 12),
+            2,
+            "the second completion landed at the device's next slot"
+        );
+        assert_eq!(fs.queues[FS_REQ_QIDX].next_used, 2);
+
+        // The pre-migration walk re-read the index per completion, so the same
+        // scribble steered its second completion on top of the first.
+        let mut fs_ref = fs_dev(dir.path());
+        program_fs_queue(&mut fs_ref, FS_REQ_QIDX, qsz, &fs_two_init_chains());
+        fs_ref.mem.wr_u16(avail + 2, 1);
+        assert!(reference_fs_process_queue(&mut fs_ref, FS_REQ_QIDX));
+        fs_ref.mem.wr_u16(used + 2, 0);
+        fs_ref.mem.wr_u16(avail + 2, 2);
+        assert!(reference_fs_process_queue(&mut fs_ref, FS_REQ_QIDX));
+        assert_eq!(
+            fs_ref.mem.rd_u16(used + 2),
+            1,
+            "the retired walk followed the guest's index"
+        );
+        assert_eq!(
+            fs_ref.mem.rd_u32(used + 4),
+            2,
+            "and overwrote slot 0 with the second head"
+        );
+    }
+
+    #[test]
+    fn fs_queue_ready_zero_rewinds_the_ring_cursors() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut fs, avail, used) = fs_drained_once(dir.path(), 8);
+        let cursors = |fs: &VirtioFs| {
+            (
+                fs.queues[FS_REQ_QIDX].last_avail,
+                fs.queues[FS_REQ_QIDX].next_used,
+            )
+        };
+        assert_eq!(cursors(&fs), (1, 1), "one chain consumed and completed");
+
+        fs_select_request_queue(&mut fs);
+        fs.write(R_QUEUE_READY, 0);
+        assert_eq!(fs.queues[FS_REQ_QIDX].ready, 0);
+        assert_eq!(
+            cursors(&fs),
+            (0, 0),
+            "detaching the queue rewinds both cursors"
+        );
+
+        fs.mem.wr_u16(used + 2, 0);
+        fs.mem.wr_u16(avail + 2, 0);
+        fs.write(R_QUEUE_READY, 1);
+        fs.mem.wr_u16(avail + 2, 1);
+        assert!(fs.process_queue(FS_REQ_QIDX));
+        assert_eq!(
+            fs.mem.rd_u16(used + 2),
+            1,
+            "completion published at index 1"
+        );
+        assert_eq!(fs.mem.rd_u32(used + 4), 0, "and recorded at slot 0");
+    }
+
+    #[test]
+    fn fs_device_reset_rewinds_every_queues_ring_cursors() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut fs, _avail, _used) = fs_drained_once(dir.path(), 8);
+        // The hiprio queue is never notified by these fixtures; give it cursors
+        // of its own so the reset is observed across the whole device.
+        fs.queues[0].last_avail = 5;
+        fs.queues[0].next_used = 5;
+
+        fs.write(R_STATUS, 0xf);
+        assert_eq!(
+            (fs.queues[FS_REQ_QIDX].last_avail, fs.queues[0].next_used),
+            (1, 5),
+            "a non-zero status write leaves the cursors alone"
+        );
+
+        fs.write(R_STATUS, 0);
+        for (qidx, q) in fs.queues.iter().enumerate() {
+            assert_eq!(
+                (q.last_avail, q.next_used),
+                (0, 0),
+                "queue {qidx} not rewound by the device reset"
+            );
+        }
+    }
+
+    #[test]
+    fn fs_redundant_queue_ready_write_does_not_rewind_a_live_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut fs, avail, used) = fs_drained_once(dir.path(), 8);
+
+        fs_select_request_queue(&mut fs);
+        fs.write(R_QUEUE_READY, 1);
+        assert_eq!(
+            (
+                fs.queues[FS_REQ_QIDX].last_avail,
+                fs.queues[FS_REQ_QIDX].next_used
+            ),
+            (1, 1),
+            "re-arming an already-ready queue must not rewind it"
+        );
+
+        fs.mem.wr_u16(avail + 2, 2);
+        assert!(fs.process_queue(FS_REQ_QIDX));
+        assert_eq!(fs.mem.rd_u16(used + 2), 2);
+        assert_eq!(
+            fs.mem.rd_u32(used + 12),
+            2,
+            "slot 1 records the second chain's head"
+        );
     }
 }
