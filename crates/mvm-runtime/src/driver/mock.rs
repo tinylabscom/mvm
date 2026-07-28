@@ -170,6 +170,7 @@ impl VmmDriver for MockDriver {
             spawned_unix_secs: now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: spec.image_sha256.clone(),
+            parent_checkpoint: None,
         })
     }
 

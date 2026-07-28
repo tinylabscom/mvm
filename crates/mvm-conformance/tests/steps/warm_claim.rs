@@ -72,6 +72,7 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
     let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
     let handle = StandbyHandle {
         id: "warm-parent".into(),
+        template_id: None,
         control_socket: store_root.path().join("control.sock").display().to_string(),
         pid: 0,
         kernel_sha256: "k".repeat(64),
@@ -81,6 +82,7 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
         spawned_unix_secs: 1,
         state: StandbyState::Idle,
         image_sha256: None,
+        parent_checkpoint: None,
     };
     pool.record(&handle).expect("record the standby parent");
 

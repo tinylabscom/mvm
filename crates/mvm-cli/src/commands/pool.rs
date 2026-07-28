@@ -752,6 +752,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: None,
+            parent_checkpoint: None,
         }
     }
 
@@ -768,6 +769,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: Some(image.into()),
+            parent_checkpoint: None,
         }
     }
 
@@ -952,6 +954,7 @@ mod tests {
                 spawned_unix_secs: 1,
                 state: StandbyState::Idle,
                 image_sha256: spec.image_sha256.clone(),
+                parent_checkpoint: None,
             })
         }
         fn start_with_mode(&self, _: &VmStartConfig, _: StartMode) -> anyhow::Result<VmId> {

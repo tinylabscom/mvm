@@ -763,6 +763,15 @@ pub struct StandbyHandle {
     /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for HVF saved-standbys.
     #[serde(default)]
     pub image_sha256: Option<String>,
+    /// The content-addressed checkpoint this parent was captured as, set once
+    /// a spawn has captured it. `None` means the parent was never captured, so
+    /// it cannot be claimed: a claim verifies content and lineage against this
+    /// checkpoint before cloning anything.
+    ///
+    /// Held as the raw id string rather than a `CheckpointId` because that type
+    /// lives a layer up; the runtime converts at its boundary.
+    #[serde(default)]
+    pub parent_checkpoint: Option<String>,
 }
 
 impl StandbyHandle {
@@ -1034,6 +1043,7 @@ mod tests {
             spawned_unix_secs: 1_700_000_000,
             state: StandbyState::Idle,
             image_sha256: None,
+            parent_checkpoint: None,
         };
         let json = serde_json::to_string(&h).unwrap();
         let back: StandbyHandle = serde_json::from_str(&json).unwrap();
@@ -1145,6 +1155,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: Some("dd".repeat(32)),
+            parent_checkpoint: None,
         };
         assert!(saved.is_saved_state());
         // serde roundtrip preserves the image sha and pid=0.

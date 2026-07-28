@@ -1596,6 +1596,7 @@ mod tests {
                 spawned_unix_secs: 1,
                 state: StandbyState::Idle,
                 image_sha256: None,
+                parent_checkpoint: None,
             }
         }
 
