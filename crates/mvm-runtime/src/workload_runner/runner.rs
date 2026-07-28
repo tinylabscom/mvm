@@ -23,7 +23,10 @@ use mvm_core::vm_backend::{
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
 
-use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_content, verify_lineage};
+use crate::checkpoint::{
+    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, capture_vm_full, verify_content,
+    verify_lineage,
+};
 use crate::driver::{ChildForkRequest, RunningVm, VmmDriver};
 use crate::egress_shared::decode_plan_secrets_from_state;
 use crate::standby_pool::SupervisorStandbyPool;
@@ -251,6 +254,15 @@ pub struct ClaimContext<'a> {
     pub registry_path: &'a Path,
 }
 
+/// The warm-pool substrate a spawn-and-capture needs beyond the runner's
+/// cold-boot fields. Only the checkpoint store: the parent is booted through the
+/// driver and captured whole, so nothing else of the claim substrate is reached
+/// on the way in.
+pub struct SpawnContext<'a> {
+    /// Content-addressed checkpoint store the captured parent is written to.
+    pub checkpoints: &'a CheckpointStore,
+}
+
 /// Starts workloads over the `VmmDriver` seam: spawn the per-VM gating endpoint,
 /// map the config to a `VmmSpec`, boot via the driver.
 pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> {
@@ -431,6 +443,72 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         endpoint.defuse();
         cleanup.commit();
         Ok(child)
+    }
+
+    /// Boot a standby parent, capture its whole live state, and release it.
+    ///
+    /// The driver boots the parent and supplies the backend-specific control;
+    /// capturing a live VM's memory is backend-agnostic, so it lives here rather
+    /// than in any one driver. The captured checkpoint is what a later claim
+    /// verifies content and lineage against.
+    pub fn spawn_standby_captured(
+        &self,
+        ctx: &SpawnContext<'_>,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let mut handle = self.driver.spawn_standby_parent(spec)?;
+
+        let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
+            StandbyError::SpawnFailed(format!(
+                "backend cannot capture a warm parent's memory for standby '{}'",
+                spec.id
+            ))
+        })?;
+
+        let captured = capture_vm_full(
+            ctx.checkpoints,
+            CaptureVmFullParams {
+                id: CheckpointId::new(format!("standby-{}", spec.id)),
+                vm_name: spec.id.clone(),
+                supervisor_config_digest: String::new(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
+                // Firecracker keeps no supervisor-config blob; its presence is
+                // what marks a checkpoint as originating from a backend that does.
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: crate::standby_pool::now_unix_secs(),
+            },
+            control.as_ref(),
+        );
+
+        // Release either way: the checkpoint carries the parent's full state, so
+        // a pool slot costs disk rather than a resident VM, and a failed capture
+        // must not strand the guest.
+        self.release_standby_parent(&spec.id);
+
+        let meta = captured
+            .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e}")))?;
+
+        // No live process backs the captured parent — zero is the sentinel
+        // `is_saved_state()` keys off, and it is now true.
+        handle.pid = 0;
+        handle.parent_checkpoint = Some(meta.id.as_str().to_string());
+        Ok(handle)
+    }
+
+    /// Stop a captured standby parent. A parent that cannot be reaped must not
+    /// fail an otherwise-good capture, but it must stay visible.
+    fn release_standby_parent(&self, vm_name: &str) {
+        let id = VmId(vm_name.to_string());
+        match self.driver.attach(&id).and_then(|vm| vm.kill()) {
+            Ok(()) => {}
+            Err(e) => tracing::warn!(
+                vm = vm_name,
+                error = %e,
+                "releasing captured standby parent failed; it may still be running"
+            ),
+        }
     }
 }
 
@@ -1707,6 +1785,47 @@ mod tests {
             spec.vsock.len(),
             3,
             "sealed prod boot must carry no console listeners"
+        );
+    }
+
+    /// A spawned parent is claimable only once captured: the handle must carry
+    /// the checkpoint a later claim verifies content and lineage against, and
+    /// that checkpoint must carry saved memory — a rootfs-only capture would
+    /// make every claim a cold boot.
+    #[test]
+    fn spawn_standby_captured_stamps_a_memory_carrying_checkpoint() {
+        use mvm_core::checkpoint::CheckpointClass;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let rootfs = tmp.path().join("parent-rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs bytes").unwrap();
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(&rootfs),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let spec = sample_standby_spec("parent-a", tmp.path());
+
+        let handle = runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                },
+                &spec,
+            )
+            .unwrap();
+
+        let id = handle
+            .parent_checkpoint
+            .expect("a captured parent must carry its checkpoint id");
+        let meta = store.read_meta(&CheckpointId::new(id)).unwrap();
+        assert_eq!(meta.class, CheckpointClass::VmFull);
+        assert!(
+            meta.content.iter().any(|b| b.name == "memory.bin"),
+            "the capture must carry saved memory, got: {:?}",
+            meta.content.iter().map(|b| &b.name).collect::<Vec<_>>()
         );
     }
 

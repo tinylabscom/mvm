@@ -11,7 +11,7 @@ pub mod spec_map;
 
 pub use runner::{
     BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, ClaimContext, EndpointSpawnRequest,
-    EndpointSpawner, RealBrokerRegistrar, RealEndpointSpawner, WorkloadLaunchInputs,
+    EndpointSpawner, RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs,
     WorkloadRunner,
 };
 pub use spec_map::{

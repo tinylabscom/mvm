@@ -680,6 +680,29 @@ impl AnyBackend {
     /// the runner never loads the host key itself.
     ///
     /// [`ClaimContext`]: crate::workload_runner::ClaimContext
+    pub fn spawn_standby_via_runner(
+        &self,
+        ctx: &crate::workload_runner::SpawnContext<'_>,
+        spec: &mvm_core::vm_backend::StandbySpec,
+    ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
+    {
+        match self {
+            AnyBackend::Firecracker(runner) => runner.spawn_standby_captured(ctx, spec),
+            AnyBackend::Libkrun(runner) => runner.spawn_standby_captured(ctx, spec),
+            AnyBackend::Hvf(runner) => runner.spawn_standby_captured(ctx, spec),
+            // The hermetic lifecycle double has no runner and no checkpoint
+            // store; it services the spawn from its own in-memory state.
+            #[cfg(feature = "test-support")]
+            AnyBackend::Mock(backend) => backend.spawn_standby(spec),
+            // Not workload-bearing backends — no warm pool, fail closed.
+            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) => {
+                Err(mvm_core::vm_backend::StandbyError::Unsupported {
+                    backend: self.inner().name().to_string(),
+                })
+            }
+        }
+    }
+
     pub fn claim_standby_via_runner(
         &self,
         ctx: &crate::workload_runner::ClaimContext<'_>,
@@ -1689,6 +1712,46 @@ mod tests {
                 assert!(
                     matches!(err, StandbyError::Unsupported { .. }),
                     "{name} must fail closed: {err}"
+                );
+            }
+        }
+
+        /// The spawn half must refuse exactly the backends the claim half does,
+        /// or a pool could be filled for a backend that can never claim from it.
+        #[test]
+        fn spawn_fails_closed_for_the_same_non_workload_backends() {
+            use crate::workload_runner::SpawnContext;
+
+            let s = Scaffold::new();
+            let spec = mvm_core::vm_backend::StandbySpec {
+                id: "parent-a".into(),
+                template_id: None,
+                kernel_path: "/img/kernel".into(),
+                kernel_sha256: "a".repeat(64),
+                vcpus: 2,
+                mem_mib: 512,
+                signing_key_path: "/keys/host-signer.ed25519".into(),
+                signer_id: "host:test".into(),
+                binding_nonce: "b".repeat(64),
+                control_socket: "/tmp/does-not-exist.sock".into(),
+                vm_state_dir: "/tmp/does-not-exist".into(),
+                image_path: None,
+                image_sha256: None,
+            };
+
+            for name in ["qemu", "wasm"] {
+                let backend = AnyBackend::from_hypervisor(name);
+                let err = backend
+                    .spawn_standby_via_runner(
+                        &SpawnContext {
+                            checkpoints: &s.checkpoints,
+                        },
+                        &spec,
+                    )
+                    .expect_err("a non-workload backend has no warm pool to fill");
+                assert!(
+                    matches!(err, StandbyError::Unsupported { .. }),
+                    "{name} must fail closed on spawn: {err}"
                 );
             }
         }
