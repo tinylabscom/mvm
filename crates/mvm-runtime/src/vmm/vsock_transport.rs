@@ -193,7 +193,7 @@ impl VsockTransportCore {
         let Some(mem) = self.mem.guest_memory() else {
             return Vec::new();
         };
-        let Some(mut queue) = build_tx_queue(&q, qsz) else {
+        let Some(mut queue) = build_split_queue(&q, qsz) else {
             return Vec::new();
         };
         // Preserve the pre-migration used-ring behaviour, which read the completion
@@ -328,50 +328,83 @@ impl VsockTransportCore {
         let Some(qsz) = super::validated_queue_size(q.num) else {
             return false;
         };
-        let mut last = q.last_avail;
+        // The `virtio-queue` walk needs a real `GuestMemory` over the same
+        // externally-owned RAM; if it can't be built (e.g. a non-page-aligned
+        // mapping) service nothing, mirroring the illegal-geometry early outs.
+        let Some(mem) = self.mem.guest_memory() else {
+            return false;
+        };
+        let Some(mut queue) = build_split_queue(&q, qsz) else {
+            return false;
+        };
+        // Seed the now device-owned used index from guest RAM so the used entries
+        // land at byte-identical slots for a conformant guest (mirrors the TX path).
+        queue.set_next_used(self.mem.rd_u16(q.used + 2));
+
+        let mut completed = Vec::new();
         let mut delivered = false;
-        while !self.pending_rx.is_empty() {
-            let avail_idx = self.mem.rd_u16(q.avail + 2);
-            if last == avail_idx {
-                break;
-            }
-            let (hdr, payload) = self
-                .pending_rx
-                .pop_front()
-                .expect("loop guard checked non-empty");
-            let slot = last % qsz;
-            let head = self.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
-            let da = q.desc + u64::from(head) * 16;
-            let addr = self.mem.rd_u64(da);
-            let cap = self.mem.rd_u32(da + 8) as usize;
-            let payload_cap = match cap.checked_sub(HDR_LEN) {
-                Some(payload_cap) if payload_cap > 0 || payload.is_empty() => payload_cap,
-                _ => {
+        {
+            let Ok(mut avail) = queue.iter(&mem) else {
+                return false;
+            };
+            while !self.pending_rx.is_empty() {
+                let Some(chain) = avail.next() else {
+                    break;
+                };
+                let head = chain.head_index();
+                // The RX buffer is the chain's writable span. `virtio-queue` yields
+                // only descriptors flagged device-writable and range-checks each
+                // `next` link, so a chain offering no writable room delivers
+                // nothing — the packet is left queued rather than silently dropped.
+                let dsts: Vec<(u64, usize)> = chain
+                    .writable()
+                    .map(|desc| (desc.addr().0, desc.len() as usize))
+                    .collect();
+                let cap: usize = dsts.iter().map(|(_, len)| len).sum();
+                let (hdr, payload) = self
+                    .pending_rx
+                    .pop_front()
+                    .expect("loop guard checked non-empty");
+                let payload_cap = match cap.checked_sub(HDR_LEN) {
+                    Some(payload_cap) if payload_cap > 0 || payload.is_empty() => payload_cap,
+                    _ => {
+                        // No usable RX buffer: leave the packet queued and un-consume
+                        // the avail entry so the used ring is not advanced for a
+                        // packet the guest never received.
+                        self.pending_rx.push_front((hdr, payload));
+                        avail.go_to_previous_position();
+                        break;
+                    }
+                };
+                let send_len = payload.len().min(payload_cap);
+                let mut framed = hdr;
+                framed.len = send_len as u32;
+                let mut bytes = framed.to_bytes().to_vec();
+                bytes.extend_from_slice(&payload[..send_len]);
+                if scatter_write(&self.mem, &dsts, &bytes) == 0 {
+                    // Out-of-range RX descriptor addr: nothing was delivered. Leave
+                    // the packet queued and un-consume the avail entry instead of
+                    // advancing the used ring (mirrors the too-small-buffer path).
                     self.pending_rx.push_front((hdr, payload));
+                    avail.go_to_previous_position();
                     break;
                 }
-            };
-            let send_len = payload.len().min(payload_cap);
-            let mut framed = hdr;
-            framed.len = send_len as u32;
-            let mut bytes = framed.to_bytes().to_vec();
-            bytes.extend_from_slice(&payload[..send_len]);
-            if self.mem.write_bytes(addr, &bytes) == 0 {
-                // Out-of-range RX descriptor addr: nothing was delivered. Leave the
-                // packet queued and stop instead of advancing the used ring for a
-                // packet the guest never received (mirrors the too-small-buffer path).
-                self.pending_rx.push_front((hdr, payload));
-                break;
+                completed.push((head, bytes.len() as u32));
+                let remainder = &payload[send_len..];
+                if !remainder.is_empty() {
+                    self.pending_rx.push_front((framed, remainder.to_vec()));
+                }
+                delivered = true;
             }
-            self.complete(RX, head, bytes.len() as u32, qsz);
-            let remainder = &payload[send_len..];
-            if !remainder.is_empty() {
-                self.pending_rx.push_front((framed, remainder.to_vec()));
-            }
-            last = last.wrapping_add(1);
-            delivered = true;
         }
-        self.queues[RX].last_avail = last;
+        for (head, written) in completed {
+            // `head` came from a validated avail-ring slot (`< qsz`); `add_used`
+            // re-checks the bound and writes the same 8-byte used element + used
+            // index the old `complete(RX, head, written, qsz)` wrote.
+            let _ = queue.add_used(&mem, head, written);
+            self.interrupt_status |= 1;
+        }
+        self.queues[RX].last_avail = queue.next_avail();
         delivered
     }
 
@@ -393,29 +426,38 @@ impl VsockTransportCore {
             .map(|credit| credit.bytes)
             .unwrap_or(0)
     }
+}
 
-    fn complete(&mut self, q: usize, head: u16, written: u32, qsz: u16) {
-        let used = self.queues[q].used;
-        let used_idx = self.mem.rd_u16(used + 2);
-        let slot = u64::from(used_idx % qsz);
-        self.mem.wr_u16(used + 4 + slot * 8, head);
-        self.mem.wr_u16(used + 6 + slot * 8, 0);
-        self.mem.wr_u16(used + 8 + slot * 8, written as u16);
-        self.mem
-            .wr_u16(used + 10 + slot * 8, (written >> 16) as u16);
-        self.mem.wr_u16(used + 2, used_idx.wrapping_add(1));
-        self.interrupt_status |= 1;
+/// Scatter `bytes` across the writable descriptors `dsts` (in chain order),
+/// returning the total number of bytes landed in guest RAM. Each descriptor
+/// write is bounds-checked by [`GuestMem`]; an out-of-range descriptor buffer
+/// lands nothing and stops the scatter, so a fully out-of-range chain returns 0
+/// and the caller treats the packet as undelivered.
+fn scatter_write(mem: &GuestMem, dsts: &[(u64, usize)], bytes: &[u8]) -> usize {
+    let mut written = 0usize;
+    for &(addr, len) in dsts {
+        if written >= bytes.len() {
+            break;
+        }
+        let take = len.min(bytes.len() - written);
+        let n = mem.write_bytes(addr, &bytes[written..written + take]);
+        written += n;
+        if n < take {
+            break;
+        }
     }
+    written
 }
 
 /// Build a validated `virtio-queue` split [`SplitQueue`] from the device's
-/// guest-programmed TX ring geometry. `qsz` is the already-validated ring size
-/// (power of two ≤ [`super::QUEUE_SIZE_MAX`]); `next_avail` resumes from the
-/// device-owned `last_avail` so iteration continues exactly where the previous
-/// drain stopped. Returns `None` if a ring address breaks virtio's alignment
-/// rules — `set_*_address` silently keeps the prior value in that case, so we
-/// refuse to service a geometry we could not faithfully program.
-fn build_tx_queue(q: &Queue, qsz: u16) -> Option<SplitQueue> {
+/// guest-programmed ring geometry (shared by the TX drain and the RX delivery).
+/// `qsz` is the already-validated ring size (power of two ≤
+/// [`super::QUEUE_SIZE_MAX`]); `next_avail` resumes from the device-owned
+/// `last_avail` so iteration continues exactly where the previous drain stopped.
+/// Returns `None` if a ring address breaks virtio's alignment rules —
+/// `set_*_address` silently keeps the prior value in that case, so we refuse to
+/// service a geometry we could not faithfully program.
+fn build_split_queue(q: &Queue, qsz: u16) -> Option<SplitQueue> {
     let mut queue = SplitQueue::new(super::QUEUE_SIZE_MAX as u16).ok()?;
     queue.set_size(qsz);
     queue.set_ready(true);
@@ -471,6 +513,9 @@ mod tests {
             core.mem.write_bytes(desc_addr, &buf.to_le_bytes());
             core.mem
                 .write_bytes(desc_addr + 8, &(*cap as u32).to_le_bytes());
+            // RX buffers are device-writable; a conformant guest sets F_WRITE so the
+            // writable-descriptor walk yields them.
+            core.mem.wr_u16(desc_addr + 12, DESC_F_WRITE);
             core.mem
                 .wr_u16(avail + 4 + (index as u64 * 2), index as u16);
         }
@@ -598,6 +643,7 @@ mod tests {
         core.mem.write_bytes(desc, &bogus.to_le_bytes());
         core.mem
             .write_bytes(desc + 8, &((HDR_LEN + 8) as u32).to_le_bytes());
+        core.mem.wr_u16(desc + 12, DESC_F_WRITE);
         core.queue_host_packet(1, 2, OP_RW, b"payload!");
 
         assert!(!core.flush_rx(), "bogus addr delivers nothing");
@@ -688,6 +734,7 @@ mod tests {
     // ---- TX virtio-queue migration: differential equivalence ----------------
 
     const DESC_F_NEXT: u16 = 1;
+    const DESC_F_WRITE: u16 = 2;
 
     /// One guest→host TX descriptor chain: its bytes split across N buffers.
     type Chain = Vec<Vec<u8>>;
@@ -991,5 +1038,230 @@ mod tests {
             "only the head descriptor was gathered"
         );
         assert_eq!(core.mem.rd_u16(used + 2), 1);
+    }
+
+    // ---- RX virtio-queue migration: differential equivalence ----------------
+
+    fn rx_hdr(dst_port: u32) -> VsockHdr {
+        VsockHdr {
+            src_cid: HOST_CID,
+            dst_cid: GUEST_CID,
+            src_port: mvm_agentd::vsock::EGRESS_PORT,
+            dst_port,
+            len: 0,
+            typ: TYPE_STREAM,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: HOST_BUF_ALLOC,
+            fwd_cnt: 3,
+        }
+    }
+
+    /// Faithful copy of the pre-migration hand-rolled RX delivery (`flush_rx` +
+    /// `complete`), kept as the differential oracle. It reads the head descriptor
+    /// directly and advances a locally-tracked `last_avail`; the migrated
+    /// `flush_rx` must reproduce its delivered bytes, used-ring writes, residual
+    /// `pending_rx`, `last_avail`, and interrupt bit exactly.
+    fn reference_flush_rx(core: &mut VsockTransportCore) -> bool {
+        let q = core.queues[RX];
+        if q.ready == 0 || core.pending_rx.is_empty() {
+            return false;
+        }
+        let Some(qsz) = super::super::validated_queue_size(q.num) else {
+            return false;
+        };
+        let mut last = q.last_avail;
+        let mut delivered = false;
+        while !core.pending_rx.is_empty() {
+            let avail_idx = core.mem.rd_u16(q.avail + 2);
+            if last == avail_idx {
+                break;
+            }
+            let (hdr, payload) = core
+                .pending_rx
+                .pop_front()
+                .expect("loop guard checked non-empty");
+            let slot = last % qsz;
+            let head = core.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
+            let da = q.desc + u64::from(head) * 16;
+            let addr = core.mem.rd_u64(da);
+            let cap = core.mem.rd_u32(da + 8) as usize;
+            let payload_cap = match cap.checked_sub(HDR_LEN) {
+                Some(payload_cap) if payload_cap > 0 || payload.is_empty() => payload_cap,
+                _ => {
+                    core.pending_rx.push_front((hdr, payload));
+                    break;
+                }
+            };
+            let send_len = payload.len().min(payload_cap);
+            let mut framed = hdr;
+            framed.len = send_len as u32;
+            let mut bytes = framed.to_bytes().to_vec();
+            bytes.extend_from_slice(&payload[..send_len]);
+            if core.mem.write_bytes(addr, &bytes) == 0 {
+                core.pending_rx.push_front((hdr, payload));
+                break;
+            }
+            reference_complete(core, q.used, head, bytes.len() as u32, qsz);
+            core.interrupt_status |= 1;
+            let remainder = &payload[send_len..];
+            if !remainder.is_empty() {
+                core.pending_rx.push_front((framed, remainder.to_vec()));
+            }
+            last = last.wrapping_add(1);
+            delivered = true;
+        }
+        core.queues[RX].last_avail = last;
+        delivered
+    }
+
+    /// Assert the migrated `flush_rx` is observationally identical to the oracle
+    /// over `caps` guest RX buffers and `packets` queued for delivery: same return
+    /// value, delivered buffer bytes, used-ring bytes, residual `pending_rx`,
+    /// `last_avail`, and interrupt bit.
+    fn assert_rx_matches_reference(label: &str, caps: &[usize], packets: &[(VsockHdr, Vec<u8>)]) {
+        let mut core_ref = transport();
+        let buffers_ref = configure_rx_buffers(&mut core_ref, caps);
+        for pkt in packets {
+            core_ref.pending_rx.push_back(pkt.clone());
+        }
+        let used = core_ref.queues[RX].used;
+        let ret_ref = reference_flush_rx(&mut core_ref);
+
+        let mut core_new = transport();
+        let buffers_new = configure_rx_buffers(&mut core_new, caps);
+        for pkt in packets {
+            core_new.pending_rx.push_back(pkt.clone());
+        }
+        let ret_new = core_new.flush_rx();
+
+        assert_eq!(ret_new, ret_ref, "return value differs for {label}");
+        assert_eq!(
+            buffers_new, buffers_ref,
+            "buffer layout differs for {label}"
+        );
+        for (i, (&buf, &cap)) in buffers_ref.iter().zip(caps).enumerate() {
+            assert_eq!(
+                core_new.mem.read_bytes(buf, cap),
+                core_ref.mem.read_bytes(buf, cap),
+                "buffer {i} bytes differ for {label}"
+            );
+        }
+        let used_len = 4 + caps.len() * 8;
+        assert_eq!(
+            core_new.mem.read_bytes(used, used_len),
+            core_ref.mem.read_bytes(used, used_len),
+            "used-ring bytes differ for {label}"
+        );
+        assert_eq!(
+            core_new.pending_rx, core_ref.pending_rx,
+            "pending_rx residue differs for {label}"
+        );
+        assert_eq!(
+            core_new.queues[RX].last_avail, core_ref.queues[RX].last_avail,
+            "last_avail differs for {label}"
+        );
+        assert_eq!(
+            core_new.interrupt_status & 1,
+            core_ref.interrupt_status & 1,
+            "interrupt bit differs for {label}"
+        );
+    }
+
+    #[test]
+    fn flush_rx_matches_reference_walk_byte_for_byte() {
+        // Single buffer, roomy: whole payload delivered in one RX buffer.
+        assert_rx_matches_reference(
+            "single-buffer",
+            &[HDR_LEN + 16],
+            &[(rx_hdr(1500), b"hello".to_vec())],
+        );
+        // Multi-buffer split: a 10-byte payload spans two smaller RX buffers
+        // (6 + 4) — the byte-identical case from the retained split test.
+        assert_rx_matches_reference(
+            "multi-buffer-split",
+            &[HDR_LEN + 6, HDR_LEN + 4],
+            &[(rx_hdr(1500), b"abcdefghij".to_vec())],
+        );
+        // Header-only buffer with an empty payload: delivered (0-length data ok).
+        assert_rx_matches_reference("empty-payload", &[HDR_LEN], &[(rx_hdr(1500), Vec::new())]);
+        // Buffer too small for even one payload byte: packet stays queued, used
+        // ring not advanced.
+        assert_rx_matches_reference("too-small", &[HDR_LEN], &[(rx_hdr(1500), b"xyz".to_vec())]);
+        // Two packets into two buffers: both delivered in order.
+        assert_rx_matches_reference(
+            "two-packets",
+            &[HDR_LEN + 8, HDR_LEN + 8],
+            &[
+                (rx_hdr(1500), b"one".to_vec()),
+                (rx_hdr(1600), b"two".to_vec()),
+            ],
+        );
+        // More packets than buffers: first delivered, second left queued.
+        assert_rx_matches_reference(
+            "packets-exceed-buffers",
+            &[HDR_LEN + 8],
+            &[
+                (rx_hdr(1500), b"aaa".to_vec()),
+                (rx_hdr(1600), b"bbb".to_vec()),
+            ],
+        );
+        // Payload larger than a single buffer but only one buffer available: the
+        // buffer is filled, the remainder re-framed and left queued.
+        assert_rx_matches_reference(
+            "partial-fill-remainder-queued",
+            &[HDR_LEN + 4],
+            &[(rx_hdr(1500), b"abcdefgh".to_vec())],
+        );
+    }
+
+    #[test]
+    fn flush_rx_matches_reference_on_bogus_rx_descriptor() {
+        // A single RX buffer whose descriptor addr points past mapped RAM. The
+        // migrated writable-descriptor path and the oracle must agree: nothing is
+        // delivered, the packet stays queued, and the used ring is not advanced.
+        let program = |core: &mut VsockTransportCore| {
+            let base = 0x4000_0000;
+            let desc = base + 0x100;
+            let avail = base + 0x200;
+            let used = base + 0x300;
+            core.queues[RX] = Queue {
+                num: 1,
+                ready: 1,
+                desc,
+                avail,
+                used,
+                last_avail: 0,
+            };
+            core.mem.wr_u16(avail + 2, 1);
+            core.mem.wr_u16(avail + 4, 0);
+            let bogus = base + 0x1_0000;
+            core.mem.write_bytes(desc, &bogus.to_le_bytes());
+            core.mem
+                .write_bytes(desc + 8, &((HDR_LEN + 8) as u32).to_le_bytes());
+            core.mem.wr_u16(desc + 12, DESC_F_WRITE);
+            core.queue_host_packet(1, 2, OP_RW, b"payload!");
+        };
+
+        let mut core_ref = transport();
+        program(&mut core_ref);
+        let ret_ref = reference_flush_rx(&mut core_ref);
+
+        let mut core_new = transport();
+        program(&mut core_new);
+        let ret_new = core_new.flush_rx();
+
+        assert_eq!(ret_new, ret_ref);
+        assert!(!ret_new, "bogus addr delivers nothing");
+        assert_eq!(core_new.pending_rx, core_ref.pending_rx);
+        assert_eq!(core_new.pending_rx.len(), 1, "packet left queued");
+        let used = core_new.queues[RX].used;
+        assert_eq!(core_new.mem.rd_u16(used + 2), core_ref.mem.rd_u16(used + 2));
+        assert_eq!(core_new.mem.rd_u16(used + 2), 0, "used ring not advanced");
+        assert_eq!(
+            core_new.queues[RX].last_avail, core_ref.queues[RX].last_avail,
+            "last_avail not advanced past the un-consumed entry"
+        );
+        assert_eq!(core_new.queues[RX].last_avail, 0);
     }
 }
