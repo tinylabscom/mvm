@@ -556,7 +556,7 @@ The driver boots the parent and supplies the backend-specific control; the captu
   }
   ```
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 /// A spawned parent is claimable only once captured: the handle must carry the
@@ -592,12 +592,12 @@ fn spawn_standby_captured_stamps_a_memory_carrying_checkpoint() {
 
 Reuse whatever runner-construction helper this file's existing tests already use for `MockDriver`.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo nextest run -p mvm-runtime workload_runner`
 Expected: FAIL — `no method named 'spawn_standby_captured'`.
 
-- [ ] **Step 3: Implement `SpawnContext` + `spawn_standby_captured`**
+- [x] **Step 3: Implement `SpawnContext` + `spawn_standby_captured`**
 
 Place `SpawnContext` next to `ClaimContext` (runner.rs:237), matching its doc-comment style. Then, alongside the existing `spawn_standby` (:669):
 
@@ -653,7 +653,7 @@ Place `SpawnContext` next to `ClaimContext` (runner.rs:237), matching its doc-co
 
 Write `release_standby_parent(&self, vm_name: &str)` as a small private helper that attaches to the VM and kills it, logging (not propagating) a failure — a parent that cannot be reaped must not fail an otherwise-good capture, but it must be visible. Check `CaptureVmFullParams`' exact field types before writing (`checkpoint/mod.rs:527`), and match what other construction sites pass for `supervisor_config_digest` if a real digest is available.
 
-- [ ] **Step 4: Add the `AnyBackend` routing seam**
+- [x] **Step 4: Add the `AnyBackend` routing seam**
 
 Mirror `claim_standby_via_runner` (backend.rs:683) exactly — same arms, same fail-closed policy:
 
@@ -683,12 +683,12 @@ Mirror `claim_standby_via_runner` (backend.rs:683) exactly — same arms, same f
 
 Add a routing test mirroring the existing `claim_routing::*` tests (qemu and wasm must return `Unsupported`).
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-runtime workload_runner backend`
 Expected: PASS.
 
-- [ ] **Step 6: Wire the child's post-restore handshake into the claim**
+- [x] **Step 6: Wire the child's post-restore handshake into the claim**
 
 In `claim_standby` (`workload_runner/runner.rs`), after `fork_standby_child` returns and **before** the claim is committed, deliver the child's real VMGenID token over vsock and require the guest to answer. Reuse the existing delivery helper rather than writing a second one — `crates/mvm-cli/src/commands/vm/checkpoint.rs` around the `deliver_fc_fork_post_restore` path shows the established shape, and the post-restore send/poll lives in the runtime already; find it and call it.
 
@@ -698,7 +698,9 @@ Write a test that drives the claim against the mock driver with a stubbed handsh
 
 Also correct the now-false doc comments on `ChildForkRequest` and `fork_standby_child` in `crates/mvm-runtime/src/driver/traits.rs` (they claim the token "rides the fork call itself" and is delivered "as the child boots"). They predate this design and will mislead the next reader; make them describe where the token is actually delivered.
 
-- [ ] **Step 7: Full gates + commit**
+**As landed.** The delivery is a new `VmmDriver::deliver_child_identity` whose *default* body is the existing runtime helper (`signal_post_restore` over `VsockPostRestoreSignal`), so every VMM shares one delivery path and inherits the vsock transport's connect retry and read deadline — no second poll loop was written. Putting the seam on the driver rather than a runner-local trait keeps the whole claim hermetic through `MockDriver`, which matters because two existing witnesses (`concurrent_claims_do_not_double_claim_one_parent` and the cucumber warm-claim step) drive a *successful* claim with no guest. The verdict stays the runner's: `require_fresh_child_identity` is a pure function over the three flags, and the driver only reports what the guest said. Refusing after the fork also stops the live child (`force_stop`) — `ClaimCleanup` releases the parent and removes the child dir but kills nothing, so unwinding alone would have left the unproven VM running.
+
+- [x] **Step 7: Full gates + commit**
 
 ```bash
 cargo fmt --all
