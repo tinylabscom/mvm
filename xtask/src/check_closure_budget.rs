@@ -46,7 +46,13 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// deleting the hand-rolled `sockaddr_vm` + raw-`libc`
 /// socket/connect/bind/listen/accept boilerplate — nix exposes no AF_VSOCK API
 /// without the `socket` feature. Lower it freely as deps drop.
-const CLOSURE_BUDGET: usize = 267;
+///
+/// 268 (was 267): adopting the audited `vm-memory` crate behind the in-house
+/// VMM's `GuestMem` seam (the accepted rust-vmm primitives migration). Only
+/// `vm-memory` itself is new on the default closure — its `libc`/`thiserror`
+/// tree is already present — so the measured delta is +1. Lower it freely as
+/// deps drop.
+const CLOSURE_BUDGET: usize = 268;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

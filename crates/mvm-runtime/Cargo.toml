@@ -88,6 +88,11 @@ tokio = { workspace = true, features = ["fs"] }
 fs2.workspace = true
 # DEK held in `EncryptedStorage` is zeroized on drop.
 zeroize.workspace = true
+# Audited rust-vmm guest-memory primitive behind the in-house VMM's `GuestMem`
+# seam (host-side, std-only). Only `VolatileSlice` — the safe wrapper over the
+# externally-owned HVF/KVM RAM pointer — is used, so the default (mmap-less)
+# feature set is kept; no `GuestMemoryMmap`/`MmapRegion` is pulled in.
+vm-memory = { version = "0.18", default-features = false }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }

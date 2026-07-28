@@ -2,9 +2,11 @@
 
 ## Status
 
-Proposed. This ADR is the gate: it records the decision to adopt three
+Accepted. This ADR is the gate: it records the decision to adopt three
 rust-vmm crates on the host VMM path and the supply-chain sign-off that
-adoption requires. No code and no dependency lands until it is accepted.
+adoption requires. Acceptance landed with Slice 2 (`vm-memory` behind the
+`GuestMem` seam); the remaining slices adopt `virtio-queue` and
+`virtio-vsock` on the same terms.
 The staged implementation lives in
 `specs/notes/2026-07-27-vsock-device-hardening-plan.md`; the audit that
 motivates it in `specs/notes/2026-07-27-vsock-device-audit-findings.md`.
