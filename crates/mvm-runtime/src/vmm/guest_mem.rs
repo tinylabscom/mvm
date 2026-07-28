@@ -127,6 +127,11 @@ impl GuestMem {
             vs.copy_from(&[v]);
         }
     }
+    /// Store a 16-bit little-endian word. The last production writer of a bare
+    /// guest word was the hand-rolled used-ring update; `virtio-queue` owns those
+    /// writes now, so this survives as the fixture/oracle helper the device tests
+    /// use to lay out rings and reproduce pre-migration completions.
+    #[cfg(test)]
     pub(super) fn wr_u16(&self, gpa: u64, v: u16) {
         if let Some(vs) = self.slice(gpa, 2) {
             vs.copy_from(&v.to_le_bytes());

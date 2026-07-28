@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use virtio_queue::{Queue as SplitQueue, QueueOwnedT, QueueT};
 use virtio_vsock::packet::{PKT_HEADER_SIZE, VsockPacket};
 
+use super::RingGeometry;
 use super::guest_mem::GuestMem;
 
 pub(crate) const VIRTIO_MAGIC: u32 = 0x7472_6976;
@@ -473,24 +474,18 @@ fn scatter_write(mem: &GuestMem, dsts: &[(u64, usize)], bytes: &[u8]) -> usize {
     written
 }
 
-/// Build a validated `virtio-queue` split [`SplitQueue`] from the device's
-/// guest-programmed ring geometry (shared by the TX drain and the RX delivery).
-/// `qsz` is the already-validated ring size (power of two ≤
-/// [`super::QUEUE_SIZE_MAX`]); `next_avail` resumes from the device-owned
-/// `last_avail` so iteration continues exactly where the previous drain stopped.
-/// Returns `None` if a ring address breaks virtio's alignment rules —
-/// `set_*_address` silently keeps the prior value in that case, so we refuse to
-/// service a geometry we could not faithfully program.
+/// Adapt this device's per-queue ring state to the module-shared
+/// [`super::build_split_queue`] (used by the TX drain and the RX delivery).
 fn build_split_queue(q: &Queue, qsz: u16) -> Option<SplitQueue> {
-    let mut queue = SplitQueue::new(super::QUEUE_SIZE_MAX as u16).ok()?;
-    queue.set_size(qsz);
-    queue.set_ready(true);
-    queue.set_desc_table_address(Some(q.desc as u32), Some((q.desc >> 32) as u32));
-    queue.set_avail_ring_address(Some(q.avail as u32), Some((q.avail >> 32) as u32));
-    queue.set_used_ring_address(Some(q.used as u32), Some((q.used >> 32) as u32));
-    queue.set_next_avail(q.last_avail);
-    (queue.desc_table() == q.desc && queue.avail_ring() == q.avail && queue.used_ring() == q.used)
-        .then_some(queue)
+    super::build_split_queue(
+        RingGeometry {
+            desc: q.desc,
+            avail: q.avail,
+            used: q.used,
+            next_avail: q.last_avail,
+        },
+        qsz,
+    )
 }
 
 fn set_lo(v: &mut u64, lo: u32) {

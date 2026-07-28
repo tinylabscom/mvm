@@ -14,7 +14,11 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use virtio_queue::desc::split::Descriptor;
+use virtio_queue::{QueueOwnedT, QueueT};
+
 use super::guest_mem::GuestMem;
+use super::{RingGeometry, build_split_queue};
 
 /// Whether the per-descriptor virtio trace is enabled (`MVM_HVF_VIRTIO_DEBUG`).
 /// Read from the environment once and cached — the request/descriptor hot path
@@ -56,8 +60,6 @@ const R_CONFIG: u64 = 0x100; // block config: capacity (u64 sectors) at +0
 
 const MMIO_LEN: u64 = 0x200;
 const SECTOR: u64 = 512;
-
-const VIRTQ_DESC_F_NEXT: u16 = 1;
 
 const VIRTIO_BLK_T_IN: u32 = 0; // read
 const VIRTIO_BLK_T_OUT: u32 = 1; // write
@@ -252,9 +254,6 @@ impl VirtioBlk {
     fn rd_u64(&self, gpa: u64) -> u64 {
         self.mem.rd_u64(gpa)
     }
-    fn wr_u16(&self, gpa: u64, v: u16) {
-        self.mem.wr_u16(gpa, v)
-    }
     fn wr_u8(&self, gpa: u64, v: u8) {
         self.mem.wr_u8(gpa, v)
     }
@@ -313,91 +312,124 @@ impl VirtioBlk {
         if self.queue_ready == 0 {
             return false;
         }
+        // Keep the geometry gate ahead of the queue build: an illegal
+        // guest-programmed `QueueNum` is left unserviced, and a legal size is also
+        // what the validated ring accepts.
         let Some(qsz) = super::validated_queue_size(self.queue_num) else {
             return false;
         };
-        let avail_idx = self.rd_u16(self.avail + 2);
+        // The validated ring walk needs a real `GuestMemory` built over the same
+        // externally-owned RAM. If it can't be constructed (e.g. a non-page-aligned
+        // mapping), service nothing — mirroring the illegal-geometry early out.
+        let Some(mem) = self.mem.guest_memory() else {
+            return false;
+        };
+        let Some(mut queue) = build_split_queue(self.ring(), qsz) else {
+            return false;
+        };
+        // Preserve the pre-migration used-ring behaviour, which read the completion
+        // index from guest RAM. Seed the now device-owned `next_used` from it so the
+        // used entries land at byte-identical slots for a conformant guest.
+        queue.set_next_used(self.rd_u16(self.used + 2));
+
         let debug = virtio_debug();
         if debug {
             eprintln!(
-                "virtio: notify qsz={qsz} ready={} avail_idx={avail_idx} last_avail={} desc={:#x} avail={:#x} used={:#x}",
-                self.queue_ready, self.last_avail, self.desc, self.avail, self.used
+                "virtio: notify qsz={qsz} ready={} avail_idx={} last_avail={} desc={:#x} avail={:#x} used={:#x}",
+                self.queue_ready,
+                self.rd_u16(self.avail + 2),
+                self.last_avail,
+                self.desc,
+                self.avail,
+                self.used
             );
         }
-        let mut serviced = false;
-        while self.last_avail != avail_idx {
-            let slot = self.last_avail % qsz;
-            let head = self.rd_u16(self.avail + 4 + u64::from(slot) * 2);
-            let written = self.service_request(head, qsz);
-            if debug {
-                eprintln!("virtio:   head={head} written={written}");
+
+        let mut completed: Vec<(u16, u32)> = Vec::new();
+        {
+            // `DescriptorChain::next` seeds `ttl` from the validated queue size and
+            // stops once `ttl == 0 || next_index >= queue_size`, so the chain walk
+            // is bounded and range-checked — no hand-rolled counter, no missing
+            // `next < qsz` guard.
+            let Ok(avail) = queue.iter(&mem) else {
+                return false;
+            };
+            for chain in avail {
+                let head = chain.head_index();
+                // virtio-blk splits a request across the chain by direction: the
+                // device-readable run carries the request header (and, for a write,
+                // the payload); the device-writable run carries the payload (for a
+                // read) and the trailing status byte.
+                let readable: Vec<Descriptor> = chain.clone().readable().collect();
+                let writable: Vec<Descriptor> = chain.writable().collect();
+                let written = self.service_request(&readable, &writable);
+                if debug {
+                    eprintln!("virtio:   head={head} written={written}");
+                }
+                completed.push((head, written));
             }
-            // used ring: {id u32, len u32} at used + 4 + (used_idx % qsz)*8
-            let used_idx = self.rd_u16(self.used + 2);
-            let slot = u64::from(used_idx % qsz);
-            self.wr_u16(self.used + 4 + slot * 8, head); // id low 16 bits
-            self.wr_u16(self.used + 6 + slot * 8, 0); // id high 16 bits
-            self.wr_u16(self.used + 8 + slot * 8, written as u16);
-            self.wr_u16(self.used + 10 + slot * 8, (written >> 16) as u16);
-            self.wr_u16(self.used + 2, used_idx.wrapping_add(1));
-            self.last_avail = self.last_avail.wrapping_add(1);
-            serviced = true;
         }
+        let serviced = !completed.is_empty();
+        for (head, written) in completed {
+            // `head` came from a validated avail-ring slot (`< qsz`); `add_used`
+            // re-checks the bound and writes the same 8-byte used element + used
+            // index the hand-rolled completion wrote.
+            let _ = queue.add_used(&mem, head, written);
+        }
+        self.last_avail = queue.next_avail();
         if serviced {
             self.interrupt_status |= 1; // used-buffer notification
         }
         serviced
     }
 
-    /// Service one descriptor chain (a virtio-blk request). Returns bytes
-    /// written into device-writable buffers (used-ring `len`).
-    fn service_request(&mut self, head: u16, qsz: u16) -> u32 {
-        // Descriptor: addr u64 @0, len u32 @8, flags u16 @12, next u16 @14.
-        let desc_base = self.desc;
-        let desc_at = |i: u16| desc_base + u64::from(i) * 16;
-        let d0 = desc_at(head);
-        let hdr_addr = self.rd_u64(d0);
+    /// This device's guest-programmed ring state, in the shape the shared
+    /// [`build_split_queue`] consumes.
+    fn ring(&self) -> RingGeometry {
+        RingGeometry {
+            desc: self.desc,
+            avail: self.avail,
+            used: self.used,
+            next_avail: self.last_avail,
+        }
+    }
+
+    /// Service one virtio-blk request, given its chain's device-readable and
+    /// device-writable descriptors in chain order. The request header is the
+    /// first readable descriptor, the 1-byte status is the last writable one, and
+    /// every descriptor between them carries payload — readable for a write
+    /// request, writable for a read. Returns bytes written into device-writable
+    /// buffers (used-ring `len`).
+    fn service_request(&mut self, readable: &[Descriptor], writable: &[Descriptor]) -> u32 {
         // request header: type u32 @0, reserved u32 @4, sector u64 @8.
+        let Some(header) = readable.first() else {
+            return 0;
+        };
+        let hdr_addr = header.addr().0;
         let req_type = self.rd_u32(hdr_addr);
         let mut sector = self.rd_u64(hdr_addr + 8);
         if virtio_debug() {
             eprintln!("virtio:   req hdr@{hdr_addr:#x} type={req_type} sector={sector}");
         }
 
-        // Walk the rest of the chain: data descriptors then the 1-byte status.
-        let mut idx = head;
-        let mut flags = self.rd_u16(d0 + 12);
+        let (status_addr, writable_data) = match writable.split_last() {
+            Some((status, data)) => (Some(status.addr().0), data),
+            // No writable descriptor at all: no status to report, and nothing the
+            // device may write into.
+            None => (None, writable),
+        };
         let mut written: u32 = 0;
-        let mut status_addr: Option<u64> = None;
         let mut io_ok = true;
-        let mut guard = 0u32;
-        while flags & VIRTQ_DESC_F_NEXT != 0 {
-            let next = self.rd_u16(desc_at(idx) + 14);
-            if next >= qsz {
-                break;
-            }
-            // virtq_desc: addr u64 @0, len u32 @8, flags u16 @12, next u16 @14.
-            let da = desc_at(next);
-            let addr = self.rd_u64(da);
-            let len = self.rd_u32(da + 8);
-            let dflags = self.rd_u16(da + 12);
+        for desc in readable[1..].iter().chain(writable_data) {
+            let (addr, len) = (desc.addr().0, desc.len());
             if virtio_debug() {
-                eprintln!("virtio:     desc[{next}] addr={addr:#x} len={len} flags={dflags:#x}");
+                eprintln!(
+                    "virtio:     data addr={addr:#x} len={len} flags={:#x}",
+                    desc.flags()
+                );
             }
-            if dflags & VIRTQ_DESC_F_NEXT == 0 {
-                // last descriptor = status byte
-                status_addr = Some(addr);
-            } else {
-                // data descriptor
-                io_ok &= self.transfer(req_type, sector, addr, len, &mut written);
-                sector += u64::from(len) / SECTOR;
-            }
-            idx = next;
-            flags = dflags;
-            guard += 1;
-            if guard > qsz as u32 {
-                break;
-            }
+            io_ok &= self.transfer(req_type, sector, addr, len, &mut written);
+            sector += u64::from(len) / SECTOR;
         }
         let ok = io_ok && matches!(req_type, VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT);
         if let Some(s) = status_addr {
@@ -464,7 +496,6 @@ impl VirtioBlk {
 // ---- virtio-fs (read-only root) --------------------------------------------
 
 const VIRTIO_ID_FS: u32 = 26;
-const VIRTQ_DESC_F_WRITE: u16 = 2;
 // hiprio (queue 0) + one request queue (queue 1). `num_request_queues` = 1.
 const FS_NUM_QUEUES: usize = 2;
 // The tag the guest mounts: `mount -t virtiofs mvmroot /`.
@@ -479,6 +510,19 @@ struct FsQueue {
     avail: u64,
     used: u64,
     last_avail: u16,
+}
+
+impl FsQueue {
+    /// This queue's guest-programmed ring state, in the shape the shared
+    /// [`build_split_queue`] consumes.
+    fn ring(&self) -> RingGeometry {
+        RingGeometry {
+            desc: self.desc,
+            avail: self.avail,
+            used: self.used,
+            next_avail: self.last_avail,
+        }
+    }
 }
 
 /// virtio-fs MMIO device serving a read-only host directory to the guest as its
@@ -618,69 +662,73 @@ impl VirtioFs {
         if q.ready == 0 {
             return false;
         }
+        // Geometry gate first: an illegal guest-programmed `QueueNum` is left
+        // unserviced, exactly as before the validated ring walk landed.
         let Some(qsz) = super::validated_queue_size(q.num) else {
             return false;
         };
-        let avail_idx = self.mem.rd_u16(q.avail + 2);
-        let mut last_avail = q.last_avail;
-        let mut serviced = false;
-        while last_avail != avail_idx {
-            let slot = last_avail % qsz;
-            let head = self.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
-            let written = self.service_request(&q, head, qsz);
-            // used ring: {id u32, len u32} at used + 4 + (used_idx % qsz)*8.
-            let used_idx = self.mem.rd_u16(q.used + 2);
-            let uslot = u64::from(used_idx % qsz);
-            self.mem.wr_u16(q.used + 4 + uslot * 8, head);
-            self.mem.wr_u16(q.used + 6 + uslot * 8, 0);
-            self.mem.wr_u16(q.used + 8 + uslot * 8, written as u16);
-            self.mem
-                .wr_u16(q.used + 10 + uslot * 8, (written >> 16) as u16);
-            self.mem.wr_u16(q.used + 2, used_idx.wrapping_add(1));
-            last_avail = last_avail.wrapping_add(1);
-            serviced = true;
+        // The validated ring walk needs a real `GuestMemory` over the same
+        // externally-owned RAM; if it can't be built (e.g. a non-page-aligned
+        // mapping) service nothing, mirroring the illegal-geometry early out.
+        let Some(mem) = self.mem.guest_memory() else {
+            return false;
+        };
+        let Some(mut queue) = build_split_queue(q.ring(), qsz) else {
+            return false;
+        };
+        // Seed the now device-owned used index from guest RAM so the used entries
+        // land at byte-identical slots for a conformant guest.
+        queue.set_next_used(self.mem.rd_u16(q.used + 2));
+
+        let mut completed: Vec<(u16, u32)> = Vec::new();
+        {
+            // `DescriptorChain::next` seeds `ttl` from the validated queue size and
+            // range-checks every `next` link, so the chain walk is bounded without a
+            // hand-rolled counter.
+            let Ok(avail) = queue.iter(&mem) else {
+                return false;
+            };
+            for chain in avail {
+                let head = chain.head_index();
+                // The FUSE request is the chain's device-readable span (gathered in
+                // chain order); the reply lands in its device-writable span.
+                let mut req = Vec::new();
+                for desc in chain.clone().readable() {
+                    req.extend_from_slice(&self.mem.read_bytes(desc.addr().0, desc.len() as usize));
+                }
+                let writable: Vec<(u64, u32)> = chain
+                    .writable()
+                    .map(|desc| (desc.addr().0, desc.len()))
+                    .collect();
+                completed.push((head, self.service_request(&req, &writable)));
+            }
         }
-        self.queues[qidx].last_avail = last_avail;
+        let serviced = !completed.is_empty();
+        for (head, written) in completed {
+            // `head` came from a validated avail-ring slot (`< qsz`); `add_used`
+            // re-checks the bound and writes the same 8-byte used element + used
+            // index the hand-rolled completion wrote.
+            let _ = queue.add_used(&mem, head, written);
+        }
+        self.queues[qidx].last_avail = queue.next_avail();
         if serviced {
             self.interrupt_status |= 1;
         }
         serviced
     }
 
-    /// Gather the chain's readable descriptors into the FUSE request, dispatch
-    /// it, then scatter the reply across the writable descriptors. Returns bytes
-    /// written into guest memory (the used-ring `len`).
-    fn service_request(&mut self, q: &FsQueue, head: u16, qsz: u16) -> u32 {
-        let desc_at = |i: u16| q.desc + u64::from(i) * 16;
-        let mut req = Vec::new();
-        let mut writable: Vec<(u64, u32)> = Vec::new();
-        let mut idx = head;
-        let mut guard = 0u32;
-        loop {
-            let da = desc_at(idx);
-            let addr = self.mem.rd_u64(da);
-            let len = self.mem.rd_u32(da + 8);
-            let flags = self.mem.rd_u16(da + 12);
-            if flags & VIRTQ_DESC_F_WRITE != 0 {
-                writable.push((addr, len));
-            } else {
-                req.extend_from_slice(&self.mem.read_bytes(addr, len as usize));
-            }
-            guard += 1;
-            if flags & VIRTQ_DESC_F_NEXT == 0 || guard > qsz as u32 {
-                break;
-            }
-            let next = self.mem.rd_u16(da + 14);
-            if next >= qsz {
-                break;
-            }
-            idx = next;
-        }
-        let reply = self.server.dispatch(&req);
-        // Scatter the reply across the writable descriptors.
+    /// Dispatch the gathered FUSE request, then scatter the reply across the
+    /// chain's device-writable descriptors in chain order. Returns bytes written
+    /// into guest memory (the used-ring `len`).
+    ///
+    /// The scatter deliberately keeps its own loop rather than reusing the vsock
+    /// transport's: an out-of-range writable descriptor here is skipped and the
+    /// reply continues into the next one, whereas the vsock RX scatter stops.
+    fn service_request(&mut self, req: &[u8], writable: &[(u64, u32)]) -> u32 {
+        let reply = self.server.dispatch(req);
         let mut off = 0usize;
         let mut written = 0u32;
-        for (addr, len) in writable {
+        for &(addr, len) in writable {
             if off >= reply.len() {
                 break;
             }
@@ -697,6 +745,16 @@ impl VirtioFs {
 mod tests {
     use super::*;
 
+    /// Split-descriptor flag bits, as a conformant guest programs them.
+    const DESC_F_NEXT: u16 = 1;
+    const DESC_F_WRITE: u16 = 2;
+
+    /// Base guest-physical address of the scratch RAM the device fixtures map.
+    const BLK_BASE: u64 = 0x4000_0000;
+    /// Scratch RAM size for the fixtures: room for the rings plus every request
+    /// buffer the differential layouts need.
+    const RAM_SIZE: usize = 0x20000;
+
     /// Drive one FUSE INIT through the virtio-fs transport: build a virtqueue in
     /// a RAM buffer with a readable request descriptor + a writable reply
     /// descriptor, notify the request queue, and assert the reply landed (a
@@ -705,35 +763,19 @@ mod tests {
     #[test]
     fn fs_transport_drives_the_fuse_server_over_a_virtqueue() {
         let dir = tempfile::tempdir().unwrap();
-        let mut ram = vec![0u8; 0x10000];
-        let put16 = |r: &mut [u8], o: usize, v: u16| r[o..o + 2].copy_from_slice(&v.to_le_bytes());
-        let put32 = |r: &mut [u8], o: usize, v: u32| r[o..o + 4].copy_from_slice(&v.to_le_bytes());
-        let put64 = |r: &mut [u8], o: usize, v: u64| r[o..o + 8].copy_from_slice(&v.to_le_bytes());
+        let mut fs = fs_dev(dir.path());
 
         // FUSE INIT request: fuse_in_header(40) + fuse_init_in(16).
-        let mut fuse = vec![0u8; 40 + 16];
-        put32(&mut fuse, 0, (40 + 16) as u32); // len
-        put32(&mut fuse, 4, 26); // opcode = FUSE_INIT
-        put64(&mut fuse, 8, 1); // unique
-        put32(&mut fuse, 40, 7); // init_in.major
-        put32(&mut fuse, 44, 31); // init_in.minor
-        ram[0x4000..0x4000 + fuse.len()].copy_from_slice(&fuse);
+        let fuse = fuse_request(FUSE_INIT, 1, 0, &init_body());
+        fs.mem.write_bytes(0x4000, &fuse);
 
         // desc[0] readable → request @0x4000; desc[1] writable → reply @0x5000.
-        put64(&mut ram, 0x1000, 0x4000);
-        put32(&mut ram, 0x1008, fuse.len() as u32);
-        put16(&mut ram, 0x100c, VIRTQ_DESC_F_NEXT);
-        put16(&mut ram, 0x100e, 1);
-        put64(&mut ram, 0x1010, 0x5000);
-        put32(&mut ram, 0x1018, 256);
-        put16(&mut ram, 0x101c, VIRTQ_DESC_F_WRITE);
+        write_desc(&fs.mem, 0x1000, 0x4000, fuse.len() as u32, DESC_F_NEXT, 1);
+        write_desc(&fs.mem, 0x1010, 0x5000, 256, DESC_F_WRITE, 0);
         // avail ring @0x2000: idx=1, ring[0]=head 0.
-        put16(&mut ram, 0x2002, 1);
-        put16(&mut ram, 0x2004, 0);
+        fs.mem.wr_u16(0x2002, 1);
+        fs.mem.wr_u16(0x2004, 0);
 
-        let ptr = ram.as_mut_ptr();
-        // SAFETY: `ram` outlives `fs` and is not reallocated in this scope.
-        let mut fs = unsafe { VirtioFs::new(0, 5, ptr, 0, ram.len(), dir.path().to_path_buf()) };
         // Program the request queue (index 1) and notify.
         fs.write(R_QUEUE_SEL, 1);
         fs.write(R_QUEUE_NUM, 4);
@@ -745,30 +787,40 @@ mod tests {
         assert!(irq, "servicing a request must raise an interrupt");
 
         // used ring idx advanced to 1.
-        assert_eq!(
-            u16::from_le_bytes(ram[0x3002..0x3004].try_into().unwrap()),
-            1
-        );
+        assert_eq!(fs.mem.rd_u16(0x3002), 1);
         // Reply @0x5000: fuse_out_header len@0, error@4 == 0, major @16.
-        let err = i32::from_le_bytes(ram[0x5004..0x5008].try_into().unwrap());
-        assert_eq!(err, 0, "INIT must succeed");
-        let major = u32::from_le_bytes(ram[0x5010..0x5014].try_into().unwrap());
-        assert_eq!(major, 7, "negotiated FUSE major version");
+        assert_eq!(fs.mem.rd_u32(0x5004) as i32, 0, "INIT must succeed");
+        assert_eq!(fs.mem.rd_u32(0x5010), 7, "negotiated FUSE major version");
+    }
+
+    /// A block device over freshly-allocated page-aligned scratch RAM. The
+    /// virtqueue paths build a `GuestMemoryMmap` over this pointer, which rejects
+    /// a non-page-aligned mapping, so the fixture RAM must match production's.
+    fn blk_dev(disk: DiskImage) -> VirtioBlk {
+        let ram = crate::test_support::page_aligned_ram(RAM_SIZE);
+        // SAFETY: page-aligned, zeroed, leaked for the test process lifetime.
+        unsafe { VirtioBlk::new(0x0a00_0000, 48, ram.as_mut_ptr(), BLK_BASE, ram.len(), disk) }
+    }
+
+    /// A virtio-fs device serving `root`, over page-aligned scratch RAM mapped at
+    /// guest-physical 0 (the addresses the fs fixtures use).
+    fn fs_dev(root: &Path) -> VirtioFs {
+        let ram = crate::test_support::page_aligned_ram(RAM_SIZE);
+        // SAFETY: page-aligned, zeroed, leaked for the test process lifetime.
+        unsafe { VirtioFs::new(0, 5, ram.as_mut_ptr(), 0, ram.len(), root.to_path_buf()) }
+    }
+
+    /// Write one 16-byte split descriptor (addr u64 @0, len u32 @8, flags u16 @12,
+    /// next u16 @14) at guest address `at`.
+    fn write_desc(mem: &GuestMem, at: u64, addr: u64, len: u32, flags: u16, next: u16) {
+        mem.write_bytes(at, &addr.to_le_bytes());
+        mem.write_bytes(at + 8, &len.to_le_bytes());
+        mem.wr_u16(at + 12, flags);
+        mem.wr_u16(at + 14, next);
     }
 
     fn dev(disk: Vec<u8>) -> VirtioBlk {
-        let mut ram = vec![0u8; 0x10000];
-        // SAFETY: ram lives for the test; leaked pointer is fine here.
-        unsafe {
-            VirtioBlk::new(
-                0x0a00_0000,
-                48,
-                ram.as_mut_ptr(),
-                0x4000_0000,
-                ram.len(),
-                DiskImage::mem(disk),
-            )
-        }
+        blk_dev(DiskImage::mem(disk))
     }
 
     #[test]
@@ -812,58 +864,25 @@ mod tests {
 
     #[test]
     fn services_a_block_read_through_the_split_virtqueue() {
-        const BASE: u64 = 0x4000_0000;
-        let mut ram = vec![0u8; 0x10000];
-        let put = |ram: &mut [u8], gpa: u64, bytes: &[u8]| {
-            let off = (gpa - BASE) as usize;
-            ram[off..off + bytes.len()].copy_from_slice(bytes);
-        };
-        let get = |ram: &[u8], gpa: u64, len: usize| {
-            let off = (gpa - BASE) as usize;
-            ram[off..off + len].to_vec()
-        };
-
-        let (desc, avail, used) = (BASE + 0x1000, BASE + 0x2000, BASE + 0x3000);
-        let (hdr, data, status) = (BASE + 0x4000, BASE + 0x5000, BASE + 0x6000);
-
-        // Descriptor chain: header(RO,->1), data(WO,->2), status(WO). The `len`
-        // field sits at desc offset 8 — the regression this test guards.
-        let mk = |addr: u64, len: u32, flags: u16, next: u16| {
-            let mut d = [0u8; 16];
-            d[0..8].copy_from_slice(&addr.to_le_bytes());
-            d[8..12].copy_from_slice(&len.to_le_bytes());
-            d[12..14].copy_from_slice(&flags.to_le_bytes());
-            d[14..16].copy_from_slice(&next.to_le_bytes());
-            d
-        };
-        put(&mut ram, desc, &mk(hdr, 16, VIRTQ_DESC_F_NEXT, 1));
-        put(
-            &mut ram,
-            desc + 16,
-            &mk(data, 512, VIRTQ_DESC_F_NEXT | 2, 2),
-        );
-        put(&mut ram, desc + 32, &mk(status, 1, 2, 0));
-        // avail: flags=0, idx=1, ring[0]=head desc 0.
-        put(&mut ram, avail + 2, &1u16.to_le_bytes());
-        put(&mut ram, avail + 4, &0u16.to_le_bytes());
-        // request header: type=IN(read), sector=0.
-        put(&mut ram, hdr, &VIRTIO_BLK_T_IN.to_le_bytes());
-        put(&mut ram, hdr + 8, &0u64.to_le_bytes());
+        let (desc, avail, used) = (BLK_BASE + 0x1000, BLK_BASE + 0x2000, BLK_BASE + 0x3000);
+        let (hdr, data, status) = (BLK_BASE + 0x4000, BLK_BASE + 0x5000, BLK_BASE + 0x6000);
 
         let mut disk = vec![0u8; 4096];
         disk[..11].copy_from_slice(b"DISK-BYTES!");
+        let mut d = blk_dev(DiskImage::mem(disk));
 
-        // SAFETY: ram outlives the device for the test.
-        let mut d = unsafe {
-            VirtioBlk::new(
-                0x0a00_0000,
-                48,
-                ram.as_mut_ptr(),
-                BASE,
-                ram.len(),
-                DiskImage::mem(disk),
-            )
-        };
+        // Descriptor chain: header(RO,->1), data(WO,->2), status(WO). The `len`
+        // field sits at desc offset 8 — the regression this test guards.
+        write_desc(&d.mem, desc, hdr, 16, DESC_F_NEXT, 1);
+        write_desc(&d.mem, desc + 16, data, 512, DESC_F_NEXT | DESC_F_WRITE, 2);
+        write_desc(&d.mem, desc + 32, status, 1, DESC_F_WRITE, 0);
+        // avail: flags=0, idx=1, ring[0]=head desc 0.
+        d.mem.wr_u16(avail + 2, 1);
+        d.mem.wr_u16(avail + 4, 0);
+        // request header: type=IN(read), sector=0.
+        d.mem.write_bytes(hdr, &VIRTIO_BLK_T_IN.to_le_bytes());
+        d.mem.write_bytes(hdr + 8, &0u64.to_le_bytes());
+
         d.write(R_QUEUE_NUM, 4);
         d.write(R_QUEUE_DESC_LO, desc & 0xffff_ffff);
         d.write(R_QUEUE_DRIVER_LO, avail & 0xffff_ffff);
@@ -872,15 +891,9 @@ mod tests {
 
         assert!(d.write(R_QUEUE_NOTIFY, 0), "notify services the queue");
         // Data buffer received sector 0; status OK; used ring advanced.
-        assert_eq!(&get(&ram, data, 11), b"DISK-BYTES!");
-        assert_eq!(get(&ram, status, 1)[0], VIRTIO_BLK_S_OK);
-        assert_eq!(
-            u16::from_le_bytes([
-                ram[(used - BASE) as usize + 2],
-                ram[(used - BASE) as usize + 3]
-            ]),
-            1
-        );
+        assert_eq!(&d.mem.read_bytes(data, 11), b"DISK-BYTES!");
+        assert_eq!(d.mem.read_bytes(status, 1)[0], VIRTIO_BLK_S_OK);
+        assert_eq!(d.mem.rd_u16(used + 2), 1);
     }
 
     #[test]
@@ -941,21 +954,9 @@ mod tests {
 
     #[test]
     fn read_only_backing_offers_the_ro_feature_bit() {
-        let mut ram = vec![0u8; 0x10000];
         let f = tempfile::NamedTempFile::new().unwrap();
         f.as_file().set_len(512).unwrap();
-        let img = DiskImage::open(f.path(), true).unwrap();
-        // SAFETY: ram outlives the device for the test.
-        let mut d = unsafe {
-            VirtioBlk::new(
-                0x0a00_0000,
-                48,
-                ram.as_mut_ptr(),
-                0x4000_0000,
-                ram.len(),
-                img,
-            )
-        };
+        let mut d = blk_dev(DiskImage::open(f.path(), true).unwrap());
         // Low feature word advertises RO; high word still offers VERSION_1.
         d.write(R_DEVICE_FEATURES_SEL, 0);
         assert_eq!(d.read(R_DEVICE_FEATURES) as u32, VIRTIO_BLK_F_RO);
@@ -977,24 +978,12 @@ mod tests {
     /// notify. Returns whether the device signalled an interrupt (serviced the
     /// ring). Must never panic.
     fn blk_notify_with_queue_num(num: u32) -> bool {
-        const BASE: u64 = 0x4000_0000;
-        let mut ram = vec![0u8; 0x10000];
-        ram[0x2002..0x2004].copy_from_slice(&1u16.to_le_bytes());
-        // SAFETY: ram outlives the device for the duration of this call.
-        let mut d = unsafe {
-            VirtioBlk::new(
-                0x0a00_0000,
-                48,
-                ram.as_mut_ptr(),
-                BASE,
-                ram.len(),
-                DiskImage::mem(vec![0u8; 4096]),
-            )
-        };
+        let mut d = blk_dev(DiskImage::mem(vec![0u8; 4096]));
+        d.mem.wr_u16(BLK_BASE + 0x2002, 1);
         d.write(R_QUEUE_NUM, u64::from(num));
-        d.write(R_QUEUE_DESC_LO, (BASE + 0x1000) & 0xffff_ffff);
-        d.write(R_QUEUE_DRIVER_LO, (BASE + 0x2000) & 0xffff_ffff);
-        d.write(R_QUEUE_DEVICE_LO, (BASE + 0x3000) & 0xffff_ffff);
+        d.write(R_QUEUE_DESC_LO, (BLK_BASE + 0x1000) & 0xffff_ffff);
+        d.write(R_QUEUE_DRIVER_LO, (BLK_BASE + 0x2000) & 0xffff_ffff);
+        d.write(R_QUEUE_DEVICE_LO, (BLK_BASE + 0x3000) & 0xffff_ffff);
         d.write(R_QUEUE_READY, 1);
         d.write(R_QUEUE_NOTIFY, 0)
     }
@@ -1019,11 +1008,8 @@ mod tests {
     /// Must never panic.
     fn fs_notify_with_queue_num(num: u32) -> bool {
         let dir = tempfile::tempdir().unwrap();
-        let mut ram = vec![0u8; 0x10000];
-        ram[0x2002..0x2004].copy_from_slice(&1u16.to_le_bytes());
-        let ptr = ram.as_mut_ptr();
-        // SAFETY: ram outlives fs for the duration of this call.
-        let mut fs = unsafe { VirtioFs::new(0, 5, ptr, 0, ram.len(), dir.path().to_path_buf()) };
+        let mut fs = fs_dev(dir.path());
+        fs.mem.wr_u16(0x2002, 1);
         fs.write(R_QUEUE_SEL, 1);
         fs.write(R_QUEUE_NUM, u64::from(num));
         fs.write(R_QUEUE_DESC_LO, 0x1000);
@@ -1045,6 +1031,754 @@ mod tests {
                 !fs_notify_with_queue_num(num),
                 "fs queue size {num:#x} must not be serviced"
             );
+        }
+    }
+
+    // ---- virtio-blk queue migration: differential equivalence ---------------
+
+    /// One conformant virtio-blk request chain: a 16-byte device-readable
+    /// request header, `data` payload descriptors of the given byte lengths
+    /// (device-writable for a read request, device-readable for a write), and a
+    /// trailing 1-byte device-writable status descriptor when `status` is set.
+    #[derive(Clone)]
+    struct BlkChain {
+        req_type: u32,
+        sector: u64,
+        data: Vec<u32>,
+        status: bool,
+    }
+
+    /// Deterministic, non-trivial disk contents so a read moves recognisable
+    /// bytes and a write is visible against the surrounding pattern.
+    fn blk_disk() -> DiskImage {
+        DiskImage::mem(
+            (0..8192usize)
+                .map(|i| (i as u8).wrapping_mul(31).wrapping_add(11))
+                .collect(),
+        )
+    }
+
+    fn disk_bytes(d: &VirtioBlk) -> Vec<u8> {
+        match &d.disk {
+            DiskImage::Mem(v) => v.clone(),
+            DiskImage::File { .. } => panic!("differential fixtures use in-memory disks"),
+        }
+    }
+
+    /// Representative conformant block layouts for `qsz`: reads and writes,
+    /// single and multi payload descriptors, a payload-less request, an unknown
+    /// request type (status IOERR), a read past capacity, and a multi-chain
+    /// batch — all within `qsz` descriptors and `qsz` chains.
+    fn blk_layouts_for(qsz: u16) -> Vec<(&'static str, Vec<BlkChain>)> {
+        let read = |sector, data: &[u32]| BlkChain {
+            req_type: VIRTIO_BLK_T_IN,
+            sector,
+            data: data.to_vec(),
+            status: true,
+        };
+        let write = |sector, data: &[u32]| BlkChain {
+            req_type: VIRTIO_BLK_T_OUT,
+            sector,
+            data: data.to_vec(),
+            status: true,
+        };
+        match qsz {
+            // One descriptor fits: a header with neither payload nor status.
+            1 => vec![(
+                "header-only",
+                vec![BlkChain {
+                    req_type: VIRTIO_BLK_T_IN,
+                    sector: 0,
+                    data: Vec::new(),
+                    status: false,
+                }],
+            )],
+            // Two descriptors: header + status, or two header-only chains.
+            2 => vec![
+                ("read-no-payload", vec![read(0, &[])]),
+                ("write-no-payload", vec![write(1, &[])]),
+                (
+                    "two-header-only-chains",
+                    vec![
+                        BlkChain {
+                            req_type: VIRTIO_BLK_T_IN,
+                            sector: 0,
+                            data: Vec::new(),
+                            status: false,
+                        },
+                        BlkChain {
+                            req_type: VIRTIO_BLK_T_OUT,
+                            sector: 3,
+                            data: Vec::new(),
+                            status: false,
+                        },
+                    ],
+                ),
+            ],
+            _ => vec![
+                ("read-single-payload", vec![read(0, &[512])]),
+                ("write-single-payload", vec![write(2, &[512])]),
+                ("read-multi-payload", vec![read(1, &[512, 512, 1024])]),
+                ("write-multi-payload", vec![write(4, &[512, 512])]),
+                ("read-bulk", vec![read(0, &[4096])]),
+                // Sector far past the 8 KiB image: the read zero-fills.
+                ("read-past-capacity", vec![read(4096, &[512])]),
+                (
+                    "unknown-request-type",
+                    vec![BlkChain {
+                        req_type: 7,
+                        sector: 0,
+                        data: Vec::new(),
+                        status: true,
+                    }],
+                ),
+                (
+                    "mixed-batch",
+                    vec![
+                        read(0, &[512]),
+                        write(6, &[512]),
+                        read(2, &[512, 512]),
+                        BlkChain {
+                            req_type: 9,
+                            sector: 1,
+                            data: Vec::new(),
+                            status: true,
+                        },
+                        write(8, &[1024]),
+                    ],
+                ),
+            ],
+        }
+    }
+
+    /// Lay `chains` out as a virtio-blk split virtqueue in `d`'s guest RAM,
+    /// program the device's ring registers, and seed each request header (plus
+    /// each write request's payload). The available index is left at zero — the
+    /// caller publishes chains by raising it, one notify round at a time.
+    /// Returns the (available ring, used ring) addresses.
+    fn program_blk_queue(d: &mut VirtioBlk, qsz: u16, chains: &[BlkChain]) -> (u64, u64) {
+        let desc = BLK_BASE + 0x1000;
+        let avail = BLK_BASE + 0x4000;
+        let used = BLK_BASE + 0x8000;
+        let mut buf = BLK_BASE + 0xc000;
+        let mut desc_idx: u16 = 0;
+        for (chain_no, chain) in chains.iter().enumerate() {
+            let head = desc_idx;
+            // Descriptor plan: 16-byte header, payload buffers, optional status.
+            let payload_flags = if chain.req_type == VIRTIO_BLK_T_IN {
+                DESC_F_WRITE
+            } else {
+                0
+            };
+            let mut plan: Vec<(u32, u16)> = vec![(16, 0)];
+            plan.extend(chain.data.iter().map(|&len| (len, payload_flags)));
+            if chain.status {
+                plan.push((1, DESC_F_WRITE));
+            }
+            for (slot, &(len, flags)) in plan.iter().enumerate() {
+                assert!(
+                    desc_idx < qsz,
+                    "layout exceeds the {qsz}-entry descriptor table"
+                );
+                let last = slot + 1 == plan.len();
+                write_desc(
+                    &d.mem,
+                    desc + u64::from(desc_idx) * 16,
+                    buf,
+                    len,
+                    flags | if last { 0 } else { DESC_F_NEXT },
+                    desc_idx + 1,
+                );
+                if slot == 0 {
+                    // request header: type u32 @0, reserved u32 @4, sector u64 @8.
+                    d.mem.write_bytes(buf, &chain.req_type.to_le_bytes());
+                    d.mem.write_bytes(buf + 8, &chain.sector.to_le_bytes());
+                } else if flags & DESC_F_WRITE == 0 {
+                    // A write request's payload, distinct per chain.
+                    let fill = vec![0xC0u8.wrapping_add(chain_no as u8); len as usize];
+                    d.mem.write_bytes(buf, &fill);
+                }
+                // Keep buffers separated and 16-aligned; empty buffers still stride.
+                buf += (u64::from(len).max(1) + 15) & !15;
+                desc_idx += 1;
+            }
+            d.mem.wr_u16(avail + 4 + (chain_no as u64) * 2, head);
+        }
+        d.queue_num = u32::from(qsz);
+        d.desc = desc;
+        d.avail = avail;
+        d.used = used;
+        d.queue_ready = 1;
+        (avail, used)
+    }
+
+    /// Notify boundaries for a layout: the available index published before each
+    /// round. A multi-chain layout is drained over two notifies so the
+    /// device-owned available and used cursors must survive between them.
+    fn notify_rounds(chains: usize) -> Vec<u16> {
+        if chains > 1 {
+            vec![1, chains as u16]
+        } else {
+            vec![chains as u16]
+        }
+    }
+
+    /// Faithful copy of the pre-migration hand-rolled virtio-blk drain loop and
+    /// used-ring completion, kept as the differential oracle. The migrated
+    /// `process_queue` must reproduce its guest-RAM writes, disk writes,
+    /// used-ring bytes, used index, `last_avail`, and interrupt bit exactly.
+    fn reference_blk_process_queue(d: &mut VirtioBlk) -> bool {
+        if d.queue_ready == 0 {
+            return false;
+        }
+        let Some(qsz) = super::super::validated_queue_size(d.queue_num) else {
+            return false;
+        };
+        let avail_idx = d.rd_u16(d.avail + 2);
+        let mut serviced = false;
+        while d.last_avail != avail_idx {
+            let slot = d.last_avail % qsz;
+            let head = d.rd_u16(d.avail + 4 + u64::from(slot) * 2);
+            let written = reference_blk_service_request(d, head, qsz);
+            // used ring: {id u32, len u32} at used + 4 + (used_idx % qsz)*8.
+            let used_idx = d.rd_u16(d.used + 2);
+            let uslot = u64::from(used_idx % qsz);
+            d.mem.wr_u16(d.used + 4 + uslot * 8, head);
+            d.mem.wr_u16(d.used + 6 + uslot * 8, 0);
+            d.mem.wr_u16(d.used + 8 + uslot * 8, written as u16);
+            d.mem
+                .wr_u16(d.used + 10 + uslot * 8, (written >> 16) as u16);
+            d.mem.wr_u16(d.used + 2, used_idx.wrapping_add(1));
+            d.last_avail = d.last_avail.wrapping_add(1);
+            serviced = true;
+        }
+        if serviced {
+            d.interrupt_status |= 1;
+        }
+        serviced
+    }
+
+    /// Faithful copy of the pre-migration positional chain walk: the head
+    /// descriptor is the request header, a descriptor without `F_NEXT` is the
+    /// status byte, everything between them is payload.
+    fn reference_blk_service_request(d: &mut VirtioBlk, head: u16, qsz: u16) -> u32 {
+        let desc_base = d.desc;
+        let desc_at = |i: u16| desc_base + u64::from(i) * 16;
+        let d0 = desc_at(head);
+        let hdr_addr = d.rd_u64(d0);
+        let req_type = d.rd_u32(hdr_addr);
+        let mut sector = d.rd_u64(hdr_addr + 8);
+
+        let mut idx = head;
+        let mut flags = d.rd_u16(d0 + 12);
+        let mut written: u32 = 0;
+        let mut status_addr: Option<u64> = None;
+        let mut io_ok = true;
+        let mut guard = 0u32;
+        while flags & DESC_F_NEXT != 0 {
+            let next = d.rd_u16(desc_at(idx) + 14);
+            if next >= qsz {
+                break;
+            }
+            let da = desc_at(next);
+            let addr = d.rd_u64(da);
+            let len = d.rd_u32(da + 8);
+            let dflags = d.rd_u16(da + 12);
+            if dflags & DESC_F_NEXT == 0 {
+                status_addr = Some(addr);
+            } else {
+                io_ok &= d.transfer(req_type, sector, addr, len, &mut written);
+                sector += u64::from(len) / SECTOR;
+            }
+            idx = next;
+            flags = dflags;
+            guard += 1;
+            if guard > u32::from(qsz) {
+                break;
+            }
+        }
+        let ok = io_ok && matches!(req_type, VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT);
+        if let Some(s) = status_addr {
+            d.wr_u8(
+                s,
+                if ok {
+                    VIRTIO_BLK_S_OK
+                } else {
+                    VIRTIO_BLK_S_IOERR
+                },
+            );
+            written += 1;
+        }
+        written
+    }
+
+    #[test]
+    fn blk_process_queue_matches_reference_walk_byte_for_byte() {
+        for qsz in [1u16, 2, 128, 256] {
+            for (label, chains) in blk_layouts_for(qsz) {
+                let what = format!("qsz={qsz} layout={label}");
+
+                // The pre-migration oracle drives one RAM + disk image, the
+                // migrated path a byte-identical pair, notify round for notify
+                // round.
+                let mut d_ref = blk_dev(blk_disk());
+                let (avail, used) = program_blk_queue(&mut d_ref, qsz, &chains);
+                let mut d_new = blk_dev(blk_disk());
+                program_blk_queue(&mut d_new, qsz, &chains);
+
+                for round in notify_rounds(chains.len()) {
+                    d_ref.mem.wr_u16(avail + 2, round);
+                    let ret_ref = reference_blk_process_queue(&mut d_ref);
+                    d_new.mem.wr_u16(avail + 2, round);
+                    let ret_new = d_new.process_queue();
+                    assert_eq!(
+                        ret_new, ret_ref,
+                        "return value differs for {what} at avail_idx={round}"
+                    );
+                }
+                assert_eq!(
+                    d_new.mem.read_bytes(BLK_BASE, RAM_SIZE),
+                    d_ref.mem.read_bytes(BLK_BASE, RAM_SIZE),
+                    "guest RAM differs for {what}"
+                );
+                let used_len = 4 + usize::from(qsz) * 8;
+                assert_eq!(
+                    d_new.mem.read_bytes(used, used_len),
+                    d_ref.mem.read_bytes(used, used_len),
+                    "used-ring bytes differ for {what}"
+                );
+                assert_eq!(
+                    d_new.rd_u16(used + 2),
+                    d_ref.rd_u16(used + 2),
+                    "used index differs for {what}"
+                );
+                assert_eq!(
+                    d_new.last_avail, d_ref.last_avail,
+                    "last_avail differs for {what}"
+                );
+                assert_eq!(
+                    d_new.interrupt_status, d_ref.interrupt_status,
+                    "interrupt_status differs for {what}"
+                );
+                assert_eq!(
+                    disk_bytes(&d_new),
+                    disk_bytes(&d_ref),
+                    "disk image differs for {what}"
+                );
+            }
+        }
+    }
+
+    /// A guest that aims a read's payload buffer at its own used ring cannot
+    /// steer where the device records completions: the used index is device
+    /// state now, not a value re-read from guest RAM per completion.
+    #[test]
+    fn blk_used_index_is_device_owned_within_a_drain() {
+        let qsz = 8u16;
+        let desc = BLK_BASE + 0x1000;
+        let avail = BLK_BASE + 0x4000;
+        let used = BLK_BASE + 0x8000;
+        let scratch = BLK_BASE + 0xc000;
+
+        // Two read chains. The first aims its 512-byte payload buffer straight at
+        // the used ring, so servicing it overwrites the used index with disk bytes.
+        let program = |d: &mut VirtioBlk| {
+            write_desc(&d.mem, desc, scratch, 16, DESC_F_NEXT, 1);
+            write_desc(&d.mem, desc + 16, used, 512, DESC_F_WRITE | DESC_F_NEXT, 2);
+            write_desc(&d.mem, desc + 32, scratch + 0x100, 1, DESC_F_WRITE, 0);
+            write_desc(&d.mem, desc + 48, scratch + 0x200, 16, DESC_F_NEXT, 4);
+            write_desc(
+                &d.mem,
+                desc + 64,
+                scratch + 0x400,
+                512,
+                DESC_F_WRITE | DESC_F_NEXT,
+                5,
+            );
+            write_desc(&d.mem, desc + 80, scratch + 0x800, 1, DESC_F_WRITE, 0);
+            // Both request headers read sector 0.
+            d.mem.write_bytes(scratch, &VIRTIO_BLK_T_IN.to_le_bytes());
+            d.mem
+                .write_bytes(scratch + 0x200, &VIRTIO_BLK_T_IN.to_le_bytes());
+            d.mem.wr_u16(avail + 4, 0);
+            d.mem.wr_u16(avail + 6, 3);
+            d.mem.wr_u16(avail + 2, 2);
+            d.queue_num = u32::from(qsz);
+            d.desc = desc;
+            d.avail = avail;
+            d.used = used;
+            d.queue_ready = 1;
+        };
+
+        let mut d = blk_dev(blk_disk());
+        program(&mut d);
+        assert!(d.process_queue());
+        // Completions landed at used slots 0 and 1, and the index counted exactly
+        // the two chains — despite the guest's payload landing on top of it.
+        assert_eq!(
+            d.mem.rd_u16(used + 2),
+            2,
+            "used index counts the two chains"
+        );
+        assert_eq!(d.mem.rd_u32(used + 4), 0, "slot 0 records the first head");
+        assert_eq!(
+            d.mem.rd_u32(used + 8),
+            513,
+            "slot 0 records payload + status"
+        );
+        assert_eq!(d.mem.rd_u32(used + 12), 3, "slot 1 records the second head");
+        assert_eq!(
+            d.mem.rd_u32(used + 16),
+            513,
+            "slot 1 records payload + status"
+        );
+        assert_eq!(d.last_avail, 2);
+
+        // The pre-migration walk re-read the index from guest RAM per completion,
+        // so the same layout steered it wherever the disk bytes pointed.
+        let mut d_ref = blk_dev(blk_disk());
+        program(&mut d_ref);
+        assert!(reference_blk_process_queue(&mut d_ref));
+        assert_ne!(
+            d_ref.mem.rd_u16(used + 2),
+            2,
+            "the hand-rolled walk was steerable — that is the behaviour being retired"
+        );
+    }
+
+    // ---- virtio-fs queue migration: differential equivalence ----------------
+
+    const FUSE_LOOKUP: u32 = 1;
+    const FUSE_GETATTR: u32 = 3;
+    const FUSE_STATFS: u32 = 17;
+    const FUSE_INIT: u32 = 26;
+    /// An opcode the server does not implement: the reply is a bare error header.
+    const FUSE_UNSUPPORTED: u32 = 0x7fff;
+    /// Wire size of `fuse_in_header`.
+    const FUSE_IN_HEADER_LEN: usize = 40;
+
+    /// Build a FUSE request: `fuse_in_header` (len, opcode, unique, nodeid, uid,
+    /// gid, pid, padding) followed by the opcode body.
+    fn fuse_request(opcode: u32, unique: u64, nodeid: u64, body: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&((FUSE_IN_HEADER_LEN + body.len()) as u32).to_le_bytes());
+        b.extend_from_slice(&opcode.to_le_bytes());
+        b.extend_from_slice(&unique.to_le_bytes());
+        b.extend_from_slice(&nodeid.to_le_bytes());
+        b.extend_from_slice(&[0u8; 16]); // uid, gid, pid, padding
+        b.extend_from_slice(body);
+        b
+    }
+
+    /// `fuse_init_in`: major, minor, max_readahead, flags.
+    fn init_body() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&7u32.to_le_bytes());
+        b.extend_from_slice(&31u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b
+    }
+
+    /// One virtio-fs chain: the FUSE request bytes split across device-readable
+    /// descriptors, then the device-writable reply-buffer capacities.
+    #[derive(Clone)]
+    struct FsChain {
+        req: Vec<Vec<u8>>,
+        reply: Vec<u32>,
+    }
+
+    /// Split `req` after `at` bytes into two device-readable descriptors.
+    fn split_at(req: &[u8], at: usize) -> Vec<Vec<u8>> {
+        vec![req[..at].to_vec(), req[at..].to_vec()]
+    }
+
+    /// Representative virtio-fs layouts for `qsz`: a whole request in one
+    /// descriptor, a request split mid-header and after the header, a reply
+    /// scattered across several writable buffers, a reply buffer too small for
+    /// the reply, a chain with no writable descriptor at all, and a multi-chain
+    /// batch of different opcodes.
+    fn fs_layouts_for(qsz: u16) -> Vec<(&'static str, Vec<FsChain>)> {
+        let init = fuse_request(FUSE_INIT, 1, 0, &init_body());
+        let getattr = fuse_request(FUSE_GETATTR, 2, 1, &[0u8; 16]);
+        let lookup = fuse_request(FUSE_LOOKUP, 3, 1, b"hello.txt\0");
+        let statfs = fuse_request(FUSE_STATFS, 4, 1, &[]);
+        let unsupported = fuse_request(FUSE_UNSUPPORTED, 5, 1, &[]);
+        match qsz {
+            // One descriptor: request only, so the reply has nowhere to land.
+            1 => vec![(
+                "request-without-reply-buffer",
+                vec![FsChain {
+                    req: vec![init.clone()],
+                    reply: Vec::new(),
+                }],
+            )],
+            2 => vec![
+                (
+                    "init",
+                    vec![FsChain {
+                        req: vec![init.clone()],
+                        reply: vec![256],
+                    }],
+                ),
+                (
+                    "reply-buffer-too-small",
+                    vec![FsChain {
+                        req: vec![init.clone()],
+                        reply: vec![8],
+                    }],
+                ),
+            ],
+            _ => vec![
+                (
+                    "request-split-after-header",
+                    vec![FsChain {
+                        req: split_at(&init, FUSE_IN_HEADER_LEN),
+                        reply: vec![256],
+                    }],
+                ),
+                (
+                    "request-split-mid-header",
+                    vec![FsChain {
+                        req: split_at(&init, 12),
+                        reply: vec![256],
+                    }],
+                ),
+                (
+                    "reply-scattered",
+                    vec![FsChain {
+                        req: vec![init.clone()],
+                        reply: vec![16, 24, 240],
+                    }],
+                ),
+                (
+                    "reply-truncated-across-buffers",
+                    vec![FsChain {
+                        req: vec![init.clone()],
+                        reply: vec![8, 8],
+                    }],
+                ),
+                (
+                    "opcode-batch",
+                    vec![
+                        FsChain {
+                            req: vec![init.clone()],
+                            reply: vec![256],
+                        },
+                        FsChain {
+                            req: vec![getattr],
+                            reply: vec![256],
+                        },
+                        FsChain {
+                            req: split_at(&lookup, FUSE_IN_HEADER_LEN),
+                            reply: vec![64, 192],
+                        },
+                        FsChain {
+                            req: vec![statfs],
+                            reply: vec![256],
+                        },
+                        FsChain {
+                            req: vec![unsupported],
+                            reply: vec![256],
+                        },
+                        FsChain {
+                            req: vec![init],
+                            reply: Vec::new(),
+                        },
+                    ],
+                ),
+            ],
+        }
+    }
+
+    /// Lay `chains` out as a virtio-fs split virtqueue in `fs`'s guest RAM,
+    /// program request queue `qidx`, and seed each request buffer. The available
+    /// index is left at zero — the caller publishes chains by raising it, one
+    /// notify round at a time. Returns the (available ring, used ring) addresses.
+    fn program_fs_queue(
+        fs: &mut VirtioFs,
+        qidx: usize,
+        qsz: u16,
+        chains: &[FsChain],
+    ) -> (u64, u64) {
+        let desc = 0x1000u64;
+        let avail = 0x4000u64;
+        let used = 0x8000u64;
+        let mut buf = 0xc000u64;
+        let mut desc_idx: u16 = 0;
+        for (chain_no, chain) in chains.iter().enumerate() {
+            let head = desc_idx;
+            let total = chain.req.len() + chain.reply.len();
+            for slot in 0..total {
+                assert!(
+                    desc_idx < qsz,
+                    "layout exceeds the {qsz}-entry descriptor table"
+                );
+                let (len, flags) = match chain.req.get(slot) {
+                    Some(seg) => {
+                        fs.mem.write_bytes(buf, seg);
+                        (seg.len() as u32, 0)
+                    }
+                    None => (chain.reply[slot - chain.req.len()], DESC_F_WRITE),
+                };
+                let last = slot + 1 == total;
+                write_desc(
+                    &fs.mem,
+                    desc + u64::from(desc_idx) * 16,
+                    buf,
+                    len,
+                    flags | if last { 0 } else { DESC_F_NEXT },
+                    desc_idx + 1,
+                );
+                // Keep buffers separated and 16-aligned; empty buffers still stride.
+                buf += (u64::from(len).max(1) + 15) & !15;
+                desc_idx += 1;
+            }
+            fs.mem.wr_u16(avail + 4 + (chain_no as u64) * 2, head);
+        }
+        fs.queues[qidx] = FsQueue {
+            num: u32::from(qsz),
+            ready: 1,
+            desc,
+            avail,
+            used,
+            last_avail: 0,
+        };
+        (avail, used)
+    }
+
+    /// Faithful copy of the pre-migration hand-rolled virtio-fs drain loop and
+    /// used-ring completion, kept as the differential oracle.
+    fn reference_fs_process_queue(fs: &mut VirtioFs, qidx: usize) -> bool {
+        if qidx >= FS_NUM_QUEUES {
+            return false;
+        }
+        let q = fs.queues[qidx];
+        if q.ready == 0 {
+            return false;
+        }
+        let Some(qsz) = super::super::validated_queue_size(q.num) else {
+            return false;
+        };
+        let avail_idx = fs.mem.rd_u16(q.avail + 2);
+        let mut last_avail = q.last_avail;
+        let mut serviced = false;
+        while last_avail != avail_idx {
+            let slot = last_avail % qsz;
+            let head = fs.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
+            let written = reference_fs_service_request(fs, &q, head, qsz);
+            let used_idx = fs.mem.rd_u16(q.used + 2);
+            let uslot = u64::from(used_idx % qsz);
+            fs.mem.wr_u16(q.used + 4 + uslot * 8, head);
+            fs.mem.wr_u16(q.used + 6 + uslot * 8, 0);
+            fs.mem.wr_u16(q.used + 8 + uslot * 8, written as u16);
+            fs.mem
+                .wr_u16(q.used + 10 + uslot * 8, (written >> 16) as u16);
+            fs.mem.wr_u16(q.used + 2, used_idx.wrapping_add(1));
+            last_avail = last_avail.wrapping_add(1);
+            serviced = true;
+        }
+        fs.queues[qidx].last_avail = last_avail;
+        if serviced {
+            fs.interrupt_status |= 1;
+        }
+        serviced
+    }
+
+    /// Faithful copy of the pre-migration hand-rolled gather/dispatch/scatter.
+    fn reference_fs_service_request(fs: &mut VirtioFs, q: &FsQueue, head: u16, qsz: u16) -> u32 {
+        let desc_at = |i: u16| q.desc + u64::from(i) * 16;
+        let mut req = Vec::new();
+        let mut writable: Vec<(u64, u32)> = Vec::new();
+        let mut idx = head;
+        let mut guard = 0u32;
+        loop {
+            let da = desc_at(idx);
+            let addr = fs.mem.rd_u64(da);
+            let len = fs.mem.rd_u32(da + 8);
+            let flags = fs.mem.rd_u16(da + 12);
+            if flags & DESC_F_WRITE != 0 {
+                writable.push((addr, len));
+            } else {
+                req.extend_from_slice(&fs.mem.read_bytes(addr, len as usize));
+            }
+            guard += 1;
+            if flags & DESC_F_NEXT == 0 || guard > u32::from(qsz) {
+                break;
+            }
+            let next = fs.mem.rd_u16(da + 14);
+            if next >= qsz {
+                break;
+            }
+            idx = next;
+        }
+        let reply = fs.server.dispatch(&req);
+        let mut off = 0usize;
+        let mut written = 0u32;
+        for (addr, len) in writable {
+            if off >= reply.len() {
+                break;
+            }
+            let n = (len as usize).min(reply.len() - off);
+            let wrote = fs.mem.write_bytes(addr, &reply[off..off + n]);
+            written += wrote as u32;
+            off += wrote;
+        }
+        written
+    }
+
+    #[test]
+    fn fs_process_queue_matches_reference_walk_byte_for_byte() {
+        // One shared read-only tree, so both devices' FUSE servers see identical
+        // inodes and identical replies.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), b"virtio-fs payload").unwrap();
+        const QIDX: usize = 1; // the request queue
+
+        for qsz in [1u16, 2, 128, 256] {
+            for (label, chains) in fs_layouts_for(qsz) {
+                let what = format!("qsz={qsz} layout={label}");
+
+                let mut fs_ref = fs_dev(dir.path());
+                let (avail, used) = program_fs_queue(&mut fs_ref, QIDX, qsz, &chains);
+                let mut fs_new = fs_dev(dir.path());
+                program_fs_queue(&mut fs_new, QIDX, qsz, &chains);
+
+                for round in notify_rounds(chains.len()) {
+                    fs_ref.mem.wr_u16(avail + 2, round);
+                    let ret_ref = reference_fs_process_queue(&mut fs_ref, QIDX);
+                    fs_new.mem.wr_u16(avail + 2, round);
+                    let ret_new = fs_new.process_queue(QIDX);
+                    assert_eq!(
+                        ret_new, ret_ref,
+                        "return value differs for {what} at avail_idx={round}"
+                    );
+                }
+                assert_eq!(
+                    fs_new.mem.read_bytes(0, RAM_SIZE),
+                    fs_ref.mem.read_bytes(0, RAM_SIZE),
+                    "guest RAM differs for {what}"
+                );
+                let used_len = 4 + usize::from(qsz) * 8;
+                assert_eq!(
+                    fs_new.mem.read_bytes(used, used_len),
+                    fs_ref.mem.read_bytes(used, used_len),
+                    "used-ring bytes differ for {what}"
+                );
+                assert_eq!(
+                    fs_new.mem.rd_u16(used + 2),
+                    fs_ref.mem.rd_u16(used + 2),
+                    "used index differs for {what}"
+                );
+                assert_eq!(
+                    fs_new.queues[QIDX].last_avail, fs_ref.queues[QIDX].last_avail,
+                    "last_avail differs for {what}"
+                );
+                assert_eq!(
+                    fs_new.interrupt_status, fs_ref.interrupt_status,
+                    "interrupt_status differs for {what}"
+                );
+            }
         }
     }
 }

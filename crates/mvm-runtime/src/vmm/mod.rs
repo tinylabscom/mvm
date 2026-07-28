@@ -10,6 +10,8 @@
 //!
 //! This module compiles on every target; it is the "no VMM lock-in" seam.
 
+use virtio_queue::{Queue as SplitQueue, QueueT};
+
 pub(crate) mod agent_bridge;
 pub(crate) mod console_bridge;
 pub mod device;
@@ -55,6 +57,44 @@ pub(crate) fn validated_queue_size(num: u32) -> Option<u16> {
     } else {
         None
     }
+}
+
+/// The guest-programmed split-virtqueue ring state a device hands to
+/// [`build_split_queue`]: the three ring base addresses plus the device-owned
+/// resume point in the available ring.
+///
+/// Grouped into one type because every virtio-mmio device in this module keeps
+/// the same four values (block as flat fields, fs and vsock per queue) and they
+/// only ever travel together.
+#[derive(Clone, Copy)]
+pub(crate) struct RingGeometry {
+    pub(crate) desc: u64,
+    pub(crate) avail: u64,
+    pub(crate) used: u64,
+    pub(crate) next_avail: u16,
+}
+
+/// Build a validated `virtio-queue` split [`SplitQueue`] from a device's
+/// guest-programmed ring geometry, shared by every virtio-mmio device here.
+///
+/// `qsz` is the already-validated ring size (a power of two ≤ [`QUEUE_SIZE_MAX`]
+/// — see [`validated_queue_size`]); `next_avail` resumes from the device-owned
+/// index so iteration continues exactly where the previous drain stopped.
+/// Returns `None` if a ring address breaks virtio's alignment rules —
+/// `set_*_address` silently keeps the prior value in that case, so we refuse to
+/// service a geometry we could not faithfully program.
+pub(crate) fn build_split_queue(ring: RingGeometry, qsz: u16) -> Option<SplitQueue> {
+    let mut queue = SplitQueue::new(QUEUE_SIZE_MAX as u16).ok()?;
+    queue.set_size(qsz);
+    queue.set_ready(true);
+    queue.set_desc_table_address(Some(ring.desc as u32), Some((ring.desc >> 32) as u32));
+    queue.set_avail_ring_address(Some(ring.avail as u32), Some((ring.avail >> 32) as u32));
+    queue.set_used_ring_address(Some(ring.used as u32), Some((ring.used >> 32) as u32));
+    queue.set_next_avail(ring.next_avail);
+    (queue.desc_table() == ring.desc
+        && queue.avail_ring() == ring.avail
+        && queue.used_ring() == ring.used)
+        .then_some(queue)
 }
 
 #[cfg(test)]
