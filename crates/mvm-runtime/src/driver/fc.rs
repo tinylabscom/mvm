@@ -22,8 +22,8 @@ use mvm_agentd::vsock::{
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
-    StandbyHandle, StandbySpec, StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId,
-    VmStatus,
+    StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 
 use crate::backend::FirecrackerBackend;
@@ -321,11 +321,47 @@ fn fc_sudo_signal(pid_file: &str, signal: FcStopSignal) {
 
 /// Read the pid `boot` recorded for the VM whose state dir is `vm_state_dir`.
 /// `boot` only returns once the guest agent has answered, so the pid file is
-/// already on disk by the time a caller reaches for it; a read failure is not
-/// fatal to a standby spawn (the parent is already running), so this reports
-/// `None` rather than erroring.
+/// already on disk by the time a caller reaches for it.
 fn read_fc_pid(vm_state_dir: &str) -> Option<u32> {
     read_firecracker_pid(vm_state_dir).ok()
+}
+
+/// Resolve the pid a just-completed `boot` recorded, via the injected
+/// `read_pid` closure, failing closed rather than defaulting to 0 on a read
+/// miss. `boot` only returns once the guest agent has answered, so by this
+/// point the pid file is on disk and a read failure is a real defect, not
+/// "no live process" — `StandbyHandle::pid == 0` is the sentinel
+/// `is_saved_state()` keys off, and both the pool's eviction (which only
+/// SIGTERMs a non-saved-state handle) and its stale reaper (which routes
+/// saved-state handles through TTL/park logic instead of a liveness probe)
+/// would silently skip a live Firecracker process wearing that sentinel.
+/// The closure is injected so this is unit-testable without booting anything.
+fn resolve_standby_parent_pid(
+    vm_id: &str,
+    read_pid: impl FnOnce() -> Option<u32>,
+) -> std::result::Result<u32, StandbyError> {
+    read_pid().ok_or_else(|| {
+        StandbyError::SpawnFailed(format!(
+            "standby parent '{vm_id}' booted but its Firecracker pid could not be read"
+        ))
+    })
+}
+
+/// Persist the per-VM runtime metadata that `FcVmFullControl::rootfs_path()`
+/// (and, through it, `device_anchors()`) resolves via `mode.json`.
+/// `spawn_standby_parent` boots through this driver directly rather than
+/// through the `workload_runner::start` orchestration — the only other writer
+/// of this file — so without this call a live capture against the spawned
+/// parent fails closed for want of a resolvable rootfs.
+fn record_standby_parent_rootfs(
+    vm_id: &str,
+    image: &Path,
+) -> std::result::Result<(), StandbyError> {
+    crate::base::runtime_meta::record_from_rootfs(vm_id, StartMode::Detached, image).map_err(|e| {
+        StandbyError::SpawnFailed(format!(
+            "recording standby parent '{vm_id}' rootfs metadata: {e}"
+        ))
+    })
 }
 
 /// SIGTERM → grace → SIGKILL escalation against a Firecracker process, mirroring
@@ -419,6 +455,11 @@ impl VmmDriver for FcDriver {
             StandbyError::SpawnFailed(format!("standby '{}' has no rootfs image to boot", spec.id))
         })?;
 
+        // Written before boot so a capture against this parent can resolve its
+        // rootfs the same way every workload-runner-launched VM's can — see
+        // `record_standby_parent_rootfs`.
+        record_standby_parent_rootfs(&spec.id, Path::new(image))?;
+
         let parent = VmmSpec {
             name: spec.id.clone(),
             kernel: KernelImage::Path(PathBuf::from(&spec.kernel_path)),
@@ -450,8 +491,17 @@ impl VmmDriver for FcDriver {
             .map_err(|e| StandbyError::SpawnFailed(format!("boot standby parent: {e}")))?;
 
         // Deliberately left running: the caller captures its live memory, and
-        // Firecracker outlives this handle.
-        let pid = read_fc_pid(&spec.vm_state_dir).unwrap_or(0);
+        // Firecracker outlives this handle. A pid we can't read is a real
+        // failure at this point (see `resolve_standby_parent_pid`), so the
+        // just-booted process is killed rather than handed back as an
+        // untracked "saved state" standby.
+        let pid = match resolve_standby_parent_pid(&spec.id, || read_fc_pid(&spec.vm_state_dir)) {
+            Ok(pid) => pid,
+            Err(e) => {
+                let _ = vm.kill();
+                return Err(e);
+            }
+        };
         drop(vm);
 
         Ok(StandbyHandle {
@@ -1390,5 +1440,49 @@ mod tests {
     #[test]
     fn fc_offers_a_vm_full_capture_control() {
         assert!(FcDriver::new().vm_full_control("any-vm").is_some());
+    }
+
+    /// The metadata `spawn_standby_parent` writes must be exactly what
+    /// `FcVmFullControl::rootfs_path()` reads — proven by constructing the
+    /// metadata state directly (no boot, no KVM) and then resolving it through
+    /// the real capture control, the same way a live capture would.
+    #[test]
+    fn record_standby_parent_rootfs_lets_the_capture_control_resolve_it() {
+        use crate::checkpoint::VmFullControl as _;
+        use mvm_core::util::test_env::TestEnv;
+
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let image = tmp.path().join("rootfs.ext4");
+        std::fs::write(&image, b"fake-rootfs").unwrap();
+
+        record_standby_parent_rootfs("standby-parent-1", &image).unwrap();
+
+        let control = crate::firecracker::FcVmFullControl::new("standby-parent-1");
+        assert_eq!(control.rootfs_path().unwrap(), image);
+    }
+
+    /// A pid that can't be read after a successful boot is a real failure, not
+    /// "no live process" — silently defaulting to 0 would leave a live
+    /// Firecracker process wearing the sentinel that pool eviction and the
+    /// stale reaper both treat as an already-quiesced saved state.
+    #[test]
+    fn resolve_standby_parent_pid_fails_closed_when_the_pid_read_fails() {
+        let err = resolve_standby_parent_pid("standby-x", || None).unwrap_err();
+        assert!(
+            matches!(err, StandbyError::SpawnFailed(ref m) if m.contains("pid")),
+            "expected a SpawnFailed naming the unreadable pid, got: {err:?}"
+        );
+    }
+
+    /// The success path: a readable pid passes straight through.
+    #[test]
+    fn resolve_standby_parent_pid_returns_the_read_pid() {
+        assert_eq!(
+            resolve_standby_parent_pid("standby-x", || Some(4242)).unwrap(),
+            4242
+        );
     }
 }
