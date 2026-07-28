@@ -692,7 +692,9 @@ Expected: PASS.
 
 In `claim_standby` (`workload_runner/runner.rs`), after `fork_standby_child` returns and **before** the claim is committed, deliver the child's real VMGenID token over vsock and require the guest to answer. Reuse the existing delivery helper rather than writing a second one — `crates/mvm-cli/src/commands/vm/checkpoint.rs` around the `deliver_fc_fork_post_restore` path shows the established shape, and the post-restore send/poll lives in the runtime already; find it and call it.
 
-The handshake is fail-closed on three flags — `acknowledged`, `reseeded`, `clock_resynced`. If any is false, or the guest never answers within the existing timeout, the claim must **fail** (returning `StandbyError::ClaimFailed`) so `ClaimCleanup` runs and the child is torn down. A child that cannot prove it reseeded is exactly the twin-CSPRNG case the fresh-identity guarantee exists to prevent, so admitting it would defeat the purpose.
+The handshake is fail-closed on three flags — `acknowledged`, `reseeded`, `clock_resynced`. If any is false, or the guest never answers within the existing timeout, the claim must **fail** with `StandbyError::ClaimFailed`. A child that cannot prove it reseeded is exactly the twin-CSPRNG case the fresh-identity guarantee exists to prevent, so admitting it would defeat the purpose.
+
+**Stop the child explicitly on that path.** `ClaimCleanup`'s `Drop` only returns the parent to the pool and removes the child's directory — **it kills no VM**. Relying on it would leave the refused, twin-CSPRNG child *running*. The refusal path must stop the child itself.
 
 Write a test that drives the claim against the mock driver with a stubbed handshake and asserts: all three flags true → claim succeeds; any flag false → `ClaimFailed` and no committed child. Do not require KVM.
 
