@@ -209,6 +209,25 @@ fn validate_shell_job(
     Ok(())
 }
 
+/// Recursively mirror `src` directory contents into `dst` (created if absent).
+/// The HVF builder extracts artifacts to its own VM output dir; downstream code
+/// (the dev-build pipeline and slot registration) reads from the caller's
+/// `artifact_out`, so the artifacts must be copied across.
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 impl BuilderVm for HvfBuilderVm {
     fn run_build(
         &self,
@@ -269,8 +288,20 @@ impl BuilderVm for HvfBuilderVm {
         }
 
         // The output tar (extracted into `output_dir`) carries rootfs.ext4 +
-        // result + boot-timings — exactly what finalize reads.
-        finalize_flake_job(&outcome.output_dir, &outcome.output_dir, &job_id)
+        // meta + result + boot-timings. The disk-transport path lands them in
+        // the VM's own `output_dir`, so mirror them into the caller's requested
+        // `artifact_out` — the dev-build pipeline and slot registration read
+        // `artifact_out`, not `output_dir`.
+        if outcome.output_dir != mounts.artifact_out {
+            copy_tree(&outcome.output_dir, &mounts.artifact_out).map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "mirroring builder artifacts {} -> {}: {e}",
+                    outcome.output_dir.display(),
+                    mounts.artifact_out.display()
+                ))
+            })?;
+        }
+        finalize_flake_job(&outcome.output_dir, &mounts.artifact_out, &job_id)
     }
 }
 
@@ -296,6 +327,26 @@ mod tests {
             b.run_build(&job, &mounts),
             Err(BuilderVmError::NotYetImplemented)
         ));
+    }
+
+    #[test]
+    fn copy_tree_mirrors_files_and_subdirs() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dst = tempfile::TempDir::new().unwrap();
+        std::fs::write(src.path().join("rootfs.ext4"), b"root").unwrap();
+        std::fs::create_dir(src.path().join("sub")).unwrap();
+        std::fs::write(src.path().join("sub").join("meta.json"), b"{}").unwrap();
+
+        copy_tree(src.path(), dst.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read(dst.path().join("rootfs.ext4")).unwrap(),
+            b"root"
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("sub").join("meta.json")).unwrap(),
+            b"{}"
+        );
     }
 
     #[test]
