@@ -24,8 +24,35 @@ pub struct VerbGrant {
     pub plan_nonce: Nonce,
     pub not_after: DateTime<Utc>,
     pub verbs: Vec<VerbId>,
-    /// Raw Ed25519 signature bytes (64) over signing_bytes(); serialized as a JSON array.
+    /// Raw Ed25519 signature bytes (64) over signing_bytes(), serialized as
+    /// base64. A `Vec<u8>` would otherwise render as a JSON array of 64 decimal
+    /// numbers — roughly 230 characters against base64's 88 — and this grant
+    /// rides the guest kernel cmdline, where the budget is finite and silently
+    /// enforced. `sig` is excluded from `signing_bytes`, so how it is encoded
+    /// cannot affect signature validity.
+    #[serde(with = "sig_base64")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub sig: Vec<u8>,
+}
+
+/// Serializes the raw signature bytes as a base64 string rather than a JSON
+/// array of numbers.
+mod sig_base64 {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use serde::{Deserialize as _, Deserializer, Serialize as _, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        B64.encode(bytes).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        B64.decode(encoded.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -128,6 +155,46 @@ mod tests {
         assert!(
             g.verify(&k.verifying_key(), "sess-A", &nonce(), now)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn sig_serializes_as_base64_and_still_verifies_after_a_round_trip() {
+        let now = Utc::now();
+        let (g, k) = signed(now, vec!["run-entrypoint"]);
+
+        let json = serde_json::to_string(&g).expect("grant serializes");
+        // A base64 string, not the JSON array of 64 numbers a bare Vec<u8> emits.
+        let expected = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(&g.sig)
+        };
+        assert!(
+            json.contains(&alloc::format!("\"sig\":\"{expected}\"")),
+            "sig is not base64-encoded: {json}"
+        );
+
+        let back: VerbGrant = serde_json::from_str(&json).expect("grant round-trips");
+        assert_eq!(
+            back.sig, g.sig,
+            "signature bytes must survive the round trip"
+        );
+        assert!(
+            back.verify(&k.verifying_key(), "sess-A", &nonce(), now)
+                .is_ok(),
+            "a round-tripped grant must still verify"
+        );
+    }
+
+    #[test]
+    fn sig_rejects_non_base64() {
+        let now = Utc::now();
+        let (g, _) = signed(now, vec!["ping"]);
+        let json = serde_json::to_string(&g).expect("grant serializes");
+        let broken = json.replace("\"sig\":\"", "\"sig\":\"!!!");
+        assert!(
+            serde_json::from_str::<VerbGrant>(&broken).is_err(),
+            "malformed base64 must fail closed"
         );
     }
 
