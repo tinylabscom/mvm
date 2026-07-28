@@ -12,8 +12,17 @@
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use super::guest_mem::GuestMem;
+
+/// Whether the per-descriptor virtio trace is enabled (`MVM_HVF_VIRTIO_DEBUG`).
+/// Read from the environment once and cached — the request/descriptor hot path
+/// must not take the process-global env lock per descriptor.
+fn virtio_debug() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MVM_HVF_VIRTIO_DEBUG").is_some())
+}
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt"
 const VIRTIO_VERSION: u32 = 2;
@@ -308,7 +317,7 @@ impl VirtioBlk {
             return false;
         };
         let avail_idx = self.rd_u16(self.avail + 2);
-        let debug = std::env::var_os("MVM_HVF_VIRTIO_DEBUG").is_some();
+        let debug = virtio_debug();
         if debug {
             eprintln!(
                 "virtio: notify qsz={qsz} ready={} avail_idx={avail_idx} last_avail={} desc={:#x} avail={:#x} used={:#x}",
@@ -351,7 +360,7 @@ impl VirtioBlk {
         // request header: type u32 @0, reserved u32 @4, sector u64 @8.
         let req_type = self.rd_u32(hdr_addr);
         let mut sector = self.rd_u64(hdr_addr + 8);
-        if std::env::var_os("MVM_HVF_VIRTIO_DEBUG").is_some() {
+        if virtio_debug() {
             eprintln!("virtio:   req hdr@{hdr_addr:#x} type={req_type} sector={sector}");
         }
 
@@ -372,7 +381,7 @@ impl VirtioBlk {
             let addr = self.rd_u64(da);
             let len = self.rd_u32(da + 8);
             let dflags = self.rd_u16(da + 12);
-            if std::env::var_os("MVM_HVF_VIRTIO_DEBUG").is_some() {
+            if virtio_debug() {
                 eprintln!("virtio:     desc[{next}] addr={addr:#x} len={len} flags={dflags:#x}");
             }
             if dflags & VIRTQ_DESC_F_NEXT == 0 {

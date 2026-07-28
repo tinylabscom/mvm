@@ -1,8 +1,9 @@
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::os::fd::RawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
 use super::agent_bridge::AgentBridge;
@@ -531,15 +532,25 @@ impl HostInitiatedHandler for ConsoleVsockHandler {
     }
 }
 
+/// Resolved `MVM_HVF_AGENT_DEBUG` trace-file path, read from the environment once
+/// and cached — the per-packet drain path must not take the process-global env
+/// lock on every call.
+fn agent_debug_path() -> Option<&'static Path> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os("MVM_HVF_AGENT_DEBUG").map(PathBuf::from))
+        .as_deref()
+}
+
 fn agent_dbg(msg: &str) {
-    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") {
-        use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(f, "[agent-bridge] {msg}");
-        }
+    let Some(path) = agent_debug_path() else {
+        return;
+    };
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[agent-bridge] {msg}");
     }
 }

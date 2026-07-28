@@ -421,7 +421,7 @@ mod tests {
 
         assert_eq!(d.transport.pending_rx.len(), MAX_CONNECTIONS + 1);
         assert_eq!(
-            d.transport.pending_rx.last().map(|(hdr, _)| hdr.op),
+            d.transport.pending_rx.back().map(|(hdr, _)| hdr.op),
             Some(OP_RST)
         );
     }
@@ -738,7 +738,7 @@ mod tests {
         let mut hdr = None;
         for _ in 0..200 {
             let _ = d.service_host_io();
-            if let Some((h, _)) = d.transport.pending_rx.first() {
+            if let Some((h, _)) = d.transport.pending_rx.front() {
                 hdr = Some(*h);
                 break;
             }
@@ -798,7 +798,7 @@ mod tests {
         let mut hdr = None;
         for _ in 0..200 {
             let _ = d.service_host_io();
-            if let Some((h, _)) = d.transport.pending_rx.first() {
+            if let Some((h, _)) = d.transport.pending_rx.front() {
                 hdr = Some(*h);
                 break;
             }
