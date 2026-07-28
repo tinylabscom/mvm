@@ -50,6 +50,30 @@ Every task's requirements implicitly include this section.
   ```
 - **No AI-tool attribution** and no `Co-Authored-By: Claude` trailer in any commit or PR.
 
+## What the warm-pool adoption commit changed (this branch is rebased onto it)
+
+Commit `1c847f458` ("complete vsock-first warm-pool adoption") landed after the
+first draft of this plan. It does **not** implement any of this plan's five
+stubs — `FcDriver` still has no `spawn_standby_parent` / `fork_standby_child`
+override, `standby_pool` is still `false`, `warm_to_target` still calls
+`spawn_standby`, and `claim_or_cold` still calls the fail-closed
+`claim_standby`. But three of its changes bind this work:
+
+- **`template_id: Option<String>` on both `StandbySpec` and `StandbyHandle`**,
+  with a cross-template claim refusal and `StandbyCompat.template_id`. Every
+  construction site must set it. In `spawn_standby_parent` it must be
+  `spec.template_id.clone()` — hardcoding `None` compiles but silently defeats
+  the cross-template refusal tests. Test fixtures may use `None`.
+- **The fork restore path now guards and resumes.** `restore_fork` routes
+  through `guarded_fork_load_resume` → `load_snapshot_for_fork` +
+  `guard_and_resume`. `guard_and_resume` is the shared tail every load path
+  funnels through, so the no-NIC guard cannot be bypassed by adding a new load.
+  A forked child therefore comes back **resumed**, not paused.
+- **The post-restore handshake is fail-closed on three flags** —
+  `acknowledged`, `reseeded`, and `clock_resynced`
+  (`mvm-agentd/src/vsock/api.rs:160-183`). A restored child is not usable until
+  the guest answers all three.
+
 ## Key facts verified against the code (do not re-derive)
 
 - `StandbyHandle` is defined in **`mvm-protocol`** (`src/protocol/vm_backend.rs:744`); `CheckpointId` is in **`mvm-core`** (`src/checkpoint.rs:12`). **`mvm-protocol` does not depend on `mvm-core`** and must not — it is the `no_std` foundation. The new handle field is therefore `Option<String>`, converted at the `mvm-runtime` boundary.
@@ -317,6 +341,9 @@ Add `vm_full_control` to `VmmDriver` in `driver/traits.rs` with the `None` defau
 
         Ok(StandbyHandle {
             id: spec.id.clone(),
+            // Propagate the template identity: a parent bound to one template
+            // must never be claimable by a launch of another.
+            template_id: spec.template_id.clone(),
             control_socket: spec.control_socket.clone(),
             pid,
             kernel_sha256: spec.kernel_sha256.clone(),
@@ -465,7 +492,9 @@ Expected: FAIL — the inherited default returns `StandbyError::Unsupported`.
     }
 ```
 
-Deliver `req.genid` to the child by the same mechanism the existing fork path uses. Note `restore_fork` internally passes an all-zero token to `warm_restore_instance_from_path` and expects the caller to deliver the real token over vsock once the agent is reachable — follow that same contract rather than inventing a second delivery path, and confirm where the existing checkpoint-fork CLI does it (`mvm-cli/src/commands/vm/checkpoint.rs:1053` references this).
+`restore_fork` already runs the no-NIC guard and **resumes** the child (it routes through `guarded_fork_load_resume` → `guard_and_resume`), so this override must not add a second guard or a resume of its own.
+
+Deliver `req.genid` by the same mechanism the existing fork path uses: `restore_fork` passes an all-zero token to `warm_restore_instance_from_path` and expects the caller to deliver the real token over vsock once the agent answers. The post-restore handshake is **fail-closed on three flags** — `acknowledged`, `reseeded`, and `clock_resynced` (`mvm-agentd/src/vsock/api.rs:160-183`) — so a child is not usable until the guest answers all three. Follow that contract rather than inventing a second delivery path; the existing checkpoint-fork CLI does it around `mvm-cli/src/commands/vm/checkpoint.rs:1053`. Decide and state in your report whether the handshake belongs in this driver override or in the runner's claim (the runner already owns the child's identity), and keep it in exactly one place.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
