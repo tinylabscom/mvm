@@ -522,9 +522,11 @@ git commit -m "feat(fc): restore a forked standby child from the parent's saved 
 
 ---
 
-### Task 4: Capture the parent's full state, then release it
+### Task 4: Capture the parent's full state, release it, and complete the child's post-restore handshake
 
 The driver boots the parent and supplies the backend-specific control; the capture itself is backend-agnostic, so it lives in the runner. After capture the parent is released — the checkpoint carries its full state, so a pool slot costs disk rather than RAM.
+
+**This task also closes a gap the fork review surfaced.** A restored child currently comes back resumed and is handed to the caller as a successful claim **while still carrying the parent's cloned CSPRNG state and clock** — silently, not fail-closed. `FcForkRestorer::restore_fork` passes an all-zero VMGenID token and expects the caller to deliver the real one over vsock once the agent answers; the handshake is fail-closed on three flags (`acknowledged`, `reseeded`, `clock_resynced` — `mvm-agentd/src/vsock/api.rs:160-183`). Nothing on the warm-pool path does this today: `fork_standby_child` never touches `req.genid`, `restore_fork` never calls the post-restore helpers, and `claim_standby` (`workload_runner/runner.rs:354-434`) commits immediately after the fork. Two identical children would share a CSPRNG — which is exactly what the fresh-identity guarantee exists to prevent. This must land before the capability flip in Task 6.
 
 **Files:**
 - Modify: `crates/mvm-runtime/src/workload_runner/runner.rs` (near `ClaimContext` at :237 and `spawn_standby` at :669)
@@ -686,14 +688,24 @@ Add a routing test mirroring the existing `claim_routing::*` tests (qemu and was
 Run: `cargo nextest run -p mvm-runtime workload_runner backend`
 Expected: PASS.
 
-- [ ] **Step 6: Full gates + commit**
+- [ ] **Step 6: Wire the child's post-restore handshake into the claim**
+
+In `claim_standby` (`workload_runner/runner.rs`), after `fork_standby_child` returns and **before** the claim is committed, deliver the child's real VMGenID token over vsock and require the guest to answer. Reuse the existing delivery helper rather than writing a second one — `crates/mvm-cli/src/commands/vm/checkpoint.rs` around the `deliver_fc_fork_post_restore` path shows the established shape, and the post-restore send/poll lives in the runtime already; find it and call it.
+
+The handshake is fail-closed on three flags — `acknowledged`, `reseeded`, `clock_resynced`. If any is false, or the guest never answers within the existing timeout, the claim must **fail** (returning `StandbyError::ClaimFailed`) so `ClaimCleanup` runs and the child is torn down. A child that cannot prove it reseeded is exactly the twin-CSPRNG case the fresh-identity guarantee exists to prevent, so admitting it would defeat the purpose.
+
+Write a test that drives the claim against the mock driver with a stubbed handshake and asserts: all three flags true → claim succeeds; any flag false → `ClaimFailed` and no committed child. Do not require KVM.
+
+Also correct the now-false doc comments on `ChildForkRequest` and `fork_standby_child` in `crates/mvm-runtime/src/driver/traits.rs` (they claim the token "rides the fork call itself" and is delivered "as the child boots"). They predate this design and will mislead the next reader; make them describe where the token is actually delivered.
+
+- [ ] **Step 7: Full gates + commit**
 
 ```bash
 cargo fmt --all
 cargo nextest run --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 git add -A
-git commit -m "feat(standby): capture a warm parent's full state and release it"
+git commit -m "feat(standby): capture a warm parent's full state and reseed the forked child"
 ```
 
 ---
