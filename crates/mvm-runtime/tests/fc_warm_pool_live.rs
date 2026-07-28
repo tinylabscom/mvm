@@ -55,7 +55,7 @@ fn fc_warm_pool_spawn_and_claim() {
     };
 
     let home = tempfile::tempdir().expect("tempdir");
-    std::env::set_var("MVM_HOME", home.path());
+    unsafe { std::env::set_var("MVM_HOME", home.path()) };
 
     let pid = std::process::id();
     let parent_id = format!("fc-warm-live-parent-{pid}");
