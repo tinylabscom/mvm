@@ -488,6 +488,7 @@ impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
             parent_vm_dir.to_path_buf(),
             std::path::PathBuf::from(&child_vm_dir),
         ));
+        std::fs::create_dir_all(child_dir.join("runtime")).ok();
         crate::microvm::remap_paths_for_fork(&mappings)
             .context("remapping parent device paths for FC fork")?;
 
