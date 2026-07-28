@@ -102,7 +102,6 @@ const ENV_SUB: &[(&str, AuditPosture)] = &[
 // Plan 178 — operational verbs grouped under `ops <sub>`. Postures unchanged.
 const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
-    ("bench", AuditPosture::DelegatesToSub(BENCH_SUB)),
     ("config", AuditPosture::Emits("ConfigChange")),
 ];
 
@@ -127,22 +126,6 @@ const BUILD_SUB: &[(&str, AuditPosture)] = &[
     (
         "runtime-overlay",
         AuditPosture::DelegatesToSub(RUNTIME_OVERLAY_SUB),
-    ),
-];
-
-// Plan 93 Phase 2 Lever 0 — `mvmctl bench microvm-launch`. The live
-// probe boots a throwaway guest through the signed-plan admission path
-// (claim 8), so the documented posture is the same `plan.*`+`VmStart`
-// chain `up` emits. (The live boot wiring is a tracked follow-up; the
-// measurement substrate ships first.)
-const BENCH_SUB: &[(&str, AuditPosture)] = &[
-    (
-        "microvm-launch",
-        AuditPosture::Emits("plan.admitted+plan.launched+VmStart"),
-    ),
-    (
-        "microvm-density",
-        AuditPosture::Emits("plan.admitted+plan.launched+VmStart+VmStop"),
     ),
 ];
 
@@ -471,7 +454,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Plan 200 — beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.
-    // Plan 178 — metrics/bench/config/mcp grouped under `ops <sub>`.
+    // Plan 178 — metrics/config/mcp grouped under `ops <sub>`.
     ("ops", AuditPosture::DelegatesToSub(OPS_SUB)),
     ("network", AuditPosture::DelegatesToSub(NETWORK_SUB)),
     ("cache", AuditPosture::DelegatesToSub(CACHE_SUB)),
