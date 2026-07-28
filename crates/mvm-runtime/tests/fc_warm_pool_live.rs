@@ -106,67 +106,57 @@ fn fc_warm_pool_spawn_and_claim() {
     let store = mvm_runtime::checkpoint::CheckpointStore::open();
     let content_dir =
         store.content_dir(&mvm_core::checkpoint::CheckpointId::new(parent_checkpoint));
+    let child_dir = mvm_core::config::vm_state_dir(&child_id);
+    std::fs::create_dir_all(&child_dir).expect("create child vm dir");
 
-    println!("FC_WARM_POOL_SPAWN_MS={spawn_ms}");
-
-    let mut claim_ms = Vec::new();
-    for i in 0..5 {
-        let claim_child_id = format!("{child_id}-claim-{i}");
-        let claim_child_dir = mvm_core::config::vm_state_dir(&claim_child_id);
-        std::fs::create_dir_all(&claim_child_dir).expect("create claim child vm dir");
-        for name in [
-            "memory.bin",
-            "vmstate.bin",
-            "rootfs.ext4",
-            "device-anchors.json",
-        ] {
-            let src = content_dir.join(name);
-            if src.exists() {
-                std::fs::copy(&src, claim_child_dir.join(name))
-                    .unwrap_or_else(|e| panic!("copy {} to claim child dir: {}", src.display(), e));
-            }
+    for name in [
+        "memory.bin",
+        "vmstate.bin",
+        "rootfs.ext4",
+        "device-anchors.json",
+    ] {
+        let src = content_dir.join(name);
+        if src.exists() {
+            std::fs::copy(&src, child_dir.join(name))
+                .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
         }
+    }
 
-        let t_claim = Instant::now();
-        let fork_result = driver.fork_standby_child(&ChildForkRequest {
-            child_vm_name: &claim_child_id,
-            child_dir: &claim_child_dir,
-            genid: GenerationToken {
-                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-                content_hash: parent_checkpoint.into(),
-            },
-        });
-        if let Err(ref e) = fork_result {
-            eprintln!("fork failed: {e:#}");
-            for name in ["firecracker.log", "console.log"] {
-                let path = claim_child_dir.join(name);
-                if path.exists() {
-                    eprintln!("--- {name} ---");
-                    if let Ok(bytes) = std::fs::read(&path) {
-                        eprintln!("{}", String::from_utf8_lossy(&bytes));
-                    }
+    let t_claim = Instant::now();
+    let fork_result = driver.fork_standby_child(&ChildForkRequest {
+        child_vm_name: &child_id,
+        child_dir: &child_dir,
+        genid: GenerationToken {
+            token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            content_hash: parent_checkpoint.into(),
+        },
+    });
+    if let Err(ref e) = fork_result {
+        eprintln!("fork failed: {e:#}");
+        for name in ["firecracker.log", "console.log"] {
+            let path = child_dir.join(name);
+            if path.exists() {
+                eprintln!("--- {name} ---");
+                if let Ok(bytes) = std::fs::read(&path) {
+                    eprintln!("{}", String::from_utf8_lossy(&bytes));
                 }
             }
         }
-        fork_result.expect("fork Firecracker standby child");
-        claim_ms.push(t_claim.elapsed().as_millis());
-
-        let child_vsock =
-            mvm_runtime::microvm::firecracker_vsock_uds_path(&claim_child_dir.to_string_lossy());
-        let connected = connect_to(&child_vsock, 5).is_ok();
-        assert!(
-            connected,
-            "child VM must answer on its vsock agent port after fork restore"
-        );
-
-        let _ = mvm_runtime::microvm::stop_vm(&claim_child_id);
-        let _ = std::fs::remove_dir_all(&claim_child_dir);
     }
+    fork_result.expect("fork Firecracker standby child");
+    let claim_ms = t_claim.elapsed().as_millis();
 
-    claim_ms.sort_unstable();
-    let p50 = claim_ms[claim_ms.len() / 2];
-    let p99 = claim_ms[(claim_ms.len() * 99) / 100];
-    println!("FC_WARM_POOL_CLAIM_MS_P50={p50}");
-    println!("FC_WARM_POOL_CLAIM_MS_P99={p99}");
-    println!("FC_WARM_POOL_CLAIM_MS_ALL={claim_ms:?}");
+    let child_vsock =
+        mvm_runtime::microvm::firecracker_vsock_uds_path(&child_dir.to_string_lossy());
+    let connected = connect_to(&child_vsock, 5).is_ok();
+    assert!(
+        connected,
+        "child VM must answer on its vsock agent port after fork restore"
+    );
+
+    let _ = mvm_runtime::microvm::stop_vm(&child_id);
+    let _ = std::fs::remove_dir_all(&child_dir);
+
+    println!("FC_WARM_POOL_SPAWN_MS={spawn_ms}");
+    println!("FC_WARM_POOL_CLAIM_MS={claim_ms}");
 }
