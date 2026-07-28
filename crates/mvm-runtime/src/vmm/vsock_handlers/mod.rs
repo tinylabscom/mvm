@@ -8,7 +8,9 @@ use std::sync::atomic::AtomicBool;
 
 use super::agent_bridge::AgentBridge;
 use super::console_bridge::ConsoleBridge;
-use super::substitution_bridge::{EndpointRelayAction, GuestEndpointRelay, SubstitutionBridge};
+use super::substitution_bridge::{
+    EgressBudget, EndpointRelayAction, GuestEndpointRelay, SubstitutionBridge,
+};
 use super::vsock_transport::{
     OP_CREDIT_REQUEST, OP_CREDIT_UPDATE, OP_REQUEST, OP_RESPONSE, OP_RST, OP_RW, OP_SHUTDOWN,
     VsockHdr, VsockTransportCore,
@@ -103,6 +105,7 @@ pub(crate) trait GuestPortHandler: Any + Send {
     fn drain(&mut self, _ctx: &mut VsockHandlerContext<'_>) -> Option<u32> {
         None
     }
+    fn cancel(&mut self) {}
     fn poll_fds(&self) -> Vec<RawFd> {
         Vec::new()
     }
@@ -113,6 +116,7 @@ pub(crate) trait HostInitiatedHandler: Any + Send {
     fn accepts_stream(&self, conn_id: u32) -> bool;
     fn on_packet(&mut self, ctx: &mut VsockHandlerContext<'_>, hdr: VsockHdr, payload: &[u8]);
     fn drain(&mut self, ctx: &mut VsockHandlerContext<'_>) -> Option<u32>;
+    fn cancel(&mut self) {}
     fn poll_fds(&self) -> Vec<RawFd> {
         Vec::new()
     }
@@ -130,13 +134,20 @@ impl VsockHandlerRegistry {
             mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
             Box::new(WorkloadExitHandler::new()),
         );
+        let egress_budget = EgressBudget::new();
         guest_ports.insert(
             mvm_agentd::vsock::EGRESS_PORT,
-            Box::new(StreamRelayHandler::new(mvm_agentd::vsock::EGRESS_PORT)),
+            Box::new(StreamRelayHandler::with_budget(
+                mvm_agentd::vsock::EGRESS_PORT,
+                egress_budget.clone(),
+            )),
         );
         guest_ports.insert(
             mvm_agentd::vsock::BROKER_PORT,
-            Box::new(StreamRelayHandler::new(mvm_agentd::vsock::BROKER_PORT)),
+            Box::new(StreamRelayHandler::with_budget(
+                mvm_agentd::vsock::BROKER_PORT,
+                egress_budget,
+            )),
         );
 
         let host_initiated: Vec<Box<dyn HostInitiatedHandler>> = vec![
@@ -257,6 +268,15 @@ impl VsockHandlerRegistry {
         delivered
     }
 
+    pub(crate) fn cancel(&mut self) {
+        for handler in &mut self.host_initiated {
+            handler.cancel();
+        }
+        for handler in self.guest_ports.values_mut() {
+            handler.cancel();
+        }
+    }
+
     pub(crate) fn poll_fds(&self) -> Vec<RawFd> {
         let mut fds = Vec::new();
         for handler in &self.host_initiated {
@@ -338,9 +358,9 @@ struct StreamRelayHandler {
 }
 
 impl StreamRelayHandler {
-    fn new(_guest_port: u32) -> Self {
+    fn with_budget(_guest_port: u32, budget: EgressBudget) -> Self {
         Self {
-            bridge: SubstitutionBridge::new(),
+            bridge: SubstitutionBridge::with_budget(budget),
             headers: HashMap::new(),
         }
     }
@@ -368,6 +388,7 @@ impl GuestPortHandler for StreamRelayHandler {
                         ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
                     }
                     EndpointRelayAction::Refused => {
+                        self.bridge.close_connection(hdr.src_port);
                         ctx.remove_recv(hdr.dst_port, hdr.src_port);
                         self.headers.remove(&hdr.src_port);
                         ctx.queue_reply(&hdr, OP_RST, &[]);
@@ -403,6 +424,11 @@ impl GuestPortHandler for StreamRelayHandler {
             }
         }
         if ctx.flush_rx() { Some(0) } else { None }
+    }
+
+    fn cancel(&mut self) {
+        self.bridge.close_all();
+        self.headers.clear();
     }
 
     fn poll_fds(&self) -> Vec<RawFd> {
@@ -485,6 +511,10 @@ impl HostInitiatedHandler for AgentVsockHandler {
         if ctx.flush_rx() { Some(0) } else { None }
     }
 
+    fn cancel(&mut self) {
+        self.bridge.close_all();
+    }
+
     fn poll_fds(&self) -> Vec<RawFd> {
         self.bridge.poll_fds()
     }
@@ -545,6 +575,10 @@ impl HostInitiatedHandler for ConsoleVsockHandler {
             ctx.queue_host_packet(conn_id, guest_port, OP_RST, &[]);
         }
         if ctx.flush_rx() { Some(0) } else { None }
+    }
+
+    fn cancel(&mut self) {
+        self.bridge.close_all();
     }
 
     fn poll_fds(&self) -> Vec<RawFd> {

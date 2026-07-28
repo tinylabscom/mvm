@@ -255,6 +255,14 @@ impl ConsoleBridge {
         }
     }
 
+    pub fn close_all(&mut self) {
+        let conn_ids: Vec<u32> = self.conns.keys().copied().collect();
+        for conn_id in conn_ids {
+            self.close(conn_id);
+        }
+        self.host_closed.clear();
+    }
+
     fn evict_idle_at(&mut self, now: Instant) {
         let expired: Vec<(u32, u32)> = self
             .conns

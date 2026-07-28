@@ -14,6 +14,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -22,6 +23,12 @@ use crate::vmm::vsock_transport::MAX_CONNECTIONS;
 
 /// Per-drain read budget per endpoint connection.
 const READ_CHUNK: usize = 16 * 1024;
+/// Maximum number of active raw/SOCKS5/DNS/substitution streams per workload.
+pub(crate) const MAX_EGRESS_STREAMS: usize = 128;
+/// Sustained egress byte budget shared by all host-mediated workload streams.
+pub(crate) const EGRESS_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
+/// Maximum burst accepted before the sustained budget must refill.
+pub(crate) const EGRESS_BURST_BYTES: u64 = 8 * 1024 * 1024;
 
 /// What the device should signal the guest after an inbound endpoint-relay frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +46,73 @@ pub(crate) struct EndpointRelayDrain {
     pub ready: Vec<(u32, Vec<u8>)>,
     /// Connection ids that hit EOF / error and were closed.
     pub closed: Vec<u32>,
+}
+
+/// Shared per-workload egress budget. The egress and broker ports use one
+/// instance so a workload cannot multiply its allowance by opening both paths.
+#[derive(Clone)]
+pub(crate) struct EgressBudget {
+    state: Arc<Mutex<EgressBudgetState>>,
+}
+
+struct EgressBudgetState {
+    active_streams: usize,
+    byte_tokens: u64,
+    last_refill: Instant,
+}
+
+impl EgressBudget {
+    pub(crate) fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    fn new_at(now: Instant) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(EgressBudgetState {
+                active_streams: 0,
+                byte_tokens: EGRESS_BURST_BYTES,
+                last_refill: now,
+            })),
+        }
+    }
+
+    fn try_reserve_stream(&self) -> bool {
+        let mut state = self.state.lock().expect("egress budget mutex poisoned");
+        if state.active_streams >= MAX_EGRESS_STREAMS {
+            return false;
+        }
+        state.active_streams += 1;
+        true
+    }
+
+    fn release_stream(&self) {
+        let mut state = self.state.lock().expect("egress budget mutex poisoned");
+        state.active_streams = state.active_streams.saturating_sub(1);
+    }
+
+    fn try_consume(&self, bytes: usize) -> bool {
+        self.try_consume_at(bytes, Instant::now())
+    }
+
+    fn try_consume_at(&self, bytes: usize, now: Instant) -> bool {
+        let mut state = self.state.lock().expect("egress budget mutex poisoned");
+        let elapsed_nanos = now.saturating_duration_since(state.last_refill).as_nanos();
+        let refill =
+            elapsed_nanos.saturating_mul(u128::from(EGRESS_BYTES_PER_SECOND)) / 1_000_000_000;
+        let refill = u64::try_from(refill).unwrap_or(u64::MAX);
+        state.byte_tokens = state
+            .byte_tokens
+            .saturating_add(refill)
+            .min(EGRESS_BURST_BYTES);
+        state.last_refill = now;
+
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        if bytes > state.byte_tokens {
+            return false;
+        }
+        state.byte_tokens -= bytes;
+        true
+    }
 }
 
 /// Backend-side byte relay between a guest connection id and a per-VM endpoint.
@@ -71,6 +145,7 @@ pub(crate) struct SubstitutionBridge {
     /// Open-connection count, published for the run loop heartbeat so it keeps
     /// waking an idle guest while there's an endpoint reply to deliver.
     active: Option<Arc<AtomicUsize>>,
+    budget: EgressBudget,
 }
 
 struct EndpointConn {
@@ -79,11 +154,17 @@ struct EndpointConn {
 }
 
 impl SubstitutionBridge {
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_budget(EgressBudget::new())
+    }
+
+    pub(crate) fn with_budget(budget: EgressBudget) -> Self {
         Self {
             endpoint: None,
             conns: HashMap::new(),
             active: None,
+            budget,
         }
     }
 
@@ -117,9 +198,17 @@ impl SubstitutionBridge {
             keep
         });
         for _ in &expired {
+            self.budget.release_stream();
             self.bump(-1);
         }
         expired
+    }
+
+    pub(crate) fn close_all(&mut self) {
+        let conn_ids: Vec<u32> = self.conns.keys().copied().collect();
+        for conn_id in conn_ids {
+            self.close_connection(conn_id);
+        }
     }
 }
 
@@ -136,6 +225,9 @@ impl SubstitutionBridge {
 impl GuestEndpointRelay for SubstitutionBridge {
     fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction {
         if let Some(conn) = self.conns.get_mut(&conn_id) {
+            if !self.budget.try_consume(payload.len()) {
+                return EndpointRelayAction::Refused;
+            }
             write_nonblocking(&mut conn.stream, payload);
             conn.last_activity = Instant::now();
             return EndpointRelayAction::Relayed;
@@ -143,12 +235,20 @@ impl GuestEndpointRelay for SubstitutionBridge {
         if self.conns.len() >= MAX_CONNECTIONS {
             return EndpointRelayAction::Refused;
         }
+        if !self.budget.try_reserve_stream() {
+            return EndpointRelayAction::Refused;
+        }
         let Some(path) = self.endpoint.clone() else {
+            self.budget.release_stream();
             return EndpointRelayAction::Refused;
         };
         match UnixStream::connect(&path) {
             Ok(stream) => {
                 let _ = stream.set_nonblocking(true);
+                if !self.budget.try_consume(payload.len()) {
+                    self.budget.release_stream();
+                    return EndpointRelayAction::Refused;
+                }
                 let conn = self.conns.entry(conn_id).or_insert(EndpointConn {
                     stream,
                     last_activity: Instant::now(),
@@ -158,7 +258,10 @@ impl GuestEndpointRelay for SubstitutionBridge {
                 self.bump(1);
                 EndpointRelayAction::Relayed
             }
-            Err(_) => EndpointRelayAction::Refused,
+            Err(_) => {
+                self.budget.release_stream();
+                EndpointRelayAction::Refused
+            }
         }
     }
 
@@ -171,8 +274,12 @@ impl GuestEndpointRelay for SubstitutionBridge {
                 Ok(0) => closed.push(*conn_id),
                 Ok(n) => {
                     buf.truncate(n);
-                    conn.last_activity = Instant::now();
-                    ready.push((*conn_id, buf));
+                    if self.budget.try_consume(n) {
+                        conn.last_activity = Instant::now();
+                        ready.push((*conn_id, buf));
+                    } else {
+                        closed.push(*conn_id);
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(_) => closed.push(*conn_id),
@@ -186,6 +293,7 @@ impl GuestEndpointRelay for SubstitutionBridge {
 
     fn close_connection(&mut self, conn_id: u32) {
         if self.conns.remove(&conn_id).is_some() {
+            self.budget.release_stream();
             self.bump(-1);
         }
     }
@@ -390,5 +498,54 @@ mod tests {
         assert_eq!(expired, vec![7]);
         assert!(!b.is_active());
         assert_eq!(active.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn egress_budget_caps_concurrency_and_releases_slots() {
+        let budget = EgressBudget::new();
+        for _ in 0..MAX_EGRESS_STREAMS {
+            assert!(budget.try_reserve_stream());
+        }
+        assert!(!budget.try_reserve_stream());
+        budget.release_stream();
+        assert!(budget.try_reserve_stream());
+    }
+
+    #[test]
+    fn egress_budget_refills_bytes_at_a_fixed_rate() {
+        let now = Instant::now();
+        let budget = EgressBudget::new_at(now);
+        assert!(budget.try_consume_at(EGRESS_BURST_BYTES as usize, now));
+        assert!(!budget.try_consume_at(1, now));
+        assert!(budget.try_consume_at(
+            EGRESS_BYTES_PER_SECOND as usize,
+            now + Duration::from_secs(1)
+        ));
+        assert!(!budget.try_consume_at(1, now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn close_all_releases_every_endpoint_slot() {
+        let mut bridge = SubstitutionBridge::new();
+        let active = Arc::new(AtomicUsize::new(0));
+        bridge.set_activity(active.clone());
+        for conn_id in 0..3 {
+            let (stream, _peer) = UnixStream::pair().unwrap();
+            bridge.conns.insert(
+                conn_id,
+                EndpointConn {
+                    stream,
+                    last_activity: Instant::now(),
+                },
+            );
+            assert!(bridge.budget.try_reserve_stream());
+            bridge.bump(1);
+        }
+
+        bridge.close_all();
+
+        assert!(!bridge.is_active());
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+        assert!(bridge.budget.try_reserve_stream());
     }
 }
