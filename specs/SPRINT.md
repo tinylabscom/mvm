@@ -463,10 +463,13 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
 **Prerequisites:** satisfied. `feat/vsock-control-conformance` and `feat/firecracker-vsock-only-final` are already merged to `main`; `feat/hvf-converge-vsock` cleanup is in PR #1905.
 
 **Execution order:**
-1. Initramfs Nix derivation + content-addressed build.
-2. PID-1 signal handling and zombie reaping in `mvm-agentd`.
-3. `ActivateEnvironment` protocol types and boot state machine.
-4. Guest-side mount library (dm-verity + overlayfs).
+1. [x] Initramfs Nix derivation + content-addressed build. Created
+   `nix/packages/mvm-guest-agent-static.nix`, `nix/images/initramfs/flake.nix`,
+   and exposed `packages.<system>.initramfs` producing `initramfs.cpio.gz`,
+   `initramfs.hash`, `initramfs.size`, and `VERSION`.
+2. [ ] PID-1 signal handling and zombie reaping in `mvm-agentd`.
+3. [ ] `ActivateEnvironment` protocol types and boot state machine.
+4. [ ] Guest-side mount library (dm-verity + overlayfs).
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
