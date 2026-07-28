@@ -566,7 +566,10 @@ mod tests {
 
     #[test]
     fn try_warm_claim_refuses_unsupported_backend_instead_of_cold_booting() {
-        let backend = AnyBackend::from_hypervisor("firecracker");
+        // qemu is the dev/test substrate and never wired for the standby pool
+        // (Firecracker now advertises it via its live spawn+claim path, so it
+        // can no longer stand in for "unsupported" here).
+        let backend = AnyBackend::from_hypervisor("qemu");
         let err = try_warm_claim(&backend, &eligible_cfg(), false, None)
             .expect_err("configured warm pool must not silently cold-boot");
         let message = format!("{err:#}");
@@ -868,13 +871,14 @@ mod tests {
     }
 
     // The following three tests need a backend that actually reaches the
-    // spawn loop (`capabilities().standby_pool == true`) — every real
-    // `AnyBackend` variant selectable via the CLI reports `false` until the
-    // runner-backed workload backends are wired in as standby-pool capable,
-    // so only the hermetic `Mock` variant can drive `warm_to_target` past its
-    // capability gate today. Gated behind `test-support` like the mock
-    // backend itself; the dedicated CI lane (`--features test-support`)
-    // covers them.
+    // spawn loop (`capabilities().standby_pool == true`) — Firecracker is the
+    // one real `AnyBackend` variant that reports this today, but its spawn
+    // loop boots a real supervisor process, which a hermetic unit test must
+    // not do. The in-memory `Mock` variant opts into the same capability
+    // (`with_standby()`) without touching the host, so it drives
+    // `warm_to_target` past its capability gate here. Gated behind
+    // `test-support` like the mock backend itself; the dedicated CI lane
+    // (`--features test-support`) covers them.
 
     #[cfg(feature = "test-support")]
     #[test]
