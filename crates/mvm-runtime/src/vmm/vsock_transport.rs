@@ -17,6 +17,10 @@ pub(crate) const HDR_LEN: usize = 44;
 pub(crate) const HOST_CID: u64 = 2;
 pub(crate) const GUEST_CID: u64 = 3;
 pub(crate) const HOST_BUF_ALLOC: u32 = 256 * 1024;
+/// Maximum number of guest-selected vsock stream identities tracked by one
+/// device. A guest can choose the source port, so this is a host resource
+/// boundary rather than a protocol limit.
+pub(crate) const MAX_CONNECTIONS: usize = 256;
 
 pub(crate) const OP_REQUEST: u16 = 1;
 pub(crate) const OP_RESPONSE: u16 = 2;
@@ -98,8 +102,14 @@ pub(crate) struct VsockTransportCore {
     pub(crate) queue_sel: u32,
     pub(crate) queues: [Queue; NUM_QUEUES],
     pub(crate) interrupt_status: u32,
-    pub(crate) recv_cnt: HashMap<(u32, u32), u32>,
+    pub(crate) recv_cnt: HashMap<VsockConnectionKey, u32>,
     pub(crate) pending_rx: Vec<(VsockHdr, Vec<u8>)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct VsockConnectionKey {
+    host_port: u32,
+    guest_port: u32,
 }
 
 impl VsockTransportCore {
@@ -185,16 +195,24 @@ impl VsockTransportCore {
         packets
     }
 
-    pub(crate) fn add_recv(&mut self, inbound: &VsockHdr, n: u32) {
-        let entry = self
-            .recv_cnt
-            .entry((inbound.dst_port, inbound.src_port))
-            .or_default();
-        *entry = entry.wrapping_add(n);
+    pub(crate) fn try_add_recv(&mut self, inbound: &VsockHdr, n: u32) -> bool {
+        let key = VsockConnectionKey {
+            host_port: inbound.dst_port,
+            guest_port: inbound.src_port,
+        };
+        if !self.recv_cnt.contains_key(&key) && self.recv_cnt.len() >= MAX_CONNECTIONS {
+            return false;
+        }
+        let entry = self.recv_cnt.entry(key).or_default();
+        *entry = entry.saturating_add(n);
+        true
     }
 
     pub(crate) fn remove_recv(&mut self, host_port: u32, guest_port: u32) {
-        self.recv_cnt.remove(&(host_port, guest_port));
+        self.recv_cnt.remove(&VsockConnectionKey {
+            host_port,
+            guest_port,
+        });
     }
 
     pub(crate) fn queue_host_packet(
@@ -291,7 +309,10 @@ impl VsockTransportCore {
 
     fn fwd_cnt_for(&self, host_port: u32, guest_port: u32) -> u32 {
         self.recv_cnt
-            .get(&(host_port, guest_port))
+            .get(&VsockConnectionKey {
+                host_port,
+                guest_port,
+            })
             .copied()
             .unwrap_or(0)
     }
@@ -470,5 +491,52 @@ mod tests {
             );
             assert_eq!(core.pending_rx.len(), 1);
         }
+    }
+
+    #[test]
+    fn recv_credit_table_rejects_new_connection_ids_at_the_cap() {
+        let mut core = transport();
+        for guest_port in 0..MAX_CONNECTIONS as u32 {
+            let hdr = VsockHdr {
+                dst_port: 9000,
+                src_port: guest_port,
+                ..Default::default()
+            };
+            assert!(core.try_add_recv(&hdr, 1));
+        }
+
+        let new_connection = VsockHdr {
+            dst_port: 9000,
+            src_port: MAX_CONNECTIONS as u32,
+            ..Default::default()
+        };
+        assert!(!core.try_add_recv(&new_connection, 1));
+        assert_eq!(core.recv_cnt.len(), MAX_CONNECTIONS);
+
+        // A normal close frees the slot, allowing a new stream to make progress.
+        core.remove_recv(9000, 0);
+        assert!(core.try_add_recv(&new_connection, 1));
+        assert_eq!(core.recv_cnt.len(), MAX_CONNECTIONS);
+    }
+
+    #[test]
+    fn recv_credit_for_existing_connection_remains_available_at_the_cap() {
+        let mut core = transport();
+        let existing = VsockHdr {
+            dst_port: 9000,
+            src_port: 7,
+            ..Default::default()
+        };
+        assert!(core.try_add_recv(&existing, 1));
+        for guest_port in 8..(MAX_CONNECTIONS as u32 + 7) {
+            let hdr = VsockHdr {
+                dst_port: 9000,
+                src_port: guest_port,
+                ..Default::default()
+            };
+            assert!(core.try_add_recv(&hdr, 1));
+        }
+        assert_eq!(core.recv_cnt.len(), MAX_CONNECTIONS);
+        assert!(core.try_add_recv(&existing, 1));
     }
 }

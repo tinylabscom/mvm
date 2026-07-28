@@ -130,8 +130,11 @@ impl VsockShared {
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
                 ctx.record_received(&payload[..n]);
-                ctx.add_recv(&hdr, n as u32);
-                ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                if ctx.try_add_recv(&hdr, n as u32) {
+                    ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                } else {
+                    ctx.queue_reply(&hdr, OP_RST, &[]);
+                }
             }
             super::vsock_transport::OP_CREDIT_REQUEST => {
                 ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[])
@@ -311,6 +314,7 @@ impl Drop for VirtioVsock {
 mod tests {
     use super::*;
     use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
+    use crate::vmm::vsock_transport::MAX_CONNECTIONS;
 
     fn dev() -> VsockShared {
         let ram = vec![0u8; 0x1000].leak();
@@ -380,6 +384,46 @@ mod tests {
         };
         d.handle_packet(rw, b"hello");
         assert_eq!(d.lifecycle.received, b"hello");
+    }
+
+    #[test]
+    fn guest_stream_cap_returns_reset_for_a_new_identity() {
+        let mut d = dev();
+        for src_port in 0..MAX_CONNECTIONS as u32 {
+            d.handle_packet(
+                VsockHdr {
+                    src_cid: GUEST_CID,
+                    dst_cid: HOST_CID,
+                    src_port,
+                    dst_port: mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+                    len: 1,
+                    typ: TYPE_STREAM,
+                    op: OP_RW,
+                    ..Default::default()
+                },
+                b"x",
+            );
+        }
+
+        d.handle_packet(
+            VsockHdr {
+                src_cid: GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: MAX_CONNECTIONS as u32,
+                dst_port: mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
+                len: 1,
+                typ: TYPE_STREAM,
+                op: OP_RW,
+                ..Default::default()
+            },
+            b"x",
+        );
+
+        assert_eq!(d.transport.pending_rx.len(), MAX_CONNECTIONS + 1);
+        assert_eq!(
+            d.transport.pending_rx.last().map(|(hdr, _)| hdr.op),
+            Some(OP_RST)
+        );
     }
 
     #[test]

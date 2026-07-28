@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::agent_bridge::write_nonblocking;
+use super::vsock_transport::MAX_CONNECTIONS;
 
 /// Per-drain read budget per host connection.
 const READ_CHUNK: usize = 16 * 1024;
@@ -152,8 +153,11 @@ impl ConsoleBridge {
         // `self.conns` / `self.next_port`) — the split keeps the borrow checker
         // happy without holding a listener borrow across the `conns` mutation.
         let mut accepted: Vec<(u32, UnixStream)> = Vec::new();
-        for (&guest_port, listener) in self.listeners.iter() {
+        'listeners: for (&guest_port, listener) in self.listeners.iter() {
             loop {
+                if self.conns.len() + accepted.len() >= MAX_CONNECTIONS {
+                    break 'listeners;
+                }
                 match listener.accept() {
                     Ok((stream, _)) => {
                         if stream.set_nonblocking(true).is_ok() {

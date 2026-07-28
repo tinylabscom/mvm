@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::vmm::vsock_transport::MAX_CONNECTIONS;
+
 /// Per-drain read budget per endpoint connection.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -112,6 +114,9 @@ impl GuestEndpointRelay for SubstitutionBridge {
             write_nonblocking(up, payload);
             return EndpointRelayAction::Relayed;
         }
+        if self.conns.len() >= MAX_CONNECTIONS {
+            return EndpointRelayAction::Refused;
+        }
         let Some(path) = self.endpoint.clone() else {
             return EndpointRelayAction::Refused;
         };
@@ -192,6 +197,23 @@ mod tests {
             EndpointRelayAction::Refused
         );
         assert!(!b.is_active());
+    }
+
+    #[test]
+    fn refuses_new_streams_at_the_connection_cap() {
+        let mut b = SubstitutionBridge::new();
+        let mut peers = Vec::with_capacity(MAX_CONNECTIONS);
+        for conn_id in 0..MAX_CONNECTIONS as u32 {
+            let (stream, peer) = UnixStream::pair().unwrap();
+            b.conns.insert(conn_id, stream);
+            peers.push(peer);
+        }
+
+        assert_eq!(
+            b.relay_guest_bytes(MAX_CONNECTIONS as u32, b"data"),
+            EndpointRelayAction::Refused
+        );
+        assert_eq!(b.conns.len(), MAX_CONNECTIONS);
     }
 
     /// A raw first frame (not a WireRequest) is relayed byte-for-byte to the

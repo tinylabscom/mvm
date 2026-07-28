@@ -24,6 +24,9 @@
       workload)` so hot plan revisions replace prior rules without orphaning
       firewalls. Focused regression coverage, workspace check, full tests,
       clippy, and formatting pass; published as PR #1847 for review.
+- [ ] #1827 vsock overload hardening: bound guest-selected connection state and
+      host bridge sockets first, then add idle eviction, egress budgets, and
+      teardown cancellation. Tracked in `specs/plans/266-vsock-overload-hardening.md`.
 
 ---
 
