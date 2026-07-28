@@ -62,16 +62,15 @@ collides with the overlay's mount point and is rejected at admission time
 with an explicit error, checked by walking the image's layers before
 unpack.
 
-**The overlay has a fixed size budget.** 32 MiB, enforced by
-pre-allocating the ext4 image at that size at build time. Today's
-contents — the agent (prod and dev-shell variants), the seccomp shim,
-the netinit binary, the runner, the egress client, the addon
-binaries, the in-guest host-services FFI shared object, and the Python
-SDK runtime package — fit well under that cap, leaving headroom for
-per-language SDK runtime additions without re-sizing the image on every
-release. A TypeScript SDK runtime is reserved space in the overlay layout
-but not yet populated; the guest-side koffi native addon it needs is not
-yet cross-built for the guest architecture.
+**The overlay has a fixed size budget.** 16 MiB, enforced by
+pre-allocating the ext4 image at that size at build time. The static-musl
+runtime contents — the agent (prod and dev-shell variants), the seccomp shim,
+the netinit binary, the runner, the egress client, the addon binaries, and
+the Python SDK runtime package — fit under that cap. The glibc host-services
+FFI and its loader closure are published in a separate opt-in SDK sidecar,
+not in every overlay. A TypeScript SDK runtime is reserved space in the
+overlay layout but not yet populated; the guest-side koffi native addon it
+needs is not yet cross-built for the guest architecture.
 
 **The overlay is version-pinned to the running mvmctl.** Its `VERSION`
 file must match the running binary's semver; a mismatch is an

@@ -1265,15 +1265,14 @@ let
               kver=$(${pkgs.coreutils}/bin/basename "$src")
               mkdir -p "$out/lib/modules/$kver"
 
-              # Keep module metadata at the kver root. Busybox modprobe
-              # reads modules.dep for the named module and dependency
-              # paths; the other modules.* files are small enough to keep
-              # and preserve compatibility with kmod-style lookup.
-              shopt -s nullglob
-              for metadata in "$src"/modules.*; do
-                cp -a --reflink=auto "$metadata" "$out/lib/modules/$kver/"
-              done
-              shopt -u nullglob
+              # Busybox modprobe resolves these exact names through the
+              # dependency graph. The other modules.* indexes serve generic
+              # alias and symbol lookup, which this image never requests.
+              if [ ! -f "$src/modules.dep" ]; then
+                echo "mkGuest: required kernel module metadata $src/modules.dep is missing" >&2
+                exit 1
+              fi
+              cp -a --reflink=auto "$src/modules.dep" "$out/lib/modules/$kver/"
 
               copy_module_closure \
                 "$src" \

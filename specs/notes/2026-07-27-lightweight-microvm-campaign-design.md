@@ -1,10 +1,10 @@
 # Lightweight microVM campaign — design
 
 **Date:** 2026-07-27
-**Status:** approved design; WS-1 and the static overlay cut implemented
+**Status:** approved design; WS-1, the static overlay cut, and the first WS-5/WS-6 gates implemented
 **Scope:** shrink the workload-guest footprint across four dimensions, gated so it
 cannot silently regrow. WS-1 and the static runtime-overlay cut are implemented;
-WS-2 and WS-4..6 remain named + sequenced follow-ups.
+WS-2 and the remaining WS-4..6 measurements remain named + sequenced follow-ups.
 
 ## Problem
 
@@ -34,7 +34,7 @@ code.
 | Dim | What | Measured today | Existing gate | Direction |
 |-----|------|----------------|---------------|-----------|
 | A | Rootfs bytes | ~10 MiB (OCI guest) | `xtask perf rootfs-size` — 20 MiB, `minimal` only | drop glibc → tighten + extend the gate beyond `minimal` |
-| B | Overlay bytes (agent + helpers) | 5.3–7.3 MiB | 32 MiB hard cap | unify on static-musl → drop the bundled glibc loader → tighten the cap |
+| B | Overlay bytes (agent + helpers) | 5.3–7.3 MiB | 16 MiB hard cap | unify on static-musl → drop the bundled glibc loader → tighten the cap |
 | D | Guest RSS | agent ~8 MB (goal) | none (aspirational) | add a measured gate |
 | E | Attack surface | crate closure ≤266 | `xtask check-closure-budget` | drop the `util-linux` package + its CVE surface; add a rootfs-package-count assertion |
 
@@ -96,7 +96,7 @@ provenance of the `setpriv` binary.
 **Measurement seeds the campaign.** The before/after numbers populate the scoreboard and
 decide whether WS-2 (a custom helper) is worth building.
 
-## Roadmap (named + sequenced, not built this pass)
+## Roadmap (named + sequenced)
 
 - **WS-2 (lever E follow-up).** Custom `mvm-setpriv` static-musl helper in `mvm-agentd`,
   built through the existing guest-helper pipeline (`guest_agent_build.rs`, sibling to
@@ -109,13 +109,14 @@ decide whether WS-2 (a custom helper) is worth building.
   `libc.so.6` / `libgcc_s.so.1` bundle from `nix/images/runtime-overlay/flake.nix` `lib/`.
   Snag: `libmvm_host_services.so` (the FFI cdylib language SDKs dlopen) is glibc-built and
   lives in that same `lib/`; moving it to an SDK-workload sidecar needs its own mini-design.
-  Tighten the overlay cap after.
+  The static runtime overlay is now capped at 16 MiB; automatic sidecar attachment remains.
 - **WS-4 (lever D).** Add a measured guest-RSS gate (agent ≤ ~8 MB). The tokio-free agent
   already lands most of this — measurement + gate, not new architecture.
-- **WS-5 (lever A/E).** Rootfs closure minimization — CA-bundle trim, kernel-module audit,
-  rootfs package-count budget.
-- **WS-6.** Fold the scattered budgets (rootfs / overlay / closure / kernel / RSS) into one
-  `xtask perf footprint` ledger + a single doc.
+- **WS-5 (lever A/E).** Rootfs closure minimization — the module metadata audit is
+  implemented; CA-bundle trim and the rootfs package-count budget remain.
+- **WS-6.** The first `xtask perf footprint` ledger is implemented for the Nix-built
+  rootfs, runtime overlay, and dm-verity sidecars; closure, kernel, and RSS entries
+  remain for the follow-up slices.
 
 ## WS-3 — static runtime overlay
 

@@ -217,11 +217,14 @@ Tracked here per the deferred-work convention; each is its own future plan.
 - **WS-2 (lever E):** custom `mvm-setpriv` static-musl helper in `mvm-agentd`, built through `crates/mvm-build/src/guest_agent_build.rs` beside `seccomp-apply`/`netinit`/`verity-init`; decided on WS-1's measured numbers (build only if the ~1 MiB + reduced attack surface justifies owning a privilege primitive).
 - **WS-3 (lever B):** the static-musl runtime-overlay cut and separate SDK sidecar
   packaging are complete; automatic runtime attachment for workloads using the
-  SDK host-service verbs remains. Tighten the 32 MiB overlay cap after measuring
-  the new image.
+  SDK host-service verbs remains. The overlay allocation is now capped at 16 MiB,
+  with a build-backed footprint gate covering the Nix-built rootfs and overlay.
 - **WS-4 (lever D):** add a measured guest-agent RSS gate (≤ ~8 MB); the tokio-free agent already lands most of it.
-- **WS-5 (lever A/E):** rootfs closure minimization — CA-bundle trim, kernel-module audit, rootfs package-count budget; absorbs any residual glibc anchor found in Task 2 Step 1.
-- **WS-6:** fold rootfs/overlay/closure/kernel/RSS budgets into one `xtask perf footprint` ledger; Task 2 landed the no-glibc closure gate only (`checks.<system>.guest-rootfs-no-glibc`) — the mkGuest-rootfs size (bytes) budget stays deferred here, per `xtask/src/perf.rs`'s `ROOTFS_MAX_BYTES` being left untouched.
+- **WS-5 (lever A/E):** the kernel-module metadata audit is complete and the rootfs
+  now copies only `modules.dep`; CA-bundle trim and a rootfs package-count budget remain.
+- **WS-6:** `xtask perf footprint` now measures the Nix-built rootfs, runtime overlay,
+  and dm-verity sidecars against the 50 MiB mvm-owned storage contract. Closure, kernel,
+  and RSS entries remain for later slices.
 
 ## Self-review
 
@@ -242,3 +245,16 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
 - [ ] Wire runtime attachment so a workload that uses host-service verbs is
   automatically opted into the SDK sidecar. The default static overlay
   intentionally does not carry the SDK FFI or its glibc closure.
+
+## WS-5/WS-6 handoff
+
+- [x] Copy only `modules.dep` from the kernel module metadata; retain the
+  module files and dependency closures required by VSOCK and virtio-fs.
+- [x] Cap the static runtime overlay allocation at 16 MiB after confirming
+  the source-built overlay is approximately 5.3 MiB.
+- [x] Add `xtask perf footprint` with JSON and human-readable output for the
+  rootfs, overlay, and optional dm-verity sidecars.
+- [x] Add a CI build-backed gate that runs the ledger against the Nix-built
+  default-tenant image and runtime overlay with a 50 MiB limit.
+- [ ] Add the remaining rootfs closure cuts, guest-RSS measurement, and
+  closure/kernel entries to the ledger.

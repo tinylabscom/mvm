@@ -66,6 +66,10 @@
       published as a separate `sdk-sidecar` output with an explicit
       `/mvm/sdk/lib` contract. Sidecar attachment remains opt-in for workloads
       that use host-service verbs.
+- [x] Lightweight guest WS-5/WS-6 slice: the Nix-built rootfs keeps only the
+      kernel module dependency index, the runtime overlay allocation is capped
+      at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars against
+      the 50 MiB mvm-owned guest-storage contract.
 
 ---
 

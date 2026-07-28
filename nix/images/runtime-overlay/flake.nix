@@ -266,11 +266,11 @@
           };
         });
 
-      # Target overlay size: 32 MiB — a hard cap for the overlay
-      # budget. Today's contents fit well under that, but using the
-      # cap as the nominal size leaves headroom for the SDK runtime
-      # libraries without re-allocating the ext4 each release.
-      overlaySizeBytes = 32 * 1024 * 1024;
+      # Target overlay size: 16 MiB — a hard cap for the static-musl
+      # runtime overlay. The SDK glibc closure lives in the separate
+      # sidecar, so the production overlay no longer needs the old
+      # 32 MiB allocation.
+      overlaySizeBytes = 16 * 1024 * 1024;
 
       mkSdkSidecar = system:
         let
@@ -388,7 +388,7 @@
             # `mvm_build::oci_to_rootfs::ext4::materialize_to_ext4`
             # parameters — same UUID / hash_seed / block size /
             # SOURCE_DATE_EPOCH conventions. Pre-allocate the
-            # output file at the fixed budget (32 MiB) so the size
+            # output file at the fixed budget (16 MiB) so the size
             # is also part of the deterministic shape.
             truncate -s ${toString overlaySizeBytes} $out/overlay.ext4
             SOURCE_DATE_EPOCH=0 \

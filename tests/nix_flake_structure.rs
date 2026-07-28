@@ -1102,3 +1102,25 @@ fn no_host_package_uses_release_binary_provenance() {
         "expected to scan every nix/packages/*.nix host package; only saw {scanned}"
     );
 }
+
+#[test]
+fn mk_guest_copies_only_module_dependency_metadata() {
+    let path = nix_dir().join("lib/mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("cp -a --reflink=auto \"$src/modules.dep\""),
+        "mkGuest must retain the dependency index required by busybox modprobe"
+    );
+    assert!(
+        content.contains("vmw_vsock_virtio_transport")
+            && content.contains("virtiofs")
+            && content.contains("fuse"),
+        "mkGuest must retain the module closures needed by guest boot and virtio-fs"
+    );
+    assert!(
+        !content.contains("for metadata in \"$src\"/modules.*"),
+        "mkGuest must not copy unused kernel module indexes into the rootfs"
+    );
+}

@@ -1,6 +1,6 @@
 //! Performance gates via `cargo xtask perf`.
 //!
-//! Two subcommands so far:
+//! The storage and boot gates are exposed through `cargo xtask perf`:
 //!
 //! - **`rootfs-size`** — assert a built rootfs is at or under the
 //!   `mvm` minimal-template budget. Pure file-size check; runs on
@@ -12,6 +12,8 @@
 //!   required; gated by `MVM_LIVE_SMOKE=1` + a rootfs path so a
 //!   bare macOS host skips cleanly. Enforces the "cold-boot ≤ 500ms
 //!   Firecracker / ≤ 1s libkrun" line.
+//! - **`footprint`** — sum the Nix-built rootfs and runtime-overlay
+//!   artifacts and assert the mvm-owned guest storage stays below 50 MiB.
 //!
 //! The thresholds are the per-backend boot budgets; they're pinned
 //! by tests in this module so a drift in the documented budget vs.
@@ -22,6 +24,7 @@
 //! ```text
 //! cargo xtask perf rootfs-size --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
+//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4
 //! ```
 //!
 //! ## What this does NOT do (yet)
@@ -56,6 +59,11 @@ use anyhow::{Context, Result, bail};
 /// pulled in a transitive dep that bloats the image."
 pub const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 
+/// Maximum mvm-owned guest storage: rootfs plus the runtime overlay and their
+/// dm-verity sidecars. The workload's own application payload and shared
+/// kernel are measured separately and are not part of this contract.
+pub const GUEST_STORAGE_MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+
 /// Cold-boot wall-clock budget for the Firecracker backend.
 /// The floor is 300ms; the strict gate is 500ms p50.
 pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(500);
@@ -70,15 +78,24 @@ pub const LIBKRUN_BOOT_BUDGET: Duration = Duration::from_millis(1000);
 pub fn run(args: &[String]) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
         Some("rootfs-size") => rootfs_size_subcommand(&args[1..]),
+        Some("footprint") => footprint_subcommand(&args[1..]),
         Some("boot") => boot_subcommand(&args[1..]),
         Some("budgets") => budgets_subcommand(&args[1..]),
         Some(other) => {
-            bail!("Unknown perf subcommand {other:?}. Available: rootfs-size, boot, budgets")
+            bail!(
+                "Unknown perf subcommand {other:?}. Available: rootfs-size, footprint, boot, budgets"
+            )
         }
         None => {
             eprintln!("Usage: cargo xtask perf <subcommand>");
             eprintln!(
                 "  rootfs-size --rootfs <PATH>    Assert rootfs is ≤ {ROOTFS_MAX_BYTES} bytes"
+            );
+            eprintln!(
+                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>]"
+            );
+            eprintln!(
+                "                                 Assert mvm-owned guest storage is ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
             );
             eprintln!("  boot --rootfs <PATH> [--runs N] [--backend firecracker|libkrun]");
             eprintln!(
@@ -132,6 +149,13 @@ pub fn all_budgets() -> Vec<PerfBudget> {
             unit: "bytes",
             source: "plan-60 Phase 9 + ADR-005",
             description: "Minimal-template ext4 rootfs size",
+        },
+        PerfBudget {
+            name: "guest_storage_size",
+            limit: GUEST_STORAGE_MAX_BYTES,
+            unit: "bytes",
+            source: "lightweight guest footprint contract",
+            description: "Nix-built rootfs + runtime overlay storage including verity sidecars",
         },
         PerfBudget {
             name: "firecracker_cold_boot",
@@ -287,6 +311,133 @@ pub fn rootfs_size_check(rootfs: &Path, max_bytes: u64) -> Result<()> {
 }
 
 // ============================================================================
+// footprint subcommand
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FootprintArtifact {
+    name: &'static str,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct FootprintEntry {
+    name: String,
+    path: PathBuf,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct FootprintReport {
+    limit_bytes: u64,
+    total_bytes: u64,
+    entries: Vec<FootprintEntry>,
+}
+
+fn footprint_subcommand(args: &[String]) -> Result<()> {
+    let json = args.iter().any(|arg| arg == "--json");
+    let artifacts = parse_footprint_artifacts(args)?;
+    let report = guest_storage_footprint_check(&artifacts, GUEST_STORAGE_MAX_BYTES)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        eprintln!(
+            "ok: mvm-owned guest storage is {} bytes (under {} bytes / 50 MiB)",
+            report.total_bytes, report.limit_bytes
+        );
+        for entry in &report.entries {
+            eprintln!(
+                "  {:<16} {} bytes  {}",
+                entry.name,
+                entry.bytes,
+                entry.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_footprint_artifacts(args: &[String]) -> Result<Vec<FootprintArtifact>> {
+    let rootfs = required_path_arg(args, "--rootfs")?;
+    let overlay = required_path_arg(args, "--overlay")?;
+    let mut artifacts = vec![
+        FootprintArtifact {
+            name: "rootfs",
+            path: rootfs,
+        },
+        FootprintArtifact {
+            name: "overlay",
+            path: overlay,
+        },
+    ];
+    if let Some(path) = optional_path_arg(args, "--rootfs-verity")? {
+        artifacts.push(FootprintArtifact {
+            name: "rootfs-verity",
+            path,
+        });
+    }
+    if let Some(path) = optional_path_arg(args, "--overlay-verity")? {
+        artifacts.push(FootprintArtifact {
+            name: "overlay-verity",
+            path,
+        });
+    }
+    Ok(artifacts)
+}
+
+fn guest_storage_footprint_check(
+    artifacts: &[FootprintArtifact],
+    max_bytes: u64,
+) -> Result<FootprintReport> {
+    let entries = artifacts
+        .iter()
+        .map(|artifact| {
+            let metadata = std::fs::metadata(&artifact.path).with_context(|| {
+                format!("stat {} at {}", artifact.name, artifact.path.display())
+            })?;
+            if !metadata.is_file() {
+                bail!(
+                    "{} at {} is not a regular file",
+                    artifact.name,
+                    artifact.path.display()
+                );
+            }
+            Ok(FootprintEntry {
+                name: artifact.name.to_string(),
+                path: artifact.path.clone(),
+                bytes: metadata.len(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let total_bytes = entries.iter().map(|entry| entry.bytes).sum::<u64>();
+    if total_bytes > max_bytes {
+        bail!(
+            "mvm-owned guest storage is {} bytes — over the footprint budget of {} bytes (50 MiB)",
+            total_bytes,
+            max_bytes
+        );
+    }
+    Ok(FootprintReport {
+        limit_bytes: max_bytes,
+        total_bytes,
+        entries,
+    })
+}
+
+fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
+    optional_path_arg(args, flag)?.ok_or_else(|| anyhow::anyhow!("{flag} requires a path"))
+}
+
+fn optional_path_arg(args: &[String], flag: &str) -> Result<Option<PathBuf>> {
+    let Some(index) = args.iter().position(|arg| arg == flag) else {
+        return Ok(None);
+    };
+    args.get(index + 1)
+        .map(|path| Some(PathBuf::from(path)))
+        .ok_or_else(|| anyhow::anyhow!("{flag} requires a path"))
+}
+
+// ============================================================================
 // boot subcommand
 // ============================================================================
 
@@ -411,6 +562,11 @@ mod tests {
     }
 
     #[test]
+    fn guest_storage_budget_is_50_mib() {
+        assert_eq!(GUEST_STORAGE_MAX_BYTES, 50 * 1024 * 1024);
+    }
+
+    #[test]
     fn firecracker_boot_budget_is_500ms() {
         assert_eq!(FIRECRACKER_BOOT_BUDGET, Duration::from_millis(500));
     }
@@ -483,6 +639,82 @@ mod tests {
         assert!(err.to_string().contains("not a regular file"));
     }
 
+    #[test]
+    fn footprint_check_sums_required_and_optional_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = write_sized_file(tmp.path(), "rootfs.ext4", 4);
+        let overlay = write_sized_file(tmp.path(), "overlay.ext4", 5);
+        let rootfs_verity = write_sized_file(tmp.path(), "rootfs.verity", 2);
+        let overlay_verity = write_sized_file(tmp.path(), "overlay.verity", 3);
+        let artifacts = vec![
+            FootprintArtifact {
+                name: "rootfs",
+                path: rootfs,
+            },
+            FootprintArtifact {
+                name: "overlay",
+                path: overlay,
+            },
+            FootprintArtifact {
+                name: "rootfs-verity",
+                path: rootfs_verity,
+            },
+            FootprintArtifact {
+                name: "overlay-verity",
+                path: overlay_verity,
+            },
+        ];
+
+        let report = guest_storage_footprint_check(&artifacts, 14).unwrap();
+        assert_eq!(report.total_bytes, 14);
+        assert_eq!(report.entries.len(), 4);
+    }
+
+    #[test]
+    fn footprint_check_rejects_over_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = write_sized_file(tmp.path(), "rootfs.ext4", 8);
+        let overlay = write_sized_file(tmp.path(), "overlay.ext4", 7);
+        let artifacts = vec![
+            FootprintArtifact {
+                name: "rootfs",
+                path: rootfs,
+            },
+            FootprintArtifact {
+                name: "overlay",
+                path: overlay,
+            },
+        ];
+
+        let err = guest_storage_footprint_check(&artifacts, 14).unwrap_err();
+        assert!(err.to_string().contains("over the footprint budget"));
+    }
+
+    #[test]
+    fn parse_footprint_requires_rootfs_and_overlay() {
+        let args = vec!["--rootfs".to_string(), "/tmp/rootfs.ext4".to_string()];
+        let err = parse_footprint_artifacts(&args).unwrap_err();
+        assert!(err.to_string().contains("--overlay"));
+    }
+
+    #[test]
+    fn parse_footprint_accepts_verity_sidecars() {
+        let args = vec![
+            "--rootfs".to_string(),
+            "/tmp/rootfs.ext4".to_string(),
+            "--overlay".to_string(),
+            "/tmp/overlay.ext4".to_string(),
+            "--rootfs-verity".to_string(),
+            "/tmp/rootfs.verity".to_string(),
+            "--overlay-verity".to_string(),
+            "/tmp/overlay.verity".to_string(),
+        ];
+        let artifacts = parse_footprint_artifacts(&args).unwrap();
+        assert_eq!(artifacts.len(), 4);
+        assert_eq!(artifacts[2].name, "rootfs-verity");
+        assert_eq!(artifacts[3].name, "overlay-verity");
+    }
+
     // ──────────────────────────────────────────────────────────────
     // Arg parsing
     // ──────────────────────────────────────────────────────────────
@@ -548,7 +780,7 @@ mod tests {
         // The count is a tripwire — if someone adds a budget without
         // a corresponding constant-pin test, this assert pushes them
         // to update both.
-        assert_eq!(all_budgets().len(), 11);
+        assert_eq!(all_budgets().len(), 12);
     }
 
     #[test]
@@ -581,6 +813,15 @@ mod tests {
             .find(|b| b.name == "rootfs_size")
             .expect("rootfs_size budget");
         assert_eq!(b.limit, ROOTFS_MAX_BYTES);
+    }
+
+    #[test]
+    fn all_budgets_pin_guest_storage_to_constant() {
+        let b = all_budgets()
+            .into_iter()
+            .find(|b| b.name == "guest_storage_size")
+            .expect("guest_storage_size budget");
+        assert_eq!(b.limit, GUEST_STORAGE_MAX_BYTES);
     }
 
     #[test]
