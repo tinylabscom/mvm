@@ -14,17 +14,22 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
+use mvm_core::checkpoint::CheckpointId;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
     StandbyClaim, StandbyCompat, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmBackend,
     VmId, VmStartConfig,
 };
+use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::checkpoint::CheckpointStore;
 use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
+use mvm_runtime::workload_runner::{ClaimContext, SpawnContext};
 use sha2::{Digest, Sha256};
 
 use super::Cli;
 use super::env::builder_vm::ensure_default_microvm_image;
+use super::vm::checkpoint::SignedChainAnchor;
 use super::vm::host_signer;
 use mvm_hostd::plan_admission::stash_plan_for_bridge;
 
@@ -120,7 +125,7 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
 
 /// Parameters for [`warm_to_target`] — grouped to keep the signature small.
 pub struct WarmParams<'a> {
-    pub backend: &'a dyn VmBackend,
+    pub backend: &'a AnyBackend,
     /// Registered template identity for the warm-parent set, if applicable.
     pub template_id: Option<&'a str>,
     pub kernel: &'a Path,
@@ -129,8 +134,11 @@ pub struct WarmParams<'a> {
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
     pub target: u32,
-    /// Source rootfs image for an image-bound saved-standby capture. Always
-    /// `None` today — no current backend captures one.
+    /// Source rootfs image for an image-bound saved-standby capture. A
+    /// Firecracker (or libkrun) parent cannot boot without a rootfs, so
+    /// `replenish_after_launch` always threads the just-completed launch's
+    /// own rootfs through here; `pool warm` passes `None` (image-agnostic —
+    /// see [`resolve_warm_shape`]).
     pub image: Option<&'a Path>,
 }
 
@@ -168,7 +176,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     let _warm_guard = mvm_core::atomic_io::FileLock::acquire(&pool.root().join("warm"))?;
     // The compat identity computed identically here and at claim time (a constant for
     // libkrun's bundled kernel) so a warmed standby is actually claimable.
-    let kernel_sha256 = kernel_identity(p.backend, p.kernel.to_str())?;
+    let kernel_sha256 = kernel_identity(p.backend.as_vm_backend(), p.kernel.to_str())?;
     let image_sha256 = match p.image {
         Some(img) => Some(
             kernel_sha256_hex(img)
@@ -186,6 +194,10 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     let have = pool.idle_count_compatible(&want)? as u32;
     let pool_root = mvm_core::config::mvm_pool_dir()?;
     let vms_root = mvm_core::config::vms_dir();
+    let checkpoints = CheckpointStore::open();
+    let spawn_ctx = SpawnContext {
+        checkpoints: &checkpoints,
+    };
     let mut spawned = 0u32;
     let mut failed = 0u32;
     for _ in have..p.target {
@@ -202,7 +214,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             image_path: p.image,
             image_sha256: image_sha256.as_deref(),
         })?;
-        match p.backend.spawn_standby(&spec) {
+        match p.backend.spawn_standby_via_runner(&spawn_ctx, &spec) {
             Ok(handle) => {
                 pool.record(&handle)?;
                 spawned += 1;
@@ -259,7 +271,7 @@ pub enum LaunchDecision {
 /// error returns a cold-boot decision after reaping the reserved standby.
 pub fn claim_or_cold<F>(
     pool: &SupervisorStandbyPool,
-    backend: &dyn VmBackend,
+    backend: &AnyBackend,
     want: &StandbyCompat,
     make_claim: F,
 ) -> Result<LaunchDecision>
@@ -283,7 +295,29 @@ where
             return Ok(LaunchDecision::ColdBoot);
         }
     };
-    match backend.claim_standby(&handle, &claim) {
+    // A claim verifies the parent's content and lineage against the checkpoint
+    // it was captured as, so an uncaptured parent is unusable by construction.
+    let parent_checkpoint = match parent_checkpoint_for(&handle) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(standby = %handle.id, error = %e, "cold-booting");
+            let _ = pool.remove(&handle.id);
+            return Ok(LaunchDecision::ColdBoot);
+        }
+    };
+    let checkpoints = CheckpointStore::open();
+    let snapshots = FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
+    let anchor = SignedChainAnchor::load()?;
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    let ctx = ClaimContext {
+        pool,
+        checkpoints: &checkpoints,
+        snapshots: &snapshots,
+        anchor: &anchor,
+        parent_checkpoint: &parent_checkpoint,
+        registry_path: &registry_path,
+    };
+    match backend.claim_standby_via_runner(&ctx, &handle, &claim) {
         Ok(vm_id) => {
             // The standby has become the VM; drop its pool entry (the control UDS is
             // one-shot). The VM now lives under its vms/<id> state dir.
@@ -296,6 +330,19 @@ where
             Ok(LaunchDecision::ColdBoot)
         }
     }
+}
+
+/// Resolve the checkpoint a standby parent was captured as. A parent that never
+/// went through the spawn-and-capture path (or predates it) has no checkpoint to
+/// verify content and lineage against, so a claim against it must refuse rather
+/// than clone unverified content. Kept separate from [`claim_or_cold`] so the
+/// refusal is unit-testable without a pool or a VM.
+fn parent_checkpoint_for(handle: &StandbyHandle) -> Result<CheckpointId> {
+    handle
+        .parent_checkpoint
+        .as_deref()
+        .map(|id| CheckpointId::new(id.to_string()))
+        .with_context(|| format!("standby '{}' was never captured to a checkpoint", handle.id))
 }
 
 fn compat_for_launch(
@@ -360,7 +407,7 @@ pub fn try_warm_claim(
     let bundle_json = cfg.bundle_json.clone();
     let claim_start_config = cfg.clone();
     let pool = SupervisorStandbyPool::open()?;
-    let decision = claim_or_cold(&pool, backend.as_vm_backend(), &want, |handle| {
+    let decision = claim_or_cold(&pool, backend, &want, |handle| {
         // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
         // under the standby-id, so compute it for `handle.id`.
         let sub = mvm_runtime::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
@@ -453,10 +500,13 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
     };
     let signer = host_signer::load_or_init()?;
     let pool = SupervisorStandbyPool::open()?;
+    // Thread the launch's own rootfs through as the warm parent's image: a
+    // Firecracker (or libkrun) parent cannot boot without one.
+    let rootfs = Path::new(cfg.rootfs_path.as_str());
     let result = warm_to_target(
         &pool,
         &WarmParams {
-            backend: backend.as_vm_backend(),
+            backend,
             template_id: cfg.template_id.as_deref(),
             kernel: Path::new(kernel),
             vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
@@ -464,7 +514,7 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
             signer_id: &host_signer::host_signer_id(),
             signing_key_path: &signer.secret_path,
             target: cfg.warm_pool_size,
-            image: None, // libkrun only: image-agnostic standbys
+            image: Some(rootfs),
         },
     )?;
     Ok(result.spawned)
@@ -484,10 +534,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    use mvm_core::vm_backend::{
-        BackendKind, StandbyError, StandbyHandle, StandbyState, StartMode, VmCapabilities, VmId,
-        VmInfo, VmStartConfig, VmStatus,
-    };
+    use mvm_core::vm_backend::{StandbyHandle, StandbyState, VmStartConfig};
 
     fn sha256_hex_of(bytes: &[u8]) -> String {
         hex_lower(&Sha256::digest(bytes))
@@ -773,6 +820,35 @@ mod tests {
         }
     }
 
+    fn sample_handle_without_parent_checkpoint() -> StandbyHandle {
+        idle_handle("standby-no-checkpoint", "aa")
+    }
+
+    /// A parent that was never captured has no checkpoint to verify content and
+    /// lineage against, so a claim against it must refuse rather than clone
+    /// unverified content.
+    #[test]
+    fn claim_refuses_a_parent_without_a_checkpoint() {
+        let handle = sample_handle_without_parent_checkpoint();
+
+        let err = parent_checkpoint_for(&handle).unwrap_err();
+
+        assert!(
+            err.to_string().contains("never captured"),
+            "expected a refusal naming the uncaptured parent, got: {err}"
+        );
+    }
+
+    #[test]
+    fn claim_resolves_the_captured_parent_checkpoint() {
+        let mut handle = sample_handle_without_parent_checkpoint();
+        handle.parent_checkpoint = Some("standby-warm-parent".to_string());
+
+        let id = parent_checkpoint_for(&handle).unwrap();
+
+        assert_eq!(id.as_str(), "standby-warm-parent");
+    }
+
     #[test]
     fn build_pool_status_reports_dead_standbys_separately() {
         let live = idle_handle("live", "aa");
@@ -791,63 +867,16 @@ mod tests {
         assert_eq!(report.standbys[2].state, "idle");
     }
 
-    // A VmBackend stub whose `spawn_standby` always fails — used to exercise
-    // the warm failure path without a real VM.
-    struct FailingSpawnBackend;
-    impl VmBackend for FailingSpawnBackend {
-        fn name(&self) -> &str {
-            "stub-fail-spawn"
-        }
-        fn kind(&self) -> BackendKind {
-            BackendKind::Mock
-        }
-        fn capabilities(&self) -> VmCapabilities {
-            VmCapabilities {
-                standby_pool: true,
-                ..VmCapabilities::default()
-            }
-        }
-        fn supports_standby_pool(&self) -> bool {
-            true
-        }
-        fn spawn_standby(
-            &self,
-            _spec: &mvm_core::vm_backend::StandbySpec,
-        ) -> std::result::Result<StandbyHandle, StandbyError> {
-            Err(StandbyError::ClaimFailed("injected spawn failure".into()))
-        }
-        fn start_with_mode(&self, _: &VmStartConfig, _: StartMode) -> anyhow::Result<VmId> {
-            unreachable!()
-        }
-        fn stop(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn stop_all(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn pause(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn resume(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn status(&self, _: &VmId) -> anyhow::Result<VmStatus> {
-            Ok(VmStatus::Stopped)
-        }
-        fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-        fn logs(&self, _: &VmId, _: u32, _: bool) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn is_available(&self) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        fn install(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
+    // The following three tests need a backend that actually reaches the
+    // spawn loop (`capabilities().standby_pool == true`) — every real
+    // `AnyBackend` variant selectable via the CLI reports `false` until the
+    // runner-backed workload backends are wired in as standby-pool capable,
+    // so only the hermetic `Mock` variant can drive `warm_to_target` past its
+    // capability gate today. Gated behind `test-support` like the mock
+    // backend itself; the dedicated CI lane (`--features test-support`)
+    // covers them.
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn warm_to_target_counts_failures_when_spawn_errors() {
         let tmp = tempfile::tempdir().unwrap();
@@ -857,7 +886,11 @@ mod tests {
         let key = tmp.path().join("host-signer.ed25519");
         std::fs::write(&key, b"fake-key").unwrap();
 
-        let backend = FailingSpawnBackend;
+        let backend = AnyBackend::Mock(
+            mvm_runtime::mock::MockBackend::new()
+                .with_standby()
+                .with_failing_spawn_standby(),
+        );
         let result = warm_to_target(
             &pool,
             &WarmParams {
@@ -882,6 +915,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn warm_to_target_already_at_target_returns_zero_spawned_zero_failed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -896,7 +930,7 @@ mod tests {
         h.kernel_sha256 = kernel_sha256_hex(&kernel).unwrap();
         pool.record(&h).unwrap();
 
-        let backend = FailingSpawnBackend;
+        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
         let result = warm_to_target(
             &pool,
             &WarmParams {
@@ -918,81 +952,11 @@ mod tests {
         assert_eq!(result.failed, 0);
     }
 
-    // A VmBackend stub whose `spawn_standby` always succeeds, echoing the spec's
-    // compat fields into the handle so the spawned standby is counted as idle.
-    // Stateless → Send + Sync, shareable across threads.
-    struct SpawnOkBackend;
-    impl VmBackend for SpawnOkBackend {
-        fn name(&self) -> &str {
-            "stub-spawn-ok"
-        }
-        fn kind(&self) -> BackendKind {
-            BackendKind::Mock
-        }
-        fn capabilities(&self) -> VmCapabilities {
-            VmCapabilities {
-                standby_pool: true,
-                ..VmCapabilities::default()
-            }
-        }
-        fn supports_standby_pool(&self) -> bool {
-            true
-        }
-        fn spawn_standby(
-            &self,
-            spec: &mvm_core::vm_backend::StandbySpec,
-        ) -> std::result::Result<StandbyHandle, StandbyError> {
-            Ok(StandbyHandle {
-                id: spec.id.clone(),
-                template_id: spec.template_id.clone(),
-                control_socket: spec.control_socket.clone(),
-                pid: std::process::id(),
-                kernel_sha256: spec.kernel_sha256.clone(),
-                vcpus: spec.vcpus,
-                mem_mib: spec.mem_mib,
-                binding_nonce: spec.binding_nonce.clone(),
-                spawned_unix_secs: 1,
-                state: StandbyState::Idle,
-                image_sha256: spec.image_sha256.clone(),
-                parent_checkpoint: None,
-            })
-        }
-        fn start_with_mode(&self, _: &VmStartConfig, _: StartMode) -> anyhow::Result<VmId> {
-            unreachable!()
-        }
-        fn stop(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn stop_all(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn pause(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn resume(&self, _: &VmId) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn status(&self, _: &VmId) -> anyhow::Result<VmStatus> {
-            Ok(VmStatus::Stopped)
-        }
-        fn list(&self) -> anyhow::Result<Vec<VmInfo>> {
-            Ok(vec![])
-        }
-        fn logs(&self, _: &VmId, _: u32, _: bool) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-        fn is_available(&self) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        fn install(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
     // Two launches warming the same pool to the same target concurrently must
     // not overshoot it: the pool-dir flock serializes the idle-count read →
     // spawn loop, so the second warmer observes the first's standbys and spawns
     // nothing. Without the lock both read an empty pool and each spawn `target`.
+    #[cfg(feature = "test-support")]
     #[test]
     fn warm_to_target_concurrent_calls_do_not_overshoot() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1002,10 +966,10 @@ mod tests {
         let key = tmp.path().join("key");
         std::fs::write(&key, b"fake-key").unwrap();
 
-        let backend = SpawnOkBackend;
+        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
         fn warm_once(
             pool: &SupervisorStandbyPool,
-            backend: &dyn VmBackend,
+            backend: &AnyBackend,
             kernel: &std::path::Path,
             key: &std::path::Path,
         ) {
@@ -1136,7 +1100,7 @@ fn run_warm(
     let result = warm_to_target(
         pool,
         &WarmParams {
-            backend: shape.backend.as_vm_backend(),
+            backend: &shape.backend,
             template_id: None,
             kernel: &shape.kernel,
             vcpus: shape.vcpus,
