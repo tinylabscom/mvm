@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use mvm_core::arch::GuestArch;
+use mvm_core::build_env::ShellEnvironment;
 use mvm_fs::initramfs::{InitramfsArtifact, InitramfsResolver};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -111,9 +112,11 @@ fn seed_from_default_cache(
 
 /// Resolve a cached universal initramfs, or return an error describing why it
 /// is unavailable. A full `nix build` fallback is intentionally gated behind
-/// `#[cfg(target_os = "linux")]` and requires the project builder VM (or a
-/// native Linux host with Nix); on macOS callers should rely on a seeded cache.
+/// `#[cfg(target_os = "linux")]` and runs through the supplied
+/// `ShellEnvironment` so it executes on the current Linux execution boundary
+/// (the builder VM on macOS, the native host on Linux).
 pub fn resolve_or_build_local_initramfs(
+    _env: &dyn ShellEnvironment,
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
@@ -128,7 +131,7 @@ pub fn resolve_or_build_local_initramfs(
 
     #[cfg(target_os = "linux")]
     {
-        build_initramfs_with_nix(cache_root, version, arch)
+        build_initramfs_with_nix(_env, cache_root, version, arch)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -167,6 +170,7 @@ fn initramfs_source_checkout_root() -> Option<PathBuf> {
 /// Build the universal initramfs via `nix build` and install it into the cache.
 #[cfg(target_os = "linux")]
 fn build_initramfs_with_nix(
+    env: &dyn ShellEnvironment,
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
@@ -183,29 +187,36 @@ fn build_initramfs_with_nix(
 
     let tmp = tempfile::tempdir()?;
     let out_link = tmp.path().join("result");
-    let status = std::process::Command::new("nix")
-        .args([
-            "build",
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "--impure",
-            "--out-link",
-            &out_link.display().to_string(),
-            &flake_ref,
-        ])
-        .env("MVM_WORKSPACE_PATH", &workspace_root)
-        .status()
-        .map_err(|e| InitramfsBuildError::NixBuildFailed {
-            reason: format!("failed to spawn nix build: {e}"),
-        })?;
+    let script = format!(
+        "MVM_WORKSPACE_PATH={} nix build --extra-experimental-features 'nix-command flakes' --impure --out-link {} {}",
+        shell_quote(&workspace_root.display().to_string()),
+        shell_quote(&out_link.display().to_string()),
+        shell_quote(&flake_ref),
+    );
 
-    if !status.success() {
+    if let Err(e) = env.shell_exec_capture(&script) {
         return Err(InitramfsBuildError::NixBuildFailed {
-            reason: format!("nix build exited with status {status}"),
+            reason: format!("nix build failed: {e}"),
         });
     }
 
     install_initramfs_into_cache(&out_link, cache_root, version, arch)
+}
+
+/// Quote a string for safe interpolation into a single-quoted POSIX shell word.
+#[cfg(target_os = "linux")]
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str(r"'\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 #[cfg(target_os = "linux")]
@@ -511,8 +522,29 @@ mod tests {
     fn resolve_returns_missing_when_cache_empty() {
         let dir = tempfile::tempdir().unwrap();
         let err =
-            resolve_or_build_local_initramfs(dir.path(), "0.18.0", GuestArch::Aarch64).unwrap_err();
+            resolve_or_build_local_initramfs(&NoopShell, dir.path(), "0.18.0", GuestArch::Aarch64)
+                .unwrap_err();
         assert!(!format!("{err}").is_empty());
+    }
+
+    struct NoopShell;
+
+    impl ShellEnvironment for NoopShell {
+        fn shell_exec(&self, _script: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn shell_exec_stdout(&self, _script: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        fn shell_exec_visible(&self, _script: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn log_info(&self, _msg: &str) {}
+
+        fn log_success(&self, _msg: &str) {}
     }
 
     #[test]
@@ -646,7 +678,8 @@ mod tests {
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         env.set("HOME", &home);
-        let default_mvm = home.join(".mvm").join("cache").join("initramfs");
+        let default_mvm =
+            PathBuf::from(mvm_core::config::default_mvm_cache_dir()).join("initramfs");
         let default_artifact_dir = default_mvm
             .join("0.18.0")
             .join(GuestArch::Aarch64.to_string());

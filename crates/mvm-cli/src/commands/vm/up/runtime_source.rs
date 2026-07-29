@@ -2,7 +2,7 @@
 //! the verity-sealed guest-binary overlay every workload backend consumes,
 //! and the audit label describing which source strategy actually landed.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::commands::runtime_overlay::{
     RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
@@ -198,6 +198,83 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
     }
 }
 
+/// Local shell execution boundary for the initramfs build fallback.
+///
+/// On Linux this runs directly on the host (which *is* the builder VM
+/// boundary). On macOS this path is never reached because the nix-build
+/// fallback is `#[cfg(target_os = "linux")]`.
+struct HostShellEnvironment;
+
+impl mvm_core::build_env::ShellEnvironment for HostShellEnvironment {
+    fn shell_exec(&self, script: &str) -> Result<()> {
+        let output = std::process::Command::new("bash")
+            .args(["-c", script])
+            .output()
+            .context("failed to run shell command")?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "shell command failed (exit {}): {stderr}",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+    }
+
+    fn shell_exec_stdout(&self, script: &str) -> Result<String> {
+        let output = self.shell_exec_capture(script)?;
+        Ok(output.0.trim().to_string())
+    }
+
+    fn shell_exec_visible(&self, script: &str) -> Result<()> {
+        let status = std::process::Command::new("bash")
+            .args(["-c", script])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("failed to run shell command")?;
+        if status.success() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "shell command failed (exit {})",
+                status.code().unwrap_or(-1)
+            );
+        }
+    }
+
+    fn log_info(&self, msg: &str) {
+        tracing::info!("{msg}");
+    }
+
+    fn log_success(&self, msg: &str) {
+        tracing::info!("{msg}");
+    }
+
+    fn shell_exec_capture(&self, script: &str) -> Result<(String, String)> {
+        let output = std::process::Command::new("bash")
+            .args(["-c", script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .context("failed to run shell command")?;
+        if output.status.success() {
+            Ok((
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "shell command failed (exit {}): {stderr}",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+    }
+}
+
 /// Attach the universal initramfs when it is present in the
 /// cache. This is intentionally non-fatal: until the Nix-built initramfs is
 /// seeded on every supported host, workloads that have a rootfs continue to
@@ -209,7 +286,8 @@ pub(crate) fn attach_universal_initramfs_if_cached(
     let version = env!("CARGO_PKG_VERSION");
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     let arch = mvm_core::arch::GuestArch::host();
-    match mvm_build::initramfs::resolve_or_build_local_initramfs(&cache_root, version, arch) {
+    let env = HostShellEnvironment;
+    match mvm_build::initramfs::resolve_or_build_local_initramfs(&env, &cache_root, version, arch) {
         Ok(artifact) => {
             start_config.initrd_path = Some(artifact.image_path.display().to_string());
             tracing::info!(
