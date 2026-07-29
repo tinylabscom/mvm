@@ -17,7 +17,7 @@ use mvm_core::vm_backend::{
 
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 
-use crate::driver::spec::VmmSpec;
+use crate::driver::spec::{VmmSpec, VsockPort};
 use crate::driver::traits::{
     ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
 };
@@ -46,14 +46,16 @@ fn rotated_child_identity() -> PostRestoreOutcome {
     }
 }
 
-/// A recorded `fork_standby_child` call: the child's fresh name plus the
-/// generation token the fork delivered, so a test can prove a claim delivered a
-/// fresh, content-bound token to the fork (and thus before the child's workload
-/// ran).
+/// A recorded `fork_standby_child` call: the child's fresh name, the generation
+/// token the fork delivered, and the host channel set the fork was asked to wire
+/// — so a test can prove a claim delivered a fresh, content-bound token to the
+/// fork (and thus before the child's workload ran) and handed it the same
+/// channels a cold boot wires.
 #[derive(Clone)]
 pub struct MockChildFork {
     pub child_vm_name: String,
     pub genid: GenerationToken,
+    pub channels: Vec<VsockPort>,
 }
 
 /// Hypervisor-free `VmmDriver` test double.
@@ -253,11 +255,13 @@ impl VmmDriver for MockDriver {
         &self,
         req: &ChildForkRequest<'_>,
     ) -> std::result::Result<(), StandbyError> {
-        // A hypervisor-free fork: record the child's fresh name + the delivered
-        // generation token so a test can prove the claim scrubbed identity and
-        // delivered a fresh, content-bound token to the fork (i.e. at boot,
-        // before the child's workload ran). The runner has already materialized
-        // the CoW clone into `req.child_dir`; the mock needs nothing on disk.
+        // A hypervisor-free fork: record the child's fresh name, the delivered
+        // generation token, and the host channel set the fork was asked to wire,
+        // so a test can prove the claim scrubbed identity, delivered a fresh
+        // content-bound token to the fork (i.e. at boot, before the child's
+        // workload ran), and handed down the channels a cold boot wires. The
+        // runner has already materialized the CoW clone into `req.child_dir`;
+        // the mock needs nothing on disk.
         if !req.child_dir.exists() {
             return Err(StandbyError::ClaimFailed(format!(
                 "fork child '{}': child dir {} was never materialized",
@@ -268,6 +272,7 @@ impl VmmDriver for MockDriver {
         self.forked.lock().unwrap().push(MockChildFork {
             child_vm_name: req.child_vm_name.to_string(),
             genid: req.genid.clone(),
+            channels: req.channels.to_vec(),
         });
         Ok(())
     }
