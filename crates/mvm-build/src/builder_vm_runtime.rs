@@ -23,12 +23,6 @@
 //!   in the impl; surfaces through `BuilderVmExitInfo.panic_line`)
 //! - Hypervisor-specific config translation (KrunContext vs.
 //!   HVF's `SupervisorConfig`)
-//!
-//! Today the helper is a skeleton. Subsequent commits migrate the
-//! concerns above out of `LibkrunBuilderVm.run_build` into here,
-//! one at a time. Each migration commit is independently
-//! verifiable: build + existing tests stay green, and the new
-//! helper methods get their own unit tests.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
