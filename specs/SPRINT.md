@@ -511,9 +511,10 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    `oci_persist.rs` and `checkpoint.rs` right after the runtime-overlay attachment. The resolver
    validates `initramfs.cpio.gz`, `initramfs.hash`, `initramfs.size`, and
    `VERSION`; the builder supports worktree-isolated caches by seeding from
-   the default cache, produces the artifact on Linux via `nix build`, and
-   installs atomically. `cargo fmt --all`, `cargo clippy --workspace
-   --all-targets -- -D warnings`, targeted nextest for the modified crates
+   the default cache, falls back to a published-release download on non-Linux
+   hosts, produces the artifact on Linux via `nix build`, and installs
+   atomically. `cargo fmt --all`, `cargo clippy --workspace --all-targets --
+   -D warnings`, the spec-ref lint, targeted nextest for the modified crates
    (mvm-fs, mvm-build, mvm-runtime, mvm-agentd, mvm-cli initramfs tests),
    and the pre-commit hook all pass. Full workspace nextest on macOS shows
    four pre-existing mvm-build failures unrelated to Plan 270; the end-to-end
