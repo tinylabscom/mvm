@@ -3991,7 +3991,7 @@ mod linux {
             assert_eq!(code, 0);
             assert_eq!(tail, "parent-exited");
             assert!(
-                elapsed < Duration::from_secs(5),
+                elapsed < std::time::Duration::from_secs(5),
                 "authoritative parent exit must not wait for descendant stderr EOF: {elapsed:?}"
             );
         }

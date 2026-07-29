@@ -508,14 +508,14 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          # Keep persistent jobs on the builder's host-mediated egress path\n\
          # even when the cached builder image predates the matching init\n\
          # binary. Nix and its fetchers inherit these loopback proxy vars.\n\
-         export ALL_PROXY='socks5h://127.0.0.1:1080'\n\
-         export HTTP_PROXY='socks5h://127.0.0.1:1080'\n\
-         export HTTPS_PROXY='socks5h://127.0.0.1:1080'\n\
-         export all_proxy='socks5h://127.0.0.1:1080'\n\
-         export http_proxy='socks5h://127.0.0.1:1080'\n\
-         export https_proxy='socks5h://127.0.0.1:1080'\n\
-         export NO_PROXY='localhost,127.0.0.1,::1'\n\
-         export no_proxy='localhost,127.0.0.1,::1'\n\
+         export ALL_PROXY='{egress_proxy_url}'\n\
+         export HTTP_PROXY='{egress_proxy_url}'\n\
+         export HTTPS_PROXY='{egress_proxy_url}'\n\
+         export all_proxy='{egress_proxy_url}'\n\
+         export http_proxy='{egress_proxy_url}'\n\
+         export https_proxy='{egress_proxy_url}'\n\
+         export NO_PROXY='{no_proxy_loopback}'\n\
+         export no_proxy='{no_proxy_loopback}'\n\
          # Older cached builder images may not have loaded the read-only\n\
          # rootfs closure into the writable Nix database at boot. Register\n\
          # it here before Nix decides to substitute paths that are local.\n\
@@ -589,6 +589,8 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
         artifact_subdir = ARTIFACT_SUBDIR,
         flake_ref = shell_escape(flake_ref),
         attr = shell_escape(attr),
+        egress_proxy_url = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL,
+        no_proxy_loopback = mvm_core::guest_netd::NO_PROXY_LOOPBACK,
     );
     let cmd_path = sub.join("cmd.sh");
     std::fs::write(&cmd_path, script).with_context(|| format!("writing {}", cmd_path.display()))?;
@@ -774,6 +776,45 @@ mod tests {
         assert!(body.contains("'packages.aarch64-linux.default'"), "{body}");
         assert!(body.contains("nix"), "{body}");
         assert!(body.starts_with("#!/bin/sh"), "{body}");
+    }
+
+    #[test]
+    fn stage_flake_cmd_sh_uses_canonical_egress_proxy_contract() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let relpath = stage_flake_cmd_sh(
+            scratch.path(),
+            "path:/work",
+            "packages.aarch64-linux.default",
+        )
+        .expect("stage");
+        let body =
+            std::fs::read_to_string(scratch.path().join(relpath).join("cmd.sh")).expect("read");
+
+        for key in [
+            "ALL_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "http_proxy",
+            "https_proxy",
+        ] {
+            assert!(
+                body.contains(&format!(
+                    "export {key}='{}'",
+                    mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL
+                )),
+                "{body}"
+            );
+        }
+        for key in ["NO_PROXY", "no_proxy"] {
+            assert!(
+                body.contains(&format!(
+                    "export {key}='{}'",
+                    mvm_core::guest_netd::NO_PROXY_LOOPBACK
+                )),
+                "{body}"
+            );
+        }
     }
 
     #[test]
