@@ -1,0 +1,14 @@
+# model/ledger.toml --- the honesty ledger for claims that are not conformance
+# IDs (R2).
+#
+# The conformance IDs and their levels live in `model/claims.toml`, which is the
+# register; duplicating them here would give a claim two sources, which is what
+# R1 forbids. What remains is the two kinds of claim that have no ID: the facts
+# this repository *reproduces* from an authority, and the quantities it
+# *measures* and never asserts.
+#
+# Empty for now. Add a row only when a non-ID claim needs an honesty level.
+
+spec = "mvm/1"
+
+claim = []

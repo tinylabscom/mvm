@@ -59,6 +59,9 @@ ed25519-dalek.workspace = true
 anyhow.workspace = true
 tar.workspace = true
 tempfile.workspace = true
+# Loading the conformance claim register for the R3 meta-gate.
+toml.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

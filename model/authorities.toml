@@ -1,0 +1,35 @@
+# model/authorities.toml --- what this repository cites rather than proves.
+#
+# A `some-true` claim is reproduced from an authority and is not established
+# here. This file names the authority well enough for a third party to find it,
+# with a checksum over the committed artifact when there is one and a stated
+# reason when there is not.
+
+spec = "mvm/1"
+
+[[authority]]
+id = "linux-seccomp"
+name = "Linux seccomp"
+citation = "https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html and ADR-001 §W2"
+checksum = "none"
+checksum_reason = "Authority is the upstream Linux kernel documentation plus project ADR text committed in this repo"
+statement = "seccomp syscall filtering can deny arbitrary syscalls by a process"
+realized_by = ["MVM-SEC-01"]
+
+[[authority]]
+id = "linux-setpriv"
+name = "util-linux setpriv"
+citation = "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/ and ADR-001 §W2.2"
+checksum = "none"
+checksum_reason = "Authority is the upstream util-linux tool and project ADR text committed in this repo"
+statement = "setpriv --no-new-privs prevents privilege elevation via setuid/setcap binaries"
+realized_by = ["MVM-SEC-02"]
+
+[[authority]]
+id = "rustsec"
+name = "RustSec Advisory Database"
+citation = "https://rustsec.org/advisories/ and deny.toml"
+checksum = "none"
+checksum_reason = "Authority is a continuously updated public advisory database; a fixed checksum would be stale immediately"
+statement = "RUSTSEC tracks security advisories for Rust crates"
+realized_by = ["MVM-SEC-07"]
