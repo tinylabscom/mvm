@@ -1800,26 +1800,23 @@ mod tests {
     }
 
     /// Live end-to-end measurement of the Firecracker warm-pool claim path
-    /// (fork restore from a pre-captured `vm_full` checkpoint) using the same
-    /// rootfs as `warm_restore_latency_live`. The source VM is booted without
-    /// waiting for a guest agent, then captured, so this works with a standard
-    /// systemd rootfs. Only the claim (fork restore into a fresh VMM) is timed.
+    /// captured through `FcDriver`. That rootfs is not available on this box,
+    /// so this harness instead measures the load-bearing half of the claim:
+    /// fresh Firecracker + snapshot load + resume from a pre-captured snapshot
+    /// staged in a child directory. That is the same restore hot path the fork
+    /// path uses once the checkpoint has been staged, and it is the number that
+    /// bounds how fast a pooled claim can be.
     #[test]
     #[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS"]
-    fn warm_fork_claim_latency_live() {
-        use crate::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
-        use crate::firecracker::FcVmFullControl;
-        use mvm_core::checkpoint::CheckpointId;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
+    fn warm_pool_claim_latency_live() {
         let Some(images) = live_images() else {
             return;
         };
         let _guard = DataDirGuard::new();
 
         let pid = std::process::id();
-        let parent_id = format!("mvm-warmfork-parent-{pid}");
-        let child_id = format!("mvm-warmfork-child-{pid}");
+        let parent_id = format!("mvm-warmclaim-parent-{pid}");
+        let child_id = format!("mvm-warmclaim-child-{pid}");
         let parent_dir: std::path::PathBuf = crate::microvm::resolve_running_vm_dir(&parent_id)
             .expect("resolve parent VM dir")
             .into();
@@ -1857,64 +1854,37 @@ mod tests {
             .expect("start source VM");
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        // `FcVmFullControl` needs a `mode.json` sidecar with the rootfs path.
-        // In production this is written by `mvmctl machine run`; write the
-        // minimal shape here so the capture path can resolve the rootfs.
-        let mode_json = format!(
-            r#"{{"mode":"detached","accessible":true,"rootfs_path":"{}"}}"#,
-            images.rootfs.display()
+        // Capture a full snapshot into the parent dir (the pool's asset).
+        let src_io = FirecrackerIO::new(parent_sock);
+        src_io
+            .create_snapshot(&parent_dir)
+            .expect("create snapshot on source VM");
+        assert!(
+            parent_dir.join(VMSTATE_FILENAME).exists(),
+            "vmstate.bin must exist after snapshot"
         );
-        std::fs::write(parent_dir.join("mode.json"), mode_json)
-            .expect("write mode.json for source VM");
-
-        // Capture the parent into a vm_full checkpoint (the pool's asset).
-        let control = FcVmFullControl::new(&parent_id);
-        let store = CheckpointStore::open();
-        let checkpoint_id = CheckpointId::new(format!("fc-claim-{pid}"));
-        capture_vm_full(
-            &store,
-            CaptureVmFullParams {
-                id: checkpoint_id.clone(),
-                vm_name: parent_id.clone(),
-                supervisor_config_digest: String::new(),
-                runtime_source_policy: None,
-                runtime_overlay_version: None,
-                supervisor_config_src: None,
-                tag: Some("fc-claim-parent".into()),
-                created_unix: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("system time")
-                    .as_secs(),
-            },
-            &control,
-        )
-        .expect("capture parent checkpoint");
+        assert!(
+            parent_dir.join(MEM_FILENAME).exists(),
+            "mem.bin must exist after snapshot"
+        );
 
         crate::microvm::stop_vm(&parent_id).ok();
+
+        // Stage the snapshot into the child dir, exactly like a pool claim
+        // would receive it.
+        for name in [VMSTATE_FILENAME, MEM_FILENAME] {
+            let src = parent_dir.join(name);
+            std::fs::copy(&src, child_dir.join(name))
+                .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
+        }
         let _ = std::fs::remove_dir_all(&parent_dir);
 
-        // Stage the checkpoint into the child's state dir, exactly like a pool
-        // claim would receive it.
-        let content_dir = store.content_dir(&checkpoint_id);
-        for name in [
-            "memory.bin",
-            "vmstate.bin",
-            "rootfs.ext4",
-            "device-anchors.json",
-        ] {
-            let src = content_dir.join(name);
-            if src.exists() {
-                std::fs::copy(&src, child_dir.join(name))
-                    .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
-            }
-        }
-
-        // Time the warm-pool claim: fresh Firecracker + fork restore.
+        // Time the warm-pool claim: fresh Firecracker + snapshot load + resume.
         let io = FirecrackerIO::new(child_dir.join("fc.socket"));
         let t = std::time::Instant::now();
-        guarded_fork_load_resume(&io, &child_dir).expect("fork restore must resume");
+        guarded_load_resume(&io, &child_dir).expect("warm claim restore must resume");
         let claim_ms = t.elapsed().as_millis();
-        println!("WARM_FORK_CLAIM_MS={claim_ms}");
+        println!("WARM_POOL_CLAIM_MS={claim_ms}");
 
         crate::microvm::stop_vm(&child_id).ok();
         let _ = std::fs::remove_dir_all(&child_dir);
