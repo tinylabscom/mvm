@@ -14,6 +14,15 @@ with its limits.
 - Supported rootfs formats can carry integrity metadata.
 - Audit records connect build, admission, launch, snapshot, and restore events.
 
+## Universal initramfs activation
+
+Workloads that attach the universal initramfs boot a static `mvm-guest-agent`
+as `/init`. The kernel cmdline carries no roothash tokens. The guest PID 1
+waits fail-closed for a signed `ActivateEnvironment` over vsock, mounts the
+dm-verity rootfs and runtime overlay from fixed block slots, pivots into the
+verified root, and drops to the workload UID before serving operational RPCs.
+See [Boot flow](/architecture/boot-flow/) for the full sequence.
+
 ## What varies by backend
 
 | Backend | Posture |

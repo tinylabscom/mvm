@@ -181,6 +181,7 @@ export default defineConfig({
           items: [
             { label: "Overview", slug: "architecture/overview" },
             { label: "Core Components", slug: "architecture/core-components" },
+            { label: "Boot flow", slug: "architecture/boot-flow" },
             { label: "Control surfaces", slug: "architecture/control-surfaces" },
             { label: "Security and Isolation", slug: "architecture/security-isolation" },
             { label: "Networking and Storage", slug: "architecture/networking-storage" },
