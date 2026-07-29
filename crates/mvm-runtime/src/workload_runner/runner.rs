@@ -2183,11 +2183,33 @@ mod tests {
             RecordingBrokerRegistrar::new(),
         );
         let mut launch = standby_launch_config(&rootfs);
-        // A sealed boot whose roothash alone pushes the assembled cmdline past
-        // the guest kernel's command-line buffer.
+        // A sealed boot; the universal initramfs moves the roothash off the
+        // cmdline, so force an overflow with an oversized verb grant instead.
         launch.verity_path = Some(tmp.path().join("rootfs.verity").display().to_string());
         launch.roothash = Some("a".repeat(4096));
         launch.initrd_path = Some(tmp.path().join("rootfs.initrd").display().to_string());
+        let state_dir = mvm_core::config::vm_state_dir("parent-oversized");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let nonce = mvm_core::plan::Nonce::from_bytes([3u8; 16]);
+        let not_after = mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap();
+        let envelope = mvm_core::protocol::vm_backend::VerbGrantEnvelope {
+            pubkey_hex: "cc".repeat(32),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant: mvm_core::plan::VerbGrant {
+                session_id: "parent-oversized".into(),
+                plan_nonce: nonce,
+                not_after,
+                verbs: vec![mvm_core::plan::VerbId::new(&"a".repeat(4000)).unwrap()],
+                sig: vec![0u8; 64],
+            },
+        };
+        std::fs::write(
+            state_dir.join("verb-grant.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
         let spec = sample_standby_spec("parent-oversized", tmp.path(), &rootfs);
 
         let err = runner

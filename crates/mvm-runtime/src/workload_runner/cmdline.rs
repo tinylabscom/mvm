@@ -347,7 +347,12 @@ mod tests {
 
     #[test]
     fn runner_cmdline_appends_uvols_to_a_non_trivial_base() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
         let config = VmStartConfig {
             network_policy: mvm_core::network_policy::NetworkPolicy::preset(
                 mvm_core::network_policy::NetworkPreset::Dev,
@@ -360,7 +365,10 @@ mod tests {
         let base = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
             .expect("non-trivial base");
         let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
-        assert!(cmdline.starts_with(&base));
+        assert!(
+            cmdline.starts_with(&base),
+            "base: {base}\ncmdline: {cmdline}"
+        );
         assert!(
             cmdline.contains("mvm.uvols=uvol0:"),
             "cmdline missing uvols token: {cmdline}"
