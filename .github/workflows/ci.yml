@@ -1,14 +1,12 @@
 name: CI
 
 on:
-  # Keep ordinary pushes cheap and predictable. This workflow is the
-  # day-to-day signal and is intentionally capped at four jobs:
+  # Keep pull-request validation cheap and predictable. This workflow is
+  # intentionally capped at four runner jobs:
   # lint, test, MCP smoke, and Nix eval. Expensive platform, live-VM,
   # OCI ratification, security, Windows, and release artifact jobs live
   # in release/manual workflows.
-  push:
-    # Exclude the merge-queue transient branches — covered by merge_group below.
-    branches: ["**", "!gh-readonly-queue/**"]
+  pull_request:
   # Required for the merge queue: checks must run against the merge_group event.
   merge_group:
   workflow_dispatch:
@@ -256,9 +254,14 @@ jobs:
       - name: Install system build deps
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update
-          sudo apt-get install -y libcap-ng-dev lld
+          sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/install-zigbuild
+
+      - name: Install pinned no_std toolchain and targets
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal \
+            --target wasm32-unknown-unknown,wasm32-wasip1,riscv32imac-unknown-none-elf
 
       - name: Cache cargo
         uses: actions/cache@v5
@@ -274,6 +277,11 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
       - name: Build
         run: cargo build --all-targets
@@ -302,55 +310,104 @@ jobs:
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
 
-  bdd-smoke:
-    name: BDD / conformance meta-gate smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install system build deps
+      - name: Install wasmtime (wasm32-wasip1 test runner)
+        env:
+          # Pinned to match the wasmtime crate version in Cargo.lock.
+          WASMTIME_VERSION: "46.0.1"
         run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
-          sudo apt-get update
-          sudo apt-get install -y libcap-ng-dev lld
+          set -euo pipefail
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          base="wasmtime-v${WASMTIME_VERSION}-x86_64-linux"
+          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/${base}.tar.xz" \
+            | tar -xJf - -C "$tmpdir"
+          mkdir -p "$HOME/.wasmtime/bin"
+          mv "$tmpdir/${base}/wasmtime" "$HOME/.wasmtime/bin/wasmtime"
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
 
-      - uses: ./.github/actions/install-zigbuild
+      - name: mvm-protocol builds no_std + alloc on wasm and bare metal
+        run: |
+          cargo +1.96.0 build -p mvm-protocol --target wasm32-unknown-unknown
+          cargo +1.96.0 build -p mvm-protocol --lib \
+            --target riscv32imac-unknown-none-elf
 
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
+      - name: mvm-protocol tests run under wasm
+        run: cargo +1.96.0 test -p mvm-protocol --target wasm32-wasip1
 
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-bdd-smoke-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-bdd-smoke-
+      - name: Write a sample ext4 image
+        run: cargo run -p mvm-fs --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
 
-      # Hermetic BDD: no live microVMs. @live/@firecracker/@bundle scenarios
-      # are skipped because MVM_BDD_LIVE is unset and no bundle fixture is
-      # supplied. The meta-gate validates R3 (register ↔ scenarios ↔ witnesses).
-      - name: Conformance meta-gate (R3)
+      - name: Loop-mount read-only and verify the ext4 tree
+        run: |
+          set -euo pipefail
+          mnt=$(mktemp -d)
+          sudo mount -o ro,loop /tmp/sample.ext4 "$mnt"
+          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
+          [ "$(cat "$mnt/etc/hosts")" = "127.0.0.1 localhost" ]
+          diff <(printf 'hi from pure-rust ext4\n') "$mnt/hello"
+          [ "$(readlink "$mnt/etc/localhost")" = "hosts" ]
+          [ -d "$mnt/bin" ] && [ -d "$mnt/etc" ]
+          [ "$(stat -c '%a' "$mnt/hello")" = "755" ]
+          [ "$(stat -c '%a' "$mnt/etc/hosts")" = "644" ]
+          [ "$(stat -c '%s' "$mnt/big")" = "716800" ]
+          cap=$(sudo getfattr --absolute-names -n security.capability -e hex "$mnt/bin/ping" \
+            | grep '^security.capability=' | cut -d= -f2)
+          echo "security.capability=$cap"
+          [ "$cap" = "0x0000000200300000000000000000000000000000" ]
+
+      - name: Match dm-verity output against veritysetup
+        run: |
+          set -euo pipefail
+          ours=$(grep '^ROOTHASH ' /tmp/sample.out | awk '{print $2}')
+          theirs=$(veritysetup format --no-superblock \
+              --data-block-size=4096 --hash-block-size=4096 \
+              --salt=0000000000000000000000000000000000000000000000000000000000000000 \
+              /tmp/sample.ext4 /tmp/vs.verity \
+            | awk '/^Root hash:/ {print $3}')
+          echo "ours=$ours theirs=$theirs"
+          [ -n "$ours" ] && [ "$ours" = "$theirs" ]
+          if ! cmp -s /tmp/sample.ext4.verity /tmp/vs.verity; then
+            echo "::error::hash tree differs from veritysetup"
+            ls -l /tmp/sample.ext4.verity /tmp/vs.verity
+            cmp -l /tmp/sample.ext4.verity /tmp/vs.verity | head -20 || true
+            exit 1
+          fi
+
+      - name: Loop-mount a multi-block-group ext4 image
+        run: |
+          set -euo pipefail
+          cargo run -p mvm-fs --example write_multigroup -- /tmp/multigroup.ext4
+          [ "$(stat -c '%s' /tmp/multigroup.ext4)" -gt 134217728 ]
+          mnt=$(mktemp -d)
+          sudo mount -o ro,loop /tmp/multigroup.ext4 "$mnt"
+          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
+          [ "$(cat "$mnt/etc/marker")" = "multi-group marker" ]
+          [ "$(stat -c '%s' "$mnt/big")" = "136314880" ]
+          off=134000000
+          got=$(dd if="$mnt/big" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+          [ "$got" = "$((off % 251))" ]
+
+      - name: Loop-mount a depth-1 extent-tree ext4 image
+        run: |
+          set -euo pipefail
+          cargo run -p mvm-fs --example write_extent_tree -- /tmp/extent_tree.ext4
+          [ "$(stat -c '%s' /tmp/extent_tree.ext4)" -gt 536870912 ]
+          mnt=$(mktemp -d)
+          sudo mount -o ro,loop /tmp/extent_tree.ext4 "$mnt"
+          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
+          [ "$(cat "$mnt/etc/marker")" = "extent-tree marker" ]
+          [ "$(stat -c '%s' "$mnt/huge")" = "545259520" ]
+          off=537000000
+          got=$(dd if="$mnt/huge" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+          [ "$got" = "$((off % 251))" ]
+
+      # Hermetic BDD: live microVM and bundle scenarios remain opt-in. The
+      # meta-gate validates the claim register against scenarios and witnesses.
+      - name: Conformance meta-gate
         run: cargo test -p mvm-conformance --test meta
 
       - name: Hermetic BDD scenarios
         run: just bdd
-
-  sdk-release-dry-run:
-    name: SDK release dry-run
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/publish-sdk.yml
-    with:
-      dry_run: true
 
   mcp-server-smoke:
     name: MCP server stdio roundtrip
@@ -407,190 +464,3 @@ jobs:
           set -euo pipefail
           nix build --print-build-logs \
             ./nix#checks.x86_64-linux.guest-rootfs-no-glibc
-
-  # `mvm-protocol` is `no_std` + `alloc` (the IR, wire protocol, policy/audit
-  # DTOs, and the audit-log verifier) so the same logic can run in a browser.
-  # A `std`/OS-only API creeping into its default build is the one thing that
-  # would break that — and the wasm32-unknown-unknown *build itself* is the
-  # proof: it only succeeds if the crate stays no_std-clean, so no separate
-  # lint is needed. The crate also goes `std` under `cfg(test)` (libtest
-  # needs `std` to link), so its tests run for real under wasm on
-  # wasm32-wasip1 via wasmtime, confirming the no_std surface behaves
-  # correctly and not just that it compiles.
-  wasm-no-std-boundary:
-    name: mvm-protocol wasm32 no_std boundary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
-        with:
-          targets: wasm32-unknown-unknown,wasm32-wasip1
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-wasm-
-
-      - name: Install wasmtime (wasm32-wasip1 test runner)
-        env:
-          # Pinned to match the wasmtime crate version in Cargo.lock.
-          # Bump intentionally when the wasmtime dependency is updated.
-          WASMTIME_VERSION: "46.0.1"
-        run: |
-          set -euo pipefail
-          tmpdir="$(mktemp -d)"
-          trap 'rm -rf "$tmpdir"' EXIT
-          base="wasmtime-v${WASMTIME_VERSION}-x86_64-linux"
-          curl -fsSL "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/${base}.tar.xz" \
-            | tar -xJf - -C "$tmpdir"
-          mkdir -p "$HOME/.wasmtime/bin"
-          mv "$tmpdir/${base}/wasmtime" "$HOME/.wasmtime/bin/wasmtime"
-          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
-
-      - name: mvm-protocol builds no_std + alloc on wasm32-unknown-unknown
-        run: cargo build -p mvm-protocol --target wasm32-unknown-unknown
-
-      - name: mvm-protocol tests run under wasm (wasm32-wasip1, via wasmtime)
-        run: cargo test -p mvm-protocol --target wasm32-wasip1
-
-  # A bare-metal `*-none-*` target is a stricter no_std proof than wasm32:
-  # wasm32-unknown-unknown still ships a partial `std`, so a stray `std::` path
-  # can slip through there, whereas a `-none-elf` target has no `std` to leak
-  # into at all — only `core` + `alloc`. This gate is what lets the verifier
-  # (chain-signed audit log + Merkle inclusion proofs) run on a
-  # microcontroller-class device that provides no operating system. riscv32imac
-  # is the closest mainline target to the RISC-V microcontrollers this is aimed
-  # at and needs no out-of-tree toolchain, so the gate stays hermetic. A
-  # lib-only build (rlib, no final link) needs no cross-linker, keeping the
-  # check fast and dependency-light.
-  baremetal-no-std-boundary:
-    name: mvm-protocol bare-metal no_std boundary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
-        with:
-          targets: riscv32imac-unknown-none-elf
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-baremetal-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-baremetal-
-
-      - name: mvm-protocol builds no_std + alloc on riscv32imac-unknown-none-elf
-        run: cargo build -p mvm-protocol --lib --target riscv32imac-unknown-none-elf
-
-  # The pure-Rust `mvm-ext4` writer (Plan 221) must produce an image the real
-  # Linux kernel mounts — the strongest correctness oracle, beyond the in-process
-  # `am-fs-ext4` read oracle. Write a fixed sample image and loop-mount it.
-  ext4-real-mount:
-    name: mvm-ext4 output mounts on the real kernel
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96.0
-      - name: Write a sample image with the pure-Rust ext4 writer
-        run: cargo run -p mvm-fs --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
-      - name: Loop-mount read-only and verify the tree on the real kernel
-        run: |
-          set -euo pipefail
-          mnt=$(mktemp -d)
-          sudo mount -o ro,loop /tmp/sample.ext4 "$mnt"
-          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
-          # File contents ($() strips the trailing newline).
-          [ "$(cat "$mnt/etc/hosts")" = "127.0.0.1 localhost" ]
-          diff <(printf 'hi from pure-rust ext4\n') "$mnt/hello"
-          # Symlink resolves to its target.
-          [ "$(readlink "$mnt/etc/localhost")" = "hosts" ]
-          # Directories present.
-          [ -d "$mnt/bin" ] && [ -d "$mnt/etc" ]
-          # Permissions preserved.
-          [ "$(stat -c '%a' "$mnt/hello")" = "755" ]
-          [ "$(stat -c '%a' "$mnt/etc/hosts")" = "644" ]
-          [ "$(stat -c '%s' "$mnt/big")" = "716800" ]
-          # Inline xattr: the real kernel reads back the security.capability the
-          # writer emitted, byte-for-byte (getfattr reads raw bytes — no cap
-          # validation — so an arbitrary fixed blob round-trips deterministically).
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y attr
-          cap=$(sudo getfattr --absolute-names -n security.capability -e hex "$mnt/bin/ping" \
-            | grep '^security.capability=' | cut -d= -f2)
-          echo "security.capability=$cap"
-          [ "$cap" = "0x0000000200300000000000000000000000000000" ]
-          echo "pure-Rust ext4 mounted + verified on the real Linux kernel"
-      - name: dm-verity root hash + hash tree match real veritysetup
-        run: |
-          set -euo pipefail
-          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list; sudo apt-get update && sudo apt-get install -y cryptsetup-bin
-          # Our writer printed `ROOTHASH <hex>` and wrote the no-superblock hash
-          # tree to `<image>.verity`.
-          ours=$(grep '^ROOTHASH ' /tmp/sample.out | awk '{print $2}')
-          # Real veritysetup, same params (v1, sha256, 4 KiB data+hash blocks,
-          # 32-byte zero salt). --no-superblock keeps the tree deterministic (no
-          # random UUID) and matches our `format()` layout.
-          theirs=$(veritysetup format --no-superblock \
-              --data-block-size=4096 --hash-block-size=4096 \
-              --salt=0000000000000000000000000000000000000000000000000000000000000000 \
-              /tmp/sample.ext4 /tmp/vs.verity \
-            | awk '/^Root hash:/ {print $3}')
-          echo "ours=$ours theirs=$theirs"
-          [ -n "$ours" ] && [ "$ours" = "$theirs" ]
-          # Hash-tree bytes must match byte-for-byte.
-          if ! cmp -s /tmp/sample.ext4.verity /tmp/vs.verity; then
-            echo "::error::hash tree differs from veritysetup"
-            ls -l /tmp/sample.ext4.verity /tmp/vs.verity
-            cmp -l /tmp/sample.ext4.verity /tmp/vs.verity | head -20 || true
-            exit 1
-          fi
-          echo "pure-Rust dm-verity root hash + hash tree == veritysetup"
-      - name: Write + loop-mount a MULTI-block-group image (> 128 MiB)
-        run: |
-          set -euo pipefail
-          cargo run -p mvm-fs --example write_multigroup -- /tmp/multigroup.ext4
-          # Sanity: bigger than one group's 128 MiB.
-          [ "$(stat -c '%s' /tmp/multigroup.ext4)" -gt 134217728 ]
-          mnt=$(mktemp -d)
-          sudo mount -o ro,loop /tmp/multigroup.ext4 "$mnt"
-          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
-          [ "$(cat "$mnt/etc/marker")" = "multi-group marker" ]
-          # The big file spans two block groups as two extents — size + a byte
-          # past the group boundary must read back correctly.
-          [ "$(stat -c '%s' "$mnt/big")" = "136314880" ]
-          # Byte at offset 130 MiB-ish (well past the first group) follows the
-          # i%251 pattern the example wrote.
-          off=134000000
-          got=$(dd if="$mnt/big" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
-          [ "$got" = "$((off % 251))" ]
-          echo "multi-group pure-Rust ext4 mounted + verified on the real Linux kernel"
-      - name: Write + loop-mount a DEPTH-1 extent-tree image (>512 MiB single file)
-        run: |
-          set -euo pipefail
-          cargo run -p mvm-fs --example write_extent_tree -- /tmp/extent_tree.ext4
-          # >4 groups → the single file needs a depth-1 extent tree.
-          [ "$(stat -c '%s' /tmp/extent_tree.ext4)" -gt 536870912 ]
-          mnt=$(mktemp -d)
-          sudo mount -o ro,loop /tmp/extent_tree.ext4 "$mnt"
-          trap 'sudo umount "$mnt" || true; rmdir "$mnt" || true' EXIT
-          [ "$(cat "$mnt/etc/marker")" = "extent-tree marker" ]
-          # The huge file is 520 MiB and must read back through the extent tree.
-          [ "$(stat -c '%s' "$mnt/huge")" = "545259520" ]
-          # A byte well past the 4th group boundary (~513 MiB in) must follow the
-          # i%251 pattern — proves the depth-1 leaf extents resolve correctly.
-          off=537000000
-          got=$(dd if="$mnt/huge" bs=1 skip=$off count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
-          [ "$got" = "$((off % 251))" ]
-          echo "depth-1 extent-tree pure-Rust ext4 mounted + verified on the real Linux kernel"
