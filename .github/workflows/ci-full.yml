@@ -1,8 +1,8 @@
 name: Full CI (manual)
 
 on:
-  # Operator-triggered full matrix. Normal pushes use ci.yml, which is
-  # intentionally capped at four jobs so day-to-day pushes do not fan
+  # Operator-triggered full matrix. Pull requests use ci.yml, which is
+  # intentionally capped at four jobs so day-to-day changes do not fan
   # out into the platform, live-VM, and OCI ratification lanes.
   workflow_dispatch:
 
@@ -19,7 +19,7 @@ env:
   RUSTFLAGS: "-D warnings"
 
 # ── Lane shape ────────────────────────────────────────────────────────
-# Manual full-matrix workflow. Normal branch pushes intentionally do
+# Manual full-matrix workflow. Normal pull requests intentionally do
 # not invoke this file; they use ci.yml's four-job day-to-day surface.
 # Use this workflow when an operator wants all historical CI lanes
 # without cutting a release tag.
@@ -271,7 +271,7 @@ jobs:
 
   # Note: cargo-audit, cargo-deny, reproducibility, and prod-agent-no-exec
   # were duplicated here AND in security.yml. They now live only in
-  # security.yml (which fires on the same triggers — push to main + PRs).
+  # security.yml, which runs nightly and before release publication.
 
   # ── Lane: sealed-prod vsock allowlist locked (plan 76 Phase 1) ────
   # Plan 76 §"Phase 8 — Security regression gate" (partial). The big

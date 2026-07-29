@@ -1,4 +1,4 @@
-# ADR-012: CI execution policy — push runs a lean lane; the full matrix and release gates are separately triggered
+# ADR-012: CI execution policy — pull requests run a lean lane; the full matrix and release gates are separately triggered
 
 ## Status
 
@@ -6,11 +6,14 @@ Accepted.
 
 ## Context
 
-A push with no PR open still needs fast feedback, and every push
-shouldn't pay for platform lanes (macOS, live KVM), OCI ratification, or
-a dependency audit that only need to run before a release or on
-deliberate request. Heavy, expensive lanes running on every push slow
-down day-to-day iteration for no proportional benefit.
+Hosted CI should produce merge signal, not run speculatively on every
+development-branch push. Contributors can run `just ci` locally or
+dispatch a workflow manually before opening a pull request. Once a pull
+request exists, each update still needs fast feedback, but it should not
+pay for platform lanes (macOS, live KVM), OCI ratification, or a
+dependency audit that only need to run before a release or on deliberate
+request. Heavy, expensive lanes running during every iteration slow down
+day-to-day development for no proportional benefit.
 
 ## Decision
 
@@ -18,8 +21,8 @@ down day-to-day iteration for no proportional benefit.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | `push` (any branch, excluding merge-queue transient refs) + `merge_group` + `workflow_dispatch` | day-to-day signal on every push; a required merge-queue check |
-| `architecture.yml` | `push: main` + `pull_request` + `merge_group` + `workflow_dispatch` | structural/architectural invariants; a required merge-queue check |
+| `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | day-to-day pull-request signal; a required merge-queue check |
+| `architecture.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | structural/architectural invariants; a required merge-queue check |
 | `ci-full.yml` | `workflow_dispatch` only | the full platform + live-VM + OCI-ratification matrix; operator-triggered, never automatic |
 | `security.yml` | `push: tags: v*` + nightly cron + `workflow_dispatch` | dependency audit / advisory scan; release-time backstop plus nightly catch for new advisories |
 | `windows.yml` | `push: tags: v*` + `workflow_dispatch` | non-blocking informational Windows build check; never a required check |
@@ -28,11 +31,19 @@ down day-to-day iteration for no proportional benefit.
 ### `ci.yml` is capped at four jobs
 
 `lint` (fmt, clippy, and the full battery of `xtask` architectural
-checks — see ADR-010), `test` (the workspace nextest run),
-`mcp-server-smoke`, and `nix-flake-check`. Nothing
-platform-specific (macOS, live KVM, Windows) or slow (OCI ratification,
-dependency audit, the full builder-VM image build) runs on every push —
-those live in `ci-full.yml`, run only by explicit `workflow_dispatch`.
+checks — see ADR-010), `test` (the workspace nextest run, doctests,
+hermetic BDD, no-std target checks, and real-kernel ext4 checks),
+`mcp-server-smoke`, and `nix-flake-check`. The SDK publication dry-run
+is part of the manual full matrix rather than the development lane.
+Nothing platform-specific (macOS, live KVM, Windows) or slow (OCI
+ratification, dependency audit, the full builder-VM image build) runs on
+every pull request — those live in `ci-full.yml`, run only by explicit
+`workflow_dispatch`.
+
+Checks that need the same Linux and Rust environment are steps in one of
+these four jobs, not standalone jobs. This shares checkout, toolchain,
+dependency installation, and cache overhead while retaining the same
+behavioral coverage.
 
 ### The merge queue's required checks
 
@@ -55,23 +66,29 @@ slow to run on every commit.
 
 ### `just ci`
 
-`just ci` (`lint`, `test`, `test-doc`, `bdd`) reproduces what `ci.yml`'s
-push lane checks, so a contributor can sanity-check locally before
-pushing.
+`just ci` (`lint`, `test`, `test-doc`, `bdd`) reproduces the core Rust
+checks from `ci.yml`, so a contributor can sanity-check locally before
+pushing. The workflow additionally exercises Linux-only real-kernel
+filesystem behavior, no-std cross-target boundaries, MCP stdio, and Nix
+evaluation on the hosted Linux runner.
 
 ## Consequences
 
-An ordinary push gets fast, complete feedback from the checks that
+A pull-request update gets fast, complete feedback from the checks that
 matter for almost every change — four Linux-only jobs plus the
-architecture-invariant lane. An operator opts into the expensive
-platform, live-VM, and OCI-ratification matrix deliberately through
-`ci-full.yml`, rather than paying for it on every push.
+architecture-invariant lane. Development branches without a pull request
+consume no hosted runners unless an operator dispatches CI manually. The
+merge queue runs the same five required checks against the final merge
+group. Landing that already-checked commit on `main` does not run them a
+third time. An operator opts into the expensive platform, live-VM,
+SDK-publication dry-run, and OCI-ratification matrix deliberately through
+`ci-full.yml`, rather than paying for it on every update.
 
 A change that only breaks on macOS or under live KVM is not caught until
 someone runs `ci-full.yml`, or until a release-time gate runs — there is
-a real gap between "push is green" and "every platform has been
+a real gap between "the PR is green" and "every platform has been
 exercised."
 
 Release-time-only gates (`security.yml`, `windows.yml`, `release.yml`)
-stay timed to minimize per-push cost while still forming a hard backstop
+stay timed to minimize development cost while still forming a hard backstop
 before anything ships.
