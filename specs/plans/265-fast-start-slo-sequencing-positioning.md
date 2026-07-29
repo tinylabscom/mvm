@@ -175,6 +175,7 @@ guest-agent readiness handshake after resume.
       - [x] Surface 7 (epoch rollback): `s11_snapshot/epoch_rollback_refused.feature`
       - [x] Surface 8 (warm-attach plan re-verify): `s6_admission_audit/warm_attach_reverifies_plan.feature`
       - [x] Surface 9 (restore reapplies confinement): `s5_lifecycle/restore_reapplies_confinement.feature`
+      - [ ] Positive live boot path: `s5_lifecycle/warm_restore_boot.feature` is `@wip` — blocked on FC snapshot capability being reported as `Unsupported` and the live kernel/rootfs pair panicking at init on the KVM box.
 - [ ] Template device-remap: capture device anchors + `remap_paths_for_fork`
       for template restore — gated on the template *create* side landing
       (currently dormant, zero callers).
