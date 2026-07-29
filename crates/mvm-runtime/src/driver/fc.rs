@@ -348,6 +348,81 @@ fn resolve_standby_parent_pid(
     })
 }
 
+/// The runtime overlay a standby parent must boot with: the extra read-only
+/// drives plus the kernel-cmdline tokens pointing the guest at them.
+///
+/// On the overlay-only runtime the overlay is the single source of the guest
+/// binaries — a cached OCI rootfs is overlay-lean and carries no
+/// `mvm-guest-agent`. A parent booted from the rootfs alone therefore reaches
+/// `/init`, resolves no agent, and panics before anything can answer, so the
+/// capture never runs and the pool can never populate. The workload launch path
+/// attaches the overlay before start; this is that attachment for the parent,
+/// which does not go through that path.
+#[derive(Debug, PartialEq, Eq)]
+struct StandbyOverlayAttachment {
+    blocks: Vec<BlockDev>,
+    cmdline_tokens: String,
+}
+
+/// Build the attachment from resolved artifact paths, numbering slots from
+/// `first_slot`. Pure, so the slot-to-device-name pairing is unit-testable
+/// without a cache or a boot. The parent carries no rootfs-verity drive, so its
+/// overlay sits one letter earlier than the workload's four-drive layout — the
+/// device names are derived from the slots rather than copied from there.
+fn standby_overlay_attachment(
+    overlay_ext4: &Path,
+    overlay_verity: &Path,
+    roothash: &str,
+    first_slot: u8,
+) -> StandbyOverlayAttachment {
+    let ro = |source: &Path, slot: u8| BlockDev {
+        source: source.to_path_buf(),
+        read_only: true,
+        ephemeral: false,
+        slot,
+    };
+    let dev = |slot: u8| format!("/dev/vd{}", (b'a' + slot) as char);
+    StandbyOverlayAttachment {
+        blocks: vec![
+            ro(overlay_ext4, first_slot),
+            ro(overlay_verity, first_slot + 1),
+        ],
+        cmdline_tokens: format!(
+            " mvm.runtime_roothash={roothash} mvm.runtime_data={} mvm.runtime_hash={} \
+             mvm.runtime_source_policy=required_overlay",
+            dev(first_slot),
+            dev(first_slot + 1)
+        ),
+    }
+}
+
+/// Resolve the runtime overlay this binary expects out of the local cache.
+/// Fails closed: a parent that cannot attach the overlay boots into the panic
+/// described on [`StandbyOverlayAttachment`], so refusing here surfaces the real
+/// cause instead of a dead guest and a timeout.
+fn resolve_standby_overlay(
+    vm_id: &str,
+) -> std::result::Result<StandbyOverlayAttachment, StandbyError> {
+    let resolver = mvm_fs::overlay::RuntimeOverlayResolver::new(
+        std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    let artifact = resolver
+        .resolve(&mvm_core::arch::GuestArch::host().to_string())
+        .map_err(|e| {
+            StandbyError::SpawnFailed(format!(
+                "standby parent '{vm_id}' needs the runtime overlay to boot a guest agent, but \
+                 it could not be resolved from the cache: {e}"
+            ))
+        })?;
+    Ok(standby_overlay_attachment(
+        &artifact.overlay_ext4,
+        &artifact.sidecar,
+        &artifact.roothash,
+        1,
+    ))
+}
+
 /// Persist the per-VM runtime metadata that `FcVmFullControl::rootfs_path()`
 /// (and, through it, `device_anchors()`) resolves via `mode.json`.
 /// `spawn_standby_parent` boots through this driver directly rather than
@@ -467,22 +542,32 @@ impl VmmDriver for FcDriver {
         // `record_standby_parent_rootfs`.
         record_standby_parent_rootfs(&spec.id, Path::new(image))?;
 
+        // The rootfs alone cannot boot a guest agent on the overlay-only
+        // runtime; see `StandbyOverlayAttachment`.
+        let overlay = resolve_standby_overlay(&spec.id)?;
+        let mut blocks = vec![BlockDev {
+            source: PathBuf::from(image),
+            // The parent's rootfs is the shared base image: never writable,
+            // so one parent cannot alter what every child clones.
+            read_only: true,
+            ephemeral: false,
+            slot: 0,
+        }];
+        blocks.extend(overlay.blocks);
+
         let parent = VmmSpec {
             name: spec.id.clone(),
             kernel: KernelImage::Path(PathBuf::from(&spec.kernel_path)),
             initramfs: None,
-            cmdline: self.workload_base_bootargs(false, true),
+            cmdline: format!(
+                "{}{}",
+                self.workload_base_bootargs(false, true),
+                overlay.cmdline_tokens
+            ),
             vcpus: u32::from(spec.vcpus),
             memory_mib: spec.mem_mib,
             mem_initial_mib: None,
-            blocks: vec![BlockDev {
-                source: PathBuf::from(image),
-                // The parent's rootfs is the shared base image: never writable,
-                // so one parent cannot alter what every child clones.
-                read_only: true,
-                ephemeral: false,
-                slot: 0,
-            }],
+            blocks,
             vsock: Vec::new(),
             console: ConsoleCapture {
                 log_path: PathBuf::from(&spec.vm_state_dir).join("console.log"),
@@ -1502,6 +1587,71 @@ mod tests {
 
         let control = crate::firecracker::FcVmFullControl::new("standby-parent-1");
         assert_eq!(control.rootfs_path().unwrap(), image);
+    }
+
+    /// The parent must carry the runtime overlay, or `/init` finds no guest
+    /// agent on an overlay-lean rootfs and the guest panics before it can
+    /// answer — which is what kept the pool from ever populating on real
+    /// hardware. Pins both halves: the drives and the cmdline that points at
+    /// them.
+    #[test]
+    fn standby_overlay_attachment_pairs_each_slot_with_its_device_name() {
+        let a = standby_overlay_attachment(
+            Path::new("/cache/overlay.ext4"),
+            Path::new("/cache/overlay.verity"),
+            "abc123",
+            1,
+        );
+
+        assert_eq!(a.blocks.len(), 2, "overlay contributes data + hash drives");
+        assert_eq!(a.blocks[0].slot, 1);
+        assert_eq!(a.blocks[1].slot, 2);
+        assert!(
+            a.blocks.iter().all(|b| b.read_only && !b.ephemeral),
+            "the overlay is sealed and file-served, never writable or RAM-backed"
+        );
+
+        // Slot 1 is /dev/vdb because the parent has no rootfs-verity drive; the
+        // workload's four-drive layout puts the same data at /dev/vdc, and
+        // copying that constant here would point the guest at the wrong device.
+        assert!(
+            a.cmdline_tokens.contains("mvm.runtime_data=/dev/vdb"),
+            "{a:?}"
+        );
+        assert!(
+            a.cmdline_tokens.contains("mvm.runtime_hash=/dev/vdc"),
+            "{a:?}"
+        );
+        assert!(
+            a.cmdline_tokens.contains("mvm.runtime_roothash=abc123"),
+            "{a:?}"
+        );
+        assert!(
+            a.cmdline_tokens
+                .contains("mvm.runtime_source_policy=required_overlay"),
+            "{a:?}"
+        );
+    }
+
+    /// The device names track the slots rather than being hardcoded, so a
+    /// layout that gains a drive ahead of the overlay stays correct.
+    #[test]
+    fn standby_overlay_attachment_device_names_follow_the_slots() {
+        let a = standby_overlay_attachment(
+            Path::new("/cache/overlay.ext4"),
+            Path::new("/cache/overlay.verity"),
+            "deadbeef",
+            2,
+        );
+        assert_eq!(a.blocks[0].slot, 2);
+        assert!(
+            a.cmdline_tokens.contains("mvm.runtime_data=/dev/vdc"),
+            "{a:?}"
+        );
+        assert!(
+            a.cmdline_tokens.contains("mvm.runtime_hash=/dev/vdd"),
+            "{a:?}"
+        );
     }
 
     /// A pid that can't be read after a successful boot is a real failure, not
