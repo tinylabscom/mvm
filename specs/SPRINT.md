@@ -516,11 +516,14 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    atomically. `cargo fmt --all`, `cargo clippy --workspace --all-targets --
    -D warnings`, the spec-ref lint, targeted nextest for the modified crates
    (mvm-fs, mvm-build, mvm-runtime, mvm-agentd, mvm-cli initramfs tests),
-   and the pre-commit hook all pass. Full workspace nextest on macOS shows
-   four pre-existing mvm-build failures unrelated to Plan 270; the end-to-end
-   Nix build of the initramfs flake succeeded on the Linux builder VM after
-   removing the sandbox-incompatible `mknod` calls (device nodes are provided
-   by devtmpfs at guest boot).  The `universal_initramfs_attach_tests` cold-cache
+   and the pre-commit hook all pass. Full workspace nextest on the Linux
+   builder VM now passes (8136 passed, 12 skipped) after also fixing the
+   runtime-overlay flake's `__pycache__` cleanup in the Nix sandbox. Full
+   workspace nextest on macOS still shows four pre-existing mvm-build
+   failures unrelated to Plan 270. The end-to-end Nix build of the initramfs
+   flake succeeded on the Linux builder VM after removing the
+   sandbox-incompatible `mknod` calls (device nodes are provided by devtmpfs
+   at guest boot).  The `universal_initramfs_attach_tests` cold-cache
    assertion was relaxed so the test stays green on Linux, where the Nix build
    fallback can warm the cache automatically.  Added a BDD scenario for the
    cold-cache non-fatal fallback under `features/suites/s14_universal_initramfs`,
