@@ -2658,20 +2658,25 @@ mod tests {
         channels: &[crate::driver::VsockPort],
         vm: &str,
     ) -> Vec<(u32, crate::driver::VsockDirection, String)> {
-        let roots = [
-            ("socket-dir", mvm_core::config::vm_socket_dir(vm)),
-            ("state-dir", vm_state_dir(vm)),
-        ];
+        // Both roots collapse to one label on purpose. A VM's socket root is its
+        // state dir until the path grows long enough to overflow the Unix-socket
+        // limit, at which point it becomes a short hashed namespace instead —
+        // which of the two a given VM landed on is that fallback's business, not
+        // a difference in the channel set. Labelling them apart would report two
+        // VMs as carrying different channels whenever only one crossed the limit.
+        // Longest root first so an equal-or-nested root cannot mask a deeper one.
+        let mut roots = [mvm_core::config::vm_socket_dir(vm), vm_state_dir(vm)];
+        roots.sort_by_key(|r| std::cmp::Reverse(r.as_os_str().len()));
         channels
             .iter()
             .map(|p| {
                 let where_ = roots
                     .iter()
-                    .find_map(|(label, root)| {
+                    .find_map(|root| {
                         p.host_uds
                             .strip_prefix(root)
                             .ok()
-                            .map(|rest| format!("<{label}>/{}", rest.display()))
+                            .map(|rest| format!("<vm>/{}", rest.display()))
                     })
                     .unwrap_or_else(|| p.host_uds.display().to_string());
                 (p.guest_port, p.direction, where_)
