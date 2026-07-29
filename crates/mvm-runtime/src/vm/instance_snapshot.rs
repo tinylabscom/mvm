@@ -1857,6 +1857,16 @@ mod tests {
             .expect("start source VM");
         std::thread::sleep(std::time::Duration::from_secs(1));
 
+        // `FcVmFullControl` needs a `mode.json` sidecar with the rootfs path.
+        // In production this is written by `mvmctl machine run`; write the
+        // minimal shape here so the capture path can resolve the rootfs.
+        let mode_json = format!(
+            r#"{{"mode":"detached","accessible":true,"rootfs_path":"{}"}}"#,
+            images.rootfs.display()
+        );
+        std::fs::write(parent_dir.join("mode.json"), mode_json)
+            .expect("write mode.json for source VM");
+
         // Capture the parent into a vm_full checkpoint (the pool's asset).
         let control = FcVmFullControl::new(&parent_id);
         let store = CheckpointStore::open();
