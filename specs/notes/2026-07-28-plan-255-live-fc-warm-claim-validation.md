@@ -265,6 +265,75 @@ before a live claim can ever be observed.
 
 ---
 
+## BLOCKER-3 — a restored child has no host-signer anchor, so it cannot be authorized at all
+
+Found by review of the BUG-1 fix, not by the live run. It is not a variant of
+BUG-2: BUG-2 is a missing sidecar on one code path, this is a structural
+consequence of a shared parent, and it survives BUG-2's fix.
+
+A forked child is not merely *ungranted*; it is **unauthorizable**. Three links,
+each a code reading:
+
+1. **The parent boots with no `mvm.host_signer_pub=` token.** `grant_tokens`
+   (`crates/mvm-runtime/src/hvf_bootargs.rs:43-52`) is keyed on `config.name`
+   and reads the named VM's `verb-grant.json`. A factory parent has no plan and
+   therefore no sidecar, so it emits none — correctly, since a parent must hold
+   no workload authority. But the child inherits the parent's cmdline out of
+   restored memory rather than deriving its own, so the child boots with **no
+   pinned host-signer trust anchor**.
+2. **Nothing re-pins one after the restore.** The production
+   `VsockPostRestoreSignal` hardcodes `grant_envelope: None`
+   (`crates/mvm-runtime/src/vm/instance_snapshot.rs:529`), and every host-side
+   construction leaves `predecessor_session_id` / `predecessor_plan_nonce_hex`
+   at `None`. Those `VerbGrantEnvelope` fields are wired guest-side only.
+3. **The guest-side re-pin cannot succeed without an anchor.**
+   `re_pin_verb_grant` deliberately verifies a replacement grant against the
+   **boot-pinned** anchor rather than against `envelope.pubkey_hex` — otherwise
+   any envelope could nominate its own key. With no anchor pinned there is
+   nothing to verify against.
+
+Consequence: the child rejects the PostRestore RPC, `require_fresh_child_identity`
+refuses it, `claim_standby` returns `ClaimFailed`, and the launch cold-boots.
+Fail-closed — there is no security hole here — but the warm claim is
+**structurally unreachable** even after BUG-1 and BUG-2 are fixed.
+
+Suggested shape, recorded but **not implemented** (it is its own slice, and
+guessing at it inside a boot-shape fix is how BUG-1 happened): the host-signer
+public key is *host identity*, not *workload authority*. Pinning
+`mvm.host_signer_pub=` on the factory parent while still withholding
+`mvm.verb_grant=` and `mvm.require_grant=` would give every child a trust anchor
+without giving the parent any authority — the parent still holds no plan, no
+grant, and no verbs. With an anchor present, the natural completion is to carry
+a replacement grant over the PostRestore signal using the already-defined
+`predecessor_session_id` / `predecessor_plan_nonce_hex` fields, so the child
+re-pins to its own admitted plan at claim time. Note that pinning the anchor on
+the parent is itself a cmdline change and so must go through the same
+`factory_parent_config` / `workload_device_spec` path, with the shape-equality
+guards updated to match.
+
+---
+
+## What must happen before `standby_pool` can flip to `true`
+
+In order; each is a hard gate.
+
+1. **BUG-1 — fixed in code, needs a live run.** The parent's boot inputs now
+   come from the launch's own `VmStartConfig` through the same mappers a
+   workload boot uses. Confirm on the KVM host that the parent reaches
+   agent-ready and `capture_vm_full` writes a checkpoint.
+2. **BUG-2 — open.** Without a verb-grant sidecar on the transient `machine run`
+   path there is no guest RPC at all, so the run that hosts the claim cannot
+   complete. Pre-existing; fix outside this slice.
+3. **BLOCKER-3 — open.** Without a boot-pinned host-signer anchor on the child,
+   the post-restore identity handshake refuses and every claim falls back to a
+   cold boot. Structural; fix outside this slice, along the shape above.
+4. Only then: re-run the Task 7 priorities (capture → restore, the reseed
+   handshake, a fresh child name with no kernel boot in its console, warm vs
+   cold timings, and the two fail-closed cases that need a real captured
+   checkpoint), and flip the capability only if that run is green.
+
+---
+
 ## What WAS verified live
 
 ### Warm pool is genuinely reachable from the CLI
@@ -376,17 +445,30 @@ neither of the two defects above is a latency problem.
 
 ## What must happen before this validation can be re-run
 
-1. ~~Fix BUG-1~~ — **done**, but by removing the second boot recipe rather than
-   by threading overlay fields into it. `spawn_standby_captured` now reduces the
-   launch's own `VmStartConfig` (already through
-   `attach_runtime_overlay_if_cached`) to a factory parent's and feeds it to the
-   same `workload_device_spec` + `runner_cmdline` mappers the workload boot uses;
-   the driver boots the assembled spec. Still needs a live run to confirm the
-   parent reaches agent-ready.
-2. Fix BUG-2, or the transient `machine run` that hosts the claim cannot
-   complete a guest RPC at all.
-3. Then re-run: priorities 1–3, the two remaining fail-closed cases, and the
-   warm-claim timing.
+See "What must happen before `standby_pool` can flip to `true`" above for the
+full gate list. In short: BUG-1 is fixed in code and needs a live run to
+confirm; BUG-2 and BLOCKER-3 are both open and each independently prevents a
+claim from ever completing.
+
+Two further defects were found by review of the BUG-1 fix and are **fixed** in
+the same change as BUG-1, so neither needs a separate live gate — but both are
+worth knowing about when reading the pool code:
+
+- **The compat key never matched.** The spawn recorded
+  `image_sha256: Some(sha256(rootfs))` while the claim computed `None`
+  unconditionally, and `StandbyHandle::is_compatible` is exact equality — so
+  every claim silently cold-booted while the pool filled and never drained. It
+  was masked here because the hand-seeded fixture in "Fail-closed" below carried
+  `image_sha256: null`, which is why *that* one was selected. Both halves now
+  build the key through one function (`compat_for_launch`), keyed on the same
+  digest claim-8 admission puts on `plan.image.sha256` and that
+  `bind_plan_to_parent` checks the captured parent against.
+- **`mvm.vsock_egress=1` was a second cmdline divergence.** A factory parent is
+  deny-all by construction, so a launch with `--network-allow` would boot the
+  workload with the token and the parent without it — and a child inheriting the
+  parent's cmdline would come up with no network, silently. Such launches are
+  now excluded from the warm pool at both ends (claim and replenish) rather than
+  served with the wrong shape.
 
 ## Reproduction
 

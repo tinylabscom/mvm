@@ -723,11 +723,14 @@ pub struct StandbySpec {
 /// The base-compat key — everything a standby fixes at spawn and must therefore match the
 /// workload exactly, else the launch cold-boots.
 ///
-/// `image_sha256` is `None` for libkrun (any image attaches; libkrun standbys carry no
-/// rootfs) and `Some(sha)` for HVF saved-standbys (which are image-specific; an HVF standby
-/// is a frozen {rootfs, memory, machine-id} triple captured from one particular image).
-/// Two standbys are compatible only when both image fields are identical — `None == None`
-/// (libkrun) and `Some(a) == Some(b)` iff `a == b`.
+/// `image_sha256` is `Some(sha)` for a standby captured from a rootfs — a saved-state
+/// standby is a frozen {rootfs, memory, machine-id} triple taken from one particular
+/// image, and every child is cloned from that captured content, so the image is part of
+/// the standby's identity rather than something attached to it later. It is `None` only
+/// for a standby carrying no rootfs at all (a bare pre-spawned supervisor any image could
+/// attach to). Compatibility is exact in both directions — `None == None` and
+/// `Some(a) == Some(b)` iff `a == b` — so a claim that computes this field differently
+/// from the spawn that recorded it matches nothing, silently and forever.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandbyCompat {
     /// Registered template identity. Compatibility is exact, including the
@@ -736,7 +739,8 @@ pub struct StandbyCompat {
     pub kernel_sha256: String,
     pub vcpus: u8,
     pub mem_mib: u32,
-    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for HVF (image-bound).
+    /// `Some(sha256-hex)` for a standby captured from a rootfs; `None` only for
+    /// one that carries no rootfs.
     pub image_sha256: Option<String>,
 }
 

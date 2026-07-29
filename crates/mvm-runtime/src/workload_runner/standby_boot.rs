@@ -258,6 +258,60 @@ mod tests {
         assert!(!parent.trusted_builder);
     }
 
+    /// The one boot-shape difference a factory parent cannot close, pinned so
+    /// the launch-path gate that exists for it is not dropped as redundant.
+    ///
+    /// `mvm.vsock_egress=1` starts the guest's in-guest egress client, and it is
+    /// emitted iff the launch's policy allows egress. A parent is deny-all by
+    /// construction: it has no gated endpoint to route through, and it is shared
+    /// across claims, so carrying one launch's policy would hand that launch's
+    /// shape to the next claim — the policy is not part of the compat key. Since
+    /// a child inherits its parent's cmdline out of restored memory rather than
+    /// deriving its own, an egress-allowing launch served warm would come up
+    /// with no network at all, silently. `warm_eligible_launch` on the CLI side
+    /// therefore refuses that shape outright and it cold-boots.
+    ///
+    /// The divergence is exactly one token, and this asserts that exactly: a
+    /// second one appearing here means something else has started depending on
+    /// the parent's stripped-down config.
+    #[test]
+    fn an_egress_allowing_launch_diverges_by_one_token_which_is_why_the_pool_refuses_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut launch = sealed_launch(tmp.path());
+        launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("api.example.com", 443),
+        ]);
+        let spec = standby_spec_for(&launch, tmp.path());
+
+        let workload = workload_boot(&launch, &tmp.path().join("workload-a"));
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+
+        assert!(
+            !parent_cfg.network_policy.allows_egress(),
+            "a parent has no gated endpoint and is shared, so it stays deny-all"
+        );
+        assert!(
+            workload.cmdline.contains("mvm.vsock_egress=1"),
+            "fixture must exercise the egress token: {}",
+            workload.cmdline
+        );
+        assert!(
+            !parent.cmdline.contains("mvm.vsock_egress"),
+            "a deny-all parent must not carry the egress token: {}",
+            parent.cmdline
+        );
+        assert_eq!(
+            workload.cmdline,
+            format!("{} mvm.vsock_egress=1", parent.cmdline),
+            "the egress token must be the only difference between the two cmdlines"
+        );
+        assert_eq!(
+            parent.blocks, workload.blocks,
+            "the disk stack must still match — the policy changes no device"
+        );
+    }
+
     /// The same guard, stated against the concrete symptoms the live run
     /// recorded, so a failure names what the guest will miss rather than only
     /// that two values differ.
