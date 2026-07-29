@@ -396,12 +396,76 @@ fn standby_overlay_attachment(
     }
 }
 
+/// The verified-boot half of a standby parent: the rootfs dm-verity sidecar,
+/// its roothash, and the initramfs that performs the verification.
+///
+/// The parent must boot the same shape a workload does. `mvm.runtime_*` is
+/// parsed by the initramfs PID 1, which is what mounts the runtime overlay at
+/// `/mvm/runtime`; booting the rootfs directly instead runs an init that only
+/// *reads* that path and never mounts it, so the agent is unresolvable and PID 1
+/// exits. Attaching the overlay without this is not enough.
+#[derive(Debug, PartialEq, Eq)]
+struct StandbyVerifiedBoot {
+    verity: PathBuf,
+    roothash: String,
+    initrd: PathBuf,
+}
+
+/// Resolve the rootfs verity sidecar (siblings of the image) and the cached
+/// verity initramfs. Fails closed naming the missing piece: every one of these
+/// is required for the parent to reach a guest agent, and a partial set boots
+/// into a panic rather than a useful error.
+fn resolve_standby_verified_boot(
+    vm_id: &str,
+    image: &Path,
+) -> std::result::Result<StandbyVerifiedBoot, StandbyError> {
+    let missing = |what: &str, path: &Path| {
+        StandbyError::SpawnFailed(format!(
+            "standby parent '{vm_id}' needs {what} to boot a verified guest, but {} is absent",
+            path.display()
+        ))
+    };
+
+    let dir = image.parent().ok_or_else(|| {
+        StandbyError::SpawnFailed(format!(
+            "standby parent '{vm_id}' rootfs {} has no parent directory",
+            image.display()
+        ))
+    })?;
+    let verity = dir.join("rootfs.verity");
+    if !verity.exists() {
+        return Err(missing("its rootfs verity sidecar", &verity));
+    }
+    let roothash_file = dir.join("rootfs.roothash");
+    let roothash = std::fs::read_to_string(&roothash_file)
+        .map_err(|_| missing("its rootfs roothash", &roothash_file))?
+        .trim()
+        .to_string();
+
+    let initrd = mvm_build::verity_initrd::VerityInitrdLayout::under(
+        Path::new(&mvm_core::config::mvm_cache_dir()),
+        env!("CARGO_PKG_VERSION"),
+        mvm_core::arch::GuestArch::host(),
+    )
+    .initrd;
+    if !initrd.exists() {
+        return Err(missing("the verity initramfs", &initrd));
+    }
+
+    Ok(StandbyVerifiedBoot {
+        verity,
+        roothash,
+        initrd,
+    })
+}
+
 /// Resolve the runtime overlay this binary expects out of the local cache.
 /// Fails closed: a parent that cannot attach the overlay boots into the panic
 /// described on [`StandbyOverlayAttachment`], so refusing here surfaces the real
 /// cause instead of a dead guest and a timeout.
 fn resolve_standby_overlay(
     vm_id: &str,
+    first_slot: u8,
 ) -> std::result::Result<StandbyOverlayAttachment, StandbyError> {
     let resolver = mvm_fs::overlay::RuntimeOverlayResolver::new(
         std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()),
@@ -419,7 +483,7 @@ fn resolve_standby_overlay(
         &artifact.overlay_ext4,
         &artifact.sidecar,
         &artifact.roothash,
-        1,
+        first_slot,
     ))
 }
 
@@ -542,26 +606,36 @@ impl VmmDriver for FcDriver {
         // `record_standby_parent_rootfs`.
         record_standby_parent_rootfs(&spec.id, Path::new(image))?;
 
-        // The rootfs alone cannot boot a guest agent on the overlay-only
-        // runtime; see `StandbyOverlayAttachment`.
-        let overlay = resolve_standby_overlay(&spec.id)?;
-        let mut blocks = vec![BlockDev {
-            source: PathBuf::from(image),
-            // The parent's rootfs is the shared base image: never writable,
-            // so one parent cannot alter what every child clones.
+        // The parent boots the same verified shape a workload does: the
+        // initramfs verifies the rootfs and mounts the runtime overlay that
+        // carries the guest agent. A direct rootfs boot reaches an init that
+        // cannot mount either, so it never gets an agent.
+        let verified = resolve_standby_verified_boot(&spec.id, Path::new(image))?;
+        // Slots 0..=1 are the rootfs and its hash device, so the overlay starts
+        // at 2 — matching the workload's four-drive layout.
+        let overlay = resolve_standby_overlay(&spec.id, 2)?;
+
+        let ro = |source: PathBuf, slot: u8| BlockDev {
+            source,
+            // Everything the parent boots is shared, sealed base state: never
+            // writable, so one parent cannot alter what every child clones.
             read_only: true,
             ephemeral: false,
-            slot: 0,
-        }];
+            slot,
+        };
+        let mut blocks = vec![ro(PathBuf::from(image), 0), ro(verified.verity.clone(), 1)];
         blocks.extend(overlay.blocks);
 
         let parent = VmmSpec {
             name: spec.id.clone(),
             kernel: KernelImage::Path(PathBuf::from(&spec.kernel_path)),
-            initramfs: None,
+            initramfs: Some(verified.initrd.clone()),
+            // No `root=`/`init=`: the initramfs PID 1 owns root selection, which
+            // is why the base is taken with `has_disk = false`.
             cmdline: format!(
-                "{}{}",
-                self.workload_base_bootargs(false, true),
+                "{} mvm.roothash={} mvm.data=/dev/vda mvm.hash=/dev/vdb{}",
+                self.workload_base_bootargs(false, false),
+                verified.roothash,
                 overlay.cmdline_tokens
             ),
             vcpus: u32::from(spec.vcpus),
