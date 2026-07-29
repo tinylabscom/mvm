@@ -105,11 +105,16 @@ Release alone also misses the SLO; pooled Firecracker still needs to close
       Plan 255 warm-pool work.
       *(Implemented `FcDriver::spawn_standby_parent` / `fork_standby_child`,
       flipped `standby_pool` capability, fixed CLI dispatch to use
-      `claim_standby_via_runner`, and added unit tests. Live end-to-end still
-      needs a KVM box run.)*
+      `claim_standby_via_runner`, added unit tests, and fixed the fork-restore
+      mount-namespace remap so the child's vsock UDS resolves. Live end-to-end
+      verified on the KVM box; numbers recorded below.)*
 - [x] Release-build measurement on the KVM box; record warm p50/p99 here.
-      *(release, native client, N=10: p50=45 ms, p99=49 ms; SLO gap = 15 ms
-      for pooled FC to close.)*
+      *(Pooled FC live end-to-end, release, N=10 on the KVM box: p50=37 ms,
+      p99=56 ms. First-run cold-cache outlier excluded: p50=37 ms, p99=41 ms.
+      SLO gap = ~7–9 ms still to close to reach ≤30 ms p50. The bottleneck is
+      the Firecracker process start + snapshot-load + agent-connect sequence;
+      page-cache priming, tmpfs checkpoint staging, and shaving the vsock
+      connect handshake are the next levers.)*
 
 ### WS3 — Density
 
