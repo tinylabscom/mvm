@@ -44,6 +44,15 @@
       tracked in
       `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
 
+- [ ] **Backend shim removal — invert the driver/backend relationship.** The
+      `VmmDriver` seam still wraps the older direct `VmBackend` impls rather
+      than owning the VMM mechanics, so `FirecrackerBackend` / `LibkrunBackend`
+      / `HvfBackend` remain live in the production path. Plan drafted at
+      `specs/plans/269-backend-shim-removal.md`; it carries a "Status and known
+      gaps" section covering the blanket-impl seam that does not exist yet, the
+      unaccounted-for `WasmBackend`, and the QEMU contradiction in §2.5 below
+      that Task 5 depends on. Not started.
+
 ---
 
 ## 1. Why
