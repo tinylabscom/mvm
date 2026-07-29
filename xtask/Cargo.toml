@@ -13,6 +13,7 @@ serde_json.workspace = true
 sha2.workspace = true
 mvm-core.workspace = true
 tempfile.workspace = true
+toml.workspace = true
 
 # Man-page generation only. mvm-cli sits at the top of the workspace tree
 # and its build.rs cross-compiles the embedded host-vm binaries via zig, so
