@@ -512,9 +512,12 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    validates `initramfs.cpio.gz`, `initramfs.hash`, `initramfs.size`, and
    `VERSION`; the builder supports worktree-isolated caches by seeding from
    the default cache, produces the artifact on Linux via `nix build`, and
-   installs atomically. `cargo fmt --all` passes and the
-   modified crates compile; full workspace clippy/nextest remains blocked on
-   the Nix builder VM availability per Plan 270.
+   installs atomically. `cargo fmt --all`, `cargo clippy --workspace
+   --all-targets -- -D warnings`, targeted nextest for the modified crates
+   (mvm-fs, mvm-build, mvm-runtime, mvm-agentd, mvm-cli initramfs tests),
+   and the pre-commit hook all pass. Full workspace nextest on macOS shows
+   four pre-existing mvm-build failures unrelated to Plan 270; the end-to-end
+   Nix build of the initramfs flake still needs the Linux builder VM.
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
