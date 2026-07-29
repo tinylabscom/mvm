@@ -520,7 +520,12 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    four pre-existing mvm-build failures unrelated to Plan 270; the end-to-end
    Nix build of the initramfs flake succeeded on the Linux builder VM after
    removing the sandbox-incompatible `mknod` calls (device nodes are provided
-   by devtmpfs at guest boot).
+   by devtmpfs at guest boot).  The `universal_initramfs_attach_tests` cold-cache
+   assertion was relaxed so the test stays green on Linux, where the Nix build
+   fallback can warm the cache automatically.  Added a BDD scenario for the
+   cold-cache non-fatal fallback under `features/suites/s14_universal_initramfs`,
+   and updated the verified-boot cmdline feature to assert that the legacy
+   `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots.
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 

@@ -870,12 +870,9 @@ mod universal_initramfs_attach_tests {
         env.set("MVM_HOME", dir.path());
 
         let mut sc = VmStartConfig::default();
+        // Must never return an error: a cold cache falls back to legacy boot
+        // (or is warmed automatically on hosts that can build/fetch it).
         attach_universal_initramfs_if_cached(&mut sc).unwrap();
-
-        assert!(
-            sc.initrd_path.is_none(),
-            "a cold initramfs cache must not prevent the legacy boot path"
-        );
     }
 
     #[test]
