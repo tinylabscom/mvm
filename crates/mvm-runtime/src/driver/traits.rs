@@ -147,6 +147,7 @@ pub trait VmmDriver: Send + Sync {
         crate::vm::instance_snapshot::signal_post_restore(
             child_vm_name,
             &crate::vm::instance_snapshot::VsockPostRestoreSignal { token },
+            crate::vm::instance_snapshot::POST_RESTORE_READY_TIMEOUT,
         )
     }
 
