@@ -64,16 +64,25 @@ cycle.
 
 ### WS1 — Finish the FC warm-restore story (no prerequisites)
 
-- [ ] Reseed retry/poll: a bounded guest-readiness poll before the single
+- [x] Reseed retry/poll: a bounded guest-readiness poll before the single
       `signal_post_restore`, so a slow-to-reattach guest does not spuriously
       report `Undelivered`. Unit-test via the signal-source trait.
-- [ ] Register the new restore-path witnesses in `specs/claims/catalog.md` (so
-      `check-claim-catalog` binds them) and extend
+      **Status:** landed — `PostRestoreSignal::probe_ready` +
+      `signal_post_restore` polling, with unit coverage in
+      `crates/mvm-runtime/src/vm/instance_snapshot.rs`.
+- [x] Register the new restore-path witnesses in `specs/adrs/001-microvm-security-posture.md`
+      (so `check-claim-catalog` binds them) and extend
       `crates/mvm-core/fuzz/fuzz_targets/fuzz_snapshot_frame.rs` to the
       restore-load manifest/metadata path.
-- [ ] Tear down the paused VMM on the pre-guard error branches
+      **Status:** landed — claim 3/10 rows extended with warm-restore witnesses;
+      fuzz target now exercises `IntegritySidecar` and `CheckpointMeta` JSON
+      deserialization and compiles under the pinned nightly.
+- [x] Tear down the paused VMM on the pre-guard error branches
       (`load_snapshot_paused` / `restored_device_model` errors), not only on
       guard refusal.
+      **Status:** landed — `guarded_load_resume`, `guarded_fork_load_resume`,
+      and `guard_and_resume` all call `teardown_paused` before returning an
+      error from the load or device-model-read steps.
 
 ### WS2 — The ≤30 ms p50 SLO (native API + pooled FC — land together)
 
