@@ -1211,3 +1211,15 @@ fn ci_builds_the_guest_rootfs_package_budget() {
         "CI must realize the rootfs package-count budget, not only eval it"
     );
 }
+
+#[test]
+fn ci_counts_the_kernel_in_the_guest_footprint() {
+    let path = repo_dir().join(".github/workflows/ci.yml");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("--kernel \"$image_path/vmlinux\""),
+        "the 50 MiB CI ledger must include the workload kernel"
+    );
+}

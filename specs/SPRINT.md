@@ -71,12 +71,13 @@
       UID/GID, group, no-new-privileges, and optional loopback capability paths.
 - [x] Lightweight guest WS-5/WS-6 slice: the Nix-built rootfs keeps only the
       kernel module dependency index, the runtime overlay allocation is capped
-      at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars against
-      the 50 MiB mvm-owned guest-storage contract. The default tenant now
+      at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars + kernel
+      against the 50 MiB complete-artifact contract. The default tenant now
       omits its redundant dynamic busybox input and copies the CA bundle without
       retaining the source `cacert` store path. A build-backed gate caps the lean
       registered runtime closure at two paths. The measured rootfs is 26,718,208
-      bytes and the complete measured footprint is 36,139,008 bytes (34.46 MiB).
+      bytes; storage with verity is 36,139,008 bytes (34.46 MiB), and the all-in
+      footprint with the 14,460,936-byte kernel is 50,599,944 bytes (48.26 MiB).
 - [x] Persistent builder completion reliability: the egress helper writes stderr
       to its VM-scoped log instead of retaining the caller's pipe, and dispatch
       completion follows the authoritative child exit after draining available

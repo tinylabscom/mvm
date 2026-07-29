@@ -12,8 +12,9 @@
 //!   required; gated by `MVM_LIVE_SMOKE=1` + a rootfs path so a
 //!   bare macOS host skips cleanly. Enforces the "cold-boot ≤ 500ms
 //!   Firecracker / ≤ 1s libkrun" line.
-//! - **`footprint`** — sum the Nix-built rootfs and runtime-overlay
-//!   artifacts and assert the mvm-owned guest storage stays below 50 MiB.
+//! - **`footprint`** — sum the Nix-built rootfs, runtime overlay, verity
+//!   sidecars, and optional kernel and assert the supplied guest artifacts stay
+//!   below 50 MiB.
 //!
 //! The thresholds are the per-backend boot budgets; they're pinned
 //! by tests in this module so a drift in the documented budget vs.
@@ -24,7 +25,7 @@
 //! ```text
 //! cargo xtask perf rootfs-size --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
-//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4
+//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --kernel result/vmlinux
 //! ```
 //!
 //! ## What this does NOT do (yet)
@@ -59,9 +60,9 @@ use anyhow::{Context, Result, bail};
 /// pulled in a transitive dep that bloats the image."
 pub const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 
-/// Maximum mvm-owned guest storage: rootfs plus the runtime overlay and their
-/// dm-verity sidecars. The workload's own application payload and shared
-/// kernel are measured separately and are not part of this contract.
+/// Maximum complete default guest artifact footprint: rootfs, runtime overlay,
+/// their dm-verity sidecars, and kernel. The workload's own application payload
+/// remains outside this contract.
 pub const GUEST_STORAGE_MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 
 /// Cold-boot wall-clock budget for the Firecracker backend.
@@ -92,10 +93,10 @@ pub fn run(args: &[String]) -> Result<()> {
                 "  rootfs-size --rootfs <PATH>    Assert rootfs is ≤ {ROOTFS_MAX_BYTES} bytes"
             );
             eprintln!(
-                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>]"
+                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>]"
             );
             eprintln!(
-                "                                 Assert mvm-owned guest storage is ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
+                "                                 Assert the supplied guest artifacts total ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
             );
             eprintln!("  boot --rootfs <PATH> [--runs N] [--backend firecracker|libkrun]");
             eprintln!(
@@ -342,7 +343,7 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         eprintln!(
-            "ok: mvm-owned guest storage is {} bytes (under {} bytes / 50 MiB)",
+            "ok: guest artifact footprint is {} bytes (under {} bytes / 50 MiB)",
             report.total_bytes, report.limit_bytes
         );
         for entry in &report.entries {
@@ -382,6 +383,12 @@ fn parse_footprint_artifacts(args: &[String]) -> Result<Vec<FootprintArtifact>> 
             path,
         });
     }
+    if let Some(path) = optional_path_arg(args, "--kernel")? {
+        artifacts.push(FootprintArtifact {
+            name: "kernel",
+            path,
+        });
+    }
     Ok(artifacts)
 }
 
@@ -412,7 +419,7 @@ fn guest_storage_footprint_check(
     let total_bytes = entries.iter().map(|entry| entry.bytes).sum::<u64>();
     if total_bytes > max_bytes {
         bail!(
-            "mvm-owned guest storage is {} bytes — over the footprint budget of {} bytes (50 MiB)",
+            "guest artifact footprint is {} bytes — over the footprint budget of {} bytes (50 MiB)",
             total_bytes,
             max_bytes
         );
@@ -646,6 +653,7 @@ mod tests {
         let overlay = write_sized_file(tmp.path(), "overlay.ext4", 5);
         let rootfs_verity = write_sized_file(tmp.path(), "rootfs.verity", 2);
         let overlay_verity = write_sized_file(tmp.path(), "overlay.verity", 3);
+        let kernel = write_sized_file(tmp.path(), "vmlinux", 6);
         let artifacts = vec![
             FootprintArtifact {
                 name: "rootfs",
@@ -663,11 +671,15 @@ mod tests {
                 name: "overlay-verity",
                 path: overlay_verity,
             },
+            FootprintArtifact {
+                name: "kernel",
+                path: kernel,
+            },
         ];
 
-        let report = guest_storage_footprint_check(&artifacts, 14).unwrap();
-        assert_eq!(report.total_bytes, 14);
-        assert_eq!(report.entries.len(), 4);
+        let report = guest_storage_footprint_check(&artifacts, 20).unwrap();
+        assert_eq!(report.total_bytes, 20);
+        assert_eq!(report.entries.len(), 5);
     }
 
     #[test]
@@ -698,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_footprint_accepts_verity_sidecars() {
+    fn parse_footprint_accepts_verity_sidecars_and_kernel() {
         let args = vec![
             "--rootfs".to_string(),
             "/tmp/rootfs.ext4".to_string(),
@@ -708,11 +720,14 @@ mod tests {
             "/tmp/rootfs.verity".to_string(),
             "--overlay-verity".to_string(),
             "/tmp/overlay.verity".to_string(),
+            "--kernel".to_string(),
+            "/tmp/vmlinux".to_string(),
         ];
         let artifacts = parse_footprint_artifacts(&args).unwrap();
-        assert_eq!(artifacts.len(), 4);
+        assert_eq!(artifacts.len(), 5);
         assert_eq!(artifacts[2].name, "rootfs-verity");
         assert_eq!(artifacts[3].name, "overlay-verity");
+        assert_eq!(artifacts[4].name, "kernel");
     }
 
     // ──────────────────────────────────────────────────────────────
