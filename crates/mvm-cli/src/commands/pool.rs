@@ -566,9 +566,9 @@ mod tests {
 
     #[test]
     fn try_warm_claim_refuses_unsupported_backend_instead_of_cold_booting() {
-        // qemu is the dev/test substrate and never wired for the standby pool
-        // (Firecracker now advertises it via its live spawn+claim path, so it
-        // can no longer stand in for "unsupported" here).
+        // qemu is the dev/test substrate and is never wired for the standby
+        // pool, so it stays "unsupported" regardless of which workload backend
+        // grows a live warm path next.
         let backend = AnyBackend::from_hypervisor("qemu");
         let err = try_warm_claim(&backend, &eligible_cfg(), false, None)
             .expect_err("configured warm pool must not silently cold-boot");
@@ -871,14 +871,14 @@ mod tests {
     }
 
     // The following three tests need a backend that actually reaches the
-    // spawn loop (`capabilities().standby_pool == true`) — Firecracker is the
-    // one real `AnyBackend` variant that reports this today, but its spawn
-    // loop boots a real supervisor process, which a hermetic unit test must
-    // not do. The in-memory `Mock` variant opts into the same capability
-    // (`with_standby()`) without touching the host, so it drives
-    // `warm_to_target` past its capability gate here. Gated behind
-    // `test-support` like the mock backend itself; the dedicated CI lane
-    // (`--features test-support`) covers them.
+    // spawn loop (`capabilities().standby_pool == true`) — every real
+    // `AnyBackend` variant selectable via the CLI reports `false` until a live
+    // run proves its spawn and claim both work, and a real spawn loop boots a
+    // VM, which a hermetic unit test must not do. The in-memory `Mock` variant
+    // opts into the capability (`with_standby()`) without touching the host,
+    // so it drives `warm_to_target` past its capability gate here. Gated
+    // behind `test-support` like the mock backend itself; the dedicated CI
+    // lane (`--features test-support`) covers them.
 
     #[cfg(feature = "test-support")]
     #[test]

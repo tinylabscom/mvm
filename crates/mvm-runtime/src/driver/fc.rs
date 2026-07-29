@@ -419,20 +419,23 @@ impl VmmDriver for FcDriver {
         // wired through this driver's boot + running-VM handle); live-memory
         // snapshots are dropped, since the runner path is cold-boot only.
         //
-        // `standby_pool` is on: `spawn_standby` boots a clean factory parent
-        // and `vm_full_control` captures its whole {rootfs, memory, vmstate}
-        // into the caller's checkpoint store, so `claim_standby` +
-        // `fork_standby_child` can restore a fresh child from saved memory
-        // instead of a cold boot. That capture/restore pair is a distinct
-        // seam from the coarse `snapshots`/`snapshot_capability` tier below —
-        // it captures one specific parent shape for the standby pool, not an
-        // arbitrary named VM's live memory on demand, so those two fields
-        // stay unchanged.
+        // `standby_pool` stays off. The spawn/capture/fork/handshake code is
+        // all here — `spawn_standby_parent` boots a clean factory parent and
+        // `vm_full_control` captures its whole {rootfs, memory, vmstate} — but
+        // the capability means "can actually spawn AND claim a warm parent on
+        // this host", and validation on real KVM hardware showed the spawn does
+        // not survive a live boot. Advertising it costs every launch a doomed
+        // parent boot and returns nothing, so it stays false until a live run
+        // is green end to end. That capture/restore pair is a distinct seam
+        // from the coarse `snapshots`/`snapshot_capability` tier below — it
+        // captures one specific parent shape for the standby pool, not an
+        // arbitrary named VM's live memory on demand, so those two fields stay
+        // unchanged either way.
         VmCapabilities {
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: true,
+            standby_pool: false,
             vsock: true,
             tap_networking: false,
             no_routable_guest_nic: true,
@@ -884,18 +887,20 @@ mod tests {
         );
     }
 
-    /// Firecracker owns a live spawn+claim path, so it advertises the pool. The
-    /// capability means "can actually spawn+claim a warm parent", so every other
-    /// driver stays off until it grows those live ops. (The in-memory
-    /// `MockBackend` opts into it explicitly via `with_standby()` for the
-    /// hermetic claim tests; the `MockDriver` seam here does not.)
+    /// No selectable driver advertises the standby (warm) pool. The capability
+    /// means "can actually spawn AND claim a warm parent on this host", so it
+    /// flips per-backend only once a live run proves that backend's spawn and
+    /// claim both work — a capability nobody can service costs every launch a
+    /// doomed parent boot. (The in-memory `MockBackend` opts into it explicitly
+    /// via `with_standby()` for the hermetic claim tests; the `MockDriver` seam
+    /// here does not.)
     #[test]
-    fn only_firecracker_advertises_the_standby_pool() {
+    fn no_selectable_driver_advertises_the_standby_pool() {
         use crate::driver::{HvfDriver, LibkrunDriver, MockDriver};
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
 
-        assert!(FcDriver::new().capabilities().standby_pool);
+        assert!(!FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
         assert!(!HvfDriver::new().capabilities().standby_pool);
         assert!(!MockDriver::default().capabilities().standby_pool);
