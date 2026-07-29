@@ -1868,16 +1868,14 @@ mod tests {
             "mem.bin must exist after snapshot"
         );
 
-        crate::microvm::stop_vm(&parent_id).ok();
-
-        // Stage the snapshot into the child dir, exactly like a pool claim
-        // would receive it.
+        // Stage the snapshot into the child dir before stopping the parent,
+        // because `stop_vm` removes the parent's VM directory.
         for name in [VMSTATE_FILENAME, MEM_FILENAME] {
             let src = parent_dir.join(name);
             std::fs::copy(&src, child_dir.join(name))
                 .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
         }
-        let _ = std::fs::remove_dir_all(&parent_dir);
+        crate::microvm::stop_vm(&parent_id).ok();
 
         // Time the warm-pool claim: fresh Firecracker + snapshot load + resume.
         let io = FirecrackerIO::new(child_dir.join("fc.socket"));
