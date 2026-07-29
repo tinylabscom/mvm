@@ -367,6 +367,10 @@
             # cdylib above. Pure Python, copied from the workspace source.
             mkdir -p "$staging/sdk-py"
             cp -r ${workspace}/crates/mvm-sdk/sdks/python/mvm "$staging/sdk-py/mvm"
+            # The copied Python package may carry read-only directories from
+            # the Nix store source, so make the tree writable before trying
+            # to prune any __pycache__ directories.
+            chmod -R u+w "$staging/sdk-py"
             find "$staging/sdk-py" -name '__pycache__' -type d -prune \
               -exec rm -rf {} +
 
