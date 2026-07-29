@@ -73,8 +73,14 @@
       kernel module dependency index, the runtime overlay allocation is capped
       at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars against
       the 50 MiB mvm-owned guest-storage contract. The default tenant now
-      omits its redundant dynamic busybox input: the measured rootfs is
-      27,330,560 bytes and the complete measured footprint is 36,771,840 bytes.
+      omits its redundant dynamic busybox input and copies the CA bundle without
+      retaining the source `cacert` store path. A build-backed gate caps the lean
+      registered runtime closure at two paths. The measured rootfs is 26,718,208
+      bytes and the complete measured footprint is 36,139,008 bytes (34.46 MiB).
+- [x] Persistent builder completion reliability: the egress helper writes stderr
+      to its VM-scoped log instead of retaining the caller's pipe, and dispatch
+      completion follows the authoritative child exit after draining available
+      stderr even if a detached descendant still holds a writer.
 
 ---
 

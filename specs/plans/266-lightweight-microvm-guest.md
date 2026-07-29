@@ -224,10 +224,12 @@ Tracked here per the deferred-work convention; each is its own future plan.
 - **WS-4 (lever D):** add a measured guest-agent RSS gate (≤ ~8 MB); the tokio-free agent already lands most of it.
 - **WS-5 (lever A/E):** the kernel-module metadata audit is complete and the rootfs
   now copies only `modules.dep`. The default tenant also drops its redundant
-  dynamic busybox closure; CA-bundle trim and a rootfs package-count budget remain.
+  dynamic busybox closure. The Mozilla CA bundle is copied into `/etc` without
+  retaining its source store path, and a build-backed gate caps the lean registered
+  runtime closure at static BusyBox plus `mvm-setpriv`.
 - **WS-6:** `xtask perf footprint` now measures the Nix-built rootfs, runtime overlay,
-  and dm-verity sidecars against the 50 MiB mvm-owned storage contract. Closure, kernel,
-  and RSS entries remain for later slices.
+  and dm-verity sidecars against the 50 MiB mvm-owned storage contract. Kernel and
+  RSS entries remain for later slices.
 
 ## Self-review
 
@@ -273,5 +275,9 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
 - [x] Remove the default tenant's redundant dynamic busybox input. The measured
   Nix-built rootfs is 27,330,560 bytes; rootfs + overlay + both verity sidecars
   total 36,771,840 bytes and pass the 50 MiB ledger gate.
-- [ ] Add the remaining rootfs closure cuts, guest-RSS measurement, and
-  closure/kernel entries to the ledger.
+- [x] Copy the Mozilla CA bundle into `/etc` without retaining the `cacert` source
+  store path, and build-gate the lean registered runtime closure at two paths.
+  The measured Nix-built rootfs is 26,718,208 bytes; rootfs + overlay + both
+  verity sidecars total 36,139,008 bytes (34.46 MiB), leaving 16,289,792 bytes
+  below the 50 MiB limit.
+- [ ] Add guest-RSS measurement plus closure/kernel entries to the unified ledger.

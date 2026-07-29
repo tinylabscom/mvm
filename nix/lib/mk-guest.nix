@@ -187,9 +187,10 @@ let
   # Nix store before an unprivileged builder starts. Without it, Nix treats
   # the read-only rootfs closure as absent and tries to substitute every path
   # again, which is both slow and unsafe when the store already contains a
-  # seeded copy.
+  # seeded copy. The CA bundle is copied into `/etc` below, so retaining the
+  # source `cacert` store path would duplicate the same certificate bytes.
   rootfsClosureInfo = pkgs.closureInfo {
-    rootPaths = [ busybox setprivPkg pkgs.cacert ] ++ packages ++ extraFileSourceRoots;
+    rootPaths = [ busybox setprivPkg ] ++ packages ++ extraFileSourceRoots;
   };
 
   assertNoSshTemplateInputs =
@@ -1429,6 +1430,7 @@ rootfsImage.overrideAttrs (old: {
   passthru = (old.passthru or { }) // {
     mvm = mvmMeta;
     inherit rootfsTree;
+    inherit rootfsClosureInfo;
     inherit setprivHelperName;
     # Surface the chosen hypervisor + resource defaults at the top
     # of passthru so `nix eval` is sufficient for mvmctl to drive

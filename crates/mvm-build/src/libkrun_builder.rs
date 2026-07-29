@@ -144,6 +144,7 @@ const PERSISTENT_BUILDER_RUNTIME_DEVICE: &str = "/dev/vdc";
 const BUILDER_INPUT_DISK_MIN: u64 = 16 << 20;
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
+const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
 const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
 const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
 const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 3;
@@ -368,13 +369,24 @@ impl BuilderVsockEgressEndpoint {
                 "resolve mvmctl for persistent builder egress supervisor: {e}"
             ))
         })?;
+        let stderr_log_path = state_dir.join(BUILDER_SUBST_STDERR_LOG_FILE);
+        let stderr_log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_log_path)
+            .map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "open persistent builder egress log {}: {e}",
+                    stderr_log_path.display()
+                ))
+            })?;
         let mut child = Command::new(mvmctl_path)
             .arg("__builder-egress-supervisor")
             .arg("--endpoint")
             .arg(&endpoint_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::from(stderr_log))
             .spawn()
             .map_err(|e| {
                 BuilderVmError::ExtractionFailed(format!(
@@ -6557,6 +6569,15 @@ mod tests {
         assert!(!DISPATCH_SOCK_MARKER.contains('/'));
         assert!(!DISPATCH_SOCK_MARKER.is_empty());
         assert_eq!(DISPATCH_SOCK_MARKER, "dispatch.sock.marker");
+    }
+
+    #[test]
+    fn persistent_builder_egress_log_is_scoped_to_vm_state() {
+        let state_dir = Path::new("/tmp/mvm-builder-state");
+        assert_eq!(
+            state_dir.join(BUILDER_SUBST_STDERR_LOG_FILE),
+            PathBuf::from("/tmp/mvm-builder-state/substitution.stderr.log")
+        );
     }
 
     #[test]

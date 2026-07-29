@@ -1145,3 +1145,69 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
         "mkGuest must not retain the util-linux setpriv closure"
     );
 }
+
+#[test]
+fn mk_guest_copies_ca_bundle_without_retaining_cacert_store_path() {
+    let path = nix_dir().join("lib/mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("rootPaths = [ busybox setprivPkg ] ++ packages ++ extraFileSourceRoots")
+            && !content.contains(
+                "rootPaths = [ busybox setprivPkg pkgs.cacert ] ++ packages ++ extraFileSourceRoots"
+            ),
+        "mkGuest's registered runtime closure must not retain the copied cacert source"
+    );
+    assert!(
+        content.contains(
+            "cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt \"$out/etc/ssl/certs/ca-bundle.crt\""
+        ),
+        "mkGuest must still copy the Mozilla CA bundle into the FHS rootfs"
+    );
+    assert!(
+        content.contains("inherit rootfsClosureInfo"),
+        "mkGuest must expose its closure for the build-backed package-count gate"
+    );
+}
+
+#[test]
+fn nix_flake_caps_the_lean_guest_rootfs_package_count() {
+    let path = nix_dir().join("flake.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("guest-rootfs-package-budget")
+            && content.contains("guest.passthru.rootfsClosureInfo")
+            && content.contains("wc -l")
+            && content.contains("-gt 2"),
+        "the Nix check must cap the realized lean rootfs closure at two store paths"
+    );
+}
+
+#[test]
+fn nix_flake_uses_the_builder_workspace_override_for_build_backed_checks() {
+    let path = nix_dir().join("flake.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("builtins.getEnv \"MVM_WORKSPACE_PATH\"")
+            && content.contains("workspaceSrc")
+            && content.contains("mvmSrc = workspaceSrc"),
+        "the root Nix flake must use the mounted workspace when evaluated in the builder VM"
+    );
+}
+
+#[test]
+fn ci_builds_the_guest_rootfs_package_budget() {
+    let path = repo_dir().join(".github/workflows/ci.yml");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("./nix#checks.x86_64-linux.guest-rootfs-package-budget"),
+        "CI must realize the rootfs package-count budget, not only eval it"
+    );
+}

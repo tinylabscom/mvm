@@ -405,11 +405,12 @@ jobs:
       # This runner is x86_64, so only the x86_64-linux check variant builds
       # here; the aarch64-linux variant stays defined for parity and for a
       # future arm64 runner.
-      - name: Baked guest rootfs tree is glibc-free (runtime overlay excluded)
+      - name: Baked guest rootfs closure stays lean and glibc-free
         run: |
           set -euo pipefail
           nix build --print-build-logs \
-            ./nix#checks.x86_64-linux.guest-rootfs-no-glibc
+            ./nix#checks.x86_64-linux.guest-rootfs-no-glibc \
+            ./nix#checks.x86_64-linux.guest-rootfs-package-budget
 
       - name: Runtime overlay uses static-musl guest binaries
         run: |
