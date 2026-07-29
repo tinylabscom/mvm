@@ -83,8 +83,10 @@ pub struct StandbySpecParams<'a> {
     pub mem_mib: u32,
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
-    /// Source rootfs image for an image-bound saved-standby capture. Always
-    /// `None` today — no current backend captures one.
+    /// Source rootfs image the parent boots and is captured from — the launch's
+    /// own rootfs, so a claim's compat key names the disk that actually booted.
+    /// `None` only when the caller has no launch to mirror, which the spawn
+    /// then refuses.
     pub image_path: Option<&'a Path>,
     /// Sha256 hex of the image for the compat key. `None` for libkrun.
     pub image_sha256: Option<&'a str>,
@@ -134,12 +136,16 @@ pub struct WarmParams<'a> {
     pub signer_id: &'a str,
     pub signing_key_path: &'a Path,
     pub target: u32,
-    /// Source rootfs image for an image-bound saved-standby capture. A
-    /// Firecracker (or libkrun) parent cannot boot without a rootfs, so
-    /// `replenish_after_launch` always threads the just-completed launch's
-    /// own rootfs through here; `pool warm` passes `None` (image-agnostic —
-    /// see [`resolve_warm_shape`]).
-    pub image: Option<&'a Path>,
+    /// The launch this warm set is being spawned for, already carrying
+    /// everything the run path resolved for it — the sealed rootfs, its verity
+    /// sidecar, and the runtime overlay that holds the guest agent. A warm
+    /// parent boots the same shape, so `replenish_after_launch` always threads
+    /// the just-completed launch through here, and both the compat key's image
+    /// identity and the parent's own boot inputs come from this one value
+    /// rather than from two fields that could disagree. `pool warm` has no
+    /// launch to mirror and passes `None`; the spawn then refuses rather than
+    /// inventing a boot shape of its own.
+    pub launch: Option<&'a VmStartConfig>,
 }
 
 /// Summary returned by [`warm_to_target`].
@@ -177,7 +183,11 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     // The compat identity computed identically here and at claim time (a constant for
     // libkrun's bundled kernel) so a warmed standby is actually claimable.
     let kernel_sha256 = kernel_identity(p.backend.as_vm_backend(), p.kernel.to_str())?;
-    let image_sha256 = match p.image {
+    // The parent boots the launch's own rootfs, so the compat key hashes that
+    // same path — one source for both, so the recorded key cannot describe a
+    // disk other than the one that booted.
+    let image = p.launch.map(|c| Path::new(c.rootfs_path.as_str()));
+    let image_sha256 = match image {
         Some(img) => Some(
             kernel_sha256_hex(img)
                 .with_context(|| format!("hashing image for pool compat key: {}", img.display()))?,
@@ -197,6 +207,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     let checkpoints = CheckpointStore::open();
     let spawn_ctx = SpawnContext {
         checkpoints: &checkpoints,
+        launch: p.launch,
     };
     let mut spawned = 0u32;
     let mut failed = 0u32;
@@ -211,7 +222,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             mem_mib: p.mem_mib,
             signer_id: p.signer_id,
             signing_key_path: p.signing_key_path,
-            image_path: p.image,
+            image_path: image,
             image_sha256: image_sha256.as_deref(),
         })?;
         match p.backend.spawn_standby_via_runner(&spawn_ctx, &spec) {
@@ -500,9 +511,10 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
     };
     let signer = host_signer::load_or_init()?;
     let pool = SupervisorStandbyPool::open()?;
-    // Thread the launch's own rootfs through as the warm parent's image: a
-    // Firecracker (or libkrun) parent cannot boot without one.
-    let rootfs = Path::new(cfg.rootfs_path.as_str());
+    // Thread the just-completed launch through as the shape the warm parent
+    // must boot: same rootfs, same verity sidecar, same runtime overlay. A
+    // parent that boots anything else hands that difference to every child
+    // restored from it.
     let result = warm_to_target(
         &pool,
         &WarmParams {
@@ -514,7 +526,7 @@ pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Resu
             signer_id: &host_signer::host_signer_id(),
             signing_key_path: &signer.secret_path,
             target: cfg.warm_pool_size,
-            image: Some(rootfs),
+            launch: Some(cfg),
         },
     )?;
     Ok(result.spawned)
@@ -906,7 +918,7 @@ mod tests {
                 signer_id: "host:test",
                 signing_key_path: &key,
                 target: 2,
-                image: None,
+                launch: None,
             },
         )
         .unwrap();
@@ -946,7 +958,7 @@ mod tests {
                 signer_id: "host:test",
                 signing_key_path: &key,
                 target: 1,
-                image: None,
+                launch: None,
             },
         )
         .unwrap();
@@ -988,7 +1000,7 @@ mod tests {
                     signer_id: "host:test",
                     signing_key_path: key,
                     target: 2,
-                    image: None,
+                    launch: None,
                 },
             )
             .unwrap();
@@ -1051,9 +1063,6 @@ pub(in crate::commands) enum PoolAction {
 struct WarmShape {
     backend: AnyBackend,
     kernel: std::path::PathBuf,
-    /// Source rootfs for an image-bound saved-standby capture. Always `None`
-    /// today (no current backend needs it).
-    image: Option<std::path::PathBuf>,
     vcpus: u8,
     mem_mib: u32,
 }
@@ -1065,18 +1074,16 @@ fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<
         ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
             .context("resolve default-microvm kernel for the warm pool")?;
     let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
-    // The warm-pool backends (Firecracker standby, libkrun) are image-agnostic
-    // here — their kernel identity is fixed — so a warm standby boots the default
-    // kernel and needs no baked rootfs image. `--rootfs` / `MVM_POOL_ROOTFS`
-    // remain accepted but are unused now that the Vz backend (the only one that
-    // baked a per-standby image) is removed.
+    // `pool warm` warms ahead of any launch, so it has no resolved launch
+    // config to mirror — and a warm parent's boot shape is the launch's, not a
+    // rootfs path on its own. `--rootfs` / `MVM_POOL_ROOTFS` remain accepted but
+    // are unused: naming a rootfs would not supply the verity sidecar, the
+    // runtime overlay, or the cmdline tokens a parent must boot with.
     let _ = (rootfs_override, default_rootfs);
-    let image = None;
     let kernel = std::path::PathBuf::from(default_kernel);
     Ok(WarmShape {
         backend,
         kernel,
-        image,
         vcpus,
         mem_mib: cfg.default_memory_mib,
     })
@@ -1112,7 +1119,7 @@ fn run_warm(
             signer_id: &host_signer::host_signer_id(),
             signing_key_path: &signer.secret_path,
             target,
-            image: shape.image.as_deref(),
+            launch: None,
         },
     )?;
     // A state-changing verb emits one audit record per attempt.

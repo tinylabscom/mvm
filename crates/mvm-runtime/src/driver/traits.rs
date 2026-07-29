@@ -36,6 +36,22 @@ pub struct ChildForkRequest<'a> {
     pub genid: GenerationToken,
 }
 
+/// What a driver needs to boot a warm-pool factory parent. Grouped so the seam
+/// takes one value instead of a positional list.
+pub struct StandbyParentSpawn<'a> {
+    /// The parent's pool record: its identity, state dir, and the compat key a
+    /// later claim matches on. It has no plan, secret or entrypoint field, so a
+    /// parent is structurally incapable of holding workload authority.
+    pub spec: &'a StandbySpec,
+    /// The parent's boot inputs, assembled by the role layer from the launch
+    /// the parent will serve, through the same mappers a workload boot uses.
+    /// The driver boots this verbatim: it must not derive a parent's device
+    /// model or cmdline itself, because a second recipe is free to drift from
+    /// the workload's, and every child restored from this parent inherits both
+    /// out of its saved memory.
+    pub boot: &'a VmmSpec,
+}
+
 /// A bidirectional, owned guest channel (a connected vsock stream).
 pub trait DuplexStream: std::io::Read + std::io::Write + Send {}
 impl<T: std::io::Read + std::io::Write + Send> DuplexStream for T {}
@@ -60,19 +76,24 @@ pub trait VmmDriver: Send + Sync {
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
 
-    /// Boot a clean, pre-workload standby parent from `spec` and capture it into
-    /// a claimable resource. The parent runs no entrypoint and holds no secret or
-    /// plan — nothing on this seam (`StandbySpec` in, `StandbyHandle` out) has a
-    /// field to carry one, so a parent is structurally incapable of holding
-    /// workload authority. The driver owns the whole boot-to-ready-plus-capture
-    /// sequence; the role layer above only ever sees the resulting handle and
-    /// never boots a VMM directly for this path.
+    /// Boot the clean, pre-workload standby parent `req` describes and return
+    /// its pool record. The parent runs no entrypoint and holds no secret or
+    /// plan — nothing on this seam (`StandbyParentSpawn` in, `StandbyHandle`
+    /// out) has a field to carry one, so a parent is structurally incapable of
+    /// holding workload authority.
+    ///
+    /// The driver boots `req.boot` as given and reports the live process; it
+    /// does not assemble the parent's boot inputs. Those come from the role
+    /// layer, which derives them from the launch the parent will serve using
+    /// the same mappers a workload boot uses — the only way a parent's device
+    /// model and cmdline stay in step with a workload's. The parent is left
+    /// **running**: the caller captures its live memory next.
     ///
     /// Fail-closed default: a driver opts in explicitly, mirroring
     /// `VmBackend::spawn_standby`'s own fail-closed default.
     fn spawn_standby_parent(
         &self,
-        _spec: &StandbySpec,
+        _req: &StandbyParentSpawn<'_>,
     ) -> std::result::Result<StandbyHandle, StandbyError> {
         Err(StandbyError::Unsupported {
             backend: self.name().to_string(),

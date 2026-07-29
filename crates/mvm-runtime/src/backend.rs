@@ -1755,6 +1755,7 @@ mod tests {
                     .spawn_standby_via_runner(
                         &SpawnContext {
                             checkpoints: &s.checkpoints,
+                            launch: None,
                         },
                         &spec,
                     )

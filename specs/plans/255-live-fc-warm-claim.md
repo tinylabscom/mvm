@@ -823,6 +823,13 @@ git commit -m "feat(pool): assemble a live claim context and boot standby parent
 
 Last, and only now: the capability means "can actually spawn+claim a warm parent". Flipping it before Tasks 2-5 would turn a configured warm pool into a silent cold boot plus warning noise.
 
+> **Reverted by Task 8 Step 1.** Task 7's live run showed the spawn cannot
+> survive a real boot, so the flip was premature: the capability is back to
+> `false` and the guard test is back to asserting that no selectable driver
+> advertises the pool. The steps below record what was done and then undone; the
+> flip is now gated on a green live run (Task 8 Step 5), not on the code
+> existing.
+
 **Files:**
 - Modify: `crates/mvm-runtime/src/driver/fc.rs:363-387` (capabilities + its stale comment), `:719-731` (the guard test)
 
@@ -1004,11 +1011,13 @@ not measurable. Enabling the pool today adds ~2.6 s median per run for nothing.
 - Consumes: everything Tasks 1-6 built.
 - Produces: a parent that boots to agent-ready on real hardware, with `standby_pool` still `false` until a live run proves it.
 
-- [ ] **Step 1: Revert the capability flip**
+- [x] **Step 1: Revert the capability flip**
 
 Set `standby_pool: false` for `FcDriver` and restore the guard test to assert **no** driver advertises the pool (rename `only_firecracker_advertises_the_standby_pool` to reflect that). The flag means "can actually spawn and claim a warm parent"; live validation proved it cannot, so advertising it is false and currently costs ~2.6 s per run for nothing. Update the capability comment to say the flip is gated on a green live run. **Commit this on its own** — it removes a live regression and must not wait on the rest of the task.
 
-- [ ] **Step 2: Make the parent's boot shape come from the workload pipeline**
+Landed as `no_selectable_driver_advertises_the_standby_pool`, committed alone.
+
+- [x] **Step 2: Make the parent's boot shape come from the workload pipeline**
 
 The parent must boot **identically to a workload**: same drives, same verity and overlay cmdline tokens. Build its configuration with the same CLI-side code that builds a workload's — `attach_runtime_overlay_if_cached` and the surrounding `runtime_source_policy` selection in `crates/mvm-cli/src/commands/vm/up/` — and derive the standby's boot inputs from that result. Do **not** write a second boot recipe.
 
@@ -1016,11 +1025,37 @@ Where the seam lands is your judgment; state your choice and reasoning in your r
 
 Keep the existing guarantees intact: no guest NIC, `trusted_builder: false`, `template_id` propagated, the parent left running for capture, and no plan/endpoint/broker on a factory parent (that is the structural never-promote property).
 
-- [ ] **Step 3: Prove it without KVM as far as possible**
+**Seam as landed.** The parent's boot inputs are derived in the role layer, from
+the launch config the CLI already ran through `attach_runtime_overlay_if_cached`:
+
+- `WarmParams`/`SpawnContext` carry that `&VmStartConfig` down from
+  `replenish_after_launch` (which already had it) instead of a lone rootfs path.
+- `workload_runner::standby_boot::factory_parent_config` reduces it to a factory
+  parent's — an exhaustive destructure plus an exhaustive struct literal, so any
+  new `VmStartConfig` field breaks the build until it is classified boot-shape
+  (carried) or workload-authority (dropped).
+- `spec_map::workload_device_spec` is the single `VmStartConfig` → device-model
+  mapping, called by both `workload_spec` and `factory_parent_spec`; the cmdline
+  comes from the same `cmdline::runner_cmdline` a workload boot uses.
+- `VmmDriver::spawn_standby_parent` now takes `StandbyParentSpawn { spec, boot }`
+  and boots the given `VmmSpec`. `FcDriver`'s hand-written recipe is deleted, not
+  patched, and the runner's context-free `VmBackend::spawn_standby` override is
+  gone so there is one way in and it carries the launch.
+
+- [x] **Step 3: Prove it without KVM as far as possible**
 
 Add a test asserting the parent's boot inputs carry the overlay drive set and the runtime cmdline tokens whenever the workload path would — i.e. that the two shapes cannot silently diverge. This is the regression guard for the exact bug that shipped.
 
-- [ ] **Step 4: Full gates + commit**
+Three guards, all verified red against the shipped shape and green after:
+`parent_boots_the_same_device_model_and_cmdline_the_workload_does` (drives and
+cmdline equal, so a new drive/token cannot land on one side only),
+`parent_carries_the_overlay_drives_and_runtime_tokens_the_guest_agent_needs`
+(names the concrete symptoms the live run recorded), and
+`the_parent_and_the_workload_boot_the_same_shape_through_the_runner` (the same
+comparison through the runner's real wiring, since the defect was that the spawn
+path never called the mappers at all).
+
+- [x] **Step 4: Full gates + commit**
 
 ```bash
 cargo fmt --all

@@ -22,14 +22,13 @@ use mvm_agentd::vsock::{
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
-    StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend, VmCapabilities, VmExitStatus,
-    VmId, VmStatus,
+    StandbyHandle, StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
 use crate::driver::{
-    BlockDev, ChildForkRequest, ConsoleCapture, DuplexStream, RunningVm, VmmDriver, VmmSpec,
+    BlockDev, ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver, VmmSpec,
     VsockDirection,
 };
 use crate::microvm::{
@@ -348,23 +347,6 @@ fn resolve_standby_parent_pid(
     })
 }
 
-/// Persist the per-VM runtime metadata that `FcVmFullControl::rootfs_path()`
-/// (and, through it, `device_anchors()`) resolves via `mode.json`.
-/// `spawn_standby_parent` boots through this driver directly rather than
-/// through the `workload_runner::start` orchestration — the only other writer
-/// of this file — so without this call a live capture against the spawned
-/// parent fails closed for want of a resolvable rootfs.
-fn record_standby_parent_rootfs(
-    vm_id: &str,
-    image: &Path,
-) -> std::result::Result<(), StandbyError> {
-    crate::base::runtime_meta::record_from_rootfs(vm_id, StartMode::Detached, image).map_err(|e| {
-        StandbyError::SpawnFailed(format!(
-            "recording standby parent '{vm_id}' rootfs metadata: {e}"
-        ))
-    })
-}
-
 /// SIGTERM → grace → SIGKILL escalation against a Firecracker process, mirroring
 /// the raw stop path's shutdown escalation. The liveness probe, signal
 /// delivery, clock, and sleep are injected so the decision — "did the process
@@ -456,48 +438,21 @@ impl VmmDriver for FcDriver {
 
     fn spawn_standby_parent(
         &self,
-        spec: &StandbySpec,
+        req: &StandbyParentSpawn<'_>,
     ) -> std::result::Result<StandbyHandle, StandbyError> {
-        // A factory parent carries no plan, no volumes, no broker endpoint and
-        // no guest NIC — nothing that could bind it to one workload. It exists
-        // only to be captured and cloned.
-        let image = spec.image_path.as_deref().ok_or_else(|| {
-            StandbyError::SpawnFailed(format!("standby '{}' has no rootfs image to boot", spec.id))
-        })?;
+        let spec = req.spec;
 
-        // Written before boot so a capture against this parent can resolve its
-        // rootfs the same way every workload-runner-launched VM's can — see
-        // `record_standby_parent_rootfs`.
-        record_standby_parent_rootfs(&spec.id, Path::new(image))?;
-
-        let parent = VmmSpec {
-            name: spec.id.clone(),
-            kernel: KernelImage::Path(PathBuf::from(&spec.kernel_path)),
-            initramfs: None,
-            cmdline: self.workload_base_bootargs(false, true),
-            vcpus: u32::from(spec.vcpus),
-            memory_mib: spec.mem_mib,
-            mem_initial_mib: None,
-            blocks: vec![BlockDev {
-                source: PathBuf::from(image),
-                // The parent's rootfs is the shared base image: never writable,
-                // so one parent cannot alter what every child clones.
-                read_only: true,
-                ephemeral: false,
-                slot: 0,
-            }],
-            vsock: Vec::new(),
-            console: ConsoleCapture {
-                log_path: PathBuf::from(&spec.vm_state_dir).join("console.log"),
-            },
-            trusted_builder: false,
-        };
-
+        // The boot inputs arrive fully assembled from the role layer, which
+        // derives them from the launch this parent will serve using the same
+        // mappers a workload boot uses. The driver adds nothing: a parent that
+        // boots a shape of this driver's own invention would hand that shape to
+        // every child restored from it.
+        //
         // `boot` returns only once the guest agent answered over vsock, so the
         // memory captured next is of a fully-booted, ready guest — that is what
         // lets a restored child skip boot entirely.
         let vm = self
-            .boot(&parent)
+            .boot(req.boot)
             .map_err(|e| StandbyError::SpawnFailed(format!("boot standby parent: {e}")))?;
 
         // Deliberately left running: the caller captures its live memory, and
@@ -1448,38 +1403,6 @@ mod tests {
         );
     }
 
-    fn standby_spec_without_image() -> StandbySpec {
-        StandbySpec {
-            id: "standby-1".into(),
-            template_id: Some("tmpl-a".into()),
-            kernel_path: "/img/vmlinux".into(),
-            kernel_sha256: "a".repeat(64),
-            vcpus: 2,
-            mem_mib: 512,
-            signing_key_path: "/keys/host-signer.ed25519".into(),
-            signer_id: "host:test".into(),
-            binding_nonce: "b".repeat(64),
-            control_socket: "/state/standby-1/control.sock".into(),
-            vm_state_dir: "/state/standby-1".into(),
-            image_path: None,
-            image_sha256: None,
-        }
-    }
-
-    /// A parent with no rootfs cannot be booted, so it is refused up front
-    /// rather than yielding a handle no claim could ever use.
-    #[test]
-    fn spawn_standby_parent_refuses_a_spec_without_an_image() {
-        let spec = standby_spec_without_image();
-
-        let err = FcDriver::new().spawn_standby_parent(&spec).unwrap_err();
-
-        assert!(
-            matches!(err, StandbyError::SpawnFailed(ref m) if m.contains("rootfs")),
-            "expected a SpawnFailed naming the missing rootfs, got: {err:?}"
-        );
-    }
-
     /// Capturing a parent's memory needs a backend-specific control; Firecracker
     /// has one, so it must offer it rather than falling through to the default.
     #[test]
@@ -1487,14 +1410,17 @@ mod tests {
         assert!(FcDriver::new().vm_full_control("any-vm").is_some());
     }
 
-    /// The metadata `spawn_standby_parent` writes must be exactly what
-    /// `FcVmFullControl::rootfs_path()` reads — proven by constructing the
-    /// metadata state directly (no boot, no KVM) and then resolving it through
-    /// the real capture control, the same way a live capture would.
+    /// The metadata the spawn path writes for a factory parent must be exactly
+    /// what `FcVmFullControl::rootfs_path()` reads back, or a live capture
+    /// fails closed for want of a resolvable rootfs. Proven by running the real
+    /// derivation (launch config → parent config → recorded metadata) and then
+    /// resolving it through the real capture control — no boot, no KVM.
     #[test]
-    fn record_standby_parent_rootfs_lets_the_capture_control_resolve_it() {
+    fn the_parent_metadata_the_spawn_path_writes_resolves_through_the_capture_control() {
         use crate::checkpoint::VmFullControl as _;
+        use crate::workload_runner::standby_boot::factory_parent_config;
         use mvm_core::util::test_env::TestEnv;
+        use mvm_core::vm_backend::{StandbySpec, StartMode, VmStartConfig};
 
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
@@ -1503,9 +1429,39 @@ mod tests {
         let image = tmp.path().join("rootfs.ext4");
         std::fs::write(&image, b"fake-rootfs").unwrap();
 
-        record_standby_parent_rootfs("standby-parent-1", &image).unwrap();
+        let launch = VmStartConfig {
+            name: "workload-a".into(),
+            rootfs_path: image.display().to_string(),
+            kernel_path: Some("/img/vmlinux".into()),
+            cpus: 2,
+            memory_mib: 512,
+            ..Default::default()
+        };
+        let spec = StandbySpec {
+            id: "standby-parent-1".into(),
+            template_id: None,
+            kernel_path: "/img/vmlinux".into(),
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 512,
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "b".repeat(64),
+            control_socket: tmp.path().join("control.sock").display().to_string(),
+            vm_state_dir: tmp.path().join("standby-parent-1").display().to_string(),
+            image_path: Some(image.display().to_string()),
+            image_sha256: Some("c".repeat(64)),
+        };
 
-        let control = crate::firecracker::FcVmFullControl::new("standby-parent-1");
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        crate::base::runtime_meta::record_from_start_config(
+            &spec.id,
+            StartMode::Detached,
+            &parent_cfg,
+        )
+        .unwrap();
+
+        let control = crate::firecracker::FcVmFullControl::new(&spec.id);
         assert_eq!(control.rootfs_path().unwrap(), image);
     }
 

@@ -386,7 +386,16 @@ Then unify + retire the old paths:
       Phase 2 slice one — the runner-side warm-pool claim substrate
       (`specs/plans/255-phase2-warm-pool-substrate.md`) — landed on branch
       `feat/plan-255-phase2-warm-pool`, with the live FC warm pool + capability
-      flip a follow-up slice.
+      flip a follow-up slice. That follow-up
+      (`specs/plans/255-live-fc-warm-claim.md`, branch
+      `feat/plan-255-live-fc-warm-claim`) built spawn/capture/fork/reseed and
+      then **failed its live KVM validation**
+      (`specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`): the
+      standby parent booted a bare rootfs and panicked for want of the runtime
+      overlay that carries the guest agent. The parent's boot inputs now come
+      from the launch's own `VmStartConfig` through the same mappers a workload
+      boot uses, guarded by shape-equality tests; `standby_pool` stays `false`
+      until a re-run on the KVM host is green.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.

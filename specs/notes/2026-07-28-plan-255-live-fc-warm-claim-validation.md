@@ -47,6 +47,12 @@ Two defects were found. Neither was fixed (this task is validation only).
 
 ## BUG-1 — the standby parent boots without the runtime overlay and panics
 
+> **Fixed in code; awaiting re-validation.** The parent's boot inputs are now
+> derived from the launch's own `VmStartConfig` through the same mappers a
+> workload boot uses, and three host-side guards assert the two shapes are
+> equal. The capability stays `false` until a live run is green. Everything
+> below is the record of the failing run, unchanged.
+
 **The blocker.** `MVM_RESIDENCY=warm` does reach the feature: `replenish_after_launch`
 fires and `FcDriver::spawn_standby_parent` boots a parent. The parent then dies.
 
@@ -370,11 +376,13 @@ neither of the two defects above is a latency problem.
 
 ## What must happen before this validation can be re-run
 
-1. Fix BUG-1: thread the runtime overlay (and the matching
-   `mvm.runtime_*` / verity cmdline tokens) into `spawn_standby_parent`'s
-   `VmmSpec`, the way the workload launch path does via
-   `attach_runtime_overlay_if_cached`. Until then no Firecracker standby can
-   boot on an overlay-only runtime.
+1. ~~Fix BUG-1~~ — **done**, but by removing the second boot recipe rather than
+   by threading overlay fields into it. `spawn_standby_captured` now reduces the
+   launch's own `VmStartConfig` (already through
+   `attach_runtime_overlay_if_cached`) to a factory parent's and feeds it to the
+   same `workload_device_spec` + `runner_cmdline` mappers the workload boot uses;
+   the driver boots the assembled spec. Still needs a live run to confirm the
+   parent reaches agent-ready.
 2. Fix BUG-2, or the transient `machine run` that hosts the claim cannot
    complete a guest RPC at all.
 3. Then re-run: priorities 1–3, the two remaining fail-closed cases, and the

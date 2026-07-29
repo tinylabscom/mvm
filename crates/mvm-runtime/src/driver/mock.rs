@@ -11,14 +11,16 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmCapabilities,
-    VmExitStatus, VmId, VmStatus,
+    SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 
-use crate::driver::spec::{ConsoleCapture, KernelImage, VmmSpec};
-use crate::driver::traits::{ChildForkRequest, DuplexStream, RunningVm, VmmDriver};
+use crate::driver::spec::VmmSpec;
+use crate::driver::traits::{
+    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
+};
 use crate::standby_pool::now_unix_secs;
 use crate::vm::instance_snapshot::PostRestoreOutcome;
 
@@ -218,29 +220,15 @@ impl VmmDriver for MockDriver {
 
     fn spawn_standby_parent(
         &self,
-        spec: &StandbySpec,
+        req: &StandbyParentSpawn<'_>,
     ) -> std::result::Result<StandbyHandle, StandbyError> {
-        // A clean parent boot: no cmdline, no volumes, no vsock channels — the
-        // recipe itself has no field that could carry a plan, a secret, or an
-        // egress/broker endpoint. Routed through `boot()` (not pushed directly)
-        // so a test can observe it the same way it observes a real workload
-        // boot, via `booted_specs()`.
-        let parent = VmmSpec {
-            name: spec.id.clone(),
-            kernel: KernelImage::Bundled,
-            initramfs: None,
-            cmdline: String::new(),
-            vcpus: u32::from(spec.vcpus),
-            memory_mib: spec.mem_mib,
-            mem_initial_mib: None,
-            blocks: Vec::new(),
-            vsock: Vec::new(),
-            console: ConsoleCapture {
-                log_path: std::path::PathBuf::from(&spec.vm_state_dir).join("console.log"),
-            },
-            trusted_builder: false,
-        };
-        self.boot(&parent)
+        let spec = req.spec;
+        // The role layer assembled the parent's boot inputs from the launch it
+        // will serve; the mock boots them verbatim, exactly as a real driver
+        // does. Routed through `boot()` (not pushed directly) so a test can
+        // observe the parent's shape the same way it observes a real workload
+        // boot, via `booted_specs()` — which is what lets a test compare them.
+        self.boot(req.boot)
             .map_err(|e| StandbyError::SpawnFailed(e.to_string()))?;
         // No live process backs a mocked capture — pid=0 mirrors the saved-state
         // convention (`StandbyHandle::is_saved_state`) already used for a
@@ -420,6 +408,8 @@ impl crate::checkpoint::VmFullControl for MockVmFullControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::driver::spec::{ConsoleCapture, KernelImage};
 
     fn sample_spec(name: &str) -> VmmSpec {
         VmmSpec {
