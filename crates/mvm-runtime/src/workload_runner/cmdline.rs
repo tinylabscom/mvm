@@ -373,6 +373,11 @@ mod tests {
     #[test]
     fn runner_cmdline_synthesizes_a_base_when_workload_cmdline_takes_the_shortcut() {
         let dir = tempfile::tempdir().unwrap();
+        // Isolate MVM_HOME: the host-signer anchor is read from the keys dir, so
+        // without this the assertions depend on whether the developer running the
+        // suite happens to have a host key on disk.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
         let config = VmStartConfig {
             rootfs_path: "/img/rootfs.ext4".into(),
             volumes: vec![disk_volume("/vol/data.img", "/data")],
@@ -398,6 +403,10 @@ mod tests {
     #[test]
     fn runner_cmdline_is_empty_when_neither_base_nor_volumes_are_present() {
         let dir = tempfile::tempdir().unwrap();
+        // See the note above: an un-isolated MVM_HOME leaks the real host key in
+        // as a `mvm.host_signer_pub=` token and this is no longer empty.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
         let config = VmStartConfig::default();
         assert_eq!(
             runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs),
