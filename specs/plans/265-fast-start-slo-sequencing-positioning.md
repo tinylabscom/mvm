@@ -130,6 +130,17 @@ shaving the vsock connect handshake are the next levers; a true pre-spawned
       *(Non-pooled native client: release, N=12: p50=46 ms, p99=49 ms.
       Pooled/pre-staged claim: release, N=12: p50=33.5 ms, p99=34 ms.
       SLO gap: ~3.5 ms still to close to reach ≤30 ms p50.)*
+      *Attempted 2026-07-28: the four `warm_pool_claim_latency_live`
+      configurations (baseline, `MVM_LIVE_PRIME_PAGES=1`,
+      `MVM_LIVE_TMPFS_CHILD=1`, both levers together) could not be measured
+      because SSH to `root@88.99.197.234` (key `~/.ssh/hetzner-rvproxy`)
+      hung during key exchange/auth and then stopped responding; no speculative
+      numbers were recorded. The remaining gap from the prior pooled/pre-staged
+      measurement is still ~3.5 ms. Once access to the KVM box is restored the
+      same harness will show whether priming, tmpfs staging, or both close that
+      gap, or whether the next lever is vsock-handshake shaving or a true
+      pre-spawned running-VMM pool.*
+
 
 ### WS3 — Density
 

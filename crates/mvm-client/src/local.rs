@@ -202,8 +202,12 @@ fn signal_guest_post_restore(name: &str) -> Result<()> {
         "scope=rpc,direction=in,kind=vsock,verb={verb}",
         verb = "post-restore",
     );
-    signal_post_restore(name, &VsockPostRestoreSignal { token })
-        .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))?;
+    signal_post_restore(
+        name,
+        &VsockPostRestoreSignal { token },
+        std::time::Duration::from_secs(5),
+    )
+    .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))?;
     Ok(())
 }
 

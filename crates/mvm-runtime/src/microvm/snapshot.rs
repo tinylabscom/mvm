@@ -24,7 +24,7 @@ use tracing::instrument;
 
 use crate::base::shell::shell_quote;
 use crate::vm::instance_snapshot::{
-    guarded_load_resume, signal_post_restore, FirecrackerIO, VsockPostRestoreSignal,
+    FirecrackerIO, VsockPostRestoreSignal, guarded_load_resume, signal_post_restore,
 };
 
 use super::daemon::api_put_socket;

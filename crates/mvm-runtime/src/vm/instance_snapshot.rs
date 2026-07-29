@@ -40,14 +40,14 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::base::shell::{run_in_vm, shell_quote};
 use mvm_core::crypto::keystore;
 use mvm_core::crypto::snapshot_encryption;
 use mvm_core::crypto::snapshot_hmac::{
-    files_in, load_or_init_key, seal, verify, EpochStore, IntegritySidecar, SnapshotFiles,
-    VerifyError, MEM_FILENAME, SIDECAR_FILENAME, VMSTATE_FILENAME,
+    EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles, VMSTATE_FILENAME,
+    VerifyError, files_in, load_or_init_key, seal, verify,
 };
 
 use secrecy::ExposeSecret;
@@ -289,8 +289,12 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
 /// sealed on disk, so a retry (after e.g. re-sealing a clean snapshot) is
 /// still possible.
 pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
-    io.load_snapshot_paused(dir)
-        .with_context(|| format!("load_snapshot_paused({})", dir.display()))?;
+    if let Err(e) = io.load_snapshot_paused(dir) {
+        // The VMM may be left paused after a failed load; do not let it sit
+        // alive with an unaudited device model.
+        let _ = io.teardown_paused();
+        return Err(e).context(format!("load_snapshot_paused({})", dir.display()));
+    }
     guard_and_resume(io)
 }
 
@@ -302,8 +306,11 @@ pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Resu
 /// resume are the same, so a fork cannot reach userspace unchecked or stay
 /// paused forever.
 pub(crate) fn guarded_fork_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
-    io.load_snapshot_for_fork_paused(dir)
-        .with_context(|| format!("load_snapshot_for_fork_paused({})", dir.display()))?;
+    if let Err(e) = io.load_snapshot_for_fork_paused(dir) {
+        // A failed fork load must not leave a paused child VMM behind.
+        let _ = io.teardown_paused();
+        return Err(e).context(format!("load_snapshot_for_fork_paused({})", dir.display()));
+    }
     guard_and_resume(io)
 }
 
@@ -313,9 +320,18 @@ pub(crate) fn guarded_fork_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &P
 /// Every load path funnels through here, so adding a new way to load a snapshot
 /// cannot silently bypass the guard.
 fn guard_and_resume<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
-    let model = io
+    let model = match io
         .restored_device_model()
-        .with_context(|| "reading restored device model")?;
+        .with_context(|| "reading restored device model")
+    {
+        Ok(m) => m,
+        Err(e) => {
+            // The paused VMM has an unreadable device model; tear it down
+            // before surfacing the error so it never resumes unchecked.
+            let _ = io.teardown_paused();
+            return Err(e);
+        }
+    };
     if let Err(e) = crate::microvm::assert_vsock_only_device_model(&model) {
         let _ = io.teardown_paused();
         return Err(e).context("restore refused by device-model guard");
@@ -417,7 +433,7 @@ impl VsockPrimedSignalSource {
     /// barrier; the deadline in [`wait_for_primed_polling`] bounds the wait.
     fn probe_once(&self) -> bool {
         use mvm_agentd::vsock::{
-            call_unary, interpret_primed_status, GuestRequest, GUEST_AGENT_PORT,
+            GUEST_AGENT_PORT, GuestRequest, call_unary, interpret_primed_status,
         };
         let Ok(transport) = crate::vsock_transport::for_vm(&self.vm_name) else {
             return false;
@@ -553,7 +569,7 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
     }
 
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
-        use mvm_agentd::vsock::{call_unary, GuestRequest, GuestResponse, GUEST_AGENT_PORT};
+        use mvm_agentd::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_unary};
         let transport = crate::vsock_transport::for_vm(vm_name)
             .with_context(|| format!("resolving vsock transport for {vm_name}"))?;
         let mut stream = transport
@@ -1529,10 +1545,6 @@ mod tests {
                 outcome: Err(e),
                 ready: true,
             }
-        }
-        fn with_ready(mut self, ready: bool) -> Self {
-            self.ready = ready;
-            self
         }
     }
 
