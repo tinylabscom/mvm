@@ -1365,6 +1365,13 @@ let
     volumeLabel = "mvm-${name}";
     populateImageCommands = ''
       cp -a --reflink=auto ${rootfsTree}/. ./files/
+      # `rootfsTree` deliberately makes the registration read-only for the
+      # runtime image. The image builder copies that mode into its staging
+      # tree, then rewrites the same file while assembling the closure. Leave
+      # it out of the generic file copy so the closure manifest can create a
+      # fresh staging file with normal build-user permissions.
+      chmod -R u+w ./files
+      rm -f ./files/nix-path-registration
     '';
   };
 
