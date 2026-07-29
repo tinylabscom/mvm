@@ -99,7 +99,10 @@
               if sealed
               then { command = [ "/bin/sleep" "infinity" ]; }
               else { shell = "/bin/sh"; };
-            packages = [ pkgs.busybox ];
+            # mkGuest supplies its own static busybox and pre-installs its
+            # applet links. Re-adding the dynamic package here would pull the
+            # glibc runtime closure into the sealed tenant image.
+            packages = [ ];
             # mkGuest's `kernel` arg supplies the in-rootfs module tree; the
             # workload kernel is module-free (DM_VERITY built-in), passed for
             # parity with a real workload image.

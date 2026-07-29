@@ -223,7 +223,8 @@ Tracked here per the deferred-work convention; each is its own future plan.
   with a build-backed footprint gate covering the Nix-built rootfs and overlay.
 - **WS-4 (lever D):** add a measured guest-agent RSS gate (≤ ~8 MB); the tokio-free agent already lands most of it.
 - **WS-5 (lever A/E):** the kernel-module metadata audit is complete and the rootfs
-  now copies only `modules.dep`; CA-bundle trim and a rootfs package-count budget remain.
+  now copies only `modules.dep`. The default tenant also drops its redundant
+  dynamic busybox closure; CA-bundle trim and a rootfs package-count budget remain.
 - **WS-6:** `xtask perf footprint` now measures the Nix-built rootfs, runtime overlay,
   and dm-verity sidecars against the 50 MiB mvm-owned storage contract. Closure, kernel,
   and RSS entries remain for later slices.
@@ -269,5 +270,8 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
   rootfs, overlay, and optional dm-verity sidecars.
 - [x] Add a CI build-backed gate that runs the ledger against the Nix-built
   default-tenant image and runtime overlay with a 50 MiB limit.
+- [x] Remove the default tenant's redundant dynamic busybox input. The measured
+  Nix-built rootfs is 27,330,560 bytes; rootfs + overlay + both verity sidecars
+  total 36,771,840 bytes and pass the 50 MiB ledger gate.
 - [ ] Add the remaining rootfs closure cuts, guest-RSS measurement, and
   closure/kernel entries to the ledger.

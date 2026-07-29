@@ -72,7 +72,9 @@
 - [x] Lightweight guest WS-5/WS-6 slice: the Nix-built rootfs keeps only the
       kernel module dependency index, the runtime overlay allocation is capped
       at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars against
-      the 50 MiB mvm-owned guest-storage contract.
+      the 50 MiB mvm-owned guest-storage contract. The default tenant now
+      omits its redundant dynamic busybox input: the measured rootfs is
+      27,330,560 bytes and the complete measured footprint is 36,771,840 bytes.
 
 ---
 
