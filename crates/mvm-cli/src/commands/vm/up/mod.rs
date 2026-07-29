@@ -39,7 +39,7 @@ pub(crate) use oci_persist::{persistent_oci_effective_initrd, persists_plan_befo
 
 pub(crate) use runtime_source::{
     attach_runtime_overlay_if_cached, attach_runtime_overlay_if_cached_version,
-    emit_runtime_source_status,
+    attach_universal_initramfs_if_cached, emit_runtime_source_status,
 };
 
 #[derive(ClapArgs, Debug, Clone)]

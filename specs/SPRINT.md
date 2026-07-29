@@ -475,11 +475,46 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    to the vsock protocol, plus `ActivationState` in `AgentBootState` and a
    fail-closed dispatch gate that rejects everything except activation until
    activated.
-4. [~] Guest-side mount library (dm-verity + overlayfs). Created
-   `guest_mount.rs` with the boot-time mount API, error type, privilege-drop
-   helper, and early-filesystem mounts. The dm-verity/pivot_root bodies are
-   structural stubs that will be filled with the ported `mvm-verity-init`
-   logic in the next pass.
+4. [x] Guest-side mount library (dm-verity + overlayfs). Filled
+   `guest_mount.rs` with real dm-verity ioctl setup, pivot_root/switch_root,
+   overlayfs runtime overlay, and virtio-fs volume mounting ported from
+   `mvm-verity-init.rs`. Includes policy guards (no shadowing of `/`, `/mvm`,
+   `/mvm/runtime`, `/dev`, `/dev/vda`, `/dev/vdc`), privilege drop with
+   supplementary-group clearance, and ext4 block-size probe. Focused tests and
+   workspace clippy pass; `cargo test -p mvm-agentd` green.
+
+5. [x] Host-side activation for the universal initramfs. Added
+   `mvm-runtime/src/microvm/activation.rs`, which builds
+   `ActivateEnvironment` from the admitted `VmStartConfig` (fixed virtio-blk
+   slots `/dev/vda`..`/dev/vdd`, rootfs roothash from config or sidecar,
+   runtime-overlay roothash, virtio-fs volume mapping, and verb-grant
+   envelope) and sends it over `RunningVm::vsock_connect(GUEST_AGENT_PORT)`.
+   `WorkloadRunner::start_workload` now activates after boot when both
+   `initrd_path` and `roothash` are present. `MockGuestAgent` answers
+   `ActivateEnvironment` with `ActivateEnvironmentAck` so hermetic tests stay
+   green. `cargo nextest run -p mvm-runtime` (1091 passed) and
+   `cargo nextest run -p mvm-agentd` (498 passed) confirm no regressions.
+
+6. [x] VmmDriver cmdline shrink for universal initramfs. Removed the
+   legacy `mvm.roothash`, `mvm.data`, `mvm.hash`, and runtime-overlay
+   device tokens from `workload_cmdline` for verity/initramfs boots; they
+   now travel over vsock via `ActivateEnvironment`. The driver base
+   bootargs already emitted only console/panic for the `!has_disk`
+   initramfs branch, so FC/libkrun/HVF/Mock drivers needed no signature
+   change. Updated `workload_runner::cmdline` and runner tests to assert
+   the new token-free cmdline shape. `cargo nextest run -p mvm-runtime`
+   (1091 passed) and `cargo nextest run -p mvm-agentd` (498 passed).
+7. [x] Initramfs cache resolver/builder and CLI attachment. Added
+   `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs` Nix
+   builder + cache installer, and `attach_universal_initramfs_if_cached` in
+   `mvm-cli/src/commands/vm/up/runtime_source.rs`, wired from `exec.rs` and
+   `oci_persist.rs` and `checkpoint.rs` right after the runtime-overlay attachment. The resolver
+   validates `initramfs.cpio.gz`, `initramfs.hash`, `initramfs.size`, and
+   `VERSION`; the builder supports worktree-isolated caches by seeding from
+   the default cache, produces the artifact on Linux via `nix build`, and
+   installs atomically. `cargo fmt --all` passes and the
+   modified crates compile; full workspace clippy/nextest remains blocked on
+   the Nix builder VM availability per Plan 270.
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 

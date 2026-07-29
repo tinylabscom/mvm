@@ -314,6 +314,15 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
 
         let vm = self.driver.boot(&spec)?;
 
+        // Universal initramfs path: the guest PID-1 agent waits for a signed
+        // ActivateEnvironment before exposing operational RPCs. Send it now,
+        // while the broker registration below still has a guard that rolls back
+        // on failure.
+        if inputs.config.initrd_path.is_some() && inputs.config.roothash.is_some() {
+            crate::microvm::activate_workload(&*vm, inputs.config)
+                .context("activate workload after boot")?;
+        }
+
         // Register the per-VM host-services broker (host.audit.v1 /
         // host.secrets.v1) for an admitted workload — the same registration the
         // raw backends run, lifted here so a workload on this runner keeps those
@@ -1312,9 +1321,10 @@ mod tests {
 
         let require_grant = crate::microvm::require_grant_cmdline_token(vm_name)
             .expect("sidecar present ⇒ enforcement token");
+        // Plan 270: roothash and block-device tokens now travel over vsock via
+        // ActivateEnvironment, so the kernel cmdline only carries policy,
+        // egress, and grant tokens.
         for needle in [
-            "mvm.roothash=",
-            "mvm.data=/dev/vda",
             "mvm.verb_grant=",
             require_grant.as_str(),
             "mvm.host_signer_pub=",

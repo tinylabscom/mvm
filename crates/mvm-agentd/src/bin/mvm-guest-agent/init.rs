@@ -17,7 +17,6 @@
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(target_os = "linux")]
 use mvm_agentd::guest_mount;
 use mvm_agentd::vsock::ActivateEnvironment;
 
@@ -25,9 +24,7 @@ use crate::state::{ActivationState, AgentBootState};
 
 /// Fixed workload UID/GID the agent drops to after activation.
 /// Matches the existing `agentUid` used by `nix/lib/mk-guest.nix`.
-#[cfg(target_os = "linux")]
 pub(crate) const WORKLOAD_UID: u32 = 901;
-#[cfg(target_os = "linux")]
 pub(crate) const WORKLOAD_GID: u32 = 901;
 
 /// True when this process is PID 1 in the initramfs.
@@ -62,29 +59,20 @@ pub(crate) fn early_setup() {
 /// rootfs, runtime overlay, and custom volumes, then drops privilege.
 /// On non-PID-1 boots this is a no-op and returns success.
 pub(crate) fn apply_activation(
-    _env: &ActivateEnvironment,
+    env: &ActivateEnvironment,
     boot_state: &AgentBootState,
-) -> Result<(), String> {
+) -> Result<(), guest_mount::MountError> {
     if !is_pid1() {
         return Ok(());
     }
 
     boot_state.set_activation(ActivationState::Activating);
 
-    #[cfg(target_os = "linux")]
-    {
-        let result: Result<(), guest_mount::MountError> = (|| {
-            let new_root = guest_mount::mount_rootfs(&_env.rootfs)?;
-            guest_mount::mount_runtime_overlay(&_env.runtime, &new_root)?;
-            guest_mount::mount_volumes(&_env.volumes, &new_root)?;
-            guest_mount::pivot_to_root(&new_root)?;
-            guest_mount::drop_privilege(WORKLOAD_UID, WORKLOAD_GID)?;
-            Ok(())
-        })();
-        if let Err(e) = result {
-            return Err(e.to_string());
-        }
-    }
+    let new_root = guest_mount::mount_rootfs(&env.rootfs)?;
+    guest_mount::mount_runtime_overlay(&env.runtime, &new_root)?;
+    guest_mount::mount_volumes(&env.volumes, &new_root)?;
+    guest_mount::pivot_to_root(&new_root)?;
+    guest_mount::drop_privilege(WORKLOAD_UID, WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
     eprintln!("mvm-guest-agent: activation complete, serving operational RPCs");

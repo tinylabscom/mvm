@@ -1,4 +1,4 @@
-//! Activation protocol for PID-1 initramfs boot (Plan 270).
+//! Activation protocol for PID-1 initramfs boot.
 //!
 //! The host sends `ActivateEnvironment` over vsock after the kernel has
 //! booted the universal initramfs.  The message carries the dm-verity
