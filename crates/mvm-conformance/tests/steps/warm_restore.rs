@@ -384,3 +384,58 @@ fn plan_verify_fails_unknown_signer(world: &mut CliWorld) {
         "expected an unknown signer error, got: {err}"
     );
 }
+
+// ---- Live warm-restore positive path ----
+
+#[when(expr = "I capture a vm_full checkpoint from {string}")]
+fn capture_vm_full_checkpoint(world: &mut CliWorld, name: String) {
+    crate::steps::cli::run_mvmctl_isolated_live_home(
+        world,
+        format!("machine vm checkpoint create --class vm-full {name}"),
+    );
+    if world.last_output().status.success() {
+        let stdout = String::from_utf8_lossy(&world.last_output().stdout);
+        // "<name>: vm_full checkpoint <id> created"
+        let id = stdout
+            .split_whitespace()
+            .nth(3)
+            .map(str::to_string)
+            .expect("checkpoint output must contain the checkpoint id");
+        world.warm_restore_checkpoint_id = Some(id);
+    }
+}
+
+#[when(expr = "I stop the parent VM {string}")]
+fn stop_parent_vm(world: &mut CliWorld, name: String) {
+    crate::steps::cli::run_mvmctl_isolated_live_home(world, format!("machine stop {name}"));
+}
+
+#[when(expr = "I warm-restore the checkpoint into a child named {string}")]
+fn warm_restore_checkpoint(world: &mut CliWorld, child: String) {
+    let id = world
+        .warm_restore_checkpoint_id
+        .as_ref()
+        .expect("a checkpoint must be captured first")
+        .clone();
+    mvm_core::naming::validate_vm_name(&child).expect("child VM name must be valid");
+    crate::steps::cli::run_mvmctl_isolated_live_home(
+        world,
+        format!("machine warm-restore {id} --name {child}"),
+    );
+}
+
+#[then(expr = "the child VM {string} is running")]
+fn child_vm_running(world: &mut CliWorld, child: String) {
+    crate::steps::cli::run_mvmctl_isolated_live_home(world, format!("machine inspect {child}"));
+    let output = world.last_output();
+    assert!(
+        output.status.success(),
+        "machine inspect must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Running"),
+        "expected child {child:?} to be Running; got:\n{stdout}"
+    );
+}

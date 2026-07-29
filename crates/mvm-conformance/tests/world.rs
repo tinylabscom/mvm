@@ -113,6 +113,8 @@ pub struct CliWorld {
 
     /// Outcome of the most recent plan-verification step.
     pub warm_restore_verify_result: Option<Result<String, String>>,
+    /// Checkpoint id captured by the most recent `machine vm checkpoint create`.
+    pub warm_restore_checkpoint_id: Option<String>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`
