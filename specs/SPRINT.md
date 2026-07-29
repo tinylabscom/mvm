@@ -10,6 +10,21 @@
 
 ## Current issue delivery
 
+- [x] BDD / conformance integration: introduced `model/*.toml` as the single
+      source for conformance claims, generated `CONFORMANCE.md`, and added
+      `xtask` gates for R1 (`check-conformance`), R2 (`check-honesty`), and R4
+      (`check-deferrals`). Added an R3 meta-gate in `mvm-conformance/tests/meta.rs`
+      tying registered IDs to Gherkin scenarios and witnesses. Wired the gates
+      into `just lint`, added hermetic BDD smoke coverage to PR CI's existing
+      test runner, and documented falsifiability in `specs/VERIFICATION.md`.
+      Full workspace clippy, xtask tests, and the meta-gate pass.
+
+- [x] Restore the accepted four-job development CI budget: consolidate
+      no-std and real-kernel filesystem checks into the existing test runner,
+      keep the SDK publication dry-run in the manual full matrix, and remove
+      speculative pre-PR and redundant post-merge `main` runs without changing
+      required check names.
+
 - [x] #1840 faithful flake-image revert: boot the recorded slot revision,
       reconcile signed artifact hashes, and preserve the admitted restore path.
       Implementation, focused tests, workspace tests, check, and clippy pass;
