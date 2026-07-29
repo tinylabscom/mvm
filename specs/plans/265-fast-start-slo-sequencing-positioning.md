@@ -162,9 +162,11 @@ shaving the vsock connect handshake are the next levers; a true pre-spawned
 
 ### WS4 — Witnesses (prerequisite-gated)
 
-- [ ] Prerequisite: wire a `machine` CLI verb that drives the vm_full warm
-      fork/restore — there is no user-facing warm-restore verb today; the number
-      comes only from the Rust `@live` harness.
+- [x] Prerequisite: wire a `machine` CLI verb that drives the vm_full warm
+      fork/restore — `machine warm-restore` added in `crates/mvm-cli` with
+      JSON/text output, unit/CLI tests, and claim-catalog/clippy/fmt gates green.
+      The lower-level env-var guard is bypassed internally because the verb
+      itself is the explicit opt-in.
 - [ ] Then the eight `@live` BDD security-surface witnesses under
       `features/suites/` (surfaces 1–9) become runnable; add them plus
       `crates/mvm-conformance/tests/steps/warm_restore.rs`.
