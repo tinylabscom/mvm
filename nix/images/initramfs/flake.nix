@@ -105,20 +105,13 @@
 
             # Staging tree for the cpio payload.
             staging="$TMPDIR/initramfs-staging"
-            mkdir -p "$staging/dev"
+            mkdir -p "$staging"
 
             # /init is the static guest agent.  Mode 0755 so the kernel can
-            # exec it as PID 1.
+            # exec it as PID 1.  No /dev nodes are staged here: the Nix
+            # sandbox does not permit mknod, and PID 1 mounts devtmpfs as
+            # soon as it starts, so device nodes are created by the kernel.
             install -m 0755 "${agent}/bin/mvm-guest-agent" "$staging/init"
-
-            # Minimal device nodes so PID 1 can log to /dev/console and open
-            # /dev/null during early bring-up before devtmpfs is mounted.
-            # Major/minor numbers are stable Linux conventions.
-            mknod -m 0600 "$staging/dev/console" c 5 1
-            mknod -m 0666 "$staging/dev/null"    c 1 3
-            mknod -m 0666 "$staging/dev/zero"    c 1 5
-            mknod -m 0666 "$staging/dev/random"  c 1 8
-            mknod -m 0666 "$staging/dev/urandom" c 1 9
 
             # Deterministic metadata: epoch timestamps and root ownership keep
             # the content hash stable across rebuilds.
