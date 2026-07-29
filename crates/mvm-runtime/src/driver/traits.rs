@@ -13,7 +13,7 @@ use mvm_core::vm_backend::{
     StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
-use crate::driver::spec::VmmSpec;
+use crate::driver::spec::{VmmSpec, VsockPort};
 use crate::vm::instance_snapshot::PostRestoreOutcome;
 
 /// What a driver needs to fork a materialized standby parent into a fresh child
@@ -34,6 +34,22 @@ pub struct ChildForkRequest<'a> {
     /// [`VmmDriver::deliver_child_identity`] before the claim is admissible.
     /// The request carries it so both halves read the same value.
     pub genid: GenerationToken,
+    /// The host end of every vsock channel the child is entitled to: the agent
+    /// RPC the host dials, the gated egress endpoint, the workload-exit report
+    /// and — for an admitted child — the host-services broker.
+    ///
+    /// This is not a boot recipe. A restored child inherits its device model and
+    /// kernel cmdline from the parent's saved memory, so the guest is already
+    /// configured to dial these ports; what is missing on the host is something
+    /// listening on the other end. The driver puts that in place **before** it
+    /// resumes the child: a restore brings back an already-booted guest, so
+    /// there is no kernel boot to cover the gap the way a cold boot's does.
+    ///
+    /// The list is assembled by the role layer from the same mapper a workload
+    /// boot's channel set comes from, never derived here — a second derivation
+    /// is free to drift, and a claimed child that dials a channel nobody bound
+    /// is silently less capable than a cold-booted one.
+    pub channels: &'a [VsockPort],
 }
 
 /// What a driver needs to boot a warm-pool factory parent. Grouped so the seam
@@ -106,6 +122,12 @@ pub trait VmmDriver: Send + Sync {
     /// fork/restore mechanics only: the role layer above has already admitted the
     /// plan, bound it to the parent, materialized the rootfs, and scrubbed the
     /// identity.
+    ///
+    /// Before it resumes anything the driver wires `req.channels` — the host end
+    /// of the channels the restored guest dials. A cold boot does the equivalent
+    /// before `InstanceStart`; a fork has a tighter window, because the guest it
+    /// brings back is already past its own boot and can dial the moment its
+    /// vCPUs run.
     ///
     /// The child comes back **still carrying the parent's random state**: a
     /// restore has no boot at which to seed it, and the guest is not reachable

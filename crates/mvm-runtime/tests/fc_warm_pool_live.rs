@@ -201,6 +201,11 @@ fn fc_warm_pool_spawn_and_claim() {
             token: [0u8; GENID_BYTES],
             content_hash: parent_checkpoint.as_str().to_string(),
         },
+        // This harness drives the driver seam directly and stands up none of
+        // the host-side processes a claim wires channels to — no gating
+        // endpoint, no broker — so it hands down the empty set the parent
+        // itself booted with. What it measures is the restore, not the wiring.
+        channels: &[],
     });
     if let Err(ref e) = fork_result {
         eprintln!("fork failed: {e:#}");

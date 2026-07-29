@@ -44,7 +44,7 @@ use crate::workload_runner::claim::{
 use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_no_dir_share_volumes,
-    workload_spec,
+    workload_spec, workload_vsock_ports,
 };
 use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
 
@@ -216,6 +216,27 @@ struct StandingSockets {
     console_data: Vec<(u32, PathBuf)>,
 }
 
+impl StandingSockets {
+    /// Bind these resolved sockets to `egress_uds` — the gating endpoint the
+    /// guest's `EGRESS_PORT` relays to — yielding the channel description both
+    /// start paths map through [`workload_vsock_ports`].
+    ///
+    /// The one place a workload's channel description is built. A cold boot
+    /// composes the mapped channels into the spec it boots; a warm claim hands
+    /// the same mapped channels to the fork, which wires them before the
+    /// restored child resumes. Adding a channel to the mapper therefore reaches
+    /// both, and neither path can grow one the other lacks.
+    fn with_egress<'a>(&'a self, egress_uds: &'a Path) -> WorkloadSockets<'a> {
+        WorkloadSockets {
+            agent: &self.agent,
+            egress_gateway: egress_uds,
+            exit: &self.exit,
+            broker: self.broker.as_deref(),
+            console_data: self.console_data.clone(),
+        }
+    }
+}
+
 fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets {
     StandingSockets {
         // Single source of truth shared with the host-side resolver so the
@@ -321,15 +342,9 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
-            sockets: WorkloadSockets {
-                agent: &socks.agent,
-                egress_gateway: endpoint.egress_uds(),
-                exit: &socks.exit,
-                broker: socks.broker.as_deref(),
-                console_data: socks.console_data,
-            },
+            sockets: socks.with_egress(endpoint.egress_uds()),
             cmdline: inputs.cmdline.clone(),
-            console_log: socks.console_log,
+            console_log: socks.console_log.clone(),
         });
 
         let vm = self.driver.boot(&spec)?;
@@ -360,10 +375,17 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     /// digest to that verified parent (so the audit-recorded plan describes
     /// exactly what boots); mint a fresh, registry-unique identity; materialize
     /// the child's rootfs from the parent's own verified content; run the
-    /// host-side overlay-contract gate and spawn the child's own 0700
-    /// substitution endpoint keyed on its fresh id; then fork the VMM and require
-    /// the restored guest to prove it adopted a fresh VMGenID before the claim
-    /// commits, so the child's CSPRNG diverges from the parent's.
+    /// host-side overlay-contract gate, spawn the child's own 0700 substitution
+    /// endpoint keyed on its fresh id, resolve its host channel set and register
+    /// its host-services broker; then fork the VMM and require the restored
+    /// guest to prove it adopted a fresh VMGenID before the claim commits, so
+    /// the child's CSPRNG diverges from the parent's.
+    ///
+    /// The host-side plumbing is deliberately all on the near side of the fork.
+    /// A cold boot has a kernel boot between wiring its channels and the guest
+    /// dialing them; a restore has nothing — the guest comes back already booted
+    /// and runs the moment the fork resumes it. Anything wired afterwards would
+    /// be wired against a guest already dialing sockets that do not exist.
     ///
     /// Layering the runner does NOT own (enforced at their own layers, mirroring
     /// a cold boot): claim-8 admission of the child plan (CLI mint + supervisor
@@ -436,6 +458,31 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             )
             .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e}")))?;
 
+        // The child's host channel set, resolved under its own state dir and
+        // mapped through the one mapper a cold boot's set comes from. The fork
+        // wires these before it resumes the child; a restored guest is already
+        // booted, so it dials the instant its vCPUs run.
+        let socks = standing_sockets(&child_dir, &child_cfg);
+        let channels = workload_vsock_ports(&socks.with_egress(endpoint.egress_uds()));
+
+        // Register the child's host-services broker (host.audit.v1 /
+        // host.secrets.v1) — the same registration a cold boot performs, and for
+        // the same reason: without it the child would run silently short of the
+        // services an admitted workload is entitled to. Registered before the
+        // fork rather than after it, because the restore resumes a guest that
+        // can dial `BROKER_PORT` immediately. Best-effort inside `register` (a
+        // failure is logged, never a rollback); the guard reaps until the claim
+        // commits.
+        let mut broker_guard = self
+            .broker
+            .register(&BrokerRegisterRequest {
+                vm_name: &child.0,
+                state_dir: &child_dir,
+                tenant: child_cfg.tenant_id.as_deref(),
+                broker_listen_socket: socks.broker.as_deref(),
+            })
+            .map_err(|e| StandbyError::ClaimFailed(format!("register child broker: {e}")))?;
+
         // (6b) Mint a fresh VMGenID bound to the child's content-address and fork
         // the VMM. A fork restores a running guest out of the parent's saved
         // memory, so the child comes back holding the parent's CSPRNG state and
@@ -447,6 +494,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             child_vm_name: &child.0,
             child_dir: &child_dir,
             genid,
+            channels: &channels,
         })?;
 
         // (7) Close that window before the claim commits: deliver the token to
@@ -463,10 +511,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             return Err(refusal);
         }
 
-        // The child booted and proved a fresh identity: disarm the endpoint reaper
-        // (the stop path owns it now) and commit — the parent stays reserved and
-        // the child dir is real state.
+        // The child booted and proved a fresh identity: disarm the endpoint and
+        // broker reapers (the stop path owns them now) and commit — the parent
+        // stays reserved and the child dir is real state.
         endpoint.defuse();
+        broker_guard.defuse();
         cleanup.commit();
         Ok(child)
     }
@@ -2129,12 +2178,19 @@ mod tests {
         ));
 
         // The parent boots with no vsock channel at all: no egress relay, no
-        // broker port, so a stray guest dial to either stays ECONNREFUSED.
+        // broker port, no exit report — so a stray guest dial to any of them
+        // stays ECONNREFUSED. Only a claimed child gets those three; parents and
+        // workloads live in disjoint namespaces and this is where that holds.
         let booted = runner.driver.booted_specs();
         assert_eq!(booted.len(), 1);
         assert!(
             booted[0].vsock.is_empty(),
-            "parent boot must carry no vsock channel (no egress/broker endpoint)"
+            "parent boot must carry no vsock channel (no egress, broker or exit channel), got: {:?}",
+            booted[0]
+                .vsock
+                .iter()
+                .map(|p| p.guest_port)
+                .collect::<Vec<_>>()
         );
 
         // No substitution endpoint and no broker were stood up for the parent:
@@ -2589,6 +2645,204 @@ mod tests {
             pool.load("warm-parent").unwrap().state,
             StandbyState::Claimed,
             "the parent is reserved so a concurrent claim cannot double-claim it"
+        );
+    }
+
+    /// A channel set described independently of which VM owns it: each port's
+    /// number, direction, and where its host socket sits *relative to that VM's
+    /// own* socket and state dirs. Two VMs' descriptions compare equal exactly
+    /// when they carry the same channels wired to the same per-VM locations —
+    /// and the relativization keeps that true even when one VM's name is long
+    /// enough to push its sockets into the short hashed namespace.
+    fn channel_shape(
+        channels: &[crate::driver::VsockPort],
+        vm: &str,
+    ) -> Vec<(u32, crate::driver::VsockDirection, String)> {
+        let roots = [
+            ("socket-dir", mvm_core::config::vm_socket_dir(vm)),
+            ("state-dir", vm_state_dir(vm)),
+        ];
+        channels
+            .iter()
+            .map(|p| {
+                let where_ = roots
+                    .iter()
+                    .find_map(|(label, root)| {
+                        p.host_uds
+                            .strip_prefix(root)
+                            .ok()
+                            .map(|rest| format!("<{label}>/{}", rest.display()))
+                    })
+                    .unwrap_or_else(|| p.host_uds.display().to_string());
+                (p.guest_port, p.direction, where_)
+            })
+            .collect()
+    }
+
+    /// One cold boot and one warm claim on the same runner, so the two host
+    /// channel sets the driver was handed can be compared directly.
+    struct ColdAndWarm {
+        driver: MockDriver,
+        broker: Option<RecordedBroker>,
+        cold_vm: String,
+        child: VmId,
+        /// Held so the assertions resolve the same `MVM_HOME` the run did.
+        /// Declaration order is drop order: the home dir goes, then the env is
+        /// restored, then the lock is released.
+        _home: tempfile::TempDir,
+        _env: TestEnv,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    /// Boot an admitted workload cold, then claim a child off a clean audited
+    /// parent seeded from the same rootfs — both through one runner, with the
+    /// endpoint spawner that keys its socket on the VM name (as the real one
+    /// does), so the two channel sets differ only where the VM identity does.
+    ///
+    /// The isolated `MVM_HOME` is handed back alive, so the caller's assertions
+    /// resolve the same per-VM paths the run wrote.
+    fn cold_boot_then_claim() -> ColdAndWarm {
+        let lock = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+        let rootfs = src.path().join("rootfs.ext4");
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        // The cold boot: an admitted launch (tenant set), so it carries the
+        // broker channel a claimed child must also get.
+        let cold_vm = "cold-admitted-workload".to_string();
+        runner
+            .start(&VmStartConfig {
+                name: cold_vm.clone(),
+                rootfs_path: rootfs.display().to_string(),
+                kernel_path: Some("/img/kernel".into()),
+                tenant_id: Some("tenant-x".into()),
+                cpus: 2,
+                memory_mib: 512,
+                ..Default::default()
+            })
+            .expect("the cold admitted workload boots");
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+        let claim = admitted_child_claim(&rootfs, signed_child_plan_json(&parent_digest));
+
+        let child = runner
+            .claim_standby(
+                &ClaimContext {
+                    pool: &pool,
+                    checkpoints: &checkpoints,
+                    snapshots: &snapshots,
+                    anchor: &anchor,
+                    parent_checkpoint: &parent_id,
+                    registry_path: &registry_path,
+                },
+                &handle,
+                &claim,
+            )
+            .expect("claim");
+
+        ColdAndWarm {
+            driver: runner.driver.clone(),
+            broker: runner.broker.seen.lock().unwrap().take(),
+            cold_vm,
+            child,
+            _home: home,
+            _env: env,
+            _lock: lock,
+        }
+    }
+
+    /// A claimed child must reach the same host-side channels a cold-booted
+    /// workload does. Asserted as an equality against the cold boot's own set
+    /// rather than as a list of ports: a channel added to the workload's set and
+    /// not to the claim's would leave a claimed child silently less capable than
+    /// a cold-booted one, and only an equality catches that.
+    #[test]
+    fn claim_hands_the_child_the_same_host_channels_a_cold_boot_gets() {
+        use mvm_agentd::vsock::{GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT};
+
+        let run = cold_boot_then_claim();
+
+        let booted = run.driver.booted_specs();
+        assert_eq!(booted.len(), 1, "one cold workload boot");
+        let cold = &booted[0].vsock;
+
+        // Non-vacuity: the fixture must actually exercise all four standing
+        // channels, or "the two match" would say nothing. These are the three
+        // the fork used to drop, plus the agent RPC.
+        let ports: Vec<u32> = cold.iter().map(|p| p.guest_port).collect();
+        for (port, what) in [
+            (EGRESS_PORT, "the gated egress endpoint"),
+            (BROKER_PORT, "host.audit.v1 / host.secrets.v1"),
+            (WORKLOAD_EXIT_PORT, "the guest's exit-code report"),
+            (GUEST_AGENT_PORT, "the agent RPC"),
+        ] {
+            assert!(
+                ports.contains(&port),
+                "fixture must exercise {what} (port {port}), got {ports:?}"
+            );
+        }
+
+        let forks = run.driver.forked_children();
+        assert_eq!(forks.len(), 1, "exactly one child fork");
+        assert_eq!(
+            channel_shape(&forks[0].channels, &run.child.0),
+            channel_shape(cold, &run.cold_vm),
+            "a claimed child must be handed exactly the channel set a cold boot wires"
+        );
+    }
+
+    /// The child's broker is registered on the very socket its `BROKER_PORT`
+    /// channel relays to, and under the claim's tenant — otherwise the guest
+    /// dials a path nothing is bound to and `host.audit.v1` / `host.secrets.v1`
+    /// are silently unavailable, a real degradation versus a cold boot.
+    #[test]
+    fn claim_registers_the_childs_broker_on_the_socket_it_wired() {
+        let run = cold_boot_then_claim();
+
+        let broker = run
+            .broker
+            .as_ref()
+            .expect("a claimed child registers a host-services broker");
+        assert_eq!(
+            broker.vm_name, run.child.0,
+            "the broker is registered for the child's own id, never the parent's"
+        );
+        assert_eq!(broker.tenant.as_deref(), Some("tenant-x"));
+
+        let wired = run.driver.forked_children()[0]
+            .channels
+            .iter()
+            .find(|p| p.guest_port == BROKER_PORT)
+            .map(|p| p.host_uds.clone())
+            .expect("the child carries a broker channel");
+        assert_eq!(
+            broker.broker_listen_socket.as_ref(),
+            Some(&wired),
+            "the broker must bind the same path the child's BROKER_PORT relays to"
+        );
+        assert_eq!(
+            wired,
+            mvm_core::config::vm_vsock_port_socket_at(&vm_state_dir(&run.child.0), BROKER_PORT),
+            "the broker socket lives under the child's own state dir"
         );
     }
 
