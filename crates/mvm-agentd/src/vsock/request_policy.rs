@@ -47,6 +47,7 @@ impl GuestRequest {
             GuestRequest::SleepPrep { .. } => Verb::SleepPrep,
             GuestRequest::Wake => Verb::Wake,
             GuestRequest::Ping => Verb::Ping,
+            GuestRequest::ResourceUsage => Verb::ResourceUsage,
             GuestRequest::IntegrationStatus => Verb::IntegrationStatus,
             GuestRequest::CheckpointIntegrations { .. } => Verb::CheckpointIntegrations,
             GuestRequest::ProbeStatus => Verb::ProbeStatus,
@@ -107,6 +108,7 @@ impl GuestRequest {
             | GuestRequest::SleepPrep { .. }
             | GuestRequest::Wake
             | GuestRequest::Ping
+            | GuestRequest::ResourceUsage
             | GuestRequest::IntegrationStatus
             | GuestRequest::CheckpointIntegrations { .. }
             | GuestRequest::ProbeStatus
@@ -177,6 +179,7 @@ impl GuestRequest {
         &[
             "protocol-hello",
             "ping",
+            "resource-usage",
             "readiness-status",
             "worker-status",
             "sleep-prep",
@@ -232,6 +235,7 @@ mod tests {
             },
             GuestRequest::Wake,
             GuestRequest::Ping,
+            GuestRequest::ResourceUsage,
             GuestRequest::IntegrationStatus,
             GuestRequest::CheckpointIntegrations {
                 integrations: vec![],
@@ -374,6 +378,7 @@ mod tests {
             "SleepPrep",
             "Wake",
             "Ping",
+            "ResourceUsage",
             "IntegrationStatus",
             "CheckpointIntegrations",
             "ProbeStatus",

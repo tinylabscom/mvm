@@ -37,6 +37,8 @@ pub enum GuestRequest {
     Wake,
     /// Health probe.
     Ping,
+    /// Query the guest agent process's current resident memory.
+    ResourceUsage,
     /// Query status of all managed integrations.
     IntegrationStatus,
     /// Checkpoint named integrations before sleep.
@@ -442,6 +444,7 @@ impl GuestRequest {
             Self::SleepPrep { .. } => "sleep-prep",
             Self::Wake => "wake",
             Self::Ping => "ping",
+            Self::ResourceUsage => "resource-usage",
             Self::IntegrationStatus => "integration-status",
             Self::CheckpointIntegrations { .. } => "checkpoint-integrations",
             Self::ProbeStatus => "probe-status",
@@ -515,6 +518,7 @@ mod tests {
             },
             GuestRequest::Wake,
             GuestRequest::Ping,
+            GuestRequest::ResourceUsage,
             GuestRequest::IntegrationStatus,
             GuestRequest::CheckpointIntegrations {
                 integrations: vec!["whatsapp".to_string(), "telegram".to_string()],
@@ -1094,6 +1098,7 @@ mod tests {
             ),
             (GuestRequest::Wake, "wake"),
             (GuestRequest::Ping, "ping"),
+            (GuestRequest::ResourceUsage, "resource-usage"),
             (GuestRequest::IntegrationStatus, "integration-status"),
             (
                 GuestRequest::CheckpointIntegrations {

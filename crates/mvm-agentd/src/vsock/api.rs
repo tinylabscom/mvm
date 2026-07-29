@@ -56,6 +56,12 @@ pub fn ping(instance_dir: &str) -> Result<bool> {
     Ok(matches!(resp, GuestResponse::Pong))
 }
 
+/// Query the guest agent process's current RSS in bytes.
+pub fn query_resource_usage(instance_dir: &str) -> Result<u64> {
+    let mut stream = connect(instance_dir, DEFAULT_TIMEOUT_SECS)?;
+    resource_usage_response(send_request(&mut stream, &GuestRequest::ResourceUsage)?)
+}
+
 /// Query integration status from the guest agent.
 pub fn query_integration_status(
     instance_dir: &str,
@@ -100,6 +106,20 @@ pub fn ping_at(vsock_uds_path: &str) -> Result<bool> {
     let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
     let resp = send_request(&mut stream, &GuestRequest::Ping)?;
     Ok(matches!(resp, GuestResponse::Pong))
+}
+
+/// Query the guest agent process's current RSS through a direct UDS path.
+pub fn query_resource_usage_at(vsock_uds_path: &str) -> Result<u64> {
+    let mut stream = connect_to(vsock_uds_path, DEFAULT_TIMEOUT_SECS)?;
+    resource_usage_response(send_request(&mut stream, &GuestRequest::ResourceUsage)?)
+}
+
+fn resource_usage_response(response: GuestResponse) -> Result<u64> {
+    match response {
+        GuestResponse::ResourceUsageReport { rss_bytes } => Ok(rss_bytes),
+        GuestResponse::Error { message } => bail!("Guest resource usage error: {message}"),
+        _ => bail!("Unexpected response to ResourceUsage"),
+    }
 }
 
 /// Query worker status from the guest vsock agent at a specific UDS path.
@@ -518,6 +538,22 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn resource_usage_response_maps_report_and_rejects_other_variants() {
+        assert_eq!(
+            resource_usage_response(GuestResponse::ResourceUsageReport { rss_bytes: 4096 })
+                .unwrap(),
+            4096
+        );
+        assert!(
+            resource_usage_response(GuestResponse::Error {
+                message: "unavailable".into()
+            })
+            .is_err()
+        );
+        assert!(resource_usage_response(GuestResponse::Pong).is_err());
     }
 
     #[test]

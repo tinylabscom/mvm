@@ -222,16 +222,22 @@ Tracked here per the deferred-work convention; each is its own future plan.
   SDK host-service verbs remains. The overlay allocation is now capped at 16 MiB,
   with a build-backed footprint gate covering the Nix-built rootfs, overlay,
   verity sidecars, and workload kernel.
-- **WS-4 (lever D):** add a measured guest-agent RSS gate (≤ ~8 MB); the tokio-free agent already lands most of it.
+- **WS-4 (lever D):** complete. The capability-negotiated `ResourceUsage`
+  control request reports the agent's own current RSS through the existing
+  `/proc` sampler. A fresh static-musl Dev-profile overlay measured a
+  conservative observed peak of 1,372,160 bytes (steady idle: 1,359,872 bytes),
+  and `xtask perf footprint --guest-rss-bytes` enforces the 8 MiB ceiling.
 - **WS-5 (lever A/E):** the kernel-module metadata audit is complete and the rootfs
   now copies only `modules.dep`. The default tenant also drops its redundant
   dynamic busybox closure. The Mozilla CA bundle is copied into `/etc` without
   retaining its source store path, and a build-backed gate caps the lean registered
   runtime closure at static BusyBox plus `mvm-setpriv`.
-- **WS-6:** `xtask perf footprint` now measures the Nix-built rootfs, runtime overlay,
-  dm-verity sidecars, and kernel against the 50 MiB complete-artifact contract.
-  The same JSON/human ledger now validates and reports the exact hash-anchored
-  rootfs closure, capped at two store paths. A measured RSS entry remains.
+- **WS-6:** complete. `xtask perf footprint` measures the Nix-built rootfs,
+  runtime overlay, dm-verity sidecars, and kernel against the 50 MiB
+  complete-artifact contract; validates the exact hash-anchored rootfs closure,
+  capped at two store paths; and validates/reports measured guest-agent RSS in
+  the same JSON/human ledger. The build-backed ledger measured 50,649,096 bytes
+  of storage with 1,779,704 bytes of headroom.
 
 ## Self-review
 
@@ -289,4 +295,7 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
 - [x] Export the exact rootfs closure inventory from the default-tenant image and
   validate it in the unified ledger. The build-backed measurement contains two
   hash-anchored paths: static BusyBox and static `mvm-setpriv`.
-- [ ] Add measured guest-agent RSS (≤ 8 MiB) to the unified ledger.
+- [x] Add a capability-negotiated guest-agent RSS query, measure the rebuilt
+  static agent in a live guest, and enforce the 8 MiB limit in the unified
+  ledger. The Dev-profile peak was 1,372,160 bytes; the build-backed storage
+  ledger remained green at 50,649,096 bytes (48.30 MiB).

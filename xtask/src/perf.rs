@@ -26,6 +26,7 @@
 //! cargo xtask perf rootfs-size --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --kernel result/vmlinux --closure-paths result/rootfs-closure-paths
+//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --guest-rss-bytes 4194304
 //! ```
 //!
 //! ## What this does NOT do (yet)
@@ -69,6 +70,9 @@ pub const GUEST_STORAGE_MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 /// rootfs: static BusyBox and the static privilege-drop helper.
 pub const GUEST_ROOTFS_MAX_STORE_PATHS: usize = 2;
 
+/// Maximum current RSS for the idle guest-agent process.
+pub const GUEST_AGENT_RSS_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Cold-boot wall-clock budget for the Firecracker backend.
 /// The floor is 300ms; the strict gate is 500ms p50.
 pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(500);
@@ -97,7 +101,7 @@ pub fn run(args: &[String]) -> Result<()> {
                 "  rootfs-size --rootfs <PATH>    Assert rootfs is ≤ {ROOTFS_MAX_BYTES} bytes"
             );
             eprintln!(
-                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>] [--closure-paths <PATH>]"
+                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>] [--closure-paths <PATH>] [--guest-rss-bytes <N>]"
             );
             eprintln!(
                 "                                 Assert the supplied guest artifacts total ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
@@ -161,6 +165,13 @@ pub fn all_budgets() -> Vec<PerfBudget> {
             unit: "bytes",
             source: "lightweight guest footprint contract",
             description: "Nix-built rootfs + runtime overlay + verity sidecars + workload kernel",
+        },
+        PerfBudget {
+            name: "guest_agent_rss",
+            limit: GUEST_AGENT_RSS_MAX_BYTES,
+            unit: "bytes",
+            source: "lightweight guest RSS contract",
+            description: "Idle guest-agent current resident memory",
         },
         PerfBudget {
             name: "firecracker_cold_boot",
@@ -346,6 +357,8 @@ struct FootprintReport {
     entries: Vec<FootprintEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rootfs_closure: Option<ClosureInventory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_agent_rss_bytes: Option<u64>,
 }
 
 fn footprint_subcommand(args: &[String]) -> Result<()> {
@@ -355,8 +368,13 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
         .as_deref()
         .map(|path| read_closure_inventory(path, GUEST_ROOTFS_MAX_STORE_PATHS))
         .transpose()?;
+    let guest_agent_rss_bytes = optional_u64_arg(args, "--guest-rss-bytes")?;
+    if let Some(rss_bytes) = guest_agent_rss_bytes {
+        guest_rss_check(rss_bytes, GUEST_AGENT_RSS_MAX_BYTES)?;
+    }
     let mut report = guest_storage_footprint_check(&artifacts, GUEST_STORAGE_MAX_BYTES)?;
     report.rootfs_closure = rootfs_closure;
+    report.guest_agent_rss_bytes = guest_agent_rss_bytes;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -382,6 +400,12 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
             for store_path in &inventory.store_paths {
                 eprintln!("    {store_path}");
             }
+        }
+        if let Some(rss_bytes) = report.guest_agent_rss_bytes {
+            eprintln!(
+                "  {:<16} {} bytes (under {} bytes / 8 MiB)",
+                "guest-agent-rss", rss_bytes, GUEST_AGENT_RSS_MAX_BYTES
+            );
         }
     }
     Ok(())
@@ -458,7 +482,17 @@ fn guest_storage_footprint_check(
         total_bytes,
         entries,
         rootfs_closure: None,
+        guest_agent_rss_bytes: None,
     })
+}
+
+fn guest_rss_check(rss_bytes: u64, max_bytes: u64) -> Result<()> {
+    if rss_bytes > max_bytes {
+        bail!(
+            "guest agent RSS is {rss_bytes} bytes — over the guest-agent RSS budget of {max_bytes} bytes (8 MiB)"
+        );
+    }
+    Ok(())
 }
 
 fn read_closure_inventory(path: &Path, max_store_paths: usize) -> Result<ClosureInventory> {
@@ -527,6 +561,18 @@ fn optional_path_arg(args: &[String], flag: &str) -> Result<Option<PathBuf>> {
     args.get(index + 1)
         .map(|path| Some(PathBuf::from(path)))
         .ok_or_else(|| anyhow::anyhow!("{flag} requires a path"))
+}
+
+fn optional_u64_arg(args: &[String], flag: &str) -> Result<Option<u64>> {
+    let Some(index) = args.iter().position(|arg| arg == flag) else {
+        return Ok(None);
+    };
+    let raw = args
+        .get(index + 1)
+        .ok_or_else(|| anyhow::anyhow!("{flag} requires a byte count"))?;
+    raw.parse::<u64>()
+        .map(Some)
+        .with_context(|| format!("{flag} must be an unsigned byte count"))
 }
 
 // ============================================================================
@@ -664,6 +710,11 @@ mod tests {
     }
 
     #[test]
+    fn guest_agent_rss_budget_is_eight_mib() {
+        assert_eq!(GUEST_AGENT_RSS_MAX_BYTES, 8 * 1024 * 1024);
+    }
+
+    #[test]
     fn firecracker_boot_budget_is_500ms() {
         assert_eq!(FIRECRACKER_BOOT_BUDGET, Duration::from_millis(500));
     }
@@ -790,6 +841,18 @@ mod tests {
 
         let err = guest_storage_footprint_check(&artifacts, 14).unwrap_err();
         assert!(err.to_string().contains("over the footprint budget"));
+    }
+
+    #[test]
+    fn guest_rss_check_accepts_the_budget_boundary() {
+        guest_rss_check(GUEST_AGENT_RSS_MAX_BYTES, GUEST_AGENT_RSS_MAX_BYTES).unwrap();
+    }
+
+    #[test]
+    fn guest_rss_check_rejects_one_byte_over_budget() {
+        let err =
+            guest_rss_check(GUEST_AGENT_RSS_MAX_BYTES + 1, GUEST_AGENT_RSS_MAX_BYTES).unwrap_err();
+        assert!(err.to_string().contains("over the guest-agent RSS budget"));
     }
 
     #[test]
@@ -952,7 +1015,7 @@ mod tests {
         // The count is a tripwire — if someone adds a budget without
         // a corresponding constant-pin test, this assert pushes them
         // to update both.
-        assert_eq!(all_budgets().len(), 12);
+        assert_eq!(all_budgets().len(), 13);
     }
 
     #[test]
@@ -994,6 +1057,15 @@ mod tests {
             .find(|b| b.name == "guest_storage_size")
             .expect("guest_storage_size budget");
         assert_eq!(b.limit, GUEST_STORAGE_MAX_BYTES);
+    }
+
+    #[test]
+    fn all_budgets_pin_guest_agent_rss_to_constant() {
+        let budget = all_budgets()
+            .into_iter()
+            .find(|budget| budget.name == "guest_agent_rss")
+            .expect("guest_agent_rss budget");
+        assert_eq!(budget.limit, GUEST_AGENT_RSS_MAX_BYTES);
     }
 
     #[test]

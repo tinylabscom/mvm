@@ -517,7 +517,7 @@ impl WorkerPool {
             );
             return true;
         }
-        if let Some(rss) = sample_rss_bytes(handle.pid) {
+        if let Some(rss) = process_rss_bytes(handle.pid) {
             handle.last_rss_bytes = rss;
             let cap = self.cfg.max_rss_mb.saturating_mul(1024 * 1024);
             if rss > cap {
@@ -779,7 +779,7 @@ fn spawn_watchdog(
 /// is `resident` in pages. Returns `None` if the file can't be read
 /// or parsed — the caller treats absent samples as "no recycle
 /// triggered by RSS" rather than failing the call.
-fn sample_rss_bytes(pid: u32) -> Option<u64> {
+pub fn process_rss_bytes(pid: u32) -> Option<u64> {
     let path = format!("/proc/{pid}/statm");
     let raw = std::fs::read_to_string(path).ok()?;
     let pages: u64 = raw.split_whitespace().nth(1)?.parse().ok()?;
@@ -834,5 +834,12 @@ mod tests {
             max_queue_depth: None,
         };
         assert_eq!(cfg.effective_queue_depth(), 6);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn process_rss_bytes_reads_the_current_process() {
+        let rss = process_rss_bytes(std::process::id()).expect("current process RSS");
+        assert!(rss > 0);
     }
 }

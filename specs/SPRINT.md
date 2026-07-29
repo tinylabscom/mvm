@@ -421,7 +421,10 @@ Then unify + retire the old paths:
 **WS10 — tiny kernel + low memory + density**
 
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
-- [ ] Guest agent ≈ **8 MB**: de-`tokio` the guest (mio / raw epoll+kqueue), strip deps, measure RSS.
+- [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured
+  1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The
+  capability-negotiated `ResourceUsage` RPC uses the existing `/proc` sampler,
+  and `xtask perf footprint --guest-rss-bytes` enforces and reports the limit.
 - [ ] Host daemon ≈ **64 MB**: minimal runtime, evaluate `mimalloc`, strip deps.
 - [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
 - [ ] Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "abort"` for bins.
