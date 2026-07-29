@@ -1255,6 +1255,77 @@ mod tests {
         std::fs::write(keys_dir.join("host-signer.pub"), [0xEEu8; 32]).unwrap();
     }
 
+    /// Seed only the host key — no verb-grant sidecar. Models the transient
+    /// `machine run` path, which mints no grant.
+    fn seed_host_key_only() {
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.pub"), [0xEEu8; 32]).unwrap();
+    }
+
+    /// A launch that mints no verb grant must still carry the host-signer
+    /// anchor, or its guest agent has no pinned key to authenticate the control
+    /// channel against, rejects every connection, and the run dies at its first
+    /// RPC.
+    ///
+    /// The sibling test below covers the grant-*bearing* launch, and that was
+    /// exactly the gap: the anchor used to be gated on the grant sidecar, so the
+    /// grant-less shape shipped no anchor and nothing at this level noticed.
+    /// Asserting the token builder alone did not catch it either — the
+    /// regression only surfaced in an assembled cmdline.
+    #[test]
+    fn start_carries_the_host_anchor_without_a_grant_but_grants_no_authority() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        let vm_name = "runner-grantless-anchor";
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(vm_name, false, true)
+            .write_to_dir(rootfs_dir.path())
+            .unwrap();
+
+        seed_host_key_only();
+
+        let cfg = VmStartConfig {
+            name: vm_name.into(),
+            rootfs_path: rootfs.display().to_string(),
+            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
+            ..Default::default()
+        };
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        runner.start(&cfg).expect("start succeeds");
+
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs.len(), 1);
+        let cmdline = &specs[0].cmdline;
+
+        assert!(
+            cmdline.contains("mvm.host_signer_pub="),
+            "a grant-less launch must still pin the host anchor, or the agent \
+             rejects every control connection: {cmdline}"
+        );
+        // Reachable, but no more privileged: authority stays sidecar-gated.
+        assert!(
+            !cmdline.contains("mvm.verb_grant="),
+            "no grant was minted, so no grant token may appear: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("mvm.require_grant="),
+            "no grant was minted, so enforcement must not be demanded: {cmdline}"
+        );
+    }
+
     /// `WorkloadRunner::start` (the `VmBackend::start` production path) must
     /// assemble the same security-bearing kernel cmdline the raw HVF backend
     /// does — dm-verity, the plan-bound grant triple, vsock egress, and the
