@@ -134,6 +134,15 @@ jobs:
       - name: Conformance claim catalog
         run: cargo run -p xtask -- check-claim-catalog
 
+      - name: Conformance model is the single source (R1)
+        run: cargo run -p xtask -- check-conformance
+
+      - name: No deferred markers (R4)
+        run: cargo run -p xtask -- check-deferrals
+
+      - name: Honesty levels respected in docs (R2)
+        run: cargo run -p xtask -- check-honesty
+
       - name: Trust-gradient ledger
         run: cargo run -p xtask -- check-trust-gradient
 
@@ -292,6 +301,47 @@ jobs:
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
+
+  bdd-smoke:
+    name: BDD / conformance meta-gate smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system build deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/azure*.list
+          sudo apt-get update
+          sudo apt-get install -y libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bdd-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-bdd-smoke-
+
+      # Hermetic BDD: no live microVMs. @live/@firecracker/@bundle scenarios
+      # are skipped because MVM_BDD_LIVE is unset and no bundle fixture is
+      # supplied. The meta-gate validates R3 (register ↔ scenarios ↔ witnesses).
+      - name: Conformance meta-gate (R3)
+        run: cargo test -p mvm-conformance --test meta
+
+      - name: Hermetic BDD scenarios
+        run: just bdd
 
   sdk-release-dry-run:
     name: SDK release dry-run

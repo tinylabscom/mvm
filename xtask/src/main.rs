@@ -15,8 +15,10 @@ mod check_builder_shell_job_sites;
 mod check_claim_catalog;
 mod check_cli_runtime_surface;
 mod check_closure_budget;
+mod check_conformance;
 mod check_content_address_determinism;
 mod check_core_runtime_free;
+mod check_deferrals;
 mod check_doc_claims;
 mod check_duplicate_majors;
 mod check_file_size;
@@ -25,6 +27,7 @@ mod check_guest_agent_in_all_images;
 mod check_guest_agent_runtime_free;
 mod check_guest_binary_lists;
 mod check_guest_images_no_builder_tools;
+mod check_honesty;
 mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
 mod check_machine_doc_guards;
@@ -102,6 +105,14 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_content_address_determinism::run(&workspace)
         }
+        Some("check-deferrals") => {
+            let workspace = workspace_root();
+            check_deferrals::run(&workspace)
+        }
+        Some("check-honesty") => {
+            let workspace = workspace_root();
+            check_honesty::run(&workspace)
+        }
         Some("check-builder-shell-job-sites") => {
             let workspace = workspace_root();
             check_builder_shell_job_sites::run(&workspace)
@@ -162,6 +173,11 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_claim_catalog::run(&workspace)
         }
+        Some("check-conformance") => {
+            let workspace = workspace_root();
+            let write = args.iter().any(|a| a == "--write");
+            check_conformance::run(&workspace, write)
+        }
         Some("check-trust-gradient") => {
             let workspace = workspace_root();
             check_trust_gradient::run(&workspace)
@@ -218,7 +234,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -250,6 +266,12 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-content-address-determinism       Assert serde_json in mvm-core/mvm-protocol has no preserve_order (stable key order → deterministic plan_id/checkpoint digests)"
+            );
+            eprintln!(
+                "  check-deferrals                         Verify no deferred TODO/FIXME/unimplemented!/placeholder markers"
+            );
+            eprintln!(
+                "  check-honesty                         Verify no open/some-true claim is asserted as established in docs"
             );
             eprintln!(
                 "  check-builder-shell-job-sites           Plan 204 WS-D: freeze the set of files that construct a legacy builder shell-job request"
@@ -298,6 +320,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-claim-catalog                    Verify the claims ledger embedded in specs/adrs/001-microvm-security-posture.md — witnesses still exist in the tree"
+            );
+            eprintln!(
+                "  check-conformance                      Verify model/*.toml is the single source and CONFORMANCE.md is up to date"
             );
             eprintln!(
                 "  check-trust-gradient                   Verify trust-gradient ledger: monotonic tiers, workload forbidden authorities, witnesses"

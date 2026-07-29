@@ -14,6 +14,7 @@
 //! transient runner, while `exec` / `shell` / `stop` stay thin wrappers over
 //! the existing running-VM surfaces.
 
+mod checkpoint;
 mod lifecycle;
 mod portable;
 mod receipt;
@@ -50,6 +51,7 @@ use super::vm::host_signer::PUBLIC_FILENAME;
 use super::vm::host_signer::{host_signer_id, load_or_init};
 use super::vm::{console, down};
 use crate::ui;
+use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
 use lifecycle::{exec_machine, run_restart, run_start, shell_machine, stop_machine};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
@@ -140,6 +142,11 @@ pub(in crate::commands) enum MachineAction {
     /// Advance one step: restore a child of the target (a fork needs `--to`).
     #[command(display_order = 17)]
     Advance(super::vm::checkpoint::AdvanceArgs),
+    /// Warm-restore a vm_full checkpoint into a fresh child VM.
+    /// The child inherits the saved machine state and receives a fresh
+    /// generation token; the parent must be stopped.
+    #[command(name = "warm-restore", display_order = 18)]
+    WarmRestore(MachineWarmRestoreArgs),
     /// Advanced single-VM operations (pause, snapshot, cp, fs, …). Hidden; use `machine <verb>` directly.
     #[command(flatten)]
     Vm(VmCmd),
@@ -173,6 +180,7 @@ impl MachineAction {
             MachineAction::Revert(_) => "revert",
             MachineAction::Rewind(_) => "rewind",
             MachineAction::Advance(_) => "advance",
+            MachineAction::WarmRestore(_) => "warm-restore",
         }
     }
 }
@@ -847,6 +855,18 @@ pub(in crate::commands) struct MachineReconfigureArgs {
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
 }
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineWarmRestoreArgs {
+    /// vm_full checkpoint id to restore.
+    #[arg(value_name = "CHECKPOINT_ID")]
+    pub checkpoint: String,
+    /// Name for the fresh child VM (auto-generated if omitted).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Output the result as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
 
 #[derive(Debug, Serialize)]
 struct MachineRemoveSummary {
@@ -1315,10 +1335,21 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Advance(a) => {
             complete_revert(cli, cfg, super::vm::checkpoint::run_advance(a)?)
         }
+        MachineAction::WarmRestore(args) => run_warm_restore(args),
         MachineAction::Vm(cmd) => {
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
     }
+}
+
+/// Run `machine warm-restore`: fork a vm_full checkpoint into a fresh child VM.
+fn run_warm_restore(args: MachineWarmRestoreArgs) -> Result<()> {
+    fork_vm_full_machine(ForkVmFullMachineInput {
+        checkpoint_id: args.checkpoint,
+        child_vm_name: args.name,
+        json: args.json,
+    })?;
+    Ok(())
 }
 
 /// Finish a restore. A checkpoint restore completes inside the engine (the fork

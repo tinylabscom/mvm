@@ -1401,25 +1401,22 @@ fn boot_transient_vm(
     // returned name diverges from `vm_name` — the caller rebinds it for the
     // Ctrl-C handler, run_in_guest, and teardown. try_warm_claim gates
     // internally (warm_pool_size > 0, admitted tenant + signed plan threaded
-    // into start_config, no extra volumes, backend supports the pool). An
-    // explicitly configured but unsupported standby pool is returned as an
-    // actionable error; only an ineligible launch shape proceeds cold.
-    let (vm_name, warm_claimed) = match crate::commands::pool::try_warm_claim(
-        attempt.backend,
-        attempt.start_config,
-        false,
-        None,
-    ) {
-        Ok(Some(id)) => {
-            ui::info(&format!(
-                "Claimed a warm standby ({}) — skipping cold boot.",
-                id.0
-            ));
-            (id.0, true)
-        }
-        Ok(None) => (vm_name, false),
-        Err(e) => return Err(e).context("claiming configured warm standby"),
-    };
+    // into start_config, a launch shape a shared parent can serve, backend
+    // supports the pool). An explicitly configured but unsupported standby pool
+    // is returned as an actionable error; only an ineligible launch shape
+    // proceeds cold.
+    let (vm_name, warm_claimed) =
+        match crate::commands::pool::try_warm_claim(attempt.backend, attempt.start_config, false) {
+            Ok(Some(id)) => {
+                ui::info(&format!(
+                    "Claimed a warm standby ({}) — skipping cold boot.",
+                    id.0
+                ));
+                (id.0, true)
+            }
+            Ok(None) => (vm_name, false),
+            Err(e) => return Err(e).context("claiming configured warm standby"),
+        };
 
     let booted = warm_claimed
         || if use_snapshot {
@@ -2099,6 +2096,10 @@ mod tests {
             "OCI --image runs with outbound egress enabled",
         )
         .expect_err("unavailable hvf must fail closed before OCI work");
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
+        }
         // HVF always advertises the NIC-less host-vsock-proxy egress caps (they
         // are unconditional — the fail-closed posture), so the capability
         // shortfall is empty and the refusal comes from the availability probe:

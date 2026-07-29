@@ -238,7 +238,7 @@ struct CheckpointForkJson<'a> {
 /// otherwise produce an unsafe on-disk directory name. The id becomes a
 /// directory component under `checkpoints_dir()`, so path-traversal and
 /// control bytes must never reach the filesystem.
-fn validated_checkpoint_id(raw: &str) -> Result<CheckpointId> {
+pub(in crate::commands) fn validated_checkpoint_id(raw: &str) -> Result<CheckpointId> {
     if raw.is_empty() {
         bail!("invalid checkpoint id: empty");
     }
@@ -255,7 +255,7 @@ fn validated_checkpoint_id(raw: &str) -> Result<CheckpointId> {
     Ok(CheckpointId::new(raw.to_string()))
 }
 
-fn now_unix() -> u64 {
+pub(in crate::commands) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -881,10 +881,59 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
 
     let parent_meta = p.store.read_meta(p.checkpoint)?;
 
+    fork_vm_full_arm_fc(ForkVmFullArmFcParams {
+        store: p.store,
+        checkpoint: p.checkpoint,
+        parent_meta,
+        child_vm_name,
+        dest_dir,
+        child_id,
+        now,
+        json: p.json,
+        bypass_experimental_guard: false,
+    })?;
+    Ok(())
+}
+
+/// Inputs for [`fork_vm_full_arm_fc`]. Grouped to stay under the
+/// `clippy::too_many_arguments` workspace ceiling.
+pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
+    pub(in crate::commands) store: &'a CheckpointStore,
+    pub(in crate::commands) checkpoint: &'a CheckpointId,
+    pub(in crate::commands) parent_meta: mvm_core::checkpoint::CheckpointMeta,
+    pub(in crate::commands) child_vm_name: String,
+    pub(in crate::commands) dest_dir: std::path::PathBuf,
+    pub(in crate::commands) child_id: CheckpointId,
+    pub(in crate::commands) now: u64,
+    pub(in crate::commands) json: bool,
+    /// When true, skip the `MVM_FORK_VMFULL_FC_EXPERIMENTAL` guard. The guard
+    /// stays on the lower-level `vm checkpoint fork` path; the user-facing
+    /// `machine warm-restore` verb opts in explicitly.
+    pub(in crate::commands) bypass_experimental_guard: bool,
+}
+
+/// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
+/// the child, rename `memory.bin` → `mem.bin`, and boot the child via a fresh
+/// Firecracker VMM loaded from the checkpoint snapshot.
+pub(in crate::commands) fn fork_vm_full_arm_fc(
+    p: ForkVmFullArmFcParams<'_>,
+) -> Result<mvm_core::checkpoint::CheckpointMeta> {
+    // FC vm_full fork loads a snapshot that still carries the parent's TAP
+    // name and guest MAC in bitcode. Remapping backing files is not enough to
+    // make a live-parent fork safe, so require the parent to be stopped first.
+    // The device-path remapping happens in a private mount namespace before
+    // the child Firecracker starts.
+    if vm_is_running(&p.parent_meta.vm_name) {
+        anyhow::bail!(
+            "Firecracker vm_full fork requires the parent VM '{}' to be stopped first;              live-parent fork would collide on the parent's TAP/MAC",
+            p.parent_meta.vm_name
+        );
+    }
+
     // Checkpoints captured under the removed Apple-Virtualization backend carry
     // a supervisor-config.json blob. Their full-VM fork is being re-homed onto
     // the in-house HVF VMM and is unavailable for now — refuse cleanly.
-    if checkpoint_is_vz(&parent_meta) {
+    if checkpoint_is_vz(&p.parent_meta) {
         anyhow::bail!(
             "this vm_full checkpoint was captured under a backend that has been removed; \
              its full-VM fork is being re-homed onto the in-house HVF VMM and is \
@@ -899,8 +948,9 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     // side is remappable, but re-IP'ing the guest is a per-child network-model
     // decision that is not yet settled — refuse cleanly rather than boot a
     // colliding child. The restore mechanism stays reachable behind an explicit
-    // opt-in for isolated single-child testing on that model.
-    if !fc_vm_full_fork_experimental_enabled() {
+    // opt-in for isolated single-child testing on that model, unless the caller
+    // has already opted in (the user-facing `machine warm-restore` path).
+    if !p.bypass_experimental_guard && !fc_vm_full_fork_experimental_enabled() {
         anyhow::bail!(
             "forking a vm_full checkpoint on Firecracker is not yet supported: the \
              forked child inherits the parent's guest IP/MAC from the saved memory \
@@ -908,46 +958,6 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
              with the parent on the shared bridge. Use an fs_quick fork, or set \
              MVM_FORK_VMFULL_FC_EXPERIMENTAL=1 to exercise the restore on an isolated \
              single-child network."
-        );
-    }
-    fork_vm_full_arm_fc(ForkVmFullArmFcParams {
-        store: p.store,
-        checkpoint: p.checkpoint,
-        parent_meta,
-        child_vm_name,
-        dest_dir,
-        child_id,
-        now,
-        json: p.json,
-    })
-}
-
-/// Inputs for [`fork_vm_full_arm_fc`]. Grouped to stay under the
-/// `clippy::too_many_arguments` workspace ceiling.
-struct ForkVmFullArmFcParams<'a> {
-    store: &'a CheckpointStore,
-    checkpoint: &'a CheckpointId,
-    parent_meta: mvm_core::checkpoint::CheckpointMeta,
-    child_vm_name: String,
-    dest_dir: std::path::PathBuf,
-    child_id: CheckpointId,
-    now: u64,
-    json: bool,
-}
-
-/// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
-/// the child, rename `memory.bin` → `mem.bin`, and boot the child via a fresh
-/// Firecracker VMM loaded from the checkpoint snapshot.
-fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
-    // FC vm_full fork loads a snapshot that still carries the parent's TAP
-    // name and guest MAC in bitcode. Remapping backing files is not enough to
-    // make a live-parent fork safe, so require the parent to be stopped first.
-    // The device-path remapping happens in a private mount namespace before
-    // the child Firecracker starts.
-    if vm_is_running(&p.parent_meta.vm_name) {
-        anyhow::bail!(
-            "Firecracker vm_full fork requires the parent VM '{}' to be stopped first;              live-parent fork would collide on the parent's TAP/MAC",
-            p.parent_meta.vm_name
         );
     }
 
@@ -1093,7 +1103,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
             p.child_vm_name
         ));
     }
-    Ok(())
+    Ok(meta)
 }
 
 fn deliver_fc_fork_post_restore(

@@ -768,6 +768,10 @@ mod tests {
         let mut env = TestEnv::new();
         env.set("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
         let caps = HvfBackend.capabilities();
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
+        }
         // Fail-closed: even a degraded host (unlaunchable supervisor) advertises
         // no routable NIC and the host vsock proxy, so egress can only ride the
         // per-VM endpoint — it never falls back to a guest NIC. Only the dev-tier

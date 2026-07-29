@@ -472,16 +472,23 @@ impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {
         if let Some(parent) = anchors.rootfs_verity {
             mappings.push((parent, child_dir.join("rootfs.verity")));
         }
-        if let Some(parent) = anchors.config {
-            mappings.push((parent, child_dir.join("config.ext4")));
-        }
-        if let Some(parent) = anchors.secrets {
-            mappings.push((parent, child_dir.join("secrets.ext4")));
-        }
+        // The snapshot encodes absolute paths under the parent's VM state dir
+        // (vsock UDS, config drive, secrets drive). Remap the whole parent dir
+        // onto the child's state dir in a private mount namespace so every
+        // parent-prefixed path resolves to the child's copy without editing
+        // Firecracker bitcode. A file-level remap of the vsock UDS alone fails
+        // because the child socket does not exist until Firecracker creates it
+        // during snapshot load.
+        let parent_vm_dir = anchors
+            .vsock
+            .parent()
+            .and_then(|p| p.parent())
+            .ok_or_else(|| anyhow::anyhow!("FC fork anchors.vsock has no VM-dir parent"))?;
         mappings.push((
-            anchors.vsock,
-            std::path::PathBuf::from(crate::microvm::firecracker_vsock_uds_path(&child_vm_dir)),
+            parent_vm_dir.to_path_buf(),
+            std::path::PathBuf::from(&child_vm_dir),
         ));
+        std::fs::create_dir_all(child_dir.join("runtime")).ok();
         crate::microvm::remap_paths_for_fork(&mappings)
             .context("remapping parent device paths for FC fork")?;
 

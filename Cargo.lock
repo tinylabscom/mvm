@@ -2801,10 +2801,12 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-runtime",
+ "serde",
  "serde_json",
  "tar",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -6702,6 +6704,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]

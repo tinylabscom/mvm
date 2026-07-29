@@ -86,6 +86,13 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "pool build substrate: backend selection",
     ),
     (
+        "commands/pool.rs",
+        &[Rule::NameRegistry],
+        "registry-lock handoff: hands the runtime the registry's location so \
+         acquire_registry_lock can serialize the standby-parent reserve against the \
+         child-name mint via ClaimContext; performs no registration op itself",
+    ),
+    (
         "commands/build/build.rs",
         &[Rule::AnyBackend],
         "build substrate: backend selection",
