@@ -3430,22 +3430,31 @@ fn wait_for_vsock_socket(
     label: &str,
 ) -> Result<(), BuilderVmError> {
     let socket_path = vm_state_dir.join(mvm_core::config::vsock_socket_filename(port));
+    wait_for_path(child, &socket_path, timeout, label)
+}
+
+fn wait_for_path(
+    child: &mut Child,
+    path: &Path,
+    timeout: Duration,
+    label: &str,
+) -> Result<(), BuilderVmError> {
     let deadline = Instant::now() + timeout;
-    while !socket_path.exists() {
+    while !path.exists() {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| BuilderVmError::ExtractionFailed(format!("poll supervisor child: {e}")))?
         {
             return Err(BuilderVmError::NixBuildFailed(format!(
-                "supervisor exited before binding {label} socket {} (status: {status})",
-                socket_path.display()
+                "supervisor exited before {label} became ready at {} (status: {status})",
+                path.display()
             )));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             return Err(BuilderVmError::NixBuildFailed(format!(
-                "supervisor did not bind {label} socket {} within {:?}; killed",
-                socket_path.display(),
+                "supervisor did not make {label} ready at {} within {:?}; killed",
+                path.display(),
                 timeout
             )));
         }
@@ -4166,6 +4175,10 @@ fn path_to_str<'a>(p: &'a Path, field: &str) -> Result<&'a str, BuilderVmError> 
 /// as the path the guest checks.
 pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
 
+/// Filename the guest creates after binding its persistent dispatch listener.
+/// The host waits for this marker before publishing a usable session record.
+pub const DISPATCH_READY_MARKER: &str = "dispatch.ready";
+
 /// Spawn the long-lived builder VM that `mvm-host-vm-init`'s
 /// dispatch loop runs inside.
 ///
@@ -4379,6 +4392,12 @@ impl LibkrunPersistentHostVm {
                 "builder guest agent",
             )?;
         }
+        wait_for_path(
+            &mut child,
+            &job_dir.join(DISPATCH_READY_MARKER),
+            Duration::from_secs(60),
+            "persistent builder dispatch loop",
+        )?;
 
         Ok(PersistentVmHandle {
             vm_state_dir,
@@ -4405,6 +4424,8 @@ fn stage_persistent_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
         ))
     })?;
     let marker_path = job_dir.join(DISPATCH_SOCK_MARKER);
+    let ready_path = job_dir.join(DISPATCH_READY_MARKER);
+    let _ = std::fs::remove_file(&ready_path);
     std::fs::write(&marker_path, b"").map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "staging dispatch marker {}: {e}",
@@ -6502,6 +6523,10 @@ mod tests {
             marker.is_file(),
             "marker should exist at {}",
             marker.display()
+        );
+        assert!(
+            !job_dir.join(DISPATCH_READY_MARKER).exists(),
+            "ready marker is guest-owned and must not be staged by the host"
         );
         // Marker body is intentionally empty — its existence is
         // the signal. If the body grows non-empty in the future

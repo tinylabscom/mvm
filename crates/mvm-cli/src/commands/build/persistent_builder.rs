@@ -486,11 +486,26 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          mkdir -p \"$XDG_CACHE_HOME\" \"$XDG_STATE_HOME\"\n\
          nix() {{ env HOME=\"$HOME\" XDG_CACHE_HOME=\"$XDG_CACHE_HOME\" XDG_STATE_HOME=\"$XDG_STATE_HOME\" /sbin/nix \"$@\"; }}\n\
          OUT_DIR='/job/{job_id}/{artifact_subdir}'\n\
+         JOB_DIR='/job/{job_id}'\n\
+         NIX_LOG=\"$JOB_DIR/nix-stderr.log\"\n\
+         NIX_STATUS=\"$JOB_DIR/nix-exit-status\"\n\
          mkdir -p \"$OUT_DIR\"\n\
+         # Keep the complete Nix diagnostic on the host-visible job share.\n\
+         # A build can terminate before the terminal Result frame is\n\
+         # written; this file remains available for post-mortem inspection.\n\
+         set +e\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
              --impure --no-write-lock-file \\\n\
-             {flake_ref}#{attr})\n\
+             {flake_ref}#{attr} 2>\"$NIX_LOG\")\n\
+         nix_status=$?\n\
+         set -e\n\
+         printf '%s\\n' \"$nix_status\" > \"$NIX_STATUS\"\n\
+         cat \"$NIX_LOG\" >&2\n\
+         if [ \"$nix_status\" -ne 0 ]; then\n\
+             echo \"mvm-host-vm-init: nix build exited $nix_status\" >&2\n\
+             exit \"$nix_status\"\n\
+         fi\n\
          echo \"store-path=$STORE_PATH\"\n\
          # mkGuest layout: $STORE_PATH/{{vmlinux,rootfs.ext4}}.\n\
          # Copy via `cp -L` so the host gets real bytes, not\n\
@@ -737,6 +752,9 @@ mod tests {
         assert!(body.contains("fallback = true"));
         assert!(body.contains("export XDG_STATE_HOME=/tmp/.local/state"));
         assert!(body.contains("nix() { env HOME=\"$HOME\""));
+        assert!(body.contains("NIX_LOG=\"$JOB_DIR/nix-stderr.log\""));
+        assert!(body.contains("NIX_STATUS=\"$JOB_DIR/nix-exit-status\""));
+        assert!(body.contains("cat \"$NIX_LOG\" >&2"));
         assert!(body.contains("--impure --no-write-lock-file"));
         let expected_guest_path = format!("/job/{relpath}/out");
         assert!(

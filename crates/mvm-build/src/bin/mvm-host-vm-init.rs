@@ -2126,6 +2126,10 @@ mod linux {
             return 1;
         };
         eprintln!("mvm-host-vm-init: dispatch loop ready on AF_VSOCK port {BUILDER_DISPATCH_PORT}");
+        let ready_marker = format!("{JOB_DIR}/dispatch.ready");
+        if let Err(e) = std::fs::write(&ready_marker, b"") {
+            eprintln!("mvm-host-vm-init: dispatch loop: failed to write {ready_marker}: {e}");
+        }
         loop {
             let Some(conn_fd) = accept_one(listen_fd) else {
                 // accept() failed with no timeout configured —
@@ -2156,6 +2160,9 @@ mod linux {
                     job,
                     job_dir_relpath,
                 } => {
+                    eprintln!(
+                        "mvm-host-vm-init: dispatch loop: starting job {job_id} at {job_dir_relpath}"
+                    );
                     let response = execute_dispatched_job(
                         &mut conn,
                         job_id,
@@ -2163,6 +2170,7 @@ mod linux {
                         &job_dir_relpath,
                         cold_boot_timings.take(),
                     );
+                    eprintln!("mvm-host-vm-init: dispatch loop: job completed; writing Result");
                     if !write_frame(&mut conn, response.as_bytes()) {
                         eprintln!("mvm-host-vm-init: dispatch loop: write Result failed mid-frame");
                     }
@@ -2437,6 +2445,7 @@ mod linux {
                         }
                     };
                     let started = Instant::now();
+                    eprintln!("mvm-host-vm-init: dispatch loop: running flake command");
                     let (code, tail) = run_job_streaming(
                         &cmd_path,
                         tmpdir.as_deref(),
@@ -2459,6 +2468,10 @@ mod linux {
                         },
                     );
                     let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    eprintln!(
+                        "mvm-host-vm-init: dispatch loop: flake command exited \
+                         code={code} elapsed_ms={ms}"
+                    );
                     // Hold `scratch` until after the build returns
                     // so its `Drop` cleans up after the
                     // subprocess. Explicit drop documents the
