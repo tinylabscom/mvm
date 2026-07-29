@@ -40,14 +40,14 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::base::shell::{run_in_vm, shell_quote};
 use mvm_core::crypto::keystore;
 use mvm_core::crypto::snapshot_encryption;
 use mvm_core::crypto::snapshot_hmac::{
-    EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles, VMSTATE_FILENAME,
-    VerifyError, files_in, load_or_init_key, seal, verify,
+    files_in, load_or_init_key, seal, verify, EpochStore, IntegritySidecar, SnapshotFiles,
+    VerifyError, MEM_FILENAME, SIDECAR_FILENAME, VMSTATE_FILENAME,
 };
 
 use secrecy::ExposeSecret;
@@ -417,7 +417,7 @@ impl VsockPrimedSignalSource {
     /// barrier; the deadline in [`wait_for_primed_polling`] bounds the wait.
     fn probe_once(&self) -> bool {
         use mvm_agentd::vsock::{
-            GUEST_AGENT_PORT, GuestRequest, call_unary, interpret_primed_status,
+            call_unary, interpret_primed_status, GuestRequest, GUEST_AGENT_PORT,
         };
         let Ok(transport) = crate::vsock_transport::for_vm(&self.vm_name) else {
             return false;
@@ -466,6 +466,11 @@ pub struct PostRestoreOutcome {
 /// `GuestRequest::PostRestore` all along, but nothing on the host sent it
 /// after a snapshot restore.
 pub trait PostRestoreSignal {
+    /// Probe whether the guest is ready to accept `PostRestore` without
+    /// actually sending the signal. Transient failures must return `false`
+    /// so the caller can poll up to its deadline; only a successful connect
+    /// (or equivalent) returns `true`.
+    fn probe_ready(&self, vm_name: &str) -> bool;
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome>;
 }
 
@@ -474,10 +479,33 @@ pub trait PostRestoreSignal {
 /// running at the hypervisor level but its drives may be unmounted, so the
 /// resume is not actually complete — fail closed and let the operator retry
 /// (`PostRestore` is safe to re-send; SIGUSR1 just re-runs the remount).
+/// Default interval between guest-readiness probes before delivering the
+/// post-restore signal.
+const POST_RESTORE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// After a snapshot restore resumes vCPUs, wait for the guest agent to be
+/// reachable (so a slow-to-reattach guest does not spuriously report
+/// `Undelivered`), then signal the guest to finish re-establishing itself.
+/// An *unacknowledged* signal is an error: the VM is running at the
+/// hypervisor level but its drives may be unmounted, so the resume is not
+/// actually complete — fail closed and let the operator retry (`PostRestore`
+/// is safe to re-send; SIGUSR1 just re-runs the remount).
 pub fn signal_post_restore<S: PostRestoreSignal + ?Sized>(
     vm_name: &str,
     signal: &S,
+    ready_timeout: std::time::Duration,
 ) -> Result<PostRestoreOutcome> {
+    match wait_for_primed_polling(ready_timeout, POST_RESTORE_PROBE_INTERVAL, || {
+        signal.probe_ready(vm_name)
+    }) {
+        PrimedOutcome::TimedOut => {
+            bail!(
+                "VM {vm_name} guest agent did not become reachable within {ready_timeout:?}                  after resume; post-restore signal undelivered"
+            );
+        }
+        PrimedOutcome::Primed => {}
+    }
+
     let outcome = signal
         .post_restore(vm_name)
         .with_context(|| format!("signaling post-restore to {vm_name}"))?;
@@ -515,8 +543,17 @@ pub struct VsockPostRestoreSignal {
 }
 
 impl PostRestoreSignal for VsockPostRestoreSignal {
+    fn probe_ready(&self, vm_name: &str) -> bool {
+        let Ok(transport) = crate::vsock_transport::for_vm(vm_name) else {
+            return false;
+        };
+        transport
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+            .is_ok()
+    }
+
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
-        use mvm_agentd::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_unary};
+        use mvm_agentd::vsock::{call_unary, GuestRequest, GuestResponse, GUEST_AGENT_PORT};
         let transport = crate::vsock_transport::for_vm(vm_name)
             .with_context(|| format!("resolving vsock transport for {vm_name}"))?;
         let mut stream = transport
@@ -1475,11 +1512,36 @@ mod tests {
 
     /// Mock `PostRestoreSignal` returning a canned result, so the
     /// `signal_post_restore` failure policy is testable without a guest.
-    struct MockSignal(Result<PostRestoreOutcome>);
+    struct MockSignal {
+        outcome: Result<PostRestoreOutcome>,
+        ready: bool,
+    }
+
+    impl MockSignal {
+        fn ok(outcome: PostRestoreOutcome) -> Self {
+            Self {
+                outcome: Ok(outcome),
+                ready: true,
+            }
+        }
+        fn err(e: anyhow::Error) -> Self {
+            Self {
+                outcome: Err(e),
+                ready: true,
+            }
+        }
+        fn with_ready(mut self, ready: bool) -> Self {
+            self.ready = ready;
+            self
+        }
+    }
 
     impl PostRestoreSignal for MockSignal {
+        fn probe_ready(&self, _vm_name: &str) -> bool {
+            self.ready
+        }
         fn post_restore(&self, _vm_name: &str) -> Result<PostRestoreOutcome> {
-            match &self.0 {
+            match &self.outcome {
                 Ok(o) => Ok(o.clone()),
                 Err(e) => bail!("{e}"),
             }
@@ -1488,13 +1550,13 @@ mod tests {
 
     #[test]
     fn signal_post_restore_ok_when_guest_acknowledges() {
-        let signal = MockSignal(Ok(PostRestoreOutcome {
+        let signal = MockSignal::ok(PostRestoreOutcome {
             acknowledged: true,
             detail: Some("post-restore signal sent to init".into()),
             reseeded: true,
             clock_resynced: true,
-        }));
-        let outcome = signal_post_restore("vm-1", &signal).unwrap();
+        });
+        let outcome = signal_post_restore("vm-1", &signal, std::time::Duration::ZERO).unwrap();
         assert!(outcome.acknowledged);
         assert!(outcome.reseeded, "a fresh-clone resume rotates the CSPRNG");
     }
@@ -1503,13 +1565,13 @@ mod tests {
     fn signal_post_restore_errors_when_guest_reports_failure() {
         // The agent answered but its SIGUSR1 failed → the VM is up but
         // degraded; resume must fail closed and name the detail.
-        let signal = MockSignal(Ok(PostRestoreOutcome {
+        let signal = MockSignal::ok(PostRestoreOutcome {
             acknowledged: false,
             detail: Some("kill failed: no such process".into()),
             reseeded: false,
             clock_resynced: false,
-        }));
-        let err = signal_post_restore("vm-1", &signal).unwrap_err();
+        });
+        let err = signal_post_restore("vm-1", &signal, std::time::Duration::ZERO).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("did not acknowledge"), "got: {msg}");
         assert!(msg.contains("kill failed"), "detail must surface: {msg}");
@@ -1517,13 +1579,13 @@ mod tests {
 
     #[test]
     fn signal_post_restore_errors_when_clock_is_not_resynced() {
-        let signal = MockSignal(Ok(PostRestoreOutcome {
+        let signal = MockSignal::ok(PostRestoreOutcome {
             acknowledged: true,
             detail: Some("post-restore signal sent to init".into()),
             reseeded: true,
             clock_resynced: false,
-        }));
-        let err = signal_post_restore("vm-1", &signal).unwrap_err();
+        });
+        let err = signal_post_restore("vm-1", &signal, std::time::Duration::ZERO).unwrap_err();
         assert!(err.to_string().contains("wall clock"));
     }
 
@@ -1531,8 +1593,8 @@ mod tests {
     fn signal_post_restore_propagates_transport_error() {
         // A transport/connect failure surfaces as Err with context, not a
         // silent success that would leave the guest unsignaled.
-        let signal = MockSignal(Err(anyhow::anyhow!("connection refused")));
-        let err = signal_post_restore("vm-1", &signal).unwrap_err();
+        let signal = MockSignal::err(anyhow::anyhow!("connection refused"));
+        let err = signal_post_restore("vm-1", &signal, std::time::Duration::ZERO).unwrap_err();
         let chained: String = err
             .chain()
             .map(|c| c.to_string())
@@ -1543,6 +1605,70 @@ mod tests {
             "context: {chained}"
         );
         assert!(chained.contains("connection refused"), "cause: {chained}");
+    }
+
+    /// A mock signal source that becomes ready after a configurable number of
+    /// probes so the "poll until ready, then send once" policy is testable
+    /// without a live guest.
+    struct MockSignalCount {
+        calls: std::cell::RefCell<usize>,
+        ready_after: usize,
+        outcome: Result<PostRestoreOutcome>,
+    }
+
+    impl PostRestoreSignal for MockSignalCount {
+        fn probe_ready(&self, _vm_name: &str) -> bool {
+            let mut c = self.calls.borrow_mut();
+            *c += 1;
+            *c > self.ready_after
+        }
+        fn post_restore(&self, _vm_name: &str) -> Result<PostRestoreOutcome> {
+            match &self.outcome {
+                Ok(o) => Ok(o.clone()),
+                Err(e) => Err(anyhow::anyhow!(e.to_string())),
+            }
+        }
+    }
+
+    #[test]
+    fn signal_post_restore_polls_until_ready_then_sends_once() {
+        let signal = MockSignalCount {
+            calls: std::cell::RefCell::new(0),
+            ready_after: 2,
+            outcome: Ok(PostRestoreOutcome {
+                acknowledged: true,
+                detail: None,
+                reseeded: true,
+                clock_resynced: true,
+            }),
+        };
+        let outcome = signal_post_restore("vm-1", &signal, std::time::Duration::from_millis(500))
+            .expect("should succeed once the guest is ready");
+        assert!(outcome.acknowledged);
+        assert!(
+            *signal.calls.borrow() > 2,
+            "probe_ready must have been polled at least three times"
+        );
+    }
+
+    #[test]
+    fn signal_post_restore_times_out_when_guest_never_ready() {
+        let signal = MockSignalCount {
+            calls: std::cell::RefCell::new(0),
+            ready_after: usize::MAX,
+            outcome: Ok(PostRestoreOutcome {
+                acknowledged: true,
+                detail: None,
+                reseeded: true,
+                clock_resynced: true,
+            }),
+        };
+        let err =
+            signal_post_restore("vm-1", &signal, std::time::Duration::from_millis(30)).unwrap_err();
+        assert!(
+            err.to_string().contains("did not become reachable"),
+            "timeout must fail closed before post_restore: {err}"
+        );
     }
 
     /// Canned [`PrimedSignalSource`] so the barrier policy is testable without
