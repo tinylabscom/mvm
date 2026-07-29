@@ -1147,6 +1147,20 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
 }
 
 #[test]
+fn mvm_setpriv_package_normalizes_the_workspace_source() {
+    let path = nix_dir().join("packages/mvm-setpriv.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("unpackPhase")
+            && content.contains("cp -R ${mvmSrc}/. source")
+            && content.contains("sourceRoot=source"),
+        "mvm-setpriv must normalize path:.. workspace sources before buildRustPackage unpacks them"
+    );
+}
+
+#[test]
 fn mk_guest_copies_ca_bundle_without_retaining_cacert_store_path() {
     let path = nix_dir().join("lib/mk-guest.nix");
     let content =
