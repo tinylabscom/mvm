@@ -869,6 +869,7 @@
           "type": "string",
           "enum": [
             "ping",
+            "resource_usage",
             "integration_status",
             "entrypoint_status",
             "run_entrypoint",
@@ -982,6 +983,13 @@
           "type": "string",
           "enum": [
             "Ping"
+          ]
+        },
+        {
+          "description": "Query the guest agent process's current resident memory.",
+          "type": "string",
+          "enum": [
+            "ResourceUsage"
           ]
         },
         {
@@ -2170,6 +2178,30 @@
           "enum": [
             "Pong"
           ]
+        },
+        {
+          "description": "Current guest-agent process resource usage.",
+          "type": "object",
+          "required": [
+            "ResourceUsageReport"
+          ],
+          "properties": {
+            "ResourceUsageReport": {
+              "type": "object",
+              "required": [
+                "rss_bytes"
+              ],
+              "properties": {
+                "rss_bytes": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         },
         {
           "description": "Error from guest agent.",
