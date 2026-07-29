@@ -29,10 +29,11 @@ use crate::ui;
 #[cfg(all(test, feature = "builder-vm"))]
 use bootstrap::BuildHeartbeat;
 pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
+#[cfg(all(test, not(feature = "release-artifact-bootstrap")))]
+use bootstrap::perform_builder_vm_download_published;
 #[cfg(test)]
 use bootstrap::{
-    BuilderVmBootstrapAction, STAGE0_FLAVOR_CURRENT, perform_builder_vm_download_published,
-    resolve_builder_vm_bootstrap_action,
+    BuilderVmBootstrapAction, STAGE0_FLAVOR_CURRENT, resolve_builder_vm_bootstrap_action,
 };
 #[cfg(all(test, feature = "builder-vm"))]
 use default_microvm::DefaultMicrovmVariant;
