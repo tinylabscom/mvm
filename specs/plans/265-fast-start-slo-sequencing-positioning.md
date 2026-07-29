@@ -87,23 +87,29 @@ cycle.
 ### WS2 — The ≤30 ms p50 SLO (native API + pooled FC — land together)
 
 Measured on the KVM box (8 vCPU / 62 GB, Firecracker v1.14.1) against the
-merge-base control in the same debug profile.
+merge-base control in the same debug profile, 2026-07-29.
 
 - Native API client A/B (debug, N=12 each):
-  curl control p50=57 ms, p99=135 ms (tail outliers from process spawn);
-  native client p50=46 ms, p99=49 ms.
-  The native client removes the tail and saves ~11 ms at p50, but it does not
-  clear the ≤30 ms SLO by itself.
+  curl control (#1901 merge-base 465022563) p50=47 ms, p99=47 ms;
+  native client (feat/plan265-ws2 a48fdc09a) p50=36 ms, p99=37 ms.
+  The native client removes the subprocess tail and saves ~11 ms at p50, but it
+  does not clear the ≤30 ms SLO by itself.
 - Release build of the native-client restore path (non-pooled, N=12):
-  p50=46 ms, p99=49 ms. Release alone does not clear the SLO.
+  p50=35 ms, p99=36 ms. Release alone does not clear the SLO; the warm path is
+  dominated by Firecracker process startup + snapshot load + resume, not by
+  Rust code.
 - Pooled / pre-staged Firecracker claim (release, N=12):
-  p50=33.5 ms, p99=34 ms. This closes ~12.5 ms of the 16 ms gap vs the SLO,
-  but still misses by ~3.5 ms at p50.
+  p50=36 ms, p99=36 ms. The saved-state pool (boot parent, capture, stop, then
+  restore into a child from the staged checkpoint) does not beat the non-pooled
+  restore because both paths spend the same time in the restore hot path: fresh
+  Firecracker + snapshot load + resume + no-NIC device-model guard.
 
-The remaining gap is the Firecracker process start + snapshot load + resume +
-no-NIC device-model guard. Page-cache priming, tmpfs checkpoint staging, and
-shaving the vsock connect handshake are the next levers; a true pre-spawned
-(running) VMM pool would eliminate the process-start cost entirely.
+SLO verdict: **not cleared.** The fastest measured configuration (release,
+native client, non-pooled or pooled) is p50=35–36 ms, which misses the ≤30 ms
+p50 target by ~5–6 ms. The remaining gap is almost entirely Firecracker process
+startup and the snapshot-load/resume handshake. The next levers are a true
+pre-spawned *running* VMM pool (eliminates process startup) and shaving the
+guest-agent readiness handshake after resume.
 
 - [x] Native Firecracker API client: hand-rolled HTTP/1.1 over `UnixStream`
       (no new deps), replacing `run_curl` / `run_curl_capture`
@@ -112,16 +118,16 @@ shaving the vsock connect handshake are the next levers; a true pre-spawned
       and has zero `read_to_end`. The regression test
       `call_returns_against_a_keep_alive_server` was verified to hang when the
       body reader is reverted to `read_to_end`, and passes with the
-      Content-Length framing. Debug A/B, N=12 each: curl control p50=57 ms,
-      p99=135 ms; native client p50=46 ms, p99=49 ms.)*
+      Content-Length framing. Debug A/B, N=12 each: curl control p50=47 ms,
+      p99=47 ms; native client p50=36 ms, p99=37 ms.)*
 - [x] `api_put_socket` (`microvm/daemon.rs`, used for `PUT /snapshot/load` and
-      FC boot helpers) stays shelled out as `sudo curl`. On the non-jailer path
-      the FC API socket is owned by root with mode `srwxr-xr-x`; a non-root uid
-      (`nobody`) gets `EACCES`. On the jailer path the socket is owned by the
-      jailer uid/gid with the same mode, so a matching non-root uid *can*
-      connect. The runtime currently spawns FC without the jailer, so
-      `api_put_socket` cannot migrate to `microvm::fc_api::call` without a
-      production spawn-path change.
+      FC boot helpers) stays shelled out as `sudo curl`. Live verification on
+      the box: the non-jailer spawn path creates the socket as root with mode
+      `srwxr-xr-x`; connecting as `nobody` returns `EACCES`. The jailer path
+      creates the socket as the jailer uid/gid with the same mode, so a
+      matching non-root uid *can* connect. The runtime currently spawns FC
+      without the jailer, so `api_put_socket` cannot migrate to
+      `microvm::fc_api::call` without a production spawn-path change.
 - [x] Pre-spawned / pooled Firecracker: wire the existing `standby_pool` /
       `WarmLease` into the FC backend so a restore claims a pre-captured VMM
       rather than booting from scratch. Overlaps Plan 255 warm-pool work.
@@ -134,21 +140,11 @@ shaving the vsock connect handshake are the next levers; a true pre-spawned
       that agent. A new live harness (`warm_pool_claim_latency_live`) measures
       the load-bearing half of the claim — fresh Firecracker + snapshot load +
       resume from a pre-captured snapshot — which is the same restore hot path
-      and bounds pooled claim time.)*
+      and bounds pooled claim time. Release, N=12: p50=36 ms, p99=36 ms.)*
 - [x] Release-build measurement on the KVM box; record warm p50/p99 here.
-      *(Non-pooled native client: release, N=12: p50=46 ms, p99=49 ms.
-      Pooled/pre-staged claim: release, N=12: p50=33.5 ms, p99=34 ms.
-      SLO gap: ~3.5 ms still to close to reach ≤30 ms p50.)*
-      *(Optional lever A/B on the pooled/pre-staged claim harness,
-      release, N=12 each, 2026-07-29: baseline p50=33 ms/p99=34 ms;
-      `MVM_LIVE_PRIME_PAGES=1` p50=33 ms/p99=34 ms;
-      `MVM_LIVE_TMPFS_CHILD=1` p50=33 ms/p99=34 ms; both levers together
-      p50=33 ms/p99=34 ms. Neither page-cache priming nor tmpfs staging
-      improved the pooled claim time, so the remaining ~3 ms gap to the
-      <= 30 ms p50 SLO is almost certainly Firecracker process startup
-      and/or the vsock connect handshake. The next levers are a true
-      pre-spawned running-VMM pool and shaving the guest-agent readiness
-      handshake.)*
+      *(Non-pooled native client: release, N=12: p50=35 ms, p99=36 ms.
+      Pooled/pre-staged claim: release, N=12: p50=36 ms, p99=36 ms.
+      SLO gap: ~5–6 ms still to close to reach ≤30 ms p50.)*
 
 
 ### WS3 — Density
