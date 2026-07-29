@@ -344,13 +344,6 @@ mod linux_impl {
 use linux_impl::*;
 
 #[cfg(target_os = "linux")]
-const MS_NOSUID: libc::c_ulong = 0x0000_0002;
-#[cfg(target_os = "linux")]
-const MS_NOEXEC: libc::c_ulong = 0x0000_0008;
-#[cfg(target_os = "linux")]
-const MS_NODEV: libc::c_ulong = 0x0000_0040;
-
-#[cfg(target_os = "linux")]
 fn mount(source: &str, target: &str, fstype: &str, flags: libc::c_ulong, data: &str) -> Result<()> {
     let invalid = |e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e);
     let src =

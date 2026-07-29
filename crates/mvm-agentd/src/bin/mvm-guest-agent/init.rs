@@ -114,7 +114,7 @@ fn install_sigchld_handler() {
     // processes exist.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = on_sigchld as usize;
+        action.sa_sigaction = on_sigchld as *const () as usize;
         action.sa_flags = libc::SA_NOCLDSTOP | libc::SA_RESTART;
         let rc = libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
         if rc != 0 {
