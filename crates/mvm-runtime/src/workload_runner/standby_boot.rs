@@ -25,11 +25,50 @@
 use std::path::Path;
 
 use mvm_core::policy::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::{StandbyError, StandbySpec, VmStartConfig};
+use mvm_core::vm_backend::{RuntimeSourcePolicy, StandbyError, StandbySpec, VmStartConfig};
 
 use crate::driver::VmmSpec;
 use crate::workload_runner::cmdline;
 use crate::workload_runner::spec_map::workload_device_spec;
+
+/// Refuse a factory parent whose boot inputs describe a guest that cannot reach
+/// an agent, naming the missing piece.
+///
+/// A parent is booted only to be captured, so one that boots into a panic costs
+/// the launch a doomed boot and yields nothing to claim, and the symptom a
+/// caller sees is an agent-readiness timeout that says nothing about the cause.
+/// Two launch shapes produce exactly that. A required runtime overlay that was
+/// never attached: on the overlay-only runtime the overlay is the single source
+/// of the guest binaries, so an overlay-lean rootfs without it has no agent for
+/// `/init` to exec. And a verity-sealed rootfs with no resolvable initramfs:
+/// the initramfs is PID 1 on a sealed boot, and it is what verifies the rootfs
+/// and mounts that overlay — without it the drives are attached but nothing
+/// mounts them.
+fn ensure_parent_can_reach_an_agent(
+    id: &str,
+    config: &VmStartConfig,
+) -> std::result::Result<(), StandbyError> {
+    if config.runtime_source_policy == RuntimeSourcePolicy::RequiredOverlay
+        && cmdline::runtime_overlay(config).is_none()
+    {
+        return Err(StandbyError::SpawnFailed(format!(
+            "standby '{id}' would boot without the runtime overlay its launch requires: the \
+             overlay is the only source of the guest agent, so the parent would panic before it \
+             could be captured"
+        )));
+    }
+    if config.verity_path.is_some()
+        && config.roothash.is_some()
+        && cmdline::effective_initrd(config).is_none()
+    {
+        return Err(StandbyError::SpawnFailed(format!(
+            "standby '{id}' has a verity-sealed rootfs but no resolvable initramfs: the \
+             initramfs is PID 1 on a sealed boot, so without it nothing verifies the rootfs or \
+             mounts the runtime overlay the guest agent lives on"
+        )));
+    }
+    Ok(())
+}
 
 /// Reduce `launch` to the launch config of the factory parent recorded as
 /// `spec`: the guest's boot shape carried verbatim, every field that carries
@@ -89,7 +128,7 @@ pub fn factory_parent_config(
         mem_initial_mib,
     } = launch;
 
-    Ok(VmStartConfig {
+    let parent = VmStartConfig {
         name: spec.id.clone(),
         template_id: spec.template_id.clone(),
         rootfs_path: image.to_string(),
@@ -120,7 +159,10 @@ pub fn factory_parent_config(
         warm_pool_size: 0,
         network_policy: NetworkPolicy::deny_all(),
         dev_console: false,
-    })
+    };
+
+    ensure_parent_can_reach_an_agent(&spec.id, &parent)?;
+    Ok(parent)
 }
 
 /// The factory parent's `VmmSpec`, assembled by the same mappers a workload
@@ -475,6 +517,70 @@ mod tests {
         assert!(
             format!("{err}").contains("no rootfs image"),
             "unexpected refusal: {err}"
+        );
+    }
+
+    /// The overlay carries the guest agent, so a parent that would boot without
+    /// one is refused up front instead of booting into the panic the live run
+    /// recorded — and the refusal names the overlay rather than surfacing as an
+    /// agent-readiness timeout.
+    #[test]
+    fn factory_parent_config_refuses_a_required_overlay_launch_carrying_no_overlay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut launch = sealed_launch(tmp.path());
+        launch.runtime_overlay_path = None;
+        launch.runtime_overlay_verity_path = None;
+        launch.runtime_overlay_roothash = None;
+        let spec = standby_spec_for(&launch, tmp.path());
+
+        let err = factory_parent_config(&launch, &spec)
+            .expect_err("a required-overlay launch with no overlay cannot boot a guest agent");
+        assert!(
+            format!("{err}").contains("runtime overlay"),
+            "unexpected refusal: {err}"
+        );
+    }
+
+    /// On a sealed boot the initramfs is PID 1: it verifies the rootfs and
+    /// mounts the overlay. Without one the drives are attached and nothing
+    /// mounts them, which is the second shape of the same failure.
+    #[test]
+    fn factory_parent_config_refuses_a_sealed_rootfs_with_no_resolvable_initramfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let launch = sealed_launch(tmp.path());
+        std::fs::remove_file(tmp.path().join("rootfs.initrd")).unwrap();
+        let spec = standby_spec_for(&launch, tmp.path());
+
+        let err = factory_parent_config(&launch, &spec)
+            .expect_err("a sealed rootfs with no initramfs has no PID 1 to mount the overlay");
+        assert!(
+            format!("{err}").contains("initramfs"),
+            "unexpected refusal: {err}"
+        );
+    }
+
+    /// The guard is keyed on the launch's own policy, so an unsealed
+    /// rootfs-only launch — a dev image with the agent baked in — still warms.
+    #[test]
+    fn factory_parent_config_admits_a_rootfs_only_launch_with_no_overlay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        let launch = VmStartConfig {
+            name: "workload-a".into(),
+            rootfs_path: rootfs.display().to_string(),
+            kernel_path: Some(tmp.path().join("vmlinux").display().to_string()),
+            cpus: 2,
+            memory_mib: 512,
+            ..Default::default()
+        };
+        let spec = standby_spec_for(&launch, tmp.path());
+
+        let parent = factory_parent_config(&launch, &spec)
+            .expect("a rootfs-only launch needs no overlay to reach its agent");
+        assert_eq!(
+            parent.runtime_source_policy,
+            RuntimeSourcePolicy::RootfsOnly
         );
     }
 

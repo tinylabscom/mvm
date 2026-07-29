@@ -830,12 +830,18 @@ git commit -m "feat(pool): assemble a live claim context and boot standby parent
 
 Last, and only now: the capability means "can actually spawn+claim a warm parent". Flipping it before Tasks 2-5 would turn a configured warm pool into a silent cold boot plus warning noise.
 
-> **Reverted by Task 8 Step 1.** Task 7's live run showed the spawn cannot
-> survive a real boot, so the flip was premature: the capability is back to
+> **Reverted by Task 8 Step 1.** Task 7's first live run showed the spawn could
+> not survive a real boot, so the flip was premature: the capability is back to
 > `false` and the guard test is back to asserting that no selectable driver
 > advertises the pool. The steps below record what was done and then undone; the
 > flip is now gated on a green live run (Task 8 Step 5), not on the code
 > existing.
+>
+> A later live run on the same host **superseded the boot half of that finding**:
+> with Task 8 Step 2's shape correction the parent boots, reaches its guest agent
+> and is captured. The capability still stays `false`, now for a different reason
+> — the *claim* half has never run. See the validation note for the full
+> chronology.
 
 **Files:**
 - Modify: `crates/mvm-runtime/src/driver/fc.rs:363-387` (capabilities + its stale comment), `:719-731` (the guard test)
@@ -844,7 +850,7 @@ Last, and only now: the capability means "can actually spawn+claim a warm parent
 - Consumes: Tasks 2-5.
 - Produces: `FcDriver::capabilities().standby_pool == true`.
 
-- [x] **Step 1: Update the guard test to assert the new boundary**
+- [ ] **Step 1: Update the guard test to assert the new boundary**
 
 `no_selectable_driver_advertises_standby_pool_yet` asserts *every* driver is off. Firecracker now supports it, so rename the test and pin the real split:
 
@@ -867,23 +873,23 @@ fn only_firecracker_advertises_the_standby_pool() {
 }
 ```
 
-- [x] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails**
 
 Run: `cargo nextest run -p mvm-runtime driver::fc`
 Expected: FAIL on the first assertion.
 
-- [x] **Step 3: Flip `standby_pool` and correct the comment**
+- [ ] **Step 3: Flip `standby_pool` and correct the comment**
 
 Set `standby_pool: true` and replace the stale "stays off … flips true with that slice" comment with one describing the shipped behavior.
 
 **Do not blanket-flip the neighbouring flags.** `snapshots`, `snapshot_capability`, and `fs_quick_checkpoint` gate other surfaces (user-facing snapshot verbs). This driver now performs `vm_full` captures for the pool, which may or may not be what those flags mean. Check what each actually gates before changing it, change only what is now genuinely true, and state your reasoning in your report.
 
-- [x] **Step 4: Run the full suite**
+- [ ] **Step 4: Run the full suite**
 
 Run: `cargo nextest run --workspace`
 Expected: PASS. Other tests may assert the old capability shape — find and update each.
 
-- [x] **Step 5: Full gates + commit**
+- [ ] **Step 5: Full gates + commit**
 
 ```bash
 cargo fmt --all
@@ -1091,6 +1097,9 @@ not measurable. Enabling the pool today adds ~2.6 s median per run for nothing.
 Set `standby_pool: false` for `FcDriver` and restore the guard test to assert **no** driver advertises the pool (rename `only_firecracker_advertises_the_standby_pool` to reflect that). The flag means "can actually spawn and claim a warm parent"; live validation proved it cannot, so advertising it is false and currently costs ~2.6 s per run for nothing. Update the capability comment to say the flip is gated on a green live run. **Commit this on its own** — it removes a live regression and must not wait on the rest of the task.
 
 Landed as `no_selectable_driver_advertises_the_standby_pool`, committed alone.
+The capability comment has since been re-stated against the live evidence: the
+spawn+capture half is proven, the claim half is not, and that is what keeps the
+flag `false`.
 
 - [x] **Step 2: Make the parent's boot shape come from the workload pipeline**
 
@@ -1116,6 +1125,12 @@ the launch config the CLI already ran through `attach_runtime_overlay_if_cached`
   and boots the given `VmmSpec`. `FcDriver`'s hand-written recipe is deleted, not
   patched, and the runner's context-free `VmBackend::spawn_standby` override is
   gone so there is one way in and it carries the launch.
+- Two fail-closed refusals sit on that path: `factory_parent_config` refuses a
+  launch whose parent could not reach a guest agent at all (a required overlay
+  that was never attached, a sealed rootfs with no resolvable initramfs), and
+  `spawn_standby_captured` applies the same kernel-cmdline truncation refusal a
+  workload boot gets — a child inherits the parent's cmdline out of restored
+  memory, so a silently truncated parent cmdline would reach every child.
 
 - [x] **Step 3: Prove it without KVM as far as possible**
 
@@ -1141,6 +1156,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 - [ ] **Step 5: Re-validate live, then and only then consider the flip**
 
 Re-run Task 7 on the KVM host. The capability stays `false` until that run is green. Expect BUG-2 to surface next; if it blocks, record it and stop rather than working around a pre-existing bug inside this slice.
+
+**Partially done.** A live run on the KVM host with the corrected boot shape
+proves the spawn half: the parent boots with the verity initramfs as PID 1,
+mounts the runtime overlay, reaches its guest agent, and `capture_vm_full`
+writes a `vm_full` checkpoint carrying a 512 MiB `memory.bin` — the pool
+populated for the first time. The claim half is still unexercised.
 
 Four blockers now gate this step, not one: BUG-2 and BLOCKER-3 each stop a claim
 from completing at all, BLOCKER-4 lets one complete but returns a child missing

@@ -200,8 +200,16 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# Format check + clippy
-lint: fmt-check clippy
+# Compile the cucumber conformance target. It sits behind the `bdd` feature to
+# stay out of `cargo nextest run --workspace` (nextest lists tests via `--list`,
+# which a `harness = false` target cannot answer), and `--all-targets` above
+# honors `required-features`, so nothing else builds it — a struct change
+# elsewhere in the workspace can break it unnoticed.
+clippy-bdd:
+    cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings
+
+# Format check + clippy (workspace + the feature-gated BDD target)
+lint: fmt-check clippy clippy-bdd
 
 # ── CI Gate ──────────────────────────────────────────────────────────────
 

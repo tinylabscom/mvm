@@ -72,6 +72,7 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
     let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
     let handle = StandbyHandle {
         id: "warm-parent".into(),
+        // Not template-bound: this fixture claims by kernel identity.
         template_id: None,
         control_socket: store_root.path().join("control.sock").display().to_string(),
         pid: 0,

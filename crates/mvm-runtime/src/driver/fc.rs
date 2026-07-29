@@ -403,16 +403,21 @@ impl VmmDriver for FcDriver {
         //
         // `standby_pool` stays off. The spawn/capture/fork/handshake code is
         // all here — `spawn_standby_parent` boots a clean factory parent and
-        // `vm_full_control` captures its whole {rootfs, memory, vmstate} — but
-        // the capability means "can actually spawn AND claim a warm parent on
-        // this host", and validation on real KVM hardware showed the spawn does
-        // not survive a live boot. Advertising it costs every launch a doomed
-        // parent boot and returns nothing, so it stays false until a live run
-        // is green end to end. That capture/restore pair is a distinct seam
-        // from the coarse `snapshots`/`snapshot_capability` tier below — it
-        // captures one specific parent shape for the standby pool, not an
-        // arbitrary named VM's live memory on demand, so those two fields stay
-        // unchanged either way.
+        // `vm_full_control` captures its whole {rootfs, memory, vmstate} — and
+        // validation on real KVM hardware has since shown that half working:
+        // the parent boots the workload's verified shape, reaches its guest
+        // agent, and the capture writes a memory-carrying checkpoint. But the
+        // capability means "can actually spawn AND claim a warm parent on this
+        // host", and the claim half has never been exercised live: the
+        // transient run path mints no verb-grant sidecar, so a restored child
+        // has no host-signer anchor to authenticate against and every claim
+        // falls back to a cold boot. Advertising it would cost every launch a
+        // parent boot for a claim that cannot yet land, so it stays false until
+        // a live run is green end to end. That capture/restore pair is a
+        // distinct seam from the coarse `snapshots`/`snapshot_capability` tier
+        // below — it captures one specific parent shape for the standby pool,
+        // not an arbitrary named VM's live memory on demand, so those two
+        // fields stay unchanged either way.
         VmCapabilities {
             pause_resume: true,
             snapshots: false,
@@ -846,9 +851,10 @@ mod tests {
     /// means "can actually spawn AND claim a warm parent on this host", so it
     /// flips per-backend only once a live run proves that backend's spawn and
     /// claim both work — a capability nobody can service costs every launch a
-    /// doomed parent boot. (The in-memory `MockBackend` opts into it explicitly
-    /// via `with_standby()` for the hermetic claim tests; the `MockDriver` seam
-    /// here does not.)
+    /// parent boot for nothing. Firecracker's spawn+capture half is live-proven;
+    /// its claim half is not, so it stays off with the rest. (The in-memory
+    /// `MockBackend` opts into it explicitly via `with_standby()` for the
+    /// hermetic claim tests; the `MockDriver` seam here does not.)
     #[test]
     fn no_selectable_driver_advertises_the_standby_pool() {
         use crate::driver::{HvfDriver, LibkrunDriver, MockDriver};

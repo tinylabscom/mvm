@@ -544,6 +544,16 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         let boot = factory_parent_spec(&parent_config, &state_dir, |virtiofs_root, has_disk| {
             self.driver.workload_base_bootargs(virtiofs_root, has_disk)
         });
+        // The same truncation refusal a workload boot gets, for the same reason
+        // and then some: a child inherits its parent's cmdline out of restored
+        // memory rather than deriving its own, so a parent whose trailing tokens
+        // the kernel silently dropped hands that loss to every child it produces.
+        if let Some(problem) = cmdline::cmdline_overflow(&boot.cmdline) {
+            return Err(StandbyError::SpawnFailed(format!(
+                "refusing to boot standby parent '{}': {problem}",
+                spec.id
+            )));
+        }
         let mut handle = self
             .driver
             .spawn_standby_parent(&StandbyParentSpawn { spec, boot: &boot })?;
@@ -900,15 +910,20 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
                 ),
             };
 
+        let cmdline = cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
+            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        });
+        if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
+            anyhow::bail!("refusing to start VM {}: {problem}", config.name);
+        }
+
         let inputs = WorkloadLaunchInputs {
             config,
             tenant,
             secrets,
             redaction,
             network_policy: &config.network_policy,
-            cmdline: cmdline::runner_cmdline(config, &state_dir, |virtiofs_root, has_disk| {
-                self.driver.workload_base_bootargs(virtiofs_root, has_disk)
-            }),
+            cmdline,
         };
         // The supervisor + endpoint are detached/disk-backed; the live handle is
         // reconstructed by id via `attach`, so the boot handle is dropped here.
@@ -2060,6 +2075,57 @@ mod tests {
         assert!(
             runner.broker.seen.lock().unwrap().is_none(),
             "a standby parent must never get a host-services broker"
+        );
+    }
+
+    /// A parent's cmdline gets the same truncation refusal a workload's does,
+    /// and needs it more: a child inherits the parent's cmdline out of restored
+    /// memory rather than deriving its own, so a parent booted with its trailing
+    /// tokens silently dropped by the kernel hands that loss to every child.
+    #[test]
+    fn spawn_standby_captured_refuses_a_parent_cmdline_the_kernel_would_truncate() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let rootfs = tmp.path().join("parent-rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs bytes").unwrap();
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(&rootfs),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let mut launch = standby_launch_config(&rootfs);
+        // A sealed boot whose roothash alone pushes the assembled cmdline past
+        // the guest kernel's command-line buffer.
+        launch.verity_path = Some(tmp.path().join("rootfs.verity").display().to_string());
+        launch.roothash = Some("a".repeat(4096));
+        launch.initrd_path = Some(tmp.path().join("rootfs.initrd").display().to_string());
+        let spec = sample_standby_spec("parent-oversized", tmp.path(), &rootfs);
+
+        let err = runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .expect_err("an oversized parent cmdline must be refused before the boot");
+
+        assert!(
+            matches!(err, StandbyError::SpawnFailed(ref m) if m.contains("command line")),
+            "expected a SpawnFailed naming the kernel command line, got: {err:?}"
+        );
+        assert!(
+            runner.driver.booted_specs().is_empty(),
+            "nothing may boot before the refusal"
         );
     }
 

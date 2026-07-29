@@ -1,12 +1,28 @@
 # Plan 255 — live Firecracker warm-claim validation (KVM host)
 
 Date: 2026-07-28
-Outcome: **FAILED — the warm pool cannot populate on a real Firecracker/KVM host at this commit.**
+
+Outcome, as of the third run: **PARTIAL — the spawn+capture half of the warm
+pool is proven live on real Firecracker/KVM hardware; the claim half is still
+unexercised, and four blockers gate the capability flip. `standby_pool` stays
+`false`.**
 
 This is the empirical gate for the Firecracker warm pool built in Tasks 1–6.
 Everything below is a command that was actually run on real hardware plus its
 real output. Where a check could not be run, that is stated rather than
 inferred.
+
+It is written **chronologically**: three live runs on the same host, in order,
+plus the structural blockers review found between them. Earlier conclusions are
+left standing where a later run superseded them, annotated in place — the
+sequence of what was believed, what was fixed, and what the fix did *not* fix is
+the point of the record.
+
+| Run | Commit | Result |
+|---|---|---|
+| 1 | `3879db5c3` | **FAILED.** The parent boots a bare rootfs, finds no guest agent, kernel-panics. Capture never runs. |
+| 2 | `03dcf3aa5` (overlay attached to the parent) | **FAILED.** Necessary but not sufficient: nothing in that boot mode mounts the overlay. |
+| 3 | `3ac531193` (parent boots the verified-boot shape) | **Parent boots, reaches its agent, capture writes a 512 MiB `memory.bin`.** Claim half still unreachable (BUG-2). |
 
 ## Host
 
@@ -23,7 +39,8 @@ inferred.
 | Image | `docker.io/library/alpine:latest` → `sha256:79ff19e9084a00eece421b2523fb93e22d730e2c0e525905de047e848e56d95f` (already in the OCI cache) |
 
 `/root/.mvm/checkpoints/` was empty before this work and `<MVM_HOME>/checkpoints/`
-was **never created** during it — see "What was NOT reached".
+was **never created** during the first two runs — see "What was NOT reached".
+The third run is where that changed.
 
 One environment note: the guest agent had to be rebuilt once for this
 checkout's guest fingerprint (`0.18.0-guest-447f29460cdf25e3`), which needs
@@ -31,31 +48,41 @@ checkout's guest fingerprint (`0.18.0-guest-447f29460cdf25e3`), which needs
 first run fails with `cargo-zigbuild failed: spawn cargo: No such file or
 directory`. `mvmctl` itself was not rebuilt.
 
+---
+
+# First live run — the parent panics
+
+Outcome as recorded at the time: **FAILED — the warm pool cannot populate on a
+real Firecracker/KVM host at this commit.**
+
 ## Result summary
+
+*(as recorded after run 1; rows 1 and 2 were partly superseded by the third run
+below, where the capture did complete.)*
 
 | # | What was to be established | Result |
 |---|---|---|
-| 1 | `capture_vm_full` → `FcForkRestorer::restore_fork` end to end | **NOT REACHED.** The standby parent kernel-panics before its agent starts, so capture never runs. |
-| 2 | Restored child answers post-restore handshake `acknowledged`+`reseeded`+`clock_resynced` | **NOT REACHED.** No checkpoint exists to restore from. |
+| 1 | `capture_vm_full` → `FcForkRestorer::restore_fork` end to end | **NOT REACHED.** The standby parent kernel-panics before its agent starts, so capture never runs. *(Superseded: the capture half completed on run 3; `restore_fork` is still unreached.)* |
+| 2 | Restored child answers post-restore handshake `acknowledged`+`reseeded`+`clock_resynced` | **NOT REACHED.** No checkpoint exists to restore from. *(A checkpoint exists as of run 3; the handshake is still unreached, blocked on BUG-2.)* |
 | 3 | Fresh child VM name, no kernel boot in the child console | **NOT REACHED.** |
 | 4 | Cold-boot vs warm-claim timing | **Cold measured; warm not measurable.** |
 | 5 | Fail-closed cases | **1 of 3 verified live** (absent `parent_checkpoint` → refuse + cold-boot, no orphaned child dir). The other two need a real captured checkpoint. |
 
 Two defects were found by the run itself — BUG-1 and BUG-2 — and neither was
 fixed during it (the task was validation only; BUG-1 has since been fixed in
-code and awaits a live re-run). Two further structural blockers, BLOCKER-3 and
-BLOCKER-4, were found by review of that fix and are recorded here because they
-gate the same capability flip. Both are open.
+code and re-validated live, see the third run). Two further structural blockers,
+BLOCKER-3 and BLOCKER-4, were found by review of that fix and are recorded here
+because they gate the same capability flip. Both are open.
 
 ---
 
 ## BUG-1 — the standby parent boots without the runtime overlay and panics
 
-> **Fixed in code; awaiting re-validation.** The parent's boot inputs are now
-> derived from the launch's own `VmStartConfig` through the same mappers a
-> workload boot uses, and three host-side guards assert the two shapes are
-> equal. The capability stays `false` until a live run is green. Everything
-> below is the record of the failing run, unchanged.
+> **Fixed in code, and the fix is live-proven on the third run below.** The
+> parent's boot inputs are now derived from the launch's own `VmStartConfig`
+> through the same mappers a workload boot uses, and host-side guards assert the
+> two shapes are equal. The capability still stays `false` — the *claim* half has
+> never run. Everything below is the record of the failing run, unchanged.
 
 **The blocker.** `MVM_RESIDENCY=warm` does reach the feature: `replenish_after_launch`
 fires and `FcDriver::spawn_standby_parent` boots a parent. The parent then dies.
@@ -269,142 +296,7 @@ before a live claim can ever be observed.
 
 ---
 
-## BLOCKER-3 — a restored child has no host-signer anchor, so it cannot be authorized at all
-
-Found by review of the BUG-1 fix, not by the live run. It is not a variant of
-BUG-2: BUG-2 is a missing sidecar on one code path, this is a structural
-consequence of a shared parent, and it survives BUG-2's fix.
-
-A forked child is not merely *ungranted*; it is **unauthorizable**. Three links,
-each a code reading:
-
-1. **The parent boots with no `mvm.host_signer_pub=` token.** `grant_tokens`
-   (`crates/mvm-runtime/src/hvf_bootargs.rs:43-52`) is keyed on `config.name`
-   and reads the named VM's `verb-grant.json`. A factory parent has no plan and
-   therefore no sidecar, so it emits none — correctly, since a parent must hold
-   no workload authority. But the child inherits the parent's cmdline out of
-   restored memory rather than deriving its own, so the child boots with **no
-   pinned host-signer trust anchor**.
-2. **Nothing re-pins one after the restore.** The production
-   `VsockPostRestoreSignal` hardcodes `grant_envelope: None`
-   (`crates/mvm-runtime/src/vm/instance_snapshot.rs:529`), and every host-side
-   construction leaves `predecessor_session_id` / `predecessor_plan_nonce_hex`
-   at `None`. Those `VerbGrantEnvelope` fields are wired guest-side only.
-3. **The guest-side re-pin cannot succeed without an anchor.**
-   `re_pin_verb_grant` deliberately verifies a replacement grant against the
-   **boot-pinned** anchor rather than against `envelope.pubkey_hex` — otherwise
-   any envelope could nominate its own key. With no anchor pinned there is
-   nothing to verify against.
-
-Consequence: the child rejects the PostRestore RPC, `require_fresh_child_identity`
-refuses it, `claim_standby` returns `ClaimFailed`, and the launch cold-boots.
-Fail-closed — there is no security hole here — but the warm claim is
-**structurally unreachable** even after BUG-1 and BUG-2 are fixed.
-
-Suggested shape, recorded but **not implemented** (it is its own slice, and
-guessing at it inside a boot-shape fix is how BUG-1 happened): the host-signer
-public key is *host identity*, not *workload authority*. Pinning
-`mvm.host_signer_pub=` on the factory parent while still withholding
-`mvm.verb_grant=` and `mvm.require_grant=` would give every child a trust anchor
-without giving the parent any authority — the parent still holds no plan, no
-grant, and no verbs. With an anchor present, the natural completion is to carry
-a replacement grant over the PostRestore signal using the already-defined
-`predecessor_session_id` / `predecessor_plan_nonce_hex` fields, so the child
-re-pins to its own admitted plan at claim time. Note that pinning the anchor on
-the parent is itself a cmdline change and so must go through the same
-`factory_parent_config` / `workload_device_spec` path, with the shape-equality
-guards updated to match.
-
----
-
-## BLOCKER-4 — a warm-claimed child is wired none of the host channels a cold boot gets
-
-Found by review, not by the live run: the claim path was never reached, so
-nothing here was observable on the host. Like BLOCKER-3 it is structural, and it
-survives BUG-1, BUG-2 and BLOCKER-3 all being fixed.
-
-A cold boot's host-side vsock wiring happens in exactly two places, and a warm
-claim goes through neither.
-
-1. **The guest-dial bridges and the exit capture are `boot`-only.**
-   `wire_guest_dial_bridges` and `spawn_workload_exit_capture` are called from
-   one site each — `FcDriver::boot`
-   (`crates/mvm-runtime/src/driver/fc.rs:580-581`). The claim path runs
-   `FcDriver::fork_standby_child` (`fc.rs:495`) →
-   `FcForkRestorer::restore_fork` (`crates/mvm-runtime/src/firecracker.rs`),
-   which remaps the snapshot's baked-in device paths and resumes the VM. It
-   does neither.
-2. **The claim spawns the child's endpoint and then drops its address.**
-   `claim_standby` stands up the child's own substitution endpoint
-   (`crates/mvm-runtime/src/workload_runner/runner.rs:426-437`) but never
-   threads the returned `egress_uds()` anywhere, and never calls
-   `BrokerRegistrar::register`. Contrast `start_workload` (`runner.rs:322-348`),
-   which does both: the endpoint's socket becomes the spec's `egress_gateway`,
-   and the broker is registered for the booted VM.
-
-What a claimed child would therefore come up with, once the pool is armed:
-
-- **no `v.sock_<EGRESS_PORT>` symlink**, so the endpoint process the claim just
-  spawned is dark — the guest's egress client dials a socket nothing serves;
-- **no `v.sock_<BROKER_PORT>`**, so `host.audit.v1` and `host.secrets.v1` are
-  silently unavailable to the workload — a *degradation relative to a cold
-  boot*, which registers the broker;
-- **no `v.sock_<WORKLOAD_EXIT_PORT>` listener**, so `workload.exit` is never
-  written and `machine run` reports UNKNOWN instead of the guest's real exit
-  code.
-
-All three fail closed — an unwired channel is an unreachable channel, and no
-isolation boundary moves — so none of this is a security hole. But a warm claim
-that hands back a child with strictly less than a cold boot gives it is not a
-fast path; it is a different and worse one.
-
-**Not implemented here**, deliberately: the shape is to lift the host-channel
-wiring out of `FcDriver::boot` so the fork path runs the same step, and to give
-`claim_standby` the tail of `start_workload` it is missing. Both are their own
-slice, and guessing at either inside a records-and-comments pass is how BUG-1
-happened.
-
----
-
-## What must happen before `standby_pool` can flip to `true`
-
-In order; each is a hard gate.
-
-1. **BUG-1 — fixed in code, needs a live run.** The parent's boot inputs now
-   come from the launch's own `VmStartConfig` through the same mappers a
-   workload boot uses. Confirm on the KVM host that the parent reaches
-   agent-ready and `capture_vm_full` writes a checkpoint.
-2. **BUG-2 — open.** Without a verb-grant sidecar on the transient `machine run`
-   path there is no guest RPC at all, so the run that hosts the claim cannot
-   complete. Pre-existing; fix outside this slice.
-3. **BLOCKER-3 — open.** Without a boot-pinned host-signer anchor on the child,
-   the post-restore identity handshake refuses and every claim falls back to a
-   cold boot. Structural; fix outside this slice, along the shape above.
-4. **BLOCKER-4 — open.** A claimed child is wired none of the host channels a
-   cold boot gets: no egress socket for the endpoint the claim itself spawned,
-   no broker registration, no exit capture — so it has no `host.audit.v1` /
-   `host.secrets.v1` and its exit code is never reported. Fail-closed, but
-   strictly worse than the cold boot it replaces. Structural; fix outside this
-   slice, along the shape above.
-5. **Deferred, known-sharp: a failed child stop leaves an invisible live VM.**
-   On the claim refusal path `force_stop` logs and swallows a failure
-   (`crates/mvm-runtime/src/workload_runner/runner.rs:462`; the swallow is at
-   `:594-605`), and `ClaimCleanup::drop` then removes the child's state dir. A
-   stop that fails therefore leaves a live Firecracker still holding the
-   parent's CSPRNG with **no state dir at all** — invisible to the caller (which
-   sees only `ClaimFailed`), invisible to orphan-state-dir reaping, and findable
-   only with `pgrep`. Harmless while the pool is disarmed because the path is
-   unreachable, so it is not a merge blocker; it must not be armed with this
-   open. The fix is to order the removal after a *successful* stop, or to leave
-   a reapable marker behind when the stop fails.
-6. Only then: re-run the Task 7 priorities (capture → restore, the reseed
-   handshake, a fresh child name with no kernel boot in its console, warm vs
-   cold timings, and the two fail-closed cases that need a real captured
-   checkpoint), and flip the capability only if that run is green.
-
----
-
-## What WAS verified live
+## What WAS verified live (run 1)
 
 ### Warm pool is genuinely reachable from the CLI
 
@@ -511,35 +403,9 @@ fresh Firecracker spawn per VM) and are unchanged by this work. **Closing the
 gap to sub-30 ms is a separate effort from making the warm claim correct**, and
 neither of the two defects above is a latency problem.
 
----
-
-## What must happen before this validation can be re-run
-
-See "What must happen before `standby_pool` can flip to `true`" above for the
-full gate list. In short: BUG-1 is fixed in code and needs a live run to
-confirm; BUG-2 and BLOCKER-3 are both open and each independently prevents a
-claim from ever completing; BLOCKER-4 lets a claim complete but returns a child
-wired none of the host channels a cold boot gets.
-
-Two further defects were found by review of the BUG-1 fix and are **fixed** in
-the same change as BUG-1, so neither needs a separate live gate — but both are
-worth knowing about when reading the pool code:
-
-- **The compat key never matched.** The spawn recorded
-  `image_sha256: Some(sha256(rootfs))` while the claim computed `None`
-  unconditionally, and `StandbyHandle::is_compatible` is exact equality — so
-  every claim silently cold-booted while the pool filled and never drained. It
-  was masked here because the hand-seeded fixture in "Fail-closed" below carried
-  `image_sha256: null`, which is why *that* one was selected. Both halves now
-  build the key through one function (`compat_for_launch`), keyed on the same
-  digest claim-8 admission puts on `plan.image.sha256` and that
-  `bind_plan_to_parent` checks the captured parent against.
-- **`mvm.vsock_egress=1` was a second cmdline divergence.** A factory parent is
-  deny-all by construction, so a launch with `--network-allow` would boot the
-  workload with the token and the parent without it — and a child inheriting the
-  parent's cmdline would come up with no network, silently. Such launches are
-  now excluded from the warm pool at both ends (claim and replenish) rather than
-  served with the wrong shape.
+One of those two structural costs has since moved on `main`: the per-call
+`curl` subprocesses were replaced with direct Firecracker API calls. The
+measurements above predate that change and were not re-taken.
 
 ## Reproduction
 
@@ -562,3 +428,361 @@ Incidental observation, not chased down: `machine stop <name>` followed by
 timing reps (`pgrep -af firecracker` showed seven live
 `--api-sock /root/mvm-t7-home/vms/t7cold/fc.socket` processes at the end).
 The next launch's orphan reaper collects them one at a time.
+
+## Gate list as written after run 1
+
+*(Superseded by "What must happen before `standby_pool` can flip to `true`" at
+the end of this note, which adds the two structural blockers review found and
+records item 1 as done. Kept because it is what the first run concluded.)*
+
+1. Fix BUG-1: thread the runtime overlay (and the matching
+   `mvm.runtime_*` / verity cmdline tokens) into `spawn_standby_parent`'s
+   `VmmSpec`, the way the workload launch path does via
+   `attach_runtime_overlay_if_cached`. Until then no Firecracker standby can
+   boot on an overlay-only runtime.
+2. Fix BUG-2, or the transient `machine run` that hosts the claim cannot
+   complete a guest RPC at all.
+3. Then re-run: priorities 1–3, the two remaining fail-closed cases, and the
+   warm-claim timing.
+
+---
+
+# Second live run — after the overlay-attachment fix
+
+Re-run on the same host at `03dcf3aa5` (`fix(fc): boot the standby parent with
+the runtime overlay attached`), release build, isolated
+`MVM_HOME=/root/mvm-t7b-home` seeded from the shared cache, fresh checkout at
+`/root/mvm-t7b`.
+
+**Outcome: still FAILS. The fix is necessary but not sufficient.**
+
+The overlay is now attached correctly — this half is fixed and verified on the
+host side:
+
+```
+$ grep -a -o "drive_id[^}]*" /root/mvm-t7b-home/vms/standby-af8f47e692da612b/firecracker.log
+drive_id\": \"blk0\", ... rootfs.ext4",     "is_root_device\": true,  "is_read_only\": true
+drive_id\": \"blk1\", ... overlay.ext4",    "is_root_device\": false, "is_read_only\": true
+drive_id\": \"blk2\", ... overlay.verity",  "is_root_device\": false, "is_read_only\": true
+
+$ grep -a -o "boot_args[^,]*" .../firecracker.log | head -1
+boot_args\": \"console=ttyS0 reboot=k panic=1 net.ifnames=0 root=/dev/vda rw rootwait init=/init
+ mvm.runtime_roothash=996d1500… mvm.runtime_data=/dev/vdb mvm.runtime_hash=/dev/vdc
+ mvm.runtime_source_policy=required_overlay\"
+```
+
+The guest still dies the same way:
+
+```
+$ grep -a -nE "Run /init|no guest agent|Kernel panic" .../console.log
+270:[    0.848812] Run /init as init process
+271:mvm-oci-init: no guest agent resolved from /mvm/runtime and no baked fallback — refusing to boot without the mvm control plane
+272:[    0.851864] Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100
+```
+
+## Root cause (deeper than BUG-1 as first written)
+
+Attaching the drives and threading the tokens is not enough, because **nothing
+in this boot mode consumes them**. The `mvm.runtime_*` tokens are parsed by
+`mvm-verity-init` (`crates/mvm-agentd/src/bin/mvm-verity-init.rs`), the
+initramfs PID 1, which mounts the overlay read-only at `/sysroot/mvm/runtime`.
+
+The parent boots `root=/dev/vda rw rootwait init=/init`, so the kernel mounts
+the rootfs directly and runs `mvm-oci-init` instead. That init only *reads*
+`/mvm/runtime` (`resolve_guest_agent()`); it never mounts anything. With no
+initramfs in the parent's `VmmSpec`, the overlay is attached but unmounted, the
+agent is unresolvable, PID 1 exits, and the kernel panics.
+
+The workload path avoids this by booting the verified-boot shape: an initrd, no
+`root=`/`init=` in the cmdline (the initramfs owns root selection), and
+rootfs-verity drives alongside the overlay.
+
+## What that run concluded
+
+The capability flip is **reverted** — Firecracker again reports
+`standby_pool: false`. Advertising the pool while a parent cannot boot would
+turn a configured warm pool into a failed spawn on every launch, which is a
+worse outcome than not offering it. The capture, fork-restore, CLI wiring, and
+overlay attachment all land; the flip returns with the parent's verified-boot
+shape.
+
+## Still open after run 2
+
+- The parent must boot the verity/initramfs shape rather than a direct rootfs
+  boot — i.e. `spawn_standby_parent` should build its spec through the same
+  mapping the workload uses instead of hand-rolling a `VmmSpec`.
+  *(Done: that is exactly what the shipped `workload_runner::standby_boot`
+  module does, and run 3 proves the resulting boot shape works.)*
+- **BUG-2** is unchanged: the transient `machine run` path still ends in
+  `Error: Failed to read frame length` (no verb-grant sidecar minted), which is
+  independent of the pool.
+
+---
+
+# Third live run — the boot-shape correction works
+
+Re-run at `3ac531193` (`fix(fc): boot the standby parent in the verified-boot
+shape`), release, same host, `MVM_HOME=/root/mvm-t7b-home`, checkout
+`/root/mvm-t7b`.
+
+**BUG-1 is fixed. The parent boots, reaches its guest agent, and is captured.**
+This is the step that was unreachable in both earlier runs.
+
+```
+$ grep -anE "Run /init|verity-init|guest-agent" .../standby-*/console.log
+274:[    0.358538] Run /init as init process
+275:mvm-verity-init: starting
+277:mvm-verity-init: rootfs  data=/dev/vda hash=/dev/vdb roothash=6381e8ee…
+279:mvm-verity-init: overlay data=/dev/vdc hash=/dev/vdd roothash=996d1500…
+320:mvm-guest-agent: listening on vsock port 5252
+```
+
+`mvm-verity-init` is PID 1 (not `mvm-oci-init`), it mounts the runtime overlay,
+and the agent binds vsock 5252. No `no guest agent resolved` line, no panic.
+
+The capture then ran, and the pool populated for the first time:
+
+```
+$ ls -1 /root/mvm-t7b-home/checkpoints
+standby-standby-6939ce49e1b69ad2
+
+$ meta.json → class: vm_full
+   blobs: rootfs.ext4, memory.bin, vmstate.bin, mvm-meta.json,
+          rootfs.verity, rootfs.roothash, device-anchors.json
+$ ls -la content/memory.bin
+-rw-r--r-- 1 root root 536870912   memory.bin
+```
+
+A real 512 MiB memory image — the property that makes a later claim a restore
+rather than a cold boot. Prior runs had no `checkpoints/` directory at all and a
+pool holding only `claim.lock` / `warm.lock`.
+
+## How to reproduce (note the capability chicken-and-egg)
+
+Task 6 gates the very path Task 7 must exercise: with `standby_pool: false` the
+run stops at `firecracker: standby pool is not supported by this backend` and
+`spawn_standby_parent` is never reached. To validate, flip the capability
+**locally on the test host only** and rebuild:
+
+```
+sed -i "s/^            standby_pool: false,/            standby_pool: true,/" \
+    crates/mvm-runtime/src/driver/fc.rs
+cargo build --release --bin mvmctl
+MVM_HOME=… MVM_RESIDENCY=warm ./target/release/mvmctl -v machine run \
+    --image docker.io/library/alpine:latest --hypervisor firecracker echo hi
+```
+
+Keep the committed default `false` until a live run earns the flip.
+
+## Still blocked: BUG-2
+
+The end-to-end run still fails, for the unrelated reason recorded above — the
+transient path mints no verb-grant sidecar:
+
+```
+Error: Failed to write frame length
+    Broken pipe (os error 32)
+# guest side:
+mvm-guest-agent: rejecting control connection without a pinned host key
+```
+
+So the **capture half is proven live; the claim half remains unexercised through
+the CLI** until BUG-2 is fixed. Not verified this run: that the parent process is
+released after capture (the check used was malformed and is not evidence either
+way).
+
+## Which implementation the evidence backs
+
+Two implementations of the boot-shape correction existed. The one exercised on
+the host was an inline `VmmSpec` build inside `FcDriver::spawn_standby_parent`
+(commit `3ac531193`). A better-factored version — a
+`workload_runner::standby_boot` module exposing `factory_parent_config` /
+`factory_parent_spec`, reusing the workload spec mapping instead of duplicating
+it — was developed in parallel, and **that is the one that shipped**: it removes
+the duplication that caused this bug rather than working around it. `3ac531193`
+was dropped rather than merged.
+
+**The evidence above applies to either**, since both produce the same boot shape:
+verity initramfs as PID 1, rootfs hash device at slot 1, overlay at slots 2-3 on
+`/dev/vdc` + `/dev/vdd`, and no `root=`/`init=` in the cmdline. The shipped
+module additionally holds that shape *by construction* — the parent's device
+model and cmdline come from the same `workload_device_spec` +
+`cmdline::runner_cmdline` mappers a workload boot uses, and host-side tests
+assert the two are equal — so the equivalence is a compile-and-test property
+rather than two recipes kept in step by hand. It also fails the spawn closed,
+naming the missing artifact, when a launch could not reach a guest agent at all
+(a required overlay that was never attached, or a sealed rootfs with no
+resolvable initramfs), instead of booting a parent that panics the way run 1's
+did — and it applies `main`'s kernel-cmdline truncation refusal to the parent as
+well as the workload, which matters more here: a child inherits the parent's
+cmdline out of restored memory, so trailing tokens the kernel silently dropped
+from a parent would be lost to every child it produces.
+
+---
+
+# Blockers found by review, not by any run
+
+Both are structural, both survive BUG-1's fix, and each independently prevents a
+claim from completing. Neither was reachable on the host: the claim path has
+never run.
+
+## BLOCKER-3 — a restored child has no host-signer anchor, so it cannot be authorized at all
+
+Found by review of the BUG-1 fix, not by the live run. It is not a variant of
+BUG-2: BUG-2 is a missing sidecar on one code path, this is a structural
+consequence of a shared parent, and it survives BUG-2's fix.
+
+A forked child is not merely *ungranted*; it is **unauthorizable**. Three links,
+each a code reading:
+
+1. **The parent boots with no `mvm.host_signer_pub=` token.** `grant_tokens`
+   (`crates/mvm-runtime/src/hvf_bootargs.rs:43-52`) is keyed on `config.name`
+   and reads the named VM's `verb-grant.json`. A factory parent has no plan and
+   therefore no sidecar, so it emits none — correctly, since a parent must hold
+   no workload authority. But the child inherits the parent's cmdline out of
+   restored memory rather than deriving its own, so the child boots with **no
+   pinned host-signer trust anchor**.
+2. **Nothing re-pins one after the restore.** The production
+   `VsockPostRestoreSignal` hardcodes `grant_envelope: None`
+   (`crates/mvm-runtime/src/vm/instance_snapshot.rs:529`), and every host-side
+   construction leaves `predecessor_session_id` / `predecessor_plan_nonce_hex`
+   at `None`. Those `VerbGrantEnvelope` fields are wired guest-side only.
+3. **The guest-side re-pin cannot succeed without an anchor.**
+   `re_pin_verb_grant` deliberately verifies a replacement grant against the
+   **boot-pinned** anchor rather than against `envelope.pubkey_hex` — otherwise
+   any envelope could nominate its own key. With no anchor pinned there is
+   nothing to verify against.
+
+Consequence: the child rejects the PostRestore RPC, `require_fresh_child_identity`
+refuses it, `claim_standby` returns `ClaimFailed`, and the launch cold-boots.
+Fail-closed — there is no security hole here — but the warm claim is
+**structurally unreachable** even after BUG-1 and BUG-2 are fixed.
+
+Suggested shape, recorded but **not implemented** (it is its own slice, and
+guessing at it inside a boot-shape fix is how BUG-1 happened): the host-signer
+public key is *host identity*, not *workload authority*. Pinning
+`mvm.host_signer_pub=` on the factory parent while still withholding
+`mvm.verb_grant=` and `mvm.require_grant=` would give every child a trust anchor
+without giving the parent any authority — the parent still holds no plan, no
+grant, and no verbs. With an anchor present, the natural completion is to carry
+a replacement grant over the PostRestore signal using the already-defined
+`predecessor_session_id` / `predecessor_plan_nonce_hex` fields, so the child
+re-pins to its own admitted plan at claim time. Note that pinning the anchor on
+the parent is itself a cmdline change and so must go through the same
+`factory_parent_config` / `workload_device_spec` path, with the shape-equality
+guards updated to match.
+
+## BLOCKER-4 — a warm-claimed child is wired none of the host channels a cold boot gets
+
+Found by review, not by the live run: the claim path was never reached, so
+nothing here was observable on the host. Like BLOCKER-3 it is structural, and it
+survives BUG-1, BUG-2 and BLOCKER-3 all being fixed.
+
+A cold boot's host-side vsock wiring happens in exactly two places, and a warm
+claim goes through neither.
+
+1. **The guest-dial bridges and the exit capture are `boot`-only.**
+   `wire_guest_dial_bridges` and `spawn_workload_exit_capture` are called from
+   one site each — `FcDriver::boot`
+   (`crates/mvm-runtime/src/driver/fc.rs:580-581`). The claim path runs
+   `FcDriver::fork_standby_child` (`fc.rs:495`) →
+   `FcForkRestorer::restore_fork` (`crates/mvm-runtime/src/firecracker.rs`),
+   which remaps the snapshot's baked-in device paths and resumes the VM. It
+   does neither.
+2. **The claim spawns the child's endpoint and then drops its address.**
+   `claim_standby` stands up the child's own substitution endpoint
+   (`crates/mvm-runtime/src/workload_runner/runner.rs:426-437`) but never
+   threads the returned `egress_uds()` anywhere, and never calls
+   `BrokerRegistrar::register`. Contrast `start_workload` (`runner.rs:322-348`),
+   which does both: the endpoint's socket becomes the spec's `egress_gateway`,
+   and the broker is registered for the booted VM.
+
+What a claimed child would therefore come up with, once the pool is armed:
+
+- **no `v.sock_<EGRESS_PORT>` symlink**, so the endpoint process the claim just
+  spawned is dark — the guest's egress client dials a socket nothing serves;
+- **no `v.sock_<BROKER_PORT>`**, so `host.audit.v1` and `host.secrets.v1` are
+  silently unavailable to the workload — a *degradation relative to a cold
+  boot*, which registers the broker;
+- **no `v.sock_<WORKLOAD_EXIT_PORT>` listener**, so `workload.exit` is never
+  written and `machine run` reports UNKNOWN instead of the guest's real exit
+  code.
+
+All three fail closed — an unwired channel is an unreachable channel, and no
+isolation boundary moves — so none of this is a security hole. But a warm claim
+that hands back a child with strictly less than a cold boot gives it is not a
+fast path; it is a different and worse one.
+
+**Not implemented here**, deliberately: the shape is to lift the host-channel
+wiring out of `FcDriver::boot` so the fork path runs the same step, and to give
+`claim_standby` the tail of `start_workload` it is missing. Both are their own
+slice, and guessing at either inside a records-and-comments pass is how BUG-1
+happened.
+
+---
+
+# Two further defects, found by review and fixed alongside BUG-1
+
+Neither needs a separate live gate — but both are worth knowing about when
+reading the pool code:
+
+- **The compat key never matched.** The spawn recorded
+  `image_sha256: Some(sha256(rootfs))` while the claim computed `None`
+  unconditionally, and `StandbyHandle::is_compatible` is exact equality — so
+  every claim silently cold-booted while the pool filled and never drained. It
+  was masked in run 1 because the hand-seeded fixture in "Fail-closed" above
+  carried `image_sha256: null`, which is why *that* one was selected. Both
+  halves now build the key through one function (`compat_for_launch`), keyed on
+  the same digest claim-8 admission puts on `plan.image.sha256` and that
+  `bind_plan_to_parent` checks the captured parent against.
+- **`mvm.vsock_egress=1` was a second cmdline divergence.** A factory parent is
+  deny-all by construction, so a launch with `--network-allow` would boot the
+  workload with the token and the parent without it — and a child inheriting the
+  parent's cmdline would come up with no network, silently. Such launches are
+  now excluded from the warm pool at both ends (claim and replenish) rather than
+  served with the wrong shape.
+
+---
+
+# What must happen before `standby_pool` can flip to `true`
+
+The current gate list, superseding the run-1 list above. In order; each is a
+hard gate.
+
+1. **BUG-1 — fixed in code and confirmed live.** The parent's boot inputs now
+   come from the launch's own `VmStartConfig` through the same mappers a
+   workload boot uses. The third run confirms on the KVM host that the parent
+   reaches agent-ready and `capture_vm_full` writes a memory-carrying
+   checkpoint.
+2. **BUG-2 — open.** Without a verb-grant sidecar on the transient `machine run`
+   path there is no guest RPC at all, so the run that hosts the claim cannot
+   complete. Pre-existing; fix outside this slice.
+3. **BLOCKER-3 — open.** Without a boot-pinned host-signer anchor on the child,
+   the post-restore identity handshake refuses and every claim falls back to a
+   cold boot. Structural; fix outside this slice, along the shape above.
+4. **BLOCKER-4 — open.** A claimed child is wired none of the host channels a
+   cold boot gets: no egress socket for the endpoint the claim itself spawned,
+   no broker registration, no exit capture — so it has no `host.audit.v1` /
+   `host.secrets.v1` and its exit code is never reported. Fail-closed, but
+   strictly worse than the cold boot it replaces. Structural; fix outside this
+   slice, along the shape above.
+5. **Deferred, known-sharp: a failed child stop leaves an invisible live VM.**
+   On the claim refusal path `force_stop` logs and swallows a failure
+   (`crates/mvm-runtime/src/workload_runner/runner.rs:462`; the swallow is at
+   `:594-605`), and `ClaimCleanup::drop` then removes the child's state dir. A
+   stop that fails
+   therefore leaves a live Firecracker still holding the parent's CSPRNG with
+   **no state dir at all** — invisible to the caller (which sees only
+   `ClaimFailed`), invisible to orphan-state-dir reaping, and findable only with
+   `pgrep`. Harmless while the pool is disarmed because the path is unreachable,
+   so it is not a merge blocker; it must not be armed with this open. The fix is
+   to order the removal after a *successful* stop, or to leave a reapable marker
+   behind when the stop fails.
+6. Only then: re-run the Task 7 priorities (capture → restore, the reseed
+   handshake, a fresh child name with no kernel boot in its console, warm vs
+   cold timings, and the two fail-closed cases that need a real captured
+   checkpoint), and flip the capability only if that run is green.
+
+In short: BUG-1 is fixed and live-proven; BUG-2 and BLOCKER-3 are both open and
+each independently prevents a claim from ever completing; BLOCKER-4 lets a claim
+complete but returns a child wired none of the host channels a cold boot gets.

@@ -571,16 +571,18 @@ let
 
     # Stage 2.475 — provision the per-run verb-grant inputs.
     #
-    # The launcher writes `mvm.verb_grant=<hex(JSON)>` onto the kernel cmdline
-    # using the same hex encoding as stages 2.46/2.47. We decode the JSON blob
+    # The launcher writes `mvm.verb_grant=<base64(JSON)>` onto the kernel
+    # cmdline — base64 rather than the hex used by stages 2.46/2.47 because this
+    # envelope is the largest thing on the cmdline and the kernel silently drops
+    # whatever runs past COMMAND_LINE_SIZE. We decode the JSON blob
     # to `/run/mvm/verb-grant.json` (tmpfs, mode 0644). The host-signer public
     # key lands in the same tmpfs so the agent verifies the grant against an
     # out-of-band key: from the read-only config drive when one is attached,
     # otherwise from the cmdline. A vsock-only guest has no config drive, so
     # there the cmdline is the only carrier — without this the agent finds no
     # key, refuses every control RPC, and the host's readiness probe times out.
-    MVM_VERB_GRANT_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_VERB_GRANT_HEX" ]; then
+    MVM_VERB_GRANT_B64=$(/bin/busybox sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_VERB_GRANT_B64" ]; then
       /bin/busybox mkdir -p /run/mvm
       if [ -r /mnt/config/host-signer.pub ]; then
         /bin/busybox cp /mnt/config/host-signer.pub /run/mvm/host-signer.pub
@@ -593,7 +595,7 @@ let
           /bin/busybox chmod 0644 /run/mvm/host-signer.pub
         fi
       fi
-      printf '%b' "$(echo "$MVM_VERB_GRANT_HEX" | /bin/busybox sed 's/../\\x&/g')" \
+      printf '%s' "$MVM_VERB_GRANT_B64" | /bin/busybox base64 -d \
         > /run/mvm/verb-grant.json
       /bin/busybox chmod 0644 /run/mvm/verb-grant.json
       echo "mvm-init: provisioned verb-grant"

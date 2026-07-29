@@ -311,8 +311,9 @@ mod tests {
         assert!(!libkrun.standby_pool);
 
         // No backend advertises the warm pool: the doctor table must report
-        // what a host can actually service, and a spawn that cannot survive a
-        // live boot is not a capability.
+        // what a host can actually service. Firecracker has the spawn, capture
+        // and fork halves and a live run has driven a parent through capture,
+        // but nothing has yet claimed one, so the pool reports off.
         let firecracker = by("firecracker").unwrap();
         assert!(!firecracker.standby_pool);
     }

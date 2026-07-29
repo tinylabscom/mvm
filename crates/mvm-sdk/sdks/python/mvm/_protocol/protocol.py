@@ -1417,7 +1417,7 @@ class VerbGrant:
     not_after: str
     plan_nonce: Nonce
     session_id: str
-    sig: List[int]
+    sig: str
     verbs: List[VerbId]
 
 

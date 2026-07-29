@@ -34,6 +34,9 @@ pub struct CliWorld {
     pub isolated_home: Option<tempfile::TempDir>,
     /// Whether live CLI steps should keep one warm standby for the next run.
     pub warm_residency: bool,
+    /// Content address of the bundle a `bundle install` step registered, so the
+    /// boot step can name it as `machine run --manifest <sha>`.
+    pub bundle_sha: Option<String>,
     /// Local kernel pins accumulated by the freshness-watcher scenarios.
     pub kernel_pins: Vec<KernelPin>,
     /// Latest upstream point release per `MAJOR.MINOR` series, as those same

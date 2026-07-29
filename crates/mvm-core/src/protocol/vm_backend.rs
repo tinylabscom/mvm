@@ -14,6 +14,8 @@
 //! itself lives in `mvm-protocol`.
 
 use anyhow::Result;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
 pub use mvm_protocol::protocol::vm_backend::{
@@ -234,12 +236,14 @@ pub struct VmStartConfig {
     pub dev_console: bool,
 }
 
-/// Envelope carried in the `mvm.verb_grant=<hex(JSON)>` kernel-cmdline token.
+/// Envelope carried in the `mvm.verb_grant=<base64(JSON)>` kernel-cmdline token.
 ///
-/// The host hex-encodes the JSON so the value is a single space/newline-free
-/// token that `/proc/cmdline` round-trips without quoting. The guest decodes
-/// the hex, parses the JSON with `deny_unknown_fields`, then passes the inner
-/// `VerbGrant` to `pin_verb_grant` for signature verification before use.
+/// The host base64-encodes the JSON so the value is a single space/newline-free
+/// token that `/proc/cmdline` round-trips without quoting. base64 rather than
+/// hex because this is the largest token on the cmdline and the kernel silently
+/// drops anything past `COMMAND_LINE_SIZE`. The guest decodes it, parses the
+/// JSON with `deny_unknown_fields`, then passes the inner `VerbGrant` to
+/// `pin_verb_grant` for signature verification before use.
 ///
 /// `pubkey_hex` is the 32-byte Ed25519 verifying key in lowercase hex.
 /// `plan_nonce_hex` is the `Nonce::as_hex()` of the plan nonce the grant was
@@ -260,36 +264,32 @@ pub struct VerbGrantEnvelope {
     pub grant: crate::plan::VerbGrant,
 }
 
-/// Encode a `VerbGrantEnvelope` as a single `mvm.verb_grant=<hex(JSON)>`
+/// Encode a `VerbGrantEnvelope` as a single `mvm.verb_grant=<base64(JSON)>`
 /// kernel-cmdline token. Returns `None` if `env.pubkey_hex` is empty (no
-/// key ⇒ nothing to verify against) or if serialization fails. The hex
-/// encoding keeps the token space/newline-free for `/proc/cmdline`.
+/// key ⇒ nothing to verify against) or if serialization fails.
+///
+/// base64 rather than hex: this envelope is by far the largest thing on the
+/// guest cmdline, and the kernel silently drops everything past
+/// `COMMAND_LINE_SIZE`. Hex doubles the payload; base64 costs ~4/3, which buys
+/// back roughly a quarter of the whole budget. The standard alphabet is
+/// space- and newline-free, so the token stays a single `/proc/cmdline` word,
+/// and `=` padding is only ever trailing — the kernel splits a parameter on
+/// its first `=`, and the guest captures to the next space.
 pub fn encode_verb_grant_cmdline(env: &VerbGrantEnvelope) -> Option<String> {
     if env.pubkey_hex.is_empty() {
         return None;
     }
     let json = serde_json::to_vec(env).ok()?;
-    let hex: String = json.iter().map(|b| format!("{b:02x}")).collect();
-    Some(format!("mvm.verb_grant={hex}"))
+    Some(format!("mvm.verb_grant={}", B64.encode(&json)))
 }
 
-/// Decode the hex value of a `mvm.verb_grant=` cmdline token (the part after
-/// the `=`) into a `VerbGrantEnvelope`. Returns `Err` on malformed hex or
-/// unknown JSON fields (fail-closed).
-pub fn decode_verb_grant_cmdline(token_value_hex: &str) -> anyhow::Result<VerbGrantEnvelope> {
-    let bytes: Result<Vec<u8>, _> = (0..token_value_hex.len())
-        .step_by(2)
-        .map(|i| {
-            token_value_hex
-                .get(i..i + 2)
-                .ok_or_else(|| anyhow::anyhow!("odd-length hex"))
-                .and_then(|pair| {
-                    u8::from_str_radix(pair, 16)
-                        .map_err(|_| anyhow::anyhow!("non-hex byte at position {i}"))
-                })
-        })
-        .collect();
-    let bytes = bytes?;
+/// Decode the base64 value of a `mvm.verb_grant=` cmdline token (the part
+/// after the first `=`) into a `VerbGrantEnvelope`. Returns `Err` on malformed
+/// base64 or unknown JSON fields (fail-closed).
+pub fn decode_verb_grant_cmdline(token_value_b64: &str) -> anyhow::Result<VerbGrantEnvelope> {
+    let bytes = B64
+        .decode(token_value_b64.trim())
+        .map_err(|e| anyhow::anyhow!("malformed base64 verb-grant token: {e}"))?;
     let env: VerbGrantEnvelope = serde_json::from_slice(&bytes)?;
     Ok(env)
 }
@@ -1000,8 +1000,8 @@ mod tests {
         // Single cmdline token — no spaces or newlines.
         assert!(!token.contains(' ') && !token.contains('\n'));
 
-        let hex_value = token.strip_prefix("mvm.verb_grant=").unwrap();
-        let decoded = decode_verb_grant_cmdline(hex_value).unwrap();
+        let encoded_value = token.strip_prefix("mvm.verb_grant=").unwrap();
+        let decoded = decode_verb_grant_cmdline(encoded_value).unwrap();
 
         assert_eq!(decoded.pubkey_hex, pubkey_hex);
         assert_eq!(decoded.plan_nonce_hex, plan_nonce_hex);
@@ -1011,17 +1011,20 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_malformed_hex() {
-        let result = decode_verb_grant_cmdline("zzzz");
-        assert!(result.is_err(), "non-hex input must be rejected");
+    fn decode_rejects_malformed_base64() {
+        // `!` is outside the standard alphabet. (Note `zzzz` would *not* do:
+        // those are legal base64 characters and would fail later, at JSON.)
+        assert!(
+            decode_verb_grant_cmdline("!!!!").is_err(),
+            "non-base64 input must be rejected"
+        );
     }
 
     #[test]
     fn decode_rejects_unknown_field() {
         // Build valid JSON with an extra field; deny_unknown_fields must reject it.
         let bad = r#"{"pubkey_hex":"aa","plan_nonce_hex":"bb","grant":{},"extra":"bad"}"#;
-        let hex: String = bad.bytes().map(|b| format!("{b:02x}")).collect();
-        let result = decode_verb_grant_cmdline(&hex);
+        let result = decode_verb_grant_cmdline(&B64.encode(bad));
         assert!(result.is_err(), "unknown field must be rejected");
     }
 }

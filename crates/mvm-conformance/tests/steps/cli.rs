@@ -136,6 +136,71 @@ fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
     world.last_run = Some(output);
 }
 
+/// Install the operator-supplied `.mvmpkg` into an isolated home and remember
+/// the content address it registered under. The `@bundle` capability gate
+/// guarantees the fixture exists before this scenario is selected.
+#[when(expr = "I install the bundle fixture")]
+fn install_bundle_fixture(world: &mut CliWorld) {
+    let fixture = crate::bundle_fixture_path()
+        .expect("`@bundle` scenarios only run when MVM_BDD_BUNDLE names a real file");
+    if world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
+    }
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home is set above");
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(["bundle", "install"])
+        .arg(&fixture)
+        .env("MVM_HOME", home.path())
+        .output()
+        .expect("failed to spawn mvmctl");
+    // `Installed bundle <sha> (N artifacts, publisher key_id=...)`
+    world.bundle_sha = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Installed bundle "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_string);
+    world.last_run = Some(output);
+}
+
+#[then(expr = "the install reports a bundle content address")]
+fn install_reports_bundle_sha(world: &mut CliWorld) {
+    let sha = world
+        .bundle_sha
+        .as_deref()
+        .expect("bundle install printed no content address");
+    assert_eq!(sha.len(), 64, "expected a 64-char sha256, got {sha:?}");
+    assert!(
+        sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "content address is not hex: {sha:?}"
+    );
+}
+
+/// Boot the bundle the previous step installed, by content address. `args` is
+/// appended after `machine run --manifest <sha>`.
+#[when(expr = "I boot the installed bundle with {string}")]
+fn boot_installed_bundle(world: &mut CliWorld, args: String) {
+    let sha = world
+        .bundle_sha
+        .clone()
+        .expect("no installed bundle — run the install step first");
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("install step creates the isolated home");
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(["machine", "run", "--manifest", &sha])
+        .args(args.split_whitespace())
+        .env("MVM_HOME", home.path())
+        .output()
+        .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
 #[then(expr = "the isolated mvm home does not contain directory {string}")]
 fn isolated_home_no_dir(world: &mut CliWorld, rel: String) {
     let home = world
