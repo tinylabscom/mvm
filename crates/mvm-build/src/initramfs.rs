@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::arch::GuestArch;
 use mvm_fs::initramfs::{InitramfsArtifact, InitramfsResolver};
+use std::collections::HashMap;
 use thiserror::Error;
 
 /// Failure modes for universal initramfs resolution/build.
@@ -28,6 +29,29 @@ pub enum InitramfsBuildError {
     /// `nix build` failed.
     #[error("nix build failed: {reason}")]
     NixBuildFailed { reason: String },
+
+    /// A downloaded artifact's sha256 didn't match the pre-committed entry.
+    #[error("checksum mismatch for {name}: expected sha256 {expected}, computed {actual}")]
+    ChecksumMismatch {
+        name: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// The fetched checksum manifest lacked an entry for a required file.
+    #[error("checksum manifest at {checksums_url} did not list an entry for {name}")]
+    ChecksumMissing { name: String, checksums_url: String },
+
+    /// The downloaded initramfs archive was malformed or unsafe to extract.
+    #[error("initramfs archive invalid at {archive_path:?}: {reason}")]
+    InvalidArchive {
+        archive_path: PathBuf,
+        reason: String,
+    },
+
+    /// `curl` failed to download the artifact.
+    #[error("download failed for {url}: {reason}")]
+    DownloadFailed { url: String, reason: String },
 
     /// Underlying I/O error.
     #[error("io error: {0}")]
@@ -108,10 +132,22 @@ pub fn resolve_or_build_local_initramfs(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Err(InitramfsBuildError::HostUnsupported {
-            operation: "nix build",
-            reason: "universal initramfs build requires Linux; seed the cache from a Linux build",
-        })
+        // macOS / non-Linux hosts cannot run `nix build` for a Linux initramfs.
+        // Try to download a published release artifact into the cache before
+        // giving up. This mirrors the runtime-overlay download path.
+        match download_initramfs(version, arch, cache_root) {
+            Ok(artifact) => Ok(artifact),
+            Err(download_err) => {
+                tracing::debug!(
+                    error = %download_err,
+                    "initramfs download fallback unavailable"
+                );
+                Err(InitramfsBuildError::HostUnsupported {
+                    operation: "nix build",
+                    reason: "universal initramfs build requires Linux and no published artifact was available; seed the cache from a Linux build",
+                })
+            }
+        }
     }
 }
 
@@ -236,6 +272,234 @@ fn set_cache_perms(_p: &Path) -> Result<(), InitramfsBuildError> {
     Ok(())
 }
 
+// =================================================================
+// Download the published initramfs (consumer side)
+// =================================================================
+
+/// Default GitHub Releases base URL for the initramfs artifact. Override via
+/// `MVM_INITRAMFS_BASE_URL` for hermetic tests or a private mirror — same
+/// pattern as the runtime overlay downloader.
+const DEFAULT_RELEASE_BASE: &str = "https://github.com/tinylabscom/mvm/releases/download";
+
+/// Documented escape hatch to bypass SHA-256 integrity checks. Mirrors the
+/// runtime-overlay and dev-image downloaders.
+pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
+
+/// Release-side artifact names for one arch. Pure data so the download path
+/// and the release pipeline can agree on filenames without touching network
+/// code in the release job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitramfsArtifactNames {
+    /// The per-arch release tarball name.
+    pub archive: String,
+    /// The tarball's sha256 checksum sidecar name.
+    pub archive_checksum: String,
+}
+
+impl InitramfsArtifactNames {
+    /// Compute the per-arch release filenames.
+    pub fn for_arch(arch: &str) -> Self {
+        Self {
+            archive: format!("initramfs-{arch}.tar.gz"),
+            archive_checksum: format!("initramfs-{arch}.tar.gz.sha256"),
+        }
+    }
+}
+
+/// Construct the per-version release base URL.
+pub fn release_base_url(version: &str) -> String {
+    let base = std::env::var("MVM_INITRAMFS_BASE_URL")
+        .unwrap_or_else(|_| DEFAULT_RELEASE_BASE.to_string());
+    format!("{}/v{version}", base.trim_end_matches('/'))
+}
+
+/// Download the published initramfs tarball for `version` + `arch` from the
+/// GitHub Release (or mirror), verify the archive checksum, safely extract it,
+/// re-verify each inner artifact, and install into `cache_root` under the
+/// canonical layout.
+pub fn download_initramfs(
+    version: &str,
+    arch: GuestArch,
+    cache_root: &Path,
+) -> Result<InitramfsArtifact, InitramfsBuildError> {
+    let names = InitramfsArtifactNames::for_arch(&arch.to_string());
+    let base = release_base_url(version);
+    let archive_checksum_url = format!("{base}/{}", names.archive_checksum);
+
+    let expected = fetch_expected_hashes(&archive_checksum_url, &[&names.archive])?;
+
+    let tmp = tempfile::tempdir()?;
+    let stage = tmp.path();
+    let archive_local = stage.join(&names.archive);
+    curl_download(&format!("{base}/{}", names.archive), &archive_local)?;
+    verify_file_sha256(&archive_local, &names.archive, expected.get(&names.archive))?;
+    extract_initramfs_archive(&archive_local, stage)?;
+
+    install_initramfs_into_cache(stage, cache_root, version, arch)
+}
+
+fn extract_initramfs_archive(archive_path: &Path, stage: &Path) -> Result<(), InitramfsBuildError> {
+    let file = std::fs::File::open(archive_path)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let mut seen = std::collections::BTreeSet::new();
+
+    for entry in archive
+        .entries()
+        .map_err(|e| InitramfsBuildError::InvalidArchive {
+            archive_path: archive_path.to_path_buf(),
+            reason: format!("read tar entries: {e}"),
+        })?
+    {
+        let mut entry = entry.map_err(|e| InitramfsBuildError::InvalidArchive {
+            archive_path: archive_path.to_path_buf(),
+            reason: format!("read tar entry: {e}"),
+        })?;
+        let path = entry
+            .path()
+            .map_err(|e| InitramfsBuildError::InvalidArchive {
+                archive_path: archive_path.to_path_buf(),
+                reason: format!("read tar path: {e}"),
+            })?;
+        let Some(name) = canonical_archive_member_name(&path) else {
+            return Err(InitramfsBuildError::InvalidArchive {
+                archive_path: archive_path.to_path_buf(),
+                reason: format!("unsafe or unexpected path {:?}", path.display()),
+            });
+        };
+        match entry.header().entry_type() {
+            tar::EntryType::Regular => {
+                let dest = stage.join(name);
+                let mut out = std::fs::File::create(&dest)?;
+                std::io::copy(&mut entry, &mut out)?;
+                set_cache_perms(&dest)?;
+                seen.insert(name.to_string());
+            }
+            tar::EntryType::Directory => {}
+            other => {
+                return Err(InitramfsBuildError::InvalidArchive {
+                    archive_path: archive_path.to_path_buf(),
+                    reason: format!(
+                        "unsupported tar entry type {other:?} for {:?}",
+                        path.display()
+                    ),
+                });
+            }
+        }
+    }
+
+    for required in [
+        mvm_fs::initramfs::INITRAMFS_IMAGE_FILE,
+        mvm_fs::initramfs::INITRAMFS_HASH_FILE,
+        mvm_fs::initramfs::INITRAMFS_SIZE_FILE,
+        mvm_fs::initramfs::VERSION_FILE,
+        mvm_fs::initramfs::CHECKSUM_MANIFEST_FILE,
+    ] {
+        if !seen.contains(required) && !stage.join(required).is_file() {
+            return Err(InitramfsBuildError::InvalidArchive {
+                archive_path: archive_path.to_path_buf(),
+                reason: format!("missing required archive member {required}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn canonical_archive_member_name(path: &Path) -> Option<&'static str> {
+    let mut components = path.components();
+    let component = match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => name,
+        _ => return None,
+    };
+    match component.to_str()? {
+        "initramfs.cpio.gz" => Some("initramfs.cpio.gz"),
+        "initramfs.hash" => Some("initramfs.hash"),
+        "initramfs.size" => Some("initramfs.size"),
+        "VERSION" => Some("VERSION"),
+        "checksums-sha256.txt" => Some("checksums-sha256.txt"),
+        _ => None,
+    }
+}
+
+fn fetch_expected_hashes(
+    checksums_url: &str,
+    wanted: &[&str],
+) -> Result<HashMap<String, String>, InitramfsBuildError> {
+    let tmp = tempfile::NamedTempFile::new()?;
+    curl_download(checksums_url, tmp.path())?;
+    let body = std::fs::read_to_string(tmp.path())?;
+    let map = mvm_fs::overlay::parse_checksums_manifest(&body);
+
+    for w in wanted {
+        if !map.contains_key(*w) {
+            return Err(InitramfsBuildError::ChecksumMissing {
+                name: (*w).to_string(),
+                checksums_url: checksums_url.to_string(),
+            });
+        }
+    }
+    Ok(map)
+}
+
+fn verify_file_sha256(
+    path: &Path,
+    name: &str,
+    expected: Option<&String>,
+) -> Result<(), InitramfsBuildError> {
+    if std::env::var_os(SKIP_HASH_VERIFY_ENV).is_some() {
+        tracing::warn!("{SKIP_HASH_VERIFY_ENV} set — skipping integrity check on {name}.");
+        return Ok(());
+    }
+    let Some(expected) = expected else {
+        return Err(InitramfsBuildError::ChecksumMissing {
+            name: name.to_string(),
+            checksums_url: "(internal: missing expected hash)".to_string(),
+        });
+    };
+    let actual = mvm_fs::overlay::compute_file_sha256(path)?;
+    if actual != *expected {
+        let _ = std::fs::remove_file(path);
+        return Err(InitramfsBuildError::ChecksumMismatch {
+            name: name.to_string(),
+            expected: expected.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn curl_download(url: &str, dest: &Path) -> Result<(), InitramfsBuildError> {
+    let output = std::process::Command::new("curl")
+        .args(["-fSL", "--silent", "--show-error", "-o"])
+        .arg(dest)
+        .arg(url)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let _ = std::fs::remove_file(dest);
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let code = out
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            Err(InitramfsBuildError::DownloadFailed {
+                url: url.to_string(),
+                reason: format!("curl exited {code}; stderr={stderr}"),
+            })
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(dest);
+            Err(InitramfsBuildError::DownloadFailed {
+                url: url.to_string(),
+                reason: format!("spawn curl failed: {e}"),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +536,102 @@ mod tests {
         assert!(target_dir.join("initramfs.cpio.gz").is_file());
         assert_eq!(artifact.image_path, target_dir.join("initramfs.cpio.gz"));
         assert_eq!(artifact.version, "0.18.0");
+    }
+
+    #[test]
+    fn download_initramfs_installs_published_artifact_into_cache() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("cache").join("initramfs");
+        let release_root = tmp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+
+        let version = "0.18.0";
+        let arch = GuestArch::Aarch64;
+        seed_release_fixture(&release_root, version, arch);
+        env.set(
+            "MVM_INITRAMFS_BASE_URL",
+            format!("file://{}", release_root.display()),
+        );
+
+        let artifact = download_initramfs(version, arch, &cache_root).unwrap();
+
+        let expected_dir = cache_root.join(version).join(arch.to_string());
+        assert_eq!(artifact.image_path, expected_dir.join("initramfs.cpio.gz"));
+        assert!(expected_dir.join("initramfs.hash").is_file());
+        assert!(expected_dir.join("initramfs.size").is_file());
+        assert!(expected_dir.join("VERSION").is_file());
+    }
+
+    fn seed_release_fixture(base: &std::path::Path, version: &str, arch: GuestArch) {
+        let release_dir = base.join(format!("v{version}"));
+        std::fs::create_dir_all(&release_dir).unwrap();
+
+        let names = InitramfsArtifactNames::for_arch(&arch.to_string());
+        let ext4_bytes = b"downloaded-cpio";
+        let hash_text = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+";
+        let size_text = b"15
+";
+        let version_text = format!(
+            "{version}
+"
+        );
+        let archive_bytes =
+            initramfs_archive_bytes(ext4_bytes, hash_text, size_text, version_text.as_bytes());
+        std::fs::write(release_dir.join(&names.archive), &archive_bytes).unwrap();
+        std::fs::write(
+            release_dir.join(&names.archive_checksum),
+            format!(
+                "{}  {}
+",
+                mvm_fs::overlay::compute_file_sha256(&release_dir.join(&names.archive)).unwrap(),
+                names.archive
+            ),
+        )
+        .unwrap();
+    }
+
+    fn initramfs_archive_bytes(
+        image_bytes: &[u8],
+        hash_bytes: &[u8],
+        size_bytes: &[u8],
+        version_bytes: &[u8],
+    ) -> Vec<u8> {
+        let checksums = format!(
+            "{}  initramfs.cpio.gz
+{}  initramfs.hash
+{}  initramfs.size
+{}  VERSION
+",
+            sha256_hex(image_bytes),
+            sha256_hex(hash_bytes),
+            sha256_hex(size_bytes),
+            sha256_hex(version_bytes),
+        );
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        append_archive_file(&mut tar, "initramfs.cpio.gz", image_bytes);
+        append_archive_file(&mut tar, "initramfs.hash", hash_bytes);
+        append_archive_file(&mut tar, "initramfs.size", size_bytes);
+        append_archive_file(&mut tar, "VERSION", version_bytes);
+        append_archive_file(&mut tar, "checksums-sha256.txt", checksums.as_bytes());
+        let encoder = tar.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(u64::try_from(bytes.len()).unwrap());
+        header.set_cksum();
+        tar.append_data(&mut header, path, bytes).unwrap();
     }
 
     #[test]

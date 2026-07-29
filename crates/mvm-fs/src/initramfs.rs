@@ -13,6 +13,8 @@ pub const INITRAMFS_IMAGE_FILE: &str = "initramfs.cpio.gz";
 pub const INITRAMFS_HASH_FILE: &str = "initramfs.hash";
 pub const INITRAMFS_SIZE_FILE: &str = "initramfs.size";
 pub const VERSION_FILE: &str = "VERSION";
+/// Optional checksum manifest file carried by published release tarballs.
+pub const CHECKSUM_MANIFEST_FILE: &str = "checksums-sha256.txt";
 
 /// A resolved, validated universal initramfs artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
