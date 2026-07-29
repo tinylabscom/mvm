@@ -1321,7 +1321,7 @@ mod tests {
 
         let require_grant = crate::microvm::require_grant_cmdline_token(vm_name)
             .expect("sidecar present ⇒ enforcement token");
-        // Plan 270: roothash and block-device tokens now travel over vsock via
+        // Roothash and block-device tokens travel over vsock via
         // ActivateEnvironment, so the kernel cmdline only carries policy,
         // egress, and grant tokens.
         for needle in [

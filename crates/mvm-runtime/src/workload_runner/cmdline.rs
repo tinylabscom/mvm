@@ -129,7 +129,7 @@ pub(crate) fn workload_cmdline(
     } else {
         base_bootargs(virtiofs_root, has_disk)
     };
-    // Legacy per-rootfs initramfs boot: removed. Plan 270 passes the rootfs
+    // Legacy per-rootfs initramfs boot: removed. The universal initramfs passes the rootfs
     // and runtime-overlay roothashes/device paths via vsock `ActivateEnvironment`
     // after boot, so the kernel cmdline no longer carries `mvm.roothash`,
     // `mvm.data`, `mvm.hash`, or the runtime overlay equivalents.
@@ -274,7 +274,7 @@ mod tests {
         };
         let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
             .expect("cmdline");
-        // Plan 270: the initramfs PID-1 receives roothashes and device paths
+        // The initramfs PID-1 receives roothashes and device paths
         // over vsock, so the kernel cmdline must not carry them.
         assert!(!cmdline.contains("root=/dev/vda"));
         assert!(!cmdline.contains("init=/init"));
