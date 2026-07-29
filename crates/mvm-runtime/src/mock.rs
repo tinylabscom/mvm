@@ -27,8 +27,9 @@ use std::sync::Mutex;
 use anyhow::{Result, bail};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StandbyClaim, StandbyError, StandbyHandle, StartMode, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmInfo, VmNetworkInfo, VmStartConfig, VmStatus,
+    SnapshotCapability, StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState,
+    StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmNetworkInfo, VmStartConfig,
+    VmStatus,
 };
 
 use crate::mock_guest_agent::MockGuestAgent;
@@ -65,6 +66,10 @@ pub struct MockBackend {
     /// Test knob: make `stop` fail, to exercise error-surfacing paths
     /// (e.g. `WarmLease::release` vs the swallowing `Drop`).
     fail_stop: bool,
+    /// Test knob: make `spawn_standby` fail even when `supports_standby` is
+    /// set, so a warm-pool caller's failure-counting path is exercisable
+    /// against the same hermetic double the success path uses.
+    fail_spawn_standby: bool,
 }
 
 impl MockBackend {
@@ -83,6 +88,14 @@ impl MockBackend {
     /// Test builder: make every `stop` return an error.
     pub fn with_failing_stop(mut self) -> Self {
         self.fail_stop = true;
+        self
+    }
+
+    /// Test builder: make every `spawn_standby` return a `SpawnFailed` error
+    /// (requires [`with_standby`](Self::with_standby) — otherwise
+    /// `spawn_standby` already fails closed with `Unsupported`).
+    pub fn with_failing_spawn_standby(mut self) -> Self {
+        self.fail_spawn_standby = true;
         self
     }
 
@@ -185,6 +198,39 @@ impl VmBackend for MockBackend {
 
     fn supports_standby_pool(&self) -> bool {
         self.supports_standby
+    }
+
+    fn spawn_standby(
+        &self,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        if !self.supports_standby {
+            return Err(StandbyError::Unsupported {
+                backend: "mock".to_string(),
+            });
+        }
+        if self.fail_spawn_standby {
+            return Err(StandbyError::SpawnFailed(
+                "injected spawn failure (mock test knob)".to_string(),
+            ));
+        }
+        // Echo the spec's compat fields into a handle — no live process backs
+        // it, so the pool's later idle/compat bookkeeping (recorded by the
+        // caller, not here) sees exactly what it asked to spawn.
+        Ok(StandbyHandle {
+            id: spec.id.clone(),
+            template_id: spec.template_id.clone(),
+            control_socket: spec.control_socket.clone(),
+            pid: std::process::id(),
+            kernel_sha256: spec.kernel_sha256.clone(),
+            vcpus: spec.vcpus,
+            mem_mib: spec.mem_mib,
+            binding_nonce: spec.binding_nonce.clone(),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            image_sha256: spec.image_sha256.clone(),
+            parent_checkpoint: None,
+        })
     }
 
     fn claim_standby(
@@ -508,5 +554,54 @@ mod tests {
         let b2 = b1.clone();
         b1.start(&cfg("vm-a")).unwrap();
         assert_eq!(b2.count(), 1, "cloned mock must see vm-a started via b1");
+    }
+
+    fn sample_standby_spec() -> StandbySpec {
+        StandbySpec {
+            id: "standby-a".into(),
+            template_id: None,
+            kernel_path: "/img/kernel".into(),
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 512,
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "b".repeat(64),
+            control_socket: "/tmp/does-not-exist.sock".into(),
+            vm_state_dir: "/tmp/does-not-exist".into(),
+            image_path: None,
+            image_sha256: None,
+        }
+    }
+
+    #[test]
+    fn spawn_standby_fails_closed_without_standby_support() {
+        let b = MockBackend::new();
+        let err = b.spawn_standby(&sample_standby_spec()).unwrap_err();
+        assert!(matches!(err, StandbyError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn spawn_standby_echoes_spec_into_the_handle_when_enabled() {
+        let b = MockBackend::new().with_standby();
+        let spec = sample_standby_spec();
+        let handle = b.spawn_standby(&spec).unwrap();
+        assert_eq!(handle.id, spec.id);
+        assert_eq!(handle.kernel_sha256, spec.kernel_sha256);
+        assert_eq!(handle.vcpus, spec.vcpus);
+        assert_eq!(handle.mem_mib, spec.mem_mib);
+        assert_eq!(
+            handle.parent_checkpoint, None,
+            "a bare spawn (no capture) carries no checkpoint yet"
+        );
+    }
+
+    #[test]
+    fn spawn_standby_honors_the_failing_test_knob() {
+        let b = MockBackend::new()
+            .with_standby()
+            .with_failing_spawn_standby();
+        let err = b.spawn_standby(&sample_standby_spec()).unwrap_err();
+        assert!(matches!(err, StandbyError::SpawnFailed(_)));
     }
 }

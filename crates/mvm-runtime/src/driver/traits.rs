@@ -7,27 +7,49 @@
 use std::path::Path;
 
 use anyhow::Result;
-use mvm_core::crypto::vmgenid::GenerationToken;
+use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
     StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::driver::spec::VmmSpec;
+use crate::vm::instance_snapshot::PostRestoreOutcome;
 
 /// What a driver needs to fork a materialized standby parent into a fresh child
-/// VMM. Grouped so the seam takes one value instead of a positional list, and so
-/// the generation-token delivery rides the fork call itself — the token is
-/// delivered as the child boots, before any guest randomness consumer runs.
+/// VMM. Grouped so the seam takes one value instead of a positional list.
 pub struct ChildForkRequest<'a> {
     /// The child's fresh, registry-unique name (its `~/.mvm/vms/<name>` key).
     pub child_vm_name: &'a str,
     /// The child's state dir, already holding the copy-on-write clone of the
     /// verified parent's own content.
     pub child_dir: &'a Path,
-    /// Fresh VMGenID token, bound to the child's content-address, delivered as
-    /// the child boots so its CSPRNG diverges from the parent's.
+    /// Fresh VMGenID token, bound to the child's content-address, that the
+    /// child must adopt so its CSPRNG diverges from the parent's.
+    ///
+    /// A fork restores a *running* guest out of saved memory rather than
+    /// booting one, so there is no boot to hand the token to: the fork brings
+    /// the child up carrying the parent's random state, and the role layer
+    /// above closes that window by delivering this token over vsock through
+    /// [`VmmDriver::deliver_child_identity`] before the claim is admissible.
+    /// The request carries it so both halves read the same value.
     pub genid: GenerationToken,
+}
+
+/// What a driver needs to boot a warm-pool factory parent. Grouped so the seam
+/// takes one value instead of a positional list.
+pub struct StandbyParentSpawn<'a> {
+    /// The parent's pool record: its identity, state dir, and the compat key a
+    /// later claim matches on. It has no plan, secret or entrypoint field, so a
+    /// parent is structurally incapable of holding workload authority.
+    pub spec: &'a StandbySpec,
+    /// The parent's boot inputs, assembled by the role layer from the launch
+    /// the parent will serve, through the same mappers a workload boot uses.
+    /// The driver boots this verbatim: it must not derive a parent's device
+    /// model or cmdline itself, because a second recipe is free to drift from
+    /// the workload's, and every child restored from this parent inherits both
+    /// out of its saved memory.
+    pub boot: &'a VmmSpec,
 }
 
 /// A bidirectional, owned guest channel (a connected vsock stream).
@@ -54,19 +76,24 @@ pub trait VmmDriver: Send + Sync {
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
 
-    /// Boot a clean, pre-workload standby parent from `spec` and capture it into
-    /// a claimable resource. The parent runs no entrypoint and holds no secret or
-    /// plan — nothing on this seam (`StandbySpec` in, `StandbyHandle` out) has a
-    /// field to carry one, so a parent is structurally incapable of holding
-    /// workload authority. The driver owns the whole boot-to-ready-plus-capture
-    /// sequence; the role layer above only ever sees the resulting handle and
-    /// never boots a VMM directly for this path.
+    /// Boot the clean, pre-workload standby parent `req` describes and return
+    /// its pool record. The parent runs no entrypoint and holds no secret or
+    /// plan — nothing on this seam (`StandbyParentSpawn` in, `StandbyHandle`
+    /// out) has a field to carry one, so a parent is structurally incapable of
+    /// holding workload authority.
+    ///
+    /// The driver boots `req.boot` as given and reports the live process; it
+    /// does not assemble the parent's boot inputs. Those come from the role
+    /// layer, which derives them from the launch the parent will serve using
+    /// the same mappers a workload boot uses — the only way a parent's device
+    /// model and cmdline stay in step with a workload's. The parent is left
+    /// **running**: the caller captures its live memory next.
     ///
     /// Fail-closed default: a driver opts in explicitly, mirroring
     /// `VmBackend::spawn_standby`'s own fail-closed default.
     fn spawn_standby_parent(
         &self,
-        _spec: &StandbySpec,
+        _req: &StandbyParentSpawn<'_>,
     ) -> std::result::Result<StandbyHandle, StandbyError> {
         Err(StandbyError::Unsupported {
             backend: self.name().to_string(),
@@ -75,11 +102,17 @@ pub trait VmmDriver: Send + Sync {
 
     /// Fork a clean standby parent — already materialized into `req.child_dir` as
     /// a copy-on-write clone of its verified content — into a fresh child VMM
-    /// identity, delivering `req.genid` as the boot-time reseed token so the
-    /// child's CSPRNG diverges from the parent's before any guest randomness
-    /// consumer runs. The driver owns the VMM fork/restore mechanics only: the
-    /// role layer above has already admitted the plan, bound it to the parent,
-    /// materialized the rootfs, and scrubbed the identity.
+    /// identity, resumed from the parent's saved memory. The driver owns the VMM
+    /// fork/restore mechanics only: the role layer above has already admitted the
+    /// plan, bound it to the parent, materialized the rootfs, and scrubbed the
+    /// identity.
+    ///
+    /// The child comes back **still carrying the parent's random state**: a
+    /// restore has no boot at which to seed it, and the guest is not reachable
+    /// until it is running. Delivering `req.genid` is therefore a separate step
+    /// the caller runs immediately afterwards, through
+    /// [`deliver_child_identity`](Self::deliver_child_identity), and a child that
+    /// cannot prove it adopted the token is never admitted.
     ///
     /// Fail-closed default: a driver opts in explicitly, mirroring
     /// [`spawn_standby_parent`](Self::spawn_standby_parent).
@@ -90,6 +123,42 @@ pub trait VmmDriver: Send + Sync {
         Err(StandbyError::Unsupported {
             backend: self.name().to_string(),
         })
+    }
+
+    /// Hand a freshly forked child its own generation token and report, verbatim,
+    /// what the guest agent says it did with it — whether it acknowledged the
+    /// signal, rotated its generation identity (reseeding its CSPRNG off the
+    /// parent's cloned state), and resynchronized its wall clock off the host's.
+    ///
+    /// The reported flags are the guest's own claims, not a verdict: judging them
+    /// is the role layer's job, so a driver never decides whether a child is
+    /// admissible.
+    ///
+    /// The default is the real host→guest RPC over the backend-agnostic vsock
+    /// dispatcher, so every VMM shares one delivery path and inherits its connect
+    /// retry and read deadline — a guest that never answers surfaces as an error
+    /// rather than an unbounded wait. A driver overrides this only to run
+    /// hypervisor-free.
+    fn deliver_child_identity(
+        &self,
+        child_vm_name: &str,
+        token: [u8; GENID_BYTES],
+    ) -> Result<PostRestoreOutcome> {
+        crate::vm::instance_snapshot::signal_post_restore(
+            child_vm_name,
+            &crate::vm::instance_snapshot::VsockPostRestoreSignal { token },
+        )
+    }
+
+    /// Backend-specific control over a running VM named `vm_name` that lets the
+    /// caller pause it, save its live memory, and resume it — the mechanics
+    /// [`crate::checkpoint::capture_vm_full`] needs to capture a spawned standby
+    /// parent. `None` by default: a backend that cannot pause-and-save-memory
+    /// cannot back a warm pool, so it simply has nothing to offer here rather
+    /// than a control whose methods would all fail.
+    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+        let _ = vm_name;
+        None
     }
 
     /// The VMM-specific base kernel bootargs (console, earlycon, root/init

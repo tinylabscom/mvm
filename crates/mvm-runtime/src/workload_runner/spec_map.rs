@@ -200,13 +200,18 @@ pub struct WorkloadSpecInputs<'a> {
     pub console_log: PathBuf,
 }
 
-/// Compose a `VmmSpec` from an admitted `VmStartConfig` and the runtime paths the
-/// role resolved. The driver-agnostic translation: sealed rootfs + verity/overlay
-/// disks, the three standing vsock channels, the kernel, and the write-only
-/// console — no NIC, no policy (those live in the role above and the bridge it
-/// spawns, never in the spec the driver boots).
-pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
-    let config = inputs.config;
+/// Everything a guest can observe about how it was booted: its identity, the
+/// kernel and initramfs, the assembled cmdline, the cpu/memory shape, and the
+/// ordered disk stack. Host-side plumbing is deliberately absent — the returned
+/// spec wires no vsock channels, and the caller adds the ones its role is
+/// entitled to.
+///
+/// Split out from [`workload_spec`] because a warm-pool factory parent must
+/// boot the identical device model and cmdline a workload does — every child
+/// restored from that parent inherits both out of the saved memory image, so a
+/// parent assembled by a second, hand-written recipe hands its divergence to
+/// every child forever. There is exactly one mapping, and both callers use it.
+pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: &Path) -> VmmSpec {
     let kernel = match &config.kernel_path {
         Some(path) if !path.is_empty() => KernelImage::Path(path.into()),
         _ => KernelImage::Bundled,
@@ -219,17 +224,30 @@ pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
             .as_ref()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from),
-        cmdline: inputs.cmdline.clone(),
+        cmdline: cmdline.to_string(),
         vcpus: config.cpus,
         memory_mib: config.memory_mib,
         mem_initial_mib: config.mem_initial_mib,
         blocks: workload_blocks(config),
-        vsock: workload_vsock_ports(&inputs.sockets),
+        // The caller's role decides which host channels it may wire.
+        vsock: Vec::new(),
         console: ConsoleCapture {
-            log_path: inputs.console_log.clone(),
+            log_path: console_log.to_path_buf(),
         },
         // A workload is untrusted: it must route egress through the gated endpoint.
         trusted_builder: false,
+    }
+}
+
+/// Compose a `VmmSpec` from an admitted `VmStartConfig` and the runtime paths the
+/// role resolved: the shared device model plus the standing vsock channels a
+/// workload is entitled to (agent, egress, exit, and — when admitted — broker).
+/// No NIC, no policy (those live in the role above and the bridge it spawns,
+/// never in the spec the driver boots).
+pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
+    VmmSpec {
+        vsock: workload_vsock_ports(&inputs.sockets),
+        ..workload_device_spec(inputs.config, &inputs.cmdline, &inputs.console_log)
     }
 }
 

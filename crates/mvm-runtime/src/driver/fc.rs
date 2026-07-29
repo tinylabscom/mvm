@@ -21,17 +21,22 @@ use mvm_agentd::vsock::{
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, VmBackend,
-    VmCapabilities, VmExitStatus, VmId, VmStatus,
+    BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
+    StandbyHandle, StandbyState, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
-use crate::driver::{BlockDev, DuplexStream, RunningVm, VmmDriver, VmmSpec, VsockDirection};
+use crate::driver::{
+    BlockDev, ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver, VmmSpec,
+    VsockDirection,
+};
 use crate::microvm::{
     FirecrackerGuard, api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
-    firecracker_vsock_uds_path, logger_body, machine_config_body, start_vm_firecracker, vsock_body,
+    firecracker_vsock_uds_path, logger_body, machine_config_body, read_firecracker_pid,
+    start_vm_firecracker, vsock_body,
 };
+use crate::standby_pool::now_unix_secs;
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
 /// `connect_to_port` retries the CONNECT handshake internally within this bound.
@@ -314,6 +319,34 @@ fn fc_sudo_signal(pid_file: &str, signal: FcStopSignal) {
     }
 }
 
+/// Read the pid `boot` recorded for the VM whose state dir is `vm_state_dir`.
+/// `boot` only returns once the guest agent has answered, so the pid file is
+/// already on disk by the time a caller reaches for it.
+fn read_fc_pid(vm_state_dir: &str) -> Option<u32> {
+    read_firecracker_pid(vm_state_dir).ok()
+}
+
+/// Resolve the pid a just-completed `boot` recorded, via the injected
+/// `read_pid` closure, failing closed rather than defaulting to 0 on a read
+/// miss. `boot` only returns once the guest agent has answered, so by this
+/// point the pid file is on disk and a read failure is a real defect, not
+/// "no live process" — `StandbyHandle::pid == 0` is the sentinel
+/// `is_saved_state()` keys off, and both the pool's eviction (which only
+/// SIGTERMs a non-saved-state handle) and its stale reaper (which routes
+/// saved-state handles through TTL/park logic instead of a liveness probe)
+/// would silently skip a live Firecracker process wearing that sentinel.
+/// The closure is injected so this is unit-testable without booting anything.
+fn resolve_standby_parent_pid(
+    vm_id: &str,
+    read_pid: impl FnOnce() -> Option<u32>,
+) -> std::result::Result<u32, StandbyError> {
+    read_pid().ok_or_else(|| {
+        StandbyError::SpawnFailed(format!(
+            "standby parent '{vm_id}' booted but its Firecracker pid could not be read"
+        ))
+    })
+}
+
 /// SIGTERM → grace → SIGKILL escalation against a Firecracker process, mirroring
 /// the raw stop path's shutdown escalation. The liveness probe, signal
 /// delivery, clock, and sleep are injected so the decision — "did the process
@@ -368,9 +401,23 @@ impl VmmDriver for FcDriver {
         // wired through this driver's boot + running-VM handle); live-memory
         // snapshots are dropped, since the runner path is cold-boot only.
         //
-        // `standby_pool` stays off: the runner owns a guarded warm-claim path,
-        // but the capability means "can actually spawn+claim a warm parent",
-        // which needs the live FC spawn/fork ops. It flips true with that slice.
+        // `standby_pool` stays off. The spawn/capture/fork/handshake code is
+        // all here — `spawn_standby_parent` boots a clean factory parent and
+        // `vm_full_control` captures its whole {rootfs, memory, vmstate} — and
+        // validation on real KVM hardware has since shown that half working:
+        // the parent boots the workload's verified shape, reaches its guest
+        // agent, and the capture writes a memory-carrying checkpoint. But the
+        // capability means "can actually spawn AND claim a warm parent on this
+        // host", and the claim half has never been exercised live: the
+        // transient run path mints no verb-grant sidecar, so a restored child
+        // has no host-signer anchor to authenticate against and every claim
+        // falls back to a cold boot. Advertising it would cost every launch a
+        // parent boot for a claim that cannot yet land, so it stays false until
+        // a live run is green end to end. That capture/restore pair is a
+        // distinct seam from the coarse `snapshots`/`snapshot_capability` tier
+        // below — it captures one specific parent shape for the standby pool,
+        // not an arbitrary named VM's live memory on demand, so those two
+        // fields stay unchanged either way.
         VmCapabilities {
             pause_resume: true,
             snapshots: false,
@@ -392,6 +439,97 @@ impl VmmDriver for FcDriver {
 
     fn workload_base_bootargs(&self, virtiofs_root: bool, has_disk: bool) -> String {
         fc_base_bootargs(virtiofs_root, has_disk)
+    }
+
+    fn spawn_standby_parent(
+        &self,
+        req: &StandbyParentSpawn<'_>,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let spec = req.spec;
+
+        // The boot inputs arrive fully assembled from the role layer, which
+        // derives them from the launch this parent will serve using the same
+        // mappers a workload boot uses. The driver adds nothing: a parent that
+        // boots a shape of this driver's own invention would hand that shape to
+        // every child restored from it.
+        //
+        // `boot` returns only once the guest agent answered over vsock, so the
+        // memory captured next is of a fully-booted, ready guest — that is what
+        // lets a restored child skip boot entirely.
+        let vm = self
+            .boot(req.boot)
+            .map_err(|e| StandbyError::SpawnFailed(format!("boot standby parent: {e}")))?;
+
+        // Deliberately left running: the caller captures its live memory, and
+        // Firecracker outlives this handle. A pid we can't read is a real
+        // failure at this point (see `resolve_standby_parent_pid`), so the
+        // just-booted process is killed rather than handed back as an
+        // untracked "saved state" standby.
+        let pid = match resolve_standby_parent_pid(&spec.id, || read_fc_pid(&spec.vm_state_dir)) {
+            Ok(pid) => pid,
+            Err(e) => {
+                let _ = vm.kill();
+                return Err(e);
+            }
+        };
+        drop(vm);
+
+        Ok(StandbyHandle {
+            id: spec.id.clone(),
+            // Propagate the template identity: a parent bound to one template
+            // must never be claimable by a launch of another.
+            template_id: spec.template_id.clone(),
+            control_socket: spec.control_socket.clone(),
+            pid,
+            kernel_sha256: spec.kernel_sha256.clone(),
+            vcpus: spec.vcpus,
+            mem_mib: spec.mem_mib,
+            binding_nonce: spec.binding_nonce.clone(),
+            spawned_unix_secs: now_unix_secs(),
+            state: StandbyState::Idle,
+            image_sha256: spec.image_sha256.clone(),
+            // The caller captures the parent and stamps this.
+            parent_checkpoint: None,
+        })
+    }
+
+    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+        Some(Box::new(crate::firecracker::FcVmFullControl::new(vm_name)))
+    }
+
+    fn fork_standby_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        if !req.child_dir.exists() {
+            return Err(StandbyError::ClaimFailed(format!(
+                "fork child '{}': child dir {} was never materialized",
+                req.child_vm_name,
+                req.child_dir.display()
+            )));
+        }
+        // The restorer renames `memory.bin` to Firecracker's canonical load
+        // name, so accept either — but require one. Without saved memory this
+        // would quietly become a cold boot, losing the whole point of the pool.
+        if !req.child_dir.join("memory.bin").exists() && !req.child_dir.join("mem.bin").exists() {
+            return Err(StandbyError::ClaimFailed(format!(
+                "fork child '{}': clone at {} carries no saved memory image",
+                req.child_vm_name,
+                req.child_dir.display()
+            )));
+        }
+
+        // Restore the parent's saved memory into a fresh VMM under the child's
+        // own identity. The device-model guard between load and resume refuses
+        // any snapshot carrying a network interface, so a restored child cannot
+        // reintroduce a path off the box that bypasses vsock.
+        crate::checkpoint::ForkVmFullRestorer::restore_fork(
+            &crate::firecracker::FcForkRestorer,
+            req.child_vm_name,
+            req.child_dir,
+        )
+        .map_err(|e| StandbyError::ClaimFailed(format!("restore forked child: {e}")))?;
+        Ok(())
     }
 
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
@@ -709,15 +847,16 @@ mod tests {
         );
     }
 
-    /// No selectable backend advertises the standby (warm) pool yet. The runner
-    /// owns a guarded warm-claim path, but the capability means "can actually
-    /// spawn+claim a warm parent"; it flips true per-backend only with that
-    /// backend's live spawn/fork ops. Until then every VMM driver and the
-    /// non-workload backends report it off. (The in-memory `MockBackend` opts
-    /// into it explicitly via `with_standby()` for the hermetic claim tests; the
-    /// `MockDriver` seam here does not.)
+    /// No selectable driver advertises the standby (warm) pool. The capability
+    /// means "can actually spawn AND claim a warm parent on this host", so it
+    /// flips per-backend only once a live run proves that backend's spawn and
+    /// claim both work — a capability nobody can service costs every launch a
+    /// parent boot for nothing. Firecracker's spawn+capture half is live-proven;
+    /// its claim half is not, so it stays off with the rest. (The in-memory
+    /// `MockBackend` opts into it explicitly via `with_standby()` for the
+    /// hermetic claim tests; the `MockDriver` seam here does not.)
     #[test]
-    fn no_selectable_driver_advertises_standby_pool_yet() {
+    fn no_selectable_driver_advertises_the_standby_pool() {
         use crate::driver::{HvfDriver, LibkrunDriver, MockDriver};
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
@@ -1267,6 +1406,140 @@ mod tests {
         assert!(
             refused.contains("supports only the agent port"),
             "an out-of-range port must be refused by the allow-list: {refused}"
+        );
+    }
+
+    /// Capturing a parent's memory needs a backend-specific control; Firecracker
+    /// has one, so it must offer it rather than falling through to the default.
+    #[test]
+    fn fc_offers_a_vm_full_capture_control() {
+        assert!(FcDriver::new().vm_full_control("any-vm").is_some());
+    }
+
+    /// The metadata the spawn path writes for a factory parent must be exactly
+    /// what `FcVmFullControl::rootfs_path()` reads back, or a live capture
+    /// fails closed for want of a resolvable rootfs. Proven by running the real
+    /// derivation (launch config → parent config → recorded metadata) and then
+    /// resolving it through the real capture control — no boot, no KVM.
+    #[test]
+    fn the_parent_metadata_the_spawn_path_writes_resolves_through_the_capture_control() {
+        use crate::checkpoint::VmFullControl as _;
+        use crate::workload_runner::standby_boot::factory_parent_config;
+        use mvm_core::util::test_env::TestEnv;
+        use mvm_core::vm_backend::{StandbySpec, StartMode, VmStartConfig};
+
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+
+        let image = tmp.path().join("rootfs.ext4");
+        std::fs::write(&image, b"fake-rootfs").unwrap();
+
+        let launch = VmStartConfig {
+            name: "workload-a".into(),
+            rootfs_path: image.display().to_string(),
+            kernel_path: Some("/img/vmlinux".into()),
+            cpus: 2,
+            memory_mib: 512,
+            ..Default::default()
+        };
+        let spec = StandbySpec {
+            id: "standby-parent-1".into(),
+            template_id: None,
+            kernel_path: "/img/vmlinux".into(),
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 512,
+            signing_key_path: "/keys/host-signer.ed25519".into(),
+            signer_id: "host:test".into(),
+            binding_nonce: "b".repeat(64),
+            control_socket: tmp.path().join("control.sock").display().to_string(),
+            vm_state_dir: tmp.path().join("standby-parent-1").display().to_string(),
+            image_path: Some(image.display().to_string()),
+            image_sha256: Some("c".repeat(64)),
+        };
+
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        crate::base::runtime_meta::record_from_start_config(
+            &spec.id,
+            StartMode::Detached,
+            &parent_cfg,
+        )
+        .unwrap();
+
+        let control = crate::firecracker::FcVmFullControl::new(&spec.id);
+        assert_eq!(control.rootfs_path().unwrap(), image);
+    }
+
+    /// A pid that can't be read after a successful boot is a real failure, not
+    /// "no live process" — silently defaulting to 0 would leave a live
+    /// Firecracker process wearing the sentinel that pool eviction and the
+    /// stale reaper both treat as an already-quiesced saved state.
+    #[test]
+    fn resolve_standby_parent_pid_fails_closed_when_the_pid_read_fails() {
+        let err = resolve_standby_parent_pid("standby-x", || None).unwrap_err();
+        assert!(
+            matches!(err, StandbyError::SpawnFailed(ref m) if m.contains("pid")),
+            "expected a SpawnFailed naming the unreadable pid, got: {err:?}"
+        );
+    }
+
+    /// The success path: a readable pid passes straight through.
+    #[test]
+    fn resolve_standby_parent_pid_returns_the_read_pid() {
+        assert_eq!(
+            resolve_standby_parent_pid("standby-x", || Some(4242)).unwrap(),
+            4242
+        );
+    }
+
+    fn sample_generation_token() -> mvm_core::crypto::vmgenid::GenerationToken {
+        mvm_core::crypto::vmgenid::GenerationToken {
+            token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            content_hash: "test-content-hash".into(),
+        }
+    }
+
+    /// The runner materializes the CoW clone before forking. An absent dir means
+    /// the clone never landed, so restoring would load something other than the
+    /// verified parent's content — refuse instead.
+    #[test]
+    fn fork_standby_child_refuses_an_unmaterialized_child_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("never-materialized");
+        let req = ChildForkRequest {
+            child_vm_name: "child-vm-1",
+            child_dir: &missing,
+            genid: sample_generation_token(),
+        };
+
+        let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
+
+        assert!(
+            matches!(err, StandbyError::ClaimFailed(ref m) if m.contains("child-vm-1")),
+            "expected a ClaimFailed naming the child, got: {err:?}"
+        );
+    }
+
+    /// A memory restore needs the parent's saved memory. A clone carrying only a
+    /// rootfs would silently cold-boot instead of restoring, so it is refused.
+    #[test]
+    fn fork_standby_child_refuses_a_clone_without_saved_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let child_dir = tmp.path().join("child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(child_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        let req = ChildForkRequest {
+            child_vm_name: "child-vm-2",
+            child_dir: &child_dir,
+            genid: sample_generation_token(),
+        };
+
+        let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
+
+        assert!(
+            matches!(err, StandbyError::ClaimFailed(ref m) if m.contains("memory")),
+            "expected a ClaimFailed naming the missing memory image, got: {err:?}"
         );
     }
 }
