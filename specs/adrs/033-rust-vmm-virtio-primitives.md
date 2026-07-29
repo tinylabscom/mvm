@@ -56,7 +56,9 @@ state:
 - **F4.** The used-ring index is re-read from guest-writable RAM each
   completion instead of being device-owned, letting a guest rewind or
   steer where used entries land (confined to its own RAM, so not host
-  unsafety — a correctness defect).
+  unsafety — a correctness defect). Closed in two steps: within a drain by
+  the `virtio-queue` adoption below, and across drains by the ring-cursor
+  ownership decision that follows it.
 
 The through-line: **hand-rolled virtqueue and guest-memory code re-derives,
 per device, invariants that a validated queue primitive enforces once.**
@@ -123,6 +125,47 @@ duration of the migration, so the default-binary closure delta stays
 feature on by default — and delete the hand-rolled path — only once
 Slice 5 lands and the old code is dead. This decouples the closure-budget
 step below from every intermediate slice.
+
+### Used-index ownership across drains, and ring-cursor lifecycle
+
+The initial migration closed F4 only *within* a drain: each device still
+seeded the per-drain `Queue`'s `next_used` from `used.idx` in guest RAM,
+to keep the used entries byte-identical to the retired hand-rolled walk.
+That left the index guest-recoverable between drains. It is now **device
+state across drains**, exactly as `next_avail` already was: every device
+carries a `next_used` sibling to its `last_avail`, feeds both into the
+shared `RingGeometry` that `build_split_queue` programs, and writes both
+back from `Queue::{next_avail,next_used}` after the drain. No device reads
+`used.idx` from guest memory on any path. For a conformant guest this is
+byte-identical — Linux zeroes the used ring before setting `QueueReady`
+and never writes `used.idx` afterward, so the seed being removed only ever
+read back what the device itself last wrote.
+
+**Cursor lifecycle.** Both cursors are zero at device construction and are
+re-zeroed on exactly the two register writes by which a driver hands the
+device a freshly-programmed ring:
+
+1. `QueueReady ← 0` — the driver detaching that queue. It then frees the
+   ring, and any later activation programs newly-allocated (zeroed)
+   memory, so the next drain must start at slot 0. Only the selected queue
+   is rewound.
+2. `Status ← 0` — a device reset. The driver re-runs the whole
+   initialization sequence afterwards, so **every** queue is rewound.
+
+Every other register write leaves the cursors alone. In particular a
+redundant `QueueReady ← 1` on an already-ready queue is a no-op: making
+activation rather than deactivation the trigger would let a mid-stream
+write rewind the device onto used slots the driver still owns — a worse
+defect than the one F4 describes. Zeroing on the 0-write covers both
+orderings, since after it any subsequent activation already sits at zero.
+
+The same lifecycle now applies to `last_avail`, which until this change
+was zeroed only at construction and never on queue teardown or device
+reset; the two cursors move together by construction rather than by
+convention. Each of the three devices carries a cross-drain witness (a
+scribbled `used.idx` between two drains does not move the next completion)
+plus tests for both rewind transitions and for the redundant-activation
+no-op.
 
 ## Supply chain and closure (ADR-002 / ADR-031 compliance)
 

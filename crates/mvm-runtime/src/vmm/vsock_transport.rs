@@ -46,6 +46,17 @@ pub(crate) struct Queue {
     pub(crate) avail: u64,
     pub(crate) used: u64,
     pub(crate) last_avail: u16,
+    pub(crate) next_used: u16,
+}
+
+impl Queue {
+    /// Rewind both device-owned ring cursors to the start of a fresh ring, on the
+    /// same two transitions the block and fs devices use: this queue being
+    /// detached (`QueueReady` ← 0) and the device being reset (`Status` ← 0).
+    fn rewind_cursors(&mut self) {
+        self.last_avail = 0;
+        self.next_used = 0;
+    }
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,8 +197,21 @@ impl VsockTransportCore {
             0x024 | 0x020 => {}
             0x030 => self.queue_sel = v,
             0x038 => self.cur_mut().num = v,
-            0x044 => self.cur_mut().ready = v,
-            0x070 => self.status = v,
+            0x044 => {
+                let q = self.cur_mut();
+                q.ready = v;
+                if v == 0 {
+                    q.rewind_cursors();
+                }
+            }
+            0x070 => {
+                self.status = v;
+                if v == 0 {
+                    // A device reset returns every queue to its pre-init state, not
+                    // just the one currently selected.
+                    self.queues.iter_mut().for_each(Queue::rewind_cursors);
+                }
+            }
             0x064 => self.interrupt_status &= !v,
             0x080 => set_lo(&mut self.cur_mut().desc, v),
             0x084 => set_hi(&mut self.cur_mut().desc, v),
@@ -221,10 +245,6 @@ impl VsockTransportCore {
         let Some(mut queue) = build_split_queue(&q, qsz) else {
             return Vec::new();
         };
-        // Preserve the pre-migration used-ring behaviour, which read the completion
-        // index from guest RAM. Seed the now device-owned `next_used` from it so the
-        // used entries land at byte-identical slots for a conformant guest.
-        queue.set_next_used(self.mem.rd_u16(q.used + 2));
 
         let mut packets = Vec::new();
         let mut completed = Vec::new();
@@ -259,6 +279,7 @@ impl VsockTransportCore {
             self.interrupt_status |= 1;
         }
         self.queues[TX].last_avail = queue.next_avail();
+        self.queues[TX].next_used = queue.next_used();
         packets
     }
 
@@ -362,9 +383,6 @@ impl VsockTransportCore {
         let Some(mut queue) = build_split_queue(&q, qsz) else {
             return false;
         };
-        // Seed the now device-owned used index from guest RAM so the used entries
-        // land at byte-identical slots for a conformant guest (mirrors the TX path).
-        queue.set_next_used(self.mem.rd_u16(q.used + 2));
 
         let mut completed = Vec::new();
         let mut delivered = false;
@@ -430,6 +448,7 @@ impl VsockTransportCore {
             self.interrupt_status |= 1;
         }
         self.queues[RX].last_avail = queue.next_avail();
+        self.queues[RX].next_used = queue.next_used();
         delivered
     }
 
@@ -483,6 +502,7 @@ fn build_split_queue(q: &Queue, qsz: u16) -> Option<SplitQueue> {
             avail: q.avail,
             used: q.used,
             next_avail: q.last_avail,
+            next_used: q.next_used,
         },
         qsz,
     )
@@ -523,6 +543,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         core.mem.wr_u16(avail + 2, caps.len() as u16);
         for (index, cap) in caps.iter().enumerate() {
@@ -696,6 +717,7 @@ mod tests {
             avail: base + 0x200,
             used: base + 0x300,
             last_avail: 0,
+            next_used: 0,
         };
         core.mem.wr_u16(base + 0x200 + 2, 1);
     }
@@ -761,6 +783,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         core.mem.wr_u16(avail + 2, 1);
         core.mem.wr_u16(avail + 4, 0); // ring[0] = head 0
@@ -961,6 +984,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         let mut desc_idx: u16 = 0;
         let mut buf_off: u64 = 0;
@@ -1039,6 +1063,12 @@ mod tests {
         out
     }
 
+    /// The pre-migration completion, shared by the TX and RX oracles: it
+    /// recovers the used index from guest RAM where the migrated path uses the
+    /// device-owned cursor. The two agree for every fixture here because each
+    /// starts from a zeroed used ring that no guest buffer aliases — the
+    /// conformant case. Divergence under a scribbled index is asserted as a
+    /// device-owned win by the ring-cursor tests below.
     fn reference_complete(core: &VsockTransportCore, used: u64, head: u16, written: u32, qsz: u16) {
         let mem = &core.mem;
         let used_idx = mem.rd_u16(used + 2);
@@ -1104,6 +1134,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         // 0 -> 1 -> 0 -> 1 -> ... with F_NEXT set on both: a cycle a 65535-hop
         // hand-rolled walk would have followed.
@@ -1145,6 +1176,7 @@ mod tests {
             avail,
             used,
             last_avail: 0,
+            next_used: 0,
         };
         // Head descriptor claims a `next` index past the ring; the validated walk
         // must stop after the head rather than follow the out-of-range link (the
@@ -1360,6 +1392,7 @@ mod tests {
                 avail,
                 used,
                 last_avail: 0,
+                next_used: 0,
             };
             core.mem.wr_u16(avail + 2, 1);
             core.mem.wr_u16(avail + 4, 0);
@@ -1391,5 +1424,173 @@ mod tests {
             "last_avail not advanced past the un-consumed entry"
         );
         assert_eq!(core_new.queues[RX].last_avail, 0);
+    }
+
+    // ---- device-owned ring cursors: cross-drain + lifecycle -----------------
+
+    /// MMIO register offsets the lifecycle tests drive, named for readability
+    /// (the device's `write_register` matches on the raw offsets).
+    const R_QUEUE_SEL: u64 = 0x030;
+    const R_QUEUE_READY: u64 = 0x044;
+    const R_STATUS: u64 = 0x070;
+
+    /// A transport with two single-descriptor TX chains programmed, drained once
+    /// — so both device-owned TX cursors sit at 1 with one chain unpublished.
+    /// Returns the core and its (available ring, used ring) addresses.
+    fn tx_drained_once(qsz: u16) -> (VsockTransportCore, u64, u64) {
+        let base = 0x4000_0000u64;
+        let chains = vec![single_chain(1000, b"first"), single_chain(1001, b"second")];
+        let mut core = transport_with_ram(0x10000);
+        let used = program_tx_queue(&mut core, base, qsz, &chains);
+        let avail = base + 0x4000;
+        core.mem.wr_u16(avail + 2, 1);
+        assert_eq!(
+            core.take_tx_packets().len(),
+            1,
+            "first drain takes one packet"
+        );
+        (core, avail, used)
+    }
+
+    /// Read the selected queue's cursors as a pair.
+    fn cursors(core: &VsockTransportCore, slot: usize) -> (u16, u16) {
+        (core.queues[slot].last_avail, core.queues[slot].next_used)
+    }
+
+    /// Cross-drain witness: a guest that rewrites `used.idx` between two TX
+    /// notifies cannot steer where the device records its next completion.
+    #[test]
+    fn take_tx_packets_used_index_is_device_owned_across_drains() {
+        let (mut core, avail, used) = tx_drained_once(4);
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            1,
+            "first drain published index 1"
+        );
+        assert_eq!(
+            core.mem.rd_u32(used + 4),
+            0,
+            "slot 0 records the first head"
+        );
+
+        // Between drains the guest scribbles its own value into `used.idx`.
+        core.mem.wr_u16(used + 2, 0);
+
+        core.mem.wr_u16(avail + 2, 2);
+        assert_eq!(core.take_tx_packets().len(), 1);
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            2,
+            "the device republished its own count, not the guest's"
+        );
+        assert_eq!(
+            core.mem.rd_u32(used + 4),
+            0,
+            "slot 0 still holds the first completion"
+        );
+        assert_eq!(
+            core.mem.rd_u32(used + 12),
+            1,
+            "the second completion landed at the device's next slot"
+        );
+        assert_eq!(cursors(&core, TX), (2, 2));
+
+        // The pre-migration walk re-read the index per completion, so the same
+        // scribble steered its second completion on top of the first.
+        let (core_ref, avail_ref, used_ref) = tx_drained_once(4);
+        core_ref.mem.wr_u16(used_ref + 2, 0);
+        core_ref.mem.wr_u16(avail_ref + 2, 2);
+        let (_, _, interrupted) = reference_take_tx_packets(&core_ref, 4);
+        assert!(interrupted);
+        assert_eq!(
+            core_ref.mem.rd_u16(used_ref + 2),
+            1,
+            "the retired walk followed the guest's index"
+        );
+        assert_eq!(
+            core_ref.mem.rd_u32(used_ref + 4),
+            1,
+            "and overwrote slot 0 with the second head"
+        );
+    }
+
+    #[test]
+    fn queue_ready_zero_rewinds_the_ring_cursors() {
+        let (mut core, avail, used) = tx_drained_once(4);
+        assert_eq!(
+            cursors(&core, TX),
+            (1, 1),
+            "one chain consumed and completed"
+        );
+
+        core.write_register(R_QUEUE_SEL, TX as u64);
+        core.write_register(R_QUEUE_READY, 0);
+        assert_eq!(core.queues[TX].ready, 0);
+        assert_eq!(
+            cursors(&core, TX),
+            (0, 0),
+            "detaching the queue rewinds both cursors"
+        );
+
+        // The driver reactivates with a freshly-zeroed ring: the first chain is
+        // taken again and its completion lands at used slot 0.
+        core.mem.wr_u16(used + 2, 0);
+        core.mem.wr_u16(avail + 2, 0);
+        core.write_register(R_QUEUE_READY, 1);
+        core.mem.wr_u16(avail + 2, 1);
+        assert_eq!(core.take_tx_packets().len(), 1);
+        assert_eq!(
+            core.mem.rd_u16(used + 2),
+            1,
+            "completion published at index 1"
+        );
+        assert_eq!(core.mem.rd_u32(used + 4), 0, "and recorded at slot 0");
+    }
+
+    #[test]
+    fn device_reset_rewinds_every_queues_ring_cursors() {
+        let (mut core, _avail, _used) = tx_drained_once(4);
+        // The RX queue is not exercised by the TX fixture; give it cursors of its
+        // own so the reset is observed across the whole device.
+        core.queues[RX].last_avail = 5;
+        core.queues[RX].next_used = 5;
+
+        core.write_register(R_STATUS, 0xf);
+        assert_eq!(
+            (core.queues[TX].last_avail, core.queues[RX].next_used),
+            (1, 5),
+            "a non-zero status write leaves the cursors alone"
+        );
+
+        core.write_register(R_STATUS, 0);
+        for slot in 0..NUM_QUEUES {
+            assert_eq!(
+                cursors(&core, slot),
+                (0, 0),
+                "queue {slot} not rewound by the device reset"
+            );
+        }
+    }
+
+    #[test]
+    fn redundant_queue_ready_write_does_not_rewind_a_live_ring() {
+        let (mut core, avail, used) = tx_drained_once(4);
+
+        core.write_register(R_QUEUE_SEL, TX as u64);
+        core.write_register(R_QUEUE_READY, 1);
+        assert_eq!(
+            cursors(&core, TX),
+            (1, 1),
+            "re-arming an already-ready queue must not rewind it"
+        );
+
+        core.mem.wr_u16(avail + 2, 2);
+        assert_eq!(core.take_tx_packets().len(), 1);
+        assert_eq!(core.mem.rd_u16(used + 2), 2);
+        assert_eq!(
+            core.mem.rd_u32(used + 12),
+            1,
+            "slot 1 records the second chain's head"
+        );
     }
 }

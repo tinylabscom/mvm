@@ -127,6 +127,15 @@ pub trait SnapshotIO {
     /// [`resume`](Self::resume).
     fn load_snapshot_paused(&self, dir: &Path) -> Result<()>;
 
+    /// Load a forked child's snapshot, leaving vCPUs PAUSED.
+    ///
+    /// Same contract as
+    /// [`load_snapshot_paused`](Self::load_snapshot_paused) — the guard still
+    /// has to run before [`resume`](Self::resume) — but the child's device
+    /// paths are already bind-mounted into its private mount namespace, so
+    /// this variant must not re-create the host vsock socket underneath them.
+    fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()>;
+
     /// The restored VM's device model, read after load, before
     /// resume — the input to `assert_vsock_only_device_model`.
     fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel>;
@@ -292,9 +301,9 @@ pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Resu
 /// way a plain instance restore does. Only the load differs — the guard and the
 /// resume are the same, so a fork cannot reach userspace unchecked or stay
 /// paused forever.
-pub(crate) fn guarded_fork_load_resume(io: &FirecrackerIO, dir: &Path) -> Result<()> {
-    io.load_snapshot_for_fork(dir)
-        .with_context(|| format!("load_snapshot_for_fork({})", dir.display()))?;
+pub(crate) fn guarded_fork_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
+    io.load_snapshot_for_fork_paused(dir)
+        .with_context(|| format!("load_snapshot_for_fork_paused({})", dir.display()))?;
     guard_and_resume(io)
 }
 
@@ -784,6 +793,9 @@ impl SnapshotIO for CannedIO {
     fn load_snapshot_paused(&self, _dir: &Path) -> Result<()> {
         Ok(())
     }
+    fn load_snapshot_for_fork_paused(&self, _dir: &Path) -> Result<()> {
+        Ok(())
+    }
     fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
         Ok(crate::microvm::RestoredDeviceModel {
             network_interfaces: Vec::new(),
@@ -798,7 +810,8 @@ impl SnapshotIO for CannedIO {
 }
 
 /// `SnapshotIO` impl that talks to a live Firecracker over its
-/// Unix socket. Pause shells out to `curl`'s `PATCH /vm` (state =
+/// Unix socket, speaking HTTP/1.1 to the API directly rather than
+/// spawning a process per call. Pause issues `PATCH /vm` (state =
 /// Paused) followed by `PUT /snapshot/create`; resume runs `PUT
 /// /snapshot/load` then `PATCH /vm` (state = Resumed).
 ///
@@ -823,12 +836,6 @@ impl FirecrackerIO {
             );
         }
         Ok(())
-    }
-
-    /// Load a forked snapshot after its recorded device paths have been
-    /// remapped in the child's private mount namespace.
-    pub(crate) fn load_snapshot_for_fork(&self, dir: &Path) -> Result<()> {
-        self.load_snapshot_inner(dir, false)
     }
 
     /// Load a sealed snapshot into a fresh VMM, leaving vCPUs paused.
@@ -887,8 +894,13 @@ impl SnapshotIO for FirecrackerIO {
         self.ensure_socket()?;
         // Pause vCPUs first (Firecracker requires a paused VM
         // before /snapshot/create). PATCH /vm.
-        run_curl(&self.socket_path, "PATCH", "/vm", r#"{"state":"Paused"}"#)
-            .with_context(|| "PATCH /vm Paused")?;
+        crate::microvm::call(
+            &self.socket_path,
+            "PATCH",
+            "/vm",
+            Some(r#"{"state":"Paused"}"#),
+        )
+        .with_context(|| "PATCH /vm Paused")?;
 
         let payload = format!(
             r#"{{"snapshot_type":"Full","snapshot_path":"{}/{}","mem_file_path":"{}/{}"}}"#,
@@ -897,7 +909,7 @@ impl SnapshotIO for FirecrackerIO {
             dir.display(),
             MEM_FILENAME,
         );
-        run_curl(&self.socket_path, "PUT", "/snapshot/create", &payload)
+        crate::microvm::call(&self.socket_path, "PUT", "/snapshot/create", Some(&payload))
             .with_context(|| "PUT /snapshot/create")?;
         Ok(())
     }
@@ -906,17 +918,26 @@ impl SnapshotIO for FirecrackerIO {
         self.load_snapshot_inner(dir, true)
     }
 
+    fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()> {
+        self.load_snapshot_inner(dir, false)
+    }
+
     fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
         self.ensure_socket()?;
-        let body = run_curl_capture(&self.socket_path, "GET", "/vm/config")
+        let body = crate::microvm::call(&self.socket_path, "GET", "/vm/config", None)
             .with_context(|| "GET /vm/config")?;
         serde_json::from_str(&body).with_context(|| "parsing GET /vm/config response")
     }
 
     fn resume(&self) -> Result<()> {
         self.ensure_socket()?;
-        run_curl(&self.socket_path, "PATCH", "/vm", r#"{"state":"Resumed"}"#)
-            .with_context(|| "PATCH /vm Resumed")?;
+        crate::microvm::call(
+            &self.socket_path,
+            "PATCH",
+            "/vm",
+            Some(r#"{"state":"Resumed"}"#),
+        )
+        .with_context(|| "PATCH /vm Resumed")?;
         Ok(())
     }
 
@@ -938,56 +959,6 @@ impl SnapshotIO for FirecrackerIO {
         let _ = run_in_vm(&format!("sudo kill -9 \"$(cat {q_pid})\" 2>/dev/null"));
         Ok(())
     }
-}
-
-fn run_curl(socket: &Path, method: &str, endpoint: &str, body: &str) -> Result<()> {
-    use std::process::Command;
-    let url = format!("http://localhost{endpoint}");
-    let out = Command::new("curl")
-        .arg("--unix-socket")
-        .arg(socket)
-        .arg("-fsS")
-        .arg("-X")
-        .arg(method)
-        .arg("-H")
-        .arg("Content-Type: application/json")
-        .arg("-d")
-        .arg(body)
-        .arg(&url)
-        .output()
-        .with_context(|| format!("invoking curl for {method} {endpoint}"))?;
-    if !out.status.success() {
-        bail!(
-            "{method} {endpoint} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(())
-}
-
-/// Like [`run_curl`] but returns the captured response body instead of
-/// discarding it. `run_curl` only asserts the request succeeded; the
-/// device-model guard needs the actual `GET /vm/config` body to parse a
-/// [`crate::microvm::RestoredDeviceModel`] out of.
-fn run_curl_capture(socket: &Path, method: &str, endpoint: &str) -> Result<String> {
-    use std::process::Command;
-    let url = format!("http://localhost{endpoint}");
-    let out = Command::new("curl")
-        .arg("--unix-socket")
-        .arg(socket)
-        .arg("-fsS")
-        .arg("-X")
-        .arg(method)
-        .arg(&url)
-        .output()
-        .with_context(|| format!("invoking curl for {method} {endpoint}"))?;
-    if !out.status.success() {
-        bail!(
-            "{method} {endpoint} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]
@@ -1158,6 +1129,10 @@ mod tests {
             self.calls.borrow_mut().push("load_paused");
             Ok(())
         }
+        fn load_snapshot_for_fork_paused(&self, _dir: &Path) -> Result<()> {
+            self.calls.borrow_mut().push("load_fork_paused");
+            Ok(())
+        }
         fn restored_device_model(&self) -> Result<crate::microvm::RestoredDeviceModel> {
             self.calls.borrow_mut().push("restored_device_model");
             let network_interfaces = if self.nic_on_restore {
@@ -1260,6 +1235,42 @@ mod tests {
             calls,
             vec!["load_paused", "restored_device_model", "resume"],
             "load, guard, then resume — in order"
+        );
+    }
+
+    /// A fork inherits its parent's device model, so it gets the same guard.
+    /// The fork load is the one that preserves the child's already-remapped
+    /// vsock path, which is why it is a distinct call from `load_paused`.
+    #[test]
+    fn guarded_fork_load_resume_resumes_when_vsock_only() {
+        let spy = SpyIO::new(false);
+        let dir = tempfile::tempdir().unwrap();
+        guarded_fork_load_resume(&spy, dir.path()).expect("a no-NIC fork must resume");
+        let calls = spy.calls();
+        assert_eq!(
+            calls,
+            vec!["load_fork_paused", "restored_device_model", "resume"],
+            "fork load, guard, then resume — in order"
+        );
+    }
+
+    /// The regression this guards: a fork that loads paused and is never
+    /// checked would either sit paused forever or, once resumed, reach
+    /// userspace carrying an unaudited NIC.
+    #[test]
+    fn guarded_fork_load_resume_refuses_nic_on_restore() {
+        let spy = SpyIO::new(true);
+        let dir = tempfile::tempdir().unwrap();
+        let err = guarded_fork_load_resume(&spy, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("device-model guard"), "got: {err}");
+        let calls = spy.calls();
+        assert!(
+            calls.contains(&"teardown_paused"),
+            "a refused fork must tear down the paused VMM: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"resume"),
+            "resume must never run when the guard refuses a fork: {calls:?}"
         );
     }
 

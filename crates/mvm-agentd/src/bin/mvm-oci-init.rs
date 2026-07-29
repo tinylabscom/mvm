@@ -179,10 +179,12 @@ mod linux {
     }
 
     fn provision_verb_grant() {
-        let Some(hex) = cmdline_value("mvm.verb_grant") else {
+        let Some(b64) = cmdline_value("mvm.verb_grant") else {
             return;
         };
-        let Ok(grant) = hex_decode(&hex) else {
+        // base64, not hex: the envelope is the largest cmdline token and the
+        // kernel silently truncates past COMMAND_LINE_SIZE.
+        let Ok(grant) = base64_decode(&b64) else {
             eprintln!("mvm-oci-init: malformed verb-grant token");
             return;
         };
@@ -437,6 +439,51 @@ mod linux {
         }
     }
 
+    /// Standard-alphabet base64 decode, hand-rolled to keep this PID 1 free of
+    /// external crates (see the module doc). Rejects a character after padding,
+    /// a trailing partial character, and non-zero padding bits.
+    fn base64_decode(input: &str) -> Result<Vec<u8>, ()> {
+        let mut acc: u32 = 0;
+        let mut nbits: u32 = 0;
+        let mut seen_pad = false;
+        let mut out = Vec::with_capacity(input.len() / 4 * 3);
+        for &b in input.as_bytes() {
+            if b.is_ascii_whitespace() {
+                continue;
+            }
+            if b == b'=' {
+                seen_pad = true;
+                continue;
+            }
+            if seen_pad {
+                return Err(());
+            }
+            acc = (acc << 6) | u32::from(base64_val(b)?);
+            nbits += 6;
+            if nbits >= 8 {
+                nbits -= 8;
+                out.push(((acc >> nbits) & 0xff) as u8);
+            }
+        }
+        // A lone trailing character carries 6 unusable bits, and whatever bits
+        // remain must be the encoder's zero padding.
+        if nbits >= 6 || acc & ((1u32 << nbits) - 1) != 0 {
+            return Err(());
+        }
+        Ok(out)
+    }
+
+    fn base64_val(b: u8) -> Result<u8, ()> {
+        match b {
+            b'A'..=b'Z' => Ok(b - b'A'),
+            b'a'..=b'z' => Ok(b - b'a' + 26),
+            b'0'..=b'9' => Ok(b - b'0' + 52),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(()),
+        }
+    }
+
     fn bring_loopback_up() {
         if let Err(e) = mvm_agentd::guest_net::bring_iface_up("lo") {
             eprintln!("mvm-oci-init: bring loopback up: {e}");
@@ -524,6 +571,26 @@ mod linux {
             assert_eq!(hex_decode("2F").unwrap(), b"/");
             assert!(hex_decode("0").is_err());
             assert!(hex_decode("zz").is_err());
+        }
+
+        #[test]
+        fn base64_decode_round_trips_each_padding_length() {
+            // 0, 1 and 2 bytes of padding respectively.
+            assert_eq!(base64_decode("Zm9vYmFy").unwrap(), b"foobar");
+            assert_eq!(base64_decode("Zm9vYmE=").unwrap(), b"fooba");
+            assert_eq!(base64_decode("Zm9vYg==").unwrap(), b"foob");
+            assert_eq!(base64_decode("").unwrap(), b"");
+            // Both non-alphanumeric alphabet characters.
+            assert_eq!(base64_decode("+/8=").unwrap(), [0xfb, 0xff]);
+        }
+
+        #[test]
+        fn base64_decode_rejects_malformed_input() {
+            assert!(base64_decode("Zm9v!mFy").is_err(), "invalid character");
+            assert!(base64_decode("Zm9vYmFyZ").is_err(), "trailing partial char");
+            assert!(base64_decode("Zm9v=YmFy").is_err(), "data after padding");
+            // Non-zero bits under the padding.
+            assert!(base64_decode("Zm9vYh==").is_err(), "dirty padding bits");
         }
 
         #[test]

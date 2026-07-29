@@ -22,6 +22,12 @@ pub const LIVE_TAG: &str = "live";
 /// without KVM (GitHub-hosted ARM runners, or any dev box lacking one).
 pub const FIRECRACKER_TAG: &str = "firecracker";
 
+/// Cucumber tag for a scenario that boots from a pre-built signed bundle.
+/// Sealing a bundle means a full image build, far too slow to run inline, so
+/// the operator supplies one with `MVM_BDD_BUNDLE=<path to .mvmpkg>` and the
+/// scenario is skipped cleanly when that is absent.
+pub const BUNDLE_TAG: &str = "bundle";
+
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
 /// Plain data so [`scenario_should_run`] is a pure decision the harness can
@@ -33,6 +39,9 @@ pub struct RuntimeCaps {
     /// A usable `/dev/kvm` and a `firecracker` binary on `PATH` are both present,
     /// so a real Firecracker boot can run here.
     pub firecracker_bootable: bool,
+    /// `MVM_BDD_BUNDLE` names a readable `.mvmpkg`, so a bundle-boot scenario
+    /// has something to install.
+    pub bundle_fixture: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -53,6 +62,9 @@ pub fn scenario_should_run(tags: &[String], caps: RuntimeCaps) -> bool {
     if tagged(FIRECRACKER_TAG) && (!caps.live_opted_in || !caps.firecracker_bootable) {
         return false;
     }
+    if tagged(BUNDLE_TAG) && !caps.bundle_fixture {
+        return false;
+    }
     true
 }
 
@@ -67,11 +79,29 @@ mod tests {
     const NONE: RuntimeCaps = RuntimeCaps {
         live_opted_in: false,
         firecracker_bootable: false,
+        bundle_fixture: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
         live_opted_in: true,
         firecracker_bootable: true,
+        bundle_fixture: true,
     };
+
+    #[test]
+    fn bundle_scenario_skips_without_a_fixture() {
+        // Everything else in place, but no `.mvmpkg` to install.
+        assert!(!scenario_should_run(
+            &tags(&["live", "firecracker", "bundle"]),
+            RuntimeCaps {
+                bundle_fixture: false,
+                ..ALL
+            },
+        ));
+        assert!(scenario_should_run(
+            &tags(&["live", "firecracker", "bundle"]),
+            ALL
+        ));
+    }
 
     #[test]
     fn untagged_scenario_always_runs() {
@@ -91,6 +121,7 @@ mod tests {
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: false,
+                bundle_fixture: false,
             },
         ));
     }
@@ -102,6 +133,7 @@ mod tests {
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: false,
+                bundle_fixture: false,
             },
         ));
         assert!(scenario_should_run(&tags(&["live", "firecracker"]), ALL));
@@ -115,6 +147,7 @@ mod tests {
             RuntimeCaps {
                 live_opted_in: false,
                 firecracker_bootable: true,
+                bundle_fixture: false,
             },
         ));
         // Live opt-in but missing capability → skipped.
@@ -123,6 +156,7 @@ mod tests {
             RuntimeCaps {
                 live_opted_in: true,
                 firecracker_bootable: false,
+                bundle_fixture: false,
             },
         ));
         // Both present → runs.

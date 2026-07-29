@@ -51,7 +51,15 @@ fn probe_caps() -> RuntimeCaps {
     RuntimeCaps {
         live_opted_in: std::env::var_os("MVM_BDD_LIVE").is_some(),
         firecracker_bootable: kvm_openable() && firecracker_on_path(),
+        bundle_fixture: bundle_fixture_path().is_some(),
     }
+}
+
+/// The operator-supplied `.mvmpkg` a bundle-boot scenario installs, when
+/// `MVM_BDD_BUNDLE` names one that actually exists.
+pub(crate) fn bundle_fixture_path() -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var_os("MVM_BDD_BUNDLE")?);
+    path.is_file().then_some(path)
 }
 
 /// `/dev/kvm` exists and this process can open it read-write — the mode a real
