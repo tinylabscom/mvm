@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
+use mvm_client::name_registry_path;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
@@ -24,7 +25,6 @@ use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::{CheckpointChainAnchor, CheckpointStore};
 use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
-use mvm_runtime::vm::name_registry::registry_path;
 use mvm_runtime::workload_runner::ClaimContext;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -356,7 +356,7 @@ pub fn try_warm_claim(
     let snapshots = FsSnapshotStore::new(PathBuf::from(mvm_core::config::mvm_snapshots_dir()))
         .context("opening warm-parent snapshot store")?;
     let anchor = PoolLineageAnchor::new(&pool)?;
-    let registry_path = registry_path();
+    let registry_path = name_registry_path();
     let Some(handle) = pool.claim_idle_compatible(&want)? else {
         return Ok(None);
     };

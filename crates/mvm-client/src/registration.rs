@@ -13,8 +13,17 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use crate::{MvmError, Result};
+
+/// Path to the host-local VM name registry file.
+///
+/// Exposed so low-level pool / standby substrates can pass the registry path
+/// into runtime claim runners without the CLI naming `mvm_runtime` internals.
+pub fn name_registry_path() -> PathBuf {
+    mvm_runtime::vm::name_registry::registry_path()
+}
 
 /// Owned registration intent for a locally-booted machine — the mirror of the
 /// registry's borrowed `RegisterParams`, with no host handles so a caller
