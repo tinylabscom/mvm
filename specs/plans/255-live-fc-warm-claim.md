@@ -953,6 +953,85 @@ git commit -m "docs: record the live Firecracker warm-claim validation run"
 
 ---
 
+## Post-validation correction (2026-07-28)
+
+Task 7 ran on real KVM and **failed**. Findings in
+`specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`.
+
+**BUG-1 — the parent boots without the runtime overlay and panics.** Task 2's
+`spawn_standby_parent` boots a bare rootfs: one block device, base bootargs. The
+workload path boots four drives (`rootfs`, `rootfs.verity`, `overlay`,
+`overlay.verity`) plus `mvm.roothash` / `mvm.runtime_*` /
+`runtime_source_policy=required_overlay` cmdline tokens. Every cached OCI rootfs
+is `runtimeLean: true`, so **the guest agent lives in the overlay, not the
+rootfs**. Without it `/init` reports `no guest agent resolved from /mvm/runtime`
+and the kernel panics `Attempted to kill init!`. `capture_vm_full` therefore
+never runs, no checkpoint is created, no claim can happen, and the reseed
+handshake was never exercised.
+
+The root cause is this plan: Task 2 specified that bare single-`BlockDev` shape.
+
+**Why the obvious fix is the wrong one.** Threading overlay fields through
+`StandbySpec` would hand-roll the boot recipe a second time — which is what
+caused this bug, and would re-break the next time a drive or cmdline token is
+added to the workload path. It also matters for correctness: the child inherits
+its device model and cmdline from the parent's restored memory, so any
+divergence in the parent's boot shape is inherited by every child. The codebase
+already states the intent (`crates/mvm-cli/src/exec.rs`): the runtime overlay is
+"the single source of the guest agent + helpers … never silently replaced by a
+baked rootfs copy". The standby spawn is the one path that skipped it.
+
+**BUG-2 — pre-existing, not this branch's.** The transient run path persists the
+plan via `write_plan` but never mints `verb-grant.json`, so no
+`mvm.host_signer_pub` reaches the guest and the agent rejects the control
+connection with `rejecting control connection without a pinned host key`. It
+predates this branch's merge base. Track it separately; expect it to be the next
+blocker once BUG-1 is fixed.
+
+**Measured:** cold boot → agent-ready median 2096 ms (2079–2253, n=7). Warm claim
+not measurable. Enabling the pool today adds ~2.6 s median per run for nothing.
+
+---
+
+### Task 8: Disarm the capability, and boot the parent the way a workload boots
+
+**Files:**
+- Modify: `crates/mvm-runtime/src/driver/fc.rs` (capability + guard test)
+- Modify: the standby spawn path so the parent's boot shape comes from the workload pipeline
+- Test: alongside each change
+
+**Interfaces:**
+- Consumes: everything Tasks 1-6 built.
+- Produces: a parent that boots to agent-ready on real hardware, with `standby_pool` still `false` until a live run proves it.
+
+- [ ] **Step 1: Revert the capability flip**
+
+Set `standby_pool: false` for `FcDriver` and restore the guard test to assert **no** driver advertises the pool (rename `only_firecracker_advertises_the_standby_pool` to reflect that). The flag means "can actually spawn and claim a warm parent"; live validation proved it cannot, so advertising it is false and currently costs ~2.6 s per run for nothing. Update the capability comment to say the flip is gated on a green live run. **Commit this on its own** — it removes a live regression and must not wait on the rest of the task.
+
+- [ ] **Step 2: Make the parent's boot shape come from the workload pipeline**
+
+The parent must boot **identically to a workload**: same drives, same verity and overlay cmdline tokens. Build its configuration with the same CLI-side code that builds a workload's — `attach_runtime_overlay_if_cached` and the surrounding `runtime_source_policy` selection in `crates/mvm-cli/src/commands/vm/up/` — and derive the standby's boot inputs from that result. Do **not** write a second boot recipe.
+
+Where the seam lands is your judgment; state your choice and reasoning in your report. Two shapes worth weighing: populate the standby spec CLI-side from a real `VmStartConfig` that has been through the overlay pipeline, or hoist the parent spawn itself to the CLI layer so it reuses that pipeline directly. Whichever you pick, a future change to the workload's boot shape must not silently diverge the parent's — say in your report how your choice achieves that.
+
+Keep the existing guarantees intact: no guest NIC, `trusted_builder: false`, `template_id` propagated, the parent left running for capture, and no plan/endpoint/broker on a factory parent (that is the structural never-promote property).
+
+- [ ] **Step 3: Prove it without KVM as far as possible**
+
+Add a test asserting the parent's boot inputs carry the overlay drive set and the runtime cmdline tokens whenever the workload path would — i.e. that the two shapes cannot silently diverge. This is the regression guard for the exact bug that shipped.
+
+- [ ] **Step 4: Full gates + commit**
+
+```bash
+cargo fmt --all
+cargo nextest run --workspace --no-fail-fast
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+- [ ] **Step 5: Re-validate live, then and only then consider the flip**
+
+Re-run Task 7 on the KVM host. The capability stays `false` until that run is green. Expect BUG-2 to surface next; if it blocks, record it and stop rather than working around a pre-existing bug inside this slice.
+
 ## Done when
 
 - All seven tasks' boxes are ticked.
