@@ -1798,4 +1798,115 @@ mod tests {
         kill_live_vm(&dest_dir);
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    /// Live end-to-end measurement of the Firecracker warm-pool claim path
+    /// (fork restore from a pre-captured `vm_full` checkpoint) using the same
+    /// rootfs as `warm_restore_latency_live`. The source VM is booted without
+    /// waiting for a guest agent, then captured, so this works with a standard
+    /// systemd rootfs. Only the claim (fork restore into a fresh VMM) is timed.
+    #[test]
+    #[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS"]
+    fn warm_fork_claim_latency_live() {
+        use crate::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
+        use crate::firecracker::FcVmFullControl;
+        use mvm_core::checkpoint::CheckpointId;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let Some(images) = live_images() else {
+            return;
+        };
+        let _guard = DataDirGuard::new();
+
+        let pid = std::process::id();
+        let parent_id = format!("mvm-warmfork-parent-{pid}");
+        let child_id = format!("mvm-warmfork-child-{pid}");
+        let parent_dir: std::path::PathBuf = crate::microvm::resolve_running_vm_dir(&parent_id)
+            .expect("resolve parent VM dir")
+            .into();
+        let child_dir: std::path::PathBuf = crate::microvm::resolve_running_vm_dir(&child_id)
+            .expect("resolve child VM dir")
+            .into();
+        std::fs::create_dir_all(&parent_dir).expect("create parent dir");
+        std::fs::create_dir_all(&child_dir).expect("create child dir");
+
+        // Boot the parent VM with the standard helper path (no agent wait).
+        let parent_sock = parent_dir.join("fc.socket");
+        crate::microvm::start_vm_firecracker(
+            &parent_dir.to_string_lossy(),
+            &parent_sock.to_string_lossy(),
+        )
+        .expect("start source FC VM");
+        let sock = parent_sock.to_string_lossy();
+        crate::microvm::api_put_socket(
+            &sock,
+            "/boot-source",
+            &crate::microvm::boot_source_body(
+                &images.kernel.to_string_lossy(),
+                "console=ttyS0 pci=off",
+                None,
+            ),
+        )
+        .expect("configure boot source");
+        crate::microvm::api_put_socket(
+            &sock,
+            "/drives/rootfs",
+            &crate::microvm::drive_body("rootfs", &images.rootfs.to_string_lossy(), true, false),
+        )
+        .expect("configure rootfs drive");
+        crate::microvm::api_put_socket(&sock, "/actions", r#"{"action_type":"InstanceStart"}"#)
+            .expect("start source VM");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Capture the parent into a vm_full checkpoint (the pool's asset).
+        let control = FcVmFullControl::new(&parent_id);
+        let store = CheckpointStore::open();
+        let checkpoint_id = CheckpointId::new(format!("fc-claim-{pid}"));
+        capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: checkpoint_id.clone(),
+                vm_name: parent_id.clone(),
+                supervisor_config_digest: String::new(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
+                supervisor_config_src: None,
+                tag: Some("fc-claim-parent".into()),
+                created_unix: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_secs(),
+            },
+            &control,
+        )
+        .expect("capture parent checkpoint");
+
+        crate::microvm::stop_vm(&parent_id).ok();
+        let _ = std::fs::remove_dir_all(&parent_dir);
+
+        // Stage the checkpoint into the child's state dir, exactly like a pool
+        // claim would receive it.
+        let content_dir = store.content_dir(&checkpoint_id);
+        for name in [
+            "memory.bin",
+            "vmstate.bin",
+            "rootfs.ext4",
+            "device-anchors.json",
+        ] {
+            let src = content_dir.join(name);
+            if src.exists() {
+                std::fs::copy(&src, child_dir.join(name))
+                    .unwrap_or_else(|e| panic!("copy {} to child dir: {}", src.display(), e));
+            }
+        }
+
+        // Time the warm-pool claim: fresh Firecracker + fork restore.
+        let io = FirecrackerIO::new(child_dir.join("fc.socket"));
+        let t = std::time::Instant::now();
+        guarded_fork_load_resume(&io, &child_dir).expect("fork restore must resume");
+        let claim_ms = t.elapsed().as_millis();
+        println!("WARM_FORK_CLAIM_MS={claim_ms}");
+
+        crate::microvm::stop_vm(&child_id).ok();
+        let _ = std::fs::remove_dir_all(&child_dir);
+    }
 }
