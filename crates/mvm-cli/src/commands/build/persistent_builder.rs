@@ -237,7 +237,23 @@ fn run_start(args: StartArgs) -> Result<()> {
 
 /// Spawn the libkrun persistent builder and build its session record.
 fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
-    let vm = LibkrunPersistentHostVm::new(&workspace).with_memory_mib(memory_mib);
+    let host_bin_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted(&host_bin_cache)
+        .context("extracting host-vm binaries for persistent builder")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&host_bin_dir, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| {
+                format!(
+                    "making persistent builder host binaries readable: {}",
+                    host_bin_dir.display()
+                )
+            })?;
+    }
+    let vm = LibkrunPersistentHostVm::new(&workspace)
+        .with_memory_mib(memory_mib)
+        .with_host_bin_dir(host_bin_dir);
     let handle = vm
         .start()
         .context("spawning persistent builder VM (LibkrunPersistentHostVm::start)")?;
@@ -486,8 +502,27 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          # writable tmpfs / persistent store locations.\n\
          export HOME=/tmp\n\
          export MVM_WORKSPACE_PATH=/work\n\
-         export XDG_CACHE_HOME=/nix-store/.cache\n\
+         export MVM_HOST_BIN_DIR=/mvm-bins\n\
+         export XDG_CACHE_HOME=/tmp/.cache\n\
          export XDG_STATE_HOME=/tmp/.local/state\n\
+         # Keep persistent jobs on the builder's host-mediated egress path\n\
+         # even when the cached builder image predates the matching init\n\
+         # binary. Nix and its fetchers inherit these loopback proxy vars.\n\
+         export ALL_PROXY='socks5h://127.0.0.1:1080'\n\
+         export HTTP_PROXY='socks5h://127.0.0.1:1080'\n\
+         export HTTPS_PROXY='socks5h://127.0.0.1:1080'\n\
+         export all_proxy='socks5h://127.0.0.1:1080'\n\
+         export http_proxy='socks5h://127.0.0.1:1080'\n\
+         export https_proxy='socks5h://127.0.0.1:1080'\n\
+         export NO_PROXY='localhost,127.0.0.1,::1'\n\
+         export no_proxy='localhost,127.0.0.1,::1'\n\
+         # Older cached builder images may not have loaded the read-only\n\
+         # rootfs closure into the writable Nix database at boot. Register\n\
+         # it here before Nix decides to substitute paths that are local.\n\
+         if [ -r /nix-path-registration ]; then\n\
+             /sbin/nix-store --load-db < /nix-path-registration 2>/tmp/nix-db-load.log ||\n\
+                 cat /tmp/nix-db-load.log >&2\n\
+         fi\n\
          export NIX_CONFIG='experimental-features = nix-command flakes\n\
          sandbox = false\n\
          build-users-group =\n\
@@ -514,7 +549,7 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          set +e\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
-             --impure --no-write-lock-file \\\n\
+            --impure --no-write-lock-file \\\n\
              {flake_ref}#{attr} 2>\"$NIX_LOG\")\n\
          nix_status=$?\n\
          set -e\n\
@@ -785,8 +820,12 @@ mod tests {
         let body = std::fs::read_to_string(job_dir.join(&relpath).join("cmd.sh")).expect("read");
         assert!(body.contains("export HOME=/tmp"));
         assert!(body.contains("export MVM_WORKSPACE_PATH=/work"));
-        assert!(body.contains("export XDG_CACHE_HOME=/nix-store/.cache"));
+        assert!(body.contains("export MVM_HOST_BIN_DIR=/mvm-bins"));
+        assert!(body.contains("export XDG_CACHE_HOME=/tmp/.cache"));
         assert!(body.contains("export NIX_CONFIG="));
+        assert!(body.contains("export HTTPS_PROXY='socks5h://127.0.0.1:1080'"));
+        assert!(body.contains("export no_proxy='localhost,127.0.0.1,::1'"));
+        assert!(body.contains("/sbin/nix-store --load-db < /nix-path-registration"));
         assert!(body.contains("fallback = true"));
         assert!(body.contains("download-attempts = 8"));
         assert!(body.contains("http-connections = 2"));

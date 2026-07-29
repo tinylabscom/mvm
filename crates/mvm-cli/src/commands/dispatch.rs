@@ -16,6 +16,9 @@ impl TopLevelCommand for Commands {
             Commands::Env(a) => env::group::run(cli, a, cfg),
             Commands::Bootstrap(a) => bootstrap::run(cli, a, cfg),
             Commands::BuilderVmBootstrap(a) => bootstrap::run_builder_vm_bootstrap(cli, a, cfg),
+            Commands::BuilderEgressSupervisor(a) => {
+                bootstrap::run_builder_egress_supervisor(cli, a, cfg)
+            }
             Commands::Ls(a) => vm::ps::run(cli, a, cfg),
             Commands::Explain(a) => vm::explain::run(a),
             Commands::Run(a) => vm::exec::run_secure(cli, a, cfg),

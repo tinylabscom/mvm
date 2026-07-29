@@ -128,6 +128,7 @@ fn internal_subprocess_commands_are_hidden_from_help() {
         "reconcile",
         "persistent-builder",
         "__builder-vm-bootstrap",
+        "__builder-egress-supervisor",
         "__qemu-vsock-bridge",
     ] {
         assert!(
@@ -141,6 +142,18 @@ fn internal_subprocess_commands_are_hidden_from_help() {
 fn internal_builder_vm_bootstrap_command_is_hidden_but_parseable() {
     let cli = Cli::try_parse_from(["mvmctl", "__builder-vm-bootstrap"]).unwrap();
     assert!(matches!(cli.command, Commands::BuilderVmBootstrap(_)));
+}
+
+#[test]
+fn internal_builder_egress_supervisor_command_is_hidden_but_parseable() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "__builder-egress-supervisor",
+        "--endpoint",
+        "/tmp/mvm-substitution-endpoint",
+    ])
+    .unwrap();
+    assert!(matches!(cli.command, Commands::BuilderEgressSupervisor(_)));
 }
 
 #[test]

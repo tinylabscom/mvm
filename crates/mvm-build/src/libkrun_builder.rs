@@ -363,13 +363,24 @@ impl BuilderVsockEgressEndpoint {
             "egress_mode": "raw",
         });
 
-        let mut child = Command::new(&endpoint_path)
+        let mvmctl_path = std::env::current_exe().map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "resolve mvmctl for persistent builder egress supervisor: {e}"
+            ))
+        })?;
+        let mut child = Command::new(mvmctl_path)
+            .arg("__builder-egress-supervisor")
+            .arg("--endpoint")
+            .arg(&endpoint_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| {
-                BuilderVmError::ExtractionFailed(format!("spawn {}: {e}", endpoint_path.display()))
+                BuilderVmError::ExtractionFailed(format!(
+                    "spawn persistent builder egress supervisor for {}: {e}",
+                    endpoint_path.display()
+                ))
             })?;
 
         child
@@ -4179,6 +4190,11 @@ pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
 /// The host waits for this marker before publishing a usable session record.
 pub const DISPATCH_READY_MARKER: &str = "dispatch.ready";
 
+/// A first boot formats and seeds the persistent Nix disk before exposing
+/// the builder agent. The seed is a large closure copy, so its readiness
+/// window must cover cold disks as well as warm boots.
+const PERSISTENT_BUILDER_READY_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Spawn the long-lived builder VM that `mvm-host-vm-init`'s
 /// dispatch loop runs inside.
 ///
@@ -4207,6 +4223,10 @@ pub struct LibkrunPersistentHostVm {
     /// Host directory bound at `/work` in the guest. Bound at VM
     /// start, not per-dispatch.
     workspace_root: PathBuf,
+    /// Extracted host binaries bound at `/mvm-bins` so a builder-image
+    /// rebuild can bake the current init and resident daemons into its
+    /// rootfs.
+    host_bin_dir: Option<PathBuf>,
 }
 
 #[cfg(feature = "builder-vm")]
@@ -4221,6 +4241,7 @@ impl LibkrunPersistentHostVm {
             nix_store_mib: DEFAULT_NIX_STORE_MIB,
             image_override: None,
             workspace_root: workspace_root.into(),
+            host_bin_dir: None,
         }
     }
 
@@ -4241,6 +4262,12 @@ impl LibkrunPersistentHostVm {
 
     pub fn with_image_override(mut self, image: BuilderVmImage) -> Self {
         self.image_override = Some(image);
+        self
+    }
+
+    /// Bind the extracted host-vm binaries at `/mvm-bins`.
+    pub fn with_host_bin_dir(mut self, host_bin_dir: impl Into<PathBuf>) -> Self {
+        self.host_bin_dir = Some(host_bin_dir.into());
         self
     }
 
@@ -4301,6 +4328,17 @@ impl LibkrunPersistentHostVm {
         let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
+        let host_bin_dir = self.host_bin_dir.as_ref().ok_or_else(|| {
+            BuilderVmError::ExtractionFailed(
+                "persistent builder requires an extracted host binary directory".into(),
+            )
+        })?;
+        if !host_bin_dir.is_dir() {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "persistent builder host binary directory does not exist: {}",
+                host_bin_dir.display()
+            )));
+        }
 
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
@@ -4320,6 +4358,7 @@ impl LibkrunPersistentHostVm {
             .add_virtio_fs("work", path_to_str(&self.workspace_root, "workspace_root")?)
             .add_virtio_fs("out", path_to_str(&job_dir, "job_dir")?)
             .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
+            .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?)
             .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT)
             // The workload-vsock nesting hop. The in-host-VM forwarder
             // listens here; the outer host reaches a workload's
@@ -4388,14 +4427,14 @@ impl LibkrunPersistentHostVm {
                 &mut child,
                 &vm_state_dir,
                 mvm_agentd::vsock::GUEST_AGENT_PORT,
-                Duration::from_secs(30),
+                PERSISTENT_BUILDER_READY_TIMEOUT,
                 "builder guest agent",
             )?;
         }
         wait_for_path(
             &mut child,
             &job_dir.join(DISPATCH_READY_MARKER),
-            Duration::from_secs(60),
+            PERSISTENT_BUILDER_READY_TIMEOUT,
             "persistent builder dispatch loop",
         )?;
 
@@ -4927,6 +4966,8 @@ mod tests {
         //   against the stub `{}` install spec, which the in-VM
         //   pipeline rejects because the spec is missing required
         //   fields (`language`, …) — surfacing as `NixBuildFailed`.
+        // - Contributor host with a current lean builder image but no
+        //   resolvable runtime overlay → `RuntimeOverlayUnavailable`.
         //
         // Both outcomes prove the wiring proceeds past validation
         // rather than short-circuiting on `NotYetImplemented`, which
@@ -4951,6 +4992,7 @@ mod tests {
                     | BuilderVmError::NixBuildFailed(_)
                     | BuilderVmError::DegradedBuilderStore { .. }
                     | BuilderVmError::SupervisorExited { .. }
+                    | BuilderVmError::RuntimeOverlayUnavailable(_)
             ),
             "unexpected error variant: {err:?}"
         );
@@ -5025,8 +5067,10 @@ mod tests {
         //   - a partially bootable cached image on a host where the
         //     supervisor starts but exits before the requested job runs →
         //     SupervisorExited
-        // All five are legitimate "environment gap" surfaces. The
-        // fourth is what `mvmctl bootstrap` reports to operators with
+        //   - a lean builder image without a resolvable runtime sidecar →
+        //     RuntimeOverlayUnavailable
+        // All six are legitimate "environment gap" surfaces. The
+        // Nix-build failure is what `mvmctl bootstrap` reports to operators with
         // a populated cache; the first three are what `mvmctl bootstrap`
         // reports before the Stage 0 bootstrap completes.
         let scratch = TempDir::new().unwrap();
@@ -5042,6 +5086,7 @@ mod tests {
                     | BuilderVmError::NixBuildFailed(_)
                     | BuilderVmError::DegradedBuilderStore { .. }
                     | BuilderVmError::SupervisorExited { .. }
+                    | BuilderVmError::RuntimeOverlayUnavailable(_)
             ),
             "unexpected error variant: {err:?}"
         );
@@ -5393,6 +5438,7 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
         env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
@@ -5416,6 +5462,7 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
         env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
@@ -5449,6 +5496,7 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
         env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch

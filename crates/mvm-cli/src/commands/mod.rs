@@ -126,6 +126,9 @@ pub(in crate::commands) enum Commands {
     /// Internal: bootstrap only the builder VM image cache.
     #[command(name = "__builder-vm-bootstrap", hide = true)]
     BuilderVmBootstrap(bootstrap::BuilderVmBootstrapArgs),
+    /// Internal: keep a persistent builder's egress endpoint alive.
+    #[command(name = "__builder-egress-supervisor", hide = true)]
+    BuilderEgressSupervisor(bootstrap::BuilderEgressSupervisorArgs),
     /// Environment / install lifecycle (bootstrap, update, sign, …)
     #[command(hide = true)]
     Env(env::group::Args),

@@ -9,8 +9,10 @@
 //! `install.sh` runs this automatically after installing the binary (unless
 //! `MVM_SKIP_BUILDER_PREFETCH=1`), and users can run it explicitly any time.
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use mvm_core::user_config::MvmConfig;
 
@@ -40,4 +42,39 @@ pub(in crate::commands) fn run_builder_vm_bootstrap(
         return Ok(());
     }
     super::env::builder_vm::bootstrap_builder_vm_image()
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct BuilderEgressSupervisorArgs {
+    /// Endpoint executable to keep alive for the persistent builder VM.
+    #[arg(long)]
+    pub endpoint: PathBuf,
+}
+
+pub(in crate::commands) fn run_builder_egress_supervisor(
+    _cli: &Cli,
+    args: BuilderEgressSupervisorArgs,
+    _cfg: &MvmConfig,
+) -> Result<()> {
+    let status = Command::new(&args.endpoint)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| {
+            format!(
+                "running builder egress endpoint {}",
+                args.endpoint.display()
+            )
+        })?;
+    if !status.success() {
+        bail!(
+            "builder egress endpoint {} exited with {}",
+            args.endpoint.display(),
+            status
+                .code()
+                .map_or_else(|| "signal".to_string(), |code| code.to_string())
+        );
+    }
+    Ok(())
 }

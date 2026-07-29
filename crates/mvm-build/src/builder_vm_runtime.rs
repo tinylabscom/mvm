@@ -44,6 +44,12 @@ use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderVmError, VmBackendF
 /// punishing fast machines.
 pub const DEFAULT_BUILDER_VM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// libkrun exposes attached sparse block images 64 KiB shorter than their
+/// host-side file length. Reserve that tail when creating a new image so an
+/// ext4 filesystem formatted to the file's capacity never trips the guest's
+/// stale-geometry guard on the next boot.
+const LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES: u64 = 64 * 1024;
+
 /// Env var the operator sets to override [`DEFAULT_BUILDER_VM_TIMEOUT`].
 /// Plain integer seconds; zero is rejected so a typo doesn't silently
 /// disable the safety net.
@@ -1223,7 +1229,8 @@ fn sidecar_lock_path(image: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Sparse-allocate `path` to `size_bytes` if it's missing or empty,
+/// Sparse-allocate `path` to `size_bytes` minus the libkrun tail reserve if
+/// it's missing or empty,
 /// then close the fd. The filesystem records the size without
 /// allocating blocks until something writes them (APFS + ext4), so a
 /// multi-GiB cap costs ~nothing until used. An existing non-empty file
@@ -1248,12 +1255,19 @@ fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmErro
         .map_err(|e| BuilderVmError::ExtractionFailed(format!("metadata {}: {e}", path.display())))?
         .len();
     if len == 0 {
-        file.set_len(size_bytes).map_err(|e| {
+        let image_bytes = size_bytes
+            .checked_sub(LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES)
+            .ok_or_else(|| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "image size {size_bytes} is too small for the libkrun block-device reserve"
+                ))
+            })?;
+        file.set_len(image_bytes).map_err(|e| {
             if !existed_before_open {
                 let _ = std::fs::remove_file(path);
             }
             BuilderVmError::ExtractionFailed(format!(
-                "set_len({size_bytes}) on {}: {e}",
+                "set_len({image_bytes}) on {}: {e}",
                 path.display()
             ))
         })?;
@@ -1310,7 +1324,8 @@ fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, BuilderVmErro
 /// return a [`VolumeImageLock`] guard the backend keeps alive across
 /// `vm.start()`.
 ///
-/// Sparse-creates the image at `size_bytes` when it's missing or empty
+/// Sparse-creates the image at `size_bytes` minus the libkrun tail reserve
+/// when it's missing or empty
 /// (an existing volume is preserved so data survives across runs). A
 /// read-write volume takes a sidecar `<host_path>.lock` exclusive
 /// `flock` — two VMs RW-attaching the same image corrupt its ext4, and
@@ -2005,7 +2020,10 @@ mod tests {
         let guard = acquire_nix_store_image_lock(&cache_dir, "x86_64", 256).unwrap();
         let path = guard.path().to_path_buf();
         assert!(path.is_file());
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 256 * 1024 * 1024);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            256 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES
+        );
         drop(guard);
         // Second acquisition is idempotent.
         let guard2 = acquire_nix_store_image_lock(&cache_dir, "x86_64", 256).unwrap();
@@ -2175,7 +2193,10 @@ mod tests {
         let img = scratch.path().join("vols").join("data.img");
         let guard = ensure_vol_rw_or_retry(&img, 32 * 1024 * 1024);
         assert!(img.is_file(), "parent dir + sparse image created");
-        assert_eq!(std::fs::metadata(&img).unwrap().len(), 32 * 1024 * 1024);
+        assert_eq!(
+            std::fs::metadata(&img).unwrap().len(),
+            32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES
+        );
         drop(guard);
         // Second call leaves the existing (non-empty) image untouched —
         // a warm volume's data must survive. Pass a different size to
@@ -2183,7 +2204,7 @@ mod tests {
         let guard2 = ensure_vol_rw_or_retry(&img, 8 * 1024 * 1024);
         assert_eq!(
             std::fs::metadata(&img).unwrap().len(),
-            32 * 1024 * 1024,
+            32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES,
             "existing volume must not be resized"
         );
         drop(guard2);
@@ -2210,7 +2231,8 @@ mod tests {
         // Seed the image directly (no RW guard, so no sidecar is created)
         // — isolates the "RO takes no lock" assertion below.
         let f = std::fs::File::create(&img).unwrap();
-        f.set_len(16 * 1024 * 1024).unwrap();
+        f.set_len(16 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES)
+            .unwrap();
         drop(f);
         // Two concurrent RO guards coexist (read-only = no exclusive lock).
         let a = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, true).unwrap();
