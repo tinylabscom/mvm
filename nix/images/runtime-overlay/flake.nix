@@ -296,7 +296,6 @@
             cp ${sdkRuntimeLibgccFor pkgs} "$out/lib/libgcc_s.so.1"
             chmod u+w "$out/lib/libmvm_host_services.so"
             patchelf \
-              --set-interpreter /mvm/sdk/lib/${sdkRuntimeLoaderBaseFor pkgs} \
               --set-rpath /mvm/sdk/lib \
               "$out/lib/libmvm_host_services.so"
             chmod 0555 "$out/lib"/*

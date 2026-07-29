@@ -928,8 +928,9 @@ fn runtime_overlay_exposes_sdk_sidecar_separately() {
     );
     assert!(
         content.contains("sdkRuntimeLoaderFor")
-            && content.contains("--set-interpreter /mvm/sdk/lib/"),
-        "the sidecar must carry and target its matching glibc loader"
+            && content.contains("--set-rpath /mvm/sdk/lib")
+            && !content.contains("--set-interpreter /mvm/sdk/lib/"),
+        "the sidecar must carry its matching glibc loader and set the cdylib RPATH without treating the shared object as an executable"
     );
 }
 
