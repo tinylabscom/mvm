@@ -10,6 +10,21 @@
 
 ## Current issue delivery
 
+- [x] BDD / conformance integration: introduced `model/*.toml` as the single
+      source for conformance claims, generated `CONFORMANCE.md`, and added
+      `xtask` gates for R1 (`check-conformance`), R2 (`check-honesty`), and R4
+      (`check-deferrals`). Added an R3 meta-gate in `mvm-conformance/tests/meta.rs`
+      tying registered IDs to Gherkin scenarios and witnesses. Wired the gates
+      into `just lint`, added hermetic BDD smoke coverage to PR CI's existing
+      test runner, and documented falsifiability in `specs/VERIFICATION.md`.
+      Full workspace clippy, xtask tests, and the meta-gate pass.
+
+- [x] Restore the accepted four-job development CI budget: consolidate
+      no-std and real-kernel filesystem checks into the existing test runner,
+      keep the SDK publication dry-run in the manual full matrix, and remove
+      speculative pre-PR and redundant post-merge `main` runs without changing
+      required check names.
+
 - [x] #1840 faithful flake-image revert: boot the recorded slot revision,
       reconcile signed artifact hashes, and preserve the admitted restore path.
       Implementation, focused tests, workspace tests, check, and clippy pass;
@@ -477,6 +492,16 @@ Phase 4 (docs, close-out, wasm stretch, mvmd)     ─   last
 ```
 
 WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net` (1d). WS2 depends on the guest/host crate merges (1e/1h). WS10's de-tokio depends on WS2's single-binary shape.
+
+### Deferred workstream: universal initramfs + vsock-activated boot
+
+Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock. It depends on three prerequisite branches merging first:
+
+- `feat/vsock-control-conformance`
+- `feat/firecracker-vsock-only-final`
+- `feat/hvf-converge-vsock`
+
+HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 269 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
 ## 5. Definition of done
 

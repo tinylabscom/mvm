@@ -39,8 +39,9 @@ use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 #[cfg(feature = "test-support")]
 use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
-    FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, VsockPrimedSignalSource,
-    await_primed_barrier, pause_and_seal, signal_post_restore, verify_and_resume,
+    FirecrackerIO, POST_RESTORE_READY_TIMEOUT, SnapshotIO, VsockPostRestoreSignal,
+    VsockPrimedSignalSource, await_primed_barrier, pause_and_seal, signal_post_restore,
+    verify_and_resume,
 };
 use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 
@@ -205,7 +206,7 @@ fn signal_guest_post_restore(name: &str) -> Result<()> {
     signal_post_restore(
         name,
         &VsockPostRestoreSignal { token },
-        std::time::Duration::from_secs(5),
+        POST_RESTORE_READY_TIMEOUT,
     )
     .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))?;
     Ok(())

@@ -12,8 +12,6 @@ name: Architecture invariants
 # day-to-day CI surface.
 
 on:
-  push:
-    branches: [main]
   pull_request:
   # Required for the merge queue: the Invariant check must run on merge_group.
   merge_group:

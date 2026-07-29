@@ -29,7 +29,7 @@ use crate::backend::FirecrackerBackend;
 use crate::driver::spec::KernelImage;
 use crate::driver::{
     BlockDev, ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver, VmmSpec,
-    VsockDirection,
+    VsockDirection, VsockPort,
 };
 use crate::microvm::{
     FirecrackerGuard, api_put_socket, balloon_body, boot_source_body, drive_body, fc_pid_path,
@@ -219,9 +219,17 @@ fn fc_guest_dial_socket(runtime_dir: &Path, port: u32) -> PathBuf {
 /// endpoint (the claim-critical one), and the host-services broker.
 /// `HostDials` ports (agent, dev-console) are not bridged here: the host
 /// dials those inbound through the CONNECT handshake on the mux socket.
-fn wire_guest_dial_bridges(spec: &VmmSpec, runtime_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+///
+/// Takes the channel list rather than a whole `VmmSpec` because both start
+/// paths need it and only one of them has a spec: a cold boot passes the spec it
+/// is about to boot, and a warm claim passes the channels the role layer
+/// resolved for a child whose device model comes from restored memory.
+fn wire_guest_dial_bridges(
+    channels: &[VsockPort],
+    runtime_dir: &Path,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
     let mut created = Vec::new();
-    for port in &spec.vsock {
+    for port in channels {
         if port.direction != VsockDirection::GuestDials {
             continue;
         }
@@ -270,6 +278,26 @@ fn spawn_workload_exit_capture(runtime_dir: &Path, state_dir: &Path) {
             sock.display()
         ),
     }
+}
+
+/// Put the host end of every channel the guest dials in place, then arm the
+/// workload-exit capture — the whole host-side channel set a Firecracker guest
+/// needs before it is able to dial anything.
+///
+/// Both start paths run this, and both run it before the guest's vCPUs do
+/// anything: a cold boot before `InstanceStart`, a warm claim before the restore
+/// resumes the child. The claim's window is the tighter of the two, because a
+/// restored guest is already past its own boot — it can dial its egress
+/// endpoint, its broker, and its exit reporter the instant it resumes, whereas a
+/// cold-booted guest spends a kernel boot getting there.
+///
+/// A prior run's captured exit code is cleared first, so a reader observes this
+/// launch's exit status and never a stale one.
+fn arm_host_channels(channels: &[VsockPort], state_dir: &Path, runtime_dir: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(state_dir));
+    wire_guest_dial_bridges(channels, runtime_dir)?;
+    spawn_workload_exit_capture(runtime_dir, state_dir);
+    Ok(())
 }
 
 /// The stop signal to deliver to the Firecracker process during teardown.
@@ -519,6 +547,28 @@ impl VmmDriver for FcDriver {
             )));
         }
 
+        // Arm the child's host channel set before anything resumes it. The
+        // restore below brings the guest back already booted, so the moment its
+        // vCPUs run it can dial its egress endpoint, its broker and its exit
+        // reporter; a cold boot gets the same wiring, just with a whole kernel
+        // boot of slack. Wiring after the restore would leave a live guest
+        // dialing sockets that do not exist — egress dark, host services
+        // silently unavailable, and no exit code recorded.
+        let runtime_dir = req.child_dir.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "fork child '{}': create runtime dir {}: {e}",
+                req.child_vm_name,
+                runtime_dir.display()
+            ))
+        })?;
+        arm_host_channels(req.channels, req.child_dir, &runtime_dir).map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "fork child '{}': wiring its host channels: {e}",
+                req.child_vm_name
+            ))
+        })?;
+
         // Restore the parent's saved memory into a fresh VMM under the child's
         // own identity. The device-model guard between load and resume refuses
         // any snapshot carrying a network interface, so a restored child cannot
@@ -545,9 +595,9 @@ impl VmmDriver for FcDriver {
         let abs_dir = state_dir.to_string_lossy().into_owned();
         let pid_file = fc_pid_path(&spec.name)
             .ok_or_else(|| anyhow!("resolve Firecracker pid path for '{}'", spec.name))?;
-        // Clear any prior run's captured exit code and stale pid marker so `wait`
-        // and the readiness poll observe only this launch's.
-        let _ = std::fs::remove_file(mvm_core::exit_capture::exit_file_path(&state_dir));
+        // Clear the stale pid marker so the readiness poll observes only this
+        // launch's process (the captured exit code is cleared with the rest of
+        // the host channel set, in `arm_host_channels`).
         let _ = std::fs::remove_file(&pid_file);
 
         // Convert the workload kernel to an FC-loadable image (x86_64 bzImage →
@@ -579,11 +629,10 @@ impl VmmDriver for FcDriver {
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;
         }
 
-        // Wire the guest-dial egress/broker bridges, then bind the
-        // workload-exit capture — both must be in place before the guest boots
-        // and dials out.
-        wire_guest_dial_bridges(spec, &runtime_dir)?;
-        spawn_workload_exit_capture(&runtime_dir, &state_dir);
+        // Wire the guest-dial egress/broker bridges and bind the workload-exit
+        // capture — the whole host channel set must be in place before the guest
+        // boots and dials out.
+        arm_host_channels(&spec.vsock, &state_dir, &runtime_dir)?;
 
         // Boot the configured instance.
         api_put_socket(&socket, "/actions", r#"{"action_type": "InstanceStart"}"#)
@@ -770,7 +819,7 @@ impl RunningVm for FcRunningVm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::{ConsoleCapture, VsockPort};
+    use crate::driver::ConsoleCapture;
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
 
     fn host_dials(guest_port: u32, uds: &str) -> VsockPort {
@@ -787,6 +836,17 @@ mod tests {
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
+    }
+
+    /// The four standing channels a workload VM carries: the agent RPC the host
+    /// dials, and the egress, broker and exit ports the guest dials.
+    fn workload_channels() -> Vec<VsockPort> {
+        vec![
+            host_dials(GUEST_AGENT_PORT, "/run/agent.sock"),
+            guest_dials(EGRESS_PORT, "/run/egress.sock"),
+            guest_dials(BROKER_PORT, "/run/broker.sock"),
+            guest_dials(WORKLOAD_EXIT_PORT, "/state/w/workload.exit"),
+        ]
     }
 
     fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
@@ -1059,17 +1119,7 @@ mod tests {
     fn wire_guest_dial_bridges_links_egress_and_broker_but_not_exit_or_agent() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = dir.path();
-        let spec = spec_with(
-            KernelImage::Path("/img/vmlinux".into()),
-            vec![
-                host_dials(GUEST_AGENT_PORT, "/run/agent.sock"),
-                guest_dials(EGRESS_PORT, "/run/egress.sock"),
-                guest_dials(BROKER_PORT, "/run/broker.sock"),
-                guest_dials(WORKLOAD_EXIT_PORT, "/state/w/workload.exit"),
-            ],
-            vec![],
-        );
-        let created = wire_guest_dial_bridges(&spec, runtime).unwrap();
+        let created = wire_guest_dial_bridges(&workload_channels(), runtime).unwrap();
         assert_eq!(created.len(), 2, "only egress + broker are bridged");
 
         // Egress: v.sock_5253 → the runner's endpoint socket.
@@ -1511,6 +1561,7 @@ mod tests {
             child_vm_name: "child-vm-1",
             child_dir: &missing,
             genid: sample_generation_token(),
+            channels: &workload_channels(),
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -1533,6 +1584,7 @@ mod tests {
             child_vm_name: "child-vm-2",
             child_dir: &child_dir,
             genid: sample_generation_token(),
+            channels: &workload_channels(),
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -1540,6 +1592,84 @@ mod tests {
         assert!(
             matches!(err, StandbyError::ClaimFailed(ref m) if m.contains("memory")),
             "expected a ClaimFailed naming the missing memory image, got: {err:?}"
+        );
+    }
+
+    /// A restore resumes a guest that is already booted, so the host end of
+    /// every channel it dials has to exist before `restore_fork` runs — there is
+    /// no kernel boot to cover the gap the way a cold boot's does.
+    ///
+    /// Driven by letting the restore itself fail (no hypervisor here, and the
+    /// clone carries no device anchors): the bridges and the exit listener are
+    /// still on disk afterwards, which they could not be if the wiring ran after
+    /// the restore. The equality against the cold-boot wiring is asserted
+    /// alongside, so a claim cannot come to wire a different set.
+    #[test]
+    fn fork_standby_child_wires_the_childs_host_channels_before_it_attempts_the_restore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let child_dir = tmp.path().join("child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(child_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        std::fs::write(child_dir.join("memory.bin"), b"saved-memory").unwrap();
+
+        let channels = workload_channels();
+        let req = ChildForkRequest {
+            child_vm_name: "child-vm-3",
+            child_dir: &child_dir,
+            genid: sample_generation_token(),
+            channels: &channels,
+        };
+
+        // The restore has no Firecracker to talk to and no device anchors to
+        // read, so it fails — the point is what survives on disk regardless.
+        FcDriver::new()
+            .fork_standby_child(&req)
+            .expect_err("no hypervisor here: the restore itself must fail");
+
+        let runtime = child_dir.join("runtime");
+        // Exactly the bridge set a cold boot of the same channels produces.
+        let cold = tempfile::tempdir().unwrap();
+        for (cold_link, _) in wire_guest_dial_bridges(&channels, cold.path()).unwrap() {
+            let name = cold_link.file_name().unwrap();
+            assert_eq!(
+                std::fs::read_link(runtime.join(name)).ok(),
+                std::fs::read_link(&cold_link).ok(),
+                "the fork must wire {} exactly as a cold boot does",
+                name.to_string_lossy()
+            );
+        }
+        // Named concretely too, so a failure says which channel went dark.
+        assert_eq!(
+            std::fs::read_link(fc_guest_dial_socket(&runtime, EGRESS_PORT)).unwrap(),
+            PathBuf::from("/run/egress.sock"),
+            "the child's egress endpoint must be reachable before it resumes"
+        );
+        assert_eq!(
+            std::fs::read_link(fc_guest_dial_socket(&runtime, BROKER_PORT)).unwrap(),
+            PathBuf::from("/run/broker.sock"),
+            "host.audit.v1 / host.secrets.v1 must be reachable before it resumes"
+        );
+        // The exit port is bound by the driver, not symlinked: a real socket.
+        let exit_sock = fc_guest_dial_socket(&runtime, WORKLOAD_EXIT_PORT);
+        assert!(
+            std::os::unix::net::UnixStream::connect(&exit_sock).is_ok(),
+            "the workload-exit listener must be bound before the child resumes, \
+             or the run reports UNKNOWN instead of the guest's exit code"
+        );
+    }
+
+    /// A factory parent carries no channel at all — it has no gating endpoint
+    /// and no broker to reach — so the same wiring call produces no bridge. The
+    /// parent/workload namespace split is what this preserves: the driver does
+    /// not invent a channel for a spec that names none.
+    #[test]
+    fn wiring_a_channel_less_boot_creates_no_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(wire_guest_dial_bridges(&[], dir.path()).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "a parent with no channels must leave the runtime dir empty"
         );
     }
 }

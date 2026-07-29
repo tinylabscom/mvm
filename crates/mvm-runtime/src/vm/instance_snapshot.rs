@@ -490,17 +490,14 @@ pub trait PostRestoreSignal {
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome>;
 }
 
-/// After a snapshot restore resumes vCPUs, signal the guest to finish
-/// re-establishing itself. An *unacknowledged* signal is an error: the VM is
-/// running at the hypervisor level but its drives may be unmounted, so the
-/// resume is not actually complete — fail closed and let the operator retry
-/// (`PostRestore` is safe to re-send; SIGUSR1 just re-runs the remount).
-/// Default interval between guest-readiness probes before delivering the
-/// post-restore signal.
+/// Interval between guest-readiness probes before delivering the post-restore
+/// signal.
 const POST_RESTORE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Default wall-clock time to wait for the guest agent to become reachable
-/// before delivering a post-restore signal.
+/// How long a resumed guest gets to make its agent reachable before the
+/// post-restore signal is declared undelivered. Every production caller uses
+/// this so one restore does not get a quietly more generous deadline than
+/// another; tests pass their own.
 pub const POST_RESTORE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// After a snapshot restore resumes vCPUs, wait for the guest agent to be
@@ -520,7 +517,8 @@ pub fn signal_post_restore<S: PostRestoreSignal + ?Sized>(
     }) {
         PrimedOutcome::TimedOut => {
             bail!(
-                "VM {vm_name} guest agent did not become reachable within {ready_timeout:?}                  after resume; post-restore signal undelivered"
+                "VM {vm_name} guest agent did not become reachable within {ready_timeout:?} \
+                 after resume; post-restore signal undelivered"
             );
         }
         PrimedOutcome::Primed => {}

@@ -1,0 +1,189 @@
+# model/claims.toml --- the conformance ID register.
+#
+# Every numbered security claim this repository asserts, in one place, so that
+# nothing is referenced without being defined. `CONFORMANCE.md` is generated
+# from this file. A claim whose ID is not listed here fails `check-conformance`,
+# and a claim listed here with no scenario and no witness fails it too.
+#
+# `level` is the honesty level (R2):
+#   some-true  a fact reproduced from an authority; not established here
+#   build      constructed here and validated against its oracle
+#   open       measured and reported, never asserted
+#
+# `suite` names the Gherkin file under `features/suites/` that carries the
+# scenario (R3). Every claim must have a scenario and at least one witness.
+#
+# Witness tokens are typed:
+#   fn:NAME   -- a `fn NAME(` must exist under `crates/`
+#   ci:NAME   -- NAME must appear in some `.github/workflows/*` file
+
+spec = "mvm/1"
+
+[[claim]]
+id = "MVM-SEC-01"
+level = "build"
+suite = "host_shares"
+statement = "No host-fs access from a guest beyond explicit shares"
+witnesses = [
+    "fn:seccomp_allows_listed_denies_unlisted",
+    "fn:validated_conversion_enforces_mount_allow_list",
+    "fn:dir_share_two_part_defaults_ro",
+    "fn:libkrun_refuses_read_only_virtiofs_share",
+    "fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched",
+    "ci:seccomp-functional",
+]
+
+[[claim]]
+id = "MVM-SEC-02"
+level = "build"
+suite = "guest_privilege"
+statement = "No guest binary can elevate to uid 0"
+witnesses = [
+    "fn:set_no_new_privs",
+    "fn:virtiofs_mount_flags_keep_workspace_read_only",
+]
+
+[[claim]]
+id = "MVM-SEC-03"
+level = "build"
+suite = "verified_boot"
+statement = "A tampered rootfs ext4 fails to boot"
+witnesses = [
+    "ci:verified-boot-artifacts",
+]
+
+[[claim]]
+id = "MVM-SEC-04"
+level = "build"
+suite = "agent_surface"
+statement = "The guest agent has no do_exec in production builds"
+witnesses = [
+    "ci:prod-agent-runentry-contract",
+]
+
+[[claim]]
+id = "MVM-SEC-05"
+level = "build"
+suite = "fuzz_surface"
+statement = "Vsock framing + supervisor-config JSON are fuzzed"
+witnesses = [
+    "ci:fuzz",
+]
+
+[[claim]]
+id = "MVM-SEC-06"
+level = "build"
+suite = "runtime_overlay"
+statement = "The pre-built dev image is hash-verified"
+witnesses = [
+    "fn:download_runtime_overlay_rejects_checksum_mismatch",
+    "ci:hash-verify-tests",
+]
+
+[[claim]]
+id = "MVM-SEC-07"
+level = "some-true"
+suite = "supply_chain"
+statement = "Cargo deps are audited on every PR"
+witnesses = [
+    "ci:cargo-deny",
+    "ci:cargo-audit",
+    "ci:reproducibility",
+]
+
+[[claim]]
+id = "MVM-SEC-08"
+level = "build"
+suite = "admission_audit"
+statement = "Every workload runs from a signed, audited ExecutionPlan"
+witnesses = [
+    "fn:synthesize_plan",
+    "fn:admit_for_run",
+    "fn:verify_audit_chain",
+]
+
+[[claim]]
+id = "MVM-SEC-09"
+level = "build"
+suite = "bundle_boot"
+statement = "Every published bundle is content-addressed and re-verified"
+witnesses = [
+    "fn:read_and_verify_bundle",
+    "fn:verify_plan_bundle",
+]
+
+[[claim]]
+id = "MVM-SEC-10"
+level = "build"
+suite = "egress_vsock"
+statement = "No untrusted workload reaches the network unless policy-admitted"
+witnesses = [
+    "fn:policy_default_is_deny_all",
+    "fn:run_net_default_is_deny_all",
+    "fn:private_link_local_loopback_ula_metadata_are_forbidden",
+    "fn:emits_resolved_query_with_ip_list",
+    "ci:fuzz-dns-codec",
+]
+
+[[claim]]
+id = "MVM-SEC-11"
+level = "build"
+suite = "app_deps"
+statement = "Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated"
+witnesses = [
+    "fn:verify_sealed_volume",
+    "fn:apply_install_gate",
+    "ci:app-deps-audit",
+]
+
+[[claim]]
+id = "MVM-SEC-12"
+level = "build"
+suite = "host_services"
+statement = "Every host-side service binding is plan-gated and audited"
+witnesses = [
+    "fn:unbound_service_returns_not_bound",
+    "fn:service_call_rejects_unknown_envelope_fields",
+]
+
+[[claim]]
+id = "MVM-SEC-13"
+level = "build"
+suite = "secrets_pii"
+statement = "No raw secret value crosses the broker channel"
+witnesses = [
+    "fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token",
+    "fn:substitute",
+]
+
+[[claim]]
+id = "MVM-SEC-14"
+level = "build"
+suite = "oci_provenance"
+statement = "OCI image provenance is recorded in the chain-signed audit log"
+witnesses = [
+    "fn:prod_pull_requires_digest_pin_before_network",
+    "fn:prod_run_image_requires_digest_pin_before_network",
+]
+
+[[claim]]
+id = "MVM-SEC-15"
+level = "build"
+suite = "prod_console"
+statement = "No interactive access to a sealed production microVM"
+witnesses = [
+    "fn:console_refused_on_sealed_image",
+    "fn:prod_console_attachment_has_no_input",
+    "ci:prod-agent-no-console",
+]
+
+[[claim]]
+id = "MVM-SEC-16"
+level = "build"
+suite = "egress_substitution"
+statement = "Egress substitution keeps a raw secret off the guest, bound-only, no value in audit"
+witnesses = [
+    "fn:handed_placeholders_never_contain_the_secret_value",
+    "fn:substitution_endpoint_refuses_unbound_destination",
+    "fn:audit_chain_carries_no_secret_value",
+]

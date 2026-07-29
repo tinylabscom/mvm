@@ -186,6 +186,27 @@ kernel-workload:
 hvf-oci-allow-host-smoke:
     bash scripts/check-hvf-oci-allow-host-smoke.sh
 
+# ── Model / Conformance gates ────────────────────────────────────────────
+
+# R1: the model is the single source. Verify model/*.toml, the generated
+# CONFORMANCE.md, and the honesty/deferral meta-gates.
+model:
+    cargo run -p xtask -- check-conformance
+    cargo run -p xtask -- check-honesty
+    cargo run -p xtask -- check-deferrals
+
+# Regenerate everything the model owns: CONFORMANCE.md.
+model-write:
+    cargo run -p xtask -- check-conformance --write
+
+# R2: verify no open/some-true claim is asserted as established in docs.
+honesty:
+    cargo run -p xtask -- check-honesty
+
+# R4: verify no TODO/FIXME/unimplemented!/placeholder markers are deferred.
+deferrals:
+    cargo run -p xtask -- check-deferrals
+
 # ── Lint & Format ────────────────────────────────────────────────────────
 
 # Format all code
@@ -208,12 +229,12 @@ clippy:
 clippy-bdd:
     cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
-# Format check + clippy (workspace + the feature-gated BDD target)
-lint: fmt-check clippy clippy-bdd
+# Format check + clippy + model gates (workspace + the feature-gated BDD target)
+lint: fmt-check clippy clippy-bdd model
 
 # ── CI Gate ──────────────────────────────────────────────────────────────
 
-# Full CI gate: lint + test + doctests (nextest skips doctests) + BDD.
+# Full CI gate: lint + test + doctests + hermetic BDD + model gates.
 ci: lint test test-doc bdd
 
 # Alias for ci

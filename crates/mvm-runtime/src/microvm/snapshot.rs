@@ -24,7 +24,8 @@ use tracing::instrument;
 
 use crate::base::shell::shell_quote;
 use crate::vm::instance_snapshot::{
-    FirecrackerIO, VsockPostRestoreSignal, guarded_load_resume, signal_post_restore,
+    FirecrackerIO, POST_RESTORE_READY_TIMEOUT, VsockPostRestoreSignal, guarded_load_resume,
+    signal_post_restore,
 };
 
 use super::daemon::api_put_socket;
@@ -116,7 +117,7 @@ pub fn warm_restore_instance_from_path(
     let reseed = match signal_post_restore(
         name,
         &VsockPostRestoreSignal { token },
-        std::time::Duration::from_secs(5),
+        POST_RESTORE_READY_TIMEOUT,
     ) {
         Ok(outcome) if outcome.reseeded => mvm_core::vm_backend::ReseedStatus::Rotated,
         Ok(_) => mvm_core::vm_backend::ReseedStatus::NotRotated,

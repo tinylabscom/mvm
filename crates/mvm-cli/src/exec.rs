@@ -2094,6 +2094,10 @@ mod tests {
             "OCI --image runs with outbound egress enabled",
         )
         .expect_err("unavailable hvf must fail closed before OCI work");
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
+        }
         // HVF always advertises the NIC-less host-vsock-proxy egress caps (they
         // are unconditional — the fail-closed posture), so the capability
         // shortfall is empty and the refusal comes from the availability probe:
