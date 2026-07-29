@@ -192,3 +192,70 @@ fn ops_help_no_longer_lists_bench() {
         "ops help still lists the removed bench verb:\n{text}"
     );
 }
+
+/// `machine warm-restore --help` advertises the expected usage.
+#[test]
+fn machine_warm_restore_help_lists_args() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["machine", "warm-restore", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "machine warm-restore --help must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("warm-restore"));
+    assert!(help.contains("CHECKPOINT_ID"));
+    assert!(help.contains("--name"));
+    assert!(help.contains("--json"));
+}
+
+/// A non-existent checkpoint id fails gracefully rather than panicking.
+#[test]
+fn machine_warm_restore_rejects_missing_checkpoint() {
+    let tmp = std::env::temp_dir().join(format!("mvm-warm-restore-test-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .env("MVM_HOME", &tmp)
+        .args(["machine", "warm-restore", "no-such-checkpoint"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "warm-restore must fail for a missing checkpoint; stderr: {stderr}"
+    );
+    assert!(!stderr.contains("panic"), "warm-restore panicked: {stderr}");
+    assert!(
+        !stderr.contains("thread panicked"),
+        "warm-restore panicked: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The `--json` output flag is accepted by the parser.
+#[test]
+fn machine_warm_restore_json_flag_parses() {
+    let tmp =
+        std::env::temp_dir().join(format!("mvm-warm-restore-json-test-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .env("MVM_HOME", &tmp)
+        .args(["machine", "warm-restore", "no-such-checkpoint", "--json"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unexpected argument") && !stderr.contains("unrecognized"),
+        "--json must parse cleanly, stderr: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}

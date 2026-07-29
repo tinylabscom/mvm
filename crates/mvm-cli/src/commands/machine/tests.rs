@@ -95,6 +95,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Revert(_) => "revert",
         MachineAction::Rewind(_) => "rewind",
         MachineAction::Advance(_) => "advance",
+        MachineAction::WarmRestore(_) => "warm-restore",
         MachineAction::Vm(_) => "vm",
     }
 }
