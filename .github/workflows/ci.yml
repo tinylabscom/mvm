@@ -436,6 +436,7 @@ jobs:
             --kernel "$image_path/vmlinux" \
             --overlay "$overlay_path/overlay.ext4" \
             --overlay-verity "$overlay_path/overlay.verity" \
+            --closure-paths "$image_path/rootfs-closure-paths" \
             --json
 
   # `mvm-protocol` is `no_std` + `alloc` (the IR, wire protocol, policy/audit

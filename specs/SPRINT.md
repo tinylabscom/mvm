@@ -75,7 +75,8 @@
       against the 50 MiB complete-artifact contract. The default tenant now
       omits its redundant dynamic busybox input and copies the CA bundle without
       retaining the source `cacert` store path. A build-backed gate caps the lean
-      registered runtime closure at two paths. The measured rootfs is 26,718,208
+      registered runtime closure at two paths, and the same footprint ledger now
+      reports those exact hash-anchored paths. The measured rootfs is 26,718,208
       bytes; storage with verity is 36,139,008 bytes (34.46 MiB), and the all-in
       footprint with the 14,460,936-byte kernel is 50,599,944 bytes (48.26 MiB).
 - [x] Persistent builder completion reliability: the egress helper writes stderr

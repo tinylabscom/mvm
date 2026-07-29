@@ -1223,3 +1223,23 @@ fn ci_counts_the_kernel_in_the_guest_footprint() {
         "the 50 MiB CI ledger must include the workload kernel"
     );
 }
+
+#[test]
+fn default_tenant_exports_and_ci_counts_the_rootfs_closure() {
+    let flake_path = nix_dir().join("images/default-tenant/flake.nix");
+    let flake = fs::read_to_string(&flake_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", flake_path.display()));
+    let ci_path = repo_dir().join(".github/workflows/ci.yml");
+    let ci = fs::read_to_string(&ci_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", ci_path.display()));
+
+    assert!(
+        flake.contains("rootfsPkg.passthru.rootfsClosureInfo")
+            && flake.contains("$out/rootfs-closure-paths"),
+        "the default tenant must export its realized rootfs closure inventory"
+    );
+    assert!(
+        ci.contains("--closure-paths \"$image_path/rootfs-closure-paths\""),
+        "the footprint CI gate must consume the exported closure inventory"
+    );
+}

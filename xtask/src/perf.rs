@@ -13,8 +13,8 @@
 //!   bare macOS host skips cleanly. Enforces the "cold-boot ≤ 500ms
 //!   Firecracker / ≤ 1s libkrun" line.
 //! - **`footprint`** — sum the Nix-built rootfs, runtime overlay, verity
-//!   sidecars, and optional kernel and assert the supplied guest artifacts stay
-//!   below 50 MiB.
+//!   sidecars, and optional kernel, assert the supplied guest artifacts stay
+//!   below 50 MiB, and optionally enforce the rootfs Nix closure inventory.
 //!
 //! The thresholds are the per-backend boot budgets; they're pinned
 //! by tests in this module so a drift in the documented budget vs.
@@ -25,7 +25,7 @@
 //! ```text
 //! cargo xtask perf rootfs-size --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
-//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --kernel result/vmlinux
+//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --kernel result/vmlinux --closure-paths result/rootfs-closure-paths
 //! ```
 //!
 //! ## What this does NOT do (yet)
@@ -65,6 +65,10 @@ pub const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 /// remains outside this contract.
 pub const GUEST_STORAGE_MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 
+/// Maximum number of registered Nix store paths retained in the default
+/// rootfs: static BusyBox and the static privilege-drop helper.
+pub const GUEST_ROOTFS_MAX_STORE_PATHS: usize = 2;
+
 /// Cold-boot wall-clock budget for the Firecracker backend.
 /// The floor is 300ms; the strict gate is 500ms p50.
 pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(500);
@@ -93,7 +97,7 @@ pub fn run(args: &[String]) -> Result<()> {
                 "  rootfs-size --rootfs <PATH>    Assert rootfs is ≤ {ROOTFS_MAX_BYTES} bytes"
             );
             eprintln!(
-                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>]"
+                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>] [--closure-paths <PATH>]"
             );
             eprintln!(
                 "                                 Assert the supplied guest artifacts total ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
@@ -156,7 +160,7 @@ pub fn all_budgets() -> Vec<PerfBudget> {
             limit: GUEST_STORAGE_MAX_BYTES,
             unit: "bytes",
             source: "lightweight guest footprint contract",
-            description: "Nix-built rootfs + runtime overlay storage including verity sidecars",
+            description: "Nix-built rootfs + runtime overlay + verity sidecars + workload kernel",
         },
         PerfBudget {
             name: "firecracker_cold_boot",
@@ -329,16 +333,30 @@ struct FootprintEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct ClosureInventory {
+    path: PathBuf,
+    store_path_count: usize,
+    store_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 struct FootprintReport {
     limit_bytes: u64,
     total_bytes: u64,
     entries: Vec<FootprintEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rootfs_closure: Option<ClosureInventory>,
 }
 
 fn footprint_subcommand(args: &[String]) -> Result<()> {
     let json = args.iter().any(|arg| arg == "--json");
     let artifacts = parse_footprint_artifacts(args)?;
-    let report = guest_storage_footprint_check(&artifacts, GUEST_STORAGE_MAX_BYTES)?;
+    let rootfs_closure = optional_path_arg(args, "--closure-paths")?
+        .as_deref()
+        .map(|path| read_closure_inventory(path, GUEST_ROOTFS_MAX_STORE_PATHS))
+        .transpose()?;
+    let mut report = guest_storage_footprint_check(&artifacts, GUEST_STORAGE_MAX_BYTES)?;
+    report.rootfs_closure = rootfs_closure;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -353,6 +371,17 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
                 entry.bytes,
                 entry.path.display()
             );
+        }
+        if let Some(inventory) = &report.rootfs_closure {
+            eprintln!(
+                "  {:<16} {} store paths  {}",
+                "rootfs-closure",
+                inventory.store_path_count,
+                inventory.path.display()
+            );
+            for store_path in &inventory.store_paths {
+                eprintln!("    {store_path}");
+            }
         }
     }
     Ok(())
@@ -428,7 +457,63 @@ fn guest_storage_footprint_check(
         limit_bytes: max_bytes,
         total_bytes,
         entries,
+        rootfs_closure: None,
     })
+}
+
+fn read_closure_inventory(path: &Path, max_store_paths: usize) -> Result<ClosureInventory> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("read rootfs closure inventory {}", path.display()))?;
+    let mut store_paths = Vec::new();
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        if line != line.trim() || !is_hash_anchored_nix_store_path(line) {
+            bail!(
+                "invalid Nix store path in rootfs closure inventory {}: {line:?}",
+                path.display()
+            );
+        }
+        store_paths.push(line.to_string());
+    }
+    if store_paths.is_empty() {
+        bail!(
+            "rootfs closure inventory {} contains no store paths",
+            path.display()
+        );
+    }
+    store_paths.sort_unstable();
+    if store_paths.windows(2).any(|pair| pair[0] == pair[1]) {
+        bail!(
+            "rootfs closure inventory {} contains duplicate store paths",
+            path.display()
+        );
+    }
+    if store_paths.len() > max_store_paths {
+        bail!(
+            "rootfs closure contains {} store paths — over the closure budget of {}",
+            store_paths.len(),
+            max_store_paths
+        );
+    }
+    Ok(ClosureInventory {
+        path: path.to_path_buf(),
+        store_path_count: store_paths.len(),
+        store_paths,
+    })
+}
+
+fn is_hash_anchored_nix_store_path(path: &str) -> bool {
+    const NIX_BASE32_ALPHABET: &[u8] = b"0123456789abcdfghijklmnpqrsvwxyz";
+
+    let Some(store_name) = path.strip_prefix("/nix/store/") else {
+        return false;
+    };
+    let Some((hash, name)) = store_name.split_once('-') else {
+        return false;
+    };
+    hash.len() == 32
+        && hash.bytes().all(|byte| NIX_BASE32_ALPHABET.contains(&byte))
+        && !name.is_empty()
+        && !name.contains('/')
 }
 
 fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
@@ -574,6 +659,11 @@ mod tests {
     }
 
     #[test]
+    fn guest_rootfs_closure_budget_is_two_store_paths() {
+        assert_eq!(GUEST_ROOTFS_MAX_STORE_PATHS, 2);
+    }
+
+    #[test]
     fn firecracker_boot_budget_is_500ms() {
         assert_eq!(FIRECRACKER_BOOT_BUDGET, Duration::from_millis(500));
     }
@@ -700,6 +790,73 @@ mod tests {
 
         let err = guest_storage_footprint_check(&artifacts, 14).unwrap_err();
         assert!(err.to_string().contains("over the footprint budget"));
+    }
+
+    #[test]
+    fn closure_inventory_accepts_two_hash_anchored_store_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(
+            &path,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-busybox-static\n\
+             /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-mvm-setpriv-static\n",
+        )
+        .unwrap();
+
+        let inventory = read_closure_inventory(&path, 2).unwrap();
+        assert_eq!(inventory.store_path_count, 2);
+        assert_eq!(inventory.store_paths.len(), 2);
+    }
+
+    #[test]
+    fn closure_inventory_rejects_a_third_store_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(
+            &path,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a\n\
+             /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b\n\
+             /nix/store/cccccccccccccccccccccccccccccccc-c\n",
+        )
+        .unwrap();
+
+        let err = read_closure_inventory(&path, 2).unwrap_err();
+        assert!(err.to_string().contains("over the closure budget"));
+    }
+
+    #[test]
+    fn closure_inventory_rejects_unanchored_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(&path, "glibc mentioned in a derivation name\n").unwrap();
+
+        let err = read_closure_inventory(&path, 2).unwrap_err();
+        assert!(err.to_string().contains("invalid Nix store path"));
+    }
+
+    #[test]
+    fn closure_inventory_rejects_duplicate_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(
+            &path,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-busybox-static\n\
+             /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-busybox-static\n",
+        )
+        .unwrap();
+
+        let err = read_closure_inventory(&path, 2).unwrap_err();
+        assert!(err.to_string().contains("duplicate store paths"));
+    }
+
+    #[test]
+    fn closure_inventory_rejects_empty_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(&path, "\n").unwrap();
+
+        let err = read_closure_inventory(&path, 2).unwrap_err();
+        assert!(err.to_string().contains("contains no store paths"));
     }
 
     #[test]

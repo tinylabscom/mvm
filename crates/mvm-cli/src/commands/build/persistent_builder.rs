@@ -581,7 +581,7 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          fi\n\
          # Production image sidecars — retain the dm-verity payload and\n\
          # admission metadata emitted by the Nix image flake.\n\
-         for sidecar in rootfs.verity rootfs.roothash mvm-meta.json; do\n\
+         for sidecar in rootfs.verity rootfs.roothash rootfs-closure-paths mvm-meta.json; do\n\
              if [ -f \"$STORE_PATH/$sidecar\" ]; then\n\
                  cp -L \"$STORE_PATH/$sidecar\" \"$OUT_DIR/$sidecar\"\n\
              fi\n\
@@ -846,6 +846,7 @@ mod tests {
         assert!(body.contains("rootfs.ext4"), "{body}");
         assert!(body.contains("rootfs.verity"), "{body}");
         assert!(body.contains("rootfs.roothash"), "{body}");
+        assert!(body.contains("rootfs-closure-paths"), "{body}");
         assert!(body.contains("mvm-meta.json"), "{body}");
         // `cp -L` (not just `cp`) so the host gets real bytes,
         // not store-path symlinks that don't resolve.

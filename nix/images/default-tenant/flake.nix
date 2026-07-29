@@ -3,8 +3,9 @@
 
   # Both variants build-validated (aarch64-linux) via
   # nix-in-docker on the authoring host: `default`/`prod` emits
-  # {vmlinux, rootfs.ext4, rootfs.verity, rootfs.roothash, mvm-meta.json} with a
-  # valid 64-hex verity roothash and a `sealed:true, accessible:false,
+  # {vmlinux, rootfs.ext4, rootfs.verity, rootfs.roothash,
+  # rootfs-closure-paths, mvm-meta.json} with a valid 64-hex verity roothash and a
+  # `sealed:true, accessible:false,
   # overlayAware:true, rootlessEntrypoint:true` sidecar; `dev` emits
   # {vmlinux, rootfs.ext4, mvm-meta.json} with `sealed:false, accessible:true`.
   # The x86_64-linux build + the actual VM boot run in CI / on a runtime host.
@@ -140,12 +141,22 @@
               cp "$img" $out/rootfs.ext4
             fi
 
+            # Preserve the exact registered runtime closure as a release
+            # provenance artifact. The footprint ledger validates every line
+            # as a complete hash-anchored store path before counting it.
+            cp ${rootfsPkg.passthru.rootfsClosureInfo}/store-paths \
+              $out/rootfs-closure-paths
+
             # Overlay-aware sidecar so `admit_overlay_aware` passes.
             cat > $out/mvm-meta.json <<'META'
             ${sidecarJson meta}
             META
 
-            chmod 0644 $out/vmlinux $out/rootfs.ext4 $out/mvm-meta.json
+            chmod 0644 \
+              $out/vmlinux \
+              $out/rootfs.ext4 \
+              $out/rootfs-closure-paths \
+              $out/mvm-meta.json
           ''
           + nixpkgs.lib.optionalString sealed ''
 

@@ -230,7 +230,8 @@ Tracked here per the deferred-work convention; each is its own future plan.
   runtime closure at static BusyBox plus `mvm-setpriv`.
 - **WS-6:** `xtask perf footprint` now measures the Nix-built rootfs, runtime overlay,
   dm-verity sidecars, and kernel against the 50 MiB complete-artifact contract.
-  An explicit closure inventory and RSS entry remain for later slices.
+  The same JSON/human ledger now validates and reports the exact hash-anchored
+  rootfs closure, capped at two store paths. A measured RSS entry remains.
 
 ## Self-review
 
@@ -285,5 +286,7 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
 - [x] Count the 14,460,936-byte workload kernel in the same ledger and CI gate.
   The all-in Nix-built guest is 50,599,944 bytes (48.26 MiB), leaving 1,828,856
   bytes below the 50 MiB limit.
-- [ ] Add guest-RSS measurement and an explicit closure inventory to the unified
-  ledger.
+- [x] Export the exact rootfs closure inventory from the default-tenant image and
+  validate it in the unified ledger. The build-backed measurement contains two
+  hash-anchored paths: static BusyBox and static `mvm-setpriv`.
+- [ ] Add measured guest-agent RSS (≤ 8 MiB) to the unified ledger.
