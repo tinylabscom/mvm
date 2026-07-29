@@ -487,6 +487,16 @@ Phase 4 (docs, close-out, wasm stretch, mvmd)     ─   last
 
 WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net` (1d). WS2 depends on the guest/host crate merges (1e/1h). WS10's de-tokio depends on WS2's single-binary shape.
 
+### Deferred workstream: universal initramfs + vsock-activated boot
+
+Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock. It depends on three prerequisite branches merging first:
+
+- `feat/vsock-control-conformance`
+- `feat/firecracker-vsock-only-final`
+- `feat/hvf-converge-vsock`
+
+HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 269 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
+
 ## 5. Definition of done
 
 - Both surfaces build; `cargo nextest run --workspace` + `cargo test --workspace --doc` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all --check` green.
