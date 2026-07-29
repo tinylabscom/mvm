@@ -497,10 +497,10 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          substituters = https://cache.nixos.org/\n\
          trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=\n\
          fallback = true\n\
-         download-attempts = 3\n\
-         http-connections = 8\n\
-         connect-timeout = 15\n\
-         stalled-download-timeout = 90'\n\
+         download-attempts = 8\n\
+         http-connections = 2\n\
+         connect-timeout = 60\n\
+         stalled-download-timeout = 300'\n\
          mkdir -p \"$XDG_CACHE_HOME\" \"$XDG_STATE_HOME\"\n\
          nix() {{ env HOME=\"$HOME\" XDG_CACHE_HOME=\"$XDG_CACHE_HOME\" XDG_STATE_HOME=\"$XDG_STATE_HOME\" /sbin/nix \"$@\"; }}\n\
          OUT_DIR='/job/{job_id}/{artifact_subdir}'\n\
@@ -788,6 +788,10 @@ mod tests {
         assert!(body.contains("export XDG_CACHE_HOME=/nix-store/.cache"));
         assert!(body.contains("export NIX_CONFIG="));
         assert!(body.contains("fallback = true"));
+        assert!(body.contains("download-attempts = 8"));
+        assert!(body.contains("http-connections = 2"));
+        assert!(body.contains("connect-timeout = 60"));
+        assert!(body.contains("stalled-download-timeout = 300"));
         assert!(body.contains("export XDG_STATE_HOME=/tmp/.local/state"));
         assert!(body.contains("nix() { env HOME=\"$HOME\""));
         assert!(body.contains("NIX_LOG=\"$JOB_DIR/nix-stderr.log\""));
