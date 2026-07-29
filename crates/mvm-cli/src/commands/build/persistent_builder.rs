@@ -284,7 +284,11 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
     let job_dir_relpath = stage_flake_cmd_sh(&record.job_dir, &args.flake, &attr)?;
 
     let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path)
-        .with_frame_read_timeout(Duration::from_secs(60));
+        // Nix can spend several minutes in a quiet compiler phase while the
+        // staged script keeps the complete diagnostic in a host-visible log.
+        // Keep the transport alive for that bounded quiet period; the
+        // one-hour dispatch deadline remains the overall build cap.
+        .with_frame_read_timeout(Duration::from_secs(10 * 60));
 
     let outcome = supervisor
         .submit(
@@ -460,6 +464,20 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
     std::fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("creating {}", artifact_dir.display()))?;
+    // The guest runs the staged script as the unprivileged builder uid while
+    // the host creates this share as the invoking user. Make only this
+    // per-dispatch subtree guest-writable so Nix diagnostics and copied
+    // artifacts can cross the virtio-fs boundary without widening the parent
+    // builder cache permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let guest_writable = std::fs::Permissions::from_mode(0o777);
+        std::fs::set_permissions(&sub, guest_writable.clone())
+            .with_context(|| format!("making {} guest-writable", sub.display()))?;
+        std::fs::set_permissions(&artifact_dir, guest_writable)
+            .with_context(|| format!("making {} guest-writable", artifact_dir.display()))?;
+    }
     let script = format!(
         "#!/bin/sh\n\
          set -eu\n\
@@ -741,6 +759,26 @@ mod tests {
             "expected pre-staged artifact dir at {}",
             artifact_dir.display()
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(job_dir.join(&relpath))
+                    .expect("staged job metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o777
+            );
+            assert_eq!(
+                std::fs::metadata(&artifact_dir)
+                    .expect("staged artifact metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o777
+            );
+        }
         // The cmd.sh body must reference the same in-guest path
         // (`/job/<relpath>/out`) so the bytes the guest writes are
         // visible at the host's `artifact_dir_for` path.

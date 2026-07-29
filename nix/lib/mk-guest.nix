@@ -183,6 +183,15 @@ let
     rootPaths = packages ++ extraFileSourceRoots;
   };
 
+  # `mvm-host-vm-init` loads this registration into the writable persistent
+  # Nix store before an unprivileged builder starts. Without it, Nix treats
+  # the read-only rootfs closure as absent and tries to substitute every path
+  # again, which is both slow and unsafe when the store already contains a
+  # seeded copy.
+  rootfsClosureInfo = pkgs.closureInfo {
+    rootPaths = [ busybox setprivPkg pkgs.cacert ] ++ packages ++ extraFileSourceRoots;
+  };
+
   assertNoSshTemplateInputs =
     let
       badPackages = lib.filter (pkg: containsSshMarker (packageLabel pkg)) packages;
@@ -1077,6 +1086,9 @@ let
     mkdir -p "$out"/{bin,sbin,etc,proc,sys,dev,tmp,run,var,root,home,nix/store,nix-store,etc/mvm,job,out,work,mvm-bins,closure-seed,mnt,data}
     chmod 1777 "$out/tmp"
     chmod 0755 "$out/run"
+
+    cp ${rootfsClosureInfo}/registration "$out/nix-path-registration"
+    chmod 0444 "$out/nix-path-registration"
 
     # The mvm runtime overlay is
     # bind-mounted at /mvm/runtime by `mvm-verity-init` before

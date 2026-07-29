@@ -2872,9 +2872,10 @@ mod linux {
         Ok(())
     }
 
-    fn builder_nix_permission_commands() -> [(&'static str, &'static [&'static str]); 4] {
+    fn builder_nix_permission_commands() -> [(&'static str, &'static [&'static str]); 5] {
         [
             ("/bin/chown", &["-R", "902:902", "/nix/var/nix"]),
+            ("/bin/chown", &["-R", "902:902", "/nix/var/log/nix"]),
             ("/bin/chown", &["0:902", "/nix/store"]),
             ("/bin/chmod", &["0775", "/nix/store"]),
             (
@@ -4196,6 +4197,7 @@ mod linux {
                 builder_nix_permission_commands(),
                 [
                     ("/bin/chown", &["-R", "902:902", "/nix/var/nix"][..]),
+                    ("/bin/chown", &["-R", "902:902", "/nix/var/log/nix"][..]),
                     ("/bin/chown", &["0:902", "/nix/store"][..]),
                     ("/bin/chmod", &["0775", "/nix/store"][..]),
                     (
