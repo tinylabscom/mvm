@@ -39,6 +39,7 @@ pub mod fs_rpc;
 /// normal wake) the guest reseeds its CSPRNG so two clones don't generate
 /// identical key material.
 pub mod genid;
+pub mod guest_mount;
 /// Shared in-guest network bring-up (eth0 up + DHCP + static fallback), used by
 /// both the builder VM init and the workload guest netinit.
 pub mod guest_net;

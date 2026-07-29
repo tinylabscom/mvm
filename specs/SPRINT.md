@@ -467,9 +467,19 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    `nix/packages/mvm-guest-agent-static.nix`, `nix/images/initramfs/flake.nix`,
    and exposed `packages.<system>.initramfs` producing `initramfs.cpio.gz`,
    `initramfs.hash`, `initramfs.size`, and `VERSION`.
-2. [ ] PID-1 signal handling and zombie reaping in `mvm-agentd`.
-3. [ ] `ActivateEnvironment` protocol types and boot state machine.
-4. [ ] Guest-side mount library (dm-verity + overlayfs).
+2. [x] PID-1 signal handling and zombie reaping in `mvm-agentd`. Added
+   `init.rs` with PID-1 detection, early filesystem mounts, and a SIGCHLD
+   reaper. Wired into `mvm-guest-agent.rs` before the vsock bind.
+3. [x] `ActivateEnvironment` protocol types and boot state machine. Added
+   `ActivateEnvironment`/`RootfsConfig`/`RuntimeOverlayConfig`/`VolumeConfig`
+   to the vsock protocol, plus `ActivationState` in `AgentBootState` and a
+   fail-closed dispatch gate that rejects everything except activation until
+   activated.
+4. [~] Guest-side mount library (dm-verity + overlayfs). Created
+   `guest_mount.rs` with the boot-time mount API, error type, privilege-drop
+   helper, and early-filesystem mounts. The dm-verity/pivot_root bodies are
+   structural stubs that will be filled with the ported `mvm-verity-init`
+   logic in the next pass.
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 

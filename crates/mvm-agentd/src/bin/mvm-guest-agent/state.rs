@@ -2,6 +2,7 @@
 //! health caches the monitoring/health/probe threads populate and the
 //! request handlers read.
 
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -9,6 +10,27 @@ use mvm_agentd::integrations::{IntegrationEntry, IntegrationHealthResult};
 use mvm_agentd::probes::{ProbeEntry, ProbeResult};
 use mvm_agentd::vsock::{BootTimingReport, ComponentState, ReadinessReport};
 use mvm_core::security::AgentProfile;
+
+// ============================================================================
+// Activation state for PID-1 initramfs boot
+// ============================================================================
+
+/// Where the PID-1 agent is in the vsock-activated boot sequence.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub(crate) enum ActivationState {
+    /// The agent has mounted early filesystems and is listening for
+    /// `ActivateEnvironment`.  Only `ActivateEnvironment` is accepted.
+    #[default]
+    Awaiting,
+    /// An activation message is being applied (mounts + privilege drop).
+    Activating,
+    /// The environment is mounted and the agent has dropped privilege.
+    /// Operational RPCs are now accepted.
+    Activated,
+    /// Activation failed and the agent will not serve operational RPCs.
+    Failed { message: String },
+}
 
 // ============================================================================
 // Agent state (shared between monitoring thread and request handlers)
@@ -62,6 +84,7 @@ pub(crate) struct AgentBootState {
 
 #[derive(Default)]
 pub(crate) struct BootStateInner {
+    pub(crate) activation: ActivationState,
     pub(crate) control_plane: ComponentState,
     pub(crate) entrypoint: ComponentState,
     pub(crate) warm_pool: ComponentState,
@@ -85,6 +108,19 @@ pub(crate) struct BootStateInner {
 }
 
 impl AgentBootState {
+    pub(crate) fn set_activation(&self, state: ActivationState) {
+        if let Ok(mut s) = self.inner.lock() {
+            s.activation = state;
+        }
+    }
+
+    pub(crate) fn activation_state(&self) -> ActivationState {
+        self.inner
+            .lock()
+            .map(|s| s.activation.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn new(profile: AgentProfile, boot_at: Instant) -> Self {
         Self {
             inner: Mutex::new(BootStateInner {
@@ -712,6 +748,30 @@ mod tests {
         assert!(
             grant.permits("run-entrypoint"),
             "a host-signed fork may widen the served verb set"
+        );
+    }
+
+    #[test]
+    fn activation_state_defaults_to_awaiting() {
+        assert_eq!(ActivationState::default(), ActivationState::Awaiting);
+    }
+
+    #[test]
+    fn boot_state_tracks_activation_transitions() {
+        let bs = AgentBootState::new(AgentProfile::default(), Instant::now());
+        assert_eq!(bs.activation_state(), ActivationState::Awaiting);
+        bs.set_activation(ActivationState::Activating);
+        assert_eq!(bs.activation_state(), ActivationState::Activating);
+        bs.set_activation(ActivationState::Activated);
+        assert_eq!(bs.activation_state(), ActivationState::Activated);
+        bs.set_activation(ActivationState::Failed {
+            message: "boom".to_string(),
+        });
+        assert_eq!(
+            bs.activation_state(),
+            ActivationState::Failed {
+                message: "boom".to_string()
+            }
         );
     }
 }

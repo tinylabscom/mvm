@@ -11,6 +11,7 @@
 
 use std::time::Duration;
 
+mod activation;
 mod api;
 mod connection;
 mod framing;
@@ -25,6 +26,7 @@ mod rpc;
 pub mod sys;
 mod verb_grant;
 
+pub use activation::{ActivateEnvironment, RootfsConfig, RuntimeOverlayConfig, VolumeConfig};
 pub use api::{
     PRIMED_MARKER_PATH, PostRestoreReply, checkpoint_integrations, interpret_primed_status,
     mount_volume_on, ping, ping_at, post_restore_at, post_restore_with_grant_and_clock_at,

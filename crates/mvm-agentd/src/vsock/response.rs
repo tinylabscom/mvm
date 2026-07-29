@@ -152,6 +152,18 @@ pub enum GuestResponse {
         required_action: ProtocolUpgradeAction,
         message: String,
     },
+    /// Activation acknowledgement for PID-1 initramfs boot.  Sent after
+    /// the agent has successfully mounted the rootfs, runtime overlay,
+    /// and any custom volumes.
+    ActivateEnvironmentAck,
+    /// Activation failed.  The agent is still in the `Awaiting` boot
+    /// state and will not serve operational RPCs until a valid
+    /// activation arrives.
+    ActivateEnvironmentError { message: String },
+    /// The agent is running in PID-1 initramfs mode and has not yet
+    /// received a valid `ActivateEnvironment`.  Only
+    /// `ActivateEnvironment` is accepted until then.
+    NotActivated,
     /// Worker status with optional last-busy timestamp.
     WorkerStatus {
         status: String,
@@ -323,7 +335,7 @@ name_enum! {
     /// the contract can be iterated; `GuestRequest::verb()` keeps it in
     /// lockstep with the wire enum (exhaustive match).
     pub enum Verb {
-        ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
+        ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
         CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
         RunDetached,
         PostRestore,
@@ -340,6 +352,7 @@ name_enum! {
     /// `GuestResponse::variant()` keeps it in lockstep with the wire enum
     /// (exhaustive match).
     pub enum ResponseVariant {
+        ActivateEnvironmentAck, ActivateEnvironmentError, NotActivated,
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, Error, UnsupportedInProfile, VerbNotAuthorized, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
@@ -413,7 +426,8 @@ impl Verb {
             | Self::ProcSendInput
             | Self::ProcWait
             | Self::RunCode => Data,
-            Self::ProtocolHello
+            Self::ActivateEnvironment
+            | Self::ProtocolHello
             | Self::WorkerStatus
             | Self::SleepPrep
             | Self::Wake
@@ -459,6 +473,11 @@ impl Verb {
             kind: Stream,
         };
         match self {
+            Verb::ActivateEnvironment => unary(&[
+                R::ActivateEnvironmentAck,
+                R::ActivateEnvironmentError,
+                R::NotActivated,
+            ]),
             Verb::ProtocolHello => unary(&[R::ProtocolHelloAck, R::ProtocolMismatch]),
             Verb::WorkerStatus => unary(&[R::WorkerStatus]),
             Verb::SleepPrep => unary(&[R::SleepPrepAck]),
@@ -507,6 +526,11 @@ impl GuestResponse {
     /// lockstep with the wire enum.
     pub fn variant(&self) -> ResponseVariant {
         match self {
+            GuestResponse::ActivateEnvironmentAck => ResponseVariant::ActivateEnvironmentAck,
+            GuestResponse::ActivateEnvironmentError { .. } => {
+                ResponseVariant::ActivateEnvironmentError
+            }
+            GuestResponse::NotActivated => ResponseVariant::NotActivated,
             GuestResponse::ProtocolHelloAck { .. } => ResponseVariant::ProtocolHelloAck,
             GuestResponse::ProtocolMismatch { .. } => ResponseVariant::ProtocolMismatch,
             GuestResponse::WorkerStatus { .. } => ResponseVariant::WorkerStatus,
@@ -1544,5 +1568,41 @@ mod tests {
         });
         assert!(term.is_stream_terminal());
         assert!(!mid.is_stream_terminal());
+    }
+
+    #[test]
+    fn activate_environment_response_contract_is_unary() {
+        let contract = Verb::ActivateEnvironment.response_contract();
+        assert_eq!(contract.kind, ResponseKind::Unary);
+        assert!(
+            contract
+                .responses
+                .contains(&ResponseVariant::ActivateEnvironmentAck)
+        );
+        assert!(
+            contract
+                .responses
+                .contains(&ResponseVariant::ActivateEnvironmentError)
+        );
+        assert!(contract.responses.contains(&ResponseVariant::NotActivated));
+    }
+
+    #[test]
+    fn activate_environment_response_variants_project() {
+        assert_eq!(
+            GuestResponse::ActivateEnvironmentAck.variant(),
+            ResponseVariant::ActivateEnvironmentAck
+        );
+        assert_eq!(
+            GuestResponse::ActivateEnvironmentError {
+                message: "x".to_string()
+            }
+            .variant(),
+            ResponseVariant::ActivateEnvironmentError
+        );
+        assert_eq!(
+            GuestResponse::NotActivated.variant(),
+            ResponseVariant::NotActivated
+        );
     }
 }
