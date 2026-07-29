@@ -166,6 +166,15 @@ guest-agent readiness handshake after resume.
 - [ ] Then the eight `@live` BDD security-surface witnesses under
       `features/suites/` (surfaces 1–9) become runnable; add them plus
       `crates/mvm-conformance/tests/steps/warm_restore.rs`.
+      - [x] Surface 1 (integrity byteflip): `s11_snapshot/integrity_byteflip_refused.feature`
+      - [x] Surface 2 (no NIC on restore): `s2_egress_vsock/warm_restore_no_nic.feature`
+      - [x] Surface 3 (fork identity replay): `s6_admission_audit/fork_identity_replay.feature`
+      - [x] Surface 4 (no cross-fork residue): `s3_secrets_pii/fork_no_residue.feature`
+      - [ ] Surface 5 (prime within verity only): pending a priming API; `@wip` placeholder in `s4_verified_boot/prime_within_verity_only.feature`
+      - [x] Surface 6 (no cross-tenant page merge): `s3_secrets_pii/no_cross_tenant_page_merge.feature`
+      - [x] Surface 7 (epoch rollback): `s11_snapshot/epoch_rollback_refused.feature`
+      - [x] Surface 8 (warm-attach plan re-verify): `s6_admission_audit/warm_attach_reverifies_plan.feature`
+      - [x] Surface 9 (restore reapplies confinement): `s5_lifecycle/restore_reapplies_confinement.feature`
 - [ ] Template device-remap: capture device anchors + `remap_paths_for_fork`
       for template restore — gated on the template *create* side landing
       (currently dormant, zero callers).

@@ -90,6 +90,29 @@ pub struct CliWorld {
     pub warm_claim_registry_path: Option<PathBuf>,
     /// The outcome of the most recent `claim_standby` call.
     pub warm_claim_outcome: Option<WarmClaimOutcome>,
+
+    /// Outcome of the most recent warm-restore guard step.
+    pub warm_restore_result: Option<Result<String, String>>,
+    /// Directory containing the sealed snapshot under test.
+    pub warm_restore_dir: Option<PathBuf>,
+    /// Which artifact file was tampered with (e.g. "vmstate.bin" or "mem.bin").
+    pub warm_restore_tampered_file: Option<String>,
+    /// Restored device model produced by the most recent restore probe.
+    pub warm_restore_device_model: Option<mvm_runtime::microvm::RestoredDeviceModel>,
+    /// Page-merge scopes staged for the most recent merge-decision step.
+    pub warm_merge_scopes: Vec<(String, mvm_core::page_merge::PageMergeScope)>,
+    /// The most recent page-merge decision.
+    pub warm_merge_decision: Option<mvm_core::page_merge::MergeDecision>,
+    /// Signer id that produced the plan under test.
+    pub warm_restore_plan_signer: Option<String>,
+    /// JSON of the most recently signed execution plan under test.
+    pub warm_restore_plan_json: Option<String>,
+    /// The isolated `MVM_HOME` backing the warm-restore guard scenarios;
+    /// kept alive so the sealed snapshot files survive the `Given` step.
+    pub warm_restore_home: Option<tempfile::TempDir>,
+
+    /// Outcome of the most recent plan-verification step.
+    pub warm_restore_verify_result: Option<Result<String, String>>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`
