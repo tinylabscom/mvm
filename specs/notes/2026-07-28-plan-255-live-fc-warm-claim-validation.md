@@ -401,3 +401,73 @@ Incidental observation, not chased down: `machine stop <name>` followed by
 timing reps (`pgrep -af firecracker` showed seven live
 `--api-sock /root/mvm-t7-home/vms/t7cold/fc.socket` processes at the end).
 The next launch's orphan reaper collects them one at a time.
+
+---
+
+## Second live run — after the overlay-attachment fix
+
+Re-run on the same host at `03dcf3aa5` (`fix(fc): boot the standby parent with
+the runtime overlay attached`), release build, isolated
+`MVM_HOME=/root/mvm-t7b-home` seeded from the shared cache, fresh checkout at
+`/root/mvm-t7b`.
+
+**Outcome: still FAILS. The fix is necessary but not sufficient.**
+
+The overlay is now attached correctly — this half is fixed and verified on the
+host side:
+
+```
+$ grep -a -o "drive_id[^}]*" /root/mvm-t7b-home/vms/standby-af8f47e692da612b/firecracker.log
+drive_id\": \"blk0\", ... rootfs.ext4",     "is_root_device\": true,  "is_read_only\": true
+drive_id\": \"blk1\", ... overlay.ext4",    "is_root_device\": false, "is_read_only\": true
+drive_id\": \"blk2\", ... overlay.verity",  "is_root_device\": false, "is_read_only\": true
+
+$ grep -a -o "boot_args[^,]*" .../firecracker.log | head -1
+boot_args\": \"console=ttyS0 reboot=k panic=1 net.ifnames=0 root=/dev/vda rw rootwait init=/init
+ mvm.runtime_roothash=996d1500… mvm.runtime_data=/dev/vdb mvm.runtime_hash=/dev/vdc
+ mvm.runtime_source_policy=required_overlay\"
+```
+
+The guest still dies the same way:
+
+```
+$ grep -a -nE "Run /init|no guest agent|Kernel panic" .../console.log
+270:[    0.848812] Run /init as init process
+271:mvm-oci-init: no guest agent resolved from /mvm/runtime and no baked fallback — refusing to boot without the mvm control plane
+272:[    0.851864] Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100
+```
+
+### Root cause (deeper than BUG-1 as first written)
+
+Attaching the drives and threading the tokens is not enough, because **nothing
+in this boot mode consumes them**. The `mvm.runtime_*` tokens are parsed by
+`mvm-verity-init` (`crates/mvm-agentd/src/bin/mvm-verity-init.rs`), the
+initramfs PID 1, which mounts the overlay read-only at `/sysroot/mvm/runtime`.
+
+The parent boots `root=/dev/vda rw rootwait init=/init`, so the kernel mounts
+the rootfs directly and runs `mvm-oci-init` instead. That init only *reads*
+`/mvm/runtime` (`resolve_guest_agent()`); it never mounts anything. With no
+initramfs in the parent's `VmmSpec`, the overlay is attached but unmounted, the
+agent is unresolvable, PID 1 exits, and the kernel panics.
+
+The workload path avoids this by booting the verified-boot shape: an initrd, no
+`root=`/`init=` in the cmdline (the initramfs owns root selection), and
+rootfs-verity drives alongside the overlay.
+
+### What this slice ships instead
+
+The capability flip is **reverted** — Firecracker again reports
+`standby_pool: false`. Advertising the pool while a parent cannot boot would
+turn a configured warm pool into a failed spawn on every launch, which is a
+worse outcome than not offering it. The capture, fork-restore, CLI wiring, and
+overlay attachment all land; the flip returns with the parent's verified-boot
+shape.
+
+### Still open
+
+- The parent must boot the verity/initramfs shape rather than a direct rootfs
+  boot — i.e. `spawn_standby_parent` should build its spec through the same
+  mapping the workload uses instead of hand-rolling a `VmmSpec`.
+- **BUG-2** is unchanged: the transient `machine run` path still ends in
+  `Error: Failed to read frame length` (no verb-grant sidecar minted), which is
+  independent of the pool.

@@ -261,7 +261,7 @@ mod tests {
             ("wasm".to_string(), "unsupported"),
         ];
         let mut expected_standby_pool = vec![
-            ("firecracker".to_string(), true),
+            ("firecracker".to_string(), false),
             ("hvf".to_string(), false),
             ("libkrun".to_string(), false),
             ("qemu".to_string(), false),
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
+        assert_eq!(r.standby_pool.get("firecracker"), Some(&false));
         assert_eq!(r.standby_pool.get("libkrun"), Some(&false));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
@@ -310,10 +310,10 @@ mod tests {
         assert_eq!(libkrun.snapshot_tier, "unsupported");
         assert!(!libkrun.standby_pool);
 
-        // Firecracker carries a live spawn+capture+claim path, so it's the one
-        // backend the doctor table should report as standby-pool capable.
+        // Firecracker has the capture and fork halves, but its parent cannot
+        // boot a guest agent yet, so the doctor table reports the pool off.
         let firecracker = by("firecracker").unwrap();
-        assert!(firecracker.standby_pool);
+        assert!(!firecracker.standby_pool);
     }
 
     #[test]

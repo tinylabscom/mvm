@@ -507,7 +507,7 @@ impl VmmDriver for FcDriver {
             pause_resume: true,
             snapshots: false,
             snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: true,
+            standby_pool: false,
             vsock: true,
             tap_networking: false,
             no_routable_guest_nic: true,
@@ -975,12 +975,12 @@ mod tests {
     /// `MockBackend` opts into it explicitly via `with_standby()` for the
     /// hermetic claim tests; the `MockDriver` seam here does not.)
     #[test]
-    fn only_firecracker_advertises_the_standby_pool() {
+    fn no_selectable_driver_advertises_standby_pool_yet() {
         use crate::driver::{HvfDriver, LibkrunDriver, MockDriver};
         use crate::qemu::QemuBackend;
         use crate::wasm_backend::WasmBackend;
 
-        assert!(FcDriver::new().capabilities().standby_pool);
+        assert!(!FcDriver::new().capabilities().standby_pool);
         assert!(!LibkrunDriver::new().capabilities().standby_pool);
         assert!(!HvfDriver::new().capabilities().standby_pool);
         assert!(!MockDriver::default().capabilities().standby_pool);

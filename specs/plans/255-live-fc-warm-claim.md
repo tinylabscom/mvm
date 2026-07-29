@@ -830,7 +830,7 @@ Last, and only now: the capability means "can actually spawn+claim a warm parent
 - Consumes: Tasks 2-5.
 - Produces: `FcDriver::capabilities().standby_pool == true`.
 
-- [x] **Step 1: Update the guard test to assert the new boundary**
+- [ ] **Step 1: Update the guard test to assert the new boundary**
 
 `no_selectable_driver_advertises_standby_pool_yet` asserts *every* driver is off. Firecracker now supports it, so rename the test and pin the real split:
 
@@ -853,23 +853,23 @@ fn only_firecracker_advertises_the_standby_pool() {
 }
 ```
 
-- [x] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Run it to verify it fails**
 
 Run: `cargo nextest run -p mvm-runtime driver::fc`
 Expected: FAIL on the first assertion.
 
-- [x] **Step 3: Flip `standby_pool` and correct the comment**
+- [ ] **Step 3: Flip `standby_pool` and correct the comment**
 
 Set `standby_pool: true` and replace the stale "stays off … flips true with that slice" comment with one describing the shipped behavior.
 
 **Do not blanket-flip the neighbouring flags.** `snapshots`, `snapshot_capability`, and `fs_quick_checkpoint` gate other surfaces (user-facing snapshot verbs). This driver now performs `vm_full` captures for the pool, which may or may not be what those flags mean. Check what each actually gates before changing it, change only what is now genuinely true, and state your reasoning in your report.
 
-- [x] **Step 4: Run the full suite**
+- [ ] **Step 4: Run the full suite**
 
 Run: `cargo nextest run --workspace`
 Expected: PASS. Other tests may assert the old capability shape — find and update each.
 
-- [x] **Step 5: Full gates + commit**
+- [ ] **Step 5: Full gates + commit**
 
 ```bash
 cargo fmt --all

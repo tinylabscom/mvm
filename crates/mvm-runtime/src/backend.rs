@@ -1332,7 +1332,7 @@ mod tests {
     #[test]
     fn recovery_capability_matrix_is_explicit_for_every_selectable_backend() {
         let mut expected = vec![
-            ("firecracker", SnapshotCapability::Unsupported, true),
+            ("firecracker", SnapshotCapability::Unsupported, false),
             ("hvf", SnapshotCapability::Unsupported, false),
             ("libkrun", SnapshotCapability::Unsupported, false),
             ("qemu", SnapshotCapability::Unsupported, false),
