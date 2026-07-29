@@ -23,14 +23,18 @@ use mvm_core::vm_backend::{
 };
 use mvm_fs::snapshot_store::FsSnapshotStore;
 
-use crate::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_content, verify_lineage};
-use crate::driver::{ChildForkRequest, RunningVm, VmmDriver};
+use crate::checkpoint::{
+    CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, capture_vm_full, verify_content,
+    verify_lineage,
+};
+use crate::driver::{ChildForkRequest, RunningVm, StandbyParentSpawn, VmmDriver};
 use crate::egress_shared::decode_plan_secrets_from_state;
 use crate::standby_pool::SupervisorStandbyPool;
 use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
     spawn_substitution_endpoint,
 };
+use crate::vm::instance_snapshot::PostRestoreOutcome;
 use crate::vm::name_registry::{VmNameRegistry, acquire_registry_lock, generate_vm_name};
 use crate::warm_snapshot::materialize_child_from_parent;
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
@@ -42,6 +46,7 @@ use crate::workload_runner::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, ensure_no_dir_share_volumes,
     workload_spec,
 };
+use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
 pub struct EndpointSpawnRequest<'a> {
@@ -251,6 +256,21 @@ pub struct ClaimContext<'a> {
     pub registry_path: &'a Path,
 }
 
+/// The warm-pool substrate a spawn-and-capture needs beyond the runner's
+/// cold-boot fields: the checkpoint store the parent is captured into, and the
+/// launch whose boot shape the parent must mirror.
+pub struct SpawnContext<'a> {
+    /// Content-addressed checkpoint store the captured parent is written to.
+    pub checkpoints: &'a CheckpointStore,
+    /// The already-resolved launch config the parent is being warmed for — the
+    /// same value the workload boot consumes, so the parent inherits whatever
+    /// the layer above resolved for it (notably the verity-sealed runtime
+    /// overlay carrying the guest agent). `None` when the caller is warming the
+    /// pool ahead of any launch, which the spawn refuses: a parent has no boot
+    /// shape of its own to fall back on.
+    pub launch: Option<&'a VmStartConfig>,
+}
+
 /// Starts workloads over the `VmmDriver` seam: spawn the per-VM gating endpoint,
 /// map the config to a `VmmSpec`, boot via the driver.
 pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> {
@@ -341,8 +361,9 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     /// exactly what boots); mint a fresh, registry-unique identity; materialize
     /// the child's rootfs from the parent's own verified content; run the
     /// host-side overlay-contract gate and spawn the child's own 0700
-    /// substitution endpoint keyed on its fresh id; then fork the VMM, delivering
-    /// a fresh VMGenID at boot so the child's CSPRNG diverges from the parent's.
+    /// substitution endpoint keyed on its fresh id; then fork the VMM and require
+    /// the restored guest to prove it adopted a fresh VMGenID before the claim
+    /// commits, so the child's CSPRNG diverges from the parent's.
     ///
     /// Layering the runner does NOT own (enforced at their own layers, mirroring
     /// a cold boot): claim-8 admission of the child plan (CLI mint + supervisor
@@ -415,22 +436,182 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             )
             .map_err(|e| StandbyError::ClaimFailed(format!("spawn child endpoint: {e}")))?;
 
-        // (6b) + (7) Mint a fresh VMGenID bound to the child's content-address and
-        // deliver it WITH the fork, so it reaches the guest at boot — before any
-        // guest randomness consumer runs, forcing the child's CSPRNG to diverge.
+        // (6b) Mint a fresh VMGenID bound to the child's content-address and fork
+        // the VMM. A fork restores a running guest out of the parent's saved
+        // memory, so the child comes back holding the parent's CSPRNG state and
+        // the parent's wall clock — nothing is scrubbed yet at this point.
         let content_hash = parent_rootfs_digest(&parent).map_err(refuse)?.to_string();
         let genid = fresh_generation_token(content_hash);
+        let token = genid.token;
         self.driver.fork_standby_child(&ChildForkRequest {
             child_vm_name: &child.0,
             child_dir: &child_dir,
             genid,
         })?;
 
-        // The child booted: disarm the endpoint reaper (the stop path owns it now)
-        // and commit — the parent stays reserved and the child dir is real state.
+        // (7) Close that window before the claim commits: deliver the token to
+        // the now-reachable guest and make it prove, on its own report, that it
+        // rotated its generation identity and took the host's clock. Two children
+        // of one parent that skipped this would draw identical randomness, which
+        // is the whole reason a warm child needs a fresh identity — so a child
+        // that cannot prove it is never admitted.
+        if let Err(refusal) = self.take_fresh_child_identity(&child.0, token) {
+            // The child is live and still carrying its parent's random state.
+            // Unwinding alone would leave running exactly the VM this refusal
+            // exists to prevent, so stop it before returning.
+            self.force_stop(&child.0, "refused forked standby child");
+            return Err(refusal);
+        }
+
+        // The child booted and proved a fresh identity: disarm the endpoint reaper
+        // (the stop path owns it now) and commit — the parent stays reserved and
+        // the child dir is real state.
         endpoint.defuse();
         cleanup.commit();
         Ok(child)
+    }
+
+    /// Deliver `token` to the forked child's guest agent and judge what it
+    /// reports. The driver owns the transport; the verdict is the claim's.
+    fn take_fresh_child_identity(
+        &self,
+        child_vm_name: &str,
+        token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    ) -> std::result::Result<(), StandbyError> {
+        let outcome = self
+            .driver
+            .deliver_child_identity(child_vm_name, token)
+            .map_err(|e| {
+                StandbyError::ClaimFailed(format!(
+                    "forked child '{child_vm_name}' never answered the post-restore identity \
+                     handshake: {e}"
+                ))
+            })?;
+        require_fresh_child_identity(child_vm_name, &outcome)
+    }
+
+    /// Boot a standby parent, capture its whole live state, and release it.
+    ///
+    /// The parent's boot inputs are derived here, from the launch it will
+    /// serve, through the same mappers `start_workload` uses — a factory parent
+    /// boots the device model and kernel cmdline a workload boots, minus the
+    /// host channels a workload is entitled to and it is not. That is not a
+    /// nicety: a child is restored out of the parent's saved memory and
+    /// inherits both, so a parent assembled by a second recipe hands every
+    /// child whatever that recipe got wrong.
+    ///
+    /// The driver boots those inputs and supplies the backend-specific control;
+    /// capturing a live VM's memory is backend-agnostic, so it lives here rather
+    /// than in any one driver. The captured checkpoint is what a later claim
+    /// verifies content and lineage against.
+    ///
+    /// A factory parent gets no substitution endpoint and no broker: those are
+    /// workload-only steps (`ClaimGuards::spawn_endpoint`, `BrokerRegistrar`,
+    /// both reached from `start_workload` and neither reachable from here), and
+    /// [`factory_parent_config`] drops every field that could carry workload
+    /// authority into the parent's launch config in the first place.
+    pub fn spawn_standby_captured(
+        &self,
+        ctx: &SpawnContext<'_>,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let launch = ctx.launch.ok_or_else(|| {
+            StandbyError::SpawnFailed(format!(
+                "standby '{}' has no launch config to mirror: a warm parent boots the same \
+                 device model and kernel cmdline a workload does, so it cannot be assembled \
+                 without the launch it will serve",
+                spec.id
+            ))
+        })?;
+        let parent_config = factory_parent_config(launch, spec)?;
+        let state_dir = PathBuf::from(&spec.vm_state_dir);
+
+        // Written before boot, exactly as `start` does for a workload, so a
+        // capture against this parent resolves its rootfs and boot contract the
+        // same way every runner-launched VM's does.
+        crate::base::runtime_meta::record_from_start_config(
+            &spec.id,
+            StartMode::Detached,
+            &parent_config,
+        )
+        .map_err(|e| {
+            StandbyError::SpawnFailed(format!(
+                "recording standby parent '{}' runtime metadata: {e}",
+                spec.id
+            ))
+        })?;
+
+        let boot = factory_parent_spec(&parent_config, &state_dir, |virtiofs_root, has_disk| {
+            self.driver.workload_base_bootargs(virtiofs_root, has_disk)
+        });
+        // The same truncation refusal a workload boot gets, for the same reason
+        // and then some: a child inherits its parent's cmdline out of restored
+        // memory rather than deriving its own, so a parent whose trailing tokens
+        // the kernel silently dropped hands that loss to every child it produces.
+        if let Some(problem) = cmdline::cmdline_overflow(&boot.cmdline) {
+            return Err(StandbyError::SpawnFailed(format!(
+                "refusing to boot standby parent '{}': {problem}",
+                spec.id
+            )));
+        }
+        let mut handle = self
+            .driver
+            .spawn_standby_parent(&StandbyParentSpawn { spec, boot: &boot })?;
+
+        let control = self.driver.vm_full_control(&spec.id).ok_or_else(|| {
+            StandbyError::SpawnFailed(format!(
+                "backend cannot capture a warm parent's memory for standby '{}'",
+                spec.id
+            ))
+        })?;
+
+        let captured = capture_vm_full(
+            ctx.checkpoints,
+            CaptureVmFullParams {
+                id: CheckpointId::new(format!("standby-{}", spec.id)),
+                vm_name: spec.id.clone(),
+                supervisor_config_digest: String::new(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
+                // Firecracker keeps no supervisor-config blob; its presence is
+                // what marks a checkpoint as originating from a backend that does.
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: crate::standby_pool::now_unix_secs(),
+            },
+            control.as_ref(),
+        );
+
+        // Release either way: the checkpoint carries the parent's full state, so
+        // a pool slot costs disk rather than a resident VM, and a failed capture
+        // must not strand the guest.
+        self.force_stop(&spec.id, "captured standby parent");
+
+        let meta = captured
+            .map_err(|e| StandbyError::SpawnFailed(format!("capture standby parent: {e}")))?;
+
+        // No live process backs the captured parent — zero is the sentinel
+        // `is_saved_state()` keys off, and it is now true.
+        handle.pid = 0;
+        handle.parent_checkpoint = Some(meta.id.as_str().to_string());
+        Ok(handle)
+    }
+
+    /// Force-stop a VM the warm-pool path is done with, naming its `role` for the
+    /// log. Failure is logged, never propagated: the callers are already on their
+    /// way out (a captured parent, a refused child) and have nothing better to do
+    /// about it, but a VM that outlives its owner must stay visible.
+    fn force_stop(&self, vm_name: &str, role: &str) {
+        let id = VmId(vm_name.to_string());
+        match self.driver.attach(&id).and_then(|vm| vm.kill()) {
+            Ok(()) => {}
+            Err(e) => tracing::warn!(
+                vm = vm_name,
+                role,
+                error = %e,
+                "stopping a warm-pool VM failed; it may still be running"
+            ),
+        }
     }
 }
 
@@ -495,6 +676,36 @@ impl Drop for ClaimCleanup<'_> {
             }
         }
     }
+}
+
+/// Judge a forked child's own report of what it did with its fresh generation
+/// token. Every flag must hold: `acknowledged` says the guest answered at all,
+/// `reseeded` says it rotated its generation identity (and so reseeded the CSPRNG
+/// it inherited from the parent's memory image), and `clock_resynced` says it
+/// took the host's wall clock instead of the parent's frozen one.
+///
+/// Pure, so the fail-closed verdict is unit-tested on its own. Any false flag is
+/// a refusal rather than a warning: a restored child that cannot prove it left
+/// the parent's random state behind is indistinguishable from a sibling that
+/// will produce the same "random" values, which is precisely what a fresh
+/// identity exists to rule out.
+fn require_fresh_child_identity(
+    child_vm_name: &str,
+    outcome: &PostRestoreOutcome,
+) -> std::result::Result<(), StandbyError> {
+    let unproven = if !outcome.acknowledged {
+        "did not acknowledge the post-restore signal"
+    } else if !outcome.reseeded {
+        "acknowledged without rotating its generation identity"
+    } else if !outcome.clock_resynced {
+        "acknowledged without resynchronizing its wall clock"
+    } else {
+        return Ok(());
+    };
+    Err(StandbyError::ClaimFailed(format!(
+        "forked child '{child_vm_name}' {unproven}; refusing to admit a child that cannot prove \
+         it left its parent's random state and clock behind"
+    )))
 }
 
 /// Map a fail-closed [`ClaimRefusal`] onto the transport-agnostic
@@ -657,21 +868,13 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         self.driver.is_available()
     }
 
-    /// Spawn a clean, pre-workload standby parent — a factory, never a
-    /// workload. `StandbySpec` carries no plan/secret/entrypoint field, so a
-    /// parent is structurally incapable of holding workload authority (the
-    /// never-promote-a-parent guard is made unrepresentable here, not merely
-    /// checked). The runner therefore never spawns the per-child substitution
-    /// endpoint for a parent — that is a workload-only step
-    /// (`ClaimGuards::spawn_endpoint`, called from `start_workload`) — and
-    /// delegates the entire boot-to-ready-plus-capture sequence to the driver,
-    /// which knows nothing about admission.
-    fn spawn_standby(
-        &self,
-        spec: &StandbySpec,
-    ) -> std::result::Result<StandbyHandle, StandbyError> {
-        self.driver.spawn_standby_parent(spec)
-    }
+    // `spawn_standby` is deliberately NOT implemented: it takes a `StandbySpec`
+    // alone, and a factory parent cannot be assembled from one. A parent must
+    // boot the shape of the launch it will serve, and that launch reaches the
+    // runner only through [`spawn_standby_captured`]'s `SpawnContext`. Leaving
+    // the fail-closed trait default in place keeps a single way in — the one
+    // that carries the launch — instead of a second, context-free entry point
+    // that could only ever produce a parent shaped like nothing in particular.
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         let state_dir = vm_state_dir(&config.name);
@@ -1255,6 +1458,77 @@ mod tests {
         std::fs::write(keys_dir.join("host-signer.pub"), [0xEEu8; 32]).unwrap();
     }
 
+    /// Seed only the host key — no verb-grant sidecar. Models the transient
+    /// `machine run` path, which mints no grant.
+    fn seed_host_key_only() {
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.pub"), [0xEEu8; 32]).unwrap();
+    }
+
+    /// A launch that mints no verb grant must still carry the host-signer
+    /// anchor, or its guest agent has no pinned key to authenticate the control
+    /// channel against, rejects every connection, and the run dies at its first
+    /// RPC.
+    ///
+    /// The sibling test below covers the grant-*bearing* launch, and that was
+    /// exactly the gap: the anchor used to be gated on the grant sidecar, so the
+    /// grant-less shape shipped no anchor and nothing at this level noticed.
+    /// Asserting the token builder alone did not catch it either — the
+    /// regression only surfaced in an assembled cmdline.
+    #[test]
+    fn start_carries_the_host_anchor_without_a_grant_but_grants_no_authority() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        let vm_name = "runner-grantless-anchor";
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(vm_name, false, true)
+            .write_to_dir(rootfs_dir.path())
+            .unwrap();
+
+        seed_host_key_only();
+
+        let cfg = VmStartConfig {
+            name: vm_name.into(),
+            rootfs_path: rootfs.display().to_string(),
+            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
+            ..Default::default()
+        };
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        runner.start(&cfg).expect("start succeeds");
+
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs.len(), 1);
+        let cmdline = &specs[0].cmdline;
+
+        assert!(
+            cmdline.contains("mvm.host_signer_pub="),
+            "a grant-less launch must still pin the host anchor, or the agent \
+             rejects every control connection: {cmdline}"
+        );
+        // Reachable, but no more privileged: authority stays sidecar-gated.
+        assert!(
+            !cmdline.contains("mvm.verb_grant="),
+            "no grant was minted, so no grant token may appear: {cmdline}"
+        );
+        assert!(
+            !cmdline.contains("mvm.require_grant="),
+            "no grant was minted, so enforcement must not be demanded: {cmdline}"
+        );
+    }
+
     /// `WorkloadRunner::start` (the `VmBackend::start` production path) must
     /// assemble the same security-bearing kernel cmdline the raw HVF backend
     /// does — dm-verity, the plan-bound grant triple, vsock egress, and the
@@ -1715,7 +1989,82 @@ mod tests {
         );
     }
 
-    fn sample_standby_spec(id: &str, vm_state_dir: &Path) -> mvm_core::vm_backend::StandbySpec {
+    /// A spawned parent is claimable only once captured: the handle must carry
+    /// the checkpoint a later claim verifies content and lineage against, and
+    /// that checkpoint must carry saved memory — a rootfs-only capture would
+    /// make every claim a cold boot.
+    #[test]
+    fn spawn_standby_captured_stamps_a_memory_carrying_checkpoint() {
+        use mvm_core::checkpoint::CheckpointClass;
+
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let rootfs = tmp.path().join("parent-rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs bytes").unwrap();
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(&rootfs),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let launch = standby_launch_config(&rootfs);
+        let spec = sample_standby_spec("parent-a", tmp.path(), &rootfs);
+
+        let handle = runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .unwrap();
+
+        let id = handle
+            .parent_checkpoint
+            .expect("a captured parent must carry its checkpoint id");
+        let meta = store.read_meta(&CheckpointId::new(id)).unwrap();
+        assert_eq!(meta.class, CheckpointClass::VmFull);
+        assert!(
+            meta.content.iter().any(|b| b.name == "memory.bin"),
+            "the capture must carry saved memory, got: {:?}",
+            meta.content.iter().map(|b| &b.name).collect::<Vec<_>>()
+        );
+        // The parent is released once captured — a pool slot costs disk, not a
+        // resident VM — and the handle says so.
+        assert_eq!(handle.pid, 0, "a captured parent backs no live process");
+        assert!(
+            runner.driver.killed_vms().contains(&spec.id),
+            "the captured parent must be stopped, got: {:?}",
+            runner.driver.killed_vms()
+        );
+    }
+
+    /// The launch a warm parent is spawned for: a plain sealed boot whose rootfs
+    /// is the one the parent will attach.
+    fn standby_launch_config(rootfs: &Path) -> VmStartConfig {
+        VmStartConfig {
+            name: "workload-a".into(),
+            rootfs_path: rootfs.display().to_string(),
+            kernel_path: Some("/img/kernel".into()),
+            cpus: 2,
+            memory_mib: 512,
+            ..Default::default()
+        }
+    }
+
+    fn sample_standby_spec(
+        id: &str,
+        vm_state_dir: &Path,
+        rootfs: &Path,
+    ) -> mvm_core::vm_backend::StandbySpec {
         mvm_core::vm_backend::StandbySpec {
             id: id.to_string(),
             template_id: None,
@@ -1728,33 +2077,48 @@ mod tests {
             binding_nonce: "b".repeat(64),
             control_socket: vm_state_dir.join("control.sock").display().to_string(),
             vm_state_dir: vm_state_dir.display().to_string(),
-            image_path: None,
-            image_sha256: None,
+            image_path: Some(rootfs.display().to_string()),
+            image_sha256: Some("c".repeat(64)),
         }
     }
 
-    /// `spawn_standby` on the `WorkloadRunner` records a clean, pre-workload
-    /// parent: no plan authority (`StandbySpec`/`StandbyHandle`/`VmmSpec` have
-    /// no field that could carry one), and — the invariant this test actually
-    /// exercises — no substitution endpoint is ever spawned for it, unlike
-    /// every real workload boot on this runner.
+    /// A spawn-and-capture records a clean, pre-workload parent: the pool
+    /// round-trip the CLI runs afterwards sees an idle standby, and — the
+    /// invariant this test actually exercises — no substitution endpoint and no
+    /// broker are ever stood up for it, unlike every real workload boot on this
+    /// runner. Those two are the host-side authority a parent must never hold.
     #[test]
-    fn spawn_standby_records_pre_workload_parent_with_no_secrets_endpoint() {
+    fn spawn_standby_captured_records_a_parent_with_no_endpoint_and_no_broker() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let rootfs = tmp.path().join("parent-rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs bytes").unwrap();
+
         let runner = WorkloadRunner::new(
-            MockDriver::default(),
+            MockDriver::default().with_vm_full_rootfs(&rootfs),
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
-
-        let tmp = tempfile::tempdir().unwrap();
-        let spec = sample_standby_spec("standby-test", &tmp.path().join("vm"));
+        let launch = standby_launch_config(&rootfs);
+        let spec = sample_standby_spec("standby-test", &tmp.path().join("vm"), &rootfs);
 
         let handle = runner
-            .spawn_standby(&spec)
-            .expect("spawn_standby succeeds through the mock driver");
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .expect("spawn_standby_captured succeeds through the mock driver");
 
-        // Record + list through the real pool — the same round-trip the CLI's
-        // warm_to_target caller runs after a successful spawn_standby.
         let pool = crate::standby_pool::SupervisorStandbyPool::at(tmp.path().join("pool"));
         pool.record(&handle).unwrap();
         let recorded = pool.list().unwrap();
@@ -1764,27 +2128,202 @@ mod tests {
             mvm_core::vm_backend::StandbyState::Idle
         ));
 
-        // The parent's boot recipe carries no cmdline (no entrypoint, no plan,
-        // no verb grant) and no vsock channel at all (no egress/broker port) —
-        // a factory has no workload authority and no secrets endpoint.
+        // The parent boots with no vsock channel at all: no egress relay, no
+        // broker port, so a stray guest dial to either stays ECONNREFUSED.
         let booted = runner.driver.booted_specs();
         assert_eq!(booted.len(), 1);
-        assert!(
-            booted[0].cmdline.is_empty(),
-            "parent boot must carry no cmdline: {}",
-            booted[0].cmdline
-        );
         assert!(
             booted[0].vsock.is_empty(),
             "parent boot must carry no vsock channel (no egress/broker endpoint)"
         );
 
-        // No substitution endpoint was spawned for the parent: the endpoint
-        // spawner was never invoked, unlike every real `start_workload` call.
+        // No substitution endpoint and no broker were stood up for the parent:
+        // neither double was ever invoked, unlike every real `start_workload`.
         assert!(
             runner.spawner.seen.lock().unwrap().is_none(),
             "a standby parent must never get a substitution endpoint"
         );
+        assert!(
+            runner.broker.seen.lock().unwrap().is_none(),
+            "a standby parent must never get a host-services broker"
+        );
+    }
+
+    /// A parent's cmdline gets the same truncation refusal a workload's does,
+    /// and needs it more: a child inherits the parent's cmdline out of restored
+    /// memory rather than deriving its own, so a parent booted with its trailing
+    /// tokens silently dropped by the kernel hands that loss to every child.
+    #[test]
+    fn spawn_standby_captured_refuses_a_parent_cmdline_the_kernel_would_truncate() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let rootfs = tmp.path().join("parent-rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs bytes").unwrap();
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(&rootfs),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let mut launch = standby_launch_config(&rootfs);
+        // A sealed boot whose roothash alone pushes the assembled cmdline past
+        // the guest kernel's command-line buffer.
+        launch.verity_path = Some(tmp.path().join("rootfs.verity").display().to_string());
+        launch.roothash = Some("a".repeat(4096));
+        launch.initrd_path = Some(tmp.path().join("rootfs.initrd").display().to_string());
+        let spec = sample_standby_spec("parent-oversized", tmp.path(), &rootfs);
+
+        let err = runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .expect_err("an oversized parent cmdline must be refused before the boot");
+
+        assert!(
+            matches!(err, StandbyError::SpawnFailed(ref m) if m.contains("command line")),
+            "expected a SpawnFailed naming the kernel command line, got: {err:?}"
+        );
+        assert!(
+            runner.driver.booted_specs().is_empty(),
+            "nothing may boot before the refusal"
+        );
+    }
+
+    /// A spawn with no launch to mirror is refused outright. The alternative —
+    /// inventing a default boot shape — is what produced a parent that booted a
+    /// bare rootfs while every workload booted a verity-sealed stack plus the
+    /// runtime overlay carrying the guest agent.
+    #[test]
+    fn spawn_standby_captured_refuses_without_the_launch_it_must_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let rootfs = tmp.path().join("parent-rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs bytes").unwrap();
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(&rootfs),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let spec = sample_standby_spec("parent-a", tmp.path(), &rootfs);
+
+        let err = runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: None,
+                },
+                &spec,
+            )
+            .expect_err("a parent cannot be assembled without the launch it serves");
+
+        assert!(
+            matches!(err, StandbyError::SpawnFailed(ref m) if m.contains("launch config")),
+            "expected a SpawnFailed naming the missing launch, got: {err:?}"
+        );
+        assert!(
+            runner.driver.booted_specs().is_empty(),
+            "nothing may boot before the refusal"
+        );
+    }
+
+    /// The same guard as `standby_boot`'s, but through the runner's real
+    /// wiring: the shipped defect was not that the mappers disagreed, it was
+    /// that the spawn path never called them. Boot a sealed, overlay-carrying
+    /// launch as a workload and then warm a parent for it, and the two specs
+    /// the driver was handed must describe the same guest.
+    #[test]
+    fn the_parent_and_the_workload_boot_the_same_shape_through_the_runner() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let (dir, rootfs) = overlay_aware_rootfs("shape-parity");
+        std::fs::write(dir.path().join("rootfs.verity"), b"verity").unwrap();
+        std::fs::write(dir.path().join("rootfs.initrd"), b"initrd").unwrap();
+
+        let launch = VmStartConfig {
+            name: "shape-parity".into(),
+            rootfs_path: rootfs.clone(),
+            kernel_path: Some("/img/kernel".into()),
+            verity_path: Some(dir.path().join("rootfs.verity").display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some(dir.path().join("overlay.ext4").display().to_string()),
+            runtime_overlay_verity_path: Some(
+                dir.path().join("overlay.verity").display().to_string(),
+            ),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_overlay_version: Some("0.18.0".into()),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            cpus: 2,
+            memory_mib: 512,
+            ..Default::default()
+        };
+
+        let store = CheckpointStore::at(home.path().join("checkpoints"));
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs)),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        runner.start(&launch).expect("workload boots");
+        let spec = sample_standby_spec(
+            "standby-parity",
+            &home.path().join("standby-parity"),
+            Path::new(&rootfs),
+        );
+        runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .expect("warm parent spawns for that launch");
+
+        let booted = runner.driver.booted_specs();
+        assert_eq!(booted.len(), 2, "one workload boot, then one parent boot");
+        let (workload, parent) = (&booted[0], &booted[1]);
+        // Non-vacuity: the fixture must actually exercise the full sealed stack,
+        // or "the two match" would say nothing.
+        assert_eq!(
+            workload.blocks.len(),
+            4,
+            "fixture must boot rootfs + verity + overlay + overlay verity"
+        );
+        assert!(
+            workload
+                .cmdline
+                .contains("mvm.runtime_source_policy=required_overlay"),
+            "fixture must boot the required-overlay contract: {}",
+            workload.cmdline
+        );
+        assert_eq!(
+            parent.blocks, workload.blocks,
+            "the warm parent must attach the workload's whole disk stack, overlay included"
+        );
+        assert_eq!(
+            parent.cmdline, workload.cmdline,
+            "the warm parent must boot the workload's kernel cmdline"
+        );
+        assert_eq!(parent.kernel, workload.kernel);
+        assert_eq!(parent.initramfs, workload.initramfs);
     }
 
     // ── Warm claim: the guarded fork of a clean parent into a fresh child ──────
@@ -1915,6 +2454,7 @@ mod tests {
             spawned_unix_secs: 1,
             state: StandbyState::Idle,
             image_sha256: None,
+            parent_checkpoint: None,
         }
     }
 
@@ -2020,6 +2560,15 @@ mod tests {
             "the fresh token is bound to the child's content-address"
         );
 
+        // The fork alone only resumes the child on the parent's saved memory, so
+        // the claim also handed that same token to the child's guest agent and
+        // committed only once the guest reported it had rotated onto it.
+        assert_eq!(
+            runner.driver.delivered_child_identities(),
+            vec![(child.0.clone(), forks[0].genid.token)],
+            "the claim delivers the forked token to the child's own guest agent, exactly once"
+        );
+
         // The runner-side overlay-contract gate ran on the materialized child:
         // its dir carries the overlay sidecar the clone rode plus the rootfs.
         let child_dir = mvm_core::config::vm_state_dir(&child.0);
@@ -2052,6 +2601,191 @@ mod tests {
                 .filter(|e| e.path().is_dir() && e.file_name().to_string_lossy().starts_with("vm-"))
                 .count(),
             Err(_) => 0,
+        }
+    }
+
+    /// What a claim driven against a scripted post-restore answer left behind.
+    struct HandshakeClaimOutcome {
+        result: std::result::Result<VmId, StandbyError>,
+        /// The driver the claim ran on — an `Arc`-shared clone, so the fork,
+        /// delivery, and kill records survive the runner it was moved into.
+        driver: MockDriver,
+        parent_state: StandbyState,
+        orphan_child_dirs: usize,
+    }
+
+    /// Drive one full claim over a clean audited parent against `driver`, whose
+    /// `deliver_child_identity` answer the caller has scripted. Everything the
+    /// claim touches (MVM_HOME, stores, pool, registry) is fresh per call, so the
+    /// handshake outcomes are independent of each other.
+    fn claim_with_scripted_handshake(driver: MockDriver) -> HandshakeClaimOutcome {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+        let claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+
+        let probe = driver.clone();
+        let runner = WorkloadRunner::new(
+            driver,
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+        };
+
+        let result = runner.claim_standby(&ctx, &handle, &claim);
+        HandshakeClaimOutcome {
+            result,
+            driver: probe,
+            parent_state: pool.load("warm-parent").unwrap().state,
+            orphan_child_dirs: orphan_child_dirs(),
+        }
+    }
+
+    /// A forked child comes back resumed on its parent's saved memory, so until
+    /// it answers the identity handshake it is still drawing on the parent's
+    /// CSPRNG and reading the parent's frozen clock. Every way that proof can
+    /// fail — the guest never answers, answers without acknowledging, without
+    /// rotating, or without resynchronizing its clock — must refuse the claim,
+    /// stop the live child, return the healthy parent to claimable, and leave no
+    /// child dir. Admitting on any of them would hand out a VM whose "random"
+    /// values match every sibling forked from the same parent.
+    #[test]
+    fn claim_refuses_a_child_that_cannot_prove_a_fresh_identity() {
+        let unproven = |acknowledged: bool, reseeded: bool, clock_resynced: bool| {
+            MockDriver::default().with_child_identity(PostRestoreOutcome {
+                acknowledged,
+                detail: None,
+                reseeded,
+                clock_resynced,
+            })
+        };
+        let cases = [
+            (
+                "guest never answered",
+                MockDriver::default().with_unreachable_child_agent(),
+            ),
+            ("guest did not acknowledge", unproven(false, true, true)),
+            ("guest did not reseed", unproven(true, false, true)),
+            (
+                "guest did not resync its clock",
+                unproven(true, true, false),
+            ),
+        ];
+
+        for (label, driver) in cases {
+            let out = claim_with_scripted_handshake(driver);
+            let err = out
+                .result
+                .expect_err(&format!("{label}: the claim must fail closed"));
+            assert!(
+                matches!(err, StandbyError::ClaimFailed(_)),
+                "{label}: refusal must be a ClaimFailed: {err}"
+            );
+
+            // The refusal lands AFTER the fork — the child really was live — and
+            // the child was stopped rather than left running unproven.
+            let forks = out.driver.forked_children();
+            assert_eq!(forks.len(), 1, "{label}: the child was forked first");
+            assert!(
+                out.driver.killed_vms().contains(&forks[0].child_vm_name),
+                "{label}: the refused child must be stopped, not left resumed: killed {:?}",
+                out.driver.killed_vms()
+            );
+            assert_eq!(
+                out.parent_state,
+                StandbyState::Idle,
+                "{label}: a child-side failure must return the healthy parent to claimable"
+            );
+            assert_eq!(
+                out.orphan_child_dirs, 0,
+                "{label}: a refused claim must leave no orphan child dir"
+            );
+        }
+    }
+
+    /// The delivered token reaches the child's agent even on the refusal path —
+    /// the claim refuses on what the guest reported, not by skipping the ask.
+    #[test]
+    fn claim_delivers_the_token_before_judging_the_child() {
+        let out = claim_with_scripted_handshake(MockDriver::default().with_child_identity(
+            PostRestoreOutcome {
+                acknowledged: true,
+                detail: None,
+                reseeded: false,
+                clock_resynced: true,
+            },
+        ));
+        assert!(out.result.is_err());
+        let delivered = out.driver.delivered_child_identities();
+        let forks = out.driver.forked_children();
+        assert_eq!(delivered.len(), 1, "the token is delivered exactly once");
+        assert_eq!(delivered[0].0, forks[0].child_vm_name);
+        assert_eq!(
+            delivered[0].1, forks[0].genid.token,
+            "the delivered token is the one the fork minted"
+        );
+    }
+
+    /// The verdict itself, without a claim around it: every flag is required, and
+    /// the refusal names which one the guest failed to prove.
+    #[test]
+    fn fresh_child_identity_requires_every_flag() {
+        let proven = PostRestoreOutcome {
+            acknowledged: true,
+            detail: None,
+            reseeded: true,
+            clock_resynced: true,
+        };
+        assert!(require_fresh_child_identity("vm-a", &proven).is_ok());
+
+        for (mutate, expected) in [
+            (
+                (|o: &mut PostRestoreOutcome| o.acknowledged = false)
+                    as fn(&mut PostRestoreOutcome),
+                "did not acknowledge",
+            ),
+            (
+                |o: &mut PostRestoreOutcome| o.reseeded = false,
+                "without rotating its generation identity",
+            ),
+            (
+                |o: &mut PostRestoreOutcome| o.clock_resynced = false,
+                "without resynchronizing its wall clock",
+            ),
+        ] {
+            let mut outcome = proven.clone();
+            mutate(&mut outcome);
+            let err = require_fresh_child_identity("vm-a", &outcome)
+                .expect_err("a false flag must refuse");
+            assert!(
+                err.to_string().contains(expected),
+                "refusal must name the unproven flag ({expected}): {err}"
+            );
         }
     }
 

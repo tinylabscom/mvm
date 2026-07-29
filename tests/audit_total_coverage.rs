@@ -229,6 +229,13 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
         "advance",
         AuditPosture::Emits("CheckpointRestored+image.reverted"),
     ),
+    // Warm fork/restore of a vm_full checkpoint into a fresh child VM. The
+    // fork emits `checkpoint.forked` against the parent plan and the restored
+    // child follows the normal admitted launch trail (`plan.launched`).
+    (
+        "warm-restore",
+        AuditPosture::Emits("CheckpointForked+plan.launched"),
+    ),
     // Advanced single-VM verbs folded under `machine` (hidden from default help).
     // The audit postures are unchanged from when these lived under `vm <sub>`.
     ("pause", AuditPosture::Emits("VmStop")),

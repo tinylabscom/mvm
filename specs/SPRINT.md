@@ -44,6 +44,15 @@
       tracked in
       `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
 
+- [ ] **Backend shim removal — invert the driver/backend relationship.** The
+      `VmmDriver` seam still wraps the older direct `VmBackend` impls rather
+      than owning the VMM mechanics, so `FirecrackerBackend` / `LibkrunBackend`
+      / `HvfBackend` remain live in the production path. Plan drafted at
+      `specs/plans/269-backend-shim-removal.md`; it carries a "Status and known
+      gaps" section covering the blanket-impl seam that does not exist yet, the
+      unaccounted-for `WasmBackend`, and the QEMU contradiction in §2.5 below
+      that Task 5 depends on. Not started.
+
 ---
 
 ## 1. Why
@@ -399,7 +408,20 @@ Then unify + retire the old paths:
       Phase 2 slice one — the runner-side warm-pool claim substrate
       (`specs/plans/255-phase2-warm-pool-substrate.md`) — landed on branch
       `feat/plan-255-phase2-warm-pool`, with the live FC warm pool + capability
-      flip a follow-up slice.
+      flip a follow-up slice. That follow-up
+      (`specs/plans/255-live-fc-warm-claim.md`, branch
+      `feat/plan-255-live-fc-warm-claim`) built spawn/capture/fork/reseed and
+      then **failed its live KVM validation**
+      (`specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`): the
+      standby parent booted a bare rootfs and panicked for want of the runtime
+      overlay that carries the guest agent. The parent's boot inputs now come
+      from the launch's own `VmStartConfig` through the same mappers a workload
+      boot uses, guarded by shape-equality tests, and a third live run on the
+      same host confirms that half — the parent boots, reaches its guest agent,
+      and the capture writes a `vm_full` checkpoint carrying a 512 MiB
+      `memory.bin`. `standby_pool` stays `false` because the **claim** half is
+      still unexercised: four blockers, headed by the transient run path minting
+      no verb-grant sidecar, are enumerated in that note.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.

@@ -83,6 +83,7 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
         spawned_unix_secs: 1,
         state: StandbyState::Idle,
         image_sha256: None,
+        parent_checkpoint: None,
     };
     pool.record(&handle).expect("record the standby parent");
 

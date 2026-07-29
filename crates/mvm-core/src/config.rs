@@ -645,6 +645,14 @@ pub fn checkpoints_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("checkpoints")
 }
 
+/// Copy-on-write snapshot store: `<mvm_home>/snapshots/`. Sibling to
+/// [`checkpoints_dir`] — a checkpoint's `content/` is the immutable source a
+/// warm claim clones from, and the clone the claimed child boots off of lives
+/// here.
+pub fn snapshots_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("snapshots")
+}
+
 /// Immutable image version-lineage store: `<mvm_home>/images/`. Each node is a
 /// subdirectory `<node-digest>/` holding `node.json`.
 pub fn images_dir() -> std::path::PathBuf {
@@ -1042,6 +1050,16 @@ mod tests {
         env.set("MVM_HOME", temp.path());
         let dir = checkpoints_dir();
         assert_eq!(dir, temp.path().join("checkpoints"));
+        env.remove("MVM_HOME");
+    }
+
+    #[test]
+    fn snapshots_dir_is_under_data_dir() {
+        let mut env = TestEnv::new();
+        let temp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", temp.path());
+        let dir = snapshots_dir();
+        assert_eq!(dir, temp.path().join("snapshots"));
         env.remove("MVM_HOME");
     }
 

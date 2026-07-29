@@ -5,22 +5,46 @@
 
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    SnapshotCapability, StandbyError, StandbyHandle, StandbySpec, StandbyState, VmCapabilities,
-    VmExitStatus, VmId, VmStatus,
+    SnapshotCapability, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 
-use mvm_core::crypto::vmgenid::GenerationToken;
+use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 
-use crate::driver::spec::{ConsoleCapture, KernelImage, VmmSpec};
-use crate::driver::traits::{ChildForkRequest, DuplexStream, RunningVm, VmmDriver};
+use crate::driver::spec::VmmSpec;
+use crate::driver::traits::{
+    ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver,
+};
 use crate::standby_pool::now_unix_secs;
+use crate::vm::instance_snapshot::PostRestoreOutcome;
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
+
+/// What a `MockDriver` reports from `deliver_child_identity`. `None` scripts a
+/// guest that never answered inside the RPC deadline (the shape a real
+/// transport error takes); `Some` scripts the flags a live agent would report.
+type ScriptedChildIdentity = Option<PostRestoreOutcome>;
+
+/// One `(child_vm_name, token)` pair `deliver_child_identity` was handed.
+type DeliveredIdentity = (String, [u8; GENID_BYTES]);
+
+/// A clean post-restore answer: the guest acknowledged, rotated its generation
+/// identity off the delivered token, and took the host's wall clock. The
+/// `MockDriver` default, so an ordinary claim test needs no extra setup.
+fn rotated_child_identity() -> PostRestoreOutcome {
+    PostRestoreOutcome {
+        acknowledged: true,
+        detail: None,
+        reseeded: true,
+        clock_resynced: true,
+    }
+}
 
 /// A recorded `fork_standby_child` call: the child's fresh name plus the
 /// generation token the fork delivered, so a test can prove a claim delivered a
@@ -40,6 +64,26 @@ pub struct MockDriver {
     booted: Arc<Mutex<Vec<VmmSpec>>>,
     forked: Arc<Mutex<Vec<MockChildFork>>>,
     guest_ends: GuestEnds,
+    /// The rootfs path `vm_full_control`'s returned control reports from
+    /// `rootfs_path()` — a test seeds this to a file it already wrote so the
+    /// capture orchestration has something real to clone.
+    vm_full_rootfs: PathBuf,
+    /// Shared with every `MockVmFullControl` this driver hands out, so a test
+    /// can read back the pause/save_memory/resume call order via
+    /// `vm_full_calls()` regardless of which `vm_full_control()` call produced
+    /// the control that was driven.
+    vm_full_calls: Arc<Mutex<Vec<&'static str>>>,
+    /// The post-restore answer `deliver_child_identity` reports for a forked
+    /// child, so a test can drive the claim's fresh-identity gate — including
+    /// the refusal arms — with no live guest.
+    child_identity: ScriptedChildIdentity,
+    /// Every `(child, token)` this driver was asked to deliver, so a test can
+    /// prove the claim handed the guest the same token it forked with.
+    delivered_identities: Arc<Mutex<Vec<DeliveredIdentity>>>,
+    /// Names of the VMs killed through any handle this driver produced, so a
+    /// test can prove a refused claim actually tore its child down instead of
+    /// leaving it resumed.
+    killed: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for MockDriver {
@@ -57,6 +101,11 @@ impl MockDriver {
             booted: Arc::new(Mutex::new(Vec::new())),
             forked: Arc::new(Mutex::new(Vec::new())),
             guest_ends: Arc::new(Mutex::new(HashMap::new())),
+            vm_full_rootfs: PathBuf::from("/mock/rootfs.ext4"),
+            vm_full_calls: Arc::new(Mutex::new(Vec::new())),
+            child_identity: Some(rotated_child_identity()),
+            delivered_identities: Arc::new(Mutex::new(Vec::new())),
+            killed: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -85,6 +134,45 @@ impl MockDriver {
             .lock()
             .unwrap()
             .remove(&(vm.0.clone(), guest_port))
+    }
+
+    /// Seed the rootfs path a subsequent `vm_full_control()` call's control
+    /// reports via `rootfs_path()`.
+    pub fn with_vm_full_rootfs(mut self, rootfs: impl Into<PathBuf>) -> Self {
+        self.vm_full_rootfs = rootfs.into();
+        self
+    }
+
+    /// The `pause`/`save_memory`/`resume` calls recorded so far against any
+    /// control this driver's `vm_full_control()` has handed out, in order.
+    pub fn vm_full_calls(&self) -> Vec<&'static str> {
+        self.vm_full_calls.lock().unwrap().clone()
+    }
+
+    /// Script the flags a forked child's guest agent reports back — e.g. an
+    /// acknowledgement that did not rotate the generation identity.
+    pub fn with_child_identity(mut self, outcome: PostRestoreOutcome) -> Self {
+        self.child_identity = Some(outcome);
+        self
+    }
+
+    /// Script a forked child whose guest agent never answers, the shape a real
+    /// transport failure or a blown RPC deadline takes.
+    pub fn with_unreachable_child_agent(mut self) -> Self {
+        self.child_identity = None;
+        self
+    }
+
+    /// Every `(child_vm_name, token)` handed to `deliver_child_identity`, in
+    /// order.
+    pub fn delivered_child_identities(&self) -> Vec<DeliveredIdentity> {
+        self.delivered_identities.lock().unwrap().clone()
+    }
+
+    /// Names of the VMs killed through any handle this driver produced, in
+    /// order.
+    pub fn killed_vms(&self) -> Vec<String> {
+        self.killed.lock().unwrap().clone()
     }
 }
 
@@ -126,34 +214,21 @@ impl VmmDriver for MockDriver {
             exit: self.exit,
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
+            killed: Arc::clone(&self.killed),
         }))
     }
 
     fn spawn_standby_parent(
         &self,
-        spec: &StandbySpec,
+        req: &StandbyParentSpawn<'_>,
     ) -> std::result::Result<StandbyHandle, StandbyError> {
-        // A clean parent boot: no cmdline, no volumes, no vsock channels — the
-        // recipe itself has no field that could carry a plan, a secret, or an
-        // egress/broker endpoint. Routed through `boot()` (not pushed directly)
-        // so a test can observe it the same way it observes a real workload
-        // boot, via `booted_specs()`.
-        let parent = VmmSpec {
-            name: spec.id.clone(),
-            kernel: KernelImage::Bundled,
-            initramfs: None,
-            cmdline: String::new(),
-            vcpus: u32::from(spec.vcpus),
-            memory_mib: spec.mem_mib,
-            mem_initial_mib: None,
-            blocks: Vec::new(),
-            vsock: Vec::new(),
-            console: ConsoleCapture {
-                log_path: std::path::PathBuf::from(&spec.vm_state_dir).join("console.log"),
-            },
-            trusted_builder: false,
-        };
-        self.boot(&parent)
+        let spec = req.spec;
+        // The role layer assembled the parent's boot inputs from the launch it
+        // will serve; the mock boots them verbatim, exactly as a real driver
+        // does. Routed through `boot()` (not pushed directly) so a test can
+        // observe the parent's shape the same way it observes a real workload
+        // boot, via `booted_specs()` — which is what lets a test compare them.
+        self.boot(req.boot)
             .map_err(|e| StandbyError::SpawnFailed(e.to_string()))?;
         // No live process backs a mocked capture — pid=0 mirrors the saved-state
         // convention (`StandbyHandle::is_saved_state`) already used for a
@@ -170,6 +245,7 @@ impl VmmDriver for MockDriver {
             spawned_unix_secs: now_unix_secs(),
             state: StandbyState::Idle,
             image_sha256: spec.image_sha256.clone(),
+            parent_checkpoint: None,
         })
     }
 
@@ -202,6 +278,29 @@ impl VmmDriver for MockDriver {
             exit: self.exit,
             status: self.status.clone(),
             guest_ends: Arc::clone(&self.guest_ends),
+            killed: Arc::clone(&self.killed),
+        }))
+    }
+
+    fn deliver_child_identity(
+        &self,
+        child_vm_name: &str,
+        token: [u8; GENID_BYTES],
+    ) -> Result<PostRestoreOutcome> {
+        self.delivered_identities
+            .lock()
+            .unwrap()
+            .push((child_vm_name.to_string(), token));
+        self.child_identity.clone().ok_or_else(|| {
+            anyhow!("mock guest agent for '{child_vm_name}' did not answer the post-restore signal")
+        })
+    }
+
+    fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn crate::checkpoint::VmFullControl>> {
+        let _ = vm_name;
+        Some(Box::new(MockVmFullControl {
+            rootfs: self.vm_full_rootfs.clone(),
+            calls: Arc::clone(&self.vm_full_calls),
         }))
     }
 
@@ -230,6 +329,7 @@ pub struct MockRunningVm {
     exit: VmExitStatus,
     status: VmStatus,
     guest_ends: GuestEnds,
+    killed: Arc<Mutex<Vec<String>>>,
 }
 
 impl RunningVm for MockRunningVm {
@@ -240,6 +340,7 @@ impl RunningVm for MockRunningVm {
         Ok(self.exit)
     }
     fn kill(&self) -> Result<()> {
+        self.killed.lock().unwrap().push(self.id.0.clone());
         Ok(())
     }
     fn pause(&self) -> Result<()> {
@@ -261,9 +362,54 @@ impl RunningVm for MockRunningVm {
     }
 }
 
+/// Hypervisor-free [`crate::checkpoint::VmFullControl`] test double: no real
+/// pause/resume happens, `save_memory` writes a small deterministic file
+/// instead of a real machine-memory image, and `rootfs_path`/`device_anchors`
+/// report the path a test seeded on the owning `MockDriver`. Every call is
+/// recorded (shared with the driver via `calls`) so a capture test can assert
+/// the pause-then-save-then-resume ordering without a live hypervisor.
+struct MockVmFullControl {
+    rootfs: PathBuf,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl crate::checkpoint::VmFullControl for MockVmFullControl {
+    fn pause(&self) -> Result<()> {
+        self.calls.lock().unwrap().push("pause");
+        Ok(())
+    }
+
+    fn resume(&self) -> Result<()> {
+        self.calls.lock().unwrap().push("resume");
+        Ok(())
+    }
+
+    fn save_memory(&self, memory_path: &Path) -> Result<()> {
+        self.calls.lock().unwrap().push("save_memory");
+        std::fs::write(memory_path, b"mock-memory-state")
+            .map_err(|e| anyhow!("writing mock memory file {}: {e}", memory_path.display()))
+    }
+
+    fn rootfs_path(&self) -> Result<PathBuf> {
+        Ok(self.rootfs.clone())
+    }
+
+    fn device_anchors(&self) -> Result<crate::checkpoint::DeviceAnchors> {
+        Ok(crate::checkpoint::DeviceAnchors {
+            rootfs: self.rootfs.clone(),
+            rootfs_verity: None,
+            config: None,
+            secrets: None,
+            vsock: PathBuf::from("/mock/vsock"),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::driver::spec::{ConsoleCapture, KernelImage};
 
     fn sample_spec(name: &str) -> VmmSpec {
         VmmSpec {
@@ -376,5 +522,40 @@ mod tests {
         let mut back = [0u8; 4];
         host.read_exact(&mut back).unwrap();
         assert_eq!(&back, b"pong");
+    }
+
+    #[test]
+    fn mock_driver_offers_a_vm_full_capture_control() {
+        assert!(MockDriver::default().vm_full_control("any-vm").is_some());
+    }
+
+    #[test]
+    fn mock_vm_full_control_records_calls_and_reports_seeded_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fake-rootfs").unwrap();
+
+        let driver = MockDriver::default().with_vm_full_rootfs(&rootfs);
+        let control = driver.vm_full_control("standby-1").unwrap();
+
+        control.pause().unwrap();
+        let memory_path = tmp.path().join("memory.bin");
+        control.save_memory(&memory_path).unwrap();
+        control.resume().unwrap();
+
+        assert_eq!(control.rootfs_path().unwrap(), rootfs);
+        assert!(
+            std::fs::read(&memory_path)
+                .unwrap()
+                .starts_with(b"mock-memory")
+        );
+        assert_eq!(
+            driver.vm_full_calls(),
+            vec!["pause", "save_memory", "resume"]
+        );
+
+        let anchors = control.device_anchors().unwrap();
+        assert_eq!(anchors.rootfs, rootfs);
+        assert!(anchors.rootfs_verity.is_none());
     }
 }
