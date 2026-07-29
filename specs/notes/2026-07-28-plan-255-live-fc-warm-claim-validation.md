@@ -471,3 +471,92 @@ shape.
 - **BUG-2** is unchanged: the transient `machine run` path still ends in
   `Error: Failed to read frame length` (no verb-grant sidecar minted), which is
   independent of the pool.
+
+---
+
+## Third live run — the boot-shape correction works
+
+Re-run at `3ac531193` (`fix(fc): boot the standby parent in the verified-boot
+shape`), release, same host, `MVM_HOME=/root/mvm-t7b-home`, checkout
+`/root/mvm-t7b`.
+
+**BUG-1 is fixed. The parent boots, reaches its guest agent, and is captured.**
+This is the step that was unreachable in both earlier runs.
+
+```
+$ grep -anE "Run /init|verity-init|guest-agent" .../standby-*/console.log
+274:[    0.358538] Run /init as init process
+275:mvm-verity-init: starting
+277:mvm-verity-init: rootfs  data=/dev/vda hash=/dev/vdb roothash=6381e8ee…
+279:mvm-verity-init: overlay data=/dev/vdc hash=/dev/vdd roothash=996d1500…
+320:mvm-guest-agent: listening on vsock port 5252
+```
+
+`mvm-verity-init` is PID 1 (not `mvm-oci-init`), it mounts the runtime overlay,
+and the agent binds vsock 5252. No `no guest agent resolved` line, no panic.
+
+The capture then ran, and the pool populated for the first time:
+
+```
+$ ls -1 /root/mvm-t7b-home/checkpoints
+standby-standby-6939ce49e1b69ad2
+
+$ meta.json → class: vm_full
+   blobs: rootfs.ext4, memory.bin, vmstate.bin, mvm-meta.json,
+          rootfs.verity, rootfs.roothash, device-anchors.json
+$ ls -la content/memory.bin
+-rw-r--r-- 1 root root 536870912   memory.bin
+```
+
+A real 512 MiB memory image — the property that makes a later claim a restore
+rather than a cold boot. Prior runs had no `checkpoints/` directory at all and a
+pool holding only `claim.lock` / `warm.lock`.
+
+### How to reproduce (note the capability chicken-and-egg)
+
+Task 6 gates the very path Task 7 must exercise: with `standby_pool: false` the
+run stops at `firecracker: standby pool is not supported by this backend` and
+`spawn_standby_parent` is never reached. To validate, flip the capability
+**locally on the test host only** and rebuild:
+
+```
+sed -i "s/^            standby_pool: false,/            standby_pool: true,/" \
+    crates/mvm-runtime/src/driver/fc.rs
+cargo build --release --bin mvmctl
+MVM_HOME=… MVM_RESIDENCY=warm ./target/release/mvmctl -v machine run \
+    --image docker.io/library/alpine:latest --hypervisor firecracker echo hi
+```
+
+Keep the committed default `false` until a live run earns the flip.
+
+### Still blocked: BUG-2
+
+The end-to-end run still fails, for the unrelated reason recorded above — the
+transient path mints no verb-grant sidecar:
+
+```
+Error: Failed to write frame length
+    Broken pipe (os error 32)
+# guest side:
+mvm-guest-agent: rejecting control connection without a pinned host key
+```
+
+So the **capture half is proven live; the claim half remains unexercised through
+the CLI** until BUG-2 is fixed. Not verified this run: that the parent process is
+released after capture (the check used was malformed and is not evidence either
+way).
+
+### Implementation note for whoever lands this
+
+Two implementations of the boot-shape correction exist. The one validated here is
+an inline `VmmSpec` build inside `FcDriver::spawn_standby_parent` (commit
+`3ac531193`). A better-factored version — a `workload_runner::standby_boot`
+module exposing `factory_parent_config` / `factory_parent_spec`, reusing the
+workload spec mapping instead of duplicating it — was developed in parallel and
+should be preferred: it removes the duplication that caused this bug rather than
+working around it.
+
+**The evidence above applies to either**, since both produce the same boot shape:
+verity initramfs as PID 1, rootfs hash device at slot 1, overlay at slots 2-3 on
+`/dev/vdc` + `/dev/vdd`, and no `root=`/`init=` in the cmdline. If the module
+version lands, `3ac531193` should be dropped rather than merged.
