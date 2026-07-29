@@ -320,6 +320,25 @@ mod tests {
         }
     }
 
+    /// A fully populated `StandbyHandle` for tests that don't care about the
+    /// specific compat/state fields, just a valid handle to round-trip.
+    fn sample_handle(id: &str) -> StandbyHandle {
+        StandbyHandle {
+            id: id.into(),
+            template_id: None,
+            control_socket: format!("/p/{id}/control.sock"),
+            pid: std::process::id(),
+            kernel_sha256: "aa".repeat(32),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "ab".repeat(32),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            image_sha256: None,
+            parent_checkpoint: None,
+        }
+    }
+
     fn compat(kernel: &str) -> StandbyCompat {
         StandbyCompat {
             template_id: None,
@@ -727,5 +746,43 @@ mod tests {
             "exact boundary kept (strict >)"
         );
         assert_eq!(pool.load("p_edge").unwrap().state, StandbyState::Parked);
+    }
+
+    #[test]
+    fn record_and_load_round_trip_parent_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut h = sample_handle("sb-parent-ckpt");
+        h.parent_checkpoint = Some("standby-sb-parent-ckpt".to_string());
+
+        pool.record(&h).unwrap();
+        let loaded = pool.load("sb-parent-ckpt").unwrap();
+
+        assert_eq!(
+            loaded.parent_checkpoint.as_deref(),
+            Some("standby-sb-parent-ckpt"),
+            "the captured parent checkpoint must survive the pool's on-disk round trip"
+        );
+    }
+
+    /// A handle written before this field existed still loads, defaulting to
+    /// `None` — an uncaptured parent is simply not claimable.
+    #[test]
+    fn handle_without_parent_checkpoint_loads_as_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let dir = tmp.path().join("sb-legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("standby.json"),
+            br#"{"id":"sb-legacy","control_socket":"/tmp/s.sock","pid":0,
+                 "kernel_sha256":"abc","vcpus":2,"mem_mib":512,"binding_nonce":"n",
+                 "spawned_unix_secs":1,"state":"idle"}"#,
+        )
+        .unwrap();
+
+        let loaded = pool.load("sb-legacy").unwrap();
+
+        assert_eq!(loaded.parent_checkpoint, None);
     }
 }

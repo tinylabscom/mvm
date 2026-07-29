@@ -1239,8 +1239,8 @@ impl VmBackend for LibkrunBackend {
             binding_nonce: spec.binding_nonce.clone(),
             spawned_unix_secs: now_unix_secs(),
             state: StandbyState::Idle,
-            image_sha256: None, // libkrun standbys are image-agnostic
-            parent_checkpoint: None,
+            image_sha256: None,      // libkrun standbys are image-agnostic
+            parent_checkpoint: None, // this spawn path does not capture a checkpoint yet
         })
     }
 
@@ -1436,7 +1436,6 @@ mod tests {
             vm_state_dir: "/vms/standby-x".into(),
             image_path: None,
             image_sha256: None,
-            parent_checkpoint: None,
         }
     }
 

@@ -8,16 +8,18 @@ pub mod claim;
 pub(crate) mod cmdline;
 pub mod runner;
 pub mod spec_map;
+pub mod standby_boot;
 
 pub use runner::{
     BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, ClaimContext, EndpointSpawnRequest,
-    EndpointSpawner, RealBrokerRegistrar, RealEndpointSpawner, WorkloadLaunchInputs,
+    EndpointSpawner, RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs,
     WorkloadRunner,
 };
 pub use spec_map::{
     WorkloadSockets, WorkloadSpecInputs, ensure_no_dir_share_volumes, workload_blocks,
-    workload_spec, workload_vsock_ports,
+    workload_device_spec, workload_spec, workload_vsock_ports,
 };
+pub use standby_boot::{factory_parent_config, factory_parent_spec};
 
 /// Assemble the exact runner cmdline for conformance tests without booting a
 /// VM. This is feature-gated with the rest of the test-support surface so the

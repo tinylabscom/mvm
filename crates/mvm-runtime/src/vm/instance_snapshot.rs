@@ -499,6 +499,10 @@ pub trait PostRestoreSignal {
 /// post-restore signal.
 const POST_RESTORE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// Default wall-clock time to wait for the guest agent to become reachable
+/// before delivering a post-restore signal.
+pub const POST_RESTORE_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// After a snapshot restore resumes vCPUs, wait for the guest agent to be
 /// reachable (so a slow-to-reattach guest does not spuriously report
 /// `Undelivered`), then signal the guest to finish re-establishing itself.

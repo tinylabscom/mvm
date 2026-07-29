@@ -718,20 +718,19 @@ pub struct StandbySpec {
     pub image_path: Option<String>,
     /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
     pub image_sha256: Option<String>,
-    /// Content-addressed checkpoint id the standby parent was captured as. Saved-state
-    /// (disk-based) standbys carry this so a warm claim can lineage-verify and materialize
-    /// the parent; live standbys leave it `None`.
-    pub parent_checkpoint: Option<String>,
 }
 
 /// The base-compat key — everything a standby fixes at spawn and must therefore match the
 /// workload exactly, else the launch cold-boots.
 ///
-/// `image_sha256` is `None` for libkrun (any image attaches; libkrun standbys carry no
-/// rootfs) and `Some(sha)` for HVF saved-standbys (which are image-specific; an HVF standby
-/// is a frozen {rootfs, memory, machine-id} triple captured from one particular image).
-/// Two standbys are compatible only when both image fields are identical — `None == None`
-/// (libkrun) and `Some(a) == Some(b)` iff `a == b`.
+/// `image_sha256` is `Some(sha)` for a standby captured from a rootfs — a saved-state
+/// standby is a frozen {rootfs, memory, machine-id} triple taken from one particular
+/// image, and every child is cloned from that captured content, so the image is part of
+/// the standby's identity rather than something attached to it later. It is `None` only
+/// for a standby carrying no rootfs at all (a bare pre-spawned supervisor any image could
+/// attach to). Compatibility is exact in both directions — `None == None` and
+/// `Some(a) == Some(b)` iff `a == b` — so a claim that computes this field differently
+/// from the spawn that recorded it matches nothing, silently and forever.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandbyCompat {
     /// Registered template identity. Compatibility is exact, including the
@@ -740,7 +739,8 @@ pub struct StandbyCompat {
     pub kernel_sha256: String,
     pub vcpus: u8,
     pub mem_mib: u32,
-    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for HVF (image-bound).
+    /// `Some(sha256-hex)` for a standby captured from a rootfs; `None` only for
+    /// one that carries no rootfs.
     pub image_sha256: Option<String>,
 }
 
@@ -767,8 +767,13 @@ pub struct StandbyHandle {
     /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for HVF saved-standbys.
     #[serde(default)]
     pub image_sha256: Option<String>,
-    /// Content-addressed checkpoint id the standby parent was captured as. Saved-state
-    /// standbys carry this so a warm claim can lineage-verify and materialize the parent.
+    /// The content-addressed checkpoint this parent was captured as, set once
+    /// a spawn has captured it. `None` means the parent was never captured, so
+    /// it cannot be claimed: a claim verifies content and lineage against this
+    /// checkpoint before cloning anything.
+    ///
+    /// Held as the raw id string rather than a `CheckpointId` because that type
+    /// lives a layer up; the runtime converts at its boundary.
     #[serde(default)]
     pub parent_checkpoint: Option<String>,
 }
@@ -1072,7 +1077,6 @@ mod tests {
         // HVF image sha must match exactly: Some(a) ≠ None, Some(a) ≠ Some(b).
         let hvf_handle = StandbyHandle {
             image_sha256: Some("c".repeat(64)),
-            parent_checkpoint: None,
             ..h.clone()
         };
         let hvf_want = StandbyCompat {
