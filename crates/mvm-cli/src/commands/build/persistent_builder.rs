@@ -284,11 +284,11 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
     let job_dir_relpath = stage_flake_cmd_sh(&record.job_dir, &args.flake, &attr)?;
 
     let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path)
-        // Nix can spend several minutes in a quiet compiler phase while the
+        // Nix can spend a long time in a quiet compiler phase while the
         // staged script keeps the complete diagnostic in a host-visible log.
         // Keep the transport alive for that bounded quiet period; the
         // one-hour dispatch deadline remains the overall build cap.
-        .with_frame_read_timeout(Duration::from_secs(10 * 60));
+        .with_frame_read_timeout(Duration::from_secs(30 * 60));
 
     let outcome = supervisor
         .submit(
