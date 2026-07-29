@@ -124,14 +124,30 @@ pub fn factory_parent_config(
 }
 
 /// The factory parent's `VmmSpec`, assembled by the same mappers a workload
-/// boot uses so the two shapes cannot drift.
+/// boot uses, so a drive or cmdline token added to the workload's boot reaches
+/// the parent's too.
 ///
-/// The one deliberate difference is the vsock channel list, which
-/// [`workload_device_spec`] leaves empty: a workload wires its agent, egress,
-/// exit and (when admitted) broker channels to host sockets, and a parent wires
-/// none because it has no endpoint and no broker to wire them to. The guest's
-/// vsock *device* is identical either way — the driver configures it
-/// unconditionally — so this costs the parent no device-model divergence.
+/// One divergence is deliberate and covered by the tests below: the vsock
+/// channel list, which [`workload_device_spec`] leaves empty. A workload wires
+/// its agent, egress, exit and (when admitted) broker channels to host sockets;
+/// a parent wires none because it has no endpoint and no broker to wire them
+/// to. The guest's vsock *device* is identical either way — the driver
+/// configures it unconditionally — so this costs the parent no device-model
+/// divergence.
+///
+/// A second divergence is **not** covered, and no test here can cover it: the
+/// per-VM grant tokens. [`cmdline::workload_cmdline`] appends whatever
+/// [`crate::hvf_bootargs::grant_tokens`] derives from the named VM's
+/// `verb-grant.json` sidecar, and a factory parent holds no plan, so it has no
+/// sidecar by construction and emits none. The transient run path mints no
+/// sidecar today, which is the only reason the two cmdlines currently agree;
+/// the moment it does, a workload's cmdline gains `mvm.verb_grant=`,
+/// `mvm.require_grant=` and `mvm.host_signer_pub=` that the parent's never
+/// carries — and the shape-equality tests keep passing, because their fixtures
+/// have no sidecar on either side. A child inherits its parent's cmdline out of
+/// restored memory rather than deriving its own, so that divergence would reach
+/// every child; resolving it is part of the work that must land before a warm
+/// pool is armed.
 pub fn factory_parent_spec(
     config: &VmStartConfig,
     state_dir: &Path,
@@ -146,10 +162,31 @@ mod tests {
     use super::*;
 
     use std::path::PathBuf;
+    use std::sync::MutexGuard;
 
+    use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::{RuntimeSourcePolicy, VmVolume, VmVolumeKind};
 
     use crate::workload_runner::spec_map::{WorkloadSockets, WorkloadSpecInputs, workload_spec};
+
+    /// Point `MVM_HOME` at an empty directory for the caller's lifetime.
+    ///
+    /// Every cmdline assembled here runs `grant_tokens`, which reads
+    /// `<MVM_HOME>/vms/<name>/verb-grant.json` for whichever VM name the fixture
+    /// used. Left alone, that is the developer's real home: a machine that
+    /// happens to have a VM of the fixture's name with a grant sidecar would
+    /// fail these tests for a reason that has nothing to do with the code. Same
+    /// isolation, taken in the same order, as the sibling shape guard in
+    /// `runner`.
+    fn isolated_home() -> (TestEnv, tempfile::TempDir, MutexGuard<'static, ()>) {
+        let lock = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        (env, home, lock)
+    }
 
     /// The Firecracker base: a verity boot (`has_disk == false`) carries only
     /// the console, and the disk shape adds root/init.
@@ -233,6 +270,7 @@ mod tests {
     /// two shapes stay in step without anyone remembering to keep them there.
     #[test]
     fn parent_boots_the_same_device_model_and_cmdline_the_workload_does() {
+        let _home = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let launch = sealed_launch(tmp.path());
         let spec = standby_spec_for(&launch, tmp.path());
@@ -271,11 +309,19 @@ mod tests {
     /// with no network at all, silently. `warm_eligible_launch` on the CLI side
     /// therefore refuses that shape outright and it cold-boots.
     ///
-    /// The divergence is exactly one token, and this asserts that exactly: a
-    /// second one appearing here means something else has started depending on
-    /// the parent's stripped-down config.
+    /// What this asserts is narrower than it looks: for *this fixture*, which
+    /// carries no verb-grant sidecar on either side, the egress token is the
+    /// only difference. It is not a claim that the two cmdlines can differ by at
+    /// most one token in production — the per-VM grant tokens
+    /// (`mvm.verb_grant=`, `mvm.require_grant=`, `mvm.host_signer_pub=`) come
+    /// from a sidecar a factory parent never has, so a workload carrying one
+    /// diverges by those too, silently and without failing anything here. See
+    /// [`factory_parent_spec`]'s note. Within the covered surface, a second
+    /// token appearing here means something else has started depending on the
+    /// parent's stripped-down config.
     #[test]
     fn an_egress_allowing_launch_diverges_by_one_token_which_is_why_the_pool_refuses_it() {
+        let _home = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let mut launch = sealed_launch(tmp.path());
         launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
@@ -317,6 +363,7 @@ mod tests {
     /// that two values differ.
     #[test]
     fn parent_carries_the_overlay_drives_and_runtime_tokens_the_guest_agent_needs() {
+        let _home = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let launch = sealed_launch(tmp.path());
         let spec = standby_spec_for(&launch, tmp.path());
@@ -350,6 +397,7 @@ mod tests {
 
     #[test]
     fn parent_drops_every_workload_authority_field_the_launch_carried() {
+        let _home = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let mut launch = sealed_launch(tmp.path());
         launch.plan_json = Some("{\"signed\":\"plan\"}".into());
@@ -432,6 +480,7 @@ mod tests {
 
     #[test]
     fn parent_console_is_captured_into_its_own_state_dir() {
+        let _home = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let launch = sealed_launch(tmp.path());
         let spec = standby_spec_for(&launch, tmp.path());

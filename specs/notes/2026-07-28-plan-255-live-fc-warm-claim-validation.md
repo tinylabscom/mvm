@@ -41,7 +41,11 @@ directory`. `mvmctl` itself was not rebuilt.
 | 4 | Cold-boot vs warm-claim timing | **Cold measured; warm not measurable.** |
 | 5 | Fail-closed cases | **1 of 3 verified live** (absent `parent_checkpoint` → refuse + cold-boot, no orphaned child dir). The other two need a real captured checkpoint. |
 
-Two defects were found. Neither was fixed (this task is validation only).
+Two defects were found by the run itself — BUG-1 and BUG-2 — and neither was
+fixed during it (the task was validation only; BUG-1 has since been fixed in
+code and awaits a live re-run). Two further structural blockers, BLOCKER-3 and
+BLOCKER-4, were found by review of that fix and are recorded here because they
+gate the same capability flip. Both are open.
 
 ---
 
@@ -313,6 +317,55 @@ guards updated to match.
 
 ---
 
+## BLOCKER-4 — a warm-claimed child is wired none of the host channels a cold boot gets
+
+Found by review, not by the live run: the claim path was never reached, so
+nothing here was observable on the host. Like BLOCKER-3 it is structural, and it
+survives BUG-1, BUG-2 and BLOCKER-3 all being fixed.
+
+A cold boot's host-side vsock wiring happens in exactly two places, and a warm
+claim goes through neither.
+
+1. **The guest-dial bridges and the exit capture are `boot`-only.**
+   `wire_guest_dial_bridges` and `spawn_workload_exit_capture` are called from
+   one site each — `FcDriver::boot`
+   (`crates/mvm-runtime/src/driver/fc.rs:580-581`). The claim path runs
+   `FcDriver::fork_standby_child` (`fc.rs:495`) →
+   `FcForkRestorer::restore_fork` (`crates/mvm-runtime/src/firecracker.rs`),
+   which remaps the snapshot's baked-in device paths and resumes the VM. It
+   does neither.
+2. **The claim spawns the child's endpoint and then drops its address.**
+   `claim_standby` stands up the child's own substitution endpoint
+   (`crates/mvm-runtime/src/workload_runner/runner.rs:426-437`) but never
+   threads the returned `egress_uds()` anywhere, and never calls
+   `BrokerRegistrar::register`. Contrast `start_workload` (`runner.rs:322-348`),
+   which does both: the endpoint's socket becomes the spec's `egress_gateway`,
+   and the broker is registered for the booted VM.
+
+What a claimed child would therefore come up with, once the pool is armed:
+
+- **no `v.sock_<EGRESS_PORT>` symlink**, so the endpoint process the claim just
+  spawned is dark — the guest's egress client dials a socket nothing serves;
+- **no `v.sock_<BROKER_PORT>`**, so `host.audit.v1` and `host.secrets.v1` are
+  silently unavailable to the workload — a *degradation relative to a cold
+  boot*, which registers the broker;
+- **no `v.sock_<WORKLOAD_EXIT_PORT>` listener**, so `workload.exit` is never
+  written and `machine run` reports UNKNOWN instead of the guest's real exit
+  code.
+
+All three fail closed — an unwired channel is an unreachable channel, and no
+isolation boundary moves — so none of this is a security hole. But a warm claim
+that hands back a child with strictly less than a cold boot gives it is not a
+fast path; it is a different and worse one.
+
+**Not implemented here**, deliberately: the shape is to lift the host-channel
+wiring out of `FcDriver::boot` so the fork path runs the same step, and to give
+`claim_standby` the tail of `start_workload` it is missing. Both are their own
+slice, and guessing at either inside a records-and-comments pass is how BUG-1
+happened.
+
+---
+
 ## What must happen before `standby_pool` can flip to `true`
 
 In order; each is a hard gate.
@@ -327,7 +380,24 @@ In order; each is a hard gate.
 3. **BLOCKER-3 — open.** Without a boot-pinned host-signer anchor on the child,
    the post-restore identity handshake refuses and every claim falls back to a
    cold boot. Structural; fix outside this slice, along the shape above.
-4. Only then: re-run the Task 7 priorities (capture → restore, the reseed
+4. **BLOCKER-4 — open.** A claimed child is wired none of the host channels a
+   cold boot gets: no egress socket for the endpoint the claim itself spawned,
+   no broker registration, no exit capture — so it has no `host.audit.v1` /
+   `host.secrets.v1` and its exit code is never reported. Fail-closed, but
+   strictly worse than the cold boot it replaces. Structural; fix outside this
+   slice, along the shape above.
+5. **Deferred, known-sharp: a failed child stop leaves an invisible live VM.**
+   On the claim refusal path `force_stop` logs and swallows a failure
+   (`crates/mvm-runtime/src/workload_runner/runner.rs:462`; the swallow is at
+   `:594-605`), and `ClaimCleanup::drop` then removes the child's state dir. A
+   stop that fails therefore leaves a live Firecracker still holding the
+   parent's CSPRNG with **no state dir at all** — invisible to the caller (which
+   sees only `ClaimFailed`), invisible to orphan-state-dir reaping, and findable
+   only with `pgrep`. Harmless while the pool is disarmed because the path is
+   unreachable, so it is not a merge blocker; it must not be armed with this
+   open. The fix is to order the removal after a *successful* stop, or to leave
+   a reapable marker behind when the stop fails.
+6. Only then: re-run the Task 7 priorities (capture → restore, the reseed
    handshake, a fresh child name with no kernel boot in its console, warm vs
    cold timings, and the two fail-closed cases that need a real captured
    checkpoint), and flip the capability only if that run is green.
@@ -448,7 +518,8 @@ neither of the two defects above is a latency problem.
 See "What must happen before `standby_pool` can flip to `true`" above for the
 full gate list. In short: BUG-1 is fixed in code and needs a live run to
 confirm; BUG-2 and BLOCKER-3 are both open and each independently prevents a
-claim from ever completing.
+claim from ever completing; BLOCKER-4 lets a claim complete but returns a child
+wired none of the host channels a cold boot gets.
 
 Two further defects were found by review of the BUG-1 fix and are **fixed** in
 the same change as BUG-1, so neither needs a separate live gate — but both are

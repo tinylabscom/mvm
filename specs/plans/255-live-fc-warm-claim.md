@@ -408,7 +408,7 @@ The runner has already verified the parent, minted a fresh `VmId` + VMGenID, and
 - Consumes: `ChildForkRequest<'a> { child_vm_name: &'a str, child_dir: &'a Path, genid: GenerationToken }` (`driver/traits.rs:22-31`); `FcForkRestorer` (`firecracker.rs`).
 - Produces: `FcDriver::fork_standby_child(&self, req: &ChildForkRequest<'_>) -> std::result::Result<(), StandbyError>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 /// The runner materializes the CoW clone before forking. An absent dir means
@@ -457,12 +457,12 @@ fn fork_standby_child_refuses_a_clone_without_saved_memory() {
 
 Write `sample_generation_token()` building `GenerationToken { token: [0u8; GENID_BYTES], content_hash: "test-content-hash".into() }`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo nextest run -p mvm-runtime driver::fc`
 Expected: FAIL — the inherited default returns `StandbyError::Unsupported`.
 
-- [ ] **Step 3: Implement the override**
+- [x] **Step 3: Implement the override**
 
 ```rust
     fn fork_standby_child(
@@ -505,12 +505,12 @@ Expected: FAIL — the inherited default returns `StandbyError::Unsupported`.
 
 Deliver `req.genid` by the same mechanism the existing fork path uses: `restore_fork` passes an all-zero token to `warm_restore_instance_from_path` and expects the caller to deliver the real token over vsock once the agent answers. The post-restore handshake is **fail-closed on three flags** — `acknowledged`, `reseeded`, and `clock_resynced` (`mvm-agentd/src/vsock/api.rs:160-183`) — so a child is not usable until the guest answers all three. Follow that contract rather than inventing a second delivery path; the existing checkpoint-fork CLI does it around `mvm-cli/src/commands/vm/checkpoint.rs:1053`. Decide and state in your report whether the handshake belongs in this driver override or in the runner's claim (the runner already owns the child's identity), and keep it in exactly one place.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo nextest run -p mvm-runtime driver::fc`
 Expected: PASS.
 
-- [ ] **Step 5: Full gates + commit**
+- [x] **Step 5: Full gates + commit**
 
 ```bash
 cargo fmt --all
@@ -519,6 +519,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 git add -A
 git commit -m "feat(fc): restore a forked standby child from the parent's saved memory"
 ```
+
+Landed in `e8f74ade6`: `FcDriver::fork_standby_child` delegates to
+`FcForkRestorer::restore_fork`, with both refusal tests
+(`fork_standby_child_refuses_an_unmaterialized_child_dir`,
+`fork_standby_child_refuses_a_clone_without_saved_memory`) in the tree. The
+VMGenID handshake question this step poses was answered in Task 4 Step 6: the
+delivery is the runner's, not the driver override's.
 
 ---
 
@@ -899,13 +906,13 @@ Everything above is hermetic. This is the acceptance gate: the chain must run on
 - Consumes: Tasks 1-6.
 - Produces: recorded evidence (commands + verbatim output) plus measured latencies.
 
-- [ ] **Step 1: Get the branch onto the box**
+- [x] **Step 1: Get the branch onto the box**
 
 Host: `ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i ~/.ssh/hetzner-rvproxy root@88.99.197.234`
 
 Use a **fresh** checkout dir under `/root`. Do not touch `/root/mvm`, `/root/mvm-plan265`, or any `/root/mvm-plan255-warm-pool-*` — those belong to other sessions. Confirm `/dev/kvm` exists before building.
 
-- [ ] **Step 2: Build in release**
+- [x] **Step 2: Build in release**
 
 ```bash
 cargo build --release --bin mvmctl
@@ -924,6 +931,10 @@ Populate a pool of one, then launch a workload that claims it. Record verbatim:
 4. a claim mints a **fresh** VM name distinct from the parent's, and the child comes up **without a kernel boot** — the console log must show no fresh boot sequence, proving a restore rather than a cold boot;
 5. `mvmctl trust audit verify` exits zero and the chain carries the claim's `plan.admitted` / `plan.launched` entries.
 
+**Ran; item 1 failed, so 2–5 were never reached.** The parent kernel-panicked
+before its agent started (BUG-1 below), so no capture, no checkpoint, and no
+claim. The run and its verbatim output are recorded in the validation note.
+
 - [ ] **Step 4: Measure**
 
 Record, in release, with several repetitions (report median and spread, not a single sample):
@@ -938,6 +949,12 @@ compilation. Expect a warm claim to land at roughly that plus the claim's own
 verify/clone/admit work, and do **not** treat missing the ≤30 ms SLO as a defect
 of this slice — closing that gap is Plan 265 WS2's.
 
+**Partially done.** The cold baseline was measured in release, 7 reps: median
+2096 ms, range 2079–2253 ms. The warm claim and the spawn/load split are not
+measurable until a parent can be captured, so no warm number is recorded and
+none is invented. Also measured: turning the pool on today costs ~2.6 s median
+per run for nothing.
+
 - [ ] **Step 5: Prove the fail-closed paths on the live host**
 
 Confirm each refusal actually refuses — do not infer from code:
@@ -947,16 +964,22 @@ Confirm each refusal actually refuses — do not infer from code:
 - a failed claim leaves no orphaned child dir under `~/.mvm/vms/`;
 - confirm the restored child's device model carries no network interface (the guard inside `guarded_load_resume` is the enforcement; verify it is exercised rather than assumed).
 
-- [ ] **Step 6: Write the validation note**
+**One of these was proven live**: a handle with an absent `parent_checkpoint`
+refuses, evicts the spent standby, cold-boots, and leaves no orphaned child dir.
+The rest need a real captured checkpoint, which BUG-1 prevents.
+
+- [x] **Step 6: Write the validation note**
 
 Record exact commands, verbatim output, host details (kernel, Firecracker version, release build), and the measured numbers with their spread. If anything failed, write down what failed rather than only what passed. State explicitly which costs remain (fresh VMM spawn per claim) and that they are Plan 265 WS2's to optimize.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md
 git commit -m "docs: record the live Firecracker warm-claim validation run"
 ```
+
+Landed as `c9f60c617`, with the corrections in `a6d0c924a`.
 
 ---
 
@@ -994,6 +1017,58 @@ plan via `write_plan` but never mints `verb-grant.json`, so no
 connection with `rejecting control connection without a pinned host key`. It
 predates this branch's merge base. Track it separately; expect it to be the next
 blocker once BUG-1 is fixed.
+
+**BLOCKER-3 — a restored child has no host-signer anchor, so it cannot be
+authorized at all.** Found by review of the BUG-1 fix, not by the run, and
+**not** a variant of BUG-2: BUG-2 is a missing sidecar on one code path, this is
+a structural consequence of a shared parent and survives BUG-2's fix. The
+grant cmdline tokens are derived per-VM from `<vm_state_dir>/verb-grant.json`; a
+factory parent holds no plan, so it has no sidecar and boots with no
+`mvm.host_signer_pub=` anchor — correctly, since a parent must hold no workload
+authority. But a child inherits the parent's cmdline out of restored memory
+rather than deriving its own, nothing re-pins an anchor after the restore (the
+production `VsockPostRestoreSignal` hardcodes `grant_envelope: None`), and the
+guest-side `re_pin_verb_grant` verifies a replacement grant against the
+**boot-pinned** anchor — which is absent. So the child refuses the PostRestore
+RPC, `require_fresh_child_identity` refuses the child, and every claim
+cold-boots. Fail-closed, no security hole, but the warm claim is structurally
+unreachable until it is fixed. Suggested shape (recorded, not implemented) in
+the validation note: pin `mvm.host_signer_pub=` on the parent as *host
+identity*, keep withholding `mvm.verb_grant=` / `mvm.require_grant=` as
+*workload authority*, and carry a replacement grant over the PostRestore signal.
+
+**BLOCKER-4 — a claimed child is wired none of the host channels a cold boot
+gets.** Also found by review. `wire_guest_dial_bridges` and
+`spawn_workload_exit_capture` are called only from `FcDriver::boot`, and the
+claim path goes `fork_standby_child` → `FcForkRestorer::restore_fork`, which
+does neither; separately `claim_standby` spawns the child's substitution
+endpoint but never threads its `egress_uds` anywhere and never registers the
+broker, where `start_workload` does both. A claimed child would come up with no
+egress socket, no `host.audit.v1` / `host.secrets.v1`, and no `workload.exit`
+listener (so `machine run` reports UNKNOWN instead of the guest's exit code).
+Fail-closed, but strictly worse than the cold boot it replaces. Not implemented;
+file/line trail in the validation note.
+
+**Fixed on the way past: the compat key never matched.** The spawn recorded
+`image_sha256: Some(sha256(rootfs))` while the claim computed `None`
+unconditionally, and `StandbyHandle::is_compatible` is exact equality — so the
+pool would fill and never drain, with every claim silently cold-booting. The
+live run did not catch it because the hand-seeded fixture carried
+`image_sha256: null`, which is precisely why that fixture was the one selected.
+Both halves now build the key through one function (`compat_for_launch`), keyed
+on the same digest claim-8 admission puts on `plan.image.sha256`.
+
+**Accepted reduction: egress-allowing launches are excluded from the pool.**
+`mvm.vsock_egress=1` is a per-launch cmdline token and a child inherits its
+parent's cmdline out of restored memory, so a deny-all parent would hand an
+egress-allowing launch a guest whose in-guest egress client never starts —
+silently no network. Carrying one launch's policy onto a shared parent instead
+would leak that launch's shape to the next claim, since the policy is not part
+of the compat key. So `warm_eligible_launch` now refuses those launches at both
+ends (claim and replenish) and they cold-boot. That is **most real workloads**:
+the warm pool as it stands serves only the no-egress, no-extra-volume,
+no-virtio-fs-root shape. Serving an egress-allowing launch needs a child that
+can be told its own egress shape after the restore, which is its own slice.
 
 **Measured:** cold boot → agent-ready median 2096 ms (2079–2253, n=7). Warm claim
 not measurable. Enabling the pool today adds ~2.6 s median per run for nothing.
@@ -1067,9 +1142,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Re-run Task 7 on the KVM host. The capability stays `false` until that run is green. Expect BUG-2 to surface next; if it blocks, record it and stop rather than working around a pre-existing bug inside this slice.
 
+Four blockers now gate this step, not one: BUG-2 and BLOCKER-3 each stop a claim
+from completing at all, BLOCKER-4 lets one complete but returns a child missing
+the host channels a cold boot gets, and the deferred failed-stop hole leaves an
+untracked live VM on the refusal path. The ordered gate list — the one to work
+from — is "What must happen before `standby_pool` can flip to `true`" in
+`specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`.
+
 ## Done when
 
-- All seven tasks' boxes are ticked.
+- All eight tasks' boxes are ticked.
 - The full gate set passes: `cargo fmt --all -- --check`, `cargo nextest run --workspace`, `cargo test --workspace --doc`, `cargo clippy --workspace --all-targets -- -D warnings`.
 - The live run on the KVM host is recorded, with measured warm and cold latencies and the fail-closed cases.
 - `specs/plans/255-vsock-first-snapshot-egress-adoption.md` and `specs/SPRINT.md` are updated to reflect this slice landing, in the same change.

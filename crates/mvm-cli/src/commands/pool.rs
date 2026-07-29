@@ -1228,14 +1228,19 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum PoolAction {
-    /// Pre-spawn idle supervisor standbys for the default-microVM launch shape so a later
-    /// `up` is fast. Default count 1.
+    /// Sweep the standby pool toward a target count. Spawns nothing today: a
+    /// warm parent boots the shape of the launch it will serve, and this verb
+    /// warms ahead of any launch, so every spawn is refused for having no
+    /// launch to mirror and only the pool's eviction sweep runs. The pool is
+    /// populated by a run replenishing after itself, not by this verb.
+    /// Default count 1.
     Warm {
         /// How many idle standbys to warm the pool toward (default 1).
         count: Option<u32>,
-        /// Accepted for compatibility; unused today (no current backend
-        /// captures an image-bound saved-standby). Defaults to the cached
-        /// default-microVM rootfs.
+        /// Accepted but ignored: a rootfs path cannot describe a warm parent's
+        /// boot, which also needs the verity sidecar, the runtime overlay
+        /// carrying the guest agent, and the matching kernel cmdline tokens —
+        /// all of which come from a resolved launch config, not from a path.
         #[arg(long)]
         rootfs: Option<String>,
     },
@@ -1364,8 +1369,11 @@ struct PoolStatusEntry {
     kernel_sha256: String,
     vcpus: u8,
     mem_mib: u32,
-    /// Always absent (null) today — no current backend populates an
-    /// image-bound compat key.
+    /// The image half of the compat key: sha256 of the rootfs the parent
+    /// booted, recorded for every standby spawned for a real launch. Absent
+    /// only for a standby recorded without one — which is every standby today,
+    /// since no backend advertises the pool and the launch-less `pool warm`
+    /// path records nothing.
     image_sha256: Option<String>,
 }
 
