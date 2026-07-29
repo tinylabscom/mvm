@@ -5344,6 +5344,13 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("MVM_HOME", scratch.path());
+        // `ensure_builder_vm_image` falls back to seeding from the *default*
+        // cache, which is `$HOME/.mvm/cache` and deliberately ignores MVM_HOME.
+        // Without isolating HOME too, a developer with a real builder image on
+        // disk gets it copied in - cmdline.txt and all - so the refusal under
+        // test never happens and this passes only on a machine that has never
+        // built one. CI is such a machine; a contributor's laptop is not.
+        env.set("HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
@@ -5367,6 +5374,13 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("MVM_HOME", scratch.path());
+        // `ensure_builder_vm_image` falls back to seeding from the *default*
+        // cache, which is `$HOME/.mvm/cache` and deliberately ignores MVM_HOME.
+        // Without isolating HOME too, a developer with a real builder image on
+        // disk gets it copied in - cmdline.txt and all - so the refusal under
+        // test never happens and this passes only on a machine that has never
+        // built one. CI is such a machine; a contributor's laptop is not.
+        env.set("HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
@@ -5400,6 +5414,13 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("MVM_HOME", scratch.path());
+        // `ensure_builder_vm_image` falls back to seeding from the *default*
+        // cache, which is `$HOME/.mvm/cache` and deliberately ignores MVM_HOME.
+        // Without isolating HOME too, a developer with a real builder image on
+        // disk gets it copied in - cmdline.txt and all - so the refusal under
+        // test never happens and this passes only on a machine that has never
+        // built one. CI is such a machine; a contributor's laptop is not.
+        env.set("HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
@@ -5434,6 +5455,13 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("MVM_HOME", scratch.path());
+        // `ensure_builder_vm_image` falls back to seeding from the *default*
+        // cache, which is `$HOME/.mvm/cache` and deliberately ignores MVM_HOME.
+        // Without isolating HOME too, a developer with a real builder image on
+        // disk gets it copied in - cmdline.txt and all - so the refusal under
+        // test never happens and this passes only on a machine that has never
+        // built one. CI is such a machine; a contributor's laptop is not.
+        env.set("HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
@@ -5482,6 +5510,13 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("MVM_HOME", scratch.path());
+        // `ensure_builder_vm_image` falls back to seeding from the *default*
+        // cache, which is `$HOME/.mvm/cache` and deliberately ignores MVM_HOME.
+        // Without isolating HOME too, a developer with a real builder image on
+        // disk gets it copied in - cmdline.txt and all - so the refusal under
+        // test never happens and this passes only on a machine that has never
+        // built one. CI is such a machine; a contributor's laptop is not.
+        env.set("HOME", scratch.path());
 
         let arch = host_arch_tag().to_string();
         let cache_root = scratch.path().join("cache");
