@@ -419,7 +419,7 @@ jobs:
             ./nix/images/runtime-overlay#packages.x86_64-linux.default \
             ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar
 
-      - name: Nix-built guest artifacts fit the 50 MiB footprint
+      - name: Nix-built guest artifacts fit the 50 MB footprint
         run: |
           set -euo pipefail
           nix build --print-build-logs --impure --no-link --print-out-paths \

@@ -231,13 +231,15 @@ Tracked here per the deferred-work convention; each is its own future plan.
   now copies only `modules.dep`. The default tenant also drops its redundant
   dynamic busybox closure. The Mozilla CA bundle is copied into `/etc` without
   retaining its source store path, and a build-backed gate caps the lean registered
-  runtime closure at static BusyBox plus `mvm-setpriv`.
+  runtime closure at static BusyBox plus `mvm-setpriv`. Because the rootfs is
+  immutable, `mkGuest` also removes the generic 16 MiB ext4 growth reserve after
+  the nixpkgs image builder runs.
 - **WS-6:** complete. `xtask perf footprint` measures the Nix-built rootfs,
-  runtime overlay, dm-verity sidecars, and kernel against the 50 MiB
+  runtime overlay, dm-verity sidecars, and kernel against the literal 50 MB
   complete-artifact contract; validates the exact hash-anchored rootfs closure,
   capped at two store paths; and validates/reports measured guest-agent RSS in
-  the same JSON/human ledger. The build-backed ledger measured 50,649,096 bytes
-  of storage with 1,779,704 bytes of headroom.
+  the same JSON/human ledger. The build-backed ledger measures 33,917,960 bytes
+  of storage with 16,082,040 bytes of headroom.
 
 ## Self-review
 
@@ -280,22 +282,28 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
   rootfs, overlay, optional dm-verity sidecars, and optional kernel.
 - [x] Add a CI build-backed gate that runs the ledger against the Nix-built
   default-tenant image, runtime overlay, verity sidecars, and kernel with a
-  50 MiB limit.
+  50 MB limit.
 - [x] Remove the default tenant's redundant dynamic busybox input. The measured
   Nix-built rootfs is 27,330,560 bytes; rootfs + overlay + both verity sidecars
-  total 36,771,840 bytes and pass the 50 MiB ledger gate.
+  total 36,771,840 bytes and pass the 50 MB ledger gate.
 - [x] Copy the Mozilla CA bundle into `/etc` without retaining the `cacert` source
   store path, and build-gate the lean registered runtime closure at two paths.
   The measured Nix-built rootfs is 26,718,208 bytes; rootfs + overlay + both
-  verity sidecars total 36,139,008 bytes (34.46 MiB), leaving 16,289,792 bytes
-  below the 50 MiB limit.
+  verity sidecars total 36,139,008 bytes (34.46 MiB), leaving 13,860,992 bytes
+  below the 50 MB limit.
 - [x] Count the 14,460,936-byte workload kernel in the same ledger and CI gate.
-  The all-in Nix-built guest is 50,599,944 bytes (48.26 MiB), leaving 1,828,856
-  bytes below the 50 MiB limit.
+  The first all-in measurement was 50,599,944 bytes (48.26 MiB), exposing that
+  the artifact was 599,944 bytes over the original literal 50 MB target.
 - [x] Export the exact rootfs closure inventory from the default-tenant image and
   validate it in the unified ledger. The build-backed measurement contains two
   hash-anchored paths: static BusyBox and static `mvm-setpriv`.
 - [x] Add a capability-negotiated guest-agent RSS query, measure the rebuilt
   static agent in a live guest, and enforce the 8 MiB limit in the unified
-  ledger. The Dev-profile peak was 1,372,160 bytes; the build-backed storage
-  ledger remained green at 50,649,096 bytes (48.30 MiB).
+  ledger. The Dev-profile peak was 1,372,160 bytes.
+- [x] Re-minimize the immutable Nix-built ext4 rootfs after nixpkgs adds its
+  generic 16 MiB growth reserve, verify it with `e2fsck`, and tighten the
+  complete-artifact gate from 50 MiB to exactly 50,000,000 bytes. The rootfs
+  falls from 26,718,208 to 10,499,072 bytes; its verity sidecar falls from
+  851,968 to 339,968 bytes. Rootfs + overlay + both verity sidecars +
+  14,460,936-byte kernel total 33,917,960 bytes (32.35 MiB), leaving
+  16,082,040 bytes below the literal 50 MB target.

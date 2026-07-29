@@ -1172,6 +1172,19 @@ fn mk_guest_copies_ca_bundle_without_retaining_cacert_store_path() {
 }
 
 #[test]
+fn mk_guest_removes_the_ext4_growth_reserve() {
+    let path = nix_dir().join("lib/mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("rootfsImageWithGrowthReserve")
+            && content.contains("resize2fs -M \"$out\""),
+        "mkGuest must minimize the immutable ext4 image after nixpkgs adds its generic growth reserve"
+    );
+}
+
+#[test]
 fn nix_flake_caps_the_lean_guest_rootfs_package_count() {
     let path = nix_dir().join("flake.nix");
     let content =
@@ -1220,7 +1233,7 @@ fn ci_counts_the_kernel_in_the_guest_footprint() {
 
     assert!(
         content.contains("--kernel \"$image_path/vmlinux\""),
-        "the 50 MiB CI ledger must include the workload kernel"
+        "the 50 MB CI ledger must include the workload kernel"
     );
 }
 

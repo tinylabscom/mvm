@@ -14,7 +14,7 @@
 //!   Firecracker / ≤ 1s libkrun" line.
 //! - **`footprint`** — sum the Nix-built rootfs, runtime overlay, verity
 //!   sidecars, and optional kernel, assert the supplied guest artifacts stay
-//!   below 50 MiB, and optionally enforce the rootfs Nix closure inventory.
+//!   below 50 MB, and optionally enforce the rootfs Nix closure inventory.
 //!
 //! The thresholds are the per-backend boot budgets; they're pinned
 //! by tests in this module so a drift in the documented budget vs.
@@ -64,7 +64,7 @@ pub const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 /// Maximum complete default guest artifact footprint: rootfs, runtime overlay,
 /// their dm-verity sidecars, and kernel. The workload's own application payload
 /// remains outside this contract.
-pub const GUEST_STORAGE_MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+pub const GUEST_STORAGE_MAX_BYTES: u64 = 50_000_000; // 50 MB
 
 /// Maximum number of registered Nix store paths retained in the default
 /// rootfs: static BusyBox and the static privilege-drop helper.
@@ -379,7 +379,7 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         eprintln!(
-            "ok: guest artifact footprint is {} bytes (under {} bytes / 50 MiB)",
+            "ok: guest artifact footprint is {} bytes (under {} bytes / 50 MB)",
             report.total_bytes, report.limit_bytes
         );
         for entry in &report.entries {
@@ -472,7 +472,7 @@ fn guest_storage_footprint_check(
     let total_bytes = entries.iter().map(|entry| entry.bytes).sum::<u64>();
     if total_bytes > max_bytes {
         bail!(
-            "guest artifact footprint is {} bytes — over the footprint budget of {} bytes (50 MiB)",
+            "guest artifact footprint is {} bytes — over the footprint budget of {} bytes (50 MB)",
             total_bytes,
             max_bytes
         );
@@ -700,8 +700,8 @@ mod tests {
     }
 
     #[test]
-    fn guest_storage_budget_is_50_mib() {
-        assert_eq!(GUEST_STORAGE_MAX_BYTES, 50 * 1024 * 1024);
+    fn guest_storage_budget_is_50_mb() {
+        assert_eq!(GUEST_STORAGE_MAX_BYTES, 50_000_000);
     }
 
     #[test]

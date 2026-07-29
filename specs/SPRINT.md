@@ -72,13 +72,15 @@
 - [x] Lightweight guest WS-5/WS-6 slice: the Nix-built rootfs keeps only the
       kernel module dependency index, the runtime overlay allocation is capped
       at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars + kernel
-      against the 50 MiB complete-artifact contract. The default tenant now
-      omits its redundant dynamic busybox input and copies the CA bundle without
-      retaining the source `cacert` store path. A build-backed gate caps the lean
-      registered runtime closure at two paths, and the same footprint ledger now
-      reports those exact hash-anchored paths. The measured rootfs is 26,718,208
-      bytes; storage with verity is 36,139,008 bytes (34.46 MiB), and the all-in
-      footprint with the 14,460,936-byte kernel is 50,599,944 bytes (48.26 MiB).
+      against the literal 50 MB complete-artifact contract. The default tenant
+      now omits its redundant dynamic busybox input and copies the CA bundle
+      without retaining the source `cacert` store path. A build-backed gate caps
+      the lean registered runtime closure at two paths, and the same footprint
+      ledger now reports those exact hash-anchored paths. `mkGuest` re-minimizes
+      the immutable ext4 after nixpkgs adds its generic 16 MiB growth reserve.
+      The measured rootfs is 10,499,072 bytes, and the all-in footprint with
+      overlay, both verity sidecars, and the 14,460,936-byte kernel is 33,917,960
+      bytes (32.35 MiB), leaving 16,082,040 bytes of headroom.
 - [x] Persistent builder completion reliability: the egress helper writes stderr
       to its VM-scoped log instead of retaining the caller's pipe, and dispatch
       completion follows the authoritative child exit after draining available
@@ -425,6 +427,8 @@ Then unify + retire the old paths:
   1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The
   capability-negotiated `ResourceUsage` RPC uses the existing `/proc` sampler,
   and `xtask perf footprint --guest-rss-bytes` enforces and reports the limit.
+- [x] Complete sealed guest ≤ **50 MB**: the Nix-built rootfs, static runtime
+  overlay, both dm-verity sidecars, and workload kernel total 33,917,960 bytes.
 - [ ] Host daemon ≈ **64 MB**: minimal runtime, evaluate `mimalloc`, strip deps.
 - [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
 - [ ] Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "abort"` for bins.

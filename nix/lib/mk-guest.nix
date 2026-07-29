@@ -1361,7 +1361,7 @@ let
   # (`${nixpkgs}/...`) rather than the angle-bracket form (`<nixpkgs/...>`)
   # — the latter trips flake pure evaluation ("cannot look up
   # '<nixpkgs/...>' in pure evaluation mode").
-  rootfsImage = pkgs.callPackage "${nixpkgs}/nixos/lib/make-ext4-fs.nix" {
+  rootfsImageWithGrowthReserve = pkgs.callPackage "${nixpkgs}/nixos/lib/make-ext4-fs.nix" {
     storePaths = [ rootfsTree ];
     volumeLabel = "mvm-${name}";
     populateImageCommands = ''
@@ -1375,6 +1375,22 @@ let
       rm -f ./files/nix-path-registration
     '';
   };
+
+  # The generic image builder expands its minimum-sized filesystem by 16 MiB
+  # so mutable images have room to grow before their first boot. mkGuest mounts
+  # its rootfs read-only and puts mutable directories on tmpfs, so that reserve
+  # can never be used.
+  rootfsImage = pkgs.runCommand "mvm-rootfs-${name}.ext4"
+    {
+      nativeBuildInputs = [ pkgs.e2fsprogs ];
+    }
+    ''
+      cp --reflink=auto ${rootfsImageWithGrowthReserve} "$out"
+      chmod u+w "$out"
+      resize2fs -M "$out"
+      e2fsck -fn "$out"
+      chmod 0444 "$out"
+    '';
 
   mvmMeta = {
     inherit name hypervisor;
