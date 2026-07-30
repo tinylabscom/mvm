@@ -305,6 +305,17 @@ fn error_output_contains(world: &mut CliWorld, needle: String) {
     );
 }
 
+#[then(expr = "the error output does not contain {string}")]
+fn error_output_does_not_contain(world: &mut CliWorld, unexpected: String) {
+    let output = world.last_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains(unexpected.as_str()),
+        "expected stderr not to contain {unexpected:?}; stderr:\n{stderr}\nstdout:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+}
+
 #[then(expr = "the help output contains {string}")]
 fn help_contains(world: &mut CliWorld, expected: String) {
     let output = world.last_output();

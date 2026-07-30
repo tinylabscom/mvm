@@ -42,6 +42,7 @@ impl GuestRequest {
     /// `Verb` in lockstep with the wire enum.
     pub fn verb(&self) -> Verb {
         match self {
+            GuestRequest::ActivateEnvironment { .. } => Verb::ActivateEnvironment,
             GuestRequest::ProtocolHello { .. } => Verb::ProtocolHello,
             GuestRequest::WorkerStatus => Verb::WorkerStatus,
             GuestRequest::SleepPrep { .. } => Verb::SleepPrep,
@@ -95,14 +96,15 @@ impl GuestRequest {
     /// `GuestRequest` variant fails to compile until it is classified.
     pub fn class(&self) -> RequestClass {
         match self {
-            // ProdSafe: compatibility negotiation + lifecycle + status + entrypoint
-            // + sleep/wake + mount-volume + idle-timeout. Volume
+            // ProdSafe: initramfs activation + compatibility negotiation + lifecycle
+            // + status + entrypoint + sleep/wake + mount-volume + idle-timeout. Volume
             // mounts are additionally constrained by
             // `MountPathPolicy` inside the handler — the gate just
             // lets the verb reach it. `ProtocolHello` remains prod-safe for
             // compatibility. The authenticated session handshake already
             // runs before dispatch on production control connections.
-            GuestRequest::ProtocolHello { .. }
+            GuestRequest::ActivateEnvironment { .. }
+            | GuestRequest::ProtocolHello { .. }
             | GuestRequest::WorkerStatus
             | GuestRequest::SleepPrep { .. }
             | GuestRequest::Wake
@@ -175,6 +177,7 @@ impl GuestRequest {
     /// with `class()`.
     pub fn prod_safe_verb_names() -> &'static [&'static str] {
         &[
+            "activate-environment",
             "protocol-hello",
             "ping",
             "readiness-status",
@@ -609,5 +612,34 @@ mod tests {
         let req = GuestRequest::Ping;
         assert_eq!(req.verb(), Verb::Ping);
         assert_eq!(req.verb().name(), req.verb_name());
+    }
+
+    #[test]
+    fn activate_environment_is_prod_safe_and_control_plane() {
+        use crate::vsock::{ActivateEnvironment, RootfsConfig, RuntimeOverlayConfig, VolumeConfig};
+        let req = GuestRequest::ActivateEnvironment(ActivateEnvironment {
+            rootfs: RootfsConfig {
+                data_dev: "/dev/vda".to_string(),
+                hash_dev: Some("/dev/vdb".to_string()),
+                roothash: Some("a".repeat(64)),
+                virtiofs_tag: None,
+            },
+            runtime: Some(RuntimeOverlayConfig {
+                data_dev: "/dev/vdc".to_string(),
+                hash_dev: "/dev/vdd".to_string(),
+                roothash: "b".repeat(64),
+            }),
+            volumes: vec![VolumeConfig {
+                tag: "vol".to_string(),
+                mountpoint: "/mnt/vol".to_string(),
+                read_only: false,
+            }],
+            verb_grant_envelope: None,
+        });
+        assert_eq!(req.verb(), Verb::ActivateEnvironment);
+        assert_eq!(req.kind_name(), "activate-environment");
+        assert_eq!(req.class(), RequestClass::ProdSafe);
+        assert!(req.allowed_in(mvm_core::security::AgentProfile::SealedProd));
+        assert_eq!(req.verb().traffic_plane(), TrafficPlane::Control);
     }
 }

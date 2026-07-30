@@ -6,15 +6,21 @@ Feature: Verified boot rejects a tampered rootfs
   kernel format it can actually boot, without changing the shared verity
   device contract.
 
+  With the universal initramfs, roothashes and block-device slots travel over
+  vsock from the host to PID 1, so the sealed workload cmdline must no longer
+  carry the legacy `mvm.roothash`, `mvm.data`, `mvm.hash`, or runtime-overlay
+  equivalents.
+
   Scenario: A sealed libkrun workload uses its virtio console
     When I assemble a sealed workload cmdline for "libkrun"
     Then the sealed workload cmdline contains "console=hvc0"
-    And the sealed workload cmdline contains "mvm.roothash="
-    And the sealed workload cmdline contains "mvm.data=/dev/vda"
-    And the sealed workload cmdline contains "mvm.hash=/dev/vdb"
-    And the sealed workload cmdline contains "mvm.runtime_roothash="
-    And the sealed workload cmdline contains "mvm.runtime_data=/dev/vdc"
-    And the sealed workload cmdline contains "mvm.runtime_hash=/dev/vdd"
+    And the sealed workload cmdline contains "mvm.runtime_source_policy=required_overlay"
+    And the sealed workload cmdline omits "mvm.roothash="
+    And the sealed workload cmdline omits "mvm.data=/dev/vda"
+    And the sealed workload cmdline omits "mvm.hash=/dev/vdb"
+    And the sealed workload cmdline omits "mvm.runtime_roothash="
+    And the sealed workload cmdline omits "mvm.runtime_data=/dev/vdc"
+    And the sealed workload cmdline omits "mvm.runtime_hash=/dev/vdd"
     But the sealed workload cmdline omits "console=ttyAMA0"
     And the sealed workload cmdline omits "earlycon=pl011"
 
@@ -22,7 +28,8 @@ Feature: Verified boot rejects a tampered rootfs
     When I assemble a sealed workload cmdline for "hvf"
     Then the sealed workload cmdline contains "console=ttyAMA0"
     And the sealed workload cmdline contains "earlycon=pl011"
-    And the sealed workload cmdline contains "mvm.roothash="
+    And the sealed workload cmdline contains "mvm.runtime_source_policy=required_overlay"
+    And the sealed workload cmdline omits "mvm.roothash="
     But the sealed workload cmdline omits "console=hvc0"
 
   Scenario: Libkrun maps the workload kernel to its host-loadable format

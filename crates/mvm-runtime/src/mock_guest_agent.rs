@@ -315,6 +315,12 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
             &requested_capabilities,
         ),
 
+        // ── Universal initramfs activation ─────────────────────────
+        // The mock accepts the post-boot ActivateEnvironment handshake so
+        // tests that boot with an initramfs + verity rootfs can reach
+        // operational RPCs without a real guest mount stack.
+        GuestRequest::ActivateEnvironment(_) => GuestResponse::ActivateEnvironmentAck,
+
         // ── Integration status ──────────────────────────────────────
         // Mock VMs have no integrations to report. Returning an empty
         // list lets the host's services-ready poll transition straight

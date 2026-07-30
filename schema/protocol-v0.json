@@ -16,6 +16,56 @@
     }
   },
   "definitions": {
+    "ActivateEnvironment": {
+      "description": "Host-to-guest activation message.  This is the only control verb accepted before privilege drop in PID-1 initramfs mode.",
+      "type": "object",
+      "required": [
+        "rootfs"
+      ],
+      "properties": {
+        "rootfs": {
+          "description": "Rootfs configuration.  The data device (or virtio-fs tag) becomes the guest's `/` after activation.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RootfsConfig"
+            }
+          ]
+        },
+        "runtime": {
+          "description": "Runtime-overlay dm-verity configuration, when the boot carries an overlay.  Mounted read-only at `/mvm/runtime` inside the rootfs before pivot.  `None` for a rootfs-only boot.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RuntimeOverlayConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verb_grant_envelope": {
+          "description": "Optional verb-grant envelope to pin before serving operational RPCs.  When present, the activation message itself must be signed by the host-signer trust anchor.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/VerbGrantEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "volumes": {
+          "description": "Optional virtio-fs volumes mounted after the rootfs and runtime overlay are in place.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/VolumeConfig"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "AgentProfile": {
       "description": "Profile baked into an mvm guest image. Determines the set of vsock verbs the guest agent's dispatcher will accept; dev-only verbs (`Exec`, `ConsoleOpen`, `ProcStart`, `RunCode`, filesystem RPC, port forwarding) are rejected pre-handler when the image declares `SealedProd`.\n\n**Source of truth.** The profile is declared by the image config — `/etc/mvm/security.json` on a sealed-prod image lives on a dm-verity rootfs, so the value cannot be widened at runtime: any modification breaks the verity hash and the kernel panics in `mvm-verity-init` before userspace. The loader treats absence of the policy file as an unprovisioned dev image (`SecurityPolicy::dev_defaults`).\n\n**Builder uses a different protocol.** `mvm-builder-agent`'s wire type is `HostVmRequest`, not `GuestRequest`; the `Builder` profile is reserved for any future `GuestRequest` variant that only makes sense during a build. No current variant is `BuilderOnly`, so the value is wire-stable but unused for the tenant agent today.",
       "oneOf": [
@@ -898,6 +948,19 @@
     "GuestRequest": {
       "description": "Request sent from host to guest vsock agent.\n\n`#[serde(deny_unknown_fields)]` is load-bearing: the guest agent must refuse frames whose JSON contains fields the deserializer doesn't recognise, on the principle that silent acceptance of unknown fields is a deserialization-bug gadget waiting to happen. Today every variant is a struct or unit, so the attribute applies cleanly.",
       "oneOf": [
+        {
+          "description": "Activation message for PID-1 initramfs boot.  Carries the dm-verity rootfs/runtime-overlay parameters and any custom volumes.  This is the only operational verb accepted before privilege drop in initramfs mode; every other request returns `NotActivated` until the agent has mounted the environment.",
+          "type": "object",
+          "required": [
+            "ActivateEnvironment"
+          ],
+          "properties": {
+            "ActivateEnvironment": {
+              "$ref": "#/definitions/ActivateEnvironment"
+            }
+          },
+          "additionalProperties": false
+        },
         {
           "description": "Negotiate guest-agent protocol compatibility and capabilities before dispatching capability-dependent requests.",
           "type": "object",
@@ -2085,6 +2148,42 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "description": "Activation acknowledgement for PID-1 initramfs boot.  Sent after the agent has successfully mounted the rootfs, runtime overlay, and any custom volumes.",
+          "type": "string",
+          "enum": [
+            "ActivateEnvironmentAck"
+          ]
+        },
+        {
+          "description": "Activation failed.  The agent is still in the `Awaiting` boot state and will not serve operational RPCs until a valid activation arrives.",
+          "type": "object",
+          "required": [
+            "ActivateEnvironmentError"
+          ],
+          "properties": {
+            "ActivateEnvironmentError": {
+              "type": "object",
+              "required": [
+                "message"
+              ],
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "The agent is running in PID-1 initramfs mode and has not yet received a valid `ActivateEnvironment`.  Only `ActivateEnvironment` is accepted until then.",
+          "type": "string",
+          "enum": [
+            "NotActivated"
+          ]
         },
         {
           "description": "Worker status with optional last-busy timestamp.",
@@ -3420,6 +3519,44 @@
       },
       "additionalProperties": false
     },
+    "RootfsConfig": {
+      "description": "Root device the guest mounts as `/`.  Three shapes, selected by which optional fields are set:\n\n- **dm-verity block** (`roothash` + `hash_dev`): create the `root` dm-verity target and mount it read-only. - **plain block** (neither): mount `data_dev` read-only without verification (unverified dev-tier boot). - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only as the root — the block-less dev-tier boot.",
+      "type": "object",
+      "required": [
+        "data_dev"
+      ],
+      "properties": {
+        "data_dev": {
+          "description": "Data device path, e.g. `/dev/vda`.  Empty for a virtio-fs root.",
+          "type": "string"
+        },
+        "hash_dev": {
+          "description": "Hash-tree device path, e.g. `/dev/vdb`.  Present only for a dm-verity rootfs.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roothash": {
+          "description": "64-character lowercase hex dm-verity root hash.  Absent for an unverified plain-block root.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "virtiofs_tag": {
+          "description": "virtio-fs tag to mount as the root instead of a block device.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "RunEntrypointError": {
       "description": "Kind of agent-side error reported via `EntrypointEvent::Error`.\n\nThe variants are deliberately coarse — the host correlates by `kind` and surfaces the human-readable `message` to the operator. Adding a variant is a wire change; renaming or removing is a breaking change.",
       "oneOf": [
@@ -3480,6 +3617,30 @@
           ]
         }
       ]
+    },
+    "RuntimeOverlayConfig": {
+      "description": "dm-verity runtime-overlay target.  The runtime overlay is always verity-sealed, so its fields stay required when it is present.",
+      "type": "object",
+      "required": [
+        "data_dev",
+        "hash_dev",
+        "roothash"
+      ],
+      "properties": {
+        "data_dev": {
+          "description": "Data device path, e.g. `/dev/vdc`.",
+          "type": "string"
+        },
+        "hash_dev": {
+          "description": "Hash-tree device path, e.g. `/dev/vdd`.",
+          "type": "string"
+        },
+        "roothash": {
+          "description": "64-character lowercase hex dm-verity root hash.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     },
     "StageFile": {
       "description": "A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.",
@@ -3580,6 +3741,30 @@
     "VerbId": {
       "description": "A guest-agent control-verb identifier: the stable `kind_name()` token (non-empty kebab-case). Validated at construction so an `agent_verbs` grant can never carry an unparseable verb.",
       "type": "string"
+    },
+    "VolumeConfig": {
+      "description": "virtio-fs volume to mount after rootfs activation.",
+      "type": "object",
+      "required": [
+        "mountpoint",
+        "tag"
+      ],
+      "properties": {
+        "mountpoint": {
+          "description": "Absolute guest mountpoint.  Must pass `MountPathPolicy`.",
+          "type": "string"
+        },
+        "read_only": {
+          "description": "Mount read-only when `true`.",
+          "default": false,
+          "type": "boolean"
+        },
+        "tag": {
+          "description": "virtio-fs tag advertised by the host for this share.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
     },
     "VolumeMountErrorKind": {
       "description": "Class of error returned in `VolumeMountResult::Error`. Closed enum so the host can branch on `kind` without parsing message text. (Renamed from `ShareErrorKind`.)",

@@ -1,0 +1,405 @@
+//! Host-side activation for the universal initramfs boot path.
+//!
+//! After the VMM boots, the guest PID-1 agent waits in a fail-closed state
+//! that only accepts [`mvm_agentd::vsock::ActivateEnvironment`]. This module
+//! builds that message from the admitted [`VmStartConfig`] and the fixed
+//! virtio-blk slot layout produced by [`crate::workload_runner::spec_map::workload_blocks`],
+//! then sends it over the agent vsock channel.
+
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+use mvm_agentd::vsock::{
+    ActivateEnvironment, GuestRequest, GuestResponse, RootfsConfig, RuntimeOverlayConfig,
+    VolumeConfig,
+};
+use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig, VmVolumeKind};
+
+use crate::driver::traits::RunningVm;
+
+/// Fixed guest device nodes matching [`crate::workload_runner::spec_map::workload_blocks`].
+const ROOTFS_DATA_DEV: &str = "/dev/vda";
+const ROOTFS_HASH_DEV: &str = "/dev/vdb";
+const RUNTIME_DATA_DEV: &str = "/dev/vdc";
+const RUNTIME_HASH_DEV: &str = "/dev/vdd";
+
+/// virtio-fs tag the backend assigns the root share on a block-less
+/// virtiofs-root dev boot.  Mirrors the driver's `root=<tag>` cmdline knob.
+const VIRTIOFS_ROOT_TAG: &str = "mvmroot";
+
+/// Whether this boot attached the universal initramfs (as opposed to a
+/// legacy per-rootfs verity initramfs or no initramfs at all).  The CLI
+/// resolves the artifact out of the shared initramfs cache, so the path
+/// itself is the discriminant — a cold-cache legacy boot keeps its
+/// `rootfs.initrd` sibling and is never sent `ActivateEnvironment`.
+pub fn booted_with_universal_initramfs(config: &VmStartConfig) -> bool {
+    let Some(initrd) = &config.initrd_path else {
+        return false;
+    };
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+    std::path::Path::new(initrd).starts_with(&cache_root)
+}
+
+/// Activate a workload that booted with the universal initramfs.
+///
+/// Sends [`ActivateEnvironment`] over the agent vsock port and waits for an
+/// ACK. If the guest replies with an error or an unexpected response, the
+/// boot fails closed.
+pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<()> {
+    let env = build_activation_environment(config)?;
+    let mut stream = vm
+        .vsock_connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+        .context("connect to guest agent for activation")?;
+    let response = mvm_agentd::vsock::send_request_stream(
+        &mut stream,
+        &GuestRequest::ActivateEnvironment(env),
+    )
+    .context("send ActivateEnvironment to guest")?;
+    match response {
+        GuestResponse::ActivateEnvironmentAck => Ok(()),
+        GuestResponse::ActivateEnvironmentError { message } => {
+            bail!("guest activation failed: {message}")
+        }
+        other => bail!("unexpected response to ActivateEnvironment: {other:?}"),
+    }
+}
+
+/// Build an [`ActivateEnvironment`] from the admitted launch config.
+///
+/// The rootfs is verity-sealed when the launch carries a roothash (config or
+/// sidecar), plain-block otherwise; a virtiofs-root launch mounts the root
+/// share by tag instead.  The runtime overlay rides along only when the full
+/// overlay triple is present — it is always verity-sealed.  Custom volumes
+/// are translated to virtio-fs tags when the config carries directory shares.
+fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnvironment> {
+    // Verity is keyed off the hash device: `verity_path` set means the
+    // backend attached the Merkle sidecar at the hash slot, so the root mounts
+    // as dm-verity and must carry a roothash. No sidecar device means a plain
+    // unverified mount, whatever the config's roothash field says.
+    let rootfs = if config.virtiofs_root.is_some() {
+        RootfsConfig {
+            data_dev: String::new(),
+            hash_dev: None,
+            roothash: None,
+            virtiofs_tag: Some(VIRTIOFS_ROOT_TAG.to_string()),
+        }
+    } else if config.verity_path.is_some() {
+        let roothash = resolve_rootfs_roothash(config)
+            .context("verity rootfs attached but no roothash in config or sidecar")?;
+        RootfsConfig {
+            data_dev: ROOTFS_DATA_DEV.to_string(),
+            hash_dev: Some(ROOTFS_HASH_DEV.to_string()),
+            roothash: Some(roothash),
+            virtiofs_tag: None,
+        }
+    } else {
+        RootfsConfig {
+            data_dev: ROOTFS_DATA_DEV.to_string(),
+            hash_dev: None,
+            roothash: None,
+            virtiofs_tag: None,
+        }
+    };
+
+    // The overlay rides only as a complete triple — the same all-three-or-none
+    // rule the block layout applies, so the guest never mounts a device the
+    // backend did not attach.
+    let runtime = match (
+        &config.runtime_overlay_path,
+        &config.runtime_overlay_verity_path,
+        &config.runtime_overlay_roothash,
+    ) {
+        (Some(_), Some(_), Some(roothash)) => Some(RuntimeOverlayConfig {
+            data_dev: RUNTIME_DATA_DEV.to_string(),
+            hash_dev: RUNTIME_HASH_DEV.to_string(),
+            roothash: roothash.clone(),
+        }),
+        _ => None,
+    };
+
+    let volumes = build_volume_configs(config);
+    let verb_grant_envelope = read_verb_grant_envelope(&config.name)?;
+
+    Ok(ActivateEnvironment {
+        rootfs,
+        runtime,
+        volumes,
+        verb_grant_envelope,
+    })
+}
+
+/// Resolve the rootfs roothash from the config or the host sidecar file, if
+/// either carries a well-formed one.  `None` means an unverified plain-block
+/// root — the guest mounts the data device without dm-verity.
+fn resolve_rootfs_roothash(config: &VmStartConfig) -> Option<String> {
+    if let Some(hash) = &config.roothash
+        && hash.len() == 64
+        && hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
+        return Some(hash.clone());
+    }
+    probe_roothash_sidecar(&config.rootfs_path)
+}
+
+/// Read `<parent>/rootfs.roothash` next to the rootfs image, if it exists and
+/// contains a well-formed 64-char lowercase hex hash.
+fn probe_roothash_sidecar(rootfs_path: &str) -> Option<String> {
+    let parent = Path::new(rootfs_path).parent()?;
+    let raw = std::fs::read_to_string(parent.join("rootfs.roothash")).ok()?;
+    let hash = raw.trim();
+    (hash.len() == 64
+        && hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+    .then(|| hash.to_string())
+}
+
+/// Translate configured volumes into virtio-fs volume configs.
+///
+/// `Disk` volumes are attached as virtio-blk devices by the runner and are not
+/// part of the activation message. `DirShare` volumes become virtio-fs tags
+/// with the index-based tag name used by the existing cmdline encoder.
+fn build_volume_configs(config: &VmStartConfig) -> Vec<VolumeConfig> {
+    config
+        .volumes
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| matches!(v.kind, VmVolumeKind::DirShare))
+        .map(|(idx, v)| VolumeConfig {
+            tag: format!("uvol{idx}"),
+            mountpoint: v.guest.clone(),
+            read_only: v.read_only,
+        })
+        .collect()
+}
+
+/// Load the signed verb-grant envelope written by the host signer, if present.
+fn read_verb_grant_envelope(vm_name: &str) -> Result<Option<VerbGrantEnvelope>> {
+    let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read verb-grant envelope from {}", path.display()))?;
+    let envelope = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse verb-grant envelope from {}", path.display()))?;
+    Ok(Some(envelope))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::util::test_env::TestEnv;
+
+    const VALID_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn test_env() -> (TestEnv, tempfile::TempDir) {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", dir.path());
+        (env, dir)
+    }
+
+    fn base_config() -> VmStartConfig {
+        VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_env_uses_config_roothash_and_sidecar_overlay() {
+        let (_env, _dir) = test_env();
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            rootfs_path: "/img/rootfs.ext4".into(),
+            verity_path: Some("/img/rootfs.verity".into()),
+            roothash: Some(VALID_HASH.into()),
+            runtime_overlay_path: Some("/img/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
+            runtime_overlay_roothash: Some(VALID_HASH.into()),
+            ..Default::default()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.rootfs.data_dev, "/dev/vda");
+        assert_eq!(env.rootfs.hash_dev.as_deref(), Some("/dev/vdb"));
+        assert_eq!(env.rootfs.roothash.as_deref(), Some(VALID_HASH));
+        let runtime = env.runtime.as_ref().expect("overlay triple ⇒ runtime");
+        assert_eq!(runtime.data_dev, "/dev/vdc");
+        assert_eq!(runtime.hash_dev, "/dev/vdd");
+        assert_eq!(runtime.roothash, VALID_HASH);
+        assert!(env.volumes.is_empty());
+        assert!(env.verb_grant_envelope.is_none());
+    }
+
+    #[test]
+    fn build_env_reads_roothash_sidecar_when_config_empty() {
+        let (_env, dir) = test_env();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"data").unwrap();
+        std::fs::write(
+            dir.path().join("rootfs.roothash"),
+            format!("{VALID_HASH}\n"),
+        )
+        .unwrap();
+
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            rootfs_path: rootfs.to_string_lossy().into_owned(),
+            verity_path: Some(
+                dir.path()
+                    .join("rootfs.verity")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ..Default::default()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.rootfs.roothash.as_deref(), Some(VALID_HASH));
+    }
+
+    #[test]
+    fn build_env_without_roothash_is_an_unverified_plain_block_root() {
+        let (_env, _dir) = test_env();
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            runtime_overlay_roothash: Some(VALID_HASH.into()),
+            ..base_config()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.rootfs.data_dev, "/dev/vda");
+        assert_eq!(env.rootfs.roothash, None);
+        assert_eq!(env.rootfs.hash_dev, None);
+        assert_eq!(env.rootfs.virtiofs_tag, None);
+        // An overlay roothash without its image/verity siblings is not a
+        // complete triple, so no overlay is mounted.
+        assert!(env.runtime.is_none());
+    }
+
+    #[test]
+    fn build_env_for_virtiofs_root_mounts_the_root_tag() {
+        let (_env, _dir) = test_env();
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            rootfs_path: String::new(),
+            virtiofs_root: Some("/host/unpacked-oci".into()),
+            ..Default::default()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.rootfs.virtiofs_tag.as_deref(), Some("mvmroot"));
+        assert_eq!(env.rootfs.roothash, None);
+        assert!(env.runtime.is_none());
+    }
+
+    #[test]
+    fn universal_initramfs_gate_keys_on_the_cache_path() {
+        let (_env, dir) = test_env();
+        let cache_root =
+            std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+        let universal = cache_root
+            .join("0.18.0")
+            .join("aarch64")
+            .join("initramfs.cpio.gz");
+        let legacy = dir.path().join("rootfs.initrd");
+
+        let mut config = base_config();
+        assert!(!booted_with_universal_initramfs(&config));
+
+        config.initrd_path = Some(legacy.display().to_string());
+        assert!(!booted_with_universal_initramfs(&config));
+
+        config.initrd_path = Some(universal.display().to_string());
+        assert!(booted_with_universal_initramfs(&config));
+    }
+
+    #[test]
+    fn build_env_maps_dir_share_volumes() {
+        let (_env, _dir) = test_env();
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            roothash: Some(VALID_HASH.into()),
+            runtime_overlay_roothash: Some(VALID_HASH.into()),
+            volumes: vec![
+                VmVolumeKind::DirShare.into_volume("/host/share", "/guest/share", false),
+                VmVolumeKind::Disk.into_volume("/host/disk", "/guest/disk", true),
+            ],
+            ..base_config()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.volumes.len(), 1);
+        assert_eq!(env.volumes[0].tag, "uvol0");
+        assert_eq!(env.volumes[0].mountpoint, "/guest/share");
+        assert!(!env.volumes[0].read_only);
+    }
+
+    #[test]
+    fn build_env_loads_verb_grant_envelope() {
+        let (_env, _dir) = test_env();
+        let state = mvm_core::config::vm_state_dir("granted-vm");
+        std::fs::create_dir_all(&state).unwrap();
+        let grant = mvm_core::plan::VerbGrant {
+            session_id: "session-1".into(),
+            plan_nonce: mvm_core::plan::Nonce::from_hex("0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            not_after: chrono::Utc::now(),
+            verbs: vec![mvm_core::plan::VerbId::new("ping").unwrap()],
+            sig: vec![0u8; 64],
+        };
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: VALID_HASH.into(),
+            plan_nonce_hex: VALID_HASH.into(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant,
+        };
+        std::fs::write(
+            state.join("verb-grant.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        let config = VmStartConfig {
+            name: "granted-vm".into(),
+            roothash: Some(VALID_HASH.into()),
+            runtime_overlay_roothash: Some(VALID_HASH.into()),
+            ..base_config()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert!(env.verb_grant_envelope.is_some());
+    }
+
+    trait VolumeExt {
+        fn into_volume(
+            self,
+            host: &str,
+            guest: &str,
+            read_only: bool,
+        ) -> mvm_core::protocol::vm_backend::VmVolume;
+    }
+
+    impl VolumeExt for VmVolumeKind {
+        fn into_volume(
+            self,
+            host: &str,
+            guest: &str,
+            read_only: bool,
+        ) -> mvm_core::protocol::vm_backend::VmVolume {
+            mvm_core::protocol::vm_backend::VmVolume {
+                host: host.into(),
+                guest: guest.into(),
+                size: String::new(),
+                read_only,
+                kind: self,
+                encrypted: false,
+            }
+        }
+    }
+}

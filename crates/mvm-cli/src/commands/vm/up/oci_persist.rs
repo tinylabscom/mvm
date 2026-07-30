@@ -24,7 +24,10 @@ use super::admission::{
 };
 use super::kernel::persistent_oci_uses_prod_kernel;
 use super::policy::shares_from_volume_cfg;
-use super::runtime_source::{attach_runtime_overlay_if_cached, emit_runtime_source_status};
+use super::runtime_source::{
+    attach_runtime_overlay_if_cached, attach_universal_initramfs_if_cached,
+    emit_runtime_source_status,
+};
 
 /// Whether the admitted plan must be persisted to `<state_dir>/plan.json`
 /// *before* `backend.start()`. Every backend whose `start()` reads that file
@@ -248,6 +251,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     // inert there.
     start_config.dev_console = true;
     attach_runtime_overlay_if_cached(&mut start_config, backend_name)?;
+    attach_universal_initramfs_if_cached(&mut start_config)?;
     emit_runtime_source_status(&start_config);
     if let Some(ctx) = admission.as_ref() {
         thread_tenant_id(&mut start_config, &ctx.admitted);

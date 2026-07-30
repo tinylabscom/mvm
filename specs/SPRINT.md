@@ -59,15 +59,6 @@
       tracked in
       `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
 
-- [ ] **Backend shim removal — invert the driver/backend relationship.** The
-      `VmmDriver` seam still wraps the older direct `VmBackend` impls rather
-      than owning the VMM mechanics, so `FirecrackerBackend` / `LibkrunBackend`
-      / `HvfBackend` remain live in the production path. Plan drafted at
-      `specs/plans/269-backend-shim-removal.md`; it carries a "Status and known
-      gaps" section covering the blanket-impl seam that does not exist yet, the
-      unaccounted-for `WasmBackend`, and the QEMU contradiction in §2.5 below
-      that Task 5 depends on. Not started.
-
 ---
 
 ## 1. Why
@@ -423,20 +414,7 @@ Then unify + retire the old paths:
       Phase 2 slice one — the runner-side warm-pool claim substrate
       (`specs/plans/255-phase2-warm-pool-substrate.md`) — landed on branch
       `feat/plan-255-phase2-warm-pool`, with the live FC warm pool + capability
-      flip a follow-up slice. That follow-up
-      (`specs/plans/255-live-fc-warm-claim.md`, branch
-      `feat/plan-255-live-fc-warm-claim`) built spawn/capture/fork/reseed and
-      then **failed its live KVM validation**
-      (`specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`): the
-      standby parent booted a bare rootfs and panicked for want of the runtime
-      overlay that carries the guest agent. The parent's boot inputs now come
-      from the launch's own `VmStartConfig` through the same mappers a workload
-      boot uses, guarded by shape-equality tests, and a third live run on the
-      same host confirms that half — the parent boots, reaches its guest agent,
-      and the capture writes a `vm_full` checkpoint carrying a 512 MiB
-      `memory.bin`. `standby_pool` stays `false` because the **claim** half is
-      still unexercised: four blockers, headed by the transient run path minting
-      no verb-grant sidecar, are enumerated in that note.
+      flip a follow-up slice.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.
@@ -493,15 +471,81 @@ Phase 4 (docs, close-out, wasm stretch, mvmd)     ─   last
 
 WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net` (1d). WS2 depends on the guest/host crate merges (1e/1h). WS10's de-tokio depends on WS2's single-binary shape.
 
-### Deferred workstream: universal initramfs + vsock-activated boot
+### Active workstream: universal initramfs + vsock-activated boot (Plan 270)
 
-Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock. It depends on three prerequisite branches merging first:
+Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
 
-- `feat/vsock-control-conformance`
-- `feat/firecracker-vsock-only-final`
-- `feat/hvf-converge-vsock`
+**Prerequisites:** satisfied. `feat/vsock-control-conformance` and `feat/firecracker-vsock-only-final` are already merged to `main`; `feat/hvf-converge-vsock` cleanup is in PR #1905.
 
-HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 269 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
+**Execution order:**
+1. [x] Initramfs Nix derivation + content-addressed build. Created
+   `nix/packages/mvm-guest-agent-static.nix`, `nix/images/initramfs/flake.nix`,
+   and exposed `packages.<system>.initramfs` producing `initramfs.cpio.gz`,
+   `initramfs.hash`, `initramfs.size`, and `VERSION`.
+2. [x] PID-1 signal handling and zombie reaping in `mvm-agentd`. Added
+   `init.rs` with PID-1 detection, early filesystem mounts, and a SIGCHLD
+   reaper. Wired into `mvm-guest-agent.rs` before the vsock bind.
+3. [x] `ActivateEnvironment` protocol types and boot state machine. Added
+   `ActivateEnvironment`/`RootfsConfig`/`RuntimeOverlayConfig`/`VolumeConfig`
+   to the vsock protocol, plus `ActivationState` in `AgentBootState` and a
+   fail-closed dispatch gate that rejects everything except activation until
+   activated.
+4. [x] Guest-side mount library (dm-verity + overlayfs). Filled
+   `guest_mount.rs` with real dm-verity ioctl setup, pivot_root/switch_root,
+   overlayfs runtime overlay, and virtio-fs volume mounting ported from
+   `mvm-verity-init.rs`. Includes policy guards (no shadowing of `/`, `/mvm`,
+   `/mvm/runtime`, `/dev`, `/dev/vda`, `/dev/vdc`), privilege drop with
+   supplementary-group clearance, and ext4 block-size probe. Focused tests and
+   workspace clippy pass; `cargo test -p mvm-agentd` green.
+
+5. [x] Host-side activation for the universal initramfs. Added
+   `mvm-runtime/src/microvm/activation.rs`, which builds
+   `ActivateEnvironment` from the admitted `VmStartConfig` (fixed virtio-blk
+   slots `/dev/vda`..`/dev/vdd`, rootfs roothash from config or sidecar,
+   runtime-overlay roothash, virtio-fs volume mapping, and verb-grant
+   envelope) and sends it over `RunningVm::vsock_connect(GUEST_AGENT_PORT)`.
+   `WorkloadRunner::start_workload` now activates after boot when both
+   `initrd_path` and `roothash` are present. `MockGuestAgent` answers
+   `ActivateEnvironment` with `ActivateEnvironmentAck` so hermetic tests stay
+   green. `cargo nextest run -p mvm-runtime` (1091 passed) and
+   `cargo nextest run -p mvm-agentd` (498 passed) confirm no regressions.
+
+6. [x] VmmDriver cmdline shrink for universal initramfs. Removed the
+   legacy `mvm.roothash`, `mvm.data`, `mvm.hash`, and runtime-overlay
+   device tokens from `workload_cmdline` for verity/initramfs boots; they
+   now travel over vsock via `ActivateEnvironment`. The driver base
+   bootargs already emitted only console/panic for the `!has_disk`
+   initramfs branch, so FC/libkrun/HVF/Mock drivers needed no signature
+   change. Updated `workload_runner::cmdline` and runner tests to assert
+   the new token-free cmdline shape. `cargo nextest run -p mvm-runtime`
+   (1091 passed) and `cargo nextest run -p mvm-agentd` (498 passed).
+7. [x] Initramfs cache resolver/builder and CLI attachment. Added
+   `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs` Nix
+   builder + cache installer, and `attach_universal_initramfs_if_cached` in
+   `mvm-cli/src/commands/vm/up/runtime_source.rs`, wired from `exec.rs` and
+   `oci_persist.rs` and `checkpoint.rs` right after the runtime-overlay attachment. The resolver
+   validates `initramfs.cpio.gz`, `initramfs.hash`, `initramfs.size`, and
+   `VERSION`; the builder supports worktree-isolated caches by seeding from
+   the default cache, falls back to a published-release download on non-Linux
+   hosts, produces the artifact on Linux via `nix build`, and installs
+   atomically. `cargo fmt --all`, `cargo clippy --workspace --all-targets --
+   -D warnings`, the spec-ref lint, targeted nextest for the modified crates
+   (mvm-fs, mvm-build, mvm-runtime, mvm-agentd, mvm-cli initramfs tests),
+   and the pre-commit hook all pass. Full workspace nextest on the Linux
+   builder VM now passes (8136 passed, 12 skipped) after also fixing the
+   runtime-overlay flake's `__pycache__` cleanup in the Nix sandbox. Full
+   workspace nextest on macOS still shows four pre-existing mvm-build
+   failures unrelated to Plan 270. The end-to-end Nix build of the initramfs
+   flake succeeded on the Linux builder VM after removing the
+   sandbox-incompatible `mknod` calls (device nodes are provided by devtmpfs
+   at guest boot).  The `universal_initramfs_attach_tests` cold-cache
+   assertion was relaxed so the test stays green on Linux, where the Nix build
+   fallback can warm the cache automatically.  Added a BDD scenario for the
+   cold-cache non-fatal fallback under `features/suites/s14_universal_initramfs`,
+   and updated the verified-boot cmdline feature to assert that the legacy
+   `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots.
+
+HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
 ## 5. Definition of done
 

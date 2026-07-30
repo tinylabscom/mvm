@@ -17,6 +17,13 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestRequest {
+    /// Activation message for PID-1 initramfs boot.  Carries the
+    /// dm-verity rootfs/runtime-overlay parameters and any custom
+    /// volumes.  This is the only operational verb accepted before
+    /// privilege drop in initramfs mode; every other request returns
+    /// `NotActivated` until the agent has mounted the environment.
+    ActivateEnvironment(ActivateEnvironment),
+
     /// Negotiate guest-agent protocol compatibility and capabilities
     /// before dispatching capability-dependent requests.
     ProtocolHello {
@@ -437,6 +444,7 @@ impl GuestRequest {
     /// `tests::kind_name_covers_every_variant`.
     pub fn kind_name(&self) -> &'static str {
         match self {
+            Self::ActivateEnvironment { .. } => "activate-environment",
             Self::ProtocolHello { .. } => "protocol-hello",
             Self::WorkerStatus => "worker-status",
             Self::SleepPrep { .. } => "sleep-prep",
@@ -1265,5 +1273,26 @@ mod tests {
             }
             other => panic!("expected ConsoleOpen, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn activate_environment_kind_name_is_kebab_case() {
+        use crate::vsock::{ActivateEnvironment, RootfsConfig, RuntimeOverlayConfig};
+        let req = GuestRequest::ActivateEnvironment(ActivateEnvironment {
+            rootfs: RootfsConfig {
+                data_dev: "/dev/vda".to_string(),
+                hash_dev: Some("/dev/vdb".to_string()),
+                roothash: Some("a".repeat(64)),
+                virtiofs_tag: None,
+            },
+            runtime: Some(RuntimeOverlayConfig {
+                data_dev: "/dev/vdc".to_string(),
+                hash_dev: "/dev/vdd".to_string(),
+                roothash: "b".repeat(64),
+            }),
+            volumes: Vec::new(),
+            verb_grant_envelope: None,
+        });
+        assert_eq!(req.kind_name(), "activate-environment");
     }
 }
