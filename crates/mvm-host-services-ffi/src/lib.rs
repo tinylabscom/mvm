@@ -77,6 +77,26 @@ pub struct MvmHsvcBuf {
     pub len: usize,
 }
 
+// Layout contract for the dlopen'd C ABI. Every language SDK declares this
+// struct again in its own FFI binding and reads the two fields by offset;
+// a reordered, resized, or added field is an out-of-bounds read inside
+// that runtime, with no diagnostic on this side of the boundary. Any
+// change here is a breaking ABI change and must land together with the
+// matching change in every binding under `sdks/`.
+//
+// Pointer-width-gated rather than written as `2 * size_of::<usize>()`,
+// which would hold for any two pointer-sized fields in any order and so
+// would assert nothing.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<MvmHsvcBuf>() == 16);
+    assert!(align_of::<MvmHsvcBuf>() == 8);
+    assert!(offset_of!(MvmHsvcBuf, data) == 0);
+    assert!(offset_of!(MvmHsvcBuf, len) == 8);
+};
+
 impl MvmHsvcBuf {
     /// The empty buffer. A freshly-zeroed `out` is always safe to free.
     const fn empty() -> Self {

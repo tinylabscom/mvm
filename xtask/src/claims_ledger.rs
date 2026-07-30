@@ -156,41 +156,9 @@ pub fn parse_witnesses(cell: &str) -> Result<Vec<Witness>> {
 }
 
 /// Walk `dir` recursively, calling `cb` with the path and text of every
-/// file whose extension matches `ext` (or every file when `ext` is
-/// `None`). Skips heavy build/VCS dirs. Missing dirs are not an error.
-pub fn for_each_file(dir: &Path, ext: Option<&str>, cb: &mut dyn FnMut(&Path, &str)) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
-    // Deterministic order: the mutation surface is committed to a file, so
-    // two runs on the same tree must resolve witnesses identically.
-    entries.sort();
-    for path in entries {
-        if path.is_dir() {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            if matches!(name, "target" | ".git" | "node_modules") {
-                continue;
-            }
-            for_each_file(&path, ext, cb)?;
-        } else {
-            let matches_ext = match ext {
-                Some(want) => path.extension().and_then(|e| e.to_str()) == Some(want),
-                None => true,
-            };
-            if matches_ext && let Ok(content) = std::fs::read_to_string(&path) {
-                cb(&path, &content);
-            }
-        }
-    }
-    Ok(())
-}
+/// file whose extension matches `ext`. Re-exported from `fs_walk`, which
+/// owns the one traversal all the source-scanning gates share.
+pub use crate::fs_walk::for_each_file;
 
 #[cfg(test)]
 mod tests {

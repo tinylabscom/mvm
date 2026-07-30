@@ -74,7 +74,8 @@ pub(crate) fn bind_listener(vsock_port: u32) -> std::io::Result<AgentListener> {
         svm_reserved1: 0,
         svm_port: vsock_port,
         svm_cid: VMADDR_CID_ANY,
-        svm_zero: [0; 4],
+        svm_flags: 0,
+        svm_zero: [0; 3],
     };
     // SAFETY: pointers are valid for the specified size; on failure the fd
     // is closed before returning.
@@ -141,7 +142,8 @@ fn accept_control_vsock(fd: RawFd) -> Option<RawFd> {
         svm_reserved1: 0,
         svm_port: 0,
         svm_cid: 0,
-        svm_zero: [0; 4],
+        svm_flags: 0,
+        svm_zero: [0; 3],
     };
     let mut peer_len = size_of::<SockAddrVm>() as u32;
     // SAFETY: `peer` is a fully-owned, correctly-sized `sockaddr_vm`; the
