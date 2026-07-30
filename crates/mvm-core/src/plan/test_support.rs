@@ -18,6 +18,7 @@ use crate::plan::types::{
     KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
     RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
 };
+use mvm_protocol::protocol::broker::ServiceId;
 
 /// Builder for a minimal, valid local [`ExecutionPlan`]. Defaults match the
 /// shape the audit/admission tests need; override only what a test pins.
@@ -30,6 +31,7 @@ pub struct PlanFixture {
     secrets: Vec<SecretBinding>,
     valid_from: Option<DateTime<Utc>>,
     valid_until: Option<DateTime<Utc>>,
+    services: Vec<ServiceId>,
 }
 
 impl Default for PlanFixture {
@@ -43,6 +45,7 @@ impl Default for PlanFixture {
             secrets: Vec::new(),
             valid_from: None,
             valid_until: None,
+            services: Vec::new(),
         }
     }
 }
@@ -79,6 +82,13 @@ impl PlanFixture {
 
     pub fn secrets(mut self, secrets: Vec<SecretBinding>) -> Self {
         self.secrets = secrets;
+        self
+    }
+
+    /// Bind host services this workload is authorized to call. Drives the
+    /// broker's dispatch gate and the SDK-sidecar attachment decision.
+    pub fn services(mut self, services: Vec<ServiceId>) -> Self {
+        self.services = services;
         self
     }
 
@@ -150,6 +160,7 @@ impl PlanFixture {
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
+            services: self.services,
         }
     }
 }
@@ -190,5 +201,15 @@ mod tests {
         assert_eq!(plan.nonce, Nonce::from_bytes([7u8; 16]));
         assert_eq!(plan.valid_from, from);
         assert_eq!(plan.valid_until, until);
+    }
+
+    #[test]
+    fn services_default_empty_and_are_overridable() {
+        assert!(PlanFixture::new().build().services.is_empty());
+        let bound = PlanFixture::new()
+            .services(vec![ServiceId::parse("host.audit.v1").unwrap()])
+            .build();
+        assert_eq!(bound.services.len(), 1);
+        assert_eq!(bound.services[0].as_str(), "host.audit.v1");
     }
 }

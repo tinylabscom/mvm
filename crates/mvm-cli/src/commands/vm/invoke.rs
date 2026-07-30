@@ -214,6 +214,7 @@ fn admit_entrypoint_boot(
         agent_verb_override: params.agent_verb_override.to_vec(),
         restrict_agent_verbs: !params.keep_alive_dev
             && super::agent_verbs::image_is_sealed(params.rootfs),
+        services: Vec::new(),
     })?;
     let Some(ctx) = ctx else { return Ok(None) };
 

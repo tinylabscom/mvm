@@ -110,7 +110,7 @@ pub enum VmVolumeKind {
 }
 
 /// A volume to mount in the guest, backend-agnostic.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VmVolume {
     /// Host-side path or identifier.
     pub host: String,

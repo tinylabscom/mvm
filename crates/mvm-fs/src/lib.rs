@@ -36,4 +36,5 @@ pub mod oci;
 pub mod oci_to_rootfs;
 pub mod overlay;
 pub mod rootfs;
+pub mod sdk_sidecar;
 pub mod snapshot_store;

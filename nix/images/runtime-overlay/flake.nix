@@ -307,6 +307,69 @@
             chmod 0444 "$out/VERSION" "$out/README"
           '';
 
+      # Target sidecar size: 8 MiB — a hard cap for the glibc SDK closure
+      # (loader + libc + libgcc + the cdylib). The sidecar is attached only to
+      # workloads whose signed plan binds an SDK-served host service, so this
+      # allocation is never part of the base guest footprint; the footprint
+      # ledger reports it as its own line rather than folding it into the base.
+      sdkSidecarSizeBytes = 8 * 1024 * 1024;
+
+      # The sidecar as a read-only ext4 the host attaches at /mvm/sdk. Same
+      # deterministic mkfs parameters as the runtime overlay, and the same
+      # `sha256sum`-format manifest the host-side resolver verifies before it
+      # offers an attachment — so a truncated or drifted artifact refuses to
+      # boot instead of surfacing as an in-guest dlopen failure.
+      mkSdkSidecarImage = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          tree = mkSdkSidecar system;
+        in
+        pkgs.runCommand "mvm-sdk-sidecar-image-${system}"
+          {
+            nativeBuildInputs = [
+              pkgs.e2fsprogs
+              pkgs.coreutils
+            ];
+            passthru = {
+              inherit tree;
+              version = overlayVersion;
+              sizeBytes = sdkSidecarSizeBytes;
+            };
+          }
+          ''
+            set -euo pipefail
+
+            staging="$TMPDIR/staging"
+            mkdir -p "$staging/lib"
+            cp -r ${tree}/lib/. "$staging/lib/"
+            chmod -R u+rwX,go+rX "$staging"
+
+            mkdir -p $out
+            truncate -s ${toString sdkSidecarSizeBytes} $out/sdk.ext4
+            SOURCE_DATE_EPOCH=0 \
+              mkfs.ext4 -F \
+                -t ext4 \
+                -L mvm-sdk-sidecar \
+                -U ${overlayUuid} \
+                -E hash_seed=${overlayHashSeed} \
+                -E no_copy_xattrs \
+                -b ${toString overlayBlockSize} \
+                -d "$staging" \
+                $out/sdk.ext4
+
+            echo "${overlayVersion}" > $out/VERSION
+            chmod 0644 $out/sdk.ext4 $out/VERSION
+
+            # Manifest over exactly the files the resolver verifies, in the
+            # order it walks them.
+            ( cd $out && sha256sum sdk.ext4 VERSION > checksums-sha256.txt )
+            chmod 0644 $out/checksums-sha256.txt
+
+            echo "mvm-sdk-sidecar-image built for ${system}" >&2
+            echo "  sdk.ext4 size: $(stat -c%s $out/sdk.ext4) bytes" >&2
+            echo "  VERSION: $(cat $out/VERSION)" >&2
+          '';
+
       mkRuntimeOverlay = system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -453,6 +516,7 @@
         default = mkRuntimeOverlay system;
         runtime-overlay = mkRuntimeOverlay system;
         sdk-sidecar = mkSdkSidecar system;
+        sdk-sidecar-image = mkSdkSidecarImage system;
       });
     };
 }

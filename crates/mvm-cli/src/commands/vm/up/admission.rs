@@ -92,6 +92,12 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// default. Validated inside `admit_plan_for_boot` via
     /// `parse_agent_verb_override`; any unknown/DevOnly verb is an error.
     pub agent_verb_override: Vec<String>,
+    /// Host services this workload is authorized to call over the broker
+    /// channel, baked into the signed plan. The broker's dispatch gate refuses
+    /// anything absent from this set, and the launch path reads the same set to
+    /// decide whether the optional glibc SDK sidecar must be attached. Empty
+    /// (the common case) means the workload calls no host service.
+    pub services: Vec<mvm_protocol::protocol::broker::ServiceId>,
     /// True iff this run should receive an attenuated (ProdSafe-only) agent-verb
     /// grant. Set this with `grant_eligible(pty, has_ad_hoc_argv, is_dev_profile, image_sealed)`.
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs
@@ -251,6 +257,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
                 !p.shares.is_empty(),
             )
         }),
+        services: p.services.clone(),
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
@@ -553,6 +560,7 @@ fn untrusted_transient_admit_in(
             // Untrusted transient runs are always ad-hoc (arbitrary user code);
             // they must not receive an attenuated verb grant.
             restrict_agent_verbs: false,
+            services: Vec::new(),
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it on
@@ -836,6 +844,7 @@ mod admit_plan_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
@@ -871,6 +880,7 @@ mod admit_plan_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -970,6 +980,7 @@ mod admit_plan_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -1012,6 +1023,7 @@ mod admit_plan_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .unwrap()
         .unwrap();
@@ -1038,6 +1050,7 @@ mod admit_plan_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .unwrap()
         .unwrap();
@@ -1089,6 +1102,7 @@ mod admit_plan_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1162,6 +1176,7 @@ mod admit_plan_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1213,6 +1228,7 @@ mod admit_plan_tests {
             network_policy: NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1271,6 +1287,7 @@ mod admit_plan_tests {
             network_policy: mvm_core::network_policy::NetworkPolicy::unrestricted(),
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
+            services: Vec::new(),
         })
         .expect("admission")
         .expect("Some when admission ran");

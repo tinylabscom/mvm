@@ -37,7 +37,7 @@ pub mod validity;
 // module aliases so every existing
 // `crate::plan::{execution_plan,types,verb,verb_grant,verb_trust}::X` path
 // keeps resolving unchanged.
-pub use mvm_protocol::plan::{execution_plan, types, verb, verb_grant, verb_trust};
+pub use mvm_protocol::plan::{execution_plan, sdk_sidecar, types, verb, verb_grant, verb_trust};
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,
@@ -48,6 +48,10 @@ pub use bundle::{
 };
 pub use content_id::{PlanIdMismatch, compute_plan_id, verify_plan_id};
 pub use execution_plan::{ExecutionPlan, SCHEMA_VERSION};
+pub use sdk_sidecar::{
+    SDK_HOST_SERVICES, SDK_SIDECAR_GUEST_PATH, SDK_SIDECAR_LIB_PATH, is_sdk_host_service,
+    sdk_host_services_in, sdk_sidecar_required, sdk_sidecar_required_for,
+};
 pub use signing::{
     PlanVerifyError, SignedExecutionPlan, plan_from_admitted_json, redaction_from_signed_json,
     secrets_from_signed_json, sign_plan, tenant_from_signed_json, verify_plan,
