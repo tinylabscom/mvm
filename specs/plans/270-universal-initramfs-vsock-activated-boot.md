@@ -268,6 +268,18 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
   Remove rootfs/overlay/roothash parameters from the kernel command line.
 
+  **Only for boots that actually attach the universal initramfs.** Attachment is
+  best-effort: a host that cannot resolve the artifact (macOS cannot `nix build`
+  a Linux initramfs, and no published release tarball exists yet) falls back to
+  the legacy per-rootfs `rootfs.initrd`, whose PID 1 is `mvm-verity-init` and is
+  never sent `ActivateEnvironment`. For that PID 1 the cmdline is the only
+  channel, so removing the tokens unconditionally panics it before userspace.
+  This is Task 3 Step 4's requirement — "a host that does not see the capability
+  must fall back to the legacy cmdline-driven boot path" — restated at the
+  cmdline layer: gate the removal on
+  `mvm_runtime::microvm::booted_with_universal_initramfs`, already the
+  discriminator the runner uses to decide whether to send activation at all.
+
 - [ ] **Step 2: Attach the initramfs**
 
   Every driver selects the content-addressed initramfs by hash from the host cache and attaches it as the boot initramfs. The hash is recorded in the VM start metadata.
