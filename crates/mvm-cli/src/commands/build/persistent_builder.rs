@@ -83,6 +83,9 @@ pub struct StartArgs {
     /// Defaults to the current working directory.
     #[arg(long)]
     pub workspace: Option<PathBuf>,
+    /// Guest memory in MiB for the persistent Nix builder.
+    #[arg(long, default_value_t = 4096)]
+    pub memory_mib: u32,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -222,7 +225,7 @@ fn run_start(args: StartArgs) -> Result<()> {
     };
 
     let record = match backend {
-        PersistentBackend::Libkrun => start_libkrun_persistent(workspace)?,
+        PersistentBackend::Libkrun => start_libkrun_persistent(workspace, args.memory_mib)?,
     };
     write_session_record(&record)?;
 
@@ -233,8 +236,24 @@ fn run_start(args: StartArgs) -> Result<()> {
 }
 
 /// Spawn the libkrun persistent builder and build its session record.
-fn start_libkrun_persistent(workspace: PathBuf) -> Result<SessionRecord> {
-    let vm = LibkrunPersistentHostVm::new(&workspace);
+fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
+    let host_bin_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted(&host_bin_cache)
+        .context("extracting host-vm binaries for persistent builder")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&host_bin_dir, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| {
+                format!(
+                    "making persistent builder host binaries readable: {}",
+                    host_bin_dir.display()
+                )
+            })?;
+    }
+    let vm = LibkrunPersistentHostVm::new(&workspace)
+        .with_memory_mib(memory_mib)
+        .with_host_bin_dir(host_bin_dir);
     let handle = vm
         .start()
         .context("spawning persistent builder VM (LibkrunPersistentHostVm::start)")?;
@@ -281,7 +300,11 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
     let job_dir_relpath = stage_flake_cmd_sh(&record.job_dir, &args.flake, &attr)?;
 
     let supervisor = PersistentBuilderSupervisor::new(&record.dispatch_socket_path)
-        .with_frame_read_timeout(Duration::from_secs(60));
+        // Nix can spend a long time in a quiet compiler phase while the
+        // staged script keeps the complete diagnostic in a host-visible log.
+        // Keep the transport alive for that bounded quiet period; the
+        // one-hour dispatch deadline remains the overall build cap.
+        .with_frame_read_timeout(Duration::from_secs(30 * 60));
 
     let outcome = supervisor
         .submit(
@@ -457,14 +480,85 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
     std::fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("creating {}", artifact_dir.display()))?;
+    // The guest runs the staged script as the unprivileged builder uid while
+    // the host creates this share as the invoking user. Make only this
+    // per-dispatch subtree guest-writable so Nix diagnostics and copied
+    // artifacts can cross the virtio-fs boundary without widening the parent
+    // builder cache permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let guest_writable = std::fs::Permissions::from_mode(0o777);
+        std::fs::set_permissions(&sub, guest_writable.clone())
+            .with_context(|| format!("making {} guest-writable", sub.display()))?;
+        std::fs::set_permissions(&artifact_dir, guest_writable)
+            .with_context(|| format!("making {} guest-writable", artifact_dir.display()))?;
+    }
     let script = format!(
         "#!/bin/sh\n\
          set -eu\n\
+         # The builder rootfs is read-only and the dispatched command runs\n\
+         # under the unprivileged builder uid. Keep Nix's user caches on the\n\
+         # writable tmpfs / persistent store locations.\n\
+         export HOME=/tmp\n\
+         export MVM_WORKSPACE_PATH=/work\n\
+         export MVM_HOST_BIN_DIR=/mvm-bins\n\
+         export XDG_CACHE_HOME=/tmp/.cache\n\
+         export XDG_STATE_HOME=/tmp/.local/state\n\
+         # Keep persistent jobs on the builder's host-mediated egress path\n\
+         # even when the cached builder image predates the matching init\n\
+         # binary. Nix and its fetchers inherit these loopback proxy vars.\n\
+         export ALL_PROXY='{egress_proxy_url}'\n\
+         export HTTP_PROXY='{egress_proxy_url}'\n\
+         export HTTPS_PROXY='{egress_proxy_url}'\n\
+         export all_proxy='{egress_proxy_url}'\n\
+         export http_proxy='{egress_proxy_url}'\n\
+         export https_proxy='{egress_proxy_url}'\n\
+         export NO_PROXY='{no_proxy_loopback}'\n\
+         export no_proxy='{no_proxy_loopback}'\n\
+         # Older cached builder images may not have loaded the read-only\n\
+         # rootfs closure into the writable Nix database at boot. Register\n\
+         # it here before Nix decides to substitute paths that are local.\n\
+         if [ -r /nix-path-registration ]; then\n\
+             /sbin/nix-store --load-db < /nix-path-registration 2>/tmp/nix-db-load.log ||\n\
+                 cat /tmp/nix-db-load.log >&2\n\
+         fi\n\
+         export NIX_CONFIG='experimental-features = nix-command flakes\n\
+         sandbox = false\n\
+         build-users-group =\n\
+         max-jobs = 1\n\
+         cores = 1\n\
+         auto-optimise-store = false\n\
+         substituters = https://cache.nixos.org/\n\
+         trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=\n\
+         fallback = true\n\
+         download-attempts = 8\n\
+         http-connections = 2\n\
+         connect-timeout = 60\n\
+         stalled-download-timeout = 300'\n\
+         mkdir -p \"$XDG_CACHE_HOME\" \"$XDG_STATE_HOME\"\n\
+         nix() {{ env HOME=\"$HOME\" XDG_CACHE_HOME=\"$XDG_CACHE_HOME\" XDG_STATE_HOME=\"$XDG_STATE_HOME\" /sbin/nix \"$@\"; }}\n\
          OUT_DIR='/job/{job_id}/{artifact_subdir}'\n\
+         JOB_DIR='/job/{job_id}'\n\
+         NIX_LOG=\"$JOB_DIR/nix-stderr.log\"\n\
+         NIX_STATUS=\"$JOB_DIR/nix-exit-status\"\n\
          mkdir -p \"$OUT_DIR\"\n\
+         # Keep the complete Nix diagnostic on the host-visible job share.\n\
+         # A build can terminate before the terminal Result frame is\n\
+         # written; this file remains available for post-mortem inspection.\n\
+         set +e\n\
          STORE_PATH=$(nix --extra-experimental-features 'nix-command flakes' \\\n\
              build --no-link --print-out-paths \\\n\
-             {flake_ref}#{attr})\n\
+            --impure --no-write-lock-file \\\n\
+             {flake_ref}#{attr} 2>\"$NIX_LOG\")\n\
+         nix_status=$?\n\
+         set -e\n\
+         printf '%s\\n' \"$nix_status\" > \"$NIX_STATUS\"\n\
+         cat \"$NIX_LOG\" >&2\n\
+         if [ \"$nix_status\" -ne 0 ]; then\n\
+             echo \"mvm-host-vm-init: nix build exited $nix_status\" >&2\n\
+             exit \"$nix_status\"\n\
+         fi\n\
          echo \"store-path=$STORE_PATH\"\n\
          # mkGuest layout: $STORE_PATH/{{vmlinux,rootfs.ext4}}.\n\
          # Copy via `cp -L` so the host gets real bytes, not\n\
@@ -484,10 +578,19 @@ fn stage_flake_cmd_sh(job_dir: &std::path::Path, flake_ref: &str, attr: &str) ->
          # for flakes that don't emit it.\n\
          if [ -f \"$STORE_PATH/manifest.json\" ]; then\n\
              cp -L \"$STORE_PATH/manifest.json\" \"$OUT_DIR/manifest.json\"\n\
-         fi\n",
+         fi\n\
+         # Production image sidecars — retain the dm-verity payload and\n\
+         # admission metadata emitted by the Nix image flake.\n\
+         for sidecar in rootfs.verity rootfs.roothash rootfs-closure-paths mvm-meta.json; do\n\
+             if [ -f \"$STORE_PATH/$sidecar\" ]; then\n\
+                 cp -L \"$STORE_PATH/$sidecar\" \"$OUT_DIR/$sidecar\"\n\
+             fi\n\
+         done\n",
         artifact_subdir = ARTIFACT_SUBDIR,
         flake_ref = shell_escape(flake_ref),
         attr = shell_escape(attr),
+        egress_proxy_url = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL,
+        no_proxy_loopback = mvm_core::guest_netd::NO_PROXY_LOOPBACK,
     );
     let cmd_path = sub.join("cmd.sh");
     std::fs::write(&cmd_path, script).with_context(|| format!("writing {}", cmd_path.display()))?;
@@ -676,6 +779,45 @@ mod tests {
     }
 
     #[test]
+    fn stage_flake_cmd_sh_uses_canonical_egress_proxy_contract() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let relpath = stage_flake_cmd_sh(
+            scratch.path(),
+            "path:/work",
+            "packages.aarch64-linux.default",
+        )
+        .expect("stage");
+        let body =
+            std::fs::read_to_string(scratch.path().join(relpath).join("cmd.sh")).expect("read");
+
+        for key in [
+            "ALL_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "http_proxy",
+            "https_proxy",
+        ] {
+            assert!(
+                body.contains(&format!(
+                    "export {key}='{}'",
+                    mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL
+                )),
+                "{body}"
+            );
+        }
+        for key in ["NO_PROXY", "no_proxy"] {
+            assert!(
+                body.contains(&format!(
+                    "export {key}='{}'",
+                    mvm_core::guest_netd::NO_PROXY_LOOPBACK
+                )),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
     fn stage_flake_cmd_sh_creates_artifact_output_subdir() {
         // The cmd.sh dispatches `nix build` and then copies
         // vmlinux + rootfs.ext4 to a per-dispatch
@@ -693,10 +835,49 @@ mod tests {
             "expected pre-staged artifact dir at {}",
             artifact_dir.display()
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(job_dir.join(&relpath))
+                    .expect("staged job metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o777
+            );
+            assert_eq!(
+                std::fs::metadata(&artifact_dir)
+                    .expect("staged artifact metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o777
+            );
+        }
         // The cmd.sh body must reference the same in-guest path
         // (`/job/<relpath>/out`) so the bytes the guest writes are
         // visible at the host's `artifact_dir_for` path.
         let body = std::fs::read_to_string(job_dir.join(&relpath).join("cmd.sh")).expect("read");
+        assert!(body.contains("export HOME=/tmp"));
+        assert!(body.contains("export MVM_WORKSPACE_PATH=/work"));
+        assert!(body.contains("export MVM_HOST_BIN_DIR=/mvm-bins"));
+        assert!(body.contains("export XDG_CACHE_HOME=/tmp/.cache"));
+        assert!(body.contains("export NIX_CONFIG="));
+        assert!(body.contains("export HTTPS_PROXY='socks5h://127.0.0.1:1080'"));
+        assert!(body.contains("export no_proxy='localhost,127.0.0.1,::1'"));
+        assert!(body.contains("/sbin/nix-store --load-db < /nix-path-registration"));
+        assert!(body.contains("fallback = true"));
+        assert!(body.contains("download-attempts = 8"));
+        assert!(body.contains("http-connections = 2"));
+        assert!(body.contains("connect-timeout = 60"));
+        assert!(body.contains("stalled-download-timeout = 300"));
+        assert!(body.contains("export XDG_STATE_HOME=/tmp/.local/state"));
+        assert!(body.contains("nix() { env HOME=\"$HOME\""));
+        assert!(body.contains("NIX_LOG=\"$JOB_DIR/nix-stderr.log\""));
+        assert!(body.contains("NIX_STATUS=\"$JOB_DIR/nix-exit-status\""));
+        assert!(body.contains("cat \"$NIX_LOG\" >&2"));
+        assert!(body.contains("--impure --no-write-lock-file"));
         let expected_guest_path = format!("/job/{relpath}/out");
         assert!(
             body.contains(&expected_guest_path),
@@ -704,6 +885,10 @@ mod tests {
         );
         assert!(body.contains("vmlinux"), "{body}");
         assert!(body.contains("rootfs.ext4"), "{body}");
+        assert!(body.contains("rootfs.verity"), "{body}");
+        assert!(body.contains("rootfs.roothash"), "{body}");
+        assert!(body.contains("rootfs-closure-paths"), "{body}");
+        assert!(body.contains("mvm-meta.json"), "{body}");
         // `cp -L` (not just `cp`) so the host gets real bytes,
         // not store-path symlinks that don't resolve.
         assert!(body.contains("cp -L"), "must use cp -L: {body}");

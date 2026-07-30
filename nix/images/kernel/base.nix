@@ -54,6 +54,15 @@ let
     url = "mirror://kernel/linux/kernel/v6.x/linux-${kernelVersion}.tar.xz";
     hash = "sha256-pitqLSB/9yUQ5fRxVrcHjh5xeXNXQSQRuOT/+X/I9Mc=";
   };
+  # The builder's overlay filesystem triggers a GNU tar directory-metadata
+  # race while unpacking this archive. Materialize the source with bsdtar once
+  # and pass the resulting directory to all kernel derivations.
+  kernelSourceTree = pkgs.runCommand "linux-${kernelVersion}-source" {
+    nativeBuildInputs = [ pkgs.libarchive ];
+  } ''
+    mkdir -p "$out"
+    ${pkgs.libarchive}/bin/bsdtar -xf ${kernelSrc} -C "$out" --strip-components=1
+  '';
 
   # ── Base: minimal feature set common to every mvm microVM kernel ──
   #
@@ -294,7 +303,7 @@ let
       set -euo pipefail
 
       mkdir -p linux
-      tar -xf ${kernelSrc} -C linux --strip-components=1
+      cp -a --reflink=auto ${kernelSourceTree}/. linux/
       cd linux
       chmod -R u+w .
 
@@ -369,7 +378,7 @@ let
   # pinned version even though CONFIG_MODULES=n leaves the module tree empty.
   mkKernel = { extraEnables ? [ ], extraDisables ? [ ] }:
     pkgs.linuxManualConfig {
-      src = kernelSrc;
+      src = kernelSourceTree;
       version = kernelVersion;
       modDirVersion = kernelVersion;
       configfile = mkConfigfile { inherit extraEnables extraDisables; };

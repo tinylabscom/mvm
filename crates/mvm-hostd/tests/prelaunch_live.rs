@@ -110,6 +110,7 @@ fn wrong_nonce_attach_is_refused_without_boot() {
         plan: serde_json::json!({ "ignored": "never-reached" }),
         bundle: None,
         network_policy: None,
+        transparent_terminator_port: None,
     };
     libkrun_sys::framing::write_json_frame_sync(&mut stream, &attach).unwrap();
 

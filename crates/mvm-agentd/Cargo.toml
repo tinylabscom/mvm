@@ -16,6 +16,12 @@ path = "src/bin/mvm-builder-agent.rs"
 name = "mvm-guest-agent"
 path = "src/bin/mvm-guest-agent.rs"
 
+# Small static-musl privilege-drop helper used by the Nix-built guest init.
+# It has a deliberately narrow flag surface and no dependency on util-linux.
+[[bin]]
+name = "mvm-setpriv"
+path = "src/bin/mvm-setpriv.rs"
+
 # Exec-shim that compiles a syscall allowlist into a BPF program via
 # seccompiler, applies it via prctl, and execve's into the wrapped
 # command. mkServiceBlock wraps every guest service launch with this

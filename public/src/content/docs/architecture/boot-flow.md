@@ -6,7 +6,12 @@ description: How a microVM boots the universal initramfs, receives its environme
 This page describes the current boot and execution path for workload microVMs.
 It replaces the older per-rootfs init schemes (`mvm-verity-init`, `mvm-oci-init`,
 busybox `/init`) with a single **universal initramfs** and a fail-closed
-activation step over vsock.
+activation step over vsock. Every runner backend boots this contract —
+Firecracker, libkrun, HVF, and QEMU (dev/test tier) all attach the universal
+initramfs and deliver `ActivateEnvironment` over vsock. QEMU's `vhost-vsock`
+speaks real `AF_VSOCK`, so its channels ride a per-VM `AF_VSOCK`↔UNIX bridge
+into the same per-port UNIX-socket convention the other backends expose
+natively.
 
 ## The universal initramfs
 
@@ -164,10 +169,18 @@ model in adapted form — or honestly not at all:
   still not a microVM; this tier exists so KVM-less dev/CI hosts can
   exercise the real agent and RPC surface, never as an isolation story.
 - **Apple Container** — Apple's `container` framework boots lightweight Linux
-  VMs with its own init and networking/vsock stack. There is no backend
-  variant for it today. Future support means a driver that boots the same
-  kernel + universal initramfs (or runs `mvm-guest-agent` as the guest init)
-  and bridges the activation channel to the framework's vsock transport.
+  VMs with its own init (`vminitd` as guest PID 1, gRPC on vsock port 1024)
+  and networking/vsock stack. An honest, fail-closed backend skeleton now
+  exists behind `--hypervisor apple-container` (opt-in only, never
+  auto-selected; every operation fails with a typed error naming the
+  milestone that provides it) — see
+  `specs/plans/271-apple-container-backend.md` for the staged design. Full
+  support means driving the same activation contract through `vminitd`'s
+  gRPC API rather than an mvm initramfs: the host writes the serialized
+  `ActivateEnvironment` into the container VM and starts `mvm-guest-agent`
+  as a root process, and the agent performs the same mounts (dm-verity
+  rootfs + runtime overlay, virtio-fs volumes) and the same uid-901 drop as
+  on every other backend.
 - **WHP (Windows Hypervisor Platform)** — a future Windows-host backend. The
   guest side is unchanged: the same kernel + universal initramfs boot and the
   same `ActivateEnvironment`. The work is entirely host-side — a WHP

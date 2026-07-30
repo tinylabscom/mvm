@@ -735,12 +735,28 @@ reading the pool code:
   halves now build the key through one function (`compat_for_launch`), keyed on
   the same digest claim-8 admission puts on `plan.image.sha256` and that
   `bind_plan_to_parent` checks the captured parent against.
-- **`mvm.vsock_egress=1` was a second cmdline divergence.** A factory parent is
+- **`mvm.vsock_egress=1` was a second cmdline divergence.** A factory parent was
   deny-all by construction, so a launch with `--network-allow` would boot the
   workload with the token and the parent without it — and a child inheriting the
-  parent's cmdline would come up with no network, silently. Such launches are
-  now excluded from the warm pool at both ends (claim and replenish) rather than
-  served with the wrong shape.
+  parent's cmdline would come up with no network, silently. Such launches were
+  first excluded from the warm pool at both ends (claim and replenish) rather
+  than served with the wrong shape.
+
+  **Since resolved by keying instead of excluding.** The exclusion assumed the
+  parent could not carry the launch's egress without leaking that launch's shape
+  to the next claim. The token is a bare boolean — no host, no allow-list reaches
+  the guest — and the destination set is resolved host-side per child, on the
+  egress endpoint the claim wires from that child's own launch config. So the pool
+  partitions on egress **enablement** alone:
+  `StandbyCompat::vsock_egress` makes a parent claimable only by launches whose
+  guest boots the same way, `factory_parent_config` takes that enablement from the
+  matched record (`spec.vsock_egress`) and carries no destination, and
+  `warm_eligible_launch` no longer refuses the shape. The key is the *effective*
+  enablement (`egress_shared::effective_vsock_egress`: the policy allows egress
+  **and** the admitted plan binds no secret), which is the same condition the token
+  itself is derived from — so a secret-bearing launch keys token-less exactly as
+  its cold boot boots, and the key can never be more permissive than the cold boot
+  it stands in for.
 
 ---
 
@@ -786,3 +802,88 @@ hard gate.
 In short: BUG-1 is fixed and live-proven; BUG-2 and BLOCKER-3 are both open and
 each independently prevents a claim from ever completing; BLOCKER-4 lets a claim
 complete but returns a child wired none of the host channels a cold boot gets.
+
+---
+
+## Fourth live run (2026-07-30) — capture proven on the full blocker set; claim blocked by a double reservation
+
+Host: Linux 6.8.0-124, Firecracker v1.14.1, `/dev/kvm`, release build of the
+four-blocker state (`65a43af1d`). Capability flipped to `true` **on the test host
+only**; the committed default stays `false`. Isolated `MVM_HOME=/root/mvm-live-home`
+with the runtime-overlay cache symlinked in.
+
+### Capture: works, reproduced on the complete blocker set
+
+`MVM_RESIDENCY=warm mvmctl machine run --image docker.io/library/alpine:latest
+--hypervisor firecracker echo hello-live` → workload ran, `EXIT=0`. The log shows
+`plan admitted`, then `runtime_source_status="overlay-required"` with
+`overlay_attached=true` — the overlay attachment whose absence made the parent
+kernel-panic in the second run. `replenish_after_launch` then spawned and captured
+a parent:
+
+```
+pool/standby-ecee9d16f0fa5f70/standby.json
+  state=idle  pid=0  parent_checkpoint=standby-standby-ecee9d16f0fa5f70
+checkpoints/standby-standby-ecee9d16f0fa5f70/meta.json
+  class=vm_full  blobs=[rootfs.ext4, memory.bin, vmstate.bin, mvm-meta.json,
+                        rootfs.verity, rootfs.roothash, device-anchors.json]
+  content/memory.bin  536870912 bytes
+```
+
+`pid=0` is the release-after-capture the design intends: a pool slot costs disk,
+not a resident VM.
+
+### Claim: refused, and the cause is a double reservation
+
+The second identical run refused:
+
+```
+WARN standby claim failed; cold-booting standby=standby-ecee9d16f0fa5f70
+     error=claim standby: parent is not in a claimable state
+```
+
+Two layers each reserve the parent:
+
+- `SupervisorStandbyPool::claim_idle_compatible` (`standby_pool.rs:106`) selects
+  **and** reserves — `mark_claimed` at `:115`, `state = Claimed` at `:116`.
+- `reserve_and_verify_parent` (`runner.rs:789`) then loads that parent, finds
+  `!state.is_claimable()` at `:800`, and refuses `ParentNotClaimable`.
+
+So a warm claim on a runner-backed backend can never succeed. The CLI then removes
+the parent as spent and cold-boots, and the next replenish warms a fresh one — the
+pool fills and never drains, indefinitely.
+
+Both halves are correct alone. The runner's reserve is the one to keep: it reserves
+and verifies inside a single locked section, which is strictly stronger. The CLI
+should select without reserving (`select_idle_compatible`, `:92`). Two launchers
+can then both select one parent; the runner's lock serializes them and the loser is
+refused into a cold boot — the same outcome the CLI-side reservation bought, without
+deadlocking the winner.
+
+**Why no test caught it.** The `claim_or_cold` tests drive `AnyBackend::Mock`, whose
+`claim_standby` answers from its own in-memory state and never runs the runner's
+reserve. The two-layer interaction existed only on a live host.
+
+### Not yet exercised
+
+The post-restore handshake (`acknowledged` + `reseeded` + `clock_resynced`) and the
+child's egress/broker/exit channels still have not run: the claim never got far
+enough. They remain the open live question after this fix.
+
+### Two incidental findings
+
+- `host-agent registration failed; host.audit.v1 unavailable for this VM — could
+  not locate the mvm-host-agent binary (set MVM_HOST_AGENT_PATH)`. This fires on the
+  **cold** boot too, so it is an environment gap on this host rather than a claim-path
+  defect — but it means broker reachability cannot be judged from this run either way.
+- 14 orphaned `firecracker --api-sock /tmp/.tmpXXXX/vms/mvm-forkblank-parent-*`
+  processes are alive on the box. That is a test-fixture name, so a live harness leaks
+  its parent VMs instead of reaping them; each holds guest memory.
+
+### Timings (not a warm-vs-cold comparison yet)
+
+Run 1 wall clock 173 s, dominated by a runtime-overlay rebuild from source
+("source-built cache is stale") plus image work — not a boot measurement. Run 2,
+with the overlay cached, was 10.0 s for cold boot + capture + replenish. The earlier
+cold-boot-to-agent-ready baseline of 2096 ms median (n=7) still stands as the number
+to beat; a warm figure needs the claim to succeed.

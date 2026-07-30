@@ -120,7 +120,9 @@ pub use crate::builder_vm_runtime::{DEFAULT_BUILDER_STORE_GC_GIB, builder_store_
 
 /// Where the workspace gets mounted inside the builder VM
 /// (read-only virtio-fs).
-pub const GUEST_WORK_DIR: &str = "/work";
+/// Explicit path URL prevents Nix from treating the mounted checkout as a
+/// Git flake and reaching for host-side worktree metadata that is not mounted.
+pub const GUEST_WORK_DIR: &str = "path:/work";
 
 /// Where artifacts get extracted inside the builder VM (read-write
 /// virtio-fs).
@@ -138,9 +140,11 @@ pub const GUEST_JOB_DIR: &str = "/job";
 const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
 const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
 const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
+const PERSISTENT_BUILDER_RUNTIME_DEVICE: &str = "/dev/vdc";
 const BUILDER_INPUT_DISK_MIN: u64 = 16 << 20;
 const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
+const BUILDER_SUBST_STDERR_LOG_FILE: &str = "substitution.stderr.log";
 const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
 const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
 const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 3;
@@ -294,6 +298,13 @@ fn builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> 
     append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
 }
 
+fn persistent_builder_runtime_overlay_cmdline(base_cmdline: &str, runtime_device: &str) -> String {
+    let cmdline = builder_boot_contract_cmdline(base_cmdline);
+    let cmdline = builder_vsock_egress_cmdline(&cmdline);
+    let cmdline = append_cmdline_token(&cmdline, "mvm.runtime_source_policy=required_overlay");
+    append_cmdline_token(&cmdline, &format!("mvm.runtime_data={runtime_device}"))
+}
+
 pub(crate) struct BuilderRuntimeOverlayAttachment<'a> {
     pub(crate) cmdline: String,
     pub(crate) disk_path: &'a Path,
@@ -353,13 +364,35 @@ impl BuilderVsockEgressEndpoint {
             "egress_mode": "raw",
         });
 
-        let mut child = Command::new(&endpoint_path)
+        let mvmctl_path = std::env::current_exe().map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "resolve mvmctl for persistent builder egress supervisor: {e}"
+            ))
+        })?;
+        let stderr_log_path = state_dir.join(BUILDER_SUBST_STDERR_LOG_FILE);
+        let stderr_log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_log_path)
+            .map_err(|e| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "open persistent builder egress log {}: {e}",
+                    stderr_log_path.display()
+                ))
+            })?;
+        let mut child = Command::new(mvmctl_path)
+            .arg("__builder-egress-supervisor")
+            .arg("--endpoint")
+            .arg(&endpoint_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::from(stderr_log))
             .spawn()
             .map_err(|e| {
-                BuilderVmError::ExtractionFailed(format!("spawn {}: {e}", endpoint_path.display()))
+                BuilderVmError::ExtractionFailed(format!(
+                    "spawn persistent builder egress supervisor for {}: {e}",
+                    endpoint_path.display()
+                ))
             })?;
 
         child
@@ -651,6 +684,25 @@ pub(crate) fn builder_runtime_overlay_attachment<'a>(
         (BuilderVmImage::Rootfs { cmdline, .. }, Some(runtime_overlay)) => {
             Some(BuilderRuntimeOverlayAttachment {
                 cmdline: builder_runtime_overlay_cmdline(cmdline, BUILDER_RUNTIME_DEVICE),
+                disk_path: runtime_overlay,
+                read_only: true,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn persistent_builder_runtime_overlay_attachment<'a>(
+    image: &'a BuilderVmImage,
+    runtime_overlay: Option<&'a Path>,
+) -> Option<BuilderRuntimeOverlayAttachment<'a>> {
+    match (image, runtime_overlay) {
+        (BuilderVmImage::Rootfs { cmdline, .. }, Some(runtime_overlay)) => {
+            Some(BuilderRuntimeOverlayAttachment {
+                cmdline: persistent_builder_runtime_overlay_cmdline(
+                    cmdline,
+                    PERSISTENT_BUILDER_RUNTIME_DEVICE,
+                ),
                 disk_path: runtime_overlay,
                 read_only: true,
             })
@@ -3401,22 +3453,31 @@ fn wait_for_vsock_socket(
     label: &str,
 ) -> Result<(), BuilderVmError> {
     let socket_path = vm_state_dir.join(mvm_core::config::vsock_socket_filename(port));
+    wait_for_path(child, &socket_path, timeout, label)
+}
+
+fn wait_for_path(
+    child: &mut Child,
+    path: &Path,
+    timeout: Duration,
+    label: &str,
+) -> Result<(), BuilderVmError> {
     let deadline = Instant::now() + timeout;
-    while !socket_path.exists() {
+    while !path.exists() {
         if let Some(status) = child
             .try_wait()
             .map_err(|e| BuilderVmError::ExtractionFailed(format!("poll supervisor child: {e}")))?
         {
             return Err(BuilderVmError::NixBuildFailed(format!(
-                "supervisor exited before binding {label} socket {} (status: {status})",
-                socket_path.display()
+                "supervisor exited before {label} became ready at {} (status: {status})",
+                path.display()
             )));
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             return Err(BuilderVmError::NixBuildFailed(format!(
-                "supervisor did not bind {label} socket {} within {:?}; killed",
-                socket_path.display(),
+                "supervisor did not make {label} ready at {} within {:?}; killed",
+                path.display(),
                 timeout
             )));
         }
@@ -4137,6 +4198,15 @@ fn path_to_str<'a>(p: &'a Path, field: &str) -> Result<&'a str, BuilderVmError> 
 /// as the path the guest checks.
 pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
 
+/// Filename the guest creates after binding its persistent dispatch listener.
+/// The host waits for this marker before publishing a usable session record.
+pub const DISPATCH_READY_MARKER: &str = "dispatch.ready";
+
+/// A first boot formats and seeds the persistent Nix disk before exposing
+/// the builder agent. The seed is a large closure copy, so its readiness
+/// window must cover cold disks as well as warm boots.
+const PERSISTENT_BUILDER_READY_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Spawn the long-lived builder VM that `mvm-host-vm-init`'s
 /// dispatch loop runs inside.
 ///
@@ -4165,6 +4235,10 @@ pub struct LibkrunPersistentHostVm {
     /// Host directory bound at `/work` in the guest. Bound at VM
     /// start, not per-dispatch.
     workspace_root: PathBuf,
+    /// Extracted host binaries bound at `/mvm-bins` so a builder-image
+    /// rebuild can bake the current init and resident daemons into its
+    /// rootfs.
+    host_bin_dir: Option<PathBuf>,
 }
 
 #[cfg(feature = "builder-vm")]
@@ -4179,6 +4253,7 @@ impl LibkrunPersistentHostVm {
             nix_store_mib: DEFAULT_NIX_STORE_MIB,
             image_override: None,
             workspace_root: workspace_root.into(),
+            host_bin_dir: None,
         }
     }
 
@@ -4199,6 +4274,12 @@ impl LibkrunPersistentHostVm {
 
     pub fn with_image_override(mut self, image: BuilderVmImage) -> Self {
         self.image_override = Some(image);
+        self
+    }
+
+    /// Bind the extracted host-vm binaries at `/mvm-bins`.
+    pub fn with_host_bin_dir(mut self, host_bin_dir: impl Into<PathBuf>) -> Self {
+        self.host_bin_dir = Some(host_bin_dir.into());
         self
     }
 
@@ -4259,6 +4340,17 @@ impl LibkrunPersistentHostVm {
         let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
+        let host_bin_dir = self.host_bin_dir.as_ref().ok_or_else(|| {
+            BuilderVmError::ExtractionFailed(
+                "persistent builder requires an extracted host binary directory".into(),
+            )
+        })?;
+        if !host_bin_dir.is_dir() {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "persistent builder host binary directory does not exist: {}",
+                host_bin_dir.display()
+            )));
+        }
 
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
@@ -4278,6 +4370,7 @@ impl LibkrunPersistentHostVm {
             .add_virtio_fs("work", path_to_str(&self.workspace_root, "workspace_root")?)
             .add_virtio_fs("out", path_to_str(&job_dir, "job_dir")?)
             .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
+            .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?)
             .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT)
             // The workload-vsock nesting hop. The in-host-VM forwarder
             // listens here; the outer host reaches a workload's
@@ -4293,7 +4386,7 @@ impl LibkrunPersistentHostVm {
             krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
-            builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
+            persistent_builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
         {
             krun = krun.with_cmdline(attachment.cmdline).add_disk(
                 "runtime-overlay",
@@ -4346,10 +4439,16 @@ impl LibkrunPersistentHostVm {
                 &mut child,
                 &vm_state_dir,
                 mvm_agentd::vsock::GUEST_AGENT_PORT,
-                Duration::from_secs(30),
+                PERSISTENT_BUILDER_READY_TIMEOUT,
                 "builder guest agent",
             )?;
         }
+        wait_for_path(
+            &mut child,
+            &job_dir.join(DISPATCH_READY_MARKER),
+            PERSISTENT_BUILDER_READY_TIMEOUT,
+            "persistent builder dispatch loop",
+        )?;
 
         Ok(PersistentVmHandle {
             vm_state_dir,
@@ -4376,6 +4475,8 @@ fn stage_persistent_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
         ))
     })?;
     let marker_path = job_dir.join(DISPATCH_SOCK_MARKER);
+    let ready_path = job_dir.join(DISPATCH_READY_MARKER);
+    let _ = std::fs::remove_file(&ready_path);
     std::fs::write(&marker_path, b"").map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "staging dispatch marker {}: {e}",
@@ -4877,6 +4978,8 @@ mod tests {
         //   against the stub `{}` install spec, which the in-VM
         //   pipeline rejects because the spec is missing required
         //   fields (`language`, …) — surfacing as `NixBuildFailed`.
+        // - Contributor host with a current lean builder image but no
+        //   resolvable runtime overlay → `RuntimeOverlayUnavailable`.
         //
         // Both outcomes prove the wiring proceeds past validation
         // rather than short-circuiting on `NotYetImplemented`, which
@@ -4901,6 +5004,7 @@ mod tests {
                     | BuilderVmError::NixBuildFailed(_)
                     | BuilderVmError::DegradedBuilderStore { .. }
                     | BuilderVmError::SupervisorExited { .. }
+                    | BuilderVmError::RuntimeOverlayUnavailable(_)
             ),
             "unexpected error variant: {err:?}"
         );
@@ -4975,8 +5079,10 @@ mod tests {
         //   - a partially bootable cached image on a host where the
         //     supervisor starts but exits before the requested job runs →
         //     SupervisorExited
-        // All five are legitimate "environment gap" surfaces. The
-        // fourth is what `mvmctl bootstrap` reports to operators with
+        //   - a lean builder image without a resolvable runtime sidecar →
+        //     RuntimeOverlayUnavailable
+        // All six are legitimate "environment gap" surfaces. The
+        // Nix-build failure is what `mvmctl bootstrap` reports to operators with
         // a populated cache; the first three are what `mvmctl bootstrap`
         // reports before the Stage 0 bootstrap completes.
         let scratch = TempDir::new().unwrap();
@@ -4992,6 +5098,7 @@ mod tests {
                     | BuilderVmError::NixBuildFailed(_)
                     | BuilderVmError::DegradedBuilderStore { .. }
                     | BuilderVmError::SupervisorExited { .. }
+                    | BuilderVmError::RuntimeOverlayUnavailable(_)
             ),
             "unexpected error variant: {err:?}"
         );
@@ -5343,6 +5450,7 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
         env.set("MVM_HOME", scratch.path());
         // `ensure_builder_vm_image` falls back to seeding from the *default*
         // cache, which is `$HOME/.mvm/cache` and deliberately ignores MVM_HOME.
@@ -5373,6 +5481,7 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
         env.set("MVM_HOME", scratch.path());
         // `ensure_builder_vm_image` falls back to seeding from the *default*
         // cache, which is `$HOME/.mvm/cache` and deliberately ignores MVM_HOME.
@@ -5413,6 +5522,7 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
         env.set("MVM_HOME", scratch.path());
         // `ensure_builder_vm_image` falls back to seeding from the *default*
         // cache, which is `$HOME/.mvm/cache` and deliberately ignores MVM_HOME.
@@ -6497,6 +6607,15 @@ mod tests {
     }
 
     #[test]
+    fn persistent_builder_egress_log_is_scoped_to_vm_state() {
+        let state_dir = Path::new("/tmp/mvm-builder-state");
+        assert_eq!(
+            state_dir.join(BUILDER_SUBST_STDERR_LOG_FILE),
+            PathBuf::from("/tmp/mvm-builder-state/substitution.stderr.log")
+        );
+    }
+
+    #[test]
     fn stage_persistent_job_dir_creates_marker_in_fresh_dir() {
         // Hermetic — no libkrun, no VM. Validates the host's
         // side of the marker-file convention.
@@ -6508,6 +6627,10 @@ mod tests {
             marker.is_file(),
             "marker should exist at {}",
             marker.display()
+        );
+        assert!(
+            !job_dir.join(DISPATCH_READY_MARKER).exists(),
+            "ready marker is guest-owned and must not be staged by the host"
         );
         // Marker body is intentionally empty — its existence is
         // the signal. If the body grows non-empty in the future
@@ -6601,6 +6724,30 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn persistent_builder_runtime_overlay_uses_virtiofs_disk_layout() {
+        let image = BuilderVmImage::new(
+            PathBuf::from("/img/Image"),
+            PathBuf::from("/img/rootfs.ext4"),
+            "console=hvc0 root=/dev/vda".to_string(),
+        );
+        let overlay = Path::new("/cache/runtime-overlay.ext4");
+        let attachment = persistent_builder_runtime_overlay_attachment(&image, Some(overlay))
+            .expect("persistent rootfs builders attach the runtime overlay");
+
+        assert_eq!(attachment.disk_path, overlay);
+        assert!(attachment.read_only);
+        assert!(attachment.cmdline.contains("mvm.runtime_data=/dev/vdc"));
+        assert!(
+            attachment
+                .cmdline
+                .contains("mvm.runtime_source_policy=required_overlay")
+        );
+        assert!(!attachment.cmdline.contains("mvm.builder_transport=disk"));
+        assert!(!attachment.cmdline.contains("mvm.builder_input="));
+        assert!(!attachment.cmdline.contains("mvm.builder_output="));
     }
 
     #[test]
@@ -7082,7 +7229,7 @@ mod tests {
             Some(tempfile::tempdir().expect("bootstrap cache tempdir"))
         };
         if let Some(cache) = &bootstrap_cache {
-            env.set("MVM_HOME", cache.path());
+            env.isolate_mvm_home(cache.path());
         }
 
         let workspace_root =

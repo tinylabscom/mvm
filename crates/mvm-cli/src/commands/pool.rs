@@ -5,15 +5,14 @@
 //! the standby re-verifies the attach plan against (claim 8). Builds a backend-agnostic
 //! `StandbySpec` and drives the `SupervisorStandbyPool` + `VmBackend` trait methods.
 //!
-//! v1 is default-shaped only: a standby is claimable by a launch whose kernel, resources
-//! **and rootfs image** all match (`StandbyCompat`, exact equality) and whose shape a
-//! shared parent can serve at all (`warm_eligible_launch` — no extra volumes, no
-//! virtio-fs root, no egress-allowing policy). Anything else cold-boots. Both halves of
+//! A standby is claimable by a launch whose kernel, resources, **rootfs image**
+//! and **guest egress enablement** all match (`StandbyCompat`, exact equality) and whose
+//! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes, no
+//! virtio-fs root). Anything else cold-boots. Both halves of
 //! the pool build that key and that eligibility test through one function each, because
 //! a spawn and a claim that compute them separately are free to disagree, and a
-//! disagreement is invisible: the pool fills and never drains. Multi-kernel keying,
-//! honouring an explicit `--name`/volumes, and serving egress-allowing launches are
-//! deferred follow-ups.
+//! disagreement is invisible: the pool fills and never drains. Multi-kernel keying and
+//! honouring an explicit `--name`/volumes are deferred follow-ups.
 
 use std::path::Path;
 
@@ -97,6 +96,10 @@ pub struct StandbySpecParams<'a> {
     /// digest a claim computes for its own launch. `None` only alongside an
     /// absent `image_path`.
     pub image_sha256: Option<&'a str>,
+    /// Whether the parent boots its guest's vsock egress client — the compat
+    /// key's egress half, read off the launch's effective enablement. A restored
+    /// child inherits the token from the parent's memory, so this is fixed here.
+    pub vsock_egress: bool,
 }
 
 /// Build a `StandbySpec` from [`StandbySpecParams`]. The control UDS lives under
@@ -128,6 +131,7 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
         binding_nonce: nonce,
         image_path: p.image_path.map(|p| p.to_string_lossy().into_owned()),
         image_sha256: p.image_sha256.map(str::to_string),
+        vsock_egress: p.vsock_egress,
         id,
     })
 }
@@ -204,6 +208,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             vcpus: p.vcpus,
             mem_mib: p.mem_mib,
             image_sha256: None,
+            vsock_egress: false,
         },
     };
     let have = pool.idle_count_compatible(&want)? as u32;
@@ -231,6 +236,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             signing_key_path: p.signing_key_path,
             image_path: image,
             image_sha256: want.image_sha256.as_deref(),
+            vsock_egress: want.vsock_egress,
         })?;
         match p.backend.spawn_standby_via_runner(&spawn_ctx, &spec) {
             Ok(handle) => {
@@ -323,7 +329,16 @@ where
         })
         .context("requested standby-pool recovery"));
     }
-    let Some(handle) = pool.claim_idle_compatible(want)? else {
+    // Select without reserving. The runner reserves this parent itself, in the
+    // same locked section it verifies it in, and refuses a parent that is
+    // already `Claimed` — so reserving here too made every warm claim fail with
+    // "parent is not in a claimable state". One reservation owner, and it is the
+    // one that also verifies.
+    //
+    // Two launchers can still both select the same idle parent; the runner's
+    // lock serializes them and the loser is refused into a cold boot, which is
+    // the same outcome reserving here bought, without deadlocking the winner.
+    let Some(handle) = pool.select_idle_compatible(want)? else {
         return Ok(LaunchDecision::ColdBoot);
     };
     let claim = match make_claim(&handle) {
@@ -397,38 +412,41 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: cfg.memory_mib,
         image_sha256: Some(image_identity(Path::new(cfg.rootfs_path.as_str()))?),
+        // Whether the guest boots an egress client, read off the launch's policy
+        // and its admitted plan through the same derivation the guest cmdline
+        // token comes from — never re-expressed here, because a second
+        // expression of it is free to drift from the token it must predict.
+        vsock_egress: mvm_runtime::egress_shared::effective_vsock_egress(cfg),
     })
 }
 
 /// Whether a warm parent can serve this launch shape at all.
 ///
-/// A parent is shared across claims and carries no workload authority, so it
-/// boots only what every eligible launch has in common. Both halves of the pool
-/// consult this — the claim to decide whether to look, the replenish to decide
-/// whether to spawn — because excluding a shape from one but not the other
-/// either fills the pool with parents nothing claims or claims parents that
-/// cannot serve the launch.
+/// A parent is shared across claims and carries no workload authority, so a
+/// launch shape whose guest a parent cannot boot is excluded here rather than
+/// keyed on. Both halves of the pool consult this — the claim to decide whether
+/// to look, the replenish to decide whether to spawn — because excluding a shape
+/// from one but not the other either fills the pool with parents nothing claims
+/// or claims parents that cannot serve the launch.
 ///
 /// Excluded:
 ///
 /// - **extra volumes** — the attach threads only the rootfs, so a volume disk
 ///   would be missing from the child;
-/// - **a virtio-fs root** — there is no rootfs image to capture;
-/// - **a policy that allows egress** — `mvm.vsock_egress=1` is a per-launch
-///   kernel-cmdline token, and a forked child inherits its parent's cmdline out
-///   of restored memory rather than deriving its own. A deny-all parent would
-///   hand every child a guest whose in-guest egress client never starts, so the
-///   workload would silently have no network. Carrying one launch's policy onto
-///   a shared parent instead would leak that launch's shape to the next claim,
-///   since the policy is not part of the compat key. Until a child can be told
-///   its own egress shape after the restore, such a launch cold-boots.
+/// - **a virtio-fs root** — there is no rootfs image to capture.
 ///
-/// The egress test is deliberately coarser than the token's own condition (the
-/// token is also suppressed when the workload has bound secrets): it depends
-/// only on the launch config, not on what is on disk at replenish time, and
-/// erring toward a cold boot is the safe direction.
+/// An egress-allowing policy is *not* excluded. `mvm.vsock_egress=1` is a
+/// kernel-cmdline token, and a forked child inherits its parent's cmdline out of
+/// restored memory rather than deriving its own — but the token carries only
+/// whether the guest starts an egress client, never a destination. So the pool
+/// partitions on that boolean instead of refusing the shape:
+/// [`StandbyCompat::vsock_egress`] makes a parent claimable only by launches
+/// whose guest boots the same way, and the destinations a workload may reach are
+/// resolved host-side on the claimed child's own egress endpoint, from that
+/// child's own policy. A shared parent therefore holds nothing per-launch that
+/// could reach the next claim.
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
-    cfg.volumes.is_empty() && cfg.virtiofs_root.is_none() && !cfg.network_policy.allows_egress()
+    cfg.volumes.is_empty() && cfg.virtiofs_root.is_none()
 }
 
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
@@ -770,7 +788,6 @@ mod tests {
     /// pays for a parent boot and cold-boots anyway.
     #[test]
     fn claim_and_replenish_agree_on_which_launch_shapes_a_warm_parent_can_serve() {
-        use mvm_core::network_policy::{HostPort, NetworkPolicy};
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 
         let ineligible = [
@@ -789,12 +806,6 @@ mod tests {
             ("virtiofs root", {
                 let mut c = eligible_cfg();
                 c.virtiofs_root = Some("/unpacked/root".into());
-                c
-            }),
-            ("egress-allowing policy", {
-                let mut c = eligible_cfg();
-                c.network_policy =
-                    NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
                 c
             }),
         ];
@@ -819,6 +830,144 @@ mod tests {
                 "{why} must not spawn a parent nothing will claim"
             );
         }
+    }
+
+    /// The launch shape the pool used to refuse outright now warms and claims
+    /// like any other. It is keyed, not excluded: the guest cmdline carries only
+    /// whether an egress client starts, so a parent can boot that and the
+    /// destinations stay host-side on the child's own endpoint.
+    ///
+    /// The assertion is equality with the baseline eligible launch rather than a
+    /// hard-coded outcome: whatever a default-shaped launch does at each gate, an
+    /// egress-allowing one must do too, so this keeps holding as the gates move.
+    #[test]
+    fn an_egress_allowing_launch_is_warm_eligible_exactly_like_a_deny_all_one() {
+        use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+
+        let baseline = eligible_cfg();
+        assert!(warm_eligible_launch(&baseline));
+        let b = AnyBackend::from_hypervisor("libkrun");
+        // The disarmed pool refuses at the capability gate, which sits *after*
+        // the shape gate — so reaching the same verdict as the baseline is what
+        // proves the shape gate no longer short-circuits an egress launch.
+        let baseline_verdict = try_warm_claim(&b, &baseline, false).is_err();
+
+        for (why, policy) in [
+            (
+                "explicit allow-list",
+                NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
+            ),
+            ("named preset", NetworkPolicy::preset(NetworkPreset::Dev)),
+            ("unrestricted", NetworkPolicy::unrestricted()),
+        ] {
+            let mut cfg = eligible_cfg();
+            cfg.network_policy = policy;
+            assert!(
+                cfg.network_policy.allows_egress(),
+                "{why} must actually allow egress, or this proves nothing"
+            );
+            assert!(warm_eligible_launch(&cfg), "{why} must be warm-eligible");
+            assert!(
+                should_replenish_inline(true, cfg.warm_pool_size, warm_eligible_launch(&cfg)),
+                "{why} must replenish, or the pool it claims from is never filled"
+            );
+            assert_eq!(
+                try_warm_claim(&b, &cfg, false).is_err(),
+                baseline_verdict,
+                "{why} must reach the same gate a deny-all launch does"
+            );
+        }
+    }
+
+    /// The compat key's egress half is the shared derivation, never a second
+    /// expression of it here — a copy in the CLI would be free to drift from the
+    /// guest cmdline token it exists to predict.
+    #[test]
+    fn the_compat_key_reads_egress_enablement_from_the_one_shared_derivation() {
+        use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        let fc = AnyBackend::from_hypervisor("firecracker");
+
+        for policy in [
+            NetworkPolicy::deny_all(),
+            NetworkPolicy::allow_list(vec![]),
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
+            NetworkPolicy::preset(NetworkPreset::Dev),
+            NetworkPolicy::unrestricted(),
+        ] {
+            for plan in [None, Some("{}".to_string())] {
+                let mut cfg = eligible_cfg();
+                cfg.kernel_path = Some(kernel.to_string_lossy().into_owned());
+                cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
+                cfg.network_policy = policy.clone();
+                cfg.plan_json = plan;
+                let want = compat_for_launch(fc.as_vm_backend(), &cfg).unwrap();
+                assert_eq!(
+                    want.vsock_egress,
+                    mvm_runtime::egress_shared::effective_vsock_egress(&cfg),
+                    "the compat key must not re-derive the guest's egress enablement"
+                );
+            }
+        }
+    }
+
+    /// A parent warmed for one egress enablement must not serve a launch of the
+    /// other. Both directions matter: the permissive one would hand a child
+    /// egress its cold boot would have denied, the restrictive one a workload
+    /// with silently no network.
+    #[test]
+    fn a_parent_of_the_wrong_egress_enablement_is_not_claimable() {
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        let fc = AnyBackend::from_hypervisor("firecracker");
+
+        let mut deny = eligible_cfg();
+        deny.kernel_path = Some(kernel.to_string_lossy().into_owned());
+        deny.rootfs_path = rootfs.to_string_lossy().into_owned();
+        let mut egress = deny.clone();
+        egress.network_policy =
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
+
+        let deny_key = compat_for_launch(fc.as_vm_backend(), &deny).unwrap();
+        let egress_key = compat_for_launch(fc.as_vm_backend(), &egress).unwrap();
+        assert!(!deny_key.vsock_egress);
+        assert!(egress_key.vsock_egress);
+        assert_ne!(
+            deny_key, egress_key,
+            "the two launches must not share a compat key"
+        );
+
+        // A recorded parent answers only its own key — the pool's compat test is
+        // exact equality, so this is what makes the mismatch a cold boot.
+        let mut parent = saved_idle_handle("standby-deny", &deny_key.kernel_sha256, "img");
+        parent.image_sha256 = deny_key.image_sha256.clone();
+        parent.vcpus = deny_key.vcpus;
+        parent.mem_mib = deny_key.mem_mib;
+        assert!(parent.is_compatible(&deny_key));
+        assert!(
+            !parent.is_compatible(&egress_key),
+            "a token-less parent must not serve an egress-allowing launch"
+        );
+
+        let egress_parent = StandbyHandle {
+            vsock_egress: true,
+            ..parent.clone()
+        };
+        assert!(egress_parent.is_compatible(&egress_key));
+        assert!(
+            !egress_parent.is_compatible(&deny_key),
+            "an egress-booted parent must not serve a launch whose guest wants none"
+        );
     }
 
     #[test]
@@ -862,6 +1011,7 @@ mod tests {
             signing_key_path: &tmp.path().join("key"),
             image_path: None,
             image_sha256: None,
+            vsock_egress: false,
         })
         .unwrap();
         // The socket lives under the nonce-derived `standby-<16hex>` dir; the filename is
@@ -934,6 +1084,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: None,
             parent_checkpoint: None,
+            vsock_egress: false,
         }
     }
 
@@ -951,6 +1102,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: Some(image.into()),
             parent_checkpoint: None,
+            vsock_egress: false,
         }
     }
 
@@ -1082,6 +1234,77 @@ mod tests {
         assert_ne!(other_want, want);
     }
 
+    /// `claim_or_cold` must hand the runner a parent that is still claimable.
+    ///
+    /// The runner reserves the parent itself, in the same locked section it
+    /// verifies it in, and refuses one that is already `Claimed`. Reserving here
+    /// as well meant every warm claim on a runner-backed backend died with
+    /// "parent is not in a claimable state": the pool filled and never drained.
+    ///
+    /// Nothing caught it because the mock backend services a claim from its own
+    /// in-memory state and never runs the runner's reserve, so the two-layer
+    /// interaction only existed on a live host. This asserts the seam directly:
+    /// at the moment the claim is built the runner has not run, so the parent
+    /// must still be claimable on disk.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn claim_or_cold_leaves_the_parent_claimable_for_the_runner_to_reserve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"warm-kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"warm-rootfs").unwrap();
+        let key = tmp.path().join("host-signer.ed25519");
+        std::fs::write(&key, b"fake-key").unwrap();
+
+        let mut cfg = eligible_cfg();
+        cfg.kernel_path = Some(kernel.display().to_string());
+        cfg.rootfs_path = rootfs.display().to_string();
+
+        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
+        assert_eq!(
+            warm_to_target(
+                &pool,
+                &WarmParams {
+                    backend: &backend,
+                    template_id: cfg.template_id.as_deref(),
+                    kernel: &kernel,
+                    vcpus: 2,
+                    mem_mib: 1024,
+                    signer_id: "host:test",
+                    signing_key_path: &key,
+                    target: 1,
+                    launch: Some(&cfg),
+                },
+            )
+            .unwrap()
+            .spawned,
+            1,
+            "the fixture must warm one parent, or this asserts nothing"
+        );
+
+        let want = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
+        let observed: std::cell::Cell<Option<StandbyState>> = std::cell::Cell::new(None);
+        let decision = claim_or_cold(&pool, &backend, &want, |handle| {
+            observed.set(Some(pool.load(&handle.id).unwrap().state));
+            // Stop here: the reservation state is the whole subject of this test.
+            anyhow::bail!("halt after inspecting the reservation state")
+        })
+        .unwrap();
+
+        assert_eq!(
+            observed.get(),
+            Some(StandbyState::Idle),
+            "the parent must still be claimable when the runner is handed it; \
+             reserving it here is what made every warm claim refuse"
+        );
+        assert!(
+            matches!(decision, LaunchDecision::ColdBoot),
+            "a halted claim falls back to a cold boot"
+        );
+    }
+
     #[cfg(feature = "test-support")]
     #[test]
     fn warm_to_target_counts_failures_when_spawn_errors() {
@@ -1209,6 +1432,9 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            // These warms carry no launch, so they mirror a launch-less spawn:
+            // no plan to read an egress decision off, hence no guest token.
+            vsock_egress: false,
         };
         assert_eq!(
             pool.idle_count_compatible(&want).unwrap(),

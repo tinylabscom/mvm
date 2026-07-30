@@ -23,7 +23,7 @@ requested_capabilities: GuestCapability[]
 SleepPrep: {
 drain_timeout_secs: number
 }
-} | "Wake" | "Ping" | "IntegrationStatus" | {
+} | "Wake" | "Ping" | "ResourceUsage" | "IntegrationStatus" | {
 CheckpointIntegrations: {
 integrations: string[]
 }
@@ -252,7 +252,7 @@ export type VerbId = string
 /**
  * Guest-agent control protocol capability. Closed enum so host and guest fail loudly on drift instead of accepting arbitrary strings.
  */
-export type GuestCapability = (("ping" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "unix_socket_forward" | "readiness")
+export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "unix_socket_forward" | "readiness")
 /**
  * Response from guest vsock agent to host.
  * 
@@ -291,6 +291,10 @@ WakeAck: {
 success: boolean
 }
 } | "Pong" | {
+ResourceUsageReport: {
+rss_bytes: number
+}
+} | {
 Error: {
 message: string
 }

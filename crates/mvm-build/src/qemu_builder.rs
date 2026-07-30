@@ -114,7 +114,7 @@ const QEMU_STAGE0_OUT_ARTIFACT_NAMES: &[&str] = &[
 ];
 
 /// Directories `copy_tree_filtered` drops when staging a `/work` tree for
-/// packing — the heavy build/VCS dirs the nix workspace filter ignores
+/// packing — the heavy build/VCS/state dirs the Nix workspace filter ignores
 /// anyway. Shared with the libkrun Stage 0 path (`libkrun_builder`), which
 /// packs `/work` onto an ext4 disk the same way this QEMU path does.
 pub(crate) const WORK_TREE_EXCLUDE_DIRS: &[&str] = &[
@@ -124,6 +124,11 @@ pub(crate) const WORK_TREE_EXCLUDE_DIRS: &[&str] = &[
     "node_modules",
     DEFAULT_MVM_HOME_DIR_NAME,
     ".mvm-test",
+    ".worktrees",
+    ".cargo",
+    "result",
+    ".direnv",
+    ".build",
 ];
 
 /// Ext4 image sizes (sparse — `set_len` + `mkfs.ext4 -d` only touch real
@@ -617,6 +622,25 @@ mod tests {
             locate_qemu_vsock_module(module_root.path(), "vsock.ko"),
             Some(module_root.path().join("vsock.ko.zst"))
         );
+    }
+
+    #[test]
+    fn stage0_workspace_copy_excludes_local_build_state() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let destination = tempfile::tempdir().expect("destination tempdir");
+        for name in [".mvm-test", ".worktrees", ".cargo", "result"] {
+            fs::create_dir(source.path().join(name)).expect("excluded directory");
+            fs::write(source.path().join(name).join("state"), name).expect("excluded state");
+        }
+        fs::write(source.path().join("kept.txt"), "kept").expect("kept file");
+
+        copy_tree_filtered(source.path(), destination.path(), WORK_TREE_EXCLUDE_DIRS)
+            .expect("copy filtered workspace");
+
+        assert!(destination.path().join("kept.txt").exists());
+        for name in [".mvm-test", ".worktrees", ".cargo", "result"] {
+            assert!(!destination.path().join(name).exists(), "{name} was copied");
+        }
     }
 }
 

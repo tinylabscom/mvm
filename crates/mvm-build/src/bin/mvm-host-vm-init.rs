@@ -2126,6 +2126,10 @@ mod linux {
             return 1;
         };
         eprintln!("mvm-host-vm-init: dispatch loop ready on AF_VSOCK port {BUILDER_DISPATCH_PORT}");
+        let ready_marker = format!("{JOB_DIR}/dispatch.ready");
+        if let Err(e) = std::fs::write(&ready_marker, b"") {
+            eprintln!("mvm-host-vm-init: dispatch loop: failed to write {ready_marker}: {e}");
+        }
         loop {
             let Some(conn_fd) = accept_one(listen_fd) else {
                 // accept() failed with no timeout configured —
@@ -2156,6 +2160,9 @@ mod linux {
                     job,
                     job_dir_relpath,
                 } => {
+                    eprintln!(
+                        "mvm-host-vm-init: dispatch loop: starting job {job_id} at {job_dir_relpath}"
+                    );
                     let response = execute_dispatched_job(
                         &mut conn,
                         job_id,
@@ -2163,6 +2170,7 @@ mod linux {
                         &job_dir_relpath,
                         cold_boot_timings.take(),
                     );
+                    eprintln!("mvm-host-vm-init: dispatch loop: job completed; writing Result");
                     if !write_frame(&mut conn, response.as_bytes()) {
                         eprintln!("mvm-host-vm-init: dispatch loop: write Result failed mid-frame");
                     }
@@ -2437,6 +2445,7 @@ mod linux {
                         }
                     };
                     let started = Instant::now();
+                    eprintln!("mvm-host-vm-init: dispatch loop: running flake command");
                     let (code, tail) = run_job_streaming(
                         &cmd_path,
                         tmpdir.as_deref(),
@@ -2459,6 +2468,10 @@ mod linux {
                         },
                     );
                     let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    eprintln!(
+                        "mvm-host-vm-init: dispatch loop: flake command exited \
+                         code={code} elapsed_ms={ms}"
+                    );
                     // Hold `scratch` until after the build returns
                     // so its `Drop` cleans up after the
                     // subprocess. Explicit drop documents the
@@ -2834,8 +2847,46 @@ mod linux {
         if let Err(e) = load_seeded_nix_db(timings, anchor) {
             eprintln!("mvm-host-vm-init: load_seeded_nix_db warning (non-fatal): {e}");
         }
+        prepare_builder_nix_permissions()?;
 
         Ok(())
+    }
+
+    /// Make the persistent single-user Nix database writable by the
+    /// unprivileged dispatch uid while keeping seeded store paths owned
+    /// by root and readable.
+    fn prepare_builder_nix_permissions() -> Result<(), String> {
+        for (program, args) in builder_nix_permission_commands() {
+            let status = Command::new(program)
+                .args(args)
+                .status()
+                .map_err(|e| format!("spawn {program}: {e}"))?;
+            if !status.success() {
+                return Err(format!(
+                    "{program} {} exited {}",
+                    args.join(" "),
+                    status.code().unwrap_or(-1)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn builder_nix_permission_commands() -> [(&'static str, &'static [&'static str]); 6] {
+        [
+            (
+                "/bin/mkdir",
+                &["-p", "/nix/var/nix", "/nix/var/log/nix"][..],
+            ),
+            ("/bin/chown", &["-R", "902:902", "/nix/var/nix"]),
+            ("/bin/chown", &["-R", "902:902", "/nix/var/log/nix"]),
+            ("/bin/chown", &["0:902", "/nix/store"]),
+            ("/bin/chmod", &["0775", "/nix/store"]),
+            (
+                "/bin/find",
+                &["/nix/store", "-maxdepth", "1", "-name", "*.lock", "-delete"],
+            ),
+        ]
     }
 
     /// Import [`CLOSURE_SEED_NAR`] into the persistent Nix store when
@@ -3300,7 +3351,8 @@ mod linux {
         mut on_line: F,
     ) -> (i32, String) {
         use std::collections::VecDeque;
-        use std::io::{BufRead, BufReader};
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
         use std::process::Stdio;
         // Switch between bare `/bin/sh
         // -eu <cmd>` and the unshare+setpriv wrapped form via
@@ -3342,23 +3394,76 @@ mod linux {
             let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
             return (code, String::new());
         };
-        let mut tail: VecDeque<String> = VecDeque::with_capacity(STDERR_TAIL_LINES);
-        for line in BufReader::new(stderr).lines() {
-            let line = match line {
-                Ok(l) => l,
-                // Treat a partial UTF-8 / I/O failure as end-of-stream
-                // — the child's exit code is still the authoritative
-                // signal. The tail we collected so far is still
-                // useful for the Result frame.
-                Err(_) => break,
-            };
-            on_line(&line);
-            if tail.len() == STDERR_TAIL_LINES {
-                tail.pop_front();
+        let stderr_fd = stderr.as_raw_fd();
+        // SAFETY: `stderr_fd` is a live pipe owned by `stderr`; F_GETFL and
+        // F_SETFL do not transfer ownership or outlive that file descriptor.
+        let flags = unsafe { libc::fcntl(stderr_fd, libc::F_GETFL) };
+        if flags >= 0 {
+            // SAFETY: same live descriptor as above. O_NONBLOCK only changes
+            // read behavior so the authoritative child exit can end the job
+            // even when a detached descendant retains a duplicate writer.
+            unsafe {
+                libc::fcntl(stderr_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
-            tail.push_back(line);
         }
-        let exit_code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        let mut stderr = stderr;
+        let mut tail: VecDeque<String> = VecDeque::with_capacity(STDERR_TAIL_LINES);
+        let mut pending = Vec::new();
+        let mut read_buf = [0u8; 4096];
+        let exit_code = loop {
+            let mut pipe_drained = false;
+            match stderr.read(&mut read_buf) {
+                Ok(0) => pipe_drained = true,
+                Ok(n) => {
+                    pending.extend_from_slice(&read_buf[..n]);
+                    while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+                        let mut bytes = pending.drain(..=newline).collect::<Vec<_>>();
+                        bytes.pop();
+                        if bytes.last() == Some(&b'\r') {
+                            bytes.pop();
+                        }
+                        let Ok(line) = String::from_utf8(bytes) else {
+                            pipe_drained = true;
+                            break;
+                        };
+                        on_line(&line);
+                        if tail.len() == STDERR_TAIL_LINES {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    pipe_drained = true;
+                }
+                Err(_) => pipe_drained = true,
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) if pipe_drained => {
+                    if !pending.is_empty()
+                        && let Ok(mut line) = String::from_utf8(std::mem::take(&mut pending))
+                    {
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+                        on_line(&line);
+                        if tail.len() == STDERR_TAIL_LINES {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line);
+                    }
+                    break status.code().unwrap_or(-1);
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(_) => break -1,
+            }
+
+            if pipe_drained {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
         let tail_joined = tail.into_iter().collect::<Vec<_>>().join("\n");
         (exit_code, tail_joined)
     }
@@ -3857,6 +3962,40 @@ mod linux {
             assert_eq!(tail, "one\ntwo\nthree");
         }
 
+        #[test]
+        fn run_job_streaming_returns_when_descendant_keeps_stderr_open() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cmd_path = dir.path().join("cmd.sh");
+            let pid_path = dir.path().join("descendant.pid");
+            std::fs::write(
+                &cmd_path,
+                format!(
+                    "sleep 30 &\necho $! > '{}'\necho parent-exited >&2\nexit 0\n",
+                    pid_path.display()
+                ),
+            )
+            .expect("write cmd.sh");
+
+            let started = Instant::now();
+            let (code, tail) =
+                run_job_streaming(cmd_path.to_str().unwrap(), None, Isolation::Inherit, |_| {});
+            let elapsed = started.elapsed();
+
+            let descendant_pid = std::fs::read_to_string(&pid_path).expect("read descendant pid");
+            let kill_status = Command::new("kill")
+                .arg(descendant_pid.trim())
+                .status()
+                .expect("kill held-open descendant");
+
+            assert!(kill_status.success(), "descendant cleanup must succeed");
+            assert_eq!(code, 0);
+            assert_eq!(tail, "parent-exited");
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "authoritative parent exit must not wait for descendant stderr EOF: {elapsed:?}"
+            );
+        }
+
         /// Non-zero exit still surfaces all
         /// streamed lines and a tail bounded by `STDERR_TAIL_LINES`.
         #[test]
@@ -4142,6 +4281,27 @@ mod linux {
         fn nix_store_needs_seed_when_path_missing() {
             let base = tempfile::tempdir().expect("tempdir");
             assert!(nix_store_needs_seed(&base.path().join("does-not-exist")));
+        }
+
+        #[test]
+        fn builder_nix_permissions_keep_store_root_owned_and_group_writable() {
+            assert_eq!(
+                builder_nix_permission_commands(),
+                [
+                    (
+                        "/bin/mkdir",
+                        &["-p", "/nix/var/nix", "/nix/var/log/nix"][..],
+                    ),
+                    ("/bin/chown", &["-R", "902:902", "/nix/var/nix"][..]),
+                    ("/bin/chown", &["-R", "902:902", "/nix/var/log/nix"][..]),
+                    ("/bin/chown", &["0:902", "/nix/store"][..]),
+                    ("/bin/chmod", &["0775", "/nix/store"][..]),
+                    (
+                        "/bin/find",
+                        &["/nix/store", "-maxdepth", "1", "-name", "*.lock", "-delete"][..],
+                    ),
+                ]
+            );
         }
 
         #[test]

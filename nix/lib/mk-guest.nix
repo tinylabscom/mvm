@@ -42,12 +42,6 @@ let
   # (which alone saves ~10ms vs a glibc-linked init).
   busybox = pkgs.pkgsStatic.busybox;
 
-  # Static-musl util-linux setpriv. busybox's stripped setpriv applet lacks
-  # --reuid/--regid/--clear-groups, so /init needs the full util-linux binary
-  # to drop privilege before exec. The *static* build's runtime closure is the
-  # binary itself — no glibc — so it does not drag glibc into the rootfs.
-  setpriv = "${pkgs.pkgsStatic.util-linux}/bin/setpriv";
-
   classifyEntrypoint = ep:
     let
       hasShell    = ep ? shell;
@@ -121,6 +115,7 @@ in
 , memory_mib     ? 256
 , dev            ? null
 , uids           ? null   # { agent = <int>; entrypoint = <int>; } — see below
+, builderUid     ? null   # optional uid used by an in-guest build daemon
 , extraFiles     ? { }
 # Whether to bake the `mvm-audit-probe` binary into the rootfs at
 # `/usr/local/bin/audit-probe`. Off by default — it is a test fixture, not a
@@ -188,6 +183,16 @@ let
     rootPaths = packages ++ extraFileSourceRoots;
   };
 
+  # `mvm-host-vm-init` loads this registration into the writable persistent
+  # Nix store before an unprivileged builder starts. Without it, Nix treats
+  # the read-only rootfs closure as absent and tries to substitute every path
+  # again, which is both slow and unsafe when the store already contains a
+  # seeded copy. The CA bundle is copied into `/etc` below, so retaining the
+  # source `cacert` store path would duplicate the same certificate bytes.
+  rootfsClosureInfo = pkgs.closureInfo {
+    rootPaths = [ busybox setprivPkg ] ++ packages ++ extraFileSourceRoots;
+  };
+
   assertNoSshTemplateInputs =
     let
       badPackages = lib.filter (pkg: containsSshMarker (packageLabel pkg)) packages;
@@ -236,6 +241,17 @@ let
     inherit mvmSrc withInteractive;
   };
 
+  # Static-musl privilege-drop helper. It replaces the much larger
+  # util-linux setpriv closure while preserving the exact privilege flags
+  # emitted by the generated init script.
+  setprivPkg = import ../packages/mvm-setpriv.nix {
+    rustPlatform = pkgs.pkgsStatic.rustPlatform;
+    lib = pkgs.lib;
+    inherit mvmSrc;
+  };
+  setpriv = "${setprivPkg}/bin/mvm-setpriv";
+  setprivHelperName = "mvm-setpriv";
+
   # In-guest host.audit.v1 driver — test fixture, baked only when
   # `withAuditProbe`. Compiled lazily (Nix only evaluates this when the
   # bake below references it) so the default path adds no build cost.
@@ -279,15 +295,11 @@ let
 
   # Wrap a command-line in `setpriv` when the target uid is non-zero.
   #
-  # **util-linux's setpriv, not busybox's.** `pkgsStatic.busybox`
-  # ships a stripped setpriv applet that only knows the bare
-  # `-d / --nnp / --inh-caps / --ambient-caps` flags — `--reuid`,
-  # `--regid`, and `--clear-groups` come from util-linux's full
-  # setpriv binary. Invoking `/bin/busybox setpriv --reuid=…`
-  # fails with `setpriv: unrecognized option: reuid=…`, killing
-  # /init at stage 2.5 before the guest agent ever forks. We use the
-  # static-musl build (see `setpriv` above) so pulling in the full
-  # binary doesn't also pull glibc into the rootfs closure.
+  # **mvm-setpriv, not busybox's setpriv applet.** `pkgsStatic.busybox`
+  # only supports the bare `-d / --nnp / --inh-caps / --ambient-caps`
+  # flags. The dedicated static helper implements the numeric uid/gid,
+  # group clearing, no-new-privileges, and loopback capability operations
+  # needed by this init without pulling util-linux into the rootfs.
   #
   # The flag set is --reuid + --regid + --clear-groups + --no-new-privs.
   # uid==0 short-circuits to the bare command — no point setpriv-ing
@@ -828,10 +840,9 @@ let
       echo "mvm-init: no guest agent resolved from /mvm/runtime and no baked fallback"
       exit 1
     fi
-    # Static-musl util-linux setpriv — busybox setpriv lacks --reuid /
-    # --regid / --clear-groups; see `setprivWrap` above for the full
-    # reasoning. Without this fix the agent never forks and vsock port
-    # 5252 stays unbound. The static build keeps glibc out of the closure.
+    # Static-musl mvm-setpriv — the helper applies the uid/gid, group, and
+    # no-new-privileges drop before the agent exec. Without this step the
+    # agent never forks and vsock port 5252 stays unbound.
     /bin/busybox setsid ${setpriv} \
       --reuid=${toString agentUid} --regid=${toString agentUid} \
       --clear-groups --securebits=keep-caps \
@@ -1077,6 +1088,9 @@ let
     chmod 1777 "$out/tmp"
     chmod 0755 "$out/run"
 
+    cp ${rootfsClosureInfo}/registration "$out/nix-path-registration"
+    chmod 0444 "$out/nix-path-registration"
+
     # The mvm runtime overlay is
     # bind-mounted at /mvm/runtime by `mvm-verity-init` before
     # switch_root. The directory must exist in the rootfs so the
@@ -1157,6 +1171,9 @@ let
       mkdir -p "$out/home/mvm-worker"
       chmod 0755 "$out/home/mvm-worker"
     fi
+    ${lib.optionalString (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid) ''
+      printf 'mvm-builder:x:${toString builderUid}:${toString builderUid}:mvm build worker:/tmp:/bin/sh\n' >> "$out/etc/passwd"
+    ''}
     chmod 0644 "$out/etc/passwd"
 
     cat > "$out/etc/group" <<EOF
@@ -1168,6 +1185,9 @@ let
     if [ "${toString entrypointUid}" != "0" ] && [ "${toString entrypointUid}" != "${toString agentUid}" ]; then
       printf 'mvm-worker:x:${toString entrypointUid}:\n' >> "$out/etc/group"
     fi
+    ${lib.optionalString (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid) ''
+      printf 'mvm-builder:x:${toString builderUid}:\n' >> "$out/etc/group"
+    ''}
     chmod 0644 "$out/etc/group"
 
     # Default /etc/resolv.conf and CA cert bundle — needed for any
@@ -1265,15 +1285,14 @@ let
               kver=$(${pkgs.coreutils}/bin/basename "$src")
               mkdir -p "$out/lib/modules/$kver"
 
-              # Keep module metadata at the kver root. Busybox modprobe
-              # reads modules.dep for the named module and dependency
-              # paths; the other modules.* files are small enough to keep
-              # and preserve compatibility with kmod-style lookup.
-              shopt -s nullglob
-              for metadata in "$src"/modules.*; do
-                cp -a --reflink=auto "$metadata" "$out/lib/modules/$kver/"
-              done
-              shopt -u nullglob
+              # Busybox modprobe resolves these exact names through the
+              # dependency graph. The other modules.* indexes serve generic
+              # alias and symbol lookup, which this image never requests.
+              if [ ! -f "$src/modules.dep" ]; then
+                echo "mkGuest: required kernel module metadata $src/modules.dep is missing" >&2
+                exit 1
+              fi
+              cp -a --reflink=auto "$src/modules.dep" "$out/lib/modules/$kver/"
 
               copy_module_closure \
                 "$src" \
@@ -1342,13 +1361,36 @@ let
   # (`${nixpkgs}/...`) rather than the angle-bracket form (`<nixpkgs/...>`)
   # — the latter trips flake pure evaluation ("cannot look up
   # '<nixpkgs/...>' in pure evaluation mode").
-  rootfsImage = pkgs.callPackage "${nixpkgs}/nixos/lib/make-ext4-fs.nix" {
+  rootfsImageWithGrowthReserve = pkgs.callPackage "${nixpkgs}/nixos/lib/make-ext4-fs.nix" {
     storePaths = [ rootfsTree ];
     volumeLabel = "mvm-${name}";
     populateImageCommands = ''
       cp -a --reflink=auto ${rootfsTree}/. ./files/
+      # `rootfsTree` deliberately makes the registration read-only for the
+      # runtime image. The image builder copies that mode into its staging
+      # tree, then rewrites the same file while assembling the closure. Leave
+      # it out of the generic file copy so the closure manifest can create a
+      # fresh staging file with normal build-user permissions.
+      chmod -R u+w ./files
+      rm -f ./files/nix-path-registration
     '';
   };
+
+  # The generic image builder expands its minimum-sized filesystem by 16 MiB
+  # so mutable images have room to grow before their first boot. mkGuest mounts
+  # its rootfs read-only and puts mutable directories on tmpfs, so that reserve
+  # can never be used.
+  rootfsImage = pkgs.runCommand "mvm-rootfs-${name}.ext4"
+    {
+      nativeBuildInputs = [ pkgs.e2fsprogs ];
+    }
+    ''
+      cp --reflink=auto ${rootfsImageWithGrowthReserve} "$out"
+      chmod u+w "$out"
+      resize2fs -M "$out"
+      e2fsck -fn "$out"
+      chmod 0444 "$out"
+    '';
 
   mvmMeta = {
     inherit name hypervisor;
@@ -1377,12 +1419,14 @@ let
       agent = agentUid;
       entrypoint = entrypointUid;
     };
+    inherit builderUid;
     rootlessEntrypoint = entrypointUid != 0;
     # Agent binary kind: "real" — the cross-compiled Rust binary.
     # The previous "stub" value flagged a placeholder sh script.
     # `mvmctl status` reads this;
     # production deployments should refuse to boot a "stub" image.
     agentBinary = "real";
+    setprivHelperName = setprivHelperName;
     # The rootfs carries a `/mvm/runtime`
     # bind-mount target and the /init script prefers the overlay
     # agent at `/mvm/runtime/agent` over the baked-in
@@ -1402,7 +1446,8 @@ rootfsImage.overrideAttrs (old: {
   passthru = (old.passthru or { }) // {
     mvm = mvmMeta;
     inherit rootfsTree;
-    inherit setpriv;
+    inherit rootfsClosureInfo;
+    inherit setprivHelperName;
     # Surface the chosen hypervisor + resource defaults at the top
     # of passthru so `nix eval` is sufficient for mvmctl to drive
     # the runtime — no NixOS evaluation needed.

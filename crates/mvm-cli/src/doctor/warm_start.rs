@@ -246,6 +246,7 @@ mod tests {
         assert_eq!(r.backends.get("qemu"), Some(&"unsupported"));
         assert_eq!(r.backends.get("hvf"), Some(&"unsupported"));
         assert_eq!(r.backends.get("wasm"), Some(&"unsupported"));
+        assert_eq!(r.backends.get("apple-container"), Some(&"unsupported"));
     }
 
     #[test]
@@ -255,6 +256,7 @@ mod tests {
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
 
         let mut expected_backends = vec![
+            ("apple-container".to_string(), "unsupported"),
             ("docker".to_string(), "unsupported"),
             ("firecracker".to_string(), "unsupported"),
             ("hvf".to_string(), "unsupported"),
@@ -263,6 +265,7 @@ mod tests {
             ("wasm".to_string(), "unsupported"),
         ];
         let mut expected_standby_pool = vec![
+            ("apple-container".to_string(), false),
             ("docker".to_string(), false),
             ("firecracker".to_string(), false),
             ("hvf".to_string(), false),
@@ -294,7 +297,15 @@ mod tests {
         // Every selectable backend remains in the matrix, including explicit
         // unsupported recovery tiers.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
-        let mut expected = vec!["docker", "firecracker", "hvf", "libkrun", "qemu", "wasm"];
+        let mut expected = vec![
+            "apple-container",
+            "docker",
+            "firecracker",
+            "hvf",
+            "libkrun",
+            "qemu",
+            "wasm",
+        ];
         if cfg!(feature = "test-support") {
             expected.push("mock");
             expected.sort_unstable();

@@ -120,21 +120,36 @@
       # User flakes consume this as `inputs.mvm.lib.<system>.mkGuest`
       # to declare a microVM image. Implementation lives under
       # `./lib/`; the entry point is `./lib/default.nix`.
-      # Pass the `mvm-workspace` flake input (the workspace root,
-      # one level up from this flake) as `mvmSrc` so
+      # Pass the workspace root as `mvmSrc` so
       # `nix/packages/mvm-guest-agent.nix` can resolve
       # `${mvmSrc}/Cargo.lock` — that lockfile is at the workspace
       # root, not under `nix/`, so `mvmSrc = self` (the historical
       # value) failed `nix build` with "Path 'nix/Cargo.lock' does
-      # not exist". The flake-input form preserves purity: nix
-      # stages the workspace into the store as a regular input
-      # snapshot.
-      libFor = import ./lib { inherit nixpkgs microvm; mvmSrc = mvm-workspace; };
+      # not exist".
+      #
+      # A local pure evaluation uses the path input. The persistent
+      # builder evaluates `path:/work/nix` after Nix stages that subdirectory
+      # into its store, where the locked `path:..` otherwise resolves to
+      # `/nix/store` instead of the mounted repository. Its impure build
+      # command supplies `MVM_WORKSPACE_PATH=/work`; use that explicit mount
+      # and the shared source filter in that environment.
+      workspaceSrc =
+        let
+          envPath = builtins.getEnv "MVM_WORKSPACE_PATH";
+        in
+        if envPath != "" then
+          (import ./lib/workspace-filter.nix { inherit (nixpkgs) lib; }) {
+            workspaceRoot = /. + envPath;
+          }
+        else
+          mvm-workspace;
+
+      libFor = import ./lib { inherit nixpkgs microvm; mvmSrc = workspaceSrc; };
 
       hostPackagesFor = system:
         import ./packages {
           pkgs = nixpkgs.legacyPackages.${system};
-          mvmSrc = mvm-workspace;
+          mvmSrc = workspaceSrc;
         };
     in
     {
@@ -149,7 +164,7 @@
         let
           hostPackages = import ./packages {
             pkgs = final;
-            mvmSrc = mvm-workspace;
+            mvmSrc = workspaceSrc;
           };
         in
         {
@@ -200,8 +215,8 @@
 
       # ── CI-provable no-glibc closure gate ─────────────────────────
       #
-      # The guest's `setpriv` is static-musl (`pkgs.pkgsStatic.util-linux`),
-      # which drops glibc from the mkGuest rootfs closure. This check
+      # The guest's `mvm-setpriv` is static-musl, which drops the
+      # util-linux and glibc closures from the mkGuest rootfs. This check
       # realizes that closure and fails if glibc re-enters it — a
       # build-backed guarantee a pure `nix eval` can't provide, since
       # eval can't see a derivation's runtime closure. Wired into the
@@ -238,6 +253,22 @@
                   exit 1
                 fi
                 echo ok > "$out"
+              '';
+
+          # The lean rootfs has exactly two registered runtime store paths:
+          # static BusyBox and the static privilege-drop helper. The CA bundle
+          # is copied into /etc rather than retaining its source store path.
+          guest-rootfs-package-budget =
+            pkgs.runCommand "guest-rootfs-package-budget"
+              { closure = guest.passthru.rootfsClosureInfo; }
+              ''
+                package_count=$(wc -l < "$closure/store-paths")
+                if [ "$package_count" -gt 2 ]; then
+                  echo "lean guest rootfs closure has $package_count store paths; budget is 2:" >&2
+                  cat "$closure/store-paths" >&2
+                  exit 1
+                fi
+                echo "$package_count" > "$out"
               '';
         });
     };

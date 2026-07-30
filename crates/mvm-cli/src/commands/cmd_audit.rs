@@ -203,6 +203,7 @@ impl Commands {
             Commands::Env(a) => a.action.verb_name(),
             Commands::Bootstrap(_) => "bootstrap",
             Commands::BuilderVmBootstrap(_) => "__builder-vm-bootstrap",
+            Commands::BuilderEgressSupervisor(_) => "__builder-egress-supervisor",
             Commands::Ls(_) => "ls",
             Commands::Explain(_) => "explain",
             Commands::Run(_) => "run",

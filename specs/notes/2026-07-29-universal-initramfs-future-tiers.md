@@ -56,15 +56,44 @@ backends").
 
 ## Apple Container
 
-- Today: no backend variant exists (`AnyBackend` enumerates Firecracker,
-  Libkrun, Qemu, Mock, Hvf, Wasm). Two doc comments in
+- Today: the stage-1 backend skeleton exists — `BackendKind::AppleContainer`
+  and `AnyBackend::AppleContainer` behind `--hypervisor apple-container`
+  (alias `container`), opt-in only and never auto-selected. Every operation
+  fails closed with a typed error naming the milestone that provides it;
+  capabilities and the security profile report honestly (no snapshot, no
+  standby pool, all seven claims `DoesNotHold`). The staged design lives in
+  `specs/plans/271-apple-container-backend.md`. Two doc comments in
   `crates/mvm-runtime/src/backend.rs` still name Apple Container
-  (`start` example, `for_started_vm` probe) — they are aspirational, and any
-  implementation should replace them with a real variant + probe marker.
-- Future support shape: a driver that boots the same kernel + universal
-  initramfs (or runs `mvm-guest-agent` as the guest init) and bridges the
-  activation channel to the framework's vsock transport. Capability and
-  security-profile honesty rules from ADR-024 apply verbatim.
+  (`start` example, `for_started_vm` probe) — they describe the real
+  variant's eventual shape (no pid-file marker; the framework tracks VM
+  state out-of-band).
+- Future support shape: Apple's Swift-only framework owns the kernel boot
+  and `vminitd` as guest PID 1 (gRPC on vsock port 1024), so the universal
+  initramfs does not apply verbatim — the **activation contract** rides
+  `vminitd`'s gRPC API instead. The host writes the serialized
+  `ActivateEnvironment` into the container VM, starts `mvm-guest-agent` as
+  a root process, and the agent performs the same mounts and the uid-901
+  drop unchanged. Capability and security-profile honesty rules from
+  ADR-024 apply verbatim.
+
+## QEMU (converged onto the unified runner)
+
+- Today: QEMU boots through the unified `WorkloadRunner` via
+  `crates/mvm-runtime/src/driver/qemu.rs` (`QemuDriver`), the same seam as
+  Firecracker/libkrun/HVF. A QEMU boot attaches the universal initramfs and
+  receives `ActivateEnvironment` over vsock exactly like the other backends;
+  the legacy `mvm.roothash=`/`mvm.data=`/`mvm.hash=` cmdline tokens are no
+  longer built by this path. Because QEMU's `vhost-vsock` speaks real
+  `AF_VSOCK`, the driver spawns a spec-driven per-VM `AF_VSOCK`↔UNIX bridge
+  (one detached `mvmctl __qemu-vsock-bridge` process) that serves the
+  host-dialed agent channel, relays the guest-dialed egress/broker channels
+  to the runner-bound listeners, and captures the workload-exit report.
+- Tier/status unchanged: dev/test tier only (Tier 2 best-case on KVM, TCG
+  runtime fallback banner-flagged), opt-in via `--hypervisor qemu`, never
+  auto-selected, and still barred from the admitted workload funnel. The
+  converged boot attaches no slirp user-mode NIC — egress routes solely
+  through the per-VM vsock endpoint, matching the other runner backends.
+  The raw `QemuBackend` remains as the driver's identity delegate.
 
 ## WHP (Windows Hypervisor Platform)
 

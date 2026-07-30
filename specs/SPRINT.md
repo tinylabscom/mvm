@@ -46,6 +46,24 @@
       #1876 and #1878; tracked in
       `specs/plans/266-vsock-overload-hardening.md`.
 
+- [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
+      only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
+      builder image / runtime overlay from the host's shared cache), so a test
+      that moved only `MVM_HOME` still read the developer's real cache — an
+      assertion that an artifact is *absent* then passed only on a machine that
+      had never built one. Added `TestEnv::isolate_mvm_home` (sets both roots),
+      migrated the 25 tests in files that provably reach a seed site, and added
+      the `check-test-home-isolation` xtask gate: `default_mvm_cache_dir` is now
+      allowlist-only, and tests in seed-reaching files must isolate `HOME`.
+      Reachability was measured empirically by running the suite against an
+      empty vs. a populated fixture `$HOME` rather than inferred from the call
+      graph. 8021/8021 nextest on a host with a populated `~/.mvm`.
+      **Deferred:** `mvmctl::audit_emissions_live
+      update_check_does_not_emit_audit_entry` fails intermittently under full
+      workspace concurrency and is *not* in this class — its `AuditSandbox`
+      already isolates both roots, and the test binary passed 47/47 across four
+      consecutive runs. Needs separate triage as a concurrency flake.
+
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
       #1888 (ARM64 `Image` kernels reach Firecracker), #1891 (guest reads the
@@ -58,6 +76,39 @@
       Firecracker build. One run on non-nested aarch64 hardware closes it;
       tracked in
       `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
+
+- [ ] **Backend shim removal — invert the driver/backend relationship.** The
+      `VmmDriver` seam still wraps the older direct `VmBackend` impls rather
+      than owning the VMM mechanics, so `FirecrackerBackend` / `LibkrunBackend`
+      / `HvfBackend` remain live in the production path. Plan drafted at
+      `specs/plans/269-backend-shim-removal.md`; it carries a "Status and known
+      gaps" section covering the blanket-impl seam that does not exist yet, the
+      unaccounted-for `WasmBackend`, and the QEMU contradiction in §2.5 below
+      that Task 5 depends on. Not started.
+- [x] Lightweight guest WS-3: runtime-overlay guest executables now build
+      static-musl without the shared loader bundle; the glibc SDK FFI is
+      published as a separate `sdk-sidecar` output with an explicit
+      `/mvm/sdk/lib` contract. Sidecar attachment remains opt-in for workloads
+      that use host-service verbs.
+- [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
+      binary with the dedicated static-musl `mvm-setpriv` helper, including
+      UID/GID, group, no-new-privileges, and optional loopback capability paths.
+- [x] Lightweight guest WS-5/WS-6 slice: the Nix-built rootfs keeps only the
+      kernel module dependency index, the runtime overlay allocation is capped
+      at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars + kernel
+      against the literal 50 MB complete-artifact contract. The default tenant
+      now omits its redundant dynamic busybox input and copies the CA bundle
+      without retaining the source `cacert` store path. A build-backed gate caps
+      the lean registered runtime closure at two paths, and the same footprint
+      ledger now reports those exact hash-anchored paths. `mkGuest` re-minimizes
+      the immutable ext4 after nixpkgs adds its generic 16 MiB growth reserve.
+      The measured rootfs is 10,499,072 bytes, and the all-in footprint with
+      overlay, both verity sidecars, and the 14,460,936-byte kernel is 33,917,960
+      bytes (32.35 MiB), leaving 16,082,040 bytes of headroom.
+- [x] Persistent builder completion reliability: the egress helper writes stderr
+      to its VM-scoped log instead of retaining the caller's pipe, and dispatch
+      completion follows the authoritative child exit after draining available
+      stderr even if a detached descendant still holds a writer.
 
 ---
 
@@ -396,7 +447,12 @@ Then unify + retire the old paths:
 **WS10 — tiny kernel + low memory + density**
 
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
-- [ ] Guest agent ≈ **8 MB**: de-`tokio` the guest (mio / raw epoll+kqueue), strip deps, measure RSS.
+- [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured
+  1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The
+  capability-negotiated `ResourceUsage` RPC uses the existing `/proc` sampler,
+  and `xtask perf footprint --guest-rss-bytes` enforces and reports the limit.
+- [x] Complete sealed guest ≤ **50 MB**: the Nix-built rootfs, static runtime
+  overlay, both dm-verity sidecars, and workload kernel total 33,917,960 bytes.
 - [ ] Host daemon ≈ **64 MB**: minimal runtime, evaluate `mimalloc`, strip deps.
 - [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
 - [ ] Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "abort"` for bins.
@@ -414,7 +470,30 @@ Then unify + retire the old paths:
       Phase 2 slice one — the runner-side warm-pool claim substrate
       (`specs/plans/255-phase2-warm-pool-substrate.md`) — landed on branch
       `feat/plan-255-phase2-warm-pool`, with the live FC warm pool + capability
-      flip a follow-up slice.
+      flip a follow-up slice. That follow-up
+      (`specs/plans/255-live-fc-warm-claim.md`) built spawn/capture/fork/reseed
+      and then **failed its live KVM validation**
+      (`specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`): the
+      standby parent booted a bare rootfs and panicked for want of the runtime
+      overlay that carries the guest agent. The parent's boot inputs now come
+      from the launch's own `VmStartConfig` through the same mappers a workload
+      boot uses, guarded by shape-equality tests, and a later live run on the
+      same host confirms that half — the parent boots, reaches its guest agent,
+      and the capture writes a `vm_full` checkpoint carrying a 512 MiB
+      `memory.bin`, then releases the parent.
+      Since then the recorded reductions have closed: a claimed child is wired
+      the host channels a cold boot gets (#1917); an egress-allowing launch is
+      **keyed** into the pool rather than excluded from it —
+      `StandbyCompat::vsock_egress` (the launch's *effective* enablement: the
+      policy allows egress **and** the admitted plan binds no secret) partitions
+      the warm set, the parent boots that boolean and no destination, and the
+      allow-list stays host-side on the claimed child's own egress endpoint; and
+      the CLI no longer reserves a parent the runner is about to reserve (#1922),
+      which had made every warm claim refuse with "parent is not in a claimable
+      state" so the pool filled and never drained.
+      `standby_pool` stays **`false`**: the **claim** half has still never
+      executed live, so the post-restore handshake and the child's egress/broker/
+      exit channels remain unproven. The flip is gated on that run.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.

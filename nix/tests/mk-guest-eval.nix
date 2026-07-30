@@ -156,6 +156,16 @@ in
     (meta g).uids.agent == 5000
     && (meta g).uids.entrypoint == 1000;  # default unaffected
 
+  builder_uid_round_trips =
+    let
+      g = mkGuest {
+        name = "builder-uid";
+        entrypoint.shell = "/bin/sh";
+        builderUid = 902;
+      };
+    in
+    (meta g).builderUid == 902;
+
   # ── Agent supervision invariants ─────────────────────────────
   #
   # Every mkGuest output advertises whether the bundled
@@ -170,14 +180,11 @@ in
 
   # ── Privilege-drop binary provenance ─────────────────────────
   #
-  # setpriv must be the static-musl util-linux build, not the glibc one.
-  # busybox's stripped setpriv lacks --reuid/--regid/--clear-groups, so we
-  # need the full binary — but the *static* build keeps glibc out of the
-  # rootfs closure. A revert to the dynamic util-linux flips this and fails
-  # before the closure regrows.
-  setpriv_is_static_musl =
-    shellGuest.setpriv == "${pkgs.pkgsStatic.util-linux}/bin/setpriv"
-    && commandGuest.setpriv == "${pkgs.pkgsStatic.util-linux}/bin/setpriv";
+  # The generated init must use the dedicated static-musl helper rather than
+  # busybox's reduced applet or the much larger util-linux package.
+  setpriv_is_custom_static_musl =
+    (meta shellGuest).setprivHelperName == "mvm-setpriv"
+    && (meta commandGuest).setprivHelperName == "mvm-setpriv";
 
   # ── Runtime overlay awareness ─────────────────────────────────
   #

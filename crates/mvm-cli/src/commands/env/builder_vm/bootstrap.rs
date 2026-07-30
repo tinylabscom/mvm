@@ -564,7 +564,7 @@ pub(in crate::commands) mod attested_builder_pack {
     /// valid bytes there, so this signals a caller bug rather than an
     /// untrusted-publisher condition.
     #[cfg(feature = "manifest-verify")]
-    pub(super) fn promote_staged_builder_pack(
+    pub(in crate::commands) fn promote_staged_builder_pack(
         staging: &Path,
         ctx: &PackVerifyCtx<'_>,
     ) -> Result<Option<VerifiedPackDir>> {
