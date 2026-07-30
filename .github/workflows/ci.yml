@@ -477,7 +477,18 @@ jobs:
           set -euo pipefail
           nix build --print-build-logs \
             ./nix/images/runtime-overlay#packages.x86_64-linux.default \
-            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar
+            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar \
+            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar-image
+
+      # Both directions, together. The overlay's staged executables must carry
+      # no glibc, and the SDK cdylib must still depend on it — otherwise a
+      # change that simply deleted the cdylib would read as a footprint win.
+      - name: Runtime overlay is glibc-free and the SDK closure moved to the sidecar
+        run: |
+          set -euo pipefail
+          nix build --print-build-logs \
+            ./nix/images/runtime-overlay#checks.x86_64-linux.runtime-overlay-no-glibc \
+            ./nix/images/runtime-overlay#checks.x86_64-linux.sdk-sidecar-carries-glibc
 
       - name: Nix-built guest artifacts fit the 50 MB footprint
         run: |
@@ -490,6 +501,12 @@ jobs:
             ./nix/images/runtime-overlay#packages.x86_64-linux.default \
             > /tmp/runtime-overlay-path.txt
           overlay_path=$(head -1 /tmp/runtime-overlay-path.txt)
+          # The optional SDK sidecar is measured against its own ceiling and
+          # reported on its own ledger line — never folded into the base total.
+          nix build --print-build-logs --no-link --print-out-paths \
+            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar-image \
+            > /tmp/sdk-sidecar-path.txt
+          sidecar_path=$(head -1 /tmp/sdk-sidecar-path.txt)
           cargo run -p xtask -- perf footprint \
             --rootfs "$image_path/rootfs.ext4" \
             --rootfs-verity "$image_path/rootfs.verity" \
@@ -497,4 +514,5 @@ jobs:
             --overlay "$overlay_path/overlay.ext4" \
             --overlay-verity "$overlay_path/overlay.verity" \
             --closure-paths "$image_path/rootfs-closure-paths" \
+            --sdk-sidecar "$sidecar_path/sdk.ext4" \
             --json

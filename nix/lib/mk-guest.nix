@@ -643,6 +643,28 @@ let
       fi
     fi
 
+    # Stage 2.478 — optional SDK sidecar mount. The glibc host-services cdylib
+    # the language SDKs dlopen is not in this rootfs and not in the runtime
+    # overlay, so a workload that was admitted to call a host service gets it as
+    # its own read-only virtio-blk device. The host names that device on the
+    # cmdline as `mvm.sdk_dev=/dev/vdN`: the slot depends on whether this boot
+    # carries verity, a runtime overlay, and how many user volumes precede it, so
+    # the guest cannot derive it. Absent token => this workload binds no
+    # SDK-served host service and /mvm/sdk stays empty.
+    #
+    # `noexec` is deliberately NOT set: the workload process maps the cdylib
+    # executable via dlopen. `nosuid,nodev` still hold, and the device is
+    # read-only at the hypervisor level as well as at the mount.
+    MVM_SDK_DEV=$(/bin/busybox sed -n 's/.*\bmvm\.sdk_dev=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_SDK_DEV" ] \
+      && ! /bin/busybox grep -q ' /mvm/sdk ' /proc/mounts 2>/dev/null; then
+      if /bin/busybox mount -t ext4 -o ro,nosuid,nodev "$MVM_SDK_DEV" /mvm/sdk 2>/dev/null; then
+        echo "mvm-init: mounted SDK sidecar $MVM_SDK_DEV at /mvm/sdk (ro)"
+      else
+        echo "mvm-init: warn: could not mount SDK sidecar $MVM_SDK_DEV at /mvm/sdk"
+      fi
+    fi
+
     # Stage 2.48 — local addon DNS bootstrap.
     #
     # The "always-install + no-op when zone empty" pattern from
@@ -1102,6 +1124,10 @@ let
     # agent. `/mvm/` is reserved (an admission-time check
     # rejects OCI images that carry content under this path).
     mkdir -p "$out/mvm/runtime"
+    # Mount target for the optional read-only SDK sidecar. Empty on every
+    # workload that binds no SDK-served host service; a missing directory would
+    # otherwise surface as an unactionable mount-time EACCES on the ones that do.
+    mkdir -p "$out/mvm/sdk"
     chmod 0755 "$out/mvm"
     chmod 0755 "$out/mvm/runtime"
 

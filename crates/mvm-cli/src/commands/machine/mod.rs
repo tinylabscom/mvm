@@ -222,9 +222,7 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Allow a production-safe guest-agent verb (repeatable).
     #[arg(long = "agent-verb", value_name = "VERB")]
     pub agent_verb: Vec<String>,
-    /// Bind a host service this workload may call over the broker channel
-    /// (repeatable). Baked into the signed execution plan; binding an
-    /// SDK-served service attaches the SDK sidecar read-only.
+    /// Bind a host service the workload may call (repeatable).
     #[arg(long = "host-service", value_name = "SERVICE")]
     pub host_service: Vec<String>,
     /// Mount HOST_PATH at GUEST_PATH[:MODE].

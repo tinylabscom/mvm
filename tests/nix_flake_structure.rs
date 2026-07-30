@@ -934,6 +934,133 @@ fn runtime_overlay_exposes_sdk_sidecar_separately() {
     );
 }
 
+/// The sidecar has to ship as an attachable read-only ext4 with the exact file
+/// set `mvm_fs::sdk_sidecar::SdkSidecarResolver` verifies. A directory output
+/// alone can't be attached to a microVM.
+#[test]
+fn runtime_overlay_publishes_an_attachable_sdk_sidecar_image() {
+    let path = nix_dir()
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+
+    assert!(
+        content.contains("mkSdkSidecarImage = system:"),
+        "the sidecar must have an ext4-image derivation, not just a directory tree"
+    );
+    assert!(
+        content.contains("sdk-sidecar-image = mkSdkSidecarImage system;"),
+        "the flake must publish the attachable sidecar image output"
+    );
+    // Exactly the resolver's canonical file set, and the manifest that covers it.
+    for required in [
+        "$out/sdk.ext4",
+        "$out/VERSION",
+        "sha256sum sdk.ext4 VERSION > checksums-sha256.txt",
+    ] {
+        assert!(
+            content.contains(required),
+            "the sidecar image must emit {required} for the host-side resolver"
+        );
+    }
+    assert!(
+        content.contains("-L mvm-sdk-sidecar"),
+        "the sidecar image must carry a distinct filesystem label"
+    );
+    assert!(
+        content.contains("sdkSidecarSizeBytes = 8 * 1024 * 1024;"),
+        "the sidecar allocation must stay pinned to the ledger's separate budget"
+    );
+}
+
+/// Both closure gates, and the direction of each. A change that deleted the SDK
+/// cdylib outright would satisfy every no-glibc assertion and look like a
+/// footprint win, so the positive gate is what makes the split meaningful.
+#[test]
+fn closure_gates_pin_glibc_out_of_the_base_and_into_the_sidecar() {
+    let overlay = fs::read_to_string(
+        nix_dir()
+            .join("images")
+            .join("runtime-overlay")
+            .join("flake.nix"),
+    )
+    .expect("runtime-overlay flake must be present");
+    let root = fs::read_to_string(nix_dir().join("flake.nix")).expect("root flake must be present");
+
+    // Hash-anchored greps only: a bare `-glibc` match would fire on any
+    // derivation whose *name* happens to contain the string.
+    let anchored = r"'/nix/store/[a-z0-9]+-glibc(-|$)'";
+    assert!(
+        root.contains(anchored),
+        "the rootfs no-glibc gate must anchor its grep on the glibc store path"
+    );
+    assert!(
+        overlay.contains(anchored),
+        "the overlay gates must anchor their greps on the glibc store path"
+    );
+
+    assert!(
+        overlay.contains("runtime-overlay-no-glibc = mkOverlayNoGlibcCheck system;"),
+        "the overlay's staged executables need a build-backed no-glibc gate"
+    );
+    assert!(
+        overlay.contains("sdk-sidecar-carries-glibc = mkSidecarCarriesGlibcCheck system;"),
+        "the sidecar needs the counterpart gate proving the glibc closure moved there"
+    );
+    // The overlay gate must close over the executables actually staged into the
+    // image; an empty root-path set would make it vacuously green.
+    for staged in [
+        "guest",
+        "guestDev",
+        "runner",
+        "egressClient",
+        "addonDns",
+        "exitReport",
+    ] {
+        assert!(
+            overlay.contains(&format!("          {staged}\n")),
+            "the overlay no-glibc closure must include the staged {staged} binary"
+        );
+    }
+    // And the positive gate must assert the shipped files, not only the closure.
+    for required in ["libmvm_host_services.so", "libc.so.6", "libgcc_s.so.1"] {
+        assert!(
+            overlay.contains(required),
+            "the sidecar gate must assert {required} is shipped"
+        );
+    }
+}
+
+/// The guest mounts the sidecar from the device the host names on the cmdline.
+/// Without the mountpoint on the read-only rootfs the mount fails with an
+/// unactionable EACCES, so both halves are pinned here.
+#[test]
+fn mk_guest_mounts_the_sdk_sidecar_read_only_from_the_host_named_device() {
+    let content = fs::read_to_string(nix_dir().join("lib").join("mk-guest.nix"))
+        .expect("nix/lib/mk-guest.nix must be present");
+
+    assert!(
+        content.contains(r"mvm\.sdk_dev="),
+        "the generated init must read the sidecar device from the kernel cmdline"
+    );
+    assert!(
+        content.contains(r#"mount -t ext4 -o ro,nosuid,nodev "$MVM_SDK_DEV" /mvm/sdk"#),
+        "the sidecar must be mounted read-only, nosuid, nodev"
+    );
+    assert!(
+        content.contains(r#"mkdir -p "$out/mvm/sdk""#),
+        "the read-only rootfs must carry the sidecar mountpoint"
+    );
+    // The cdylib is dlopen'd, so the mount must not be noexec — assert the
+    // option set explicitly rather than trusting the absence of a token.
+    assert!(
+        !content.contains(r#"mount -t ext4 -o ro,noexec,nosuid,nodev "$MVM_SDK_DEV""#),
+        "the sidecar mount must not be noexec: the workload dlopens the cdylib"
+    );
+}
+
 #[test]
 fn mk_guest_accepts_compact_and_legacy_egress_ca_cmdline_tokens() {
     let path = nix_dir().join("lib").join("mk-guest.nix");

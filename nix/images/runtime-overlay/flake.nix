@@ -370,6 +370,81 @@
             echo "  VERSION: $(cat $out/VERSION)" >&2
           '';
 
+      # ── CI-provable closure gates ───────────────────────────────────
+      #
+      # The overlay's ext4 is an opaque image with no store references, so a
+      # closure over the *image* would be vacuously empty. These gates instead
+      # realize the closure of the executables staged into it — the property
+      # that actually keeps glibc out of every guest.
+      #
+      # The greps are hash-anchored (`/nix/store/<hash>-glibc…`) so they match
+      # the glibc package's own store path and never a derivation whose name
+      # merely contains "glibc".
+      overlayStagedExecutables = system:
+        let
+          overlay = mkRuntimeOverlay system;
+        in
+        with overlay.passthru; [
+          guest
+          guestDev
+          runner
+          egressClient
+          addonDns
+          exitReport
+        ];
+
+      mkOverlayNoGlibcCheck = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        pkgs.runCommand "runtime-overlay-no-glibc"
+          {
+            closure = pkgs.closureInfo {
+              rootPaths = overlayStagedExecutables system;
+            };
+          }
+          ''
+            if grep -Eq -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths"; then
+              echo "glibc present in the runtime overlay's staged-executable closure:" >&2
+              grep -E -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths" >&2
+              exit 1
+            fi
+            echo ok > "$out"
+          '';
+
+      # The counterpart assertion. Without it, a change that dropped the SDK
+      # cdylib entirely would satisfy the two no-glibc gates above and look like
+      # progress. The glibc closure has to still exist — in the sidecar, where
+      # only workloads that bind an SDK-served host service pay for it.
+      mkSidecarCarriesGlibcCheck = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          sidecar = mkSdkSidecar system;
+        in
+        pkgs.runCommand "sdk-sidecar-carries-glibc"
+          {
+            closure = pkgs.closureInfo {
+              rootPaths = [ sidecar.passthru.hostsvc ];
+            };
+          }
+          ''
+            if ! grep -Eq -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths"; then
+              echo "the SDK host-services cdylib no longer depends on glibc — the" >&2
+              echo "sidecar split is only meaningful while it does:" >&2
+              cat "$closure/store-paths" >&2
+              exit 1
+            fi
+            # And the sidecar tree must actually ship the loader + libc the
+            # cdylib needs, not just depend on them in the closure.
+            for required in libmvm_host_services.so libc.so.6 libgcc_s.so.1; do
+              if [ ! -e "${sidecar}/lib/$required" ]; then
+                echo "SDK sidecar is missing $required" >&2
+                exit 1
+              fi
+            done
+            echo ok > "$out"
+          '';
+
       mkRuntimeOverlay = system:
         let
           pkgs = import nixpkgs { inherit system; };
@@ -388,8 +463,9 @@
               pkgs.coreutils
             ];
             passthru = {
-              inherit guest guestDev runner;
+              inherit guest guestDev runner egressClient addonDns exitReport;
               sdkSidecar = mkSdkSidecar system;
+              sdkSidecarImage = mkSdkSidecarImage system;
               version = overlayVersion;
               dataBlockSize = overlayBlockSize;
               verityHashAlgorithm = overlayVerityHashAlgorithm;
@@ -517,6 +593,11 @@
         runtime-overlay = mkRuntimeOverlay system;
         sdk-sidecar = mkSdkSidecar system;
         sdk-sidecar-image = mkSdkSidecarImage system;
+      });
+
+      checks = forAllSystems (system: {
+        runtime-overlay-no-glibc = mkOverlayNoGlibcCheck system;
+        sdk-sidecar-carries-glibc = mkSidecarCarriesGlibcCheck system;
       });
     };
 }

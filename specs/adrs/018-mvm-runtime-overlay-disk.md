@@ -67,10 +67,34 @@ pre-allocating the ext4 image at that size at build time. The static-musl
 runtime contents — the agent (prod and dev-shell variants), the seccomp shim,
 the netinit binary, the runner, the egress client, the addon binaries, and
 the Python SDK runtime package — fit under that cap. The glibc host-services
-FFI and its loader closure are published in a separate opt-in SDK sidecar,
-not in every overlay. A TypeScript SDK runtime is reserved space in the
+FFI and its loader closure are published in a separate SDK sidecar, not in
+every overlay. A TypeScript SDK runtime is reserved space in the
 overlay layout but not yet populated; the guest-side koffi native addon it
 needs is not yet cross-built for the guest architecture.
+
+**The SDK sidecar is attached per-workload, from the signed plan.** It is its
+own 8 MiB read-only ext4 (`sdk-sidecar-image`), resolved from
+`<cache>/sdk-sidecar/<version>/<arch>/` under the same version-pin and
+`sha256sum`-manifest discipline as the overlay, and mounted read-only at
+`/mvm/sdk`. Whether a workload gets it is decided from
+`ExecutionPlan.services` — the same host-service binding set the broker's
+dispatch gate enforces — and from nothing else: not an environment variable a
+guest could set, not a scan of application source. Attachment reuses the
+admitted read-only disk-volume mechanism (one `HostShareGrant` in the signed
+plan, one `VmVolume` in the launch config, ordered after user volumes), and
+`enforce_sdk_sidecar_attachment` refuses both a bound-but-unattached workload
+and an attachment at `/mvm/sdk` the plan never authorized. Unlike the overlay it
+carries no dm-verity target: integrity comes from the checksum manifest and the
+version pin, which is the same bar the cached overlay artifact meets before its
+roothash reaches the guest, and a malicious host is out of scope by ADR-001.
+
+Its size is budgeted and reported **outside** the 50,000,000-byte
+complete-artifact contract, because only workloads that bind an SDK-served host
+service pay for it. Two build-backed Nix gates pin the split in both
+directions: `runtime-overlay-no-glibc` fails if glibc re-enters the overlay's
+staged-executable closure, and `sdk-sidecar-carries-glibc` fails if the SDK
+cdylib stops depending on glibc — without the second, deleting the cdylib
+outright would satisfy every no-glibc assertion and read as a footprint win.
 
 **The overlay is version-pinned to the running mvmctl.** Its `VERSION`
 file must match the running binary's semver; a mismatch is an

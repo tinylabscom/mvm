@@ -217,11 +217,12 @@ Tracked here per the deferred-work convention; each is its own future plan.
 - **WS-2 (lever E):** the custom static-musl `mvm-setpriv` helper is complete as a
   dedicated `mvm-agentd` binary and Nix package; the generated `mkGuest` init now
   uses it instead of util-linux.
-- **WS-3 (lever B):** the static-musl runtime-overlay cut and separate SDK sidecar
-  packaging are complete; automatic runtime attachment for workloads using the
-  SDK host-service verbs remains. The overlay allocation is now capped at 16 MiB,
-  with a build-backed footprint gate covering the Nix-built rootfs, overlay,
-  verity sidecars, and workload kernel.
+- **WS-3 (lever B):** complete. The static-musl runtime-overlay cut, the
+  separate SDK sidecar packaging, and automatic plan-driven sidecar attachment
+  all landed. The overlay allocation is capped at 16 MiB, with a build-backed
+  footprint gate covering the Nix-built rootfs, overlay, verity sidecars, and
+  workload kernel; the optional 8 MiB sidecar is budgeted and reported on its
+  own ledger line outside that contract.
 - **WS-4 (lever D):** complete. The capability-negotiated `ResourceUsage`
   control request reports the agent's own current RSS through the existing
   `/proc` sampler. A fresh static-musl Dev-profile overlay measured a
@@ -257,9 +258,66 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
 - [x] Publish the glibc `libmvm_host_services.so` artifact separately as
   `packages.<system>.sdk-sidecar` (including its matching loader, libc, and
   libgcc); both language SDKs default to `/mvm/sdk/lib`.
-- [ ] Wire runtime attachment so a workload that uses host-service verbs is
+- [x] Wire runtime attachment so a workload that uses host-service verbs is
   automatically opted into the SDK sidecar. The default static overlay
   intentionally does not carry the SDK FFI or its glibc closure.
+
+  **How it landed.** The need is derived from the signed plan, never from the
+  environment or application content:
+
+  - `ExecutionPlan.services` carries the host-service bindings the broker's
+    dispatch gate already documents as authoritative (`#[serde(default)]`, so
+    existing plans deserialize unchanged and an empty set is omitted from the
+    signed bytes). Surfaced by `--host-service <SERVICE>` on `machine run` and
+    the transient run path; a malformed id is refused before it can reach a
+    plan.
+  - `mvm_protocol::plan::sdk_sidecar` answers the single question — does this
+    plan bind a service the SDK cdylib serves? `SDK_HOST_SERVICES` is the exact
+    versioned set (`host.audit.v1`, `host.cost.v1`, `host.secrets.v1`,
+    `host.time.v1`); `broker.v1` and a hypothetical `host.audit.v2` do not
+    match, so widening is a deliberate edit.
+  - `mvm_fs::sdk_sidecar` resolves the artifact from
+    `<cache>/sdk-sidecar/<version>/<arch>/` with the same discipline the runtime
+    overlay uses: required-file existence, `VERSION` match, per-file
+    `sha256sum` manifest verification, and an ext4-payload probe proving
+    `/lib/libmvm_host_services.so` is present. Every failure returns `Err`.
+  - `mvm_runtime::sdk_sidecar` turns a verified artifact into one plan
+    `HostShareGrant` plus one read-only `VmVolume` — both from the same
+    artifact, so the signed plan and the launch config cannot disagree.
+  - `mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment` runs inside
+    `admit_and_start`, beside `enforce_admitted_shares`, and refuses both
+    directions: a bound SDK service with no attachment, and an attachment at
+    `/mvm/sdk` that the plan never authorized. It also refuses a writable
+    attachment, a directory share, and duplicate attachments. Because it sits on
+    the shared admission path, the mock and dev-tier backends are gated
+    identically to production.
+  - Attachment reuses the existing admitted-disk mechanism end to end:
+    `workload_blocks` assigns the slot (sidecar last, so adding it never
+    renumbers a user volume), and `runner_cmdline` emits
+    `mvm.sdk_dev=/dev/vdN` — the same shape as the overlay's
+    `mvm.runtime_data=` device token — because the slot shifts with verity, the
+    overlay, and preceding user volumes, so the guest cannot derive it. The
+    generated `mkGuest` init mounts that device `ro,nosuid,nodev` at `/mvm/sdk`
+    (not `noexec`: the workload `dlopen`s the cdylib).
+  - Nix publishes `sdk-sidecar-image`: an 8 MiB ext4 with `VERSION` and the
+    `checksums-sha256.txt` the resolver verifies, built with the same pinned
+    mkfs parameters as the overlay.
+
+  **Footprint accounting.** The sidecar is budgeted and reported separately:
+  `xtask perf footprint --sdk-sidecar <PATH>` checks it against
+  `SDK_SIDECAR_MAX_BYTES` (8 MiB) and emits it as its own ledger line, excluded
+  from `total_bytes`. The base contract stays exactly 50,000,000 bytes, so a
+  growing sidecar cannot consume base headroom and a base regression cannot
+  hide behind an absent sidecar.
+
+  **Closure gates, both directions.** `runtime-overlay-no-glibc` realizes the
+  closure of every executable staged into the overlay and fails if a
+  hash-anchored `/nix/store/<hash>-glibc` path appears;
+  `sdk-sidecar-carries-glibc` fails if the SDK cdylib *stops* depending on
+  glibc, and asserts the sidecar ships the loader, `libc.so.6`, and
+  `libgcc_s.so.1`. Without the second gate, deleting the cdylib outright would
+  satisfy every no-glibc assertion and read as a footprint win. Both build in
+  the `nix-flake-check` CI job alongside the existing rootfs gate.
 
 ## WS-2 handoff
 

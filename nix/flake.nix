@@ -222,12 +222,15 @@
       # eval can't see a derivation's runtime closure. Wired into the
       # `nix-flake-check` CI job.
       #
-      # Scope: this covers only the baked rootfs tree that ships inside
-      # the guest image (busybox, init, setpriv, and friends). It does
-      # not cover the runtime overlay that gets bind-mounted into the
-      # guest at boot, which still carries its own glibc today; that
-      # gets addressed separately. A green result here means the baked
-      # tree is glibc-free, not the whole running guest.
+      # Scope: this covers the baked rootfs tree that ships inside the
+      # guest image (busybox, init, setpriv, and friends). The runtime
+      # overlay bind-mounted in at boot has its own matching gate,
+      # `runtime-overlay-no-glibc` in
+      # `nix/images/runtime-overlay/flake.nix`; the glibc SDK cdylib now
+      # lives in the separately-attached sidecar, gated in the same place
+      # by `sdk-sidecar-carries-glibc`. Green across all three means no
+      # ordinary guest carries glibc, and the workloads that need the SDK
+      # get it from a disk they were admitted to mount.
       checks = nixpkgs.lib.genAttrs systems (system:
         let
           pkgs = import nixpkgs { inherit system; };

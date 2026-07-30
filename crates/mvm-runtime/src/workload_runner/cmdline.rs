@@ -176,15 +176,27 @@ pub(crate) fn runner_cmdline(
     base_bootargs: impl Fn(bool, bool) -> String,
 ) -> String {
     let base = workload_cmdline(config, state_dir, &base_bootargs);
-    let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) else {
+    let mut tokens: Vec<String> = Vec::new();
+    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
+        tokens.push(uvols);
+    }
+    // Tell the guest which device the SDK sidecar landed on. The guest can't
+    // derive the slot itself — it shifts with verity, the runtime overlay, and
+    // any preceding user volumes — so the host names it, exactly as it already
+    // does for the runtime overlay's `mvm.runtime_data=` device.
+    if let Some(dev) = super::spec_map::sdk_sidecar_block_device(config) {
+        tokens.push(format!("mvm.sdk_dev={dev}"));
+    }
+    if tokens.is_empty() {
         return base.unwrap_or_default();
-    };
+    }
+    let extra = tokens.join(" ");
     match base {
-        Some(base) => format!("{base} {uvols}"),
+        Some(base) => format!("{base} {extra}"),
         None => {
             let virtiofs_root = config.virtiofs_root.is_some();
             let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
-            format!("{} {uvols}", base_bootargs(virtiofs_root, has_disk))
+            format!("{} {extra}", base_bootargs(virtiofs_root, has_disk))
         }
     }
 }
@@ -403,6 +415,58 @@ mod tests {
             cmdline.contains("mvm.uvols=uvol0:"),
             "cmdline missing uvols token: {cmdline}"
         );
+    }
+
+    fn sdk_sidecar_volume(host: &str) -> mvm_core::vm_backend::VmVolume {
+        let mut v = disk_volume(host, mvm_core::plan::SDK_SIDECAR_GUEST_PATH);
+        v.read_only = true;
+        v
+    }
+
+    #[test]
+    fn runner_cmdline_emits_no_sidecar_token_without_a_sidecar_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        let config = VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            volumes: vec![disk_volume("/vol/data.img", "/data")],
+            ..Default::default()
+        };
+        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        assert!(
+            !cmdline.contains("mvm.sdk_dev="),
+            "a workload with no SDK sidecar must carry no sidecar token: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn runner_cmdline_names_the_sidecar_device_the_backend_attached() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        let config = VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            volumes: vec![
+                disk_volume("/vol/data.img", "/data"),
+                sdk_sidecar_volume("/cache/sdk.ext4"),
+            ],
+            ..Default::default()
+        };
+        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        // Two disks after the rootfs on an unsealed boot: the user volume takes
+        // /dev/vdb, so the sidecar is /dev/vdc. The token must match the block
+        // list, not a baked constant.
+        let attached = super::super::spec_map::sdk_sidecar_block_device(&config)
+            .expect("the sidecar resolves a device");
+        assert_eq!(attached, "/dev/vdc");
+        assert!(
+            cmdline.contains("mvm.sdk_dev=/dev/vdc"),
+            "cmdline missing the sidecar device token: {cmdline}"
+        );
+        // Both tokens ride together, and the cmdline stays single-token-safe.
+        assert!(cmdline.contains("mvm.uvols=uvol0:"), "cmdline: {cmdline}");
+        assert_eq!(cmdline_overflow(&cmdline), None);
     }
 
     #[test]
