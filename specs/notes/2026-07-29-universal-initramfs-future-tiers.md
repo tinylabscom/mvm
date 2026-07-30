@@ -36,15 +36,25 @@ backends").
 
 ## Apple Container
 
-- Today: no backend variant exists (`AnyBackend` enumerates Firecracker,
-  Libkrun, Qemu, Mock, Hvf, Wasm). Two doc comments in
+- Today: the stage-1 backend skeleton exists — `BackendKind::AppleContainer`
+  and `AnyBackend::AppleContainer` behind `--hypervisor apple-container`
+  (alias `container`), opt-in only and never auto-selected. Every operation
+  fails closed with a typed error naming the milestone that provides it;
+  capabilities and the security profile report honestly (no snapshot, no
+  standby pool, all seven claims `DoesNotHold`). The staged design lives in
+  `specs/plans/271-apple-container-backend.md`. Two doc comments in
   `crates/mvm-runtime/src/backend.rs` still name Apple Container
-  (`start` example, `for_started_vm` probe) — they are aspirational, and any
-  implementation should replace them with a real variant + probe marker.
-- Future support shape: a driver that boots the same kernel + universal
-  initramfs (or runs `mvm-guest-agent` as the guest init) and bridges the
-  activation channel to the framework's vsock transport. Capability and
-  security-profile honesty rules from ADR-024 apply verbatim.
+  (`start` example, `for_started_vm` probe) — they describe the real
+  variant's eventual shape (no pid-file marker; the framework tracks VM
+  state out-of-band).
+- Future support shape: Apple's Swift-only framework owns the kernel boot
+  and `vminitd` as guest PID 1 (gRPC on vsock port 1024), so the universal
+  initramfs does not apply verbatim — the **activation contract** rides
+  `vminitd`'s gRPC API instead. The host writes the serialized
+  `ActivateEnvironment` into the container VM, starts `mvm-guest-agent` as
+  a root process, and the agent performs the same mounts and the uid-901
+  drop unchanged. Capability and security-profile honesty rules from
+  ADR-024 apply verbatim.
 
 ## WHP (Windows Hypervisor Platform)
 

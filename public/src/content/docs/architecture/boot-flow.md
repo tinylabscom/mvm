@@ -158,10 +158,18 @@ model in adapted form — or honestly not at all:
   refused by prod admission, and would carry its own explicitly weaker boot
   contract rather than sharing this one.
 - **Apple Container** — Apple's `container` framework boots lightweight Linux
-  VMs with its own init and networking/vsock stack. There is no backend
-  variant for it today. Future support means a driver that boots the same
-  kernel + universal initramfs (or runs `mvm-guest-agent` as the guest init)
-  and bridges the activation channel to the framework's vsock transport.
+  VMs with its own init (`vminitd` as guest PID 1, gRPC on vsock port 1024)
+  and networking/vsock stack. An honest, fail-closed backend skeleton now
+  exists behind `--hypervisor apple-container` (opt-in only, never
+  auto-selected; every operation fails with a typed error naming the
+  milestone that provides it) — see
+  `specs/plans/271-apple-container-backend.md` for the staged design. Full
+  support means driving the same activation contract through `vminitd`'s
+  gRPC API rather than an mvm initramfs: the host writes the serialized
+  `ActivateEnvironment` into the container VM and starts `mvm-guest-agent`
+  as a root process, and the agent performs the same mounts (dm-verity
+  rootfs + runtime overlay, virtio-fs volumes) and the same uid-901 drop as
+  on every other backend.
 - **WHP (Windows Hypervisor Platform)** — a future Windows-host backend. The
   guest side is unchanged: the same kernel + universal initramfs boot and the
   same `ActivateEnvironment`. The work is entirely host-side — a WHP

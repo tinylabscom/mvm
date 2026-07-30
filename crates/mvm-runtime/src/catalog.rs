@@ -12,6 +12,7 @@
 //! constructor wiring; `VmBackend` owns runtime behavior; `AnyBackend` remains
 //! the closed enum for the few intentionally backend-specific operations.
 
+use crate::apple_container_backend::AppleContainerBackend;
 use crate::backend::{AnyBackend, BackendTier};
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
@@ -238,6 +239,23 @@ backend_catalog![
         bundled_kernel: false,
         needs_plan_json: false,
         is_workload: true
+    },
+    {
+        kind: AppleContainer,
+        selector: "apple-container",
+        aliases: ["container"],
+        constructor: AnyBackend::AppleContainer(AppleContainerBackend::new()),
+        tier: Tier2,
+        // No pid-file lifecycle — the skeleton boots nothing, and the real
+        // framework-driven path will track VM state out-of-band.
+        marker_file: None,
+        started_vm_probe_order: None,
+        list_all: true,
+        balloon_support: false,
+        warm_start_support: false,
+        bundled_kernel: false,
+        needs_plan_json: false,
+        is_workload: true
     }
 ];
 
@@ -358,7 +376,14 @@ mod tests {
         );
         assert_eq!(
             selectors(list_all_descriptors()),
-            ["firecracker", "libkrun", "qemu", "hvf", "wasm"]
+            [
+                "firecracker",
+                "libkrun",
+                "qemu",
+                "hvf",
+                "wasm",
+                "apple-container"
+            ]
         );
         // Started-VM probe is sorted by probe order, not declaration order.
         assert_eq!(
