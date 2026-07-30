@@ -1432,6 +1432,9 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            // These warms carry no launch, so they mirror a launch-less spawn:
+            // no plan to read an egress decision off, hence no guest token.
+            vsock_egress: false,
         };
         assert_eq!(
             pool.idle_count_compatible(&want).unwrap(),
