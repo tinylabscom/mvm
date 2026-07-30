@@ -863,7 +863,7 @@ used to derive it.
 
 ---
 
-# WS2 — a nextest profile that exists
+# WS2 — a nextest profile that exists  ✅ shipped in #1943
 
 **Why.** `Justfile:157` defines:
 
@@ -913,7 +913,7 @@ process-external, since per-test process isolation does not help it.
 **Interfaces:**
 - Produces: profiles `default` and `ci`, consumed by `just test`, `just test-ci`, and the `ci-full.yml` test job.
 
-- [ ] **Step 1: Confirm the failure first**
+- [x] **Step 1: Confirm the failure first**
 
   ```sh
   cargo nextest show-config test-groups --profile ci
@@ -921,7 +921,7 @@ process-external, since per-test process isolation does not help it.
 
   Expected: `error: profile 'ci' not found`.
 
-- [ ] **Step 2: Write `.config/nextest.toml`**
+- [x] **Step 2: Write `.config/nextest.toml`**
 
   ```toml
   # cargo-nextest configuration.
@@ -963,7 +963,7 @@ process-external, since per-test process isolation does not help it.
   store-failure-output = false
   ```
 
-- [ ] **Step 3: Verify both profiles resolve, and measure the slow tail**
+- [x] **Step 3: Verify both profiles resolve, and measure the slow tail**
 
   ```sh
   cargo nextest show-config test-groups --profile ci
@@ -985,7 +985,7 @@ process-external, since per-test process isolation does not help it.
   `terminate-after`; if a legitimate test runs long, note that a hard
   kill is off the table and warning-only is the permanent answer.
 
-- [ ] **Step 4: Run the suite under the ci profile**
+- [x] **Step 4: Run the suite under the ci profile**
 
   ```sh
   cargo nextest run --workspace --profile ci
@@ -1006,7 +1006,7 @@ process-external, since per-test process isolation does not help it.
 
   Expected: no captured output sections. Revert the inverted assertion.
 
-- [ ] **Step 5: Add the JUnit artifact to the CI test job**
+- [x] **Step 5: Add the JUnit artifact to the CI test job**
 
   In `.github/workflows/ci-full.yml`, change the workspace test step
   (currently `cargo nextest run --workspace --all-targets` around line
@@ -1027,7 +1027,7 @@ process-external, since per-test process isolation does not help it.
           retention-days: 14
   ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
   ```sh
   git -C /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan272-witness-rigor add .config/nextest.toml
@@ -1043,7 +1043,7 @@ process-external, since per-test process isolation does not help it.
 **Interfaces:**
 - Produces: the list of tests, if any, that fail under parallel load but pass serially. Task 7 consumes it.
 
-- [ ] **Step 1: Establish the serial baseline**
+- [x] **Step 1: Establish the serial baseline**
 
   ```sh
   cargo nextest run --workspace --test-threads=1 2>&1 | tee /tmp/nextest-serial.log
@@ -1052,7 +1052,7 @@ process-external, since per-test process isolation does not help it.
   Expected: PASS. If anything fails here it is an ordinary bug, not
   contention — fix it before continuing.
 
-- [ ] **Step 2: Run five parallel passes**
+- [x] **Step 2: Run five parallel passes**
 
   ```sh
   for i in 1 2 3 4 5; do
@@ -1065,7 +1065,7 @@ process-external, since per-test process isolation does not help it.
   Do **not** swallow failures with `|| true` — the whole point is the
   failure list.
 
-- [ ] **Step 3: Start from the known flake**
+- [x] **Step 3: Start from the known flake**
 
   Run the recorded intermittent one directly, many times, under load:
 
@@ -1085,7 +1085,7 @@ process-external, since per-test process isolation does not help it.
   the update-check code path, the audit log directory, or a network/port
   resource. Whatever it is, it is process-external.
 
-- [ ] **Step 4: Classify every other name that appears**
+- [x] **Step 4: Classify every other name that appears**
 
   For every test that fails in a parallel pass but passed serially,
   identify the shared resource: a fixed path outside a per-test tempdir,
@@ -1101,7 +1101,7 @@ process-external, since per-test process isolation does not help it.
   whose own comments document an `EWOULDBLOCK` false positive under
   parallel load. Confirm or rule them out; do not assume.
 
-- [ ] **Step 5: Write the finding into the Task 7 step**
+- [x] **Step 5: Write the finding into the Task 7 step**
 
   Record, for each contended test, the name and the shared resource. If
   the only entry is the audit flake and its resource turns out to be
@@ -1122,7 +1122,7 @@ process-external, since per-test process isolation does not help it.
 - Consumes: the contended-test list from Task 6.
 - Produces: a `[test-groups]` table and matching overrides, or a recorded finding that none are needed.
 
-- [ ] **Step 1: Prefer fixing the test over serializing it**
+- [x] **Step 1: Prefer fixing the test over serializing it**
 
   A test that needs a unique tempdir and does not have one is a bug in
   the test, and a test group would paper over it. Serialize only what
@@ -1132,7 +1132,7 @@ process-external, since per-test process isolation does not help it.
   is more likely a test-side fix than a group; decide from what Task 6
   Step 3 found, and record the reasoning either way.
 
-- [ ] **Step 2: If serialization is warranted, add the group**
+- [x] **Step 2: If serialization is warranted, add the group**
 
   ```toml
   [test-groups]
@@ -1153,7 +1153,7 @@ process-external, since per-test process isolation does not help it.
   Narrow the filter to exactly the names Task 6 produced. A broad filter
   serializes tests that did not need it and hides the next real race.
 
-- [ ] **Step 3: Verify the group binds**
+- [x] **Step 3: Verify the group binds**
 
   ```sh
   cargo nextest show-config test-groups --profile ci
@@ -1162,11 +1162,11 @@ process-external, since per-test process isolation does not help it.
   Expected: the `stage0-lock` group listed with exactly the tests from
   Task 6 and no others.
 
-- [ ] **Step 4: Re-run the five parallel passes**
+- [x] **Step 4: Re-run the five parallel passes**
 
   Repeat Task 6 Step 2. Expected: zero failures across all five.
 
-- [ ] **Step 5: Commit and open the WS2 PR**
+- [x] **Step 5: Commit and open the WS2 PR**
 
   Title: `feat(test): give nextest the ci profile the Justfile has always named`.
   Body states that `just test-ci` was broken, quotes the
