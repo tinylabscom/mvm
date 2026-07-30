@@ -59,11 +59,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// `vmm-sys-util` 0.12.1 stays, so the closure target counts both) — while
 /// `vm-memory`/`log` are already present. Lower it freely as deps drop.
 ///
-/// 272 (was 271): adopting the audited `virtio-vsock` crate for the in-house
-/// VMM's typed vsock packet header parse/format. The measured delta is +1 —
-/// `virtio-vsock` itself — since its `virtio-bindings`/`virtio-queue`/`vm-memory`
-/// tree is already present. Lower it freely as deps drop.
-const CLOSURE_BUDGET: usize = 272;
+/// 279 (was 272): the Apple Container backend's vminitd gRPC client
+/// (`prost`/`prost-types`/`h2`/`http` + their small transitive set) — the
+/// SandboxContext transport the backend needs in the default build. The
+/// measured delta is +7. Lower it freely as deps drop.
+const CLOSURE_BUDGET: usize = 279;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;
