@@ -43,6 +43,36 @@ it changes no types, so nothing but an offset assertion sees it.
 | `SockaddrVm` | Revert to the pre-6.0 `svm_zero: [u8; 4]` shape | yes |
 | `DmTargetSpec` | Swap the `sector_start` and `length` `u64` fields | yes |
 
+### Does device-mapper layout drift fail open?
+
+Asked because `DmIoctl`/`DmTargetSpec` build the dm-verity table, and a
+drift that produced a *working but unverified* device would make
+MVM-SEC-03 silently void rather than loudly broken.
+
+Measured directly against the kernel on Linux 6.8 rather than inferred:
+a `dm_target_spec` was submitted to `DM_TABLE_LOAD` with `target_type`
+displaced by 4 and by 8 bytes, the displacement a same-size field
+reorder upstream of it would cause.
+
+| Layout | `DM_TABLE_LOAD` |
+| --- | --- |
+| Correct | succeeds; device resumes with a live table |
+| `target_type` shifted +4 | `EINVAL` |
+| `target_type` shifted +8 | `EINVAL` |
+
+**Fail-closed.** The kernel resolves the target by name string before any
+target-specific parsing, so a displaced field yields a name that matches
+no registered target and the load is rejected. The mechanism is
+target-agnostic, so this holds for `verity` as it does for the `linear`
+target used in the probe.
+
+The layout contracts are therefore drift insurance that turns a confusing
+runtime `EINVAL` into a build error — worth having, but MVM-SEC-03 was
+not at risk. One residual case is not covered: a displacement that
+happened to land a *different valid* target name at the kernel's read
+offset would resolve. Nothing in the current struct makes that reachable,
+and the offset contracts now prevent the displacement outright.
+
 ## What this suite does not establish
 
 Anything about a dependency. A library imported here is gated in its own
