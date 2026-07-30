@@ -511,6 +511,47 @@ jobs:
             crates/mvm-sdk/fuzz/corpus/
             crates/mvm-sdk/fuzz/artifacts/
 
+  # ── Lane 4b: Claim witnesses are mutation-tested ──────────────────
+  # check-claim-catalog (ci.yml) proves a claim's witness EXISTS. This
+  # lane asks whether it BITES: cargo-mutants breaks the enforcement
+  # code on purpose and a surviving mutant means the witness cannot
+  # detect its own property being violated. Sibling to the fuzz lane —
+  # fuzzing asks whether bad input is handled, mutation asks whether
+  # our own tests would notice the handling going away.
+  #
+  # The surface is derived from the claims ledger, and its pin is
+  # checked on every PR by ci.yml; only the mutation run itself is
+  # nightly, because it costs hours.
+  mutation-witnesses:
+    name: Claim witnesses — mutation-tested (ADR-001 claims ledger)
+    runs-on: ubuntu-latest
+    # NON-BLOCKING for now: accepted_misses is seeded only for the
+    # claim-10 anchor, so the first full runs will report holes in the
+    # not-yet-triaged files. Flip this off once the baseline covers the
+    # whole surface — tracked in specs/plans/272.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-mutation-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-mutation-
+
+      - name: Install cargo-mutants and nextest
+        run: cargo install --locked cargo-mutants cargo-nextest
+
+      - name: Mutate the claim surface and ratchet survivors
+        run: cargo run -p xtask -- check-mutation-witnesses --run
+
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-001 §W5.1 — the unit tests that exercise the
   # download-and-verify code path live in mvm-cli. Run them in

@@ -62,3 +62,8 @@ specs/scratch.md
 # Default `mvmctl compile` output dir — generated flake + bundled src,
 # regenerable, never committed (header says "re-run `mvmctl compile`").
 /out/
+
+# cargo-mutants drops its per-run report tree here unless `--output` points
+# elsewhere. `xtask check-mutation-witnesses` always redirects it to a temp
+# dir; this guards a hand-run from leaving a report in the tree.
+mutants.out/
