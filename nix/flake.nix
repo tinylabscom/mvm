@@ -152,6 +152,18 @@
           mvmSrc = workspaceSrc;
         };
 
+      # A `path:` input evaluated from the `nix/` subflake can retain a
+      # trailing `nix/..` source shape that the generic unpacker refuses with
+      # "destination already exists". `mvm-setpriv.nix` carries the same
+      # workaround inline; normalizing once here lets the recipes that take
+      # `mvmSrc` verbatim build from this flake too, without four copies of the
+      # fix.
+      normalizedWorkspaceFor = system:
+        nixpkgs.legacyPackages.${system}.runCommand "mvm-workspace-normalized" { } ''
+          mkdir -p "$out"
+          cp -R ${workspaceSrc}/. "$out"/
+        '';
+
       # The overlay's staged guest executables that have their own package
       # recipe, built from those same recipes and the same static package set
       # the overlay flake instantiates them from. `mvm-runner` is built inline
@@ -162,18 +174,18 @@
       overlayStagedExecutablesFor = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          mvmSrc = normalizedWorkspaceFor system;
           guestAgent = withInteractive:
             import ./packages/mvm-guest-agent.nix {
               pkgs = pkgs.pkgsStatic;
               inherit (pkgs) lib;
-              mvmSrc = workspaceSrc;
-              inherit withInteractive;
+              inherit mvmSrc withInteractive;
             };
           staticPackage = recipe:
             import recipe {
               pkgs = pkgs.pkgsStatic;
               inherit (pkgs) lib;
-              mvmSrc = workspaceSrc;
+              inherit mvmSrc;
             };
         in
         [
@@ -194,7 +206,7 @@
         import ./packages/mvm-host-services-ffi.nix {
           inherit pkgs;
           inherit (pkgs) lib;
-          mvmSrc = workspaceSrc;
+          mvmSrc = normalizedWorkspaceFor system;
         };
     in
     {
