@@ -11,12 +11,11 @@ use mvm_core::vm_backend::{
 use crate::apple_container_backend::AppleContainerBackend;
 use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
-use crate::driver::{FcDriver, HvfDriver, LibkrunDriver};
+use crate::driver::{FcDriver, HvfDriver, LibkrunDriver, QemuDriver};
 use crate::image::RuntimeVolume;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
-use crate::qemu::QemuBackend;
 use crate::wasm_backend::WasmBackend;
 use crate::workload_runner::{RealBrokerRegistrar, RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
@@ -56,6 +55,23 @@ pub(crate) fn libkrun_runner() -> LibkrunRunner {
         RealEndpointSpawner,
         RealBrokerRegistrar,
     )
+}
+
+/// QEMU (Linux dev/test substrate; KVM where present, TCG fallback) driven
+/// through the same unified workload-runner role — qemu's sole workload launch
+/// path (`--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
+/// it). NIC-less: the converged boot attaches no slirp user-mode network, so
+/// egress routes to the per-VM gating endpoint over vsock only, through the
+/// per-VM AF_VSOCK↔UNIX bridge. The raw [`QemuBackend`](crate::qemu::QemuBackend)
+/// stays behind the driver as its identity delegate, unreached via this enum.
+type QemuRunner = WorkloadRunner<QemuDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+
+/// Construct QEMU's workload runner. Like [`libkrun_runner`] the runner is not
+/// const-constructible, so this helper is the one construction site the enum
+/// variant, `from_build_output`, the descriptor catalog, and the capability
+/// selector all call.
+pub(crate) fn qemu_runner() -> QemuRunner {
+    WorkloadRunner::new(QemuDriver::new(), RealEndpointSpawner, RealBrokerRegistrar)
 }
 
 /// Firecracker (Linux KVM) driven through the same unified workload-runner role
@@ -378,11 +394,16 @@ pub enum AnyBackend {
     /// the endpoint); no transparent `:80/:443` terminator.
     Libkrun(LibkrunRunner),
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
-    /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
-    /// `MVM_BACKEND=qemu`; `auto_select` never picks it (Firecracker
-    /// stays the production runtime). Dev tier only, outside the
-    /// security claims.
-    Qemu(QemuBackend),
+    /// present, TCG fallback), driven through the unified `WorkloadRunner`
+    /// over the driver seam — qemu's sole workload path, selected by
+    /// `--hypervisor qemu` / `MVM_BACKEND=qemu`; `auto_select` never picks
+    /// it (Firecracker stays the production runtime). The boot attaches the
+    /// universal initramfs and receives `ActivateEnvironment` over vsock
+    /// (via the AF_VSOCK↔UNIX bridge), exactly like the other runner
+    /// backends. Dev tier only, outside the security claims. The raw
+    /// [`QemuBackend`](crate::qemu::QemuBackend) stays behind the driver as
+    /// its identity delegate, unreached via this enum.
+    Qemu(QemuRunner),
     /// In-memory mock — test-only. Records `start`/`stop`/`pause`/
     /// `resume` calls against a `Mutex<HashMap>` and never touches
     /// the host. Selected only via explicit `--hypervisor mock`;
@@ -432,7 +453,7 @@ impl AnyBackend {
     /// backend (TCG where KVM is absent); otherwise Firecracker.
     pub fn from_build_output(has_runner: bool) -> Self {
         if has_runner {
-            Self::Qemu(QemuBackend)
+            Self::Qemu(qemu_runner())
         } else {
             Self::Firecracker(fc_runner())
         }
@@ -1632,7 +1653,7 @@ mod tests {
         let mut backends: Vec<(&str, AnyBackend)> = vec![
             ("firecracker", AnyBackend::Firecracker(fc_runner())),
             ("libkrun", AnyBackend::Libkrun(libkrun_runner())),
-            ("qemu", AnyBackend::Qemu(QemuBackend)),
+            ("qemu", AnyBackend::Qemu(qemu_runner())),
             ("hvf", AnyBackend::Hvf(hvf_runner())),
             (
                 "apple-container",

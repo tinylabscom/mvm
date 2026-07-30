@@ -2,10 +2,14 @@
 //!
 //! Hidden helper spawned (detached) by the QEMU workload backend
 //! (`mvm_runtime::qemu`). QEMU's virtio-vsock speaks real AF_VSOCK, but
-//! the shared agent client connects to the per-port UNIX socket that
-//! libkrun/Firecracker expose. This process bridges the two: it listens
-//! on the UNIX socket and splices each connection to the guest's
-//! `AF_VSOCK(cid, port)`, exiting when the watched qemu process dies.
+//! the shared agent client and the runner's channel set are expressed as
+//! per-port UNIX sockets. This process bridges the two, in both
+//! directions, following the JSON `QemuBridgeSpec` the backend wrote next
+//! to the VM's pid file: it listens on each host-dialed UNIX socket and
+//! splices to the guest's `AF_VSOCK(cid, port)`, terminates each
+//! guest-dialed AF_VSOCK channel and splices to its runner-bound UNIX
+//! listener, captures the workload-exit report, and exits when the watched
+//! qemu process dies.
 //!
 //! The AF_VSOCK + splice logic lives in `mvm_runtime::qemu` (beside the
 //! backend that needs it); this is just the argument surface + forward.
@@ -16,20 +20,11 @@ use std::path::PathBuf;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// UNIX socket to listen on (the agent client connects here).
+    /// Path to the JSON `QemuBridgeSpec` the backend wrote for this VM.
     #[arg(long)]
-    uds: PathBuf,
-    /// Guest CID to dial over AF_VSOCK.
-    #[arg(long)]
-    cid: u32,
-    /// Guest vsock port to dial.
-    #[arg(long)]
-    port: u32,
-    /// Exit when this PID file's process is no longer alive (the VM is gone).
-    #[arg(long)]
-    watch_pid_file: PathBuf,
+    spec: PathBuf,
 }
 
 pub(in crate::commands) fn run(args: &Args) -> Result<()> {
-    mvm_runtime::qemu::run_vsock_bridge(&args.uds, args.cid, args.port, &args.watch_pid_file)
+    mvm_runtime::qemu::run_vsock_bridge_from_spec_file(&args.spec)
 }

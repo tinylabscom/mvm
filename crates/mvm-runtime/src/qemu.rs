@@ -8,6 +8,14 @@
 //! (`--hypervisor qemu` / `MVM_BACKEND=qemu`) and `auto_select` never
 //! picks it.
 //!
+//! The selectable launch path is the unified workload runner over
+//! [`crate::driver::QemuDriver`] — a QEMU boot attaches the universal
+//! initramfs and receives `ActivateEnvironment` over vsock exactly like
+//! Firecracker/libkrun/HVF. This raw backend remains as the driver's
+//! identity delegate and owns the shared QEMU machinery both paths use:
+//! guest-CID allocation, the AF_VSOCK↔UNIX bridge, and the pid-file
+//! lifecycle.
+//!
 //! ## Tier
 //!
 //! Dev tier only, outside the security claims. `AnyBackend::tier()` reports
@@ -29,17 +37,21 @@
 //!   (a detached `mvmctl` subprocess) so the shared UNIX-socket agent
 //!   client reaches the guest agent exactly as it does under
 //!   libkrun/Firecracker — QEMU's `vhost-vsock` speaks real AF_VSOCK, not
-//!   the per-port UNIX sockets those VMMs expose.
+//!   the per-port UNIX sockets those VMMs expose. The bridge is
+//!   spec-driven ([`QemuBridgeSpec`]): the runner's driver additionally
+//!   relays the guest-dialed channels (egress, broker) and captures the
+//!   workload-exit report through the same process.
 //! - `stop` SIGTERMs the qemu PID (then SIGKILL), reaps the bridge.
 //! - `status` probes the qemu PID; `list` walks `~/.mvm/vms/*/qemu.pid`.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::config::{vm_console_log, vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
     SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig,
     VmStatus,
 };
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -50,16 +62,16 @@ use crate::libkrun::open_console_capture;
 /// QEMU workload backend (Linux dev/test; KVM where present, TCG fallback).
 pub struct QemuBackend;
 
-/// How long [`QemuBackend::start`] waits for qemu's `-pidfile` to appear
+/// How long a boot waits for qemu's `-pidfile` to appear
 /// before declaring the boot failed.
-const PID_FILE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the host AF_VSOCK↔UNIX bridge gets to bind its listening UNIX
-/// socket before `start` returns. The socket existing means the agent
+/// socket before the boot returns. The socket existing means the agent
 /// client has somewhere to connect; the guest agent coming up is raced by
 /// the client's own retry, exactly as under libkrun.
-const BRIDGE_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const BRIDGE_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 /// SIGTERM→SIGKILL grace on `stop`.
-const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// QEMU's unprivileged user-mode network gives dev/test guests transparent
 /// TCP and UDP without requiring a host TAP device or elevated setup.
@@ -73,10 +85,12 @@ fn qemu_user_network_args() -> [&'static str; 4] {
 }
 
 /// Per-VM file names under `vm_state_dir(name)`.
-const QEMU_PID_FILE: &str = "qemu.pid";
-const QEMU_LOG_FILE: &str = "qemu.log";
-const QEMU_CID_FILE: &str = "qemu.cid";
-const BRIDGE_PID_FILE: &str = "qemu-vsock-bridge.pid";
+pub(crate) const QEMU_PID_FILE: &str = "qemu.pid";
+pub(crate) const QEMU_LOG_FILE: &str = "qemu.log";
+pub(crate) const QEMU_CID_FILE: &str = "qemu.cid";
+pub(crate) const BRIDGE_PID_FILE: &str = "qemu-vsock-bridge.pid";
+/// The JSON wiring plan the detached bridge process reads at startup.
+pub(crate) const BRIDGE_SPEC_FILE: &str = "qemu-vsock-bridge.json";
 
 /// Default workload kernel cmdline. `console=ttyS0` is QEMU's serial line
 /// (vs libkrun's `hvc0`); `root=/dev/vda rw init=/init` matches the same
@@ -380,7 +394,8 @@ impl VmBackend for QemuBackend {
         // orphaned (a failed `start` won't be followed by `stop`). Roll back:
         // kill qemu + drop the pid/cid sidecars so a retry re-allocates a CID
         // instead of pinning the (possibly conflicting) one this attempt wrote.
-        if let Err(e) = spawn_vsock_bridge(&config.name, cid, &state_dir) {
+        let bridge_spec = QemuBridgeSpec::agent_only(&config.name, cid, &state_dir);
+        if let Err(e) = spawn_vsock_bridges(&config.name, &state_dir, &bridge_spec) {
             if let Some(pid) = read_pid(&pid_file) {
                 send_signal(pid, libc::SIGTERM);
             }
@@ -583,9 +598,17 @@ fn host_arch() -> &'static str {
     }
 }
 
+/// Resolve the kernel to boot the workload under QEMU from a start config:
+/// the build's emitted `vmlinux` when there is one, else the cached builder
+/// fallback. Thin wrapper over [`resolve_workload_kernel_path`] for the
+/// config-carrying raw path.
+fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
+    resolve_workload_kernel_path(&config.name, config.kernel_path.as_deref().map(Path::new))
+}
+
 /// Resolve the kernel to boot the workload under QEMU.
 ///
-/// `config.kernel_path` is the build's emitted `vmlinux` when there is one
+/// `kernel_path` is the build's emitted `vmlinux` when there is one
 /// (builder/interactive images). A plain `mkGuest` **workload** is a bare
 /// rootfs with no kernel — libkrun boots it with libkrunfw's bundled
 /// kernel, but QEMU has none. For the dev tier we fall back to the cached
@@ -594,12 +617,19 @@ fn host_arch() -> &'static str {
 /// (`root=/dev/vda init=/init`) just fine — the Linux analog of
 /// libkrunfw's bundled kernel. Production uses a workload kernel via
 /// Firecracker; QEMU is dev/test only.
-fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
-    if let Some(k) = config.kernel_path.as_deref() {
-        let p = PathBuf::from(k);
-        if p.is_file() {
-            return Ok(p);
-        }
+///
+/// Shared by the raw backend (`VmStartConfig::kernel_path`) and the
+/// `VmmDriver` (`KernelImage::Bundled` — QEMU has no libkrunfw, so the
+/// cached-builder fallback IS its bundled kernel) so both boot paths
+/// resolve the same file.
+pub(crate) fn resolve_workload_kernel_path(
+    name: &str,
+    kernel_path: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(p) = kernel_path
+        && p.is_file()
+    {
+        return Ok(p.to_path_buf());
     }
     // ~/.mvm/cache/builder-vm/<arch>/vmlinux — same layout
     // `mvm_build::libkrun_builder::ensure_builder_vm_image` promotes to.
@@ -611,17 +641,15 @@ fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
         return Ok(builder_kernel);
     }
     bail!(
-        "qemu workload '{}' has no bootable kernel: the build produced no vmlinux \
-         ({:?}) and no cached builder kernel exists at {}. Run a build / `mvmctl bootstrap` \
+        "qemu workload '{name}' has no bootable kernel: the build produced no vmlinux \
+         ({kernel_path:?}) and no cached builder kernel exists at {}. Run a build / `mvmctl bootstrap` \
          to populate the builder VM image first.",
-        config.name,
-        config.kernel_path,
         builder_kernel.display()
     )
 }
 
 /// `qemu-system-<host-arch>` on `$PATH`.
-fn locate_qemu() -> Result<String> {
+pub(crate) fn locate_qemu() -> Result<String> {
     let bin = match std::env::consts::ARCH {
         "x86_64" => "qemu-system-x86_64",
         "aarch64" => "qemu-system-aarch64",
@@ -652,7 +680,7 @@ pub(crate) fn kvm_available() -> bool {
 /// duplicate CIDs across live VMs, so we pick the lowest CID ≥ 3 not
 /// recorded by another VM's `qemu.cid` sidecar and persist it. Reuses the
 /// VM's own recorded CID on restart.
-fn allocate_cid(name: &str) -> Result<u32> {
+pub(crate) fn allocate_cid(name: &str) -> Result<u32> {
     if let Some(existing) = read_cid(name) {
         return Ok(existing);
     }
@@ -715,7 +743,7 @@ fn used_cids() -> std::collections::HashSet<u32> {
     set
 }
 
-fn read_cid(name: &str) -> Option<u32> {
+pub(crate) fn read_cid(name: &str) -> Option<u32> {
     std::fs::read_to_string(vm_state_dir(name).join(QEMU_CID_FILE))
         .ok()?
         .trim()
@@ -725,33 +753,102 @@ fn read_cid(name: &str) -> Option<u32> {
 
 // ─── host AF_VSOCK ↔ UNIX bridge ────────────────────────────────────
 
-/// Spawn the detached host-side AF_VSOCK↔UNIX bridge for this VM. QEMU's
-/// virtio-vsock speaks real AF_VSOCK, but the shared agent client
-/// (`mvm::vsock_transport`) connects to the per-port UNIX socket that
-/// libkrun/Firecracker expose. The bridge listens on that UNIX socket
-/// (`vm_vsock_port_socket`) and splices each connection to
-/// `AF_VSOCK(cid, GUEST_AGENT_PORT)`, so the client is backend-agnostic.
+/// One host-dialed vsock channel the bridge serves: it listens on
+/// `listen_uds` (the per-port UNIX socket the shared agent client connects
+/// to, `vm_vsock_port_socket`) and splices each accepted connection to
+/// `AF_VSOCK(cid, guest_port)`, so the client stays backend-agnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QemuBridgeHostDial {
+    pub guest_port: u32,
+    pub listen_uds: PathBuf,
+}
+
+/// One guest-dialed vsock channel the bridge serves: it listens on
+/// `AF_VSOCK(VMADDR_CID_ANY, guest_port)` on the host and splices each
+/// accepted connection to `target_uds` — the runner-bound listener (the
+/// egress endpoint, the host-services broker) that owns the channel's
+/// policy. QEMU's `vhost-vsock` exposes no per-port host sockets for the
+/// guest's outbound dials, so the bridge terminates them here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QemuBridgeGuestDial {
+    pub guest_port: u32,
+    pub target_uds: PathBuf,
+}
+
+/// The detached bridge process's wiring plan for one VM, written as JSON
+/// next to the VM's pid file and passed to `mvmctl __qemu-vsock-bridge
+/// --spec`. QEMU's virtio-vsock speaks real AF_VSOCK, but the shared agent
+/// client and the runner's channel set are expressed as per-port UNIX
+/// sockets; the bridge is the translation layer between the two, in both
+/// directions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QemuBridgeSpec {
+    /// The VM's guest CID (host-dialed channels dial `AF_VSOCK(cid, port)`).
+    pub cid: u32,
+    /// Exit when this PID file's process is no longer alive (the VM is gone).
+    pub watch_pid_file: PathBuf,
+    /// Channels the host dials into the guest (agent RPC, dev console data).
+    pub host_dials: Vec<QemuBridgeHostDial>,
+    /// Channels the guest dials out to the host (egress, broker).
+    pub guest_dials: Vec<QemuBridgeGuestDial>,
+    /// When the spec carries the workload-exit port, the bridge accepts one
+    /// connection on it and persists the guest's exit code under this state
+    /// dir (`workload.exit`), mirroring the other drivers' capture.
+    pub exit_capture_state_dir: Option<PathBuf>,
+}
+
+impl QemuBridgeSpec {
+    /// The bridge plan for the raw (pre-runner) boot path: only the agent
+    /// RPC channel, in the host-dialed direction — exactly what the legacy
+    /// single-port bridge served.
+    fn agent_only(name: &str, cid: u32, state_dir: &Path) -> Self {
+        Self {
+            cid,
+            watch_pid_file: state_dir.join(QEMU_PID_FILE),
+            host_dials: vec![QemuBridgeHostDial {
+                guest_port: mvm_agentd::vsock::GUEST_AGENT_PORT,
+                listen_uds: mvm_core::config::vm_vsock_port_socket(
+                    name,
+                    mvm_agentd::vsock::GUEST_AGENT_PORT,
+                ),
+            }],
+            guest_dials: Vec::new(),
+            exit_capture_state_dir: None,
+        }
+    }
+}
+
+/// Spawn the detached host-side AF_VSOCK↔UNIX bridge for this VM.
 ///
-/// It runs as a detached `mvmctl __qemu-vsock-bridge` subprocess so it
-/// outlives the `mvmctl up` invocation, exactly as qemu (`-daemonize`)
-/// does. `stop` reaps it via `BRIDGE_PID_FILE`.
-fn spawn_vsock_bridge(name: &str, cid: u32, state_dir: &Path) -> Result<()> {
-    let uds = mvm_core::config::vm_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT);
-    let _ = std::fs::remove_file(&uds);
+/// Writes `spec` as JSON next to the VM's pid file and launches a detached
+/// `mvmctl __qemu-vsock-bridge` subprocess so it outlives the invoking
+/// `mvmctl`, exactly as qemu (`-daemonize`) does. `stop` reaps it via
+/// `BRIDGE_PID_FILE`. When the plan serves at least one host-dialed
+/// channel, this waits for the first channel's UNIX socket to appear so an
+/// immediately-following console/agent connect doesn't race a
+/// not-yet-bound socket — the socket existing means the client has
+/// somewhere to connect; the guest agent coming up is raced by the
+/// client's own retry, exactly as under libkrun.
+pub(crate) fn spawn_vsock_bridges(
+    name: &str,
+    state_dir: &Path,
+    spec: &QemuBridgeSpec,
+) -> Result<()> {
+    let spec_path = state_dir.join(BRIDGE_SPEC_FILE);
+    let json = serde_json::to_string(spec)
+        .map_err(|e| anyhow!("serialize qemu bridge spec for '{name}': {e}"))?;
+    std::fs::write(&spec_path, json).map_err(|e| anyhow!("write {}: {e}", spec_path.display()))?;
+    for dial in &spec.host_dials {
+        let _ = std::fs::remove_file(&dial.listen_uds);
+    }
     let bridge_pid_file = state_dir.join(BRIDGE_PID_FILE);
 
     let exe =
         std::env::current_exe().map_err(|e| anyhow!("resolve current exe for bridge: {e}"))?;
     let mut cmd = Command::new(&exe);
     cmd.arg("__qemu-vsock-bridge")
-        .arg("--uds")
-        .arg(&uds)
-        .arg("--cid")
-        .arg(cid.to_string())
-        .arg("--port")
-        .arg(mvm_agentd::vsock::GUEST_AGENT_PORT.to_string())
-        .arg("--watch-pid-file")
-        .arg(state_dir.join(QEMU_PID_FILE))
+        .arg("--spec")
+        .arg(&spec_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -770,14 +867,18 @@ fn spawn_vsock_bridge(name: &str, cid: u32, state_dir: &Path) -> Result<()> {
     std::fs::write(&bridge_pid_file, child.id().to_string())
         .map_err(|e| anyhow!("write {}: {e}", bridge_pid_file.display()))?;
 
-    // Wait for the bridge to bind its UNIX socket so an immediately-
-    // following console/agent connect doesn't race a not-yet-bound socket.
+    // Wait for the first host-dialed channel's socket (always the agent RPC
+    // channel on every real plan) so a following connect doesn't race the
+    // bind. A plan with no host-dialed channels has nothing to wait on.
+    let Some(first) = spec.host_dials.first() else {
+        return Ok(());
+    };
     let deadline = Instant::now() + BRIDGE_SOCKET_TIMEOUT;
-    while !uds.exists() {
+    while !first.listen_uds.exists() {
         if Instant::now() >= deadline {
             bail!(
                 "qemu vsock bridge did not bind {} within {:?}",
-                uds.display(),
+                first.listen_uds.display(),
                 BRIDGE_SOCKET_TIMEOUT
             );
         }
@@ -786,30 +887,65 @@ fn spawn_vsock_bridge(name: &str, cid: u32, state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Body of the `mvmctl __qemu-vsock-bridge` subcommand. Listens on the
-/// UNIX socket `uds` and, for each accepted connection, dials
-/// `AF_VSOCK(cid, port)` and splices the two halves bidirectionally.
-/// Exits when `watch_pid_file`'s process dies (the VM is gone).
+/// Read a [`QemuBridgeSpec`] JSON file and run the bridge — the body of the
+/// `mvmctl __qemu-vsock-bridge --spec <path>` subcommand.
 ///
 /// Lives here (not in mvm-cli) so the AF_VSOCK plumbing sits beside the
-/// backend that needs it; mvm-cli's hidden subcommand just forwards args.
-pub fn run_vsock_bridge(uds: &Path, cid: u32, port: u32, watch_pid_file: &Path) -> Result<()> {
-    use std::os::unix::net::UnixListener;
+/// backend that needs it; mvm-cli's hidden subcommand just forwards the path.
+pub fn run_vsock_bridge_from_spec_file(spec_path: &Path) -> Result<()> {
+    let json = std::fs::read_to_string(spec_path)
+        .with_context(|| format!("read qemu bridge spec {}", spec_path.display()))?;
+    let spec: QemuBridgeSpec = serde_json::from_str(&json)
+        .with_context(|| format!("parse qemu bridge spec {}", spec_path.display()))?;
+    run_vsock_bridge(&spec)
+}
 
-    let _ = std::fs::remove_file(uds);
-    let listener = UnixListener::bind(uds).map_err(|e| anyhow!("bind {}: {e}", uds.display()))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| anyhow!("set_nonblocking on {}: {e}", uds.display()))?;
+/// Body of the `mvmctl __qemu-vsock-bridge` subcommand: bind every channel
+/// in the plan, then watch the VM's pid file and exit (cleaning up the
+/// host-dialed sockets) when the VM is gone.
+fn run_vsock_bridge(spec: &QemuBridgeSpec) -> Result<()> {
+    // Host-dialed channels: one UNIX listener per channel; each accepted
+    // connection is spliced to AF_VSOCK(cid, guest_port).
+    for dial in &spec.host_dials {
+        let listener = std::os::unix::net::UnixListener::bind(&dial.listen_uds)
+            .with_context(|| format!("bind {}", dial.listen_uds.display()))?;
+        let cid = spec.cid;
+        let port = dial.guest_port;
+        std::thread::spawn(move || serve_host_dial(listener, cid, port));
+    }
+    // Guest-dialed channels: one AF_VSOCK listener per channel; each
+    // accepted connection is spliced to the runner-bound UNIX listener.
+    for dial in &spec.guest_dials {
+        let listener = VsockListener::bind(dial.guest_port)
+            .with_context(|| format!("bind AF_VSOCK port {}", dial.guest_port))?;
+        let target = dial.target_uds.clone();
+        std::thread::spawn(move || serve_guest_dial(listener, target));
+    }
+    // Workload-exit capture: accept the guest's single exit report and
+    // persist it where `wait_for_workload_exit` reads it.
+    if let Some(state_dir) = &spec.exit_capture_state_dir {
+        let listener = VsockListener::bind(mvm_agentd::vsock::WORKLOAD_EXIT_PORT)
+            .context("bind AF_VSOCK workload-exit port")?;
+        let state_dir = state_dir.clone();
+        std::thread::spawn(move || {
+            match listener
+                .accept()
+                .and_then(|stream| mvm_core::exit_capture::capture_stream(stream, &state_dir))
+            {
+                Ok(code) => tracing::info!(code, "qemu workload exit captured"),
+                Err(e) => tracing::warn!("qemu workload exit capture failed: {e}"),
+            }
+        });
+    }
 
+    // Watch loop: stop when the watched VM is gone. Re-read the pidfile each
+    // iteration so a transient partial read at startup doesn't latch
+    // (the old read-once approach could loop forever on a one-off None).
+    // Distinguish the cases: file *missing* or a *dead* pid → the VM is
+    // torn down, exit; file present but momentarily unparseable → treat
+    // as still-alive and retry (don't exit on a transient bad read).
     loop {
-        // Stop when the watched VM is gone. Re-read the pidfile each
-        // iteration so a transient partial read at startup doesn't latch
-        // (the old read-once approach could loop forever on a one-off None).
-        // Distinguish the cases: file *missing* or a *dead* pid → the VM is
-        // torn down, exit; file present but momentarily unparseable → treat
-        // as still-alive and retry (don't exit on a transient bad read).
-        let vm_gone = match std::fs::read_to_string(watch_pid_file) {
+        let vm_gone = match std::fs::read_to_string(&spec.watch_pid_file) {
             Err(_) => true, // pidfile removed → VM torn down
             Ok(s) => match s.trim().parse::<libc::pid_t>() {
                 Ok(pid) => !pid_alive(pid),
@@ -817,22 +953,145 @@ pub fn run_vsock_bridge(uds: &Path, cid: u32, port: u32, watch_pid_file: &Path) 
             },
         };
         if vm_gone {
-            let _ = std::fs::remove_file(uds);
+            for dial in &spec.host_dials {
+                let _ = std::fs::remove_file(&dial.listen_uds);
+            }
             return Ok(());
         }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Accept loop for one host-dialed channel: splice each UNIX connection to
+/// `AF_VSOCK(cid, port)`. A failed guest dial (agent not up yet) drops the
+/// client; the caller retries.
+fn serve_host_dial(listener: std::os::unix::net::UnixListener, cid: u32, port: u32) {
+    loop {
         match listener.accept() {
             Ok((client, _)) => {
                 if let Ok(guest) = dial_vsock(cid, port) {
                     std::thread::spawn(move || splice_bidirectional(client, guest));
                 }
-                // If the guest dial fails (agent not up yet), drop the
-                // client; the caller retries.
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
+            Err(e) => {
+                tracing::warn!("qemu bridge accept on host-dial port {port} failed: {e}");
+                return;
             }
-            Err(e) => return Err(anyhow!("accept on {}: {e}", uds.display())),
         }
+    }
+}
+
+/// Accept loop for one guest-dialed channel: splice each AF_VSOCK
+/// connection to the runner-bound UNIX listener. A failed target connect
+/// (endpoint not bound yet) drops the guest's dial; the guest retries.
+fn serve_guest_dial(listener: VsockListener, target_uds: PathBuf) {
+    loop {
+        match listener.accept() {
+            Ok(guest) => {
+                if let Ok(host) = std::os::unix::net::UnixStream::connect(&target_uds) {
+                    std::thread::spawn(move || splice_bidirectional(host, guest));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("qemu bridge accept on guest-dial listener failed: {e}");
+                return;
+            }
+        }
+    }
+}
+
+/// The Linux `struct sockaddr_vm` wire layout, hoisted so the dial and the
+/// listener share one definition. Pinned against the kernel uapi (family
+/// u16 + reserved u16 + port u32 + cid u32 + 4-byte pad = 16, ==
+/// sizeof(struct sockaddr)): a future field edit that desyncs the `socklen`
+/// passed to connect(2)/bind(2) trips this at compile time.
+#[repr(C)]
+struct SockaddrVm {
+    svm_family: libc::sa_family_t,
+    svm_reserved1: u16,
+    svm_port: u32,
+    svm_cid: u32,
+    svm_zero: [u8; 4],
+}
+const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
+
+const AF_VSOCK: libc::c_int = 40;
+
+fn sockaddr_vm(cid: u32, port: u32) -> SockaddrVm {
+    SockaddrVm {
+        svm_family: AF_VSOCK as libc::sa_family_t,
+        svm_reserved1: 0,
+        svm_port: port,
+        svm_cid: cid,
+        svm_zero: [0; 4],
+    }
+}
+
+fn vsock_socket() -> std::io::Result<libc::c_int> {
+    // SAFETY: standard socket(2) on AF_VSOCK.
+    let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+/// A bound host-side AF_VSOCK listener: the host end of the channels the
+/// guest dials out to (egress, broker, workload-exit). QEMU's
+/// `vhost-vsock-pci` delivers a guest's `connect(cid=host, port)` to a host
+/// process listening here, so the bridge terminates those dials and
+/// splices them to the runner-bound UNIX listeners.
+struct VsockListener {
+    fd: libc::c_int,
+}
+
+impl VsockListener {
+    /// Bind `AF_VSOCK(VMADDR_CID_ANY, port)` and start listening.
+    fn bind(port: u32) -> std::io::Result<Self> {
+        const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
+        let fd = vsock_socket()?;
+        let addr = sockaddr_vm(VMADDR_CID_ANY, port);
+        // SAFETY: bind(2)/listen(2) on a valid fd; addr is fully initialized
+        // and sized exactly. On failure the fd is closed before returning.
+        unsafe {
+            let rc = libc::bind(
+                fd,
+                std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+                std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+            );
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err);
+            }
+            if libc::listen(fd, 16) < 0 {
+                let err = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err);
+            }
+        }
+        Ok(Self { fd })
+    }
+
+    /// Accept one guest connection, wrapped in a [`std::net::TcpStream`]
+    /// (an owned fd with read/write + shutdown; no TCP methods are used).
+    fn accept(&self) -> std::io::Result<std::net::TcpStream> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: accept(2) on a listening fd; the returned fd is owned and
+        // wrapped exactly once.
+        let conn = unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        if conn < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `conn` is a fresh, owned descriptor from accept.
+        Ok(unsafe { std::net::TcpStream::from_raw_fd(conn) })
+    }
+}
+
+impl Drop for VsockListener {
+    fn drop(&mut self) {
+        // SAFETY: `fd` is owned by this listener and closed exactly once.
+        unsafe { libc::close(self.fd) };
     }
 }
 
@@ -842,35 +1101,11 @@ pub fn run_vsock_bridge(uds: &Path, cid: u32, port: u32, watch_pid_file: &Path) 
 fn dial_vsock(cid: u32, port: u32) -> std::io::Result<std::net::TcpStream> {
     use std::os::fd::FromRawFd;
 
-    const AF_VSOCK: libc::c_int = 40;
-    #[repr(C)]
-    struct SockaddrVm {
-        svm_family: libc::sa_family_t,
-        svm_reserved1: u16,
-        svm_port: u32,
-        svm_cid: u32,
-        svm_zero: [u8; 4],
-    }
-    // Pin the wire layout against the kernel uapi `struct sockaddr_vm`
-    // (family u16 + reserved u16 + port u32 + cid u32 + 4-byte pad = 16,
-    // == sizeof(struct sockaddr)). A future field edit that desyncs the
-    // `socklen` passed to connect(2) trips this at compile time.
-    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
-
-    // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; addr is fully
-    // initialized and sized exactly.
+    let fd = vsock_socket()?;
+    let addr = sockaddr_vm(cid, port);
+    // SAFETY: connect(2) on a valid fd; addr is fully initialized and sized
+    // exactly. On failure the fd is closed before returning.
     unsafe {
-        let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let addr = SockaddrVm {
-            svm_family: AF_VSOCK as libc::sa_family_t,
-            svm_reserved1: 0,
-            svm_port: port,
-            svm_cid: cid,
-            svm_zero: [0; 4],
-        };
         let rc = libc::connect(
             fd,
             std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
@@ -915,15 +1150,15 @@ fn splice_bidirectional(a: std::os::unix::net::UnixStream, b: std::net::TcpStrea
 
 // ─── pid helpers (local copies — libkrun's are private) ─────────────
 
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
+pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-fn pid_alive(pid: libc::pid_t) -> bool {
+pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
+pub(crate) fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
     unsafe {
         libc::kill(pid, sig);
     }

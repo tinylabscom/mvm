@@ -1090,7 +1090,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use mvm_agentd::vsock::EGRESS_PORT;
+    use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
     use mvm_core::plan::{Nonce, SecretBinding, SecretSource, VerbGrant, VerbId};
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
     use mvm_core::util::test_env::TestEnv;
@@ -1704,6 +1704,150 @@ mod tests {
         assert!(
             !cmdline.contains("ttyAMA0"),
             "cmdline carried the hardcoded HVF console rather than the driver's: {cmdline}"
+        );
+    }
+
+    /// A boot that attached the universal initramfs must be sent
+    /// `ActivateEnvironment` over the agent vsock port before the launch
+    /// returns — proven by driving `start_workload` through the `MockDriver`
+    /// loopback and answering as the guest: the host's request must BE the
+    /// activation verb (not an operational RPC), and the launch must succeed
+    /// on the ACK. This is the contract every runner driver (Firecracker,
+    /// libkrun, HVF, QEMU) inherits: the driver's only part is a working
+    /// `vsock_connect(GUEST_AGENT_PORT)`.
+    #[test]
+    fn start_workload_sends_activate_environment_for_a_universal_initramfs_boot() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        // The activation handshake authenticates against the host signer;
+        // seed one so both ends of the loopback share the identity.
+        let host_signer = [7u8; 32];
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.ed25519"), host_signer).unwrap();
+
+        // An initramfs artifact under the shared cache is the discriminant
+        // for the universal-initramfs boot path.
+        let initrd = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir())
+            .join("initramfs")
+            .join("test-version")
+            .join("initramfs.cpio.gz");
+        std::fs::create_dir_all(initrd.parent().expect("initramfs cache parent")).unwrap();
+        std::fs::write(&initrd, b"initramfs").unwrap();
+
+        let driver = MockDriver::default();
+        let runner = WorkloadRunner::new(
+            driver.clone(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let cfg = VmStartConfig {
+            name: "runner-activation".into(),
+            initrd_path: Some(initrd.to_string_lossy().into_owned()),
+            ..config("runner-activation")
+        };
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+
+        // The guest side of the loopback: authenticate, assert the request
+        // is exactly the activation verb, ACK it.
+        let guest = std::thread::spawn(move || {
+            use ed25519_dalek::SigningKey;
+            use mvm_agentd::vsock::{AuthenticatedSession, GuestRequest, GuestResponse};
+
+            let mut stream = {
+                let mut found = None;
+                for _ in 0..200 {
+                    if let Some(end) =
+                        driver.take_guest_end(&VmId("runner-activation".into()), GUEST_AGENT_PORT)
+                    {
+                        found = Some(end);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                found.expect("the runner connected to the guest agent port")
+            };
+            let host_key = SigningKey::from_bytes(&host_signer).verifying_key();
+            let mut session = AuthenticatedSession::guest(
+                &mut stream,
+                SigningKey::from_bytes(&[9u8; 32]),
+                &host_key,
+            )
+            .expect("guest handshake");
+            let req: GuestRequest = session.read(&mut stream).expect("read request");
+            assert!(
+                matches!(req, GuestRequest::ActivateEnvironment(_)),
+                "the first post-boot verb must be ActivateEnvironment, got: {req:?}"
+            );
+            session
+                .write(&mut stream, &GuestResponse::ActivateEnvironmentAck)
+                .expect("write ack");
+        });
+
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "local",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: String::new(),
+            })
+            .expect("start_workload succeeds once activation is ACKed");
+        guest.join().expect("guest thread");
+    }
+
+    /// A legacy per-rootfs initramfs boot (an initrd NOT under the shared
+    /// cache) is never sent `ActivateEnvironment` — the guest keeps its own
+    /// PID 1 and the launch proceeds without the handshake.
+    #[test]
+    fn start_workload_skips_activation_for_a_legacy_initramfs_boot() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let legacy = home.path().join("rootfs.initrd");
+        std::fs::write(&legacy, b"initrd").unwrap();
+
+        let driver = MockDriver::default();
+        let runner = WorkloadRunner::new(
+            driver.clone(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let cfg = VmStartConfig {
+            name: "runner-legacy-initrd".into(),
+            initrd_path: Some(legacy.to_string_lossy().into_owned()),
+            ..config("runner-legacy-initrd")
+        };
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "local",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: String::new(),
+            })
+            .expect("a legacy initramfs boot needs no activation handshake");
+        // No vsock connect was ever made for activation: the loopback guest
+        // end registry is empty.
+        assert!(
+            driver
+                .take_guest_end(&VmId("runner-legacy-initrd".into()), GUEST_AGENT_PORT)
+                .is_none(),
+            "a legacy initramfs boot must not connect for activation"
         );
     }
 
