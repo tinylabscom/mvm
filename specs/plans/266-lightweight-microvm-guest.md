@@ -310,14 +310,19 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
   growing sidecar cannot consume base headroom and a base regression cannot
   hide behind an absent sidecar.
 
-  **Closure gates, both directions.** `runtime-overlay-no-glibc` realizes the
+  **Closure gates, both directions.** `runtime-overlay-no-glibc` queries the
   closure of every executable staged into the overlay and fails if a
   hash-anchored `/nix/store/<hash>-glibc` path appears;
   `sdk-sidecar-carries-glibc` fails if the SDK cdylib *stops* depending on
   glibc, and asserts the sidecar ships the loader, `libc.so.6`, and
   `libgcc_s.so.1`. Without the second gate, deleting the cdylib outright would
-  satisfy every no-glibc assertion and read as a footprint win. Both build in
-  the `nix-flake-check` CI job alongside the existing rootfs gate.
+  satisfy every no-glibc assertion and read as a footprint win. Both run in the
+  `nix-flake-check` CI job beside the existing rootfs gate, as closure queries
+  over the artifacts the preceding step already built — the runtime-overlay
+  flake reaches the workspace through a path outside its own flake root, so a
+  `closureInfo` derivation there cannot be instantiated under a pure
+  `nix flake check`, and re-realizing those binaries from the root flake both
+  doubles the build and hits a different toolchain shape.
 
 ## WS-2 handoff
 

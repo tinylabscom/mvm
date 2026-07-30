@@ -16,7 +16,7 @@
 //! Documented in `specs/runbooks/cross-platform-install.md` (Phase 5).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn nix_dir() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
@@ -978,65 +978,67 @@ fn runtime_overlay_publishes_an_attachable_sdk_sidecar_image() {
 /// Both closure gates, and the direction of each. A change that deleted the SDK
 /// cdylib outright would satisfy every no-glibc assertion and look like a
 /// footprint win, so the positive gate is what makes the split meaningful.
+///
+/// The overlay-facing gates run as a CI step rather than a flake `check`: the
+/// runtime-overlay flake reaches the workspace through a path outside its own
+/// flake root, so `closureInfo` against its sources cannot be instantiated under
+/// a pure `nix flake check`. Querying the closure of the artifacts CI has
+/// already built is equally build-backed and does not rebuild them.
 #[test]
 fn closure_gates_pin_glibc_out_of_the_base_and_into_the_sidecar() {
-    let overlay = fs::read_to_string(
-        nix_dir()
-            .join("images")
-            .join("runtime-overlay")
-            .join("flake.nix"),
-    )
-    .expect("runtime-overlay flake must be present");
     let root = fs::read_to_string(nix_dir().join("flake.nix")).expect("root flake must be present");
+    let ci = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml"),
+    )
+    .expect("ci.yml must be present");
 
-    // Hash-anchored greps only: a bare `-glibc` match would fire on any
+    // Hash-anchored matches only: a bare `-glibc` pattern would fire on any
     // derivation whose *name* happens to contain the string.
-    let anchored = r"'/nix/store/[a-z0-9]+-glibc(-|$)'";
     assert!(
-        root.contains(anchored),
+        root.contains(r"'/nix/store/[a-z0-9]+-glibc(-|$)'"),
         "the rootfs no-glibc gate must anchor its grep on the glibc store path"
     );
-    // Both overlay-facing gates live in the root flake: the runtime-overlay
-    // flake reaches the workspace through a path outside its own flake root, so
-    // a closure query against its sources cannot resolve under a pure
-    // `nix flake check`.
     assert!(
-        root.contains("runtime-overlay-no-glibc ="),
-        "the overlay's staged executables need a build-backed no-glibc gate"
+        ci.contains(r"glibc_re='/nix/store/[a-z0-9]+-glibc(-|$)'"),
+        "the overlay/sidecar gates must anchor their grep on the glibc store path"
     );
-    assert!(
-        root.contains("sdk-sidecar-carries-glibc ="),
-        "the sidecar needs the counterpart gate proving the glibc closure moved there"
-    );
-    // The overlay gate must close over the executables actually staged into the
-    // image; an empty root-path set would make it vacuously green.
-    assert!(
-        root.contains("rootPaths = overlayStagedExecutablesFor system;"),
-        "the overlay no-glibc gate must close over the staged executables"
-    );
-    for recipe in [
-        "mvm-guest-agent.nix",
-        "mvm-egress-client.nix",
-        "mvm-addon-dns.nix",
-        "mvm-exit-report.nix",
+
+    // The negative direction must close over the executables actually staged
+    // into the overlay; an empty root-path set would make it vacuously green.
+    for staged in [
+        "guest",
+        "guestDev",
+        "runner",
+        "egressClient",
+        "addonDns",
+        "exitReport",
     ] {
         assert!(
-            root.contains(recipe),
-            "the overlay no-glibc closure must include {recipe}"
+            ci.contains(staged),
+            "the overlay no-glibc closure must include the staged {staged} binary"
         );
     }
-    // Each of those must be instantiated from the static package set, or the
-    // gate would be asserting the wrong binaries.
     assert!(
-        root.contains("pkgs = pkgs.pkgsStatic;"),
-        "the overlay no-glibc gate must build its root paths from pkgsStatic"
+        ci.contains("nix path-info -r"),
+        "the gates must query a realized closure, not a bare evaluation"
     );
-    // And the sidecar's own payload assertions stay with the derivation that
-    // ships them.
+
+    // And the positive direction, plus the files the sidecar has to ship.
+    assert!(
+        ci.contains("sdk-sidecar.passthru.hostsvc"),
+        "the positive gate must query the SDK cdylib's own closure"
+    );
+    assert!(
+        ci.contains("no longer depends on glibc"),
+        "the positive gate must fail when the cdylib stops depending on glibc"
+    );
     for required in ["libmvm_host_services.so", "libc.so.6", "libgcc_s.so.1"] {
         assert!(
-            overlay.contains(required),
-            "the sidecar must ship {required}"
+            ci.contains(required),
+            "the sidecar gate must assert {required} is shipped"
         );
     }
 }

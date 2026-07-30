@@ -118,7 +118,7 @@
       manifest) and is resolved through the same version-keyed,
       manifest-verified discipline as the runtime overlay; missing, drifted,
       tampered, unreadable, and cdylib-less artifacts all fail closed. Two
-      build-backed Nix gates pin the split in both directions
+      build-backed CI gates pin the split in both directions
       (`runtime-overlay-no-glibc`, `sdk-sidecar-carries-glibc`), and
       `xtask perf footprint --sdk-sidecar` reports the sidecar on its own
       ledger line against its own 8 MiB ceiling, never folded into the base

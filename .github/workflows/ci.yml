@@ -480,15 +480,52 @@ jobs:
             ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar \
             ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar-image
 
-      # Both directions, together. The overlay's staged executables must carry
-      # no glibc, and the SDK cdylib must still depend on it — otherwise a
-      # change that simply deleted the cdylib would read as a footprint win.
+      # Both directions, together, over the artifacts the step above already
+      # built — a closure query, not a second build of the same binaries.
+      #
+      # The overlay's ext4 is an opaque image with no store references, so
+      # querying the *image* would be vacuously empty; these query the
+      # executables staged into it, and the cdylib the sidecar ships. The greps
+      # are hash-anchored (`/nix/store/<hash>-glibc…`) so they match the glibc
+      # package's own store path, never a derivation whose name merely contains
+      # "glibc".
+      #
+      # The positive direction is what makes the split meaningful: without it, a
+      # change that deleted the SDK cdylib outright would satisfy every
+      # no-glibc assertion and read as a footprint win.
       - name: Runtime overlay is glibc-free and the SDK closure moved to the sidecar
         run: |
           set -euo pipefail
-          nix build --print-build-logs \
-            ./nix#checks.x86_64-linux.runtime-overlay-no-glibc \
-            ./nix#checks.x86_64-linux.sdk-sidecar-carries-glibc
+          overlay=./nix/images/runtime-overlay
+          glibc_re='/nix/store/[a-z0-9]+-glibc(-|$)'
+
+          staged_closure=$(mktemp)
+          for binary in guest guestDev runner egressClient addonDns exitReport; do
+            path=$(nix eval --raw "$overlay#packages.x86_64-linux.default.passthru.$binary")
+            nix path-info -r "$path" >> "$staged_closure"
+          done
+          if grep -Eq -- "$glibc_re" "$staged_closure"; then
+            echo "glibc present in the runtime overlay's staged-executable closure:" >&2
+            grep -E -- "$glibc_re" "$staged_closure" >&2
+            exit 1
+          fi
+          echo "ok: runtime overlay staged executables carry no glibc"
+
+          hostsvc=$(nix eval --raw "$overlay#packages.x86_64-linux.sdk-sidecar.passthru.hostsvc")
+          if ! nix path-info -r "$hostsvc" | grep -Eq -- "$glibc_re"; then
+            echo "the SDK host-services cdylib no longer depends on glibc — the" >&2
+            echo "sidecar split is only meaningful while it does:" >&2
+            nix path-info -r "$hostsvc" >&2
+            exit 1
+          fi
+          sidecar=$(nix build --no-link --print-out-paths \
+            "$overlay#packages.x86_64-linux.sdk-sidecar")
+          for required in libmvm_host_services.so libc.so.6 libgcc_s.so.1; do
+            test -e "$sidecar/lib/$required" \
+              || { echo "SDK sidecar is missing $required" >&2; exit 1; }
+          done
+          echo "ok: the glibc SDK closure lives in the sidecar"
+
 
       - name: Nix-built guest artifacts fit the 50 MB footprint
         run: |

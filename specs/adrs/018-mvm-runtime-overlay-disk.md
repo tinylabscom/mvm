@@ -90,11 +90,13 @@ roothash reaches the guest, and a malicious host is out of scope by ADR-001.
 
 Its size is budgeted and reported **outside** the 50,000,000-byte
 complete-artifact contract, because only workloads that bind an SDK-served host
-service pay for it. Two build-backed Nix gates pin the split in both
-directions: `runtime-overlay-no-glibc` fails if glibc re-enters the overlay's
-staged-executable closure, and `sdk-sidecar-carries-glibc` fails if the SDK
-cdylib stops depending on glibc — without the second, deleting the cdylib
-outright would satisfy every no-glibc assertion and read as a footprint win.
+service pay for it. Two build-backed CI gates pin the split in both directions:
+`runtime-overlay-no-glibc` fails if glibc re-enters the closure of the
+executables staged into the overlay, and `sdk-sidecar-carries-glibc` fails if
+the SDK cdylib stops depending on glibc — without the second, deleting the
+cdylib outright would satisfy every no-glibc assertion and read as a footprint
+win. Both query the closure of artifacts the preceding CI step already built,
+rather than realizing them a second time.
 
 **The overlay is version-pinned to the running mvmctl.** Its `VERSION`
 file must match the running binary's semver; a mismatch is an
