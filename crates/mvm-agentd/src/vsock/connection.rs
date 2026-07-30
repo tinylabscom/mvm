@@ -320,7 +320,20 @@ pub(super) fn connect(instance_dir: &str, timeout_secs: u64) -> Result<UnixStrea
 /// Establishes the authenticated, encrypted control session and sends one
 /// length-prefixed JSON request envelope.
 pub fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<GuestResponse> {
-    let mut session = open_authenticated_session(stream)?;
+    send_request_stream(stream, req)
+}
+
+/// Send a request over any synchronous duplex stream.
+///
+/// Mirrors [`send_request`] but accepts any `Read + Write + Send` type so
+/// callers that obtain a stream through the `RunningVm::vsock_connect` seam
+/// (which returns a boxed [`std::io::Read`] + [`std::io::Write`]) can use it
+/// directly without re-resolving the backend-specific socket path.
+pub fn send_request_stream<S: std::io::Read + std::io::Write + Send>(
+    stream: &mut S,
+    req: &GuestRequest,
+) -> Result<GuestResponse> {
+    let mut session = open_authenticated_session_stream(stream)?;
     session.write(stream, req)?;
     session.read(stream)
 }
@@ -330,6 +343,12 @@ pub fn send_request(stream: &mut UnixStream, req: &GuestRequest) -> Result<Guest
 /// `/run/mvm/host-signer.pub` trust anchor.
 pub(crate) fn open_authenticated_session(
     stream: &mut UnixStream,
+) -> Result<crate::vsock::AuthenticatedSession> {
+    open_authenticated_session_stream(stream)
+}
+
+pub(crate) fn open_authenticated_session_stream<S: std::io::Read + std::io::Write + Send>(
+    stream: &mut S,
 ) -> Result<crate::vsock::AuthenticatedSession> {
     let key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
     let key_bytes: [u8; 32] = std::fs::read(&key_path)

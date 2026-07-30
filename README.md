@@ -433,10 +433,24 @@ Host (macOS / Linux)
                      Firecracker (KVM) · in-house HVF · libkrun · QEMU (dev/test)
                                               │
 Guest (its own Linux kernel)
-  /init ──► mvm-guest-agent on vsock :5252  — exec, files, processes, code-run
+  /init (universal initramfs) ──► mvm-guest-agent on vsock :5252
+    1. mounts /proc, /sys, /dev
+    2. waits fail-closed for a signed ActivateEnvironment
+    3. mounts the dm-verity rootfs + runtime overlay, pivots root, drops to uid 901
   no sshd · no SSH keys · setpriv + seccomp service isolation
   rootfs: ext4 (dm-verity sealed in prod) or read-only virtio-fs
 ```
+
+On boots that attach the universal initramfs, the kernel cmdline carries no
+roothash tokens. The guest PID 1 waits fail-closed for a signed
+`ActivateEnvironment` over vsock, then mounts the root — dm-verity for a
+sealed boot, plain-block for an unverified dev boot, or a virtio-fs tag for a
+block-less boot — plus the runtime overlay when one is attached, pivots into
+it, and drops to the workload uid before serving operational RPCs. The same
+initramfs serves Nix-built and OCI images on every runner backend
+(Firecracker, libkrun, HVF). See
+[Boot flow](public/src/content/docs/architecture/boot-flow.md) for the
+detailed sequence.
 
 Backend selection is automatic per host (`--hypervisor` overrides); all backends
 consume the same image artifacts. Egress is default-deny — where policy admits
@@ -452,10 +466,11 @@ claims), each backed by a named test or workflow gate. In summary:
    seccomp, `setpriv --no-new-privs` bounding set.
 2. **No guest binary can elevate to uid 0** — read-only `/etc/{passwd,group}`,
    `no-new-privs` in the launch path.
-3. **A tampered rootfs ext4 fails to boot** — dm-verity + kernel-cmdline roothash
-   + verity initramfs; live-KVM tamper regression panics before userspace.
-   Scoped to the block+ext4 backends (Firecracker + Option B); the virtiofs-root
-   dev-tier path carries a weaker contract — see the claim catalog.
+3. **A tampered rootfs ext4 fails to boot** — dm-verity + universal initramfs
+   (roothash delivered over vsock, not the kernel cmdline); live-KVM tamper
+   regression panics before userspace. Scoped to the block+ext4 backends
+   (Firecracker + Option B); the virtiofs-root dev-tier path carries a weaker
+   contract — see the claim catalog.
 4. **The guest agent has no `do_exec` in production builds** — symbol-absence
    CI gate on the sealed agent.
 5. **Vsock framing + supervisor config are fuzzed** — `cargo-fuzz` targets;

@@ -27,6 +27,8 @@ mod globals;
 mod handlers;
 #[path = "mvm-guest-agent/health.rs"]
 mod health;
+#[path = "mvm-guest-agent/init.rs"]
+mod init;
 #[cfg(feature = "interactive")]
 #[path = "mvm-guest-agent/interactive.rs"]
 mod interactive;
@@ -111,7 +113,7 @@ use crate::socket::{
     AF_VSOCK, AuthenticatedWriter, SOCK_STREAM, SockAddrVm, VMADDR_CID_ANY, accept, bind, close,
     listen, peer_cid_is_authorized, socket, write_response,
 };
-use crate::state::{AgentBootState, AgentState, IntegrationState, ProbeState};
+use crate::state::{ActivationState, AgentBootState, AgentState, IntegrationState, ProbeState};
 
 use handlers::{
     handle_checkpoint_integrations, handle_entrypoint_status, handle_fs_diff, handle_fs_list,
@@ -230,6 +232,30 @@ fn handle_client(
         }
     };
 
+    // Initramfs PID-1 activation gate.  Before `ActivateEnvironment`
+    // is accepted and applied, only `ActivateEnvironment` may pass; every
+    // other operational verb is refused with `NotActivated`.  After a
+    // failure the agent stays in `Failed` and reports the reason.
+    if init::is_pid1() {
+        match boot_state.activation_state() {
+            ActivationState::Awaiting | ActivationState::Activating
+                if !matches!(req, GuestRequest::ActivateEnvironment { .. }) =>
+            {
+                let resp = GuestResponse::NotActivated;
+                send_authenticated_response(&mut file, &mut session, &resp);
+                return;
+            }
+            ActivationState::Failed { ref message } => {
+                let resp = GuestResponse::ActivateEnvironmentError {
+                    message: message.clone(),
+                };
+                send_authenticated_response(&mut file, &mut session, &resp);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     let active_profile = boot_state.profile;
 
     // Profile gate. Reject dev-only verbs in sealed-prod *before*
@@ -301,6 +327,19 @@ fn handle_client(
             // through. Returning `Error` here would mask the bug.
             GuestRequest::ProtocolHello { .. } => {
                 unreachable!("protocol hello reached operational dispatch")
+            }
+
+            GuestRequest::ActivateEnvironment(env) => {
+                match init::apply_activation(&env, boot_state) {
+                    Ok(()) => GuestResponse::ActivateEnvironmentAck,
+                    Err(e) => {
+                        let message = e.to_string();
+                        boot_state.set_activation(ActivationState::Failed {
+                            message: message.clone(),
+                        });
+                        GuestResponse::ActivateEnvironmentError { message }
+                    }
+                }
             }
 
             GuestRequest::Ping => handle_ping(),
@@ -502,6 +541,11 @@ fn main() {
         "mvm-guest-agent: starting on vsock port {} (threshold={}, interval={}s)",
         cfg.port, cfg.busy_threshold, cfg.sample_interval_secs
     );
+
+    // PID-1 initramfs setup: mount early filesystems and install the
+    // SIGCHLD reaper before the control plane comes up.  On non-PID-1
+    // boots this is a no-op.
+    init::early_setup();
 
     // Install signal handlers BEFORE vsock bind + background init.
     // Same handlers fire whether we're mid-warmup

@@ -1027,6 +1027,7 @@ fn run_inner(
         use_snapshot = false;
     }
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
+    crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
     let t_admitted = timing.then(std::time::Instant::now);
 
@@ -1863,6 +1864,7 @@ pub fn boot_session_vm(
     }
 
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
+    crate::commands::vm::up::attach_universal_initramfs_if_cached(&mut start_config)?;
 
     let use_snapshot = !admitted_workload
         && snap_info.is_some()

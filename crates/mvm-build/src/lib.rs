@@ -41,6 +41,8 @@ pub mod firecracker;
 /// Config contract for the `mvm-hvf-supervisor` per-VM host process (raw HVF
 /// macOS backend, raw HVF backend). Shared by `mvm_runtime::hvf` (writer) + the bin.
 pub mod hvf_supervisor;
+/// Universal initramfs build + cache resolution.
+pub mod initramfs;
 /// Hash-verify a fetched kernel image against its [`mvm_core::kernel_artifact::KernelArtifactId`].
 pub mod kernel_fetch;
 /// Portable signed `.mvm` artifacts. A tar.gz wrapper around kernel +

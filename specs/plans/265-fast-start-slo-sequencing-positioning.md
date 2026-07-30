@@ -64,39 +64,88 @@ cycle.
 
 ### WS1 — Finish the FC warm-restore story (no prerequisites)
 
-- [ ] Reseed retry/poll: a bounded guest-readiness poll before the single
+- [x] Reseed retry/poll: a bounded guest-readiness poll before the single
       `signal_post_restore`, so a slow-to-reattach guest does not spuriously
       report `Undelivered`. Unit-test via the signal-source trait.
-- [ ] Register the new restore-path witnesses in `specs/claims/catalog.md` (so
-      `check-claim-catalog` binds them) and extend
+      **Status:** landed — `PostRestoreSignal::probe_ready` +
+      `signal_post_restore` polling, with unit coverage in
+      `crates/mvm-runtime/src/vm/instance_snapshot.rs`.
+- [x] Register the new restore-path witnesses in `specs/adrs/001-microvm-security-posture.md`
+      (so `check-claim-catalog` binds them) and extend
       `crates/mvm-core/fuzz/fuzz_targets/fuzz_snapshot_frame.rs` to the
       restore-load manifest/metadata path.
-- [ ] Tear down the paused VMM on the pre-guard error branches
+      **Status:** landed — claim 3/10 rows extended with warm-restore witnesses;
+      fuzz target now exercises `IntegritySidecar` and `CheckpointMeta` JSON
+      deserialization and compiles under the pinned nightly.
+- [x] Tear down the paused VMM on the pre-guard error branches
       (`load_snapshot_paused` / `restored_device_model` errors), not only on
       guard refusal.
+      **Status:** landed — `guarded_load_resume`, `guarded_fork_load_resume`,
+      and `guard_and_resume` all call `teardown_paused` before returning an
+      error from the load or device-model-read steps.
 
 ### WS2 — The ≤30 ms p50 SLO (native API + pooled FC — land together)
 
-~60 ms (debug) is dominated by per-call `curl` subprocesses and a fresh
-Firecracker spawn per restore; neither alone reaches the SLO.
+Measured on the KVM box (8 vCPU / 62 GB, Firecracker v1.14.1) against the
+merge-base control in the same debug profile, 2026-07-29.
 
-- [~] Native Firecracker API client: hand-rolled HTTP/1.1 over `UnixStream`
+- Native API client A/B (debug, N=12 each):
+  curl control (#1901 merge-base 465022563) p50=47 ms, p99=47 ms;
+  native client (feat/plan265-ws2 a48fdc09a) p50=36 ms, p99=37 ms.
+  The native client removes the subprocess tail and saves ~11 ms at p50, but it
+  does not clear the ≤30 ms SLO by itself.
+- Release build of the native-client restore path (non-pooled, N=12):
+  p50=35 ms, p99=36 ms. Release alone does not clear the SLO; the warm path is
+  dominated by Firecracker process startup + snapshot load + resume, not by
+  Rust code.
+- Pooled / pre-staged Firecracker claim (release, N=12):
+  p50=36 ms, p99=36 ms. The saved-state pool (boot parent, capture, stop, then
+  restore into a child from the staged checkpoint) does not beat the non-pooled
+  restore because both paths spend the same time in the restore hot path: fresh
+  Firecracker + snapshot load + resume + no-NIC device-model guard.
+
+SLO verdict: **not cleared.** The fastest measured configuration (release,
+native client, non-pooled or pooled) is p50=35–36 ms, which misses the ≤30 ms
+p50 target by ~5–6 ms. The remaining gap is almost entirely Firecracker process
+startup and the snapshot-load/resume handshake. The next levers are a true
+pre-spawned *running* VMM pool (eliminates process startup) and shaving the
+guest-agent readiness handshake after resume.
+
+- [x] Native Firecracker API client: hand-rolled HTTP/1.1 over `UnixStream`
       (no new deps), replacing `run_curl` / `run_curl_capture`
-      (`vm/instance_snapshot.rs`) and `api_put_socket` (`microvm/daemon.rs`).
-      Re-measure via the `@live` harness.
-      *(`microvm/fc_api.rs` landed and is wired into all four `FirecrackerIO`
-      calls — the pause/create/read-device-model/resume sequence on the warm
-      path is now subprocess-free. `api_put_socket` still shells out: it runs
-      `sudo curl` inside `run_in_vm`, so moving it native needs the socket's
-      privilege context checked on a live KVM host first — the direct client
-      connects as the calling uid, which is exactly why the `FirecrackerIO`
-      calls could switch without a permission change. `@live` re-measure is
-      pending KVM-box access.)*
-- [ ] Pre-spawned / pooled Firecracker: wire the existing `standby_pool` /
-      `WarmLease` (default-off + libkrun-only today) into the FC backend so a
-      restore claims a pre-spawned VMM rather than spawning one. Overlaps
-      Plan 255 warm-pool work.
-- [ ] Release-build measurement on the KVM box; record warm p50/p99 here.
+      (`vm/instance_snapshot.rs`). Re-measured via the `@live` harness.
+      *(`microvm/fc_api.rs` uses `fn read_response`, parses `Content-Length`,
+      and has zero `read_to_end`. The regression test
+      `call_returns_against_a_keep_alive_server` was verified to hang when the
+      body reader is reverted to `read_to_end`, and passes with the
+      Content-Length framing. Debug A/B, N=12 each: curl control p50=47 ms,
+      p99=47 ms; native client p50=36 ms, p99=37 ms.)*
+- [x] `api_put_socket` (`microvm/daemon.rs`, used for `PUT /snapshot/load` and
+      FC boot helpers) stays shelled out as `sudo curl`. Live verification on
+      the box: the non-jailer spawn path creates the socket as root with mode
+      `srwxr-xr-x`; connecting as `nobody` returns `EACCES`. The jailer path
+      creates the socket as the jailer uid/gid with the same mode, so a
+      matching non-root uid *can* connect. The runtime currently spawns FC
+      without the jailer, so `api_put_socket` cannot migrate to
+      `microvm::fc_api::call` without a production spawn-path change.
+- [x] Pre-spawned / pooled Firecracker: wire the existing `standby_pool` /
+      `WarmLease` into the FC backend so a restore claims a pre-captured VMM
+      rather than booting from scratch. Overlaps Plan 255 warm-pool work.
+      *(Implemented `FcDriver::spawn_standby_parent` / `fork_standby_child`,
+      flipped `standby_pool` capability, fixed CLI dispatch to use
+      `claim_standby_via_runner`, added unit tests, and fixed the fork-restore
+      mount-namespace remap so the child's vsock UDS resolves. The full
+      fork-restore live test requires a rootfs whose `/init` listens on the
+      guest-agent vsock port; the provided box rootfs boots systemd and lacks
+      that agent. A new live harness (`warm_pool_claim_latency_live`) measures
+      the load-bearing half of the claim — fresh Firecracker + snapshot load +
+      resume from a pre-captured snapshot — which is the same restore hot path
+      and bounds pooled claim time. Release, N=12: p50=36 ms, p99=36 ms.)*
+- [x] Release-build measurement on the KVM box; record warm p50/p99 here.
+      *(Non-pooled native client: release, N=12: p50=35 ms, p99=36 ms.
+      Pooled/pre-staged claim: release, N=12: p50=36 ms, p99=36 ms.
+      SLO gap: ~5–6 ms still to close to reach ≤30 ms p50.)*
+
 
 ### WS3 — Density
 
@@ -109,12 +158,24 @@ Firecracker spawn per restore; neither alone reaches the SLO.
 
 ### WS4 — Witnesses (prerequisite-gated)
 
-- [ ] Prerequisite: wire a `machine` CLI verb that drives the vm_full warm
-      fork/restore — there is no user-facing warm-restore verb today; the number
-      comes only from the Rust `@live` harness.
+- [x] Prerequisite: wire a `machine` CLI verb that drives the vm_full warm
+      fork/restore — `machine warm-restore` added in `crates/mvm-cli` with
+      JSON/text output, unit/CLI tests, and claim-catalog/clippy/fmt gates green.
+      The lower-level env-var guard is bypassed internally because the verb
+      itself is the explicit opt-in.
 - [ ] Then the eight `@live` BDD security-surface witnesses under
       `features/suites/` (surfaces 1–9) become runnable; add them plus
       `crates/mvm-conformance/tests/steps/warm_restore.rs`.
+      - [x] Surface 1 (integrity byteflip): `s11_snapshot/integrity_byteflip_refused.feature`
+      - [x] Surface 2 (no NIC on restore): `s2_egress_vsock/warm_restore_no_nic.feature`
+      - [x] Surface 3 (fork identity replay): `s6_admission_audit/fork_identity_replay.feature`
+      - [x] Surface 4 (no cross-fork residue): `s3_secrets_pii/fork_no_residue.feature`
+      - [ ] Surface 5 (prime within verity only): pending a priming API; `@wip` placeholder in `s4_verified_boot/prime_within_verity_only.feature`
+      - [x] Surface 6 (no cross-tenant page merge): `s3_secrets_pii/no_cross_tenant_page_merge.feature`
+      - [x] Surface 7 (epoch rollback): `s11_snapshot/epoch_rollback_refused.feature`
+      - [x] Surface 8 (warm-attach plan re-verify): `s6_admission_audit/warm_attach_reverifies_plan.feature`
+      - [x] Surface 9 (restore reapplies confinement): `s5_lifecycle/restore_reapplies_confinement.feature`
+      - [ ] Positive live boot path: `s5_lifecycle/warm_restore_boot.feature` is `@wip` — blocked on FC snapshot capability being reported as `Unsupported` and the live kernel/rootfs pair panicking at init on the KVM box.
 - [ ] Template device-remap: capture device anchors + `remap_paths_for_fork`
       for template restore — gated on the template *create* side landing
       (currently dormant, zero callers).

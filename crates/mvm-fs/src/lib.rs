@@ -26,6 +26,7 @@
 pub mod clone;
 pub mod ext4;
 pub mod hash;
+pub mod initramfs;
 pub mod oci;
 /// OCI layer unpack to a staging rootfs directory. Handles whiteouts,
 /// symlinks, hardlinks, ownership, permissions, path traversal, the

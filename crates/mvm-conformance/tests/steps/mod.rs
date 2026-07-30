@@ -7,4 +7,5 @@ mod readme_contract;
 mod snapshot;
 mod verified_boot;
 mod warm_claim;
+mod warm_restore;
 mod workload_identity;

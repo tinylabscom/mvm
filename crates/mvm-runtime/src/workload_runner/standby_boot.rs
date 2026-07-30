@@ -420,18 +420,24 @@ mod tests {
         );
         assert!(parent.blocks.iter().all(|b| b.read_only));
 
-        for token in [
+        assert!(
+            parent
+                .cmdline
+                .contains("mvm.runtime_source_policy=required_overlay"),
+            "parent cmdline missing runtime-source policy: {}",
+            parent.cmdline
+        );
+        for legacy in [
             "mvm.roothash=",
             "mvm.data=/dev/vda",
             "mvm.hash=/dev/vdb",
             "mvm.runtime_roothash=",
             "mvm.runtime_data=/dev/vdc",
             "mvm.runtime_hash=/dev/vdd",
-            "mvm.runtime_source_policy=required_overlay",
         ] {
             assert!(
-                parent.cmdline.contains(token),
-                "parent cmdline missing {token}: {}",
+                !parent.cmdline.contains(legacy),
+                "parent cmdline carries legacy token {legacy}: {}",
                 parent.cmdline
             );
         }

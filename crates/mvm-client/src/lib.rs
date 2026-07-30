@@ -32,5 +32,6 @@ pub use connect::{Target, connect};
 pub use local::LocalBackend;
 pub use readiness::{readiness_of, record_readiness, touch_activity};
 pub use registration::{
-    MachineRegistration, StaleRegistration, gc_stale_registrations, register_machine,
+    MachineRegistration, StaleRegistration, gc_stale_registrations, name_registry_path,
+    register_machine,
 };

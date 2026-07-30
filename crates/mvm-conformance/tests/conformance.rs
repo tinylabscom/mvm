@@ -32,7 +32,13 @@ use world::CliWorld;
 
 #[tokio::main]
 async fn main() {
-    CliWorld::filter_run(features_dir(), should_run).await;
+    // Warm-restore scenarios mutate the process `MVM_HOME` and call
+    // in-process seal/verify helpers. Run all scenarios sequentially so
+    // no other thread observes the environment mid-scenario.
+    CliWorld::cucumber()
+        .max_concurrent_scenarios(1)
+        .filter_run_and_exit(features_dir(), should_run)
+        .await;
 }
 
 /// Decide whether a scenario runs from its tags and the host's probed

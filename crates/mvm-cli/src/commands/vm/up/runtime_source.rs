@@ -2,7 +2,7 @@
 //! the verity-sealed guest-binary overlay every workload backend consumes,
 //! and the audit label describing which source strategy actually landed.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::commands::runtime_overlay::{
     RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
@@ -196,6 +196,111 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
         }
         Err(err) => Err(err),
     }
+}
+
+/// Local shell execution boundary for the initramfs build fallback.
+///
+/// On Linux this runs directly on the host (which *is* the builder VM
+/// boundary). On macOS this path is never reached because the nix-build
+/// fallback is `#[cfg(target_os = "linux")]`.
+struct HostShellEnvironment;
+
+impl mvm_core::build_env::ShellEnvironment for HostShellEnvironment {
+    fn shell_exec(&self, script: &str) -> Result<()> {
+        let output = std::process::Command::new("bash")
+            .args(["-c", script])
+            .output()
+            .context("failed to run shell command")?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "shell command failed (exit {}): {stderr}",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+    }
+
+    fn shell_exec_stdout(&self, script: &str) -> Result<String> {
+        let output = self.shell_exec_capture(script)?;
+        Ok(output.0.trim().to_string())
+    }
+
+    fn shell_exec_visible(&self, script: &str) -> Result<()> {
+        let status = std::process::Command::new("bash")
+            .args(["-c", script])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("failed to run shell command")?;
+        if status.success() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "shell command failed (exit {})",
+                status.code().unwrap_or(-1)
+            );
+        }
+    }
+
+    fn log_info(&self, msg: &str) {
+        tracing::info!("{msg}");
+    }
+
+    fn log_success(&self, msg: &str) {
+        tracing::info!("{msg}");
+    }
+
+    fn shell_exec_capture(&self, script: &str) -> Result<(String, String)> {
+        let output = std::process::Command::new("bash")
+            .args(["-c", script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .context("failed to run shell command")?;
+        if output.status.success() {
+            Ok((
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "shell command failed (exit {}): {stderr}",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+    }
+}
+
+/// Attach the universal initramfs when it is present in the
+/// cache. This is intentionally non-fatal: until the Nix-built initramfs is
+/// seeded on every supported host, workloads that have a rootfs continue to
+/// boot with their legacy `/init`. Once attached, `WorkloadRunner::start_workload`
+/// will send `ActivateEnvironment` over vsock after boot.
+pub(crate) fn attach_universal_initramfs_if_cached(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+    let arch = mvm_core::arch::GuestArch::host();
+    let env = HostShellEnvironment;
+    match mvm_build::initramfs::resolve_or_build_local_initramfs(&env, &cache_root, version, arch) {
+        Ok(artifact) => {
+            start_config.initrd_path = Some(artifact.image_path.display().to_string());
+            tracing::info!(
+                initramfs_version = version,
+                path = %artifact.image_path.display(),
+                "attached universal initramfs"
+            );
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "universal initramfs not attached");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -825,6 +930,61 @@ mod runtime_overlay_attach_tests {
         assert_eq!(
             resolve_runtime_source_status(&sc),
             RuntimeSourceStatus::RootfsOnlyByPolicy
+        );
+    }
+}
+
+#[cfg(test)]
+mod universal_initramfs_attach_tests {
+    use super::*;
+    use mvm_core::arch::GuestArch;
+    use mvm_core::util::test_env::TestEnv;
+    use mvm_core::vm_backend::VmStartConfig;
+
+    #[test]
+    fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", dir.path());
+
+        let mut sc = VmStartConfig::default();
+        // Must never return an error: a cold cache falls back to legacy boot
+        // (or is warmed automatically on hosts that can build/fetch it).
+        attach_universal_initramfs_if_cached(&mut sc).unwrap();
+    }
+
+    #[test]
+    fn attach_universal_initramfs_if_cached_attaches_from_cache() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", dir.path());
+
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("initramfs.cpio.gz"), b"image").unwrap();
+        std::fs::write(source.join("initramfs.hash"), b"hash").unwrap();
+        std::fs::write(source.join("initramfs.size"), "5").unwrap();
+        std::fs::write(source.join("VERSION"), version).unwrap();
+
+        let cache_root = dir.path().join("cache").join("initramfs");
+        mvm_build::initramfs::install_initramfs_into_cache(&source, &cache_root, version, arch)
+            .unwrap();
+
+        let mut sc = VmStartConfig::default();
+        attach_universal_initramfs_if_cached(&mut sc).unwrap();
+
+        assert!(
+            sc.initrd_path.is_some(),
+            "initramfs path should be attached from a warm cache"
+        );
+        assert!(
+            sc.initrd_path
+                .as_deref()
+                .unwrap()
+                .contains("initramfs.cpio.gz"),
+            "attached path should point at the cpio.gz image"
         );
     }
 }

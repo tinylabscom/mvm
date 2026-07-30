@@ -116,6 +116,8 @@ pub(crate) fn workload_cmdline(
         && !verity_is_enabled
         && config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
     {
+        // No security tokens, no runtime policy, and no initramfs boot: let the
+        // driver fall back to its own default base cmdline.
         return None;
     }
     let mut cmdline = if verity_is_enabled {
@@ -127,17 +129,10 @@ pub(crate) fn workload_cmdline(
     } else {
         base_bootargs(virtiofs_root, has_disk)
     };
-    if let Some(verity_args) = crate::microvm::build_verity_cmdline_args(
-        config.roothash.as_deref(),
-        if verity_is_enabled {
-            runtime_overlay(config).map(|(_, _, roothash)| roothash)
-        } else {
-            None
-        },
-    ) {
-        cmdline.push(' ');
-        cmdline.push_str(&verity_args);
-    }
+    // Legacy per-rootfs initramfs boot: removed. The universal initramfs passes the rootfs
+    // and runtime-overlay roothashes/device paths via vsock `ActivateEnvironment`
+    // after boot, so the kernel cmdline no longer carries `mvm.roothash`,
+    // `mvm.data`, `mvm.hash`, or the runtime overlay equivalents.
     // Non-verity boots carry the runtime overlay as a plain read-only
     // `/dev/vdb` (attached by the backend's disk layout); emit the token its
     // `/init` mounts from. Verity boots already emitted the dm-verity variant
@@ -258,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn workload_cmdline_uses_verity_shape_and_runtime_overlay_tokens() {
+    fn workload_cmdline_for_verity_boot_emits_console_and_policy_only() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
         let verity = dir.path().join("rootfs.verity");
@@ -279,14 +274,16 @@ mod tests {
         };
         let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
             .expect("cmdline");
+        // The initramfs PID-1 receives roothashes and device paths
+        // over vsock, so the kernel cmdline must not carry them.
         assert!(!cmdline.contains("root=/dev/vda"));
         assert!(!cmdline.contains("init=/init"));
-        assert!(cmdline.contains("mvm.roothash="));
-        assert!(cmdline.contains("mvm.data=/dev/vda"));
-        assert!(cmdline.contains("mvm.hash=/dev/vdb"));
-        assert!(cmdline.contains("mvm.runtime_roothash="));
-        assert!(cmdline.contains("mvm.runtime_data=/dev/vdc"));
-        assert!(cmdline.contains("mvm.runtime_hash=/dev/vdd"));
+        assert!(!cmdline.contains("mvm.roothash="));
+        assert!(!cmdline.contains("mvm.data=/dev/vda"));
+        assert!(!cmdline.contains("mvm.hash=/dev/vdb"));
+        assert!(!cmdline.contains("mvm.runtime_roothash="));
+        assert!(!cmdline.contains("mvm.runtime_data=/dev/vdc"));
+        assert!(!cmdline.contains("mvm.runtime_hash=/dev/vdd"));
         assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
     }
 
@@ -350,7 +347,12 @@ mod tests {
 
     #[test]
     fn runner_cmdline_appends_uvols_to_a_non_trivial_base() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
         let config = VmStartConfig {
             network_policy: mvm_core::network_policy::NetworkPolicy::preset(
                 mvm_core::network_policy::NetworkPreset::Dev,
@@ -363,7 +365,10 @@ mod tests {
         let base = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
             .expect("non-trivial base");
         let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
-        assert!(cmdline.starts_with(&base));
+        assert!(
+            cmdline.starts_with(&base),
+            "base: {base}\ncmdline: {cmdline}"
+        );
         assert!(
             cmdline.contains("mvm.uvols=uvol0:"),
             "cmdline missing uvols token: {cmdline}"

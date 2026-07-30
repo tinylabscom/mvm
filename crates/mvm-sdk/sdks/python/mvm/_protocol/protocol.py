@@ -332,11 +332,11 @@ class ProtocolHello:
 
 
 @dataclass
-class GuestRequest1:
+class GuestRequest2:
     ProtocolHello: ProtocolHello
 
 
-class GuestRequest2(Enum):
+class GuestRequest3(Enum):
     WorkerStatus = 'WorkerStatus'
 
 
@@ -346,23 +346,23 @@ class SleepPrep:
 
 
 @dataclass
-class GuestRequest3:
+class GuestRequest4:
     SleepPrep: SleepPrep
 
 
-class GuestRequest4(Enum):
+class GuestRequest5(Enum):
     Wake = 'Wake'
 
 
-class GuestRequest5(Enum):
+class GuestRequest6(Enum):
     Ping = 'Ping'
 
 
-class GuestRequest6(Enum):
+class GuestRequest7(Enum):
     ResourceUsage = 'ResourceUsage'
 
 
-class GuestRequest7(Enum):
+class GuestRequest8(Enum):
     IntegrationStatus = 'IntegrationStatus'
 
 
@@ -372,15 +372,15 @@ class CheckpointIntegrations:
 
 
 @dataclass
-class GuestRequest8:
+class GuestRequest9:
     CheckpointIntegrations: CheckpointIntegrations
 
 
-class GuestRequest9(Enum):
+class GuestRequest10(Enum):
     ProbeStatus = 'ProbeStatus'
 
 
-class GuestRequest10(Enum):
+class GuestRequest11(Enum):
     PrimedStatus = 'PrimedStatus'
 
 
@@ -392,7 +392,7 @@ class Exec:
 
 
 @dataclass
-class GuestRequest11:
+class GuestRequest12:
     Exec: Exec
 
 
@@ -404,7 +404,7 @@ class RunEntrypoint:
 
 
 @dataclass
-class GuestRequest13:
+class GuestRequest14:
     RunEntrypoint: RunEntrypoint
 
 
@@ -415,14 +415,14 @@ class RunDetached:
 
 
 @dataclass
-class GuestRequest14:
+class GuestRequest15:
     RunDetached: RunDetached
 
 
 TokenItem = int
 
 
-class GuestRequest16(Enum):
+class GuestRequest17(Enum):
     FsDiff = 'FsDiff'
 
 
@@ -432,7 +432,7 @@ class StartPortForward:
 
 
 @dataclass
-class GuestRequest17:
+class GuestRequest18:
     StartPortForward: StartPortForward
 
 
@@ -444,7 +444,7 @@ class StartUnixSocketForward:
 
 
 @dataclass
-class GuestRequest18:
+class GuestRequest19:
     StartUnixSocketForward: StartUnixSocketForward
 
 
@@ -457,7 +457,7 @@ class ConsoleOpen:
 
 
 @dataclass
-class GuestRequest19:
+class GuestRequest20:
     ConsoleOpen: ConsoleOpen
 
 
@@ -467,7 +467,7 @@ class ConsoleClose:
 
 
 @dataclass
-class GuestRequest20:
+class GuestRequest21:
     ConsoleClose: ConsoleClose
 
 
@@ -479,15 +479,15 @@ class ConsoleResize:
 
 
 @dataclass
-class GuestRequest21:
+class GuestRequest22:
     ConsoleResize: ConsoleResize
 
 
-class GuestRequest22(Enum):
+class GuestRequest23(Enum):
     EntrypointStatus = 'EntrypointStatus'
 
 
-class GuestRequest23(Enum):
+class GuestRequest24(Enum):
     ReadinessStatus = 'ReadinessStatus'
 
 
@@ -500,7 +500,7 @@ class FsRead:
 
 
 @dataclass
-class GuestRequest24:
+class GuestRequest25:
     FsRead: FsRead
 
 
@@ -516,7 +516,7 @@ class FsWrite:
 
 
 @dataclass
-class GuestRequest25:
+class GuestRequest26:
     FsWrite: FsWrite
 
 
@@ -527,7 +527,7 @@ class FsList:
 
 
 @dataclass
-class GuestRequest26:
+class GuestRequest27:
     FsList: FsList
 
 
@@ -538,7 +538,7 @@ class FsStat1:
 
 
 @dataclass
-class GuestRequest27:
+class GuestRequest28:
     FsStat: FsStat1
 
 
@@ -550,7 +550,7 @@ class FsMkdir:
 
 
 @dataclass
-class GuestRequest28:
+class GuestRequest29:
     FsMkdir: FsMkdir
 
 
@@ -562,7 +562,7 @@ class FsRemove:
 
 
 @dataclass
-class GuestRequest29:
+class GuestRequest30:
     FsRemove: FsRemove
 
 
@@ -574,7 +574,7 @@ class FsMove:
 
 
 @dataclass
-class GuestRequest30:
+class GuestRequest31:
     FsMove: FsMove
 
 
@@ -588,11 +588,11 @@ class ProcStart:
 
 
 @dataclass
-class GuestRequest31:
+class GuestRequest32:
     ProcStart: ProcStart
 
 
-class GuestRequest32(Enum):
+class GuestRequest33(Enum):
     ProcList = 'ProcList'
 
 
@@ -603,7 +603,7 @@ class ProcSignal:
 
 
 @dataclass
-class GuestRequest33:
+class GuestRequest34:
     ProcSignal: ProcSignal
 
 
@@ -614,7 +614,7 @@ class ProcSendInput:
 
 
 @dataclass
-class GuestRequest34:
+class GuestRequest35:
     ProcSendInput: ProcSendInput
 
 
@@ -625,7 +625,7 @@ class ProcWait:
 
 
 @dataclass
-class GuestRequest35:
+class GuestRequest36:
     ProcWait: ProcWait
 
 
@@ -635,7 +635,7 @@ class ProcKill:
 
 
 @dataclass
-class GuestRequest36:
+class GuestRequest37:
     ProcKill: ProcKill
 
 
@@ -647,7 +647,7 @@ class MountVolume:
 
 
 @dataclass
-class GuestRequest37:
+class GuestRequest38:
     MountVolume: MountVolume
 
 
@@ -658,7 +658,7 @@ class UnmountVolume:
 
 
 @dataclass
-class GuestRequest38:
+class GuestRequest39:
     UnmountVolume: UnmountVolume
 
 
@@ -668,7 +668,7 @@ class UpdateIdleTimeout:
 
 
 @dataclass
-class GuestRequest39:
+class GuestRequest40:
     UpdateIdleTimeout: UpdateIdleTimeout
 
 
@@ -679,7 +679,7 @@ class RunCode:
 
 
 @dataclass
-class GuestRequest40:
+class GuestRequest41:
     RunCode: RunCode
 
 
@@ -696,6 +696,24 @@ class GuestResponse1:
     ProtocolHelloAck: ProtocolHelloAck
 
 
+class GuestResponse3(Enum):
+    ActivateEnvironmentAck = 'ActivateEnvironmentAck'
+
+
+@dataclass
+class ActivateEnvironmentError:
+    message: str
+
+
+@dataclass
+class GuestResponse4:
+    ActivateEnvironmentError: ActivateEnvironmentError
+
+
+class GuestResponse5(Enum):
+    NotActivated = 'NotActivated'
+
+
 @dataclass
 class WorkerStatus:
     status: str
@@ -703,7 +721,7 @@ class WorkerStatus:
 
 
 @dataclass
-class GuestResponse3:
+class GuestResponse6:
     WorkerStatus: WorkerStatus
 
 
@@ -714,7 +732,7 @@ class SleepPrepAck:
 
 
 @dataclass
-class GuestResponse4:
+class GuestResponse7:
     SleepPrepAck: SleepPrepAck
 
 
@@ -724,11 +742,11 @@ class WakeAck:
 
 
 @dataclass
-class GuestResponse5:
+class GuestResponse8:
     WakeAck: WakeAck
 
 
-class GuestResponse6(Enum):
+class GuestResponse9(Enum):
     Pong = 'Pong'
 
 
@@ -738,7 +756,7 @@ class ResourceUsageReport:
 
 
 @dataclass
-class GuestResponse7:
+class GuestResponse10:
     ResourceUsageReport: ResourceUsageReport
 
 
@@ -748,7 +766,7 @@ class Error2:
 
 
 @dataclass
-class GuestResponse8:
+class GuestResponse11:
     Error: Error2
 
 
@@ -759,7 +777,7 @@ class UnsupportedInProfile:
 
 
 @dataclass
-class GuestResponse9:
+class GuestResponse12:
     UnsupportedInProfile: UnsupportedInProfile
 
 
@@ -769,7 +787,7 @@ class VerbNotAuthorized:
 
 
 @dataclass
-class GuestResponse10:
+class GuestResponse13:
     VerbNotAuthorized: VerbNotAuthorized
 
 
@@ -781,7 +799,7 @@ class CheckpointResult:
 
 
 @dataclass
-class GuestResponse12:
+class GuestResponse15:
     CheckpointResult: CheckpointResult
 
 
@@ -791,12 +809,12 @@ class PrimedStatusReport:
 
 
 @dataclass
-class GuestResponse14:
+class GuestResponse17:
     PrimedStatusReport: PrimedStatusReport
 
 
 @dataclass
-class GuestResponse16:
+class GuestResponse19:
     ExecEvent: ExecEvent
 
 
@@ -806,7 +824,7 @@ class ExecBatchResult:
 
 
 @dataclass
-class GuestResponse17:
+class GuestResponse20:
     ExecBatchResult: ExecBatchResult
 
 
@@ -816,7 +834,7 @@ class DetachedStarted:
 
 
 @dataclass
-class GuestResponse18:
+class GuestResponse21:
     DetachedStarted: DetachedStarted
 
 
@@ -829,7 +847,7 @@ class PostRestoreAck:
 
 
 @dataclass
-class GuestResponse19:
+class GuestResponse22:
     PostRestoreAck: PostRestoreAck
 
 
@@ -840,7 +858,7 @@ class PortForwardStarted:
 
 
 @dataclass
-class GuestResponse21:
+class GuestResponse24:
     PortForwardStarted: PortForwardStarted
 
 
@@ -851,7 +869,7 @@ class UnixSocketForwardStarted:
 
 
 @dataclass
-class GuestResponse22:
+class GuestResponse25:
     UnixSocketForwardStarted: UnixSocketForwardStarted
 
 
@@ -862,7 +880,7 @@ class ConsoleOpened:
 
 
 @dataclass
-class GuestResponse23:
+class GuestResponse26:
     ConsoleOpened: ConsoleOpened
 
 
@@ -873,7 +891,7 @@ class ConsoleExited:
 
 
 @dataclass
-class GuestResponse24:
+class GuestResponse27:
     ConsoleExited: ConsoleExited
 
 
@@ -883,7 +901,7 @@ class ConsoleResized:
 
 
 @dataclass
-class GuestResponse25:
+class GuestResponse28:
     ConsoleResized: ConsoleResized
 
 
@@ -895,7 +913,7 @@ class EntrypointStatusReport:
 
 
 @dataclass
-class GuestResponse26:
+class GuestResponse29:
     EntrypointStatusReport: EntrypointStatusReport
 
 
@@ -906,7 +924,7 @@ class UpdateIdleTimeoutAck:
 
 
 @dataclass
-class GuestResponse32:
+class GuestResponse35:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
 
 
@@ -1142,6 +1160,14 @@ class ReadinessReport:
     warm_pool: ComponentState
 
 
+@dataclass
+class RootfsConfig:
+    data_dev: str
+    hash_dev: Optional[str] = None
+    roothash: Optional[str] = None
+    virtiofs_tag: Optional[str] = None
+
+
 class RunEntrypointError1(Enum):
     PayloadCap = 'PayloadCap'
 
@@ -1187,6 +1213,13 @@ RunEntrypointError = Union[
 
 
 @dataclass
+class RuntimeOverlayConfig:
+    data_dev: str
+    hash_dev: str
+    roothash: str
+
+
+@dataclass
 class StageFile:
     content: List[int]
     mode: int
@@ -1194,6 +1227,13 @@ class StageFile:
 
 
 VerbId = str
+
+
+@dataclass
+class VolumeConfig:
+    mountpoint: str
+    tag: str
+    read_only: Optional[bool] = False
 
 
 class VolumeMountErrorKind1(Enum):
@@ -1333,7 +1373,7 @@ class ExecBatch:
 
 
 @dataclass
-class GuestRequest12:
+class GuestRequest13:
     ExecBatch: ExecBatch
 
 
@@ -1356,12 +1396,12 @@ class ProbeStatusReport:
 
 
 @dataclass
-class GuestResponse13:
+class GuestResponse16:
     ProbeStatusReport: ProbeStatusReport
 
 
 @dataclass
-class GuestResponse15:
+class GuestResponse18:
     EntrypointEvent: EntrypointEvent
 
 
@@ -1371,27 +1411,27 @@ class FsDiffResult:
 
 
 @dataclass
-class GuestResponse20:
+class GuestResponse23:
     FsDiffResult: FsDiffResult
 
 
 @dataclass
-class GuestResponse27:
+class GuestResponse30:
     ReadinessStatusReport: ReadinessReport
 
 
 @dataclass
-class GuestResponse28:
+class GuestResponse31:
     FsResult: FsResult
 
 
 @dataclass
-class GuestResponse30:
+class GuestResponse33:
     ProcWaitEvent: ProcWaitEvent
 
 
 @dataclass
-class GuestResponse31:
+class GuestResponse34:
     VolumeMountResult: VolumeMountResult
 
 
@@ -1446,6 +1486,19 @@ class VerbGrantEnvelope:
 
 
 @dataclass
+class ActivateEnvironment:
+    rootfs: RootfsConfig
+    runtime: Optional[RuntimeOverlayConfig] = None
+    verb_grant_envelope: Optional[VerbGrantEnvelope] = None
+    volumes: Optional[List[VolumeConfig]] = field(default_factory=lambda: [])
+
+
+@dataclass
+class GuestRequest1:
+    ActivateEnvironment: ActivateEnvironment
+
+
+@dataclass
 class PostRestore:
     grant_envelope: Optional[VerbGrantEnvelope] = None
     host_epoch_secs: Optional[int] = None
@@ -1455,7 +1508,7 @@ class PostRestore:
 
 
 @dataclass
-class GuestRequest15:
+class GuestRequest16:
     PostRestore: PostRestore
 
 
@@ -1500,6 +1553,7 @@ GuestRequest = Union[
     GuestRequest38,
     GuestRequest39,
     GuestRequest40,
+    GuestRequest41,
 ]
 
 
@@ -1509,12 +1563,12 @@ class IntegrationStatusReport:
 
 
 @dataclass
-class GuestResponse11:
+class GuestResponse14:
     IntegrationStatusReport: IntegrationStatusReport
 
 
 @dataclass
-class GuestResponse29:
+class GuestResponse32:
     ProcResult: ProcResult
 
 
@@ -1551,6 +1605,9 @@ GuestResponse = Union[
     GuestResponse30,
     GuestResponse31,
     GuestResponse32,
+    GuestResponse33,
+    GuestResponse34,
+    GuestResponse35,
 ]
 
 
