@@ -127,6 +127,32 @@
       memory (775 MB) instead of streaming, and compared whole manifest
       strings, so a reordered manifest read as tampering.
 
+- [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
+      (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
+      contract and the other four asserted size only, so nothing was protected
+      against a same-size field reorder. Deriving the values from the headers
+      rather than the Rust structs found that all seven hand-declared
+      `sockaddr_vm` copies mirror the pre-Linux-6.0 layout (`svm_flags` landed
+      at offset 12 in 6.0, shrinking `svm_zero`; the total stayed 16, which is
+      why a size-only assertion could never have caught it). Also answered the
+      question the contracts raised: device-mapper layout drift **fails
+      closed** — `DM_TABLE_LOAD` returns `EINVAL` for a displaced
+      `target_type`, measured against Linux 6.8 — so MVM-SEC-03 was never at
+      risk. **WS2 shipped (#1943):** `just test-ci` named a nextest `ci`
+      profile that did not exist and had therefore never run. Adding it, with
+      no captured test output in the uploaded JUnit, surfaced that the
+      `update_check_does_not_emit_audit_entry` flake deferred above was not a
+      concurrency flake at all but a macOS-only fixture bug — an accepted
+      socket inherits `O_NONBLOCK` there but not on Linux, so the fixture read
+      an empty request and answered 404. Fixed; that deferral is closed.
+      **WS3 re-scoped:** `check-mutation-witnesses` (#1934) shipped the
+      mutation-testing idea mid-flight and does it better than this plan's
+      WS4, which is struck. WS3 is now the three claims whose only witness is
+      a CI lane (MVM-SEC-04/05/07), which mutation testing structurally cannot
+      reach, plus triaging #1934's first full run — blocked on #1946, since
+      `--run` currently executes mutated security code against the real
+      `~/.mvm`.
+
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
       #1888 (ARM64 `Image` kernels reach Firecracker), #1891 (guest reads the
