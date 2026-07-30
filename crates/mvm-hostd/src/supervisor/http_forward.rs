@@ -65,32 +65,41 @@ where
     let head = match read_http_head(&mut guest).await {
         Ok(head) => head,
         Err(error) => {
-            write_proxy_error_async(&mut guest, ProxyStatus::BadRequest).await?;
+            write_proxy_error_async(&mut guest, ProxyStatus::BadRequest, None).await?;
             return Err(error);
         }
     };
     let request = match parse_forward_request(&head) {
         Ok(request) => request,
         Err(status) => {
-            write_proxy_error_async(&mut guest, status).await?;
+            write_proxy_error_async(&mut guest, status, None).await?;
             return Ok(());
         }
     };
     let (ips, port) = match gate.decide_request(&request.target) {
         EgressVerdict::Allow { ips, port } => (ips, port),
-        EgressVerdict::Deny => {
-            write_proxy_error_async(&mut guest, ProxyStatus::Forbidden).await?;
+        EgressVerdict::Deny(reason) => {
+            // Also host-side: the body reaches anything that reads it, but a
+            // plain `wget` prints only the status line, so the operator would
+            // still be left with three digits.
+            tracing::warn!(target_dest = %request.target, %reason, "egress refused");
+            write_proxy_error_async(
+                &mut guest,
+                ProxyStatus::Forbidden,
+                Some(&reason.to_string()),
+            )
+            .await?;
             return Ok(());
         }
         EgressVerdict::Malformed => {
-            write_proxy_error_async(&mut guest, ProxyStatus::BadRequest).await?;
+            write_proxy_error_async(&mut guest, ProxyStatus::BadRequest, None).await?;
             return Ok(());
         }
     };
     let body = match read_request_body_async(&mut guest, request.content_length).await {
         Ok(body) => body,
         Err(error) => {
-            write_proxy_error_async(&mut guest, ProxyStatus::BadRequest).await?;
+            write_proxy_error_async(&mut guest, ProxyStatus::BadRequest, None).await?;
             return Err(error);
         }
     };
@@ -98,7 +107,7 @@ where
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(error = %error, target = %request.target, "host HTTP forward request failed");
-            write_proxy_error_async(&mut guest, ProxyStatus::BadGateway).await?;
+            write_proxy_error_async(&mut guest, ProxyStatus::BadGateway, None).await?;
             return Ok(());
         }
     };
@@ -118,32 +127,37 @@ where
     let head = match read_http_head_blocking(&mut guest) {
         Ok(head) => head,
         Err(error) => {
-            write_proxy_error_blocking(&mut guest, ProxyStatus::BadRequest)?;
+            write_proxy_error_blocking(&mut guest, ProxyStatus::BadRequest, None)?;
             return Err(error);
         }
     };
     let request = match parse_forward_request(&head) {
         Ok(request) => request,
         Err(status) => {
-            write_proxy_error_blocking(&mut guest, status)?;
+            write_proxy_error_blocking(&mut guest, status, None)?;
             return Ok(());
         }
     };
     let (ips, port) = match gate.decide_request(&request.target) {
         EgressVerdict::Allow { ips, port } => (ips, port),
-        EgressVerdict::Deny => {
-            write_proxy_error_blocking(&mut guest, ProxyStatus::Forbidden)?;
+        EgressVerdict::Deny(reason) => {
+            tracing::warn!(target_dest = %request.target, %reason, "egress refused");
+            write_proxy_error_blocking(
+                &mut guest,
+                ProxyStatus::Forbidden,
+                Some(&reason.to_string()),
+            )?;
             return Ok(());
         }
         EgressVerdict::Malformed => {
-            write_proxy_error_blocking(&mut guest, ProxyStatus::BadRequest)?;
+            write_proxy_error_blocking(&mut guest, ProxyStatus::BadRequest, None)?;
             return Ok(());
         }
     };
     let body = match read_request_body_blocking(&mut guest, request.content_length) {
         Ok(body) => body,
         Err(error) => {
-            write_proxy_error_blocking(&mut guest, ProxyStatus::BadRequest)?;
+            write_proxy_error_blocking(&mut guest, ProxyStatus::BadRequest, None)?;
             return Err(error);
         }
     };
@@ -151,7 +165,7 @@ where
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(error = %error, target = %request.target, "host HTTP forward request failed");
-            write_proxy_error_blocking(&mut guest, ProxyStatus::BadGateway)?;
+            write_proxy_error_blocking(&mut guest, ProxyStatus::BadGateway, None)?;
             return Ok(());
         }
     };
@@ -534,34 +548,46 @@ where
     guest.write_all(b"\r\n")
 }
 
-async fn write_proxy_error_async<W>(guest: &mut W, status: ProxyStatus) -> std::io::Result<()>
+/// A proxy-generated error response. `detail` is the guest-facing explanation —
+/// for a policy refusal it is the [`EgressVerdict::Deny`] reason, which the guest
+/// has no other way to learn: it sees a status code from a proxy it did not
+/// configure, against a policy it cannot read. Without it a port mismatch and a
+/// broken network are the same three digits.
+async fn write_proxy_error_async<W>(
+    guest: &mut W,
+    status: ProxyStatus,
+    detail: Option<&str>,
+) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    guest
-        .write_all(
-            format!(
-                "HTTP/1.1 {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                status.line()
-            )
-            .as_bytes(),
-        )
-        .await?;
+    guest.write_all(&proxy_error_bytes(status, detail)).await?;
     guest.flush().await
 }
 
+/// The response bytes for [`write_proxy_error_async`] and its blocking sibling,
+/// so the two paths cannot drift.
+fn proxy_error_bytes(status: ProxyStatus, detail: Option<&str>) -> Vec<u8> {
+    let body = detail.map(|d| format!("{d}\n")).unwrap_or_default();
+    format!(
+        "HTTP/1.1 {}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\
+         Connection: close\r\n\r\n{body}",
+        status.line(),
+        body.len()
+    )
+    .into_bytes()
+}
+
 #[cfg(target_os = "linux")]
-fn write_proxy_error_blocking<W>(guest: &mut W, status: ProxyStatus) -> std::io::Result<()>
+fn write_proxy_error_blocking<W>(
+    guest: &mut W,
+    status: ProxyStatus,
+    detail: Option<&str>,
+) -> std::io::Result<()>
 where
     W: Write,
 {
-    guest.write_all(
-        format!(
-            "HTTP/1.1 {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            status.line()
-        )
-        .as_bytes(),
-    )?;
+    guest.write_all(&proxy_error_bytes(status, detail))?;
     guest.flush()
 }
 
@@ -727,6 +753,58 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("Transfer-Encoding: chunked\r\n"));
         assert!(response.ends_with("Connection: close\r\n\r\n"));
+        task.await.unwrap();
+    }
+
+    /// The refusal a caller actually meets: a bare `--allow-host example.com`
+    /// admits `example.com:443`, so an `http://` URL asks for port 80 and is
+    /// correctly denied. The guest cannot read the policy, so unless the 403
+    /// carries the reason the answer is indistinguishable from a broken network
+    /// — which is exactly how it reads today.
+    #[tokio::test]
+    async fn port_mismatch_403_tells_the_guest_which_port_is_admitted() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec!["93.184.216.34".parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort {
+            host: "example.com".into(),
+            port: 443,
+        }]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        let (mut client, server) = tokio::io::duplex(1024);
+        let task = tokio::spawn(async move {
+            serve_http_forward(server, &gate, Duration::from_secs(1))
+                .await
+                .unwrap();
+        });
+        client
+            .write_all(b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        client.read_to_end(&mut buf).await.unwrap();
+        let response = std::str::from_utf8(&buf).unwrap();
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "{response:?}"
+        );
+        assert!(
+            response.contains("example.com:80 is not admitted"),
+            "403 must name the refused destination: {response:?}"
+        );
+        assert!(
+            response.contains("example.com:443"),
+            "403 must name the admitted destination: {response:?}"
+        );
         task.await.unwrap();
     }
 

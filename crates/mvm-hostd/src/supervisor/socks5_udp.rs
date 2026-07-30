@@ -46,7 +46,16 @@ async fn relay_async(
         raw_egress::resolve_hostname_ips_pure(host, timeout)
     }) {
         EgressVerdict::Allow { ips, port } => (ips, port),
-        EgressVerdict::Deny | EgressVerdict::Malformed => return Ok(None),
+        // A refused datagram is answered with silence (SOCKS UDP has no error
+        // reply), so the reason is logged host-side rather than dropped.
+        EgressVerdict::Deny(reason) => {
+            tracing::debug!(%target, %reason, "socks5-udp: refusing datagram");
+            return Ok(None);
+        }
+        EgressVerdict::Malformed => {
+            tracing::debug!(%target, "socks5-udp: refusing malformed datagram target");
+            return Ok(None);
+        }
     };
 
     let mut sent = false;
@@ -154,7 +163,14 @@ fn relay_blocking(
         raw_egress::resolve_hostname_ips_pure(host, timeout)
     }) {
         EgressVerdict::Allow { ips, port } => (ips, port),
-        EgressVerdict::Deny | EgressVerdict::Malformed => return Ok(None),
+        EgressVerdict::Deny(reason) => {
+            tracing::debug!(%target, %reason, "socks5-udp: refusing datagram");
+            return Ok(None);
+        }
+        EgressVerdict::Malformed => {
+            tracing::debug!(%target, "socks5-udp: refusing malformed datagram target");
+            return Ok(None);
+        }
     };
     let mut selected = None;
     for ip in &ips {
