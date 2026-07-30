@@ -13,6 +13,7 @@ pub(in crate::commands) mod explain;
 pub(super) mod forward;
 pub(super) mod fs;
 pub(super) mod group;
+mod host_services;
 pub(super) mod host_signer;
 pub(super) mod invoke;
 pub(super) mod logs;

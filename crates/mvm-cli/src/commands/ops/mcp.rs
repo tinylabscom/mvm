@@ -435,6 +435,7 @@ impl ExecDispatcher {
             // MCP has no `--hypervisor` CLI flag; auto-detect (or the
             // MVM_HYPERVISOR/MVM_BACKEND env override) applies as before.
             hypervisor: None,
+            sdk_sidecar: None,
         };
         // Admit the run (see `mcp_untrusted_admit`): without it no bridge spawns
         // and the deny-all above is inert on the libkrun/HVF backends.

@@ -392,14 +392,9 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
-    // The signed plan carries the host-service bindings, and — when one of them
-    // is SDK-served — the grant admitting the sidecar attachment the launch
-    // config will carry. Resolving once here keeps the two in lockstep; the
-    // shared admission gate refuses the boot if they ever diverge.
-    let admit_host_services = parse_host_service_bindings(&args.host_service)?;
-    let admit_sdk_sidecar_grant =
-        crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(&admit_host_services)?
-            .map(|a| a.grant);
+    let (admit_host_services, admit_sidecar) =
+        super::host_services::resolve_bindings_and_sidecar(&args.host_service)?;
+    let admit_sdk_sidecar_grant = admit_sidecar.map(|a| a.grant);
     let admit_pty = args.pty;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
@@ -704,25 +699,6 @@ fn run_run_args(
     Ok(())
 }
 
-/// Validate `--host-service` values into plan-bound service ids.
-///
-/// Every value must be a well-formed `<name>.v<n>` service id. Refusing a
-/// malformed id here — rather than at broker dispatch — keeps the signed plan
-/// from carrying a binding no handler could ever satisfy.
-pub(crate) fn parse_host_service_bindings(
-    raw: &[String],
-) -> Result<Vec<mvm_protocol::protocol::broker::ServiceId>> {
-    let mut out = Vec::with_capacity(raw.len());
-    for value in raw {
-        let id = mvm_protocol::protocol::broker::ServiceId::parse(value.trim())
-            .map_err(|e| anyhow::anyhow!("invalid --host-service '{value}': {e}"))?;
-        if !out.contains(&id) {
-            out.push(id);
-        }
-    }
-    Ok(out)
-}
-
 fn build_exec_request(
     args: Args,
     command_name: &str,
@@ -908,12 +884,7 @@ fn build_exec_request(
             },
         }
     };
-    // Host-service bindings decide whether the optional glibc SDK sidecar has
-    // to ride along. Resolved (and verified) here, before admission, so the
-    // signed plan's grant and the launch config's volume name the same bytes.
-    let host_services = parse_host_service_bindings(&args.host_service)?;
-    let sdk_sidecar =
-        crate::commands::vm::up::resolve_sdk_sidecar_attachment_for_host(&host_services)?;
+    let (_, sdk_sidecar) = super::host_services::resolve_bindings_and_sidecar(&args.host_service)?;
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,
         image,
@@ -1624,61 +1595,7 @@ fn test_run_security_summary_from_parts(
 }
 
 #[cfg(test)]
-mod host_service_binding_tests {
-    use super::*;
-
-    #[test]
-    fn no_flag_binds_no_services() {
-        assert!(parse_host_service_bindings(&[]).unwrap().is_empty());
-    }
-
-    #[test]
-    fn well_formed_ids_are_bound_in_order() {
-        let bound =
-            parse_host_service_bindings(&["host.audit.v1".into(), "host.time.v1".into()]).unwrap();
-        assert_eq!(
-            bound.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            ["host.audit.v1", "host.time.v1"]
-        );
-    }
-
-    #[test]
-    fn duplicates_collapse_so_the_plan_carries_each_binding_once() {
-        let bound =
-            parse_host_service_bindings(&["host.audit.v1".into(), "host.audit.v1".into()]).unwrap();
-        assert_eq!(bound.len(), 1);
-    }
-
-    #[test]
-    fn surrounding_whitespace_is_tolerated() {
-        let bound = parse_host_service_bindings(&["  host.cost.v1 ".into()]).unwrap();
-        assert_eq!(bound[0].as_str(), "host.cost.v1");
-    }
-
-    #[test]
-    fn a_malformed_id_is_refused_before_it_reaches_the_plan() {
-        for bad in [
-            "",
-            "host.audit",
-            "host..v1",
-            "HOST.AUDIT.V1",
-            "host.audit.vX",
-        ] {
-            assert!(
-                parse_host_service_bindings(&[bad.to_string()]).is_err(),
-                "{bad:?} must be refused"
-            );
-        }
-    }
-
-    #[test]
-    fn only_sdk_served_bindings_ask_for_the_sidecar() {
-        let sdk = parse_host_service_bindings(&["host.secrets.v1".into()]).unwrap();
-        assert!(mvm_core::plan::sdk_sidecar_required_for(&sdk));
-        let other = parse_host_service_bindings(&["broker.v1".into()]).unwrap();
-        assert!(!mvm_core::plan::sdk_sidecar_required_for(&other));
-    }
-
+mod host_service_flag_tests {
     #[test]
     fn machine_run_forwards_the_flag_into_the_transient_run_args() {
         use clap::Parser as _;
