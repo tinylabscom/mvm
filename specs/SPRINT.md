@@ -127,6 +127,35 @@
       memory (775 MB) instead of streaming, and compared whole manifest
       strings, so a reordered manifest read as tampering.
 
+- [ ] Witness rigor (`specs/plans/272-witness-rigor.md`), four workstreams
+      landing as separate PRs in order. **WS1:** thirteen of seventeen
+      `#[repr(C)]` types carry no compile-time layout contract and the other
+      four assert size only, so no type in the tree is protected against a
+      same-size field reordering. Three sit on enforcement paths —
+      `CapHeader`/`CapData` on `capset(2)` (MVM-SEC-02, drift can *widen*
+      privileges), `DmIoctl`/`DmTargetSpec` on the device-mapper table load
+      (MVM-SEC-03, which has no code-level witness at all today), and
+      `MvmHsvcBuf` on the broker C ABI every language SDK dlopens. Add
+      size + alignment + offset contracts derived from the authoritative
+      headers, an `xtask check-abi-layout` gate, and determine empirically
+      whether device-mapper drift fails open. **WS2:** `just test-ci` names a
+      nextest `ci` profile that does not exist (`error: profile 'ci' not
+      found`), so it has never run; add `.config/nextest.toml` — capturing
+      no test output into the uploaded JUnit, and warning rather than
+      killing on slow tests until the tail is measured — then measure
+      cross-process contention, which subsumes the
+      `update_check_does_not_emit_audit_entry` triage deferred above.
+      **WS3:** `check-claim-catalog` proves each claim's witnesses *exist*;
+      nothing proves they *discriminate*. Extend the planted-defect table in
+      `specs/VERIFICATION.md` from four gates to all thirty `fn:` witnesses
+      by hand — no tooling, no schema change — repair whichever did not
+      fire, and take a written position on the five `ci:`-only claims.
+      **WS4 (conditional):** automate the maintenance with `cargo-mutants`
+      scoped per claim, gated on a feasibility probe, run hermetically
+      because it executes deliberately-broken security code, with a ratchet
+      so a recorded baseline cannot be quietly lowered. Plan carries a
+      seven-item security section (S1–S7) to settle before implementation.
+
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
       #1888 (ARM64 `Image` kernels reach Firecracker), #1891 (guest reads the
