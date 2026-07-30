@@ -735,12 +735,28 @@ reading the pool code:
   halves now build the key through one function (`compat_for_launch`), keyed on
   the same digest claim-8 admission puts on `plan.image.sha256` and that
   `bind_plan_to_parent` checks the captured parent against.
-- **`mvm.vsock_egress=1` was a second cmdline divergence.** A factory parent is
+- **`mvm.vsock_egress=1` was a second cmdline divergence.** A factory parent was
   deny-all by construction, so a launch with `--network-allow` would boot the
   workload with the token and the parent without it — and a child inheriting the
-  parent's cmdline would come up with no network, silently. Such launches are
-  now excluded from the warm pool at both ends (claim and replenish) rather than
-  served with the wrong shape.
+  parent's cmdline would come up with no network, silently. Such launches were
+  first excluded from the warm pool at both ends (claim and replenish) rather
+  than served with the wrong shape.
+
+  **Since resolved by keying instead of excluding.** The exclusion assumed the
+  parent could not carry the launch's egress without leaking that launch's shape
+  to the next claim. The token is a bare boolean — no host, no allow-list reaches
+  the guest — and the destination set is resolved host-side per child, on the
+  egress endpoint the claim wires from that child's own launch config. So the pool
+  partitions on egress **enablement** alone:
+  `StandbyCompat::vsock_egress` makes a parent claimable only by launches whose
+  guest boots the same way, `factory_parent_config` takes that enablement from the
+  matched record (`spec.vsock_egress`) and carries no destination, and
+  `warm_eligible_launch` no longer refuses the shape. The key is the *effective*
+  enablement (`egress_shared::effective_vsock_egress`: the policy allows egress
+  **and** the admitted plan binds no secret), which is the same condition the token
+  itself is derived from — so a secret-bearing launch keys token-less exactly as
+  its cold boot boots, and the key can never be more permissive than the cold boot
+  it stands in for.
 
 ---
 

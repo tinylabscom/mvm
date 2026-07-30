@@ -1064,17 +1064,73 @@ live run did not catch it because the hand-seeded fixture carried
 Both halves now build the key through one function (`compat_for_launch`), keyed
 on the same digest claim-8 admission puts on `plan.image.sha256`.
 
-**Accepted reduction: egress-allowing launches are excluded from the pool.**
-`mvm.vsock_egress=1` is a per-launch cmdline token and a child inherits its
-parent's cmdline out of restored memory, so a deny-all parent would hand an
-egress-allowing launch a guest whose in-guest egress client never starts —
-silently no network. Carrying one launch's policy onto a shared parent instead
-would leak that launch's shape to the next claim, since the policy is not part
-of the compat key. So `warm_eligible_launch` now refuses those launches at both
-ends (claim and replenish) and they cold-boot. That is **most real workloads**:
-the warm pool as it stands serves only the no-egress, no-extra-volume,
-no-virtio-fs-root shape. Serving an egress-allowing launch needs a child that
-can be told its own egress shape after the restore, which is its own slice.
+**Resolved (superseding the accepted reduction below): egress-allowing launches
+are keyed into the pool, not excluded.** The reduction as recorded —
+`warm_eligible_launch` refusing any launch whose policy allows egress, i.e. most
+real workloads — rested on the premise that carrying a launch's egress onto a
+shared parent would leak that launch's shape to the next claim. It does not. The
+guest cmdline carries only the **boolean** `mvm.vsock_egress=1`
+(`vsock_egress_cmdline_token`); no host and no allow-list ever reaches the guest,
+and the destination set is resolved host-side, per child, on the egress endpoint
+the claim wires from that child's own launch config
+(`PlanFlowPolicy::from_network_policy` reduces the whole policy to one
+`egress_permitted` bit, and `resolve_bare_dns_pins` resolves the allow-list from
+the launch's own policy at bridge launch). So the pool only has to partition on
+egress **enablement**.
+
+It now does. `StandbyCompat` — and `StandbySpec`/`StandbyHandle` with it — carries
+a `vsock_egress: bool`, exact-equality like every other compat field, so a
+token-less parent can never serve a launch whose guest needs the client and an
+egress-booted parent can never serve one whose guest must not have it.
+`factory_parent_config` derives the parent's enablement from `spec.vsock_egress` —
+the same value a claim matches on, sourced from the record that will be matched
+rather than re-derived — and carries no destination onto the parent.
+`warm_eligible_launch` drops the egress test, leaving only the two shapes a parent
+genuinely cannot boot: extra volumes and a virtio-fs root.
+
+The key is the **effective** enablement, not the raw policy:
+`egress_shared::effective_vsock_egress` is `allows_egress() && the admitted plan
+binds no secret` — the same condition the guest cmdline token is derived from, with
+the plan read from the launch config instead of from the state dir. That resolves
+the bound-secrets asymmetry with no special case (a secret-bearing launch keys to
+`false` and claims a token-less parent, which is exactly what its cold boot boots),
+and it is the conservative side of the one place the two sources can disagree: on
+a launch path that has not yet persisted its plan beside the VM, this can only
+*withhold* the client from a warm child, never grant one a cold boot would have
+denied.
+
+**One pre-existing inconsistency this exposes, and which side the key takes.**
+Two producers answer "does this workload bind a secret" from different sources.
+The `up` / OCI paths persist the admitted plan beside the VM
+(`stash_plan_for_bridge`) before `backend.start()`, so the cold-boot token reads
+the plan and suppresses itself for a secret-bearing workload. The transient
+`machine run` path — the only path that claims from the pool — does not persist it
+before start, so `state_has_bound_secrets` reads an absent file and the cold boot
+emits the token *and* spawns a raw-egress endpoint even for a secret-bearing plan.
+The compat key sides with the plan the launch config carries, because that is the
+authoritative statement of what the workload binds. For a secret-bearing
+egress-allowing transient launch the warm child therefore comes up token-less with
+a substitution endpoint (its endpoint's secrets are decoded from `claim.plan_json`,
+not from disk) where the cold boot comes up with the token and a raw endpoint. The
+warm shape is the narrower of the two — destination-bound signed credentials rather
+than raw TCP — so no warm child gets egress its cold boot would have denied. Making
+the transient path persist its plan before start, so both sides read one source, is
+the follow-up that removes the divergence outright; it is not a prerequisite for
+this key, which is already the conservative side of it.
+
+The original reduction, kept for the record:
+
+> **Accepted reduction: egress-allowing launches are excluded from the pool.**
+> `mvm.vsock_egress=1` is a per-launch cmdline token and a child inherits its
+> parent's cmdline out of restored memory, so a deny-all parent would hand an
+> egress-allowing launch a guest whose in-guest egress client never starts —
+> silently no network. Carrying one launch's policy onto a shared parent instead
+> would leak that launch's shape to the next claim, since the policy is not part
+> of the compat key. So `warm_eligible_launch` now refuses those launches at both
+> ends (claim and replenish) and they cold-boot. That is **most real workloads**:
+> the warm pool as it stands serves only the no-egress, no-extra-volume,
+> no-virtio-fs-root shape. Serving an egress-allowing launch needs a child that
+> can be told its own egress shape after the restore, which is its own slice.
 
 **Measured:** cold boot → agent-ready median 2096 ms (2079–2253, n=7). Warm claim
 not measurable. Enabling the pool today adds ~2.6 s median per run for nothing.

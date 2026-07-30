@@ -1691,6 +1691,7 @@ mod tests {
                 state: StandbyState::Idle,
                 image_sha256: None,
                 parent_checkpoint: None,
+                vsock_egress: false,
             }
         }
 
@@ -1808,6 +1809,7 @@ mod tests {
                 vm_state_dir: "/tmp/does-not-exist".into(),
                 image_path: None,
                 image_sha256: None,
+                vsock_egress: false,
             };
 
             for name in ["qemu", "wasm", "apple-container"] {
