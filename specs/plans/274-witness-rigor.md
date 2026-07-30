@@ -4,21 +4,19 @@
 
 **Goal:** Close three gaps in how this repo proves things about itself: (1) 13 of 17 `#[repr(C)]` types cross a foreign ABI boundary with no compile-time layout contract at all, and the other four assert size only, (2) the `ci` nextest profile every `just test-ci` invocation names does not exist, and (3) nothing establishes that a claim's named witness would actually go red if the code it ratifies were wrong.
 
-**Architecture:** Four workstreams, sequenced cheapest-and-most-certain first. WS1 adds `const _: () = assert!(...)` layout contracts to every `repr(C)` type plus an `xtask check-abi-layout` gate. WS2 adds `.config/nextest.toml`, fixing a broken Justfile recipe. WS3 extends the existing planted-defect discipline in `specs/VERIFICATION.md` from four gates to every code-level witness, by hand — no tooling, no schema change, and it establishes the property WS4 would otherwise have to establish from scratch. WS4 then automates the maintenance of that property with `cargo-mutants`, and is explicitly gated on a feasibility probe.
+**Architecture:** Three workstreams. WS1 adds `const _: () = assert!(...)` layout contracts to every `repr(C)` type plus an `xtask check-abi-layout` gate (shipped, #1940). WS2 adds `.config/nextest.toml`, fixing a Justfile recipe that had never run (shipped, #1943). WS3 was a by-hand planted-defect sweep across every code-level witness; `check-mutation-witnesses` (#1934) shipped that mechanically while this plan was in flight, so WS3 is cut down to the three claims whose witnesses are CI lanes that mutation testing structurally cannot reach, plus triaging that gate's first full run. The originally-planned WS4 is struck — see "Superseded by #1934".
 
 **Tech Stack:** Rust 1.96 (`offset_of!` stable since 1.77), `xtask`, `cargo-nextest` 0.9.122, `cargo-mutants`, GitHub Actions (`ci.yml` Lint job, `security.yml` nightly).
 
-**Sequencing rationale.** WS1 and WS2 are near-certain wins and land first.
-WS3 before WS4 is the load-bearing ordering decision: eleven of the sixteen
-claims have `fn:` witnesses and could in principle be mutation-tested, but
-establishing "this witness discriminates" does not require a mutation
-engine — it requires planting one defect per witness and recording that
-the witness fired, which is what `specs/VERIFICATION.md` already does for
-four xtask gates. Doing that by hand costs about a day, needs no
-dependency and no CI budget, and produces the same artifact. WS4 then has
-a much narrower job — keeping a property that already holds from
-regressing — which is a far easier thing to justify spending hours of
-nightly CI on than "discover whether the property holds at all."
+**Sequencing rationale, and what changed.** WS1 and WS2 were near-certain
+wins and landed first. The original argument for a by-hand sweep before
+any automation was that establishing "this witness discriminates" is
+cheap and needs no tooling. That argument died when #1934 merged: the
+tooling exists, derives its surface from the ledger rather than a
+hand-kept list, and covers the mutable witnesses exhaustively. Keeping
+the sweep would have been duplicated effort against a better mechanism.
+What no mechanism covers is a claim whose only witness is a CI lane, and
+that is what WS3 is now.
 
 ## Numbering and overlap with plan 272
 
@@ -1175,817 +1173,123 @@ process-external, since per-test process isolation does not help it.
 
 ---
 
-# WS3 — establish that every code-level witness discriminates
+# WS3 — the witnesses mutation testing cannot reach  ✅ re-scoped
 
-**Why.** `model/claims.toml` registers 16 claims with 30 `fn:` witnesses
-and 11 `ci:` witnesses. `xtask check-claim-catalog` proves each named
-witness **exists**. Nothing proves any of them **discriminates** — that
-the witness would fail if the enforcement code it ratifies were wrong. A
-witness that passes on broken code is a claim with no backing, and from
-every angle the current gates can see it is indistinguishable from a
-claim with backing.
+**This workstream was cut down after WS1/WS2 shipped.** It originally
+planned a by-hand planted-defect sweep across all 34 `fn:` witnesses.
+`check-mutation-witnesses` (#1934, merged 2026-07-30) now does that job
+mechanically and exhaustively, so the sweep would be duplicated effort
+against a better mechanism — see "Superseded by #1934" below. What
+survives is the part #1934 structurally cannot do.
 
-`specs/VERIFICATION.md` already applies exactly the right discipline: it
-records, per gate, a defect that was planted and whether the gate fired.
-It covers four xtask gates. Extending the same table to every `fn:`
-witness needs no tooling, no dependency, no schema change, and no CI
-budget — it needs someone to plant thirty defects and write down what
-happened. That is roughly a day, and it establishes the property
-outright rather than estimating it.
+## What #1934 cannot reach
 
-**Scope.** Eleven of the sixteen claims have `fn:` witnesses. Five —
-MVM-SEC-03 (tampered rootfs), MVM-SEC-04 (no `do_exec` in prod),
-MVM-SEC-05 (fuzz targets), MVM-SEC-07 (dep audit) — are `ci:`-only. Their
-witnesses are a symbol-absence grep, a fuzz lane, and a `cargo deny` job;
-there is no Rust function whose mutation would test anything. Those five
-get a different treatment in Task 9 Step 3, not a fabricated one. (WS1
-Task 4 Step 9 gives MVM-SEC-03 its first code-level witness, which moves
-it into scope for the next pass.)
+Three of the sixteen claims have no `fn:` witness at all: **MVM-SEC-04**
+(no `do_exec` in a production build), **MVM-SEC-05** (fuzz targets),
+**MVM-SEC-07** (dependency audit). Their witnesses are a symbol-absence
+grep over a release binary, a fuzz lane, and a `cargo deny` job. There is
+no Rust function body whose mutation exercises any of them, and
+`check-mutation-witnesses` correctly reports them as reaching no mutable
+file rather than inventing a surface.
 
-## Task 8: Plant a defect against every `fn:` witness
+A `ci:` witness nobody has seen fail is the same problem as a `fn:` one.
+These need the hand treatment, once, recorded in `specs/VERIFICATION.md`.
+
+## Task 8: Falsify the three CI-lane witnesses
 
 **Files:**
 - Modify: `specs/VERIFICATION.md` (extend the falsifiability table)
-- No source changes in this task — every edit made here is reverted.
+- No source changes survive this task — every edit is reverted.
 
-**Interfaces:**
-- Consumes: the 30 `fn:` tokens in `model/claims.toml`.
-- Produces: a per-witness verdict — fired / did not fire — that Task 9 acts on.
+- [ ] **Step 1: MVM-SEC-04 — `prod-agent-no-exec`**
 
-- [ ] **Step 1: Enumerate the witnesses**
+  Build the agent *with* the `interactive` feature on a scratch branch and
+  confirm the symbol-grep job fails rather than passing on a build that
+  contains `do_exec`. This is a CI-lane experiment, not a test run, so it
+  needs a pushed branch to observe.
 
-  ```sh
-  python3 - <<'PY'
-  import tomllib
-  d = tomllib.load(open('model/claims.toml','rb'))
-  for c in d['claim']:
-      for w in c.get('witnesses', []):
-          if w.startswith('fn:'):
-              print(f"{c['id']}\t{w[3:]}")
-  PY
-  ```
+- [ ] **Step 2: MVM-SEC-07 — the dependency audit**
 
-  Write the output to `/tmp/witnesses.tsv`. This is the worklist.
+  Add a crate with a disallowed licence to a scratch branch and confirm
+  `cargo deny` fails. Cheap and fast; the point is that nobody has
+  watched it fail on this repo's actual configuration.
 
-- [ ] **Step 2: For each witness, find what it actually asserts**
+- [ ] **Step 3: MVM-SEC-05 — the fuzz lane**
 
-  ```sh
-  rg -n "fn <name>\(" --type rust crates/
-  ```
+  Break a parser the fuzz targets cover — the `GuestRequest` framing is
+  the obvious one — and confirm a short local `cargo fuzz` run finds it.
+  Record the wall-clock to find, since a lane that needs hours to catch a
+  planted defect is weaker evidence than one that catches it in seconds.
 
-  Read the body. Identify the single enforcement behaviour it depends
-  on — the deny-by-default branch, the signature check, the path
-  allow-list test. That behaviour is what you break in Step 3.
+- [ ] **Step 4: Record all three**
 
-- [ ] **Step 3: Plant one defect and record the verdict**
-
-  Break the behaviour in the *implementation*, not the test. Invert the
-  default, drop the check, widen the allow-list — the smallest edit that
-  makes the enforcement wrong while still compiling. Then:
-
-  ```sh
-  cargo nextest run --workspace -E 'test(<witness-name>)'
-  ```
-
-  Record `fired` or `did not fire`, then `git checkout --` the file.
-  **Revert before moving to the next witness.** Two planted defects at
-  once produce a verdict for neither.
-
-  A witness that names an *impl* symbol rather than a test needs the
-  inverse move: break the impl and run whatever test suite covers it,
-  and if nothing covers it, that is a `did not fire` — the strongest
-  possible finding.
-
-- [ ] **Step 4: Record the sweep in `specs/VERIFICATION.md`**
-
-  Add a second table under §"Falsifiability", separate from the existing
-  gate table:
+  Add to `specs/VERIFICATION.md` §"Falsifiability", in the claim-witness
+  table:
 
   ```markdown
-  ### Claim witnesses
-
-  Each row records a defect planted in the enforcement code and whether
-  the claim's witness caught it. A witness that did not fire was not a
-  witness; the Fixed column names the test added to make it one.
-
-  | Claim | Witness | Planted defect | Fired | Fixed by |
-  | --- | --- | --- | --- | --- |
-  | MVM-SEC-10 | `policy_default_is_deny_all` | Default resolution returns `Unrestricted` instead of `DenyAll` | yes | — |
+  | Claim | Witness | Planted defect | Fired |
+  | --- | --- | --- | --- |
+  | MVM-SEC-04 | `ci:prod-agent-no-exec` | Build the agent with the `interactive` feature | |
   ```
 
-  One row per witness, all thirty. Fill the real rows from the Step 3
-  verdicts; the row above is the format, not a result.
+  Fill the verdicts from Steps 1-3. A `did not fire` is a finding, not a
+  failure of the task.
 
-- [ ] **Step 5: Commit the sweep before fixing anything**
+## Task 9: Triage the first full mutation run
 
-  Commit the table with the `did not fire` rows still unfixed. The
-  honest artifact is the measurement, and a reviewer should be able to
-  see what the tree looked like before the repairs.
+**Why this and not a hand sweep.** #1934's nightly is
+`continue-on-error: true` until its baseline covers the whole surface —
+seeded only for the claim-10 anchor today. Establishing that baseline and
+reading the survivors is the human work, and it is where the findings
+actually are. The score is bookkeeping.
 
-  ```sh
-  git -C /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan272-witness-rigor add specs/VERIFICATION.md
-  git -C /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan272-witness-rigor commit -m \
-    "docs(verification): record a planted-defect sweep across every claim witness"
-  ```
+- [ ] **Step 1: Establish the baseline hermetically**
 
-## Task 9: Repair the non-discriminating witnesses
+  Blocked on #1946. `--run` executes mutated security code and neither
+  the nightly lane nor `just mutation-witnesses` isolates `MVM_HOME` and
+  `HOME` today. Do not run it against a real `~/.mvm`.
 
-**Files:**
-- Modify: whichever test files own the witnesses that did not fire
-- Modify: `specs/VERIFICATION.md` (fill the Fixed column)
-- Modify: `model/claims.toml` (only if a claim gains a witness)
+- [ ] **Step 2: Triage every survivor**
 
-**Interfaces:**
-- Consumes: the Task 8 verdict table.
-- Produces: every `fn:` witness demonstrated to fire, and a written position on the five `ci:`-only claims.
+  For each: a **real hole** gets the test that catches it; an
+  **equivalent mutant** gets an `accepted_misses` entry with a stated
+  reason. `check_accepted_reasons` already refuses an unexplained entry,
+  so the reason is enforced rather than merely encouraged.
 
-- [ ] **Step 1: Write a catching test for each `did not fire`**
+- [ ] **Step 3: Arm the lane**
 
-  One commit per witness, message naming the defect that motivated it,
-  e.g. `test(egress): catch a default policy that resolves permissive`.
-  Then re-plant the same defect and confirm the new test fires. Never
-  reword a claim to match a weak witness — the claim is the requirement
-  and the witness is the evidence, not the other way round.
-
-- [ ] **Step 2: Fill the Fixed column and re-verify the whole table**
-
-  Re-run the full sweep against the repaired tree. Every row must read
-  `fired`. If any still does not, the repair did not work and the row
-  stays honest.
-
-- [ ] **Step 3: Take a written position on the five `ci:`-only claims**
-
-  MVM-SEC-03, 04, 05, 07 have no code-level witness. Do not fabricate
-  one. For each, add a row to the same table with the planted defect
-  expressed at the level the witness actually operates:
-
-  - MVM-SEC-04 (`prod-agent-no-exec`): build the agent *with* the
-    `interactive` feature and confirm the symbol-grep job fails.
-  - MVM-SEC-07 (`cargo deny`): add a crate with a disallowed licence to a
-    scratch branch and confirm the job fails.
-  - MVM-SEC-05 (fuzz lane): confirm a deliberately broken parser is
-    caught by a short local fuzz run.
-  - MVM-SEC-03: this is the one WS1 Task 3 Step 5 is investigating.
-    Record whatever that step found; if device-mapper drift fails open,
-    say so here too.
-
-  Each of these is a CI-lane experiment rather than a test run, so it is
-  slower and some need a scratch branch. Do them anyway — a `ci:` witness
-  nobody has seen fail is the same problem as a `fn:` one.
-
-- [ ] **Step 4: Open the WS3 PR**
-
-  Title: `docs(verification): prove every claim witness fires on a planted defect`.
-  The body leads with the count that did **not** fire and the tests added
-  to fix them. That number is the finding; the completed table is just
-  where it is recorded.
+  Once the baseline covers the surface, drop `continue-on-error: true`
+  from the `mutation-witnesses` job in `security.yml`.
 
 ---
 
-# WS4 — automate the maintenance with mutation testing
-
-**Why now and not before.** WS3 establishes that the witnesses
-discriminate *today*. It does not keep them discriminating: a refactor
-can widen a branch the witness no longer reaches, and nothing would
-notice until the next manual sweep. `cargo-mutants` is the same planted-
-defect procedure run continuously and exhaustively — thousands of small
-defects rather than thirty chosen ones — which is the right tool for
-maintenance and the wrong tool for a first measurement, because a
-first measurement needs to be cheap enough to actually happen.
-
-**The design problem.** Mutating a witness *test* is pointless — you
-mutate the *implementation* the witness exercises. The catalog says a
-`fn:` witness may be "a test, or the impl symbol the claim exercises", so
-the token alone does not identify what to mutate. WS4 makes that mapping
-explicit rather than inferring it.
-
-**The honesty constraint.** Do not open with an asserted score floor.
-`model/claims.toml` already distinguishes `build` (validated against an
-oracle) from `open` (measured and reported, never asserted), and
-`check-honesty` enforces the distinction in docs. A mutation score
-starts as `open`: measured, recorded, and gated only against
-**regression** below its own recorded baseline. Asserting "80%" before
-measuring is how the reviewed crate ended up with a coverage gate written
-`cargo llvm-cov --fail-under-lines 95 || echo "..."`, which always exits 0.
-
-**This workstream is conditional.** Task 10 is a probe with an explicit
-stop outcome. Abandoning WS4 with a written reason after Task 10 is a
-success, not a failure — WS3 will already have delivered the property.
-
-## Task 10: Feasibility probe on one claim
-
-**Files:**
-- No committed changes. Produces a written finding that gates Tasks 11–14.
-
-**Interfaces:**
-- Produces: a go/no-go, plus the measured per-mutant wall-clock that sizes the CI budget.
-
-- [ ] **Step 1: Set up a disposable, hermetic environment — precondition, not advice**
-
-  Per S2. Everything from here mutates security enforcement code and then
-  runs the suite against it: plan verification that no longer verifies, a
-  seccomp filter that no longer filters, a host signer that writes keys
-  somewhere unexpected. Running that against a real `~/.mvm` can corrupt
-  live state, mint keys at the wrong mode, install firewall rules nothing
-  removes, and leave VMs running.
-
-  Run every mutation pass in a throwaway container on the Linux box, with
-  both roots redirected:
-
-  ```sh
-  export MVM_HOME=$(mktemp -d /tmp/mutants-mvm-home.XXXXXX)
-  export HOME="$MVM_HOME"
-  ```
-
-  `MVM_HOME` alone is not enough — `default_mvm_cache_dir` deliberately
-  reads `$HOME` so an isolated session can seed from the shared cache,
-  which is exactly the leak `check-test-home-isolation` exists to catch.
-  Confirm before proceeding:
-
-  ```sh
-  ls -la ~/.mvm 2>/dev/null && echo "NOT ISOLATED — stop" || echo "isolated"
-  ```
-
-  Never run this task on a developer machine, and never with a real
-  `~/.mvm` reachable. If the only available host is a dev Mac, stop and
-  wait for the Linux box rather than working around it.
-
-- [ ] **Step 2: Install the tool**
-
-  ```sh
-  cargo install --locked cargo-mutants
-  cargo mutants --version
-  ```
-
-- [ ] **Step 3: Pick the cleanest claim to probe**
-
-  Use claim `MVM-SEC-10` (default-deny egress). Its enforcement is pure
-  policy resolution with no VM boot, and its witnesses
-  (`policy_default_is_deny_all`,
-  `test_resolve_network_policy_default_is_deny_all`) are fast unit tests.
-  Find the file that defines the resolution function:
-
-  ```sh
-  rg -n 'fn resolve_network_policy' --type rust crates/
-  ```
-
-- [ ] **Step 4: Run a scoped mutation pass**
-
-  ```sh
-  cargo mutants \
-    --file crates/mvm-core/src/policy/network_policy.rs \
-    --test-tool=nextest \
-    --timeout 120 \
-    -- --workspace -E 'test(policy_default_is_deny_all) + test(test_resolve_network_policy_default_is_deny_all)' \
-    2>&1 | tee /tmp/mutants-sec10.log
-  ```
-
-  Correct the `--file` path to whatever Step 3 found.
-
-- [ ] **Step 5: Read the result honestly**
-
-  `cargo mutants` reports caught / missed / unviable / timeout. Record
-  all four counts. A high **timeout** count means the test filter is
-  pulling in something slow and the scoping is wrong, not that the
-  witnesses are good — timeouts are not catches. A high **unviable**
-  count means most mutants do not compile, which is normal and should be
-  excluded from the score denominator.
-
-- [ ] **Step 6: Write the finding**
-
-  Append to this plan file, under this task:
-  - caught / missed / unviable / timeout counts
-  - wall-clock for the whole pass
-  - the identity of every **missed** mutant — each one is a concrete
-    hole in claim 10's witness set and is more valuable than the score
-  - the projected cost of 16 claims at this rate
-
-  If a single claim takes longer than ~10 minutes, Tasks 11–14 must run
-  nightly-only and probably claim-sharded. Say which.
-
-- [ ] **Step 7: Decision point**
-
-  If the probe shows the approach works, continue to Task 11. If it shows
-  mutants are dominated by timeouts or unviables, stop and record why —
-  an abandoned workstream with a written reason is a good outcome, and
-  strictly better than shipping a gate that reports a number nobody can
-  interpret.
-
-## Task 11: Teach the model which files enforce each claim
-
-**Files:**
-- Modify: `model/claims.toml` (add `enforced_by` to each `[[claim]]`)
-- Modify: the claims deserializer used by `xtask check-conformance` — find it with `rg -n 'struct Claim' xtask/src/`
-- Modify: `xtask/src/check_conformance.rs` (validate the new field)
-
-**Interfaces:**
-- Produces: `Claim::enforced_by: Vec<String>` — repo-relative paths to the source files that implement the claim's enforcement. Tasks 12–13 consume it.
-- Consumes: the existing `[[claim]]` schema (`id`, `level`, `suite`, `statement`, `witnesses`).
-
-- [ ] **Step 1: Write the failing validation test**
-
-  In `xtask/src/check_conformance.rs`'s test module:
-
-  ```rust
-  #[test]
-  fn claim_with_nonexistent_enforced_by_path_is_rejected() {
-      let toml = r#"
-          spec = "mvm/1"
-          [[claim]]
-          id = "MVM-SEC-99"
-          level = "build"
-          suite = "nope"
-          statement = "s"
-          witnesses = ["fn:x"]
-          enforced_by = ["crates/does-not-exist/src/lib.rs"]
-      "#;
-      let err = validate_enforced_by_paths(toml, Path::new(".")).unwrap_err();
-      assert!(err.to_string().contains("does-not-exist"));
-  }
-
-  #[test]
-  fn claim_with_fn_witness_and_no_enforced_by_is_rejected() {
-      let toml = r#"
-          spec = "mvm/1"
-          [[claim]]
-          id = "MVM-SEC-98"
-          level = "build"
-          suite = "nope"
-          statement = "s"
-          witnesses = ["fn:x"]
-      "#;
-      let err = validate_enforced_by_paths(toml, Path::new(".")).unwrap_err();
-      assert!(err.to_string().contains("MVM-SEC-98"));
-  }
-
-  #[test]
-  fn ci_only_claim_may_declare_mutation_not_applicable() {
-      let toml = r#"
-          spec = "mvm/1"
-          [[claim]]
-          id = "MVM-SEC-97"
-          level = "build"
-          suite = "nope"
-          statement = "s"
-          witnesses = ["ci:some-lane"]
-          mutation = "not-applicable"
-          mutation_reason = "witness is a symbol-absence grep; no Rust function to mutate"
-      "#;
-      assert!(validate_enforced_by_paths(toml, Path::new(".")).is_ok());
-  }
-
-  #[test]
-  fn ci_only_claim_without_a_reason_is_rejected() {
-      let toml = r#"
-          spec = "mvm/1"
-          [[claim]]
-          id = "MVM-SEC-96"
-          level = "build"
-          suite = "nope"
-          statement = "s"
-          witnesses = ["ci:some-lane"]
-          mutation = "not-applicable"
-      "#;
-      let err = validate_enforced_by_paths(toml, Path::new(".")).unwrap_err();
-      assert!(err.to_string().contains("mutation_reason"));
-  }
-  ```
-
-- [ ] **Step 2: Run to confirm failure**
-
-  ```sh
-  cargo nextest run -p xtask -E 'test(enforced_by)'
-  ```
-
-  Expected: FAIL — `cannot find function validate_enforced_by_paths`.
-
-- [ ] **Step 3: Add the fields to the deserializer**
-
-  Three fields, all `#[serde(default)]`:
-
-  ```rust
-  #[serde(default)]
-  enforced_by: Vec<String>,
-  #[serde(default)]
-  mutation: Option<String>,       // only legal value: "not-applicable"
-  #[serde(default)]
-  mutation_reason: Option<String>,
-  ```
-
-  If the struct carries `#[serde(deny_unknown_fields)]`, they must be
-  added there before `model/claims.toml` can name them or every parse
-  breaks at once.
-
-  **Do not make `enforced_by` unconditionally required.** Five of the
-  sixteen claims (MVM-SEC-03, 04, 05, 07) are `ci:`-only — their
-  witnesses are a symbol-absence grep, a fuzz lane, and a dependency
-  audit job. There is no Rust function whose mutation tests anything.
-  Forcing a value there would put a fabricated path into the file that is
-  the R1 source of truth, which is worse than the gap it papers over.
-  The requirement is conditional, and Step 4 encodes the condition.
-
-- [ ] **Step 4: Implement `validate_enforced_by_paths`**
-
-  Three rules:
-
-  1. A claim with at least one `fn:` witness **must** declare a
-     non-empty `enforced_by`.
-  2. Every declared path must resolve to an existing file under the
-     workspace root.
-  3. A claim may instead declare `mutation = "not-applicable"`, in which
-     case `mutation_reason` is required and must be non-empty. Any other
-     value of `mutation` is an error — the field exists to record one
-     specific, argued exemption, not to become a free-text escape hatch.
-
-  Rule 3 is what keeps the five `ci:`-only claims honest: the file states
-  *why* they are out of scope instead of leaving a reader to infer it
-  from an empty list.
-
-- [ ] **Step 5: Populate all 16 claims**
-
-  For the eleven with `fn:` witnesses, list the source files that
-  *implement the enforcement*, not the files that test it. Worked
-  example:
-
-  ```toml
-  [[claim]]
-  id = "MVM-SEC-10"
-  level = "build"
-  suite = "egress_default_deny"
-  statement = "No untrusted workload reaches the network unless explicitly admitted by policy"
-  witnesses = [
-      "fn:policy_default_is_deny_all",
-      "fn:test_resolve_network_policy_default_is_deny_all",
-  ]
-  # Source files whose behaviour the witnesses above must discriminate.
-  # A mutation planted in any of these that no witness catches is a hole
-  # in this claim's backing.
-  enforced_by = [
-      "crates/mvm-core/src/policy/network_policy.rs",
-  ]
-  ```
-
-  Resolve each claim's real paths with `rg`; do not guess. Where a claim
-  spans several files (claim 8's admission path, claim 11's sealed-volume
-  verifier), list them all.
-
-  For the five `ci:`-only claims, declare the exemption instead, with the
-  reason stated at the level the witness actually operates:
-
-  ```toml
-  [[claim]]
-  id = "MVM-SEC-04"
-  level = "build"
-  suite = "prod_agent_no_exec"
-  statement = "The guest agent has no do_exec in production builds"
-  witnesses = ["ci:prod-agent-no-exec"]
-  mutation = "not-applicable"
-  # The witness is a symbol-absence grep over a release build, not a test
-  # of a function. There is no Rust body whose mutation would exercise it;
-  # its falsification is recorded in specs/VERIFICATION.md instead — build
-  # the agent with the interactive feature and confirm the job fails.
-  mutation_reason = "witness is a symbol-absence grep over a release binary; no function to mutate"
-  ```
-
-  Each of the five reasons should point at the corresponding row the WS3
-  sweep added to `specs/VERIFICATION.md`. The two mechanisms are
-  complementary: mutation testing covers what has a function body, the
-  planted-defect table covers what does not, and between them every claim
-  has been seen to fail.
-
-- [ ] **Step 6: Run the full gate**
-
-  ```sh
-  cargo nextest run -p xtask
-  cargo run -p xtask -- check-conformance
-  cargo run -p xtask -- check-claim-catalog
-  ```
-
-  Expected: all PASS. `check-conformance` regenerates or validates
-  `CONFORMANCE.md` — if the generator emits the new field into the doc,
-  regenerate and commit the doc in the same change.
-
-- [ ] **Step 7: Commit**
-
-  ```sh
-  git -C /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan272-witness-rigor commit -am \
-    "feat(conformance): record which source files enforce each claim"
-  ```
-
-## Task 12: `xtask mutants-witnesses`
-
-**Files:**
-- Create: `xtask/src/mutants_witnesses.rs`
-- Modify: `xtask/src/main.rs`
-- Modify: `xtask/src/check_claim_catalog.rs` — extract the shared ledger parser
-
-**Interfaces:**
-- Consumes: `Claim::enforced_by` (Task 11) and the existing witness resolver.
-- Produces: `cargo run -p xtask -- mutants-witnesses [--claim MVM-SEC-10] [--print-only]`, which for each claim invokes `cargo mutants` over that claim's `enforced_by` files with that claim's witnesses as the nextest filter, and writes a JSON summary to `target/mutants-witnesses/summary.json`.
-
-- [ ] **Step 1: Extract the shared parser**
-
-  `check_claim_catalog.rs` owns `Needle`, `Witness`, and
-  `resolve_fn_needles`. Move them into `xtask/src/claims.rs` and have
-  both `check_claim_catalog` and the new subcommand call it. Do not copy
-  the parser — a second copy drifts, which is the exact failure this
-  whole plan is about.
-
-- [ ] **Step 2: Write the failing test for filter construction**
-
-  ```rust
-  #[test]
-  fn nextest_filter_ors_every_witness_of_a_claim() {
-      let witnesses = vec![
-          Witness::Fn("policy_default_is_deny_all".into()),
-          Witness::Fn("test_resolve_network_policy_default_is_deny_all".into()),
-          Witness::Ci("egress-default-deny".into()),
-      ];
-      assert_eq!(
-          nextest_filter(&witnesses),
-          "test(policy_default_is_deny_all) + test(test_resolve_network_policy_default_is_deny_all)"
-      );
-  }
-
-  #[test]
-  fn claim_with_only_ci_witnesses_yields_no_filter() {
-      let witnesses = vec![Witness::Ci("some-lane".into())];
-      assert!(nextest_filter(&witnesses).is_empty());
-  }
-  ```
-
-  The second case matters: a `ci:` witness names a workflow lane, which
-  `cargo mutants` cannot run. Such a claim is **not mutation-testable**
-  and must be reported as `skipped: ci-only`, never silently scored 100%.
-
-- [ ] **Step 3: Run to confirm failure, then implement**
-
-  ```sh
-  cargo nextest run -p xtask -E 'test(nextest_filter)'
-  ```
-
-  Expected: FAIL. Then implement `nextest_filter` and the driver that
-  shells out to `cargo mutants` with `--file` per `enforced_by` entry,
-  `--test-tool=nextest`, `--timeout` from a constant, and the filter
-  after `--`.
-
-- [ ] **Step 4: Emit a machine-readable summary**
-
-  Per claim: `caught`, `missed`, `unviable`, `timeout`, `skipped_reason`,
-  and the full identity of every missed mutant (file, line, operator).
-  Score is `caught / (caught + missed)` — unviable and timeout are
-  excluded from the denominator, and a timeout is **not** a catch.
-  Timeouts get their own field so a slow suite cannot inflate the score.
-
-- [ ] **Step 5: Run against the real tree**
-
-  ```sh
-  cargo run -p xtask -- mutants-witnesses --claim MVM-SEC-10
-  ```
-
-  Expected: the same counts as the Task 10 probe. If they differ, the
-  driver is not reproducing the manual invocation — fix that before
-  proceeding.
-
-- [ ] **Step 6: Commit**
-
-  ```sh
-  cargo nextest run -p xtask
-  rustup run nightly cargo fmt --all
-  git -C /Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan272-witness-rigor commit -am \
-    "feat(xtask): run mutation testing scoped to each claim's witnesses"
-  ```
-
-## Task 13: Record the baseline and act on the misses
-
-**Files:**
-- Modify: `model/claims.toml` (add `mutation_baseline` per claim)
-- Modify: whichever crates the missed mutants expose
-
-**Interfaces:**
-- Consumes: the Task 12 summary.
-- Produces: a recorded per-claim baseline that Task 14 gates against.
-
-- [ ] **Step 1: Run every claim**
-
-  ```sh
-  cargo run -p xtask -- mutants-witnesses 2>&1 | tee /tmp/mutants-all.log
-  ```
-
-  Expect this to take a while. Run it in the background and let it
-  finish; do not sample a subset and extrapolate.
-
-- [ ] **Step 2: Triage every missed mutant**
-
-  This is the actual product of WS4 — the score is bookkeeping, the
-  misses are the findings. Any mutant that survives here survived a
-  witness that WS3 already saw fire on a hand-planted defect, so it names
-  a behaviour the witness reaches only partly. For each:
-  - **Real hole** — the witness does not discriminate. Write the test
-    that catches the mutant. This strengthens a security claim and is the
-    reason the workstream exists.
-  - **Equivalent mutant** — the mutation genuinely does not change
-    behaviour. Record it in `model/claims.toml` with a one-line reason;
-    do not silently exclude it.
-
-- [ ] **Step 3: Add the tests**
-
-  One commit per claim whose witnesses gained a test, with a message
-  naming the mutant that motivated it, e.g.
-  `test(egress): catch a mutant that made the default policy permissive`.
-  Never reword the claim to match a weak witness.
-
-- [ ] **Step 4: Re-run and record the baseline**
-
-  ```sh
-  cargo run -p xtask -- mutants-witnesses
-  ```
-
-  Write each claim's post-fix score into `model/claims.toml`:
-
-  ```toml
-  # Measured, not asserted. This is the observed mutation score for this
-  # claim's witnesses against its enforced_by files; the gate fails on
-  # regression below it, and raising it requires re-measuring.
-  mutation_baseline = 0.87
-  ```
-
-- [ ] **Step 5: Commit**
-
-## Task 14: Nightly lane and non-regression gate
-
-**Files:**
-- Modify: `.github/workflows/security.yml`
-- Modify: `xtask/src/mutants_witnesses.rs` (add `--check-baseline`)
-- Modify: `specs/VERIFICATION.md`
-
-**Interfaces:**
-- Consumes: `mutation_baseline` from Task 13.
-- Produces: a nightly job that fails when any claim's measured score drops below its recorded baseline.
-
-- [ ] **Step 1: Implement `--check-baseline`, including the ratchet**
-
-  Compare measured to recorded per claim; exit nonzero listing every
-  claim that regressed, with the mutants that newly survived. Do not fail
-  on a claim scoring *above* its baseline — report it and tell the
-  operator to re-record.
-
-  Per S3, the gate also has to defend against being disarmed. Lowering
-  `mutation_baseline` makes a regression pass and reads as a one-character
-  diff. Add a second check that runs on every invocation, not just in the
-  nightly:
-
-  ```rust
-  /// A recorded baseline may be raised freely; lowering one requires an
-  /// explicit `--rebaseline` and a written reason, because a quietly
-  /// lowered baseline is indistinguishable from a fixed regression.
-  fn check_baseline_not_silently_lowered(
-      previous: &BaselineSet,   // parsed from git HEAD's model/claims.toml
-      current: &BaselineSet,
-      rebaseline: bool,
-  ) -> Result<()>;
-  ```
-
-  Without `--rebaseline`, any claim whose recorded baseline decreased is
-  an error naming the claim, both numbers, and the flag. With
-  `--rebaseline`, require a non-empty `mutation_baseline_reason` on each
-  lowered claim and print it, so the justification lands in the diff and
-  the CI log rather than in a PR comment that ages out.
-
-  Write the failing test first:
-
-  ```rust
-  #[test]
-  fn lowering_a_baseline_without_the_flag_is_rejected() {
-      let prev = baselines(&[("MVM-SEC-10", 0.87)]);
-      let cur = baselines(&[("MVM-SEC-10", 0.42)]);
-      let err = check_baseline_not_silently_lowered(&prev, &cur, false).unwrap_err();
-      assert!(err.to_string().contains("MVM-SEC-10"));
-      assert!(err.to_string().contains("--rebaseline"));
-  }
-
-  #[test]
-  fn raising_a_baseline_needs_no_flag() {
-      let prev = baselines(&[("MVM-SEC-10", 0.87)]);
-      let cur = baselines(&[("MVM-SEC-10", 0.94)]);
-      assert!(check_baseline_not_silently_lowered(&prev, &cur, false).is_ok());
-  }
-  ```
-
-  Narrowing `enforced_by` has the same disarming effect and is harder to
-  gate mechanically — a legitimate refactor moves files. Do not try to
-  automate it; state in the WS4 PR that shrinking a claim's
-  `enforced_by` is a review red flag on par with deleting a witness, so
-  reviewers know to look.
-
-- [ ] **Step 2: Add the nightly job**
-
-  `security.yml` runs on release tags, nightly cron, and manual dispatch,
-  and is invisible on PRs — correct for a job of this cost, but it means
-  the job must be validated by explicit dispatch rather than by opening a
-  PR:
-
-  Every action is SHA-pinned per S6. Resolve each with
-  `gh api repos/<owner>/<repo>/git/ref/tags/<tag> -q .object.sha` and
-  substitute; do not copy a placeholder through.
-
-  ```yaml
-    claim-witness-mutants:
-      name: Claim witnesses discriminate
-      runs-on: ubuntu-latest
-      timeout-minutes: 180
-      env:
-        # S2: the job runs mutated security code. Both roots are
-        # redirected so a mutant cannot reach a real ~/.mvm even on a
-        # runner that has one.
-        MVM_HOME: ${{ runner.temp }}/mutants-mvm-home
-        HOME: ${{ runner.temp }}/mutants-mvm-home
-      steps:
-        - uses: actions/checkout@<sha>          # v4
-        - uses: dtolnay/rust-toolchain@<sha>    # stable
-        - uses: taiki-e/install-action@<sha>    # v2
-          with:
-            tool: nextest,cargo-mutants
-        - name: Confirm the run is hermetic
-          run: |
-            mkdir -p "$MVM_HOME"
-            test ! -e "$HOME/.mvm/keys" || { echo "real keystore reachable"; exit 1; }
-        - name: Mutation-test every claim's witnesses
-          run: cargo run -p xtask -- mutants-witnesses --check-baseline
-        - name: Upload summary
-          if: always()
-          uses: actions/upload-artifact@<sha>   # v4
-          with:
-            name: mutants-witnesses-summary
-            path: target/mutants-witnesses/summary.json
-            retention-days: 30
-  ```
-
-  Install `cargo-mutants` as a hard step. If the tool is missing the job
-  must fail, not skip — a gate that degrades to a no-op reports green.
-
-  The summary artifact carries mutant identities and scores, not test
-  output, so S1 does not apply to it. Keep it that way: if the summary
-  ever grows a field holding captured stdout, it inherits S1's problem.
-
-- [ ] **Step 3: Wire the fastest claim into the PR lane**
-
-  Per S7. The nightly is invisible on PRs, so a change that weakens a
-  witness merges green and someone else finds out at 04:00. Add one fast
-  claim to the PR path — MVM-SEC-10, the same one Task 10 probed, which
-  is pure policy resolution with no VM boot. In `.github/workflows/ci.yml`
-  and `.github/workflows/ci-full.yml`, after the claim-catalog step:
-
-  ```yaml
-      - name: Claim witnesses discriminate (fast claim)
-        run: cargo run -p xtask -- mutants-witnesses --check-baseline --claim MVM-SEC-10
-  ```
-
-  Only add this if Task 10's measured wall-clock for that one claim fits
-  the PR budget. If it does not, leave the PR lane alone and record the
-  number — an honestly deferred check beats a lane everyone learns to
-  ignore because it doubled PR time.
-
-- [ ] **Step 4: Validate by dispatch, not by PR**
-
-  ```sh
-  gh workflow run security.yml --ref docs/plan-272-witness-rigor
-  gh run watch
-  ```
-
-- [ ] **Step 5: Plant two defects and record that the gate fired**
-
-  One for the regression path, one for the ratchet:
-
-  1. Delete an assertion from a witness test whose claim scored well, run
-     `cargo run -p xtask -- mutants-witnesses --check-baseline --claim <that claim>`,
-     confirm nonzero exit naming the newly-surviving mutant, restore it.
-  2. Lower one `mutation_baseline` in `model/claims.toml`, run
-     `--check-baseline` without `--rebaseline`, confirm nonzero exit
-     naming the claim and both numbers, restore it.
-
-  Add both to `specs/VERIFICATION.md` §"Falsifiability":
-
-  ```markdown
-  | `mutants-witnesses --check-baseline` | Delete an assertion from a witness test so a previously-caught mutant survives | yes |
-  | `mutants-witnesses --check-baseline` | Lower a recorded `mutation_baseline` without `--rebaseline` | yes |
-  ```
-
-- [ ] **Step 6: Document the rule and open the WS4 PR**
-
-  Add to `specs/VERIFICATION.md` §"The rules". R5 was established by
-  WS3's hand sweep; this row records the mechanism that keeps it true:
-
-  ```markdown
-  | R5 | A witness must discriminate. Every witness has been seen to fail on a planted defect, and for claims with a function body to mutate, the measured mutation score may not regress. | `cargo run -p xtask -- mutants-witnesses --check-baseline` + the claim-witness table in §Falsifiability |
-  ```
-
-  PR title: `feat(conformance): keep each claim's witnesses discriminating`.
-  The body leads with the misses found and fixed in Task 13 — mutants that
-  survived a witness WS3 had already seen fire, i.e. partial coverage the
-  hand sweep could not have found — not with the score.
-
----
+## Superseded by #1934
+
+The original WS4 in this plan — `enforced_by` in `model/claims.toml`, an
+`xtask mutants-witnesses` driver, a per-claim `mutation_baseline` and a
+`--rebaseline` ratchet — is **struck**. #1934 shipped the same idea and
+is better on four counts:
+
+| This plan proposed | #1934 does |
+| --- | --- |
+| A hand-maintained `enforced_by` list per claim | Derives the surface from the ledger — a `fn:` witness resolves to its declaring file, using the repo's `#[cfg(test)] mod tests`-beside-the-impl convention |
+| Nightly-only, so invisible on PRs | A millisecond **surface pin** every PR plus the hours-long `--run` nightly, so a claim losing coverage is a reviewable diff |
+| A `--rebaseline` flag guarding a lowered number | `check_accepted_reasons` requires a stated reason per accepted miss, and names the failure mode it prevents |
+| `mutation = "not-applicable"` + reason, hand-written | Reports claims reaching no mutable file and pins them, rather than fabricating a value |
+
+Do not re-propose the struck design. The one gap found reviewing #1934
+is filed as #1946 (hermetic execution), not reimplemented here.
+
+**A note on why the hand sweep was dropped, beyond redundancy.** A
+spot-check ran MVM-SEC-10's seven witnesses before this re-scope. Six
+fired; one appeared not to. The apparent miss was the *defect in the
+wrong place* — `resolve_run_network_policy` calls `NetworkPolicy::deny_all()`
+directly rather than going through `Default`, so neutering the `Default`
+impl never touched the path that witness guards. Re-run against the
+correct line, it fired. A hand sweep's "did not fire" is ambiguous
+between a weak witness and a badly-chosen defect, and disambiguating it
+costs a human read per witness. Mutating the witness's own declaring
+file, as #1934 does, does not have that ambiguity.
 
 ## Non-goals
 
