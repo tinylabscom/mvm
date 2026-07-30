@@ -470,7 +470,30 @@ Then unify + retire the old paths:
       Phase 2 slice one — the runner-side warm-pool claim substrate
       (`specs/plans/255-phase2-warm-pool-substrate.md`) — landed on branch
       `feat/plan-255-phase2-warm-pool`, with the live FC warm pool + capability
-      flip a follow-up slice.
+      flip a follow-up slice. That follow-up
+      (`specs/plans/255-live-fc-warm-claim.md`) built spawn/capture/fork/reseed
+      and then **failed its live KVM validation**
+      (`specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`): the
+      standby parent booted a bare rootfs and panicked for want of the runtime
+      overlay that carries the guest agent. The parent's boot inputs now come
+      from the launch's own `VmStartConfig` through the same mappers a workload
+      boot uses, guarded by shape-equality tests, and a later live run on the
+      same host confirms that half — the parent boots, reaches its guest agent,
+      and the capture writes a `vm_full` checkpoint carrying a 512 MiB
+      `memory.bin`, then releases the parent.
+      Since then the recorded reductions have closed: a claimed child is wired
+      the host channels a cold boot gets (#1917); an egress-allowing launch is
+      **keyed** into the pool rather than excluded from it —
+      `StandbyCompat::vsock_egress` (the launch's *effective* enablement: the
+      policy allows egress **and** the admitted plan binds no secret) partitions
+      the warm set, the parent boots that boolean and no destination, and the
+      allow-list stays host-side on the claimed child's own egress endpoint; and
+      the CLI no longer reserves a parent the runner is about to reserve (#1922),
+      which had made every warm claim refuse with "parent is not in a claimable
+      state" so the pool filled and never drained.
+      `standby_pool` stays **`false`**: the **claim** half has still never
+      executed live, so the post-restore handshake and the child's egress/broker/
+      exit channels remain unproven. The flip is gated on that run.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.

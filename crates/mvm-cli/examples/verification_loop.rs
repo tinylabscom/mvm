@@ -70,7 +70,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// What a standby must match to be claimable (kernel + fixed resources + image).
+/// What a standby must match to be claimable (kernel + fixed resources + image
+/// + whether the guest boots an egress client).
 fn standby_compat() -> StandbyCompat {
     StandbyCompat {
         template_id: None,
@@ -78,6 +79,7 @@ fn standby_compat() -> StandbyCompat {
         vcpus: 2,
         mem_mib: 512,
         image_sha256: None,
+        vsock_egress: false,
     }
 }
 

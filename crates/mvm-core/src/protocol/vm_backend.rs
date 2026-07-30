@@ -627,6 +627,7 @@ mod tests {
             vm_state_dir: "/p/standby-x".into(),
             image_path: None,
             image_sha256: None,
+            vsock_egress: false,
         }
     }
 
@@ -667,6 +668,7 @@ mod tests {
                 state: StandbyState::Idle,
                 image_sha256: None,
                 parent_checkpoint: None,
+                vsock_egress: false,
             },
             &sample_standby_claim(),
         ) {

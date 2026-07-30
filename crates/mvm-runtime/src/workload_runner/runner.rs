@@ -2219,7 +2219,7 @@ mod tests {
             RecordingBrokerRegistrar::new(),
         );
         let launch = standby_launch_config(&rootfs);
-        let spec = sample_standby_spec("parent-a", tmp.path(), &rootfs);
+        let spec = standby_spec_for("parent-a", tmp.path(), &launch);
 
         let handle = runner
             .spawn_standby_captured(
@@ -2264,6 +2264,9 @@ mod tests {
         }
     }
 
+    /// A pool record for a parent of `rootfs`, booting no guest egress client.
+    /// Tests that warm a parent *for a launch* go through [`standby_spec_for`]
+    /// instead, so the record they match on is the one a real spawn would write.
     fn sample_standby_spec(
         id: &str,
         vm_state_dir: &Path,
@@ -2283,6 +2286,21 @@ mod tests {
             vm_state_dir: vm_state_dir.display().to_string(),
             image_path: Some(rootfs.display().to_string()),
             image_sha256: Some("c".repeat(64)),
+            vsock_egress: false,
+        }
+    }
+
+    /// The pool record a spawn for `launch` would write: the base fixture plus
+    /// the egress enablement the compat-key builder derives from that launch, so
+    /// the parent boots the value a claim for the same launch would match on.
+    fn standby_spec_for(
+        id: &str,
+        vm_state_dir: &Path,
+        launch: &VmStartConfig,
+    ) -> mvm_core::vm_backend::StandbySpec {
+        mvm_core::vm_backend::StandbySpec {
+            vsock_egress: crate::egress_shared::effective_vsock_egress(launch),
+            ..sample_standby_spec(id, vm_state_dir, Path::new(&launch.rootfs_path))
         }
     }
 
@@ -2311,7 +2329,7 @@ mod tests {
             RecordingBrokerRegistrar::new(),
         );
         let launch = standby_launch_config(&rootfs);
-        let spec = sample_standby_spec("standby-test", &tmp.path().join("vm"), &rootfs);
+        let spec = standby_spec_for("standby-test", &tmp.path().join("vm"), &launch);
 
         let handle = runner
             .spawn_standby_captured(
@@ -2411,7 +2429,11 @@ mod tests {
             serde_json::to_vec(&envelope).unwrap(),
         )
         .unwrap();
-        let spec = sample_standby_spec("parent-oversized", tmp.path(), &rootfs);
+        // Derive the spec from this launch: the compat key now carries the
+        // launch's egress enablement, so a spec built from the rootfs alone
+        // could refuse for a mismatched key rather than the oversized cmdline
+        // this test is about.
+        let spec = standby_spec_for("parent-oversized", tmp.path(), &launch);
 
         let err = runner
             .spawn_standby_captured(
@@ -2515,10 +2537,10 @@ mod tests {
         );
 
         runner.start(&launch).expect("workload boots");
-        let spec = sample_standby_spec(
+        let spec = standby_spec_for(
             "standby-parity",
             &home.path().join("standby-parity"),
-            Path::new(&rootfs),
+            &launch,
         );
         runner
             .spawn_standby_captured(
@@ -2557,6 +2579,93 @@ mod tests {
         );
         assert_eq!(parent.kernel, workload.kernel);
         assert_eq!(parent.initramfs, workload.initramfs);
+    }
+
+    /// The same parity, for the launch shape the pool used to refuse: one whose
+    /// policy allows egress.
+    ///
+    /// A restored child inherits its cmdline from the parent's saved memory, so
+    /// the only way a warm child ends up with the guest egress client a cold boot
+    /// would have started is for the parent to have started it. This drives both
+    /// paths through the real runner wiring and requires the two specs to be
+    /// equal — and it names the token, so a failure says which side lost it. The
+    /// parent still gets no substitution endpoint and no broker: what it boots is
+    /// the enablement, not the authority.
+    #[test]
+    fn a_parent_warmed_for_an_egress_allowing_launch_boots_that_launchs_shape() {
+        use mvm_core::network_policy::HostPort;
+
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        // `_dir` holds the rootfs's temp dir alive for the whole test.
+        let (_dir, rootfs) = overlay_aware_rootfs("egress-parity");
+        let launch = VmStartConfig {
+            name: "egress-parity".into(),
+            rootfs_path: rootfs.clone(),
+            kernel_path: Some("/img/kernel".into()),
+            network_policy: NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
+            cpus: 2,
+            memory_mib: 512,
+            ..Default::default()
+        };
+
+        let store = CheckpointStore::at(home.path().join("checkpoints"));
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs)),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        runner.start(&launch).expect("workload boots");
+        let spec = standby_spec_for(
+            "standby-egress-parity",
+            &home.path().join("standby-egress-parity"),
+            &launch,
+        );
+        assert!(
+            spec.vsock_egress,
+            "the compat key for this launch must ask for an egress-enabled parent"
+        );
+        runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .expect("warm parent spawns for an egress-allowing launch");
+
+        let booted = runner.driver.booted_specs();
+        assert_eq!(booted.len(), 2, "one workload boot, then one parent boot");
+        let (workload, parent) = (&booted[0], &booted[1]);
+        assert!(
+            workload.cmdline.contains("mvm.vsock_egress=1"),
+            "fixture must boot the guest egress client: {}",
+            workload.cmdline
+        );
+        assert!(
+            parent.cmdline.contains("mvm.vsock_egress=1"),
+            "the parent must boot it too, or every child restored from it has no network: {}",
+            parent.cmdline
+        );
+        assert_eq!(parent.cmdline, workload.cmdline);
+        assert_eq!(parent.blocks, workload.blocks);
+        assert!(
+            !parent.cmdline.contains("api.example.com"),
+            "the parent's cmdline must name no destination: {}",
+            parent.cmdline
+        );
+        assert!(
+            parent.vsock.is_empty(),
+            "an egress-enabled parent still wires no egress channel to dial"
+        );
+        assert!(!parent.trusted_builder);
     }
 
     // ── Warm claim: the guarded fork of a clean parent into a fresh child ──────
@@ -2688,6 +2797,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: None,
             parent_checkpoint: None,
+            vsock_egress: false,
         }
     }
 
@@ -2822,6 +2932,75 @@ mod tests {
             pool.load("warm-parent").unwrap().state,
             StandbyState::Claimed,
             "the parent is reserved so a concurrent claim cannot double-claim it"
+        );
+    }
+
+    /// Where a claimed child's egress *destinations* come from: its own launch
+    /// policy, threaded into its own endpoint at claim time.
+    ///
+    /// This is what makes keying the pool on the enablement boolean sound. The
+    /// parent boots only whether a guest egress client starts; every host:port a
+    /// workload may reach is resolved here, per child, from that child's policy —
+    /// so a shared parent has no launch's allow-list to hand to the next claim.
+    #[test]
+    fn a_claimed_childs_endpoint_gets_its_own_launchs_allow_list() {
+        use mvm_core::network_policy::HostPort;
+
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = parent_rootfs_digest(&parent_meta).unwrap().to_string();
+
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let mut handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        // The parent was warmed for an egress-enabled launch, so it is claimable
+        // by one.
+        handle.vsock_egress = true;
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+
+        let policy = NetworkPolicy::allow_list(vec![
+            HostPort::new("api.example.com", 443),
+            HostPort::new("logs.example.com", 443),
+        ]);
+        let mut claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+        claim.network_policy = policy.clone();
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+        };
+
+        runner
+            .claim_standby(&ctx, &handle, &claim)
+            .expect("claim an egress-enabled parent");
+
+        let seen = runner.spawner.seen.lock().unwrap();
+        let recorded = seen.as_ref().expect("the child got its own endpoint");
+        assert_eq!(
+            recorded.policy, policy,
+            "the child's endpoint must enforce the launch's own allow-list, not the parent's"
         );
     }
 

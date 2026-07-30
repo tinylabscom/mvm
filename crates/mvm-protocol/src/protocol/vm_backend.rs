@@ -718,6 +718,13 @@ pub struct StandbySpec {
     pub image_path: Option<String>,
     /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
     pub image_sha256: Option<String>,
+    /// Whether the parent boots the guest's vsock egress client on
+    /// (see [`StandbyCompat::vsock_egress`]).
+    ///
+    /// The spawn takes this from the compat key it is recording rather than
+    /// re-deriving it, so the parent that boots and the record a claim matches
+    /// can never describe different guests.
+    pub vsock_egress: bool,
 }
 
 /// The base-compat key — everything a standby fixes at spawn and must therefore match the
@@ -742,6 +749,22 @@ pub struct StandbyCompat {
     /// `Some(sha256-hex)` for a standby captured from a rootfs; `None` only for
     /// one that carries no rootfs.
     pub image_sha256: Option<String>,
+    /// Whether the guest boots with its in-guest vsock egress client started.
+    ///
+    /// A restored child inherits its kernel cmdline from the parent's saved
+    /// memory rather than deriving its own, so the one guest-visible egress
+    /// token (`mvm.vsock_egress=1`) is fixed at the parent's boot and cannot be
+    /// changed at claim time. A launch whose guest would start that client must
+    /// therefore claim a parent that started it, and a launch whose guest would
+    /// not must claim one that did not — hence a compat field rather than a
+    /// launch-shape exclusion.
+    ///
+    /// This is the *enablement* only. The set of destinations a workload may
+    /// reach is resolved host-side, on the claimed child's own egress endpoint,
+    /// from that launch's own policy — so a shared parent carries no launch's
+    /// allow-list and there is nothing per-launch here to leak to the next
+    /// claim.
+    pub vsock_egress: bool,
 }
 
 /// A recorded standby (persisted as `~/.mvm/pool/<id>/standby.json`).
@@ -776,6 +799,14 @@ pub struct StandbyHandle {
     /// lives a layer up; the runtime converts at its boundary.
     #[serde(default)]
     pub parent_checkpoint: Option<String>,
+    /// Whether this parent booted its guest's vsock egress client on
+    /// (see [`StandbyCompat::vsock_egress`]).
+    ///
+    /// Defaults to `false` so a record written before the field existed reads as
+    /// a parent that booted no egress client — which is what those parents did,
+    /// and which keeps them claimable only by launches whose guest wants none.
+    #[serde(default)]
+    pub vsock_egress: bool,
 }
 
 impl StandbyHandle {
@@ -787,11 +818,13 @@ impl StandbyHandle {
             vcpus: self.vcpus,
             mem_mib: self.mem_mib,
             image_sha256: self.image_sha256.clone(),
+            vsock_egress: self.vsock_egress,
         }
     }
 
-    /// A launch may claim this standby only if its kernel, fixed resources, and image
-    /// sha256 all match exactly — no silent wrong-kernel, wrong-size, or wrong-image boot.
+    /// A launch may claim this standby only if its kernel, fixed resources, image
+    /// sha256 and guest egress enablement all match exactly — no silent
+    /// wrong-kernel, wrong-size, wrong-image or no-network boot.
     pub fn is_compatible(&self, want: &StandbyCompat) -> bool {
         &self.compat() == want
     }
@@ -1053,6 +1086,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: None,
             parent_checkpoint: None,
+            vsock_egress: false,
         };
         let json = serde_json::to_string(&h).unwrap();
         let back: StandbyHandle = serde_json::from_str(&json).unwrap();
@@ -1064,6 +1098,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            vsock_egress: false,
         };
         assert!(back.is_compatible(&want));
         // wrong kernel, wrong cpus, and wrong mem each break compat.
@@ -1092,6 +1127,23 @@ mod tests {
         assert!(!hvf_handle.is_compatible(&want)); // None ≠ Some
         assert!(!hvf_handle.is_compatible(&StandbyCompat {
             image_sha256: Some("d".repeat(64)),
+            ..want.clone()
+        }));
+        // Guest egress enablement partitions the pool in both directions: a
+        // parent that booted no egress client cannot serve a launch whose guest
+        // wants one (the child would silently have no network), and a parent
+        // that booted one cannot serve a launch whose guest must not have it.
+        assert!(!h.is_compatible(&StandbyCompat {
+            vsock_egress: true,
+            ..want.clone()
+        }));
+        let egress_parent = StandbyHandle {
+            vsock_egress: true,
+            ..h.clone()
+        };
+        assert!(!egress_parent.is_compatible(&want));
+        assert!(egress_parent.is_compatible(&StandbyCompat {
+            vsock_egress: true,
             ..want
         }));
     }
@@ -1119,8 +1171,9 @@ mod tests {
         assert!(!StandbyState::Claimed.is_claimable());
     }
 
-    /// Old standby.json records written before the image_sha256 field was added
-    /// must still deserialise cleanly via `#[serde(default)]`.
+    /// Old standby.json records written before the image_sha256 and
+    /// vsock_egress fields were added must still deserialise cleanly via
+    /// `#[serde(default)]`.
     #[test]
     fn standby_handle_old_record_without_image_sha_deserialises_as_none() {
         let old_json = r#"{
@@ -1136,6 +1189,10 @@ mod tests {
         }"#;
         let h: StandbyHandle = serde_json::from_str(old_json).unwrap();
         assert_eq!(h.image_sha256, None, "absent field must default to None");
+        assert!(
+            !h.vsock_egress,
+            "a record from before the field existed booted no egress client"
+        );
         assert!(!h.is_saved_state(), "pid != 0 → live standby");
         // An old libkrun standby is compatible with a libkrun launch (both None).
         let want = StandbyCompat {
@@ -1144,8 +1201,16 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            vsock_egress: false,
         };
         assert!(h.is_compatible(&want));
+        assert!(
+            !h.is_compatible(&StandbyCompat {
+                vsock_egress: true,
+                ..want
+            }),
+            "an old record must never satisfy a launch whose guest needs egress"
+        );
     }
 
     /// An HVF saved-standby uses pid=0 (no running supervisor) and must be treated
@@ -1165,6 +1230,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: Some("dd".repeat(32)),
             parent_checkpoint: None,
+            vsock_egress: false,
         };
         assert!(saved.is_saved_state());
         // serde roundtrip preserves the image sha and pid=0.

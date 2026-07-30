@@ -169,6 +169,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 512,
             image_sha256: None,
+            vsock_egress: false,
         }
     }
 
@@ -187,6 +188,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: c.image_sha256,
             parent_checkpoint: None,
+            vsock_egress: c.vsock_egress,
         }
     }
 

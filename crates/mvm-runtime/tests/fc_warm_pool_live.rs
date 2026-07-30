@@ -108,6 +108,9 @@ fn standby_spec(id: &str, images: &LiveImages, home: &Path) -> StandbySpec {
             .into_owned(),
         image_path: Some(images.rootfs.to_string_lossy().into_owned()),
         image_sha256: Some(sha256(&images.rootfs)),
+        // The live launch this parent mirrors is deny-all, so the guest boots no
+        // egress client.
+        vsock_egress: false,
     }
 }
 
