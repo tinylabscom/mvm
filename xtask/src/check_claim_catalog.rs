@@ -22,7 +22,7 @@
 //! frontmatter.
 
 use crate::claims_ledger::{self, Row, Witness};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 const KNOWN_STATUSES: [&str; 4] = ["Shipped", "Preview", "Planned", "Not-claimed"];
@@ -30,8 +30,13 @@ const KNOWN_STATUSES: [&str; 4] = ["Shipped", "Preview", "Planned", "Not-claimed
 pub fn run(workspace: &Path) -> Result<()> {
     let rows = claims_ledger::load(workspace)?;
 
+    let model_path = workspace.join("model").join("claims.toml");
+    let model_toml = std::fs::read_to_string(&model_path)
+        .with_context(|| format!("reading {}", model_path.display()))?;
+
     let mut errors: Vec<String> = Vec::new();
     structural_checks(&rows, &mut errors);
+    ledger_witnesses_are_known_to_the_model(&rows, &model_toml, &mut errors);
 
     let mut needles: Vec<Needle> = Vec::new();
     for row in &rows {
@@ -98,6 +103,70 @@ impl Needle {
             found: false,
         }
     }
+}
+
+/// Every witness the ADR ledger names must also appear in
+/// `model/claims.toml` for the same claim.
+///
+/// R1 makes the model the single source, so the ledger table is allowed to
+/// be a representative anchor — a subset — but never to name a witness the
+/// model has never heard of. Nothing else compares the two: this gate
+/// resolves the ledger's witnesses against the tree, `check-conformance`
+/// compares the model against `CONFORMANCE.md`, and
+/// `check-mutation-witnesses` derives its surface from the ledger. A
+/// witness added to the ADR table but not to the model was invisible to
+/// all three, which is how two claims had already drifted.
+fn ledger_witnesses_are_known_to_the_model(
+    rows: &[Row],
+    model_toml: &str,
+    errors: &mut Vec<String>,
+) {
+    for row in rows {
+        let id = format!("MVM-SEC-{:02}", row.number);
+        let Some(model) = model_claim_witnesses(model_toml, &id) else {
+            errors.push(format!(
+                "claim {}: ledger row has no `[[claim]]` with id = \"{id}\" in model/claims.toml",
+                row.number
+            ));
+            continue;
+        };
+        for w in &row.witnesses {
+            let token = w.token();
+            if !model.contains(&token) {
+                errors.push(format!(
+                    "claim {}: ledger names witness `{token}` that model/claims.toml does not \
+                     list for {id}. The model is the single source — add it there first.",
+                    row.number
+                ));
+            }
+        }
+    }
+}
+
+/// The `witnesses = [...]` tokens recorded for `id` in `model/claims.toml`.
+///
+/// Deliberately a small hand parser rather than a serde model: this gate
+/// must keep working when the claim schema grows a field, and it only ever
+/// needs one of them.
+fn model_claim_witnesses(model_toml: &str, id: &str) -> Option<Vec<String>> {
+    let needle = format!("id = \"{id}\"");
+    let start = model_toml.find(&needle)?;
+    let rest = &model_toml[start..];
+    // Stop at the next claim so a missing `witnesses` key cannot silently
+    // borrow the following claim's list.
+    let scope_end = rest[needle.len()..]
+        .find("[[claim]]")
+        .map_or(rest.len(), |i| i + needle.len());
+    let scope = &rest[..scope_end];
+    let list_start = scope.find("witnesses = [")? + "witnesses = [".len();
+    let list_end = list_start + scope[list_start..].find(']')?;
+    Some(
+        scope[list_start..list_end]
+            .split(',')
+            .map(|t| t.trim().trim_matches('"').to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+    )
 }
 
 fn structural_checks(rows: &[Row], errors: &mut Vec<String>) {

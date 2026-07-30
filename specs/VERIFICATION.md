@@ -25,9 +25,22 @@ row below records a defect that was planted to prove the gate fires.
 | `check-honesty` (R2) | Add "MVM-SEC-07 proves cargo deps are audited" to `README.md` | yes |
 | `meta` (R3) | Register `MVM-SEC-99` with no scenario, or remove a scenario's ID tag | yes |
 | `check-deferrals` (R4) | Add `// TODO example` to a production source file outside an exemption | yes |
+| `check-abi-layout` | Add a `#[repr(C)]` struct with no `size_of`/`align_of` assertion | yes |
+| `check-abi-layout` | Mention `size_of::<T>()` in a comment instead of asserting it | yes |
 
 The `meta` gate also catches the reverse direction: a scenario tagged with an
 unregistered ID, or a scenario whose level tag disagrees with the register.
+
+The layout contracts `check-abi-layout` requires were each planted against
+too, since the gate only proves an assertion is present and the assertion is
+what has to discriminate. A same-type field reorder is the case of interest:
+it changes no types, so nothing but an offset assertion sees it.
+
+| Contract | Planted defect | Reported |
+| --- | --- | --- |
+| `hv_vcpu_exit_exception_t` | Swap the `syndrome` and `virtual_address` `u64` fields | yes |
+| `SockaddrVm` | Revert to the pre-6.0 `svm_zero: [u8; 4]` shape | yes |
+| `DmTargetSpec` | Swap the `sector_start` and `length` `u64` fields | yes |
 
 ## What this suite does not establish
 

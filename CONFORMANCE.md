@@ -59,7 +59,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-02` | `build` | No guest binary can elevate to uid 0 | `fn:set_no_new_privs`, `fn:virtiofs_mount_flags_keep_workspace_read_only` |
+| `MVM-SEC-02` | `build` | No guest binary can elevate to uid 0 | `fn:set_no_new_privs`, `fn:virtiofs_mount_flags_keep_workspace_read_only`, `ci:check-abi-layout` |
 
 ## host_services
 
@@ -107,7 +107,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts` |
+| `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts`, `ci:check-abi-layout` |
 
 ## Cited authorities
 
