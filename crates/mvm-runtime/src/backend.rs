@@ -433,13 +433,14 @@ pub enum AnyBackend {
     /// closed with a typed error the first time the backend is actually
     /// used, not at construction.
     Wasm(WasmBackend),
-    /// Apple Containerization-framework backend skeleton — see
-    /// [`crate::apple_container_backend`]. Selectable only via explicit
+    /// Apple Container backend — see [`crate::apple_container_backend`].
+    /// Boots Apple's container kernel + vminitd initfs on the in-house HVF
+    /// supervisor. Selectable only via explicit
     /// `--hypervisor apple-container` (alias `container`); `auto_select`
     /// never falls through here. Always constructible and side-effect free;
-    /// every operation that would touch a real VM fails closed with a typed
-    /// error naming the milestone that provides it, since no
-    /// Containerization-framework integration exists yet.
+    /// `start` fails closed with a typed error (missing artifact,
+    /// unsupported config, or the final agent-bring-up milestone) rather
+    /// than silently falling back.
     AppleContainer(AppleContainerBackend),
     /// Docker shared-kernel container dev tier — see
     /// [`crate::docker_backend`]. Selectable only via explicit
@@ -551,10 +552,11 @@ impl AnyBackend {
     /// backends each drop a distinct marker under `vm_state_dir(name)`:
     /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`.
     ///
-    /// Returns `None` when no marker is present — the VM isn't one of the
-    /// pid-file backends (e.g. Apple Container, which tracks state
-    /// out-of-band) or doesn't exist. Callers fall back to the platform
-    /// default in that case.
+    /// Returns `None` when no marker is present — the VM doesn't exist, or
+    /// isn't one of the pid-file backends (Apple Container boots through
+    /// the same HVF supervisor, so its live VMs surface under the HVF
+    /// marker until its own lifecycle lands). Callers fall back to the
+    /// platform default in that case.
     pub fn for_started_vm(name: &str) -> Option<Self> {
         let dir = mvm_core::config::vm_state_dir(name);
         catalog::started_vm_probe_descriptors()
@@ -809,7 +811,8 @@ impl AnyBackend {
     ///
     /// Each backend converts `VmStartConfig` into its own internal
     /// configuration (e.g., Firecracker allocates a VmSlot and builds
-    /// a `FlakeRunConfig`; Apple Container creates a LinuxContainer).
+    /// a `FlakeRunConfig`; Apple Container assembles an HVF supervisor
+    /// config for the container kernel + vminitd initfs).
     pub fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         self.inner().start(config)
     }

@@ -99,6 +99,9 @@ jobs:
       - name: No host-nix invocation (builds route through the builder VM)
         run: cargo run -p xtask -- check-no-host-nix
 
+      - name: No Virtualization.framework / Containerization Swift (Apple Container rides the in-house HVF VMM)
+        run: cargo run -p xtask -- check-no-vz
+
       - name: No forbidden dependency families
         run: cargo run -p xtask -- check-forbidden-deps
 

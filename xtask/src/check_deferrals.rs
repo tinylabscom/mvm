@@ -56,10 +56,6 @@ const EXEMPTIONS: &[(&str, &str)] = &[
         "crates/mvm-sdk/src/compile/mvm_pin.rs",
         "tracked release-time pin-bump automation; resolves when the xtask exists",
     ),
-    (
-        "crates/mvm-runtime/src/vm/vminitd_client.rs",
-        "tracked vminitd vsock:1024 connection plumbing; resolves when guest init system is wired",
-    ),
 ];
 
 /// Run the R4 gate.

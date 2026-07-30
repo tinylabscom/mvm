@@ -1,8 +1,15 @@
 # Plan 271: Apple Container backend — same boot contract through vminitd
 
-**Status:** Stage 1 (backend skeleton) implemented; stages 2–4 designed below.
+**Status:** Stage 1 (backend skeleton) merged; stage 2 (HVF boot + vminitd transport + injection) implemented; stages 3–4 designed below.
 **Owner:** mvm core.
 **Depends on:** universal initramfs + `ActivateEnvironment` (PR #1914).
+
+> **Design change (stage 2, as built):** the Swift/Virtualization.framework
+> shim originally planned for stage 2 was abandoned (PR #1939 closed). The
+> container kernel and the `initfs.ext4` that carries `/sbin/vminitd` boot
+> on mvm's own HVF supervisor instead — no Swift, no
+> Virtualization.framework, no `swift/` tree. Apple's code runs only
+> guest-side, unmodified. Stages 2–4 below describe the design as built.
 
 ## Goal
 
@@ -13,12 +20,14 @@ environment-activation step, dm-verity rootfs + runtime overlay, virtio-fs
 volumes, privilege drop to uid 901, and the standard operational RPC surface
 after activation.
 
-Apple's framework is Swift-only and owns two things we cannot replace:
-the kernel boot path and `vminitd` as guest PID 1. The universal initramfs
-therefore does not apply verbatim; the **activation contract** applies
-through `vminitd`'s existing gRPC API instead. The contract, the guest
-binaries, the mount logic (`mvm_agentd::guest_mount`), and the RPC surface
-are unchanged.
+Apple's containerization package supplies two guest-side artifacts we do
+not rebuild: the container kernel and `vminitd` as guest PID 1. The boot
+itself runs on mvm's own HVF supervisor (the original Swift/
+Virtualization.framework shim design was abandoned — see the status note
+above). The universal initramfs therefore does not apply verbatim; the
+**activation contract** applies through `vminitd`'s existing gRPC API
+instead. The contract, the guest binaries, the mount logic
+(`mvm_agentd::guest_mount`), and the RPC surface are unchanged.
 
 ## Design
 
@@ -26,8 +35,10 @@ are unchanged.
 Firecracker / libkrun / HVF / QEMU / WHP:  kernel + universal initramfs
                                            → agent is PID 1 → ActivateEnvironment over vsock:5252
 
-Apple Container:                           framework kernel + vminitd (PID 1, vsock:1024)
-                                           → host drives SandboxContext gRPC
+Apple Container:                           container kernel + initfs.ext4 on the in-house HVF VMM,
+                                           init=/sbin/vminitd (PID 1, vsock:1024)
+                                           → host drives SandboxContext gRPC over the supervisor's
+                                             vsock port bridge
                                            → agent started as root process → same mounts → uid 901
 ```
 
@@ -37,7 +48,7 @@ Activation equivalence:
 | --- | --- | --- |
 | Fail-closed init gate | agent is PID 1; only `ActivateEnvironment` accepted | agent started only after host prepares env; agent's own RPC gate unchanged (`NotActivated` until activation completes) |
 | Root env delivery | `ActivateEnvironment` over vsock:5252 | serialized `ActivateEnvironment` written via `WriteFile` to `/run/mvm/activation.json`, then `CreateProcess`/`StartProcess` for the agent with `MVM_ACTIVATION_FILE` |
-| Rootfs + overlay mount | agent `guest_mount` (dm-verity, plain, virtiofs) | identical — the agent runs as root in the container VM, which has `CAP_SYS_ADMIN`; block devices are attached by the framework |
+| Rootfs + overlay mount | agent `guest_mount` (dm-verity, plain, virtiofs) | identical — the agent runs as root in the container VM, which has `CAP_SYS_ADMIN`; block devices are attached by the HVF supervisor in the activation environment's fixed slot order |
 | Pivot | `pivot_to_root` (PID 1 owns `/`) | agent `chroot`s workload children into the verified root; vminitd keeps `/` |
 | Privilege drop | uid/gid 901 | uid/gid 901 (same `WORKLOAD_UID`/`WORKLOAD_GID`) |
 | Operational RPCs | vsock:5252 | vsock:5252, reached through `ProxyVsock` or direct CID connect |
@@ -45,10 +56,10 @@ Activation equivalence:
 
 What is honestly different, and must be documented as such:
 
-- The kernel is supplied by the framework (or by us through the framework's
-  kernel slot), not bundled by mvm. Verified boot of the rootfs still holds —
+- The kernel is an Apple-built artifact cached on the host, not bundled by
+  mvm. Verified boot of the rootfs still holds —
   dm-verity runs in-guest — but the *kernel image* chain of custody is the
-  framework's, exactly like libkrun's bundled kernel.
+  artifact cache's, exactly like libkrun's bundled kernel.
 - The fail-closed gate is weaker at the very first hop: `vminitd`'s own gRPC
   listens from boot. That surface is Apple's signed component, not a
   workload-reachable mvm verb; the mvm agent still refuses every operational
@@ -72,68 +83,72 @@ What is honestly different, and must be documented as such:
   `snapshot`/`warm_start` all fail closed with the typed error.
 - Gate: workspace clippy + tests + policy xtasks green.
 
-### Stage 2 — Swift Containerization shim
+### Stage 2 — HVF boot of the Apple guest stack + vminitd transport (this change)
 
-- New SwiftPM package `swift/container-shim/` vendoring
-  `github.com/apple/containerization` (pin to a tagged release; record the
-  pin and its SHA in the shim's `Package.swift` comment and in
-  `xtask check-forbidden-deps` allowance if the checker scans it).
-- `@_cdecl` exports: `mvm_ac_create(config_json) -> handle`,
-  `mvm_ac_start(handle)`, `mvm_ac_stop(handle)`,
-  `mvm_ac_vsock_fd(handle, port) -> fd`, `mvm_ac_destroy(handle)`.
-  Config JSON carries: kernel path, rootfs block, verity sidecar, overlay
-  pair, virtiofs shares, cpus/mem, vm name.
-- Rust binding crate `crates/mvm-runtime/src/apple_container/sys.rs`
-  (hand-written `extern "C"`, `// SAFETY:` per call) built by `build.rs`
-  invoking `swift build` behind the `apple-container` Cargo feature —
-  off by default so the default build has no SwiftPM dependency (same
-  discipline as `wasm-backend`).
-- Kernel: reuse the mvm workload kernel artifact
-  (`mvmctl kernel build --which workload`) in the framework's kernel slot.
-- Entitlements: add `com.apple.vm.networking` to
-  `assets/mvmctl.entitlements` only if the endpoint path needs vmnet;
-  document the codesign step in the milestone PR.
-- Verification: a macOS-only `#[cfg(all(target_os = "macos",
-  feature = "apple-container"))]` smoke test that creates and destroys a VM
-  running the stock container kernel — gated `MVM_AC_E2E=1`, ignored by
-  default (mirrors `MVM_LIBKRUN_E2E`).
+- Boot path: the container kernel (`vmlinux`) and `initfs.ext4` resolve from
+  `<mvm-cache>/apple-container/` (typed `ArtifactMissing{what,path,hint}`
+  naming the build command — `make kernel` / `make init` from Apple's
+  containerization package) and boot on the in-house HVF supervisor. The
+  initfs is the **root block device**, attached *last* so the workload disks
+  keep the activation environment's fixed slot names (rootfs `/dev/vda`,
+  verity `/dev/vdb`, overlay `/dev/vdc`, overlay verity `/dev/vdd`); the
+  cmdline is `console=ttyAMA0 … root=/dev/vd<last> rw init=/sbin/vminitd`.
+  Deviation from Apple's own runtime, documented: their cmdline uses
+  `console=hvc0` (virtio-console), which our VMM does not implement — the
+  PL011 UART is the only serial console, so the console token differs and
+  nothing else does.
+- Disk shapes: sealed (both verity sidecars) and plain (neither) only;
+  partial sets, virtiofs-root dev boots, separate initrds, and extra
+  block-device volumes fail closed with a typed `UnsupportedConfig`.
+- vminitd's control channel (guest vsock port 1024) rides the supervisor's
+  existing port-bridge mechanism (`console_data_sockets` →
+  `ConsoleBridge::bind_ports`), one host UDS per guest port — no new VMM
+  code.
+- Transport: `h2` + hand-written `prost` wire types (no protoc/
+  `prost-build` in the pipeline; `h2`/`http` were already in the lockfile
+  via the S3 client tree). A hand-rolled HTTP/2 client was rejected: HPACK
+  *decoding* (dynamic tables + Huffman) cannot honestly be minimized. The
+  client is a blocking facade over a single-threaded tokio runtime so the
+  rest of the backend stays synchronous.
+- Injection: `Mkdir /run/mvm` → `WriteFile` agent binary (0755) →
+  `WriteFile` activation.json (0644, the same `ActivateEnvironment` builder
+  every backend uses) → `CreateProcess` (uid 0, `MVM_ACTIVATION_FILE` set)
+  → `StartProcess`.
+- Fail-closed edge: the agent has no non-PID-1 activation entry point yet,
+  so a fully successful `start` tears the VM down and returns a typed
+  `NotImplemented` naming that milestone. `stop`/`status` are real
+  (pid-file, same convention as the HVF driver); `wait`/`logs`/`pause`/
+  `resume` stay fail-closed.
+- Tests: mock h2 gRPC server over `tokio::io::duplex` asserting the exact
+  activation-sequence frames + error paths; pure boot-spec mapping tests
+  (sealed/plain/partial/refusals); artifact resolution tests; pid-guard
+  test; pid-file stop/status tests. E2E: `MVM_AC_E2E=1`, `#[ignore]`d.
 
-### Stage 3 — vminitd gRPC-over-vsock transport
+### Stage 3 — Agent non-PID-1 activation entry
 
-- Generate prost types from `crates/mvm-runtime/src/vm/proto/sandbox_context.proto`
-  (`prost-build` in the existing build pipeline; the proto is already
-  vendored).
-- Transport: HTTP/2 gRPC over the shim's vsock fd using `tonic` with a
-  custom connector, or `h2` hand-framed if the `tonic` dependency tree is
-  rejected at audit time — decision recorded in the stage-3 PR after
-  `cargo deny` output.
-- Fill `vm/vminitd_client.rs` (typed interface already exists): `WriteFile`,
-  `CreateProcess`, `StartProcess`, `WaitProcess`, `KillProcess`,
-  `ProxyVsock`, `Mount`.
-- Tests: in-process mock gRPC server over a Unix socket pair asserting the
-  exact request bytes for the activation sequence; no Apple framework
-  required.
+- Agent flag: `--activation-file <path>` (or the `MVM_ACTIVATION_FILE` env
+  the injection already sets) added to `mvm-guest-agent`: read the env,
+  apply it, then serve; fail closed on malformed JSON.
+- Mount-without-pivot: when not PID 1, the agent enters its own mount
+  namespace (`unshare(CLONE_NEWNS)`) and `chroot`s workload children into
+  the verified root instead of `pivot_root` — vminitd keeps `/`. The
+  `RootfsConfig.in_place` wire field (Docker tier) is the existing seam for
+  "skip the pivot".
+- At that point `start` stops tearing down: the VM stays up, `wait` reads
+  the supervisor's workload-exit file, `logs` reads the console capture.
 
-### Stage 4 — Activation through vminitd + driver wiring
+### Stage 4 — Runner/driver parity
 
-- `AppleContainerDriver: VmmDriver` assembling the framework VM config from
-  `VmmSpec` (blocks: rootfs `/dev/vda`, verity `/dev/vdb`, overlay
-  `/dev/vdc`+`/dev/vdd`; virtiofs shares; vsock ports 1024 + 5252).
-- Boot sequence: shim create/start → connect vminitd:1024 →
-  `WriteFile(/run/mvm/activation.json)` with the serialized
-  `ActivateEnvironment` (same builder as `microvm::activation`) →
-  `CreateProcess` + `StartProcess` for `/sbin/mvm-guest-agent
-  --activation-file /run/mvm/activation.json` as uid 0 → agent performs the
-  identical `guest_mount` sequence and drops to uid 901 → host connects
-  vsock:5252 and proceeds through the standard `WorkloadRunner` broker/exit
-  wiring.
-- Agent flag: `--activation-file <path>` added to `mvm-guest-agent` (reads
-  the env, applies it, then serves; fails closed on malformed JSON).
+- `AppleContainerDriver: VmmDriver` or equivalent wiring so admitted plans
+  reach the backend with the same egress/broker relay sockets the HVF
+  driver assembles (the stage-2 boot path leaves them unwired).
+- virtio-fs shares for `DirShare` volumes through the supervisor's
+  virtiofs device (only the root share exists today).
 - Verification: `MVM_AC_E2E=1` macOS smoke booting the dev image to
   `Ping`; dm-verity sealed smoke reusing the existing
   `mvm-ext4 output mounts on the real kernel` lane's artifacts where
   possible; BDD scenario under `features/suites/` mirroring the
-  initramfs-cache feature.
+  initramfs-cache feature; claim-by-claim review of `security_profile()`.
 
 ## Constraints that do not change
 
