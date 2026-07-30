@@ -134,6 +134,43 @@ egress). They are captured before activation, so the warm-claim path with the
 universal initramfs is not armed yet; it is part of the HVF / warm-claim
 convergence work.
 
+## Future tiers and backends
+
+The universal initramfs assumes a Linux guest kernel with virtio-blk /
+virtio-fs devices and a vsock channel. Tiers that don't provide those get the
+model in adapted form — or honestly not at all:
+
+- **Wasm** (`WasmBackend`, ADR-024) — no Linux kernel and no initramfs: the
+  workload is a WASI module under host `wasmtime`, so `ActivateEnvironment`
+  does not apply. If this tier ever goes beyond demo/preview, the analogous
+  step is a capability handshake over the wasm import channel (the same seam
+  as today's host-mediated `mvm:egress` import): admission binds policy, the
+  module receives exactly the host functions the plan admits, and any
+  kernel/verified-boot/vsock request fails closed. Per ADR-024 it stays
+  opt-in, claim-free, and — if it ever executes real workloads — the engine
+  runs in-guest, never as a host process dependency.
+- **Docker / shared-kernel containers** — there is no container fallback and
+  none is planned: a shared-kernel container is not a microVM (see
+  [Matryoshka model](/security/matryoshka/)). Its init is not
+  `mvm-guest-agent` and its mounts are host-kernel namespaces, not dm-verity
+  block devices, so this boot contract cannot apply without becoming a
+  microVM. A container tier, if one is ever admitted, would be dev-tier only,
+  refused by prod admission, and would carry its own explicitly weaker boot
+  contract rather than sharing this one.
+- **Apple Container** — Apple's `container` framework boots lightweight Linux
+  VMs with its own init and networking/vsock stack. There is no backend
+  variant for it today. Future support means a driver that boots the same
+  kernel + universal initramfs (or runs `mvm-guest-agent` as the guest init)
+  and bridges the activation channel to the framework's vsock transport.
+- **WHP (Windows Hypervisor Platform)** — a future Windows-host backend. The
+  guest side is unchanged: the same kernel + universal initramfs boot and the
+  same `ActivateEnvironment`. The work is entirely host-side — a WHP
+  `VmmDriver`, virtio-blk/virtio-fs device model, and a vsock transport over
+  Hyper-V sockets (`AF_HYPERV`) in place of `AF_VSOCK`. dm-verity runs in the
+  guest, so verified boot is host-agnostic and a WHP backend could target the
+  same Tier 2 posture as HVF/libkrun once its egress gate lands. Until then,
+  WSL2 with nested `/dev/kvm` is the supported Windows-adjacent path.
+
 ## Security properties
 
 - **Fail-closed guest** — no operational RPCs before a successful
