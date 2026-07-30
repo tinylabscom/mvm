@@ -742,7 +742,7 @@ mod runtime_overlay_attach_tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", dir.path());
+        env.isolate_mvm_home(dir.path());
 
         let current = env!("CARGO_PKG_VERSION");
         let pinned = if current == "0.17.0" {
@@ -784,7 +784,10 @@ mod runtime_overlay_attach_tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", dir.path());
+        // Asserting an *absence*, so HOME has to move with MVM_HOME: the
+        // overlay resolver seeds a cold cache from `$HOME/.mvm/cache`, which
+        // would supply the very version this test requires to be missing.
+        env.isolate_mvm_home(dir.path());
 
         let current = env!("CARGO_PKG_VERSION");
         let missing = if current == "0.17.0" {
@@ -820,7 +823,7 @@ mod runtime_overlay_attach_tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", dir.path());
+        env.isolate_mvm_home(dir.path());
         env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
 
         let current = env!("CARGO_PKG_VERSION");
@@ -859,7 +862,7 @@ mod runtime_overlay_attach_tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", dir.path());
+        env.isolate_mvm_home(dir.path());
         env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
 
         let current = env!("CARGO_PKG_VERSION");
@@ -945,7 +948,9 @@ mod universal_initramfs_attach_tests {
     fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", dir.path());
+        // HOME moves with MVM_HOME or the cache under test is not cold: the
+        // initramfs resolver seeds a miss from `$HOME/.mvm/cache`.
+        env.isolate_mvm_home(dir.path());
 
         let mut sc = VmStartConfig::default();
         // Must never return an error: a cold cache falls back to legacy boot
@@ -957,7 +962,7 @@ mod universal_initramfs_attach_tests {
     fn attach_universal_initramfs_if_cached_attaches_from_cache() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", dir.path());
+        env.isolate_mvm_home(dir.path());
 
         let version = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();

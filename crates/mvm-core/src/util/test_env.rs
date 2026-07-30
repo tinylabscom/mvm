@@ -40,6 +40,27 @@ impl TestEnv {
         unsafe { std::env::set_var(key, value) };
     }
 
+    /// Point the whole mvm world at `root`: sets `MVM_HOME` **and** `HOME`.
+    ///
+    /// `MVM_HOME` on its own does not isolate a test. A few resolvers
+    /// deliberately ignore it and read `$HOME/.mvm/cache` directly so an
+    /// isolated session can seed expensive artifacts — the builder VM image,
+    /// the runtime overlay — from the host's shared cache instead of
+    /// rebuilding them. That seed is correct for real use and wrong under
+    /// test: a test that moves only `MVM_HOME` still reads the developer's
+    /// real cache through it, so an assertion that an artifact is *absent*
+    /// holds only on a machine that has never built one. CI is such a
+    /// machine and a contributor's laptop is not, which is how a green
+    /// suite ends up hiding a live regression.
+    pub fn isolate_mvm_home<V>(&mut self, root: V)
+    where
+        V: AsRef<OsStr>,
+    {
+        let root = root.as_ref();
+        self.set("MVM_HOME", root);
+        self.set("HOME", root);
+    }
+
     pub fn remove<K>(&mut self, key: K)
     where
         K: AsRef<OsStr>,
@@ -125,6 +146,25 @@ mod tests {
         assert_eq!(std::env::var(&key).as_deref(), Ok("before"));
         // SAFETY: cleanup for the same process-unique variable used by this test.
         unsafe { std::env::remove_var(&key) };
+    }
+
+    #[test]
+    fn isolate_mvm_home_sets_both_roots_and_restores_them() {
+        let before_home = std::env::var_os("HOME");
+        let before_mvm_home = std::env::var_os("MVM_HOME");
+        let root = "/tmp/mvm-test-env-isolate-both";
+
+        {
+            let mut env = TestEnv::new();
+            env.isolate_mvm_home(root);
+            assert_eq!(std::env::var("MVM_HOME").as_deref(), Ok(root));
+            // The whole point: HOME moves too, so the MVM_HOME-ignoring
+            // default-cache resolvers cannot reach the real one.
+            assert_eq!(std::env::var("HOME").as_deref(), Ok(root));
+        }
+
+        assert_eq!(std::env::var_os("MVM_HOME"), before_mvm_home);
+        assert_eq!(std::env::var_os("HOME"), before_home);
     }
 
     #[test]

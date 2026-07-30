@@ -1527,7 +1527,7 @@ mod tests {
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let mut plan = PlanFixture::new()
             .tenant("local")
@@ -1561,7 +1561,7 @@ mod tests {
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let store = mvm_runtime::checkpoint::CheckpointStore::open();
         let meta = mvm_core::checkpoint::CheckpointMeta::builder(
@@ -1604,7 +1604,7 @@ mod tests {
     fn stopped_vm_is_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
         assert!(
             vm_is_quiesced("no-such-vm-stopped"),
             "stopped VM must be quiesced"
@@ -1619,7 +1619,7 @@ mod tests {
     fn fc_paused_vm_with_matching_marker_is_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let pid = unsafe { libc::getpid() };
         let pid_str = pid.to_string();
@@ -1651,7 +1651,7 @@ mod tests {
     fn fc_running_without_marker_is_not_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let pid = unsafe { libc::getpid() };
 
@@ -1679,7 +1679,7 @@ mod tests {
     fn fc_stale_marker_is_not_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let live_pid = unsafe { libc::getpid() };
         let stale_pid = live_pid.saturating_add(1);
@@ -1711,7 +1711,7 @@ mod tests {
     fn resolve_rootfs_from_mode_json_when_present() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let vm_name = "mode-json-rootfs-vm";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -1745,7 +1745,7 @@ mod tests {
     fn mode_json_rootfs_path_missing_on_disk_produces_actionable_error() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let vm_name = "mode-json-gone-vm";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -1804,7 +1804,7 @@ mod tests {
     fn resource_shape_no_plan_no_flags_uses_defaults() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let store = CheckpointStore::at(tmp.path().join("store"));
         let ckpt_id = seed_checkpoint(&store, "origin-vm");
@@ -2070,7 +2070,7 @@ mod tests {
     fn read_grant_envelope_for_returns_none_when_absent() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let result = read_grant_envelope_for("no-such-vm-read-grant-test");
         assert!(result.is_none());
@@ -2084,7 +2084,7 @@ mod tests {
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let vm_name = "test-fork-grant-read-sidecar";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -2122,7 +2122,7 @@ mod tests {
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let vm_name = "test-fork-grant-predecessor";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -2206,7 +2206,7 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         // Point MVM_HOME somewhere clean so the per-VM dirs have no stale pids.
-        env.set("MVM_HOME", tmp.path().join("mvm"));
+        env.isolate_mvm_home(tmp.path().join("mvm"));
 
         // Construct <mvm_home>/vms/<name>/fc.pid with the current process PID.
         let vm_name = "live-fc-vm-quiesce-test";
@@ -2226,7 +2226,7 @@ mod tests {
     fn resolve_quiesced_vm_rootfs_refuses_live_fc_vm() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path().join("mvm"));
+        env.isolate_mvm_home(tmp.path().join("mvm"));
 
         let vm_name = "live-fc-refuse-test";
         let fc_vms_dir = tmp.path().join("mvm").join("vms").join(vm_name);
@@ -2249,7 +2249,7 @@ mod tests {
     fn stopped_fc_vm_is_quiesced() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path().join("mvm"));
+        env.isolate_mvm_home(tmp.path().join("mvm"));
 
         // No fc.pid written — VM is stopped.
         assert!(
@@ -2320,7 +2320,7 @@ mod tests {
     fn signed_chain_anchor_indexes_a_real_created_entry_and_verify_passes() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let store = CheckpointStore::open();
         let meta = seed_audited_checkpoint(&store, "ckpt-anchor-1", "aa");
@@ -2343,7 +2343,7 @@ mod tests {
     fn chain_anchor_catches_a_fully_consistent_local_reforge() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let store = CheckpointStore::open();
         // The audited original: the chain records ITS content-address.
@@ -2425,7 +2425,7 @@ mod tests {
     fn image_lineage_verifies_against_a_real_signed_chain() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let store = ImageStore::open();
         let g0 = image_node("slot-a", "rev-1", None);
@@ -2456,7 +2456,7 @@ mod tests {
     fn image_lineage_refuses_a_node_absent_from_the_signed_chain() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let store = ImageStore::open();
         let g0 = image_node("slot-a", "rev-1", None);
@@ -2481,7 +2481,7 @@ mod tests {
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let store = ImageStore::open();
         let signer = super::super::host_signer::load_or_init().unwrap();
@@ -2583,7 +2583,7 @@ mod tests {
 
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let store = ImageStore::open();
         let signer = super::super::host_signer::load_or_init().unwrap();

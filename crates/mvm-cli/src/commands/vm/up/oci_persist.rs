@@ -398,7 +398,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
         let cache = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_HOME", cache.path());
+        env.isolate_mvm_home(cache.path());
         env.set(
             crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "download",
@@ -449,7 +449,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
         let cache = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_HOME", cache.path());
+        env.isolate_mvm_home(cache.path());
         env.set(
             crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "build",

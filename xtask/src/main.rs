@@ -41,6 +41,7 @@ mod check_no_string_backend_dispatch;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
 mod check_single_home;
+mod check_test_home_isolation;
 mod check_trust_gradient;
 mod check_two_surfaces;
 mod check_uniform_vsock_egress;
@@ -161,6 +162,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_single_home::run(&workspace)
         }
+        Some("check-test-home-isolation") => {
+            let workspace = workspace_root();
+            check_test_home_isolation::run(&workspace)
+        }
         Some("check-no-network-literals") => {
             let workspace = workspace_root();
             check_no_network_literals::run(&workspace)
@@ -234,7 +239,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -311,6 +316,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-single-home                      Reject host-path derivations that bypass mvm-core::config's single MVM_HOME root"
+            );
+            eprintln!(
+                "  check-test-home-isolation              Reject tests that move MVM_HOME but not HOME in files that can reach the MVM_HOME-ignoring default cache"
             );
             eprintln!(
                 "  check-cli-runtime-surface              Reject mvm_runtime::vm::name_registry + AnyBackend reaches in mvm-cli drive-a-machine code — route through the mvm-client facade"
