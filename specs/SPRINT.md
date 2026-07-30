@@ -64,6 +64,24 @@
       already isolates both roots, and the test binary passed 47/47 across four
       consecutive runs. Needs separate triage as a concurrency flake.
 
+- [x] Cross-root cache-seed hardening (#1925, #1926, #1927, #1928). The three
+      opportunistic seeds that populate an isolated cache root from the host's
+      shared one now share `mvm_build::cache_install`, which owns the single
+      derivation of the default cache root — so the set of places that can read
+      `$HOME` while `MVM_HOME` is set is exactly one, and the
+      `check-test-home-isolation` allowlist shrank from four entries to two.
+      `install_initramfs_into_cache` now verifies the staged image against its
+      `initramfs.hash` sidecar before the rename, closing the one real
+      integrity asymmetry: the hash is SHA-256 of the *uncompressed* cpio (the
+      size sidecar is the compressed length), so this gunzips rather than
+      hashing the file, and it runs at cache-root admission rather than on
+      every resolve to keep a decompress off the boot path. Abandoned
+      `<arch>.tmp.<pid>` staging dirs are now reaped by age (a real 6-day-old
+      orphan was found on a dev host), and the initramfs seed asks the resolver
+      for its artifact dir instead of recovering it from a file path. Three
+      test fixtures had to become realistic — they wrote `b"image"` with a
+      `b"hash"` sidecar, which is why the gap survived review.
+
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
       #1888 (ARM64 `Image` kernels reach Firecracker), #1891 (guest reads the

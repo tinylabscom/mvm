@@ -2290,22 +2290,30 @@ fn builder_vm_source_checkout_root() -> Option<PathBuf> {
 }
 
 fn default_builder_vm_cache_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::default_mvm_cache_dir()).join("builder-vm")
+    crate::cache_install::default_cache_root().join("builder-vm")
 }
 
 fn seed_builder_vm_image_from_default_cache(arch_dir: &Path) -> Result<bool, BuilderVmError> {
-    let source_arch_dir = default_builder_vm_cache_dir().join(host_arch_tag());
-    let target_arch_dir = builder_vm_cache_dir().join(host_arch_tag());
-    if source_arch_dir == target_arch_dir || !source_arch_dir.is_dir() {
-        return Ok(false);
-    }
+    crate::cache_install::seed_on_miss(
+        &builder_vm_cache_dir().join(host_arch_tag()),
+        &default_builder_vm_cache_dir().join(host_arch_tag()),
+        |source_arch_dir| {
+            // Seeding from the default cache is opportunistic. If the host's
+            // shared cache is stale or malformed, skip it and let
+            // source-checkout auto-bootstrap build a fresh image into the
+            // isolated target cache. A missing dir fails validation too.
+            validate_builder_vm_image_cache(source_arch_dir)
+                .ok()
+                .map(|_| source_arch_dir.to_path_buf())
+        },
+        |source_arch_dir| copy_builder_vm_image_files(&source_arch_dir, arch_dir),
+    )
+}
 
-    // Seeding from the default cache is opportunistic. If the host's shared
-    // cache is stale or malformed, skip it and let source-checkout
-    // auto-bootstrap build a fresh image into the isolated target cache.
-    if validate_builder_vm_image_cache(&source_arch_dir).is_err() {
-        return Ok(false);
-    }
+fn copy_builder_vm_image_files(
+    source_arch_dir: &Path,
+    arch_dir: &Path,
+) -> Result<(), BuilderVmError> {
     std::fs::create_dir_all(arch_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("create {}: {e}", arch_dir.display()))
     })?;
@@ -2321,7 +2329,7 @@ fn seed_builder_vm_image_from_default_cache(arch_dir: &Path) -> Result<bool, Bui
             ))
         })?;
     }
-    Ok(true)
+    Ok(())
 }
 
 fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, BuilderVmError> {
@@ -5674,7 +5682,7 @@ mod tests {
         env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let arch = host_arch_tag().to_string();
-        let source_arch_dir = std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir())
+        let source_arch_dir = crate::cache_install::default_cache_root()
             .join("builder-vm")
             .join(&arch);
         std::fs::create_dir_all(&source_arch_dir).unwrap();
@@ -5731,7 +5739,7 @@ mod tests {
         env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let arch = host_arch_tag().to_string();
-        let source_arch_dir = std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir())
+        let source_arch_dir = crate::cache_install::default_cache_root()
             .join("builder-vm")
             .join(&arch);
         std::fs::create_dir_all(&source_arch_dir).unwrap();

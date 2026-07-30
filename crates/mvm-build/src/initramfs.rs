@@ -88,26 +88,23 @@ fn seed_from_default_cache(
     version: &str,
     arch: GuestArch,
 ) -> Result<bool, InitramfsBuildError> {
-    let default_cache_root =
-        PathBuf::from(mvm_core::config::default_mvm_cache_dir()).join("initramfs");
-    if cache_root == default_cache_root {
-        return Ok(false);
-    }
-
-    let source = InitramfsResolver::new(default_cache_root, version).resolve(&arch.to_string());
-    let Ok(source) = source else {
-        return Ok(false);
-    };
-
-    let source_dir = source.image_path.parent().ok_or_else(|| {
-        InitramfsBuildError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "resolved initramfs image has no parent directory",
-        ))
-    })?;
-
-    install_initramfs_into_cache(source_dir, cache_root, version, arch)?;
-    Ok(true)
+    let arch_dir = arch.to_string();
+    crate::cache_install::seed_on_miss(
+        cache_root,
+        &crate::cache_install::default_cache_root().join("initramfs"),
+        |root| {
+            // Ask the resolver for the directory rather than recovering it
+            // from a resolved file path — it is the type that owns the layout.
+            let resolver = InitramfsResolver::new(root, version);
+            resolver
+                .resolve(&arch_dir)
+                .ok()
+                .map(|_| resolver.artifact_dir(&arch_dir))
+        },
+        |source_dir| {
+            install_initramfs_into_cache(&source_dir, cache_root, version, arch).map(|_| ())
+        },
+    )
 }
 
 /// Resolve a cached universal initramfs, or return an error describing why it
@@ -243,10 +240,14 @@ pub fn install_initramfs_into_cache(
     })?;
     std::fs::create_dir_all(parent)?;
 
-    let staging = parent.join(staging_dir_name(&arch.to_string()));
+    let arch_dir = arch.to_string();
+    let staging = parent.join(crate::cache_install::staging_dir_name(&arch_dir));
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }
+    // A run killed between here and the rename below orphans its staging dir
+    // under another pid, which nothing else would ever clean up.
+    crate::cache_install::reap_stale_staging(parent, &arch_dir);
     std::fs::create_dir(&staging)?;
 
     for file in [
@@ -259,6 +260,10 @@ pub fn install_initramfs_into_cache(
         set_cache_perms(&staging.join(file))?;
     }
 
+    // Verify before the rename, so a corrupt artifact never becomes visible
+    // to a resolver.
+    verify_staged_image_hash(&staging)?;
+
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)?;
     }
@@ -267,8 +272,51 @@ pub fn install_initramfs_into_cache(
     mvm_fs::initramfs::read_initramfs_artifact_from_dir(&target_dir).map_err(Into::into)
 }
 
-fn staging_dir_name(arch: &str) -> String {
-    format!("{}.tmp.{}", arch, std::process::id())
+/// Check the staged image against its `initramfs.hash` sidecar.
+///
+/// This is the one choke point every artifact passes through on its way into
+/// a cache root — the download, the local build, and the cross-root seed all
+/// land here — so verifying here covers all three without putting the cost on
+/// the boot path. `resolve()` deliberately stays cheap: it runs on every VM
+/// start, and a decompress-and-hash per start is not affordable.
+///
+/// The build hashes the *uncompressed* cpio, so this decompresses rather than
+/// hashing the compressed file. (`initramfs.size`, checked by the resolver, is
+/// the compressed length — the two sidecars describe different bytes.)
+fn verify_staged_image_hash(staging: &Path) -> Result<(), InitramfsBuildError> {
+    let expected = std::fs::read_to_string(staging.join(mvm_fs::initramfs::INITRAMFS_HASH_FILE))?
+        .trim()
+        .to_ascii_lowercase();
+    let image = staging.join(mvm_fs::initramfs::INITRAMFS_IMAGE_FILE);
+    let actual = sha256_of_gunzipped(&image)?;
+    if actual != expected {
+        return Err(InitramfsBuildError::ChecksumMismatch {
+            name: format!("{} (uncompressed)", mvm_fs::initramfs::INITRAMFS_IMAGE_FILE),
+            expected,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+/// SHA-256 over the gunzipped contents of `path`, streamed so a large
+/// initramfs never lands in memory whole.
+fn sha256_of_gunzipped(path: &Path) -> Result<String, InitramfsBuildError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    let file = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut decoder = flate2::read::GzDecoder::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let read = decoder.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 #[cfg(unix)]
@@ -552,11 +600,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
         let cache_root = tmp.path().join("cache");
-        std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("initramfs.cpio.gz"), b"image").unwrap();
-        std::fs::write(source.join("initramfs.hash"), b"hash").unwrap();
-        std::fs::write(source.join("initramfs.size"), "5").unwrap();
-        std::fs::write(source.join("VERSION"), "0.18.0").unwrap();
+        write_initramfs_artifact(&source, "0.18.0", b"cpio-payload");
 
         let artifact =
             install_initramfs_into_cache(&source, &cache_root, "0.18.0", GuestArch::Aarch64)
@@ -568,6 +612,41 @@ mod tests {
         assert!(target_dir.join("initramfs.cpio.gz").is_file());
         assert_eq!(artifact.image_path, target_dir.join("initramfs.cpio.gz"));
         assert_eq!(artifact.version, "0.18.0");
+    }
+
+    #[test]
+    fn install_refuses_an_image_that_does_not_match_its_hash_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let cache_root = tmp.path().join("cache");
+        write_initramfs_artifact(&source, "0.18.0", b"cpio-payload");
+
+        // Swap in a different payload, leaving the sidecar hash untouched —
+        // the substitution a size check alone cannot see, because the
+        // replacement is written to the same compressed length.
+        let (honest, ..) = initramfs_fixture(b"cpio-payload");
+        let (tampered, ..) = initramfs_fixture(b"evil-payload");
+        assert_eq!(
+            honest.len(),
+            tampered.len(),
+            "fixture must keep the compressed length identical"
+        );
+        std::fs::write(source.join("initramfs.cpio.gz"), &tampered).unwrap();
+
+        let err = install_initramfs_into_cache(&source, &cache_root, "0.18.0", GuestArch::Aarch64)
+            .unwrap_err();
+
+        assert!(
+            matches!(err, InitramfsBuildError::ChecksumMismatch { .. }),
+            "expected a checksum mismatch, got {err:?}"
+        );
+        let target_dir = cache_root
+            .join("0.18.0")
+            .join(GuestArch::Aarch64.to_string());
+        assert!(
+            !target_dir.exists(),
+            "a refused artifact must never become visible to a resolver"
+        );
     }
 
     #[test]
@@ -601,17 +680,25 @@ mod tests {
         std::fs::create_dir_all(&release_dir).unwrap();
 
         let names = InitramfsArtifactNames::for_arch(&arch.to_string());
-        let ext4_bytes = b"downloaded-cpio";
-        let hash_text = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-";
-        let size_text = b"15
-";
+        let (image_bytes, hash, size) = initramfs_fixture(b"downloaded-cpio-payload");
+        let hash_text = format!(
+            "{hash}
+"
+        );
+        let size_text = format!(
+            "{size}
+"
+        );
         let version_text = format!(
             "{version}
 "
         );
-        let archive_bytes =
-            initramfs_archive_bytes(ext4_bytes, hash_text, size_text, version_text.as_bytes());
+        let archive_bytes = initramfs_archive_bytes(
+            &image_bytes,
+            hash_text.as_bytes(),
+            size_text.as_bytes(),
+            version_text.as_bytes(),
+        );
         std::fs::write(release_dir.join(&names.archive), &archive_bytes).unwrap();
         std::fs::write(
             release_dir.join(&names.archive_checksum),
@@ -658,6 +745,30 @@ mod tests {
         hex::encode(Sha256::digest(bytes))
     }
 
+    /// The three sidecar values the nix build emits for a cpio payload: a real
+    /// gzip stream, the SHA-256 of the *uncompressed* payload, and the length
+    /// of the *compressed* file. Fixtures have to match that shape or they
+    /// cannot exercise the install-time hash check.
+    fn initramfs_fixture(payload: &[u8]) -> (Vec<u8>, String, String) {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(payload).unwrap();
+        let image = encoder.finish().unwrap();
+        let hash = sha256_hex(payload);
+        let size = image.len().to_string();
+        (image, hash, size)
+    }
+
+    /// Write a complete, self-consistent artifact directory.
+    fn write_initramfs_artifact(dir: &std::path::Path, version: &str, payload: &[u8]) {
+        let (image, hash, size) = initramfs_fixture(payload);
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("initramfs.cpio.gz"), &image).unwrap();
+        std::fs::write(dir.join("initramfs.hash"), format!("{hash}\n")).unwrap();
+        std::fs::write(dir.join("initramfs.size"), format!("{size}\n")).unwrap();
+        std::fs::write(dir.join("VERSION"), format!("{version}\n")).unwrap();
+    }
+
     fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
         let mut header = tar::Header::new_gnu();
         header.set_mode(0o644);
@@ -678,20 +789,11 @@ mod tests {
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         env.set("HOME", &home);
-        let default_mvm =
-            PathBuf::from(mvm_core::config::default_mvm_cache_dir()).join("initramfs");
+        let default_mvm = crate::cache_install::default_cache_root().join("initramfs");
         let default_artifact_dir = default_mvm
             .join("0.18.0")
             .join(GuestArch::Aarch64.to_string());
-        std::fs::create_dir_all(&default_artifact_dir).unwrap();
-        std::fs::write(
-            default_artifact_dir.join("initramfs.cpio.gz"),
-            b"default-image",
-        )
-        .unwrap();
-        std::fs::write(default_artifact_dir.join("initramfs.hash"), b"hash").unwrap();
-        std::fs::write(default_artifact_dir.join("initramfs.size"), "13").unwrap();
-        std::fs::write(default_artifact_dir.join("VERSION"), "0.18.0").unwrap();
+        write_initramfs_artifact(&default_artifact_dir, "0.18.0", b"default-cpio-payload");
 
         let artifact =
             resolve_or_seed_from_default_cache(&isolated_cache, "0.18.0", GuestArch::Aarch64)
