@@ -274,6 +274,26 @@ partially-enforced backend matrix.
 Adding a runtime means passing this suite. Failing any check means the runtime
 cannot be selected, with no flag to override.
 
+### v1 ships candle plus a mock runtime
+
+candle is the only *admitted* runtime in v1. A second, test-only mock runtime
+exists to exercise the seam and the full suite in CI: it declares a different
+format and a different capability set, so registry lookup, runtime selection,
+the ambiguity refusal, and the three-party match are all exercised against more
+than one entry.
+
+The suite is therefore written **before** any second real runtime exists, which
+is the point — a seam validated only by its first implementation tends to fit
+exactly that implementation. The mock is the cheap way to keep the seam honest
+without paying for a second guest image, a second host-side format parser and
+its fuzz target, and C/C++ on the workload path in v1.
+
+Stated limitation: a mock cannot prove the seam survives a genuinely different
+runtime. It proves the seam is *used* by more than one entry, not that it is
+sufficient. The first real second runtime — most likely GGUF-capable, to fill
+candle's quantization gap — remains the real test, and finding the seam wrong at
+that point is an accepted risk of this choice.
+
 ## Security surfaces
 
 ### Host-side parsing — the deliberate inversion
@@ -451,9 +471,6 @@ as a licence check.
 
 ## Open questions
 
-- How many runtimes ship in v1 — candle alone with the seam and suite proven by
-  a mock, or candle plus a GGUF runtime so the seam is validated against a
-  genuinely different format and language? See the note below.
 - Does candle plus a tokenizer fit the 50 MB guest footprint budget? Measure
   before embedding. The budget applies per runtime image.
 - How exactly does a capability profile attach to the template schema — a new
