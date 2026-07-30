@@ -82,6 +82,22 @@
       test fixtures had to become realistic — they wrote `b"image"` with a
       `b"hash"` sidecar, which is why the gap survived review.
 
+- [x] Builder-image seed verified at admission (#1932). The cross-root seed
+      copied four artifacts and left the integrity sidecars behind, so the
+      seeded cache could not be verified afterwards *and* read as
+      `MissingArtifactDigestManifest` to a later bootstrap — which then
+      rebuilt the ~775 MB it had just copied. The seed now carries the
+      sidecars and checks `.mvm-artifacts.sha256` before admitting bytes,
+      declining (not erroring) on drift so a damaged shared cache falls
+      through to a fresh local build. Measured cost of digesting the image is
+      ~2.1s, which is why the check sits at admission and not in
+      `validate_builder_vm_image_cache`, which runs on every builder VM
+      start. The digest logic moved into `mvm_build::cache_install` and is
+      now shared with the bootstrap readiness check — that also fixed two
+      latent defects in it: the old version read each artifact wholly into
+      memory (775 MB) instead of streaming, and compared whole manifest
+      strings, so a reordered manifest read as tampering.
+
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
       #1888 (ARM64 `Image` kernels reach Firecracker), #1891 (guest reads the
