@@ -20,6 +20,22 @@ a much narrower job — keeping a property that already holds from
 regressing — which is a far easier thing to justify spending hours of
 nightly CI on than "discover whether the property holds at all."
 
+## Numbering and overlap with plan 272
+
+This plan was authored as 272 and renumbered to 274: another session
+independently claimed 272 for `specs/plans/272-mutation-tested-claim-witnesses.md`
+and published it first (PR #1934), so that one keeps the number. The worktree
+and branch slugs below still read `plan272`; they are sandbox identifiers, not
+the plan number, and are left alone.
+
+**Read plan 272 before starting WS3/WS4.** The two plans were written without
+knowledge of each other and their scopes overlap: plan 272 covers
+mutation-tested claim witnesses, which is this plan's WS4 and much of its WS3.
+WS1 (ABI layout contracts) and WS2 (the missing nextest profile) are unique to
+this plan and unaffected. Whether WS3/WS4 should be descoped in favour of plan
+272, or plan 272 folded in here, is an owner decision that has not been made —
+do not start either workstream assuming it is unclaimed.
+
 ## Provenance
 
 The three techniques come from a review of an unrelated public Rust

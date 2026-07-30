@@ -127,7 +127,7 @@
       memory (775 MB) instead of streaming, and compared whole manifest
       strings, so a reordered manifest read as tampering.
 
-- [ ] Witness rigor (`specs/plans/272-witness-rigor.md`), four workstreams
+- [ ] Witness rigor (`specs/plans/274-witness-rigor.md`), four workstreams
       landing as separate PRs in order. **WS1:** thirteen of seventeen
       `#[repr(C)]` types carry no compile-time layout contract and the other
       four assert size only, so no type in the tree is protected against a
