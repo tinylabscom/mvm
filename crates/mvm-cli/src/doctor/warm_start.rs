@@ -274,8 +274,8 @@ mod tests {
             ("wasm".to_string(), false),
         ];
         if cfg!(feature = "test-support") {
-            expected_backends.insert(4, ("mock".to_string(), "live-memory"));
-            expected_standby_pool.insert(4, ("mock".to_string(), false));
+            expected_backends.insert(5, ("mock".to_string(), "live-memory"));
+            expected_standby_pool.insert(5, ("mock".to_string(), false));
         }
         assert_eq!(ordered_backends, expected_backends);
         assert_eq!(ordered_standby_pool, expected_standby_pool);
