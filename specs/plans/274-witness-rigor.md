@@ -102,10 +102,11 @@ accordingly.** Three of the unprotected structs sit on enforcement paths:
 | `DmIoctl` / `DmTargetSpec` | device-mapper table load | MVM-SEC-03 (tampered rootfs fails to boot) | Possibly loads a device that is not verity-backed |
 | `MvmHsvcBuf` | broker C ABI | MVM-SEC-12 / MVM-SEC-13 | Over-read in an SDK process whose heap holds signed broker credentials |
 
-MVM-SEC-03 currently has **no `fn:` witness at all** — its only witness is
-a CI lane. The device-mapper contracts are the first code-level witness
-material that claim has had. WS1 Task 4 registers `check-abi-layout` as a
-witness accordingly.
+MVM-SEC-03's entry in `model/claims.toml` lists only a CI lane, but the
+ADR-001 ledger also names `fn:verify_and_resume_rejects_tampered_mem` —
+the two files had drifted and nothing gated the relationship. WS1
+reconciles both and adds the missing cross-check. WS1 Task 4 registers
+`check-abi-layout` as an additional witness for claims 2 and 3.
 
 **S5 — Derived layout values are architecture-scoped.** Deriving Linux
 struct layouts on an x86_64 host and applying them to aarch64 guest
@@ -133,7 +134,7 @@ deferred.
 
 ---
 
-# WS1 — ABI layout contracts
+# WS1 — ABI layout contracts  ✅ shipped in #1940
 
 **Why.** Seventeen `#[repr(C)]` items live under `crates/`. Four carry a
 compile-time **size** assertion (`SockaddrVm` in `qemu.rs:858` and
@@ -181,7 +182,7 @@ used to derive it.
 - Produces: the `const _: () = assert!(...)` house pattern that Tasks 2–3 replicate, and the header-derivation comment convention that `check-abi-layout` (Task 4) does *not* verify but reviewers do.
 - Consumes: nothing.
 
-- [ ] **Step 1: Derive the Hypervisor.framework values from the SDK header**
+- [x] **Step 1: Derive the Hypervisor.framework values from the SDK header**
 
   Do not read them off the Rust struct. Run, on an Apple Silicon host:
 
@@ -213,7 +214,7 @@ used to derive it.
   the current Rust definition, **the Rust definition is the bug** — fix
   the struct, do not weaken the assertion.
 
-- [ ] **Step 2: Add the assertion block to `hvf/sys.rs`**
+- [x] **Step 2: Add the assertion block to `hvf/sys.rs`**
 
   Insert immediately after the `hv_vcpu_exit_t` definition (line 76).
   Substitute the Step 1 values for the ones below if they differ:
@@ -241,7 +242,7 @@ used to derive it.
   };
   ```
 
-- [ ] **Step 3: Verify the assertion fires**
+- [x] **Step 3: Verify the assertion fires**
 
   Temporarily change `syndrome: u64` to `syndrome: u32` in
   `hv_vcpu_exit_exception_t`. Run:
@@ -255,7 +256,7 @@ used to derive it.
   re-run; expected: PASS. A layout contract that has not been seen to
   fail has not been tested.
 
-- [ ] **Step 4: Add the `MvmHsvcBuf` contract**
+- [x] **Step 4: Add the `MvmHsvcBuf` contract**
 
   Insert after line 78 of `crates/mvm-host-services-ffi/src/lib.rs`. This
   one is pointer-width-dependent, so it is gated rather than weakened
@@ -279,7 +280,7 @@ used to derive it.
   };
   ```
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
   ```sh
   cargo check -p mvm-host-services-ffi -p mvm-runtime
@@ -305,11 +306,13 @@ used to derive it.
 - Consumes: the assertion pattern from Task 1.
 - Produces: an identical contract on all seven copies, so a future consolidation can prove the copies were interchangeable.
 
-- [ ] **Step 1: Confirm the authoritative values**
+- [x] **Step 1: Confirm the authoritative values**
 
   `struct sockaddr_vm` from `linux/vm_sockets.h` is
   `svm_family: u16`, `svm_reserved1: u16`, `svm_port: u32`,
-  `svm_cid: u32`, `svm_zero: [u8; 4]` — size 16, align 4. Confirm on a
+  `svm_cid: u32`, `svm_flags: u8`, `svm_zero: [u8; 3]` — size 16, align 4.
+  (`svm_flags` arrived in Linux 6.0; every mvm copy mirrors the older
+  four-byte `svm_zero`, which is the defect this task fixes.) Confirm on a
   Linux host (the KVM box, `ssh -i ~/.ssh/hetzner-rvproxy root@…`) rather
   than trusting this paragraph:
 
@@ -318,7 +321,7 @@ used to derive it.
   cc /tmp/vsabi.c -o /tmp/vsabi && /tmp/vsabi
   ```
 
-- [ ] **Step 2: Add the same block after each of the seven definitions**
+- [x] **Step 2: Add the same block after each of the seven definitions**
 
   Field names differ slightly between the copies — read each struct and
   use its own field identifiers. The shape, using
@@ -337,7 +340,8 @@ used to derive it.
       assert!(offset_of!(SockAddrVm, svm_reserved1) == 2);
       assert!(offset_of!(SockAddrVm, svm_port) == 4);
       assert!(offset_of!(SockAddrVm, svm_cid) == 8);
-      assert!(offset_of!(SockAddrVm, svm_zero) == 12);
+      assert!(offset_of!(SockAddrVm, svm_flags) == 12);
+      assert!(offset_of!(SockAddrVm, svm_zero) == 13);
   };
   ```
 
@@ -347,13 +351,13 @@ used to derive it.
   whole reason it needs the contract more than the production copy, not
   less.
 
-- [ ] **Step 3: Verify one of them fires**
+- [x] **Step 3: Verify one of them fires**
 
   Reorder `svm_port` and `svm_cid` in `console.rs`. Run
   `cargo check -p mvm-agentd`. Expected: FAIL on the `offset_of!` lines.
   Revert.
 
-- [ ] **Step 4: Cross-compile check**
+- [x] **Step 4: Cross-compile check**
 
   The guest and builder binaries are Linux-target; a host-only
   `cargo check` does not compile them.
@@ -364,7 +368,7 @@ used to derive it.
 
   Expected: PASS with no warnings (the recipe sets `RUSTFLAGS=-D warnings`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
   ```sh
   rustup run nightly cargo fmt --all
@@ -384,13 +388,13 @@ used to derive it.
 - Consumes: the pattern from Tasks 1–2.
 - Produces: full `repr(C)` coverage, which is the precondition for the Task 4 gate to pass on a clean tree.
 
-- [ ] **Step 1: Derive each family's values from its header**
+- [x] **Step 1: Derive each family's values from its header**
 
   Use the same `cc` + `sizeof`/`offsetof`/`_Alignof` technique as Task 2,
   on a Linux host, one small program per header. Record the outputs into
   `/tmp/abi-values.txt`; they go into the assertion comments.
 
-- [ ] **Step 2: Promote the existing runtime `Winsize` assertion to compile time**
+- [x] **Step 2: Promote the existing runtime `Winsize` assertion to compile time**
 
   `crates/mvm-agentd/src/console.rs:647` currently asserts
   `assert_eq!(std::mem::size_of::<Winsize>(), 8)` inside a `#[test]`. A
@@ -414,7 +418,7 @@ used to derive it.
 
   Use the struct's actual field identifiers if they differ.
 
-- [ ] **Step 3: Add the capability contracts**
+- [x] **Step 3: Add the capability contracts**
 
   Both structs in `mvm-setpriv.rs` sit under `#[cfg(target_os = "linux")]`,
   so the assertion block needs the same cfg or it fails to resolve on a
@@ -445,7 +449,7 @@ used to derive it.
   };
   ```
 
-- [ ] **Step 4: Add the device-mapper contracts**
+- [x] **Step 4: Add the device-mapper contracts**
 
   `DmTargetSpec` is the highest-value struct in this task: it is the
   payload the verity-init path hands to the device-mapper ioctl, so
@@ -482,7 +486,7 @@ used to derive it.
   fields the verity setup actually writes. The gate in Task 4 requires
   size **and** alignment, so the size-only form does not satisfy it.
 
-- [ ] **Step 5: Determine whether device-mapper layout drift can fail open**
+- [x] **Step 5: Determine whether device-mapper layout drift can fail open**
 
   This is the question that decides whether the whole plan's highest
   severity sits here. MVM-SEC-03 says a tampered rootfs fails to boot,
@@ -508,7 +512,15 @@ used to derive it.
   the contract is going in regardless; the answer changes how MVM-SEC-03
   is described in the ledger.
 
-- [ ] **Step 6: Confirm the values are architecture-stable**
+  **Answered: fail-closed.** Measured on Linux 6.8 by submitting a
+  `dm_target_spec` to `DM_TABLE_LOAD` with `target_type` displaced by 4
+  and by 8 bytes. The correct layout loads and resumes a live table; both
+  displacements return `EINVAL`, because the kernel resolves the target by
+  name before any target-specific parsing and a displaced field names no
+  registered target. MVM-SEC-03 was not at risk. Recorded in
+  `specs/VERIFICATION.md`.
+
+- [x] **Step 6: Confirm the values are architecture-stable**
 
   Per S5. Re-derive `dm_target_spec` and the capability structs on both
   an x86_64 and an aarch64 Linux host (the KVM box covers x86_64; an
@@ -516,7 +528,7 @@ used to derive it.
   they differ, the assertion needs `#[cfg(target_arch)]` arms rather than
   a single value. Record the two outputs in the assertion comment.
 
-- [ ] **Step 7: Verify, cross-check, commit**
+- [x] **Step 7: Verify, cross-check, commit**
 
   Everything in Steps 3–4 is Linux-gated, so a macOS `cargo check` never
   compiles it and cannot tell you the assertions hold. `just check-linux`
@@ -543,7 +555,7 @@ used to derive it.
 - Consumes: nothing from Tasks 1–3 at the code level, but requires them merged or it fails on a clean tree.
 - Produces: `cargo run -p xtask -- check-abi-layout`, exit 0 on clean, exit 1 with a per-struct diagnostic otherwise.
 
-- [ ] **Step 1: Write the failing gate test**
+- [x] **Step 1: Write the failing gate test**
 
   In `xtask/src/check_abi_layout.rs`:
 
@@ -600,7 +612,7 @@ used to derive it.
   }
   ```
 
-- [ ] **Step 2: Run the tests to confirm they fail**
+- [x] **Step 2: Run the tests to confirm they fail**
 
   ```sh
   cargo nextest run -p xtask -E 'test(abi_layout)'
@@ -608,7 +620,7 @@ used to derive it.
 
   Expected: FAIL — `cannot find function missing_contracts`.
 
-- [ ] **Step 3: Implement `missing_contracts` and `run`**
+- [x] **Step 3: Implement `missing_contracts` and `run`**
 
   Text-scan, matching the house style of the sibling gates
   (`check_claim_catalog.rs`, `check_single_home.rs`) — no `syn`
@@ -720,7 +732,7 @@ used to derive it.
   part of this task, not a follow-up: a plan about drift that adds its
   own fourth copy of a helper is not credible.
 
-- [ ] **Step 4: Run the tests to confirm they pass**
+- [x] **Step 4: Run the tests to confirm they pass**
 
   ```sh
   cargo nextest run -p xtask -E 'test(abi_layout)'
@@ -728,7 +740,7 @@ used to derive it.
 
   Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Register the subcommand — all four places**
+- [x] **Step 5: Register the subcommand — all four places**
 
   `xtask/src/main.rs` dispatches on a string match, not a clap enum, and
   the command name is repeated in two human-facing lists. Miss either
@@ -761,7 +773,7 @@ used to derive it.
      "  check-abi-layout                       Verify every #[repr(C)] type carries a compile-time size + alignment contract"
      ```
 
-- [ ] **Step 6: Run the gate against the real tree**
+- [x] **Step 6: Run the gate against the real tree**
 
   ```sh
   cargo run -p xtask -- check-abi-layout
@@ -772,7 +784,7 @@ used to derive it.
   contract, do not add an exemption. This gate ships with no exemption
   list on purpose; the first exemption should require an argued PR.
 
-- [ ] **Step 7: Wire into both CI Lint jobs**
+- [x] **Step 7: Wire into both CI Lint jobs**
 
   In `.github/workflows/ci.yml` and `.github/workflows/ci-full.yml`, after
   the `Conformance claim catalog` step:
@@ -782,7 +794,7 @@ used to derive it.
         run: cargo run -p xtask -- check-abi-layout
   ```
 
-- [ ] **Step 8: Plant a defect and record that the gate fired**
+- [x] **Step 8: Plant a defect and record that the gate fired**
 
   Add `#[repr(C)] struct Unpinned { a: u64 }` to
   `crates/mvm-runtime/src/hvf/sys.rs`, run
@@ -794,7 +806,7 @@ used to derive it.
   | `check-abi-layout` | Add a `#[repr(C)]` struct with no `size_of`/`align_of` assertion | yes |
   ```
 
-- [ ] **Step 9: Register the gate as a claim witness**
+- [x] **Step 9: Register the gate as a claim witness**
 
   Per S4, these contracts back three claims, and MVM-SEC-03 has no
   code-level witness of any kind today. Add `ci:check-abi-layout` to the
@@ -819,7 +831,7 @@ used to derive it.
   than either claim's statement. Mention the relationship in the PR body
   and leave the ledger alone.
 
-- [ ] **Step 10: Full gate run and commit**
+- [x] **Step 10: Full gate run and commit**
 
   ```sh
   rustup run nightly cargo fmt --all
@@ -830,7 +842,7 @@ used to derive it.
     "feat(xtask): gate repr(C) types on a compile-time layout contract"
   ```
 
-- [ ] **Step 11: Open the WS1 PR**
+- [x] **Step 11: Open the WS1 PR**
 
   Title: `feat(abi): pin every repr(C) layout to its authoritative header and gate it`.
   The body states the 13-of-17 gap, names `MvmHsvcBuf` and
