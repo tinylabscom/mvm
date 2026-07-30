@@ -4129,14 +4129,8 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
     assert!(exits_early(&[
         "mvmctl",
         "__qemu-vsock-bridge",
-        "--uds",
-        "/tmp/bridge.sock",
-        "--cid",
-        "3",
-        "--port",
-        "5252",
-        "--watch-pid-file",
-        "/tmp/qemu.pid",
+        "--spec",
+        "/tmp/qemu-vsock-bridge.json",
     ]));
     assert!(!exits_early(&["mvmctl", "doctor"]));
     assert!(!exits_early(&[

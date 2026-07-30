@@ -6,7 +6,12 @@ description: How a microVM boots the universal initramfs, receives its environme
 This page describes the current boot and execution path for workload microVMs.
 It replaces the older per-rootfs init schemes (`mvm-verity-init`, `mvm-oci-init`,
 busybox `/init`) with a single **universal initramfs** and a fail-closed
-activation step over vsock.
+activation step over vsock. Every runner backend boots this contract —
+Firecracker, libkrun, HVF, and QEMU (dev/test tier) all attach the universal
+initramfs and deliver `ActivateEnvironment` over vsock. QEMU's `vhost-vsock`
+speaks real `AF_VSOCK`, so its channels ride a per-VM `AF_VSOCK`↔UNIX bridge
+into the same per-port UNIX-socket convention the other backends expose
+natively.
 
 ## The universal initramfs
 

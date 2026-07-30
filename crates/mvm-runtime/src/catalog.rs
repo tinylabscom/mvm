@@ -15,7 +15,6 @@
 use crate::backend::{AnyBackend, BackendTier};
 #[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
-use crate::qemu::QemuBackend;
 use crate::wasm_backend::WasmBackend;
 use mvm_core::vm_backend::VmBackend;
 
@@ -181,7 +180,7 @@ backend_catalog![
         kind: Qemu,
         selector: "qemu",
         aliases: [],
-        constructor: AnyBackend::Qemu(QemuBackend),
+        constructor: AnyBackend::Qemu(crate::backend::qemu_runner()),
         tier: Tier2,
         marker_file: Some("qemu.pid"),
         started_vm_probe_order: Some(1),

@@ -36,8 +36,20 @@ pub fn capture_once(
     listener: &std::os::unix::net::UnixListener,
     vm_state_dir: &Path,
 ) -> std::io::Result<i32> {
-    use std::io::Read as _;
-    let (mut stream, _addr) = listener.accept()?;
+    let (stream, _addr) = listener.accept()?;
+    capture_stream(stream, vm_state_dir)
+}
+
+/// Read one guest exit report (4-byte LE i32) from an already-connected
+/// stream, persist it to `<vm_state_dir>/workload.exit`, and ack. Returns
+/// the code. The stream half of [`capture_once`], split out so a capture
+/// site whose control channel is not a `UnixListener` (e.g. an accepted
+/// AF_VSOCK connection) persists and acks with the identical protocol and
+/// file-then-ack ordering.
+pub fn capture_stream(
+    mut stream: impl std::io::Read + std::io::Write,
+    vm_state_dir: &Path,
+) -> std::io::Result<i32> {
     let mut buf = [0u8; 4];
     stream.read_exact(&mut buf)?;
     let code = i32::from_le_bytes(buf);
@@ -46,7 +58,6 @@ pub fn capture_once(
     // powering off, so a supervisor's start_enter->exit() can't race the file
     // write. Best-effort — a failed ack just means the guest times out and
     // powers off (file already written).
-    use std::io::Write as _;
     let _ = stream.write_all(&[1u8]);
     let _ = stream.flush();
     Ok(code)
@@ -94,5 +105,23 @@ mod tests {
         handle.join().unwrap();
         assert_eq!(code, -7);
         assert_eq!(read_captured(dir.path()), Some(-7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_stream_persists_le_i32_from_any_connected_stream() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guest, host) = UnixStream::pair().unwrap();
+        let handle = std::thread::spawn(move || {
+            guest.write_all(&42i32.to_le_bytes()).unwrap();
+        });
+
+        let code = capture_stream(host, dir.path()).unwrap();
+        handle.join().unwrap();
+        assert_eq!(code, 42);
+        assert_eq!(read_captured(dir.path()), Some(42));
     }
 }

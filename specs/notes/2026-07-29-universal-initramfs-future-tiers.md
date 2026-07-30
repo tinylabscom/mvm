@@ -46,6 +46,25 @@ backends").
   activation channel to the framework's vsock transport. Capability and
   security-profile honesty rules from ADR-024 apply verbatim.
 
+## QEMU (converged onto the unified runner)
+
+- Today: QEMU boots through the unified `WorkloadRunner` via
+  `crates/mvm-runtime/src/driver/qemu.rs` (`QemuDriver`), the same seam as
+  Firecracker/libkrun/HVF. A QEMU boot attaches the universal initramfs and
+  receives `ActivateEnvironment` over vsock exactly like the other backends;
+  the legacy `mvm.roothash=`/`mvm.data=`/`mvm.hash=` cmdline tokens are no
+  longer built by this path. Because QEMU's `vhost-vsock` speaks real
+  `AF_VSOCK`, the driver spawns a spec-driven per-VM `AF_VSOCK`↔UNIX bridge
+  (one detached `mvmctl __qemu-vsock-bridge` process) that serves the
+  host-dialed agent channel, relays the guest-dialed egress/broker channels
+  to the runner-bound listeners, and captures the workload-exit report.
+- Tier/status unchanged: dev/test tier only (Tier 2 best-case on KVM, TCG
+  runtime fallback banner-flagged), opt-in via `--hypervisor qemu`, never
+  auto-selected, and still barred from the admitted workload funnel. The
+  converged boot attaches no slirp user-mode NIC — egress routes solely
+  through the per-VM vsock endpoint, matching the other runner backends.
+  The raw `QemuBackend` remains as the driver's identity delegate.
+
 ## WHP (Windows Hypervisor Platform)
 
 - Guest side: unchanged — same kernel + universal initramfs, same
