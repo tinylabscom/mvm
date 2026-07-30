@@ -59,6 +59,39 @@
       tracked in
       `specs/plans/268-nonnested-aarch64-machine-run-witness.md`.
 
+- [ ] **Backend shim removal — invert the driver/backend relationship.** The
+      `VmmDriver` seam still wraps the older direct `VmBackend` impls rather
+      than owning the VMM mechanics, so `FirecrackerBackend` / `LibkrunBackend`
+      / `HvfBackend` remain live in the production path. Plan drafted at
+      `specs/plans/269-backend-shim-removal.md`; it carries a "Status and known
+      gaps" section covering the blanket-impl seam that does not exist yet, the
+      unaccounted-for `WasmBackend`, and the QEMU contradiction in §2.5 below
+      that Task 5 depends on. Not started.
+- [x] Lightweight guest WS-3: runtime-overlay guest executables now build
+      static-musl without the shared loader bundle; the glibc SDK FFI is
+      published as a separate `sdk-sidecar` output with an explicit
+      `/mvm/sdk/lib` contract. Sidecar attachment remains opt-in for workloads
+      that use host-service verbs.
+- [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
+      binary with the dedicated static-musl `mvm-setpriv` helper, including
+      UID/GID, group, no-new-privileges, and optional loopback capability paths.
+- [x] Lightweight guest WS-5/WS-6 slice: the Nix-built rootfs keeps only the
+      kernel module dependency index, the runtime overlay allocation is capped
+      at 16 MiB, and CI measures rootfs + overlay + dm-verity sidecars + kernel
+      against the literal 50 MB complete-artifact contract. The default tenant
+      now omits its redundant dynamic busybox input and copies the CA bundle
+      without retaining the source `cacert` store path. A build-backed gate caps
+      the lean registered runtime closure at two paths, and the same footprint
+      ledger now reports those exact hash-anchored paths. `mkGuest` re-minimizes
+      the immutable ext4 after nixpkgs adds its generic 16 MiB growth reserve.
+      The measured rootfs is 10,499,072 bytes, and the all-in footprint with
+      overlay, both verity sidecars, and the 14,460,936-byte kernel is 33,917,960
+      bytes (32.35 MiB), leaving 16,082,040 bytes of headroom.
+- [x] Persistent builder completion reliability: the egress helper writes stderr
+      to its VM-scoped log instead of retaining the caller's pipe, and dispatch
+      completion follows the authoritative child exit after draining available
+      stderr even if a detached descendant still holds a writer.
+
 ---
 
 ## 1. Why
@@ -396,7 +429,12 @@ Then unify + retire the old paths:
 **WS10 — tiny kernel + low memory + density**
 
 - [x] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264). **Landed via #1786.**
-- [ ] Guest agent ≈ **8 MB**: de-`tokio` the guest (mio / raw epoll+kqueue), strip deps, measure RSS.
+- [x] Guest agent ≤ **8 MiB**: the static-musl Dev-profile agent measured
+  1,372,160 bytes peak observed RSS (1,359,872 bytes steady idle). The
+  capability-negotiated `ResourceUsage` RPC uses the existing `/proc` sampler,
+  and `xtask perf footprint --guest-rss-bytes` enforces and reports the limit.
+- [x] Complete sealed guest ≤ **50 MB**: the Nix-built rootfs, static runtime
+  overlay, both dm-verity sidecars, and workload kernel total 33,917,960 bytes.
 - [ ] Host daemon ≈ **64 MB**: minimal runtime, evaluate `mimalloc`, strip deps.
 - [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
 - [ ] Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "abort"` for bins.

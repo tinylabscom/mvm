@@ -121,9 +121,10 @@ use handlers::{
     handle_fs_write, handle_integration_status, handle_mount_volume, handle_ping,
     handle_post_restore, handle_primed_status, handle_probe_status, handle_proc_kill,
     handle_proc_list, handle_proc_send_input, handle_proc_signal, handle_proc_start,
-    handle_proc_wait, handle_readiness_status, handle_run_entrypoint_request, handle_sleep_prep,
-    handle_start_port_forward, handle_start_unix_socket_forward, handle_unmount_volume,
-    handle_update_idle_timeout, handle_wake, handle_worker_status,
+    handle_proc_wait, handle_readiness_status, handle_resource_usage,
+    handle_run_entrypoint_request, handle_sleep_prep, handle_start_port_forward,
+    handle_start_unix_socket_forward, handle_unmount_volume, handle_update_idle_timeout,
+    handle_wake, handle_worker_status,
 };
 #[cfg(not(feature = "interactive"))]
 use handlers::{
@@ -342,6 +343,7 @@ fn handle_client(
             }
 
             GuestRequest::Ping => handle_ping(),
+            GuestRequest::ResourceUsage => handle_resource_usage(),
             GuestRequest::WorkerStatus => handle_worker_status(&mut ctx),
             GuestRequest::SleepPrep { drain_timeout_secs } => handle_sleep_prep(drain_timeout_secs),
             GuestRequest::Wake => handle_wake(&mut ctx),

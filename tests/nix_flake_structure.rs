@@ -867,6 +867,74 @@ fn runtime_overlay_flake_stages_egress_client_binary() {
 }
 
 #[test]
+fn runtime_overlay_guest_packages_use_static_musl_and_have_no_loader_bundle() {
+    let path = nix_dir()
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+    let runtime = content
+        .split("mkRuntimeOverlay = system:")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    in\n    {").next())
+        .expect("runtime-overlay derivation body");
+
+    assert!(
+        content.contains("pkgs = pkgs.pkgsStatic;"),
+        "all runtime-overlay guest package recipes must be instantiated from pkgsStatic"
+    );
+    assert!(
+        content.contains("staticPkgs.rustPlatform.buildRustPackage"),
+        "the runner must use the static-musl Rust platform too"
+    );
+    for forbidden in [
+        "runtimeLoaderFor",
+        "runtimeLibcFor",
+        "runtimeLibgccFor",
+        "relocate_runtime_exe",
+        "patchelf",
+        "libc.so.6",
+        "libgcc_s.so.1",
+        "hostsvc",
+    ] {
+        assert!(
+            !runtime.contains(forbidden),
+            "static runtime-overlay body must not carry the dynamic loader bundle or SDK FFI: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn runtime_overlay_exposes_sdk_sidecar_separately() {
+    let path = nix_dir()
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+
+    assert!(
+        content.contains("mkSdkSidecar = system:"),
+        "the glibc SDK FFI must have a distinct sidecar derivation"
+    );
+    assert!(
+        content.contains("sdk-sidecar = mkSdkSidecar system;"),
+        "the runtime-overlay flake must publish the SDK sidecar output"
+    );
+    assert!(
+        content.contains("/mvm/sdk/lib"),
+        "the sidecar must use the stable /mvm/sdk mount contract"
+    );
+    assert!(
+        content.contains("sdkRuntimeLoaderFor")
+            && content.contains("--set-rpath /mvm/sdk/lib")
+            && !content.contains("--set-interpreter /mvm/sdk/lib/"),
+        "the sidecar must carry its matching glibc loader and set the cdylib RPATH without treating the shared object as an executable"
+    );
+}
+
+#[test]
 fn mk_guest_accepts_compact_and_legacy_egress_ca_cmdline_tokens() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
@@ -1033,5 +1101,173 @@ fn no_host_package_uses_release_binary_provenance() {
     assert!(
         scanned >= 5,
         "expected to scan every nix/packages/*.nix host package; only saw {scanned}"
+    );
+}
+
+#[test]
+fn mk_guest_copies_only_module_dependency_metadata() {
+    let path = nix_dir().join("lib/mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("cp -a --reflink=auto \"$src/modules.dep\""),
+        "mkGuest must retain the dependency index required by busybox modprobe"
+    );
+    assert!(
+        content.contains("vmw_vsock_virtio_transport")
+            && content.contains("virtiofs")
+            && content.contains("fuse"),
+        "mkGuest must retain the module closures needed by guest boot and virtio-fs"
+    );
+    assert!(
+        !content.contains("for metadata in \"$src\"/modules.*"),
+        "mkGuest must not copy unused kernel module indexes into the rootfs"
+    );
+}
+
+#[test]
+fn mk_guest_uses_the_static_custom_privilege_helper() {
+    let path = nix_dir().join("lib/mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("import ../packages/mvm-setpriv.nix")
+            && content.contains("rustPlatform = pkgs.pkgsStatic.rustPlatform"),
+        "mkGuest must build the privilege helper through the static package set"
+    );
+    assert!(
+        content.contains("setprivPkg") && content.contains("/bin/mvm-setpriv"),
+        "mkGuest init must resolve the dedicated helper, not util-linux"
+    );
+    assert!(
+        !content.contains("pkgs.pkgsStatic.util-linux"),
+        "mkGuest must not retain the util-linux setpriv closure"
+    );
+}
+
+#[test]
+fn mvm_setpriv_package_normalizes_the_workspace_source() {
+    let path = nix_dir().join("packages/mvm-setpriv.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("unpackPhase")
+            && content.contains("cp -R ${mvmSrc}/. source")
+            && content.contains("sourceRoot=source"),
+        "mvm-setpriv must normalize path:.. workspace sources before buildRustPackage unpacks them"
+    );
+}
+
+#[test]
+fn mk_guest_copies_ca_bundle_without_retaining_cacert_store_path() {
+    let path = nix_dir().join("lib/mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("rootPaths = [ busybox setprivPkg ] ++ packages ++ extraFileSourceRoots")
+            && !content.contains(
+                "rootPaths = [ busybox setprivPkg pkgs.cacert ] ++ packages ++ extraFileSourceRoots"
+            ),
+        "mkGuest's registered runtime closure must not retain the copied cacert source"
+    );
+    assert!(
+        content.contains(
+            "cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt \"$out/etc/ssl/certs/ca-bundle.crt\""
+        ),
+        "mkGuest must still copy the Mozilla CA bundle into the FHS rootfs"
+    );
+    assert!(
+        content.contains("inherit rootfsClosureInfo"),
+        "mkGuest must expose its closure for the build-backed package-count gate"
+    );
+}
+
+#[test]
+fn mk_guest_removes_the_ext4_growth_reserve() {
+    let path = nix_dir().join("lib/mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("rootfsImageWithGrowthReserve")
+            && content.contains("resize2fs -M \"$out\""),
+        "mkGuest must minimize the immutable ext4 image after nixpkgs adds its generic growth reserve"
+    );
+}
+
+#[test]
+fn nix_flake_caps_the_lean_guest_rootfs_package_count() {
+    let path = nix_dir().join("flake.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("guest-rootfs-package-budget")
+            && content.contains("guest.passthru.rootfsClosureInfo")
+            && content.contains("wc -l")
+            && content.contains("-gt 2"),
+        "the Nix check must cap the realized lean rootfs closure at two store paths"
+    );
+}
+
+#[test]
+fn nix_flake_uses_the_builder_workspace_override_for_build_backed_checks() {
+    let path = nix_dir().join("flake.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("builtins.getEnv \"MVM_WORKSPACE_PATH\"")
+            && content.contains("workspaceSrc")
+            && content.contains("mvmSrc = workspaceSrc"),
+        "the root Nix flake must use the mounted workspace when evaluated in the builder VM"
+    );
+}
+
+#[test]
+fn ci_builds_the_guest_rootfs_package_budget() {
+    let path = repo_dir().join(".github/workflows/ci.yml");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("./nix#checks.x86_64-linux.guest-rootfs-package-budget"),
+        "CI must realize the rootfs package-count budget, not only eval it"
+    );
+}
+
+#[test]
+fn ci_counts_the_kernel_in_the_guest_footprint() {
+    let path = repo_dir().join(".github/workflows/ci.yml");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    assert!(
+        content.contains("--kernel \"$image_path/vmlinux\""),
+        "the 50 MB CI ledger must include the workload kernel"
+    );
+}
+
+#[test]
+fn default_tenant_exports_and_ci_counts_the_rootfs_closure() {
+    let flake_path = nix_dir().join("images/default-tenant/flake.nix");
+    let flake = fs::read_to_string(&flake_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", flake_path.display()));
+    let ci_path = repo_dir().join(".github/workflows/ci.yml");
+    let ci = fs::read_to_string(&ci_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", ci_path.display()));
+
+    assert!(
+        flake.contains("rootfsPkg.passthru.rootfsClosureInfo")
+            && flake.contains("$out/rootfs-closure-paths"),
+        "the default tenant must export its realized rootfs closure inventory"
+    );
+    assert!(
+        ci.contains("--closure-paths \"$image_path/rootfs-closure-paths\""),
+        "the footprint CI gate must consume the exported closure inventory"
     );
 }

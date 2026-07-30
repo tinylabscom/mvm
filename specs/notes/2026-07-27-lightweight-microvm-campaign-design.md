@@ -1,10 +1,10 @@
 # Lightweight microVM campaign — design
 
 **Date:** 2026-07-27
-**Status:** approved design; WS-1 ready to plan
+**Status:** approved design; WS-1, the static overlay cut, and the first WS-5/WS-6 gates implemented
 **Scope:** shrink the workload-guest footprint across four dimensions, gated so it
-cannot silently regrow. First workstream (WS-1) implemented from this spec; WS-2..6
-are named + sequenced roadmap, not built this pass.
+cannot silently regrow. WS-1, WS-2, the static runtime-overlay cut, and the first
+WS-5/WS-6 gates are implemented; the remaining WS-4..6 measurements stay sequenced.
 
 ## Problem
 
@@ -34,7 +34,7 @@ code.
 | Dim | What | Measured today | Existing gate | Direction |
 |-----|------|----------------|---------------|-----------|
 | A | Rootfs bytes | ~10 MiB (OCI guest) | `xtask perf rootfs-size` — 20 MiB, `minimal` only | drop glibc → tighten + extend the gate beyond `minimal` |
-| B | Overlay bytes (agent + helpers) | 5.3–7.3 MiB | 32 MiB hard cap | unify on static-musl → drop the bundled glibc loader → tighten the cap |
+| B | Overlay bytes (agent + helpers) | 5.3–7.3 MiB | 16 MiB hard cap | unify on static-musl → drop the bundled glibc loader → tighten the cap |
 | D | Guest RSS | agent ~8 MB (goal) | none (aspirational) | add a measured gate |
 | E | Attack surface | crate closure ≤266 | `xtask check-closure-budget` | drop the `util-linux` package + its CVE surface; add a rootfs-package-count assertion |
 
@@ -68,10 +68,9 @@ regression, not a win.
 
 ## WS-1 — static setpriv, glibc out of the rootfs (implemented from this spec)
 
-**Change.** Swap `pkgs.util-linux` → `pkgs.pkgsStatic.util-linux` at the four `setpriv`
-references in `nix/lib/mk-guest.nix` (the `setprivWrap` helper plus the agent / addon-DNS /
-egress-client fork sites). The static-musl `setpriv` binary's runtime closure is just
-itself — no glibc — so glibc garbage-collects out of the rootfs closure.
+**Change.** The first cut swapped `pkgs.util-linux` → `pkgs.pkgsStatic.util-linux` at
+the four `setpriv` references in `nix/lib/mk-guest.nix`. WS-2 replaces that baseline
+with the smaller static-musl `mvm-setpriv` helper.
 
 **Faithful capability surface.** The replacement is the same `setpriv`, static-linked, so
 the flag surface is preserved by construction:
@@ -93,45 +92,58 @@ the flag surface is preserved by construction:
 plus the new closure assertion. WS-1 does not touch the security semantics — only the
 provenance of the `setpriv` binary.
 
-**Measurement seeds the campaign.** The before/after numbers populate the scoreboard and
-decide whether WS-2 (a custom helper) is worth building.
+**Measurement seeds the campaign.** The before/after numbers populated the scoreboard and
+justified replacing util-linux with the custom helper in WS-2.
 
-## Roadmap (named + sequenced, not built this pass)
+## Roadmap (named + sequenced)
 
-- **WS-2 (lever E follow-up).** Custom `mvm-setpriv` static-musl helper in `mvm-agentd`,
-  built through the existing guest-helper pipeline (`guest_agent_build.rs`, sibling to
-  `seccomp-apply` / `netinit` / `verity-init`): implements exactly the flags above via
-  `setresuid` / `setresgid` / `setgroups([])` / `prctl(NO_NEW_PRIVS)` / ambient-cap raise,
-  then `execvp`. ~400 KiB, minimal attack surface, no `util-linux` build dep. Decided on
-  WS-1's measurements — build it only if shaving ~1 MiB and removing setpriv's other code
-  paths is worth owning a security primitive.
+- **WS-2 (lever E).** The static-musl `mvm-setpriv` helper is implemented as a dedicated
+  `mvm-agentd` binary and Nix package. It implements the exact generated flag surface via
+  `setresuid` / `setresgid` / `setgroups([])` / `prctl(NO_NEW_PRIVS)` / ambient-cap
+  raise, then `execvp`, with no `util-linux` build dependency.
 - **WS-3 (lever B).** Unify the overlay binaries on static-musl; drop the glibc loader /
   `libc.so.6` / `libgcc_s.so.1` bundle from `nix/images/runtime-overlay/flake.nix` `lib/`.
   Snag: `libmvm_host_services.so` (the FFI cdylib language SDKs dlopen) is glibc-built and
   lives in that same `lib/`; moving it to an SDK-workload sidecar needs its own mini-design.
-  Tighten the overlay cap after.
+  The static runtime overlay is now capped at 16 MiB; automatic sidecar attachment remains.
 - **WS-4 (lever D).** Add a measured guest-RSS gate (agent ≤ ~8 MB). The tokio-free agent
   already lands most of this — measurement + gate, not new architecture.
-- **WS-5 (lever A/E).** Rootfs closure minimization — CA-bundle trim, kernel-module audit,
-  rootfs package-count budget.
-- **WS-6.** Fold the scattered budgets (rootfs / overlay / closure / kernel / RSS) into one
-  `xtask perf footprint` ledger + a single doc.
+- **WS-5 (lever A/E).** Rootfs closure minimization — the module metadata audit is
+  implemented; CA-bundle trim and the rootfs package-count budget remain.
+- **WS-6.** The first `xtask perf footprint` ledger is implemented for the Nix-built
+  rootfs, runtime overlay, and dm-verity sidecars; closure, kernel, and RSS entries
+  remain for the follow-up slices.
+
+## WS-3 — static runtime overlay
+
+The runtime-overlay flake now instantiates every guest executable from
+`pkgs.pkgsStatic` (including the runner, addon DNS, egress client, and exit reporter).
+The ext4 staging step therefore copies self-contained musl binaries directly and no
+longer runs `patchelf` or carries a dynamic loader, `libc.so.6`, or `libgcc_s.so.1`.
+
+The SDK FFI is deliberately not linked into those binaries. It remains a glibc
+`cdylib`, so the flake publishes it as `packages.<system>.sdk-sidecar`, containing
+the FFI plus its matching loader, libc, and libgcc under `/mvm/sdk/lib`. Python
+and TypeScript SDK defaults point at that sidecar mount, while
+`MVM_HOST_SERVICES_LIB` remains the override for custom arrangements. The runtime-overlay attachment path must mount
+the sidecar only for workloads that use host services; until that attachment is
+selected, a workload must not call the SDK host-service verbs.
 
 ## Deliverables of this spec's implementation (WS-1 only)
 
 - The `mk-guest.nix` setpriv swap.
 - A no-glibc / no-dynamic-util-linux rootfs closure test under `nix/tests/`.
 - Rootfs before/after measurement + `ROOTFS_MAX_BYTES` tighten/extend.
-- WS-2..6 tracked as deferred follow-ups in the implementation plan.
+- Remaining WS-3..6 work is tracked as deferred follow-ups in the implementation plan.
 
 ## Risks / open questions
 
-- **`pkgsStatic.util-linux` build.** `setpriv` builds and runs static under musl (Alpine
-  ships full util-linux on musl); confirm the derivation evaluates and the ambient-cap flags
-  behave identically to the glibc build during WS-1.
-- **Glibc anchor completeness.** WS-1 assumes `util-linux setpriv` is the sole glibc anchor
-  in the rootfs. The closure test proves or disproves this; if another store path pulls
-  glibc, it surfaces as a WS-5 item.
+- **`mvm-setpriv` static build.** The dedicated helper must cross-build with musl and retain
+  the ambient-cap behavior used by the DNS and egress helpers; the Linux execution tests
+  and builder-backed Nix build are the witnesses.
+- **Glibc anchor completeness.** WS-1 removed the original util-linux anchor and WS-2 removes
+  the remaining util-linux dependency from the workload rootfs. The closure test proves or
+  disproves that another store path pulls glibc, surfacing any remainder as a WS-5 item.
 - **Gate scope beyond `minimal`.** Extending `rootfs-size` past the `minimal` template must
   not penalize workloads that legitimately bundle large app deps — the gate targets the
   mvm-owned base, not user payload; decide the boundary during WS-1.

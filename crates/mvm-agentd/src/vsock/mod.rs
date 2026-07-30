@@ -32,9 +32,10 @@ pub use api::{
     mount_volume_on, ping, ping_at, post_restore_at, post_restore_with_grant_and_clock_at,
     post_restore_with_grant_at, query_fs_diff, query_fs_diff_at, query_fs_diff_on,
     query_integration_status, query_integration_status_at, query_primed_at, query_probe_status,
-    query_probe_status_at, query_worker_status, query_worker_status_at, request_sleep_prep,
-    send_fs_request, send_fs_request_on, send_proc_request, send_proc_request_on, send_proc_wait,
-    send_proc_wait_on, signal_wake, start_port_forward_on, workload_is_primed_at,
+    query_probe_status_at, query_resource_usage, query_resource_usage_at, query_worker_status,
+    query_worker_status_at, request_sleep_prep, send_fs_request, send_fs_request_on,
+    send_proc_request, send_proc_request_on, send_proc_wait, send_proc_wait_on, signal_wake,
+    start_port_forward_on, workload_is_primed_at,
 };
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, send_request, send_request_stream,

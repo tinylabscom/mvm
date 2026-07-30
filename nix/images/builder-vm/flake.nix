@@ -307,6 +307,9 @@
           # entrypoint is vestigial — but we still
           # need to declare one to satisfy the type contract.
           entrypoint.shell = "/bin/sh";
+          # Persistent build jobs run as this unprivileged numeric uid. Keep
+          # a passwd/group entry so Nix can resolve its home directory.
+          builderUid = 902;
           packages = (builderPackages pkgs) ++ extraPkgs;
           # Host binaries (mvm-host-vm-init, mvm-egress-proxy) come
           # from MVM_HOST_BIN_DIR via hostBinExtraFiles — embedded

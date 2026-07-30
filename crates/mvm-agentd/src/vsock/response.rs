@@ -178,6 +178,8 @@ pub enum GuestResponse {
     WakeAck { success: bool },
     /// Pong.
     Pong,
+    /// Current guest-agent process resource usage.
+    ResourceUsageReport { rss_bytes: u64 },
     /// Error from guest agent.
     Error { message: String },
     /// The dispatcher refused this verb because the active
@@ -335,7 +337,8 @@ name_enum! {
     /// the contract can be iterated; `GuestRequest::verb()` keeps it in
     /// lockstep with the wire enum (exhaustive match).
     pub enum Verb {
-        ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
+        ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, ResourceUsage,
+        IntegrationStatus,
         CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
         RunDetached,
         PostRestore,
@@ -354,7 +357,7 @@ name_enum! {
     pub enum ResponseVariant {
         ActivateEnvironmentAck, ActivateEnvironmentError, NotActivated,
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
-        Pong, Error, UnsupportedInProfile, VerbNotAuthorized, IntegrationStatusReport,
+        Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
         ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
@@ -432,6 +435,7 @@ impl Verb {
             | Self::SleepPrep
             | Self::Wake
             | Self::Ping
+            | Self::ResourceUsage
             | Self::IntegrationStatus
             | Self::CheckpointIntegrations
             | Self::ProbeStatus
@@ -483,6 +487,7 @@ impl Verb {
             Verb::SleepPrep => unary(&[R::SleepPrepAck]),
             Verb::Wake => unary(&[R::WakeAck]),
             Verb::Ping => unary(&[R::Pong]),
+            Verb::ResourceUsage => unary(&[R::ResourceUsageReport]),
             Verb::IntegrationStatus => unary(&[R::IntegrationStatusReport]),
             Verb::CheckpointIntegrations => unary(&[R::CheckpointResult]),
             Verb::ProbeStatus => unary(&[R::ProbeStatusReport]),
@@ -537,6 +542,7 @@ impl GuestResponse {
             GuestResponse::SleepPrepAck { .. } => ResponseVariant::SleepPrepAck,
             GuestResponse::WakeAck { .. } => ResponseVariant::WakeAck,
             GuestResponse::Pong => ResponseVariant::Pong,
+            GuestResponse::ResourceUsageReport { .. } => ResponseVariant::ResourceUsageReport,
             GuestResponse::Error { .. } => ResponseVariant::Error,
             GuestResponse::UnsupportedInProfile { .. } => ResponseVariant::UnsupportedInProfile,
             GuestResponse::VerbNotAuthorized { .. } => ResponseVariant::VerbNotAuthorized,
@@ -589,6 +595,7 @@ impl GuestResponse {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum GuestCapability {
     Ping,
+    ResourceUsage,
     IntegrationStatus,
     EntrypointStatus,
     RunEntrypoint,
@@ -630,6 +637,7 @@ pub struct ProtocolNegotiation {
 pub fn supported_capabilities() -> Vec<GuestCapability> {
     vec![
         GuestCapability::Ping,
+        GuestCapability::ResourceUsage,
         GuestCapability::IntegrationStatus,
         GuestCapability::EntrypointStatus,
         GuestCapability::RunEntrypoint,
@@ -872,6 +880,7 @@ mod tests {
             },
             GuestResponse::WakeAck { success: true },
             GuestResponse::Pong,
+            GuestResponse::ResourceUsageReport { rss_bytes: 4096 },
             GuestResponse::Error {
                 message: "oops".to_string(),
             },
@@ -1072,6 +1081,14 @@ mod tests {
     #[test]
     fn test_supported_capabilities_include_unix_socket_forward() {
         assert!(supported_capabilities().contains(&GuestCapability::UnixSocketForward));
+    }
+
+    #[test]
+    fn resource_usage_is_capability_negotiated_and_unary() {
+        assert!(supported_capabilities().contains(&GuestCapability::ResourceUsage));
+        let contract = Verb::ResourceUsage.response_contract();
+        assert_eq!(contract.kind, ResponseKind::Unary);
+        assert_eq!(contract.responses, &[ResponseVariant::ResourceUsageReport]);
     }
 
     #[test]

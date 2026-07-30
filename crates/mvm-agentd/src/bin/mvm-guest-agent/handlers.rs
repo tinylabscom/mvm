@@ -407,6 +407,15 @@ pub(crate) fn handle_ping() -> GuestResponse {
     GuestResponse::Pong
 }
 
+pub(crate) fn handle_resource_usage() -> GuestResponse {
+    match mvm_agentd::worker_pool::process_rss_bytes(std::process::id()) {
+        Some(rss_bytes) => GuestResponse::ResourceUsageReport { rss_bytes },
+        None => GuestResponse::Error {
+            message: "guest agent RSS is unavailable".to_string(),
+        },
+    }
+}
+
 pub(crate) fn handle_worker_status(ctx: &mut HandlerCtx) -> GuestResponse {
     let (status, last_busy_at) = match ctx.state.lock() {
         Ok(s) => (s.status.clone(), s.last_busy_at.clone()),

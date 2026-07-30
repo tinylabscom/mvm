@@ -20,10 +20,10 @@ import json
 import os
 from typing import Any, Callable, Optional, Tuple
 
-# Where mkGuest bakes the shared object inside the runtime overlay. Overridable
-# (host unit tests, alternate layouts) via the env var.
+# Where the SDK sidecar is mounted for a workload. Overridable (host unit
+# tests, alternate layouts) via the env var.
 LIB_PATH_ENV = "MVM_HOST_SERVICES_LIB"
-DEFAULT_LIB_PATH = "/mvm/runtime/lib/libmvm_host_services.so"
+DEFAULT_LIB_PATH = "/mvm/sdk/lib/libmvm_host_services.so"
 
 # Must match the MVM_HSVC_* status codes in the Rust cdylib.
 _OK = 0

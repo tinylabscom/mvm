@@ -447,6 +447,9 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Eval-check every flake
         run: |
           set -euo pipefail
@@ -459,8 +462,36 @@ jobs:
       # This runner is x86_64, so only the x86_64-linux check variant builds
       # here; the aarch64-linux variant stays defined for parity and for a
       # future arm64 runner.
-      - name: Baked guest rootfs tree is glibc-free (runtime overlay excluded)
+      - name: Baked guest rootfs closure stays lean and glibc-free
         run: |
           set -euo pipefail
           nix build --print-build-logs \
-            ./nix#checks.x86_64-linux.guest-rootfs-no-glibc
+            ./nix#checks.x86_64-linux.guest-rootfs-no-glibc \
+            ./nix#checks.x86_64-linux.guest-rootfs-package-budget
+
+      - name: Runtime overlay uses static-musl guest binaries
+        run: |
+          set -euo pipefail
+          nix build --print-build-logs \
+            ./nix/images/runtime-overlay#packages.x86_64-linux.default \
+            ./nix/images/runtime-overlay#packages.x86_64-linux.sdk-sidecar
+
+      - name: Nix-built guest artifacts fit the 50 MB footprint
+        run: |
+          set -euo pipefail
+          nix build --print-build-logs --impure --no-link --print-out-paths \
+            ./nix/images/default-tenant#packages.x86_64-linux.default \
+            > /tmp/default-tenant-path.txt
+          image_path=$(head -1 /tmp/default-tenant-path.txt)
+          nix build --print-build-logs --no-link --print-out-paths \
+            ./nix/images/runtime-overlay#packages.x86_64-linux.default \
+            > /tmp/runtime-overlay-path.txt
+          overlay_path=$(head -1 /tmp/runtime-overlay-path.txt)
+          cargo run -p xtask -- perf footprint \
+            --rootfs "$image_path/rootfs.ext4" \
+            --rootfs-verity "$image_path/rootfs.verity" \
+            --kernel "$image_path/vmlinux" \
+            --overlay "$overlay_path/overlay.ext4" \
+            --overlay-verity "$overlay_path/overlay.verity" \
+            --closure-paths "$image_path/rootfs-closure-paths" \
+            --json

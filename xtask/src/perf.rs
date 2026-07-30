@@ -1,6 +1,6 @@
 //! Performance gates via `cargo xtask perf`.
 //!
-//! Two subcommands so far:
+//! The storage and boot gates are exposed through `cargo xtask perf`:
 //!
 //! - **`rootfs-size`** — assert a built rootfs is at or under the
 //!   `mvm` minimal-template budget. Pure file-size check; runs on
@@ -12,6 +12,9 @@
 //!   required; gated by `MVM_LIVE_SMOKE=1` + a rootfs path so a
 //!   bare macOS host skips cleanly. Enforces the "cold-boot ≤ 500ms
 //!   Firecracker / ≤ 1s libkrun" line.
+//! - **`footprint`** — sum the Nix-built rootfs, runtime overlay, verity
+//!   sidecars, and optional kernel, assert the supplied guest artifacts stay
+//!   below 50 MB, and optionally enforce the rootfs Nix closure inventory.
 //!
 //! The thresholds are the per-backend boot budgets; they're pinned
 //! by tests in this module so a drift in the documented budget vs.
@@ -22,6 +25,8 @@
 //! ```text
 //! cargo xtask perf rootfs-size --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
+//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --kernel result/vmlinux --closure-paths result/rootfs-closure-paths
+//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --guest-rss-bytes 4194304
 //! ```
 //!
 //! ## What this does NOT do (yet)
@@ -56,6 +61,18 @@ use anyhow::{Context, Result, bail};
 /// pulled in a transitive dep that bloats the image."
 pub const ROOTFS_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MiB
 
+/// Maximum complete default guest artifact footprint: rootfs, runtime overlay,
+/// their dm-verity sidecars, and kernel. The workload's own application payload
+/// remains outside this contract.
+pub const GUEST_STORAGE_MAX_BYTES: u64 = 50_000_000; // 50 MB
+
+/// Maximum number of registered Nix store paths retained in the default
+/// rootfs: static BusyBox and the static privilege-drop helper.
+pub const GUEST_ROOTFS_MAX_STORE_PATHS: usize = 2;
+
+/// Maximum current RSS for the idle guest-agent process.
+pub const GUEST_AGENT_RSS_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Cold-boot wall-clock budget for the Firecracker backend.
 /// The floor is 300ms; the strict gate is 500ms p50.
 pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(500);
@@ -70,15 +87,24 @@ pub const LIBKRUN_BOOT_BUDGET: Duration = Duration::from_millis(1000);
 pub fn run(args: &[String]) -> Result<()> {
     match args.first().map(|s| s.as_str()) {
         Some("rootfs-size") => rootfs_size_subcommand(&args[1..]),
+        Some("footprint") => footprint_subcommand(&args[1..]),
         Some("boot") => boot_subcommand(&args[1..]),
         Some("budgets") => budgets_subcommand(&args[1..]),
         Some(other) => {
-            bail!("Unknown perf subcommand {other:?}. Available: rootfs-size, boot, budgets")
+            bail!(
+                "Unknown perf subcommand {other:?}. Available: rootfs-size, footprint, boot, budgets"
+            )
         }
         None => {
             eprintln!("Usage: cargo xtask perf <subcommand>");
             eprintln!(
                 "  rootfs-size --rootfs <PATH>    Assert rootfs is ≤ {ROOTFS_MAX_BYTES} bytes"
+            );
+            eprintln!(
+                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>] [--closure-paths <PATH>] [--guest-rss-bytes <N>]"
+            );
+            eprintln!(
+                "                                 Assert the supplied guest artifacts total ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
             );
             eprintln!("  boot --rootfs <PATH> [--runs N] [--backend firecracker|libkrun]");
             eprintln!(
@@ -132,6 +158,20 @@ pub fn all_budgets() -> Vec<PerfBudget> {
             unit: "bytes",
             source: "plan-60 Phase 9 + ADR-005",
             description: "Minimal-template ext4 rootfs size",
+        },
+        PerfBudget {
+            name: "guest_storage_size",
+            limit: GUEST_STORAGE_MAX_BYTES,
+            unit: "bytes",
+            source: "lightweight guest footprint contract",
+            description: "Nix-built rootfs + runtime overlay + verity sidecars + workload kernel",
+        },
+        PerfBudget {
+            name: "guest_agent_rss",
+            limit: GUEST_AGENT_RSS_MAX_BYTES,
+            unit: "bytes",
+            source: "lightweight guest RSS contract",
+            description: "Idle guest-agent current resident memory",
         },
         PerfBudget {
             name: "firecracker_cold_boot",
@@ -287,6 +327,255 @@ pub fn rootfs_size_check(rootfs: &Path, max_bytes: u64) -> Result<()> {
 }
 
 // ============================================================================
+// footprint subcommand
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FootprintArtifact {
+    name: &'static str,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct FootprintEntry {
+    name: String,
+    path: PathBuf,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct ClosureInventory {
+    path: PathBuf,
+    store_path_count: usize,
+    store_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct FootprintReport {
+    limit_bytes: u64,
+    total_bytes: u64,
+    entries: Vec<FootprintEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rootfs_closure: Option<ClosureInventory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guest_agent_rss_bytes: Option<u64>,
+}
+
+fn footprint_subcommand(args: &[String]) -> Result<()> {
+    let json = args.iter().any(|arg| arg == "--json");
+    let artifacts = parse_footprint_artifacts(args)?;
+    let rootfs_closure = optional_path_arg(args, "--closure-paths")?
+        .as_deref()
+        .map(|path| read_closure_inventory(path, GUEST_ROOTFS_MAX_STORE_PATHS))
+        .transpose()?;
+    let guest_agent_rss_bytes = optional_u64_arg(args, "--guest-rss-bytes")?;
+    if let Some(rss_bytes) = guest_agent_rss_bytes {
+        guest_rss_check(rss_bytes, GUEST_AGENT_RSS_MAX_BYTES)?;
+    }
+    let mut report = guest_storage_footprint_check(&artifacts, GUEST_STORAGE_MAX_BYTES)?;
+    report.rootfs_closure = rootfs_closure;
+    report.guest_agent_rss_bytes = guest_agent_rss_bytes;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        eprintln!(
+            "ok: guest artifact footprint is {} bytes (under {} bytes / 50 MB)",
+            report.total_bytes, report.limit_bytes
+        );
+        for entry in &report.entries {
+            eprintln!(
+                "  {:<16} {} bytes  {}",
+                entry.name,
+                entry.bytes,
+                entry.path.display()
+            );
+        }
+        if let Some(inventory) = &report.rootfs_closure {
+            eprintln!(
+                "  {:<16} {} store paths  {}",
+                "rootfs-closure",
+                inventory.store_path_count,
+                inventory.path.display()
+            );
+            for store_path in &inventory.store_paths {
+                eprintln!("    {store_path}");
+            }
+        }
+        if let Some(rss_bytes) = report.guest_agent_rss_bytes {
+            eprintln!(
+                "  {:<16} {} bytes (under {} bytes / 8 MiB)",
+                "guest-agent-rss", rss_bytes, GUEST_AGENT_RSS_MAX_BYTES
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_footprint_artifacts(args: &[String]) -> Result<Vec<FootprintArtifact>> {
+    let rootfs = required_path_arg(args, "--rootfs")?;
+    let overlay = required_path_arg(args, "--overlay")?;
+    let mut artifacts = vec![
+        FootprintArtifact {
+            name: "rootfs",
+            path: rootfs,
+        },
+        FootprintArtifact {
+            name: "overlay",
+            path: overlay,
+        },
+    ];
+    if let Some(path) = optional_path_arg(args, "--rootfs-verity")? {
+        artifacts.push(FootprintArtifact {
+            name: "rootfs-verity",
+            path,
+        });
+    }
+    if let Some(path) = optional_path_arg(args, "--overlay-verity")? {
+        artifacts.push(FootprintArtifact {
+            name: "overlay-verity",
+            path,
+        });
+    }
+    if let Some(path) = optional_path_arg(args, "--kernel")? {
+        artifacts.push(FootprintArtifact {
+            name: "kernel",
+            path,
+        });
+    }
+    Ok(artifacts)
+}
+
+fn guest_storage_footprint_check(
+    artifacts: &[FootprintArtifact],
+    max_bytes: u64,
+) -> Result<FootprintReport> {
+    let entries = artifacts
+        .iter()
+        .map(|artifact| {
+            let metadata = std::fs::metadata(&artifact.path).with_context(|| {
+                format!("stat {} at {}", artifact.name, artifact.path.display())
+            })?;
+            if !metadata.is_file() {
+                bail!(
+                    "{} at {} is not a regular file",
+                    artifact.name,
+                    artifact.path.display()
+                );
+            }
+            Ok(FootprintEntry {
+                name: artifact.name.to_string(),
+                path: artifact.path.clone(),
+                bytes: metadata.len(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let total_bytes = entries.iter().map(|entry| entry.bytes).sum::<u64>();
+    if total_bytes > max_bytes {
+        bail!(
+            "guest artifact footprint is {} bytes — over the footprint budget of {} bytes (50 MB)",
+            total_bytes,
+            max_bytes
+        );
+    }
+    Ok(FootprintReport {
+        limit_bytes: max_bytes,
+        total_bytes,
+        entries,
+        rootfs_closure: None,
+        guest_agent_rss_bytes: None,
+    })
+}
+
+fn guest_rss_check(rss_bytes: u64, max_bytes: u64) -> Result<()> {
+    if rss_bytes > max_bytes {
+        bail!(
+            "guest agent RSS is {rss_bytes} bytes — over the guest-agent RSS budget of {max_bytes} bytes (8 MiB)"
+        );
+    }
+    Ok(())
+}
+
+fn read_closure_inventory(path: &Path, max_store_paths: usize) -> Result<ClosureInventory> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("read rootfs closure inventory {}", path.display()))?;
+    let mut store_paths = Vec::new();
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        if line != line.trim() || !is_hash_anchored_nix_store_path(line) {
+            bail!(
+                "invalid Nix store path in rootfs closure inventory {}: {line:?}",
+                path.display()
+            );
+        }
+        store_paths.push(line.to_string());
+    }
+    if store_paths.is_empty() {
+        bail!(
+            "rootfs closure inventory {} contains no store paths",
+            path.display()
+        );
+    }
+    store_paths.sort_unstable();
+    if store_paths.windows(2).any(|pair| pair[0] == pair[1]) {
+        bail!(
+            "rootfs closure inventory {} contains duplicate store paths",
+            path.display()
+        );
+    }
+    if store_paths.len() > max_store_paths {
+        bail!(
+            "rootfs closure contains {} store paths — over the closure budget of {}",
+            store_paths.len(),
+            max_store_paths
+        );
+    }
+    Ok(ClosureInventory {
+        path: path.to_path_buf(),
+        store_path_count: store_paths.len(),
+        store_paths,
+    })
+}
+
+fn is_hash_anchored_nix_store_path(path: &str) -> bool {
+    const NIX_BASE32_ALPHABET: &[u8] = b"0123456789abcdfghijklmnpqrsvwxyz";
+
+    let Some(store_name) = path.strip_prefix("/nix/store/") else {
+        return false;
+    };
+    let Some((hash, name)) = store_name.split_once('-') else {
+        return false;
+    };
+    hash.len() == 32
+        && hash.bytes().all(|byte| NIX_BASE32_ALPHABET.contains(&byte))
+        && !name.is_empty()
+        && !name.contains('/')
+}
+
+fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
+    optional_path_arg(args, flag)?.ok_or_else(|| anyhow::anyhow!("{flag} requires a path"))
+}
+
+fn optional_path_arg(args: &[String], flag: &str) -> Result<Option<PathBuf>> {
+    let Some(index) = args.iter().position(|arg| arg == flag) else {
+        return Ok(None);
+    };
+    args.get(index + 1)
+        .map(|path| Some(PathBuf::from(path)))
+        .ok_or_else(|| anyhow::anyhow!("{flag} requires a path"))
+}
+
+fn optional_u64_arg(args: &[String], flag: &str) -> Result<Option<u64>> {
+    let Some(index) = args.iter().position(|arg| arg == flag) else {
+        return Ok(None);
+    };
+    let raw = args
+        .get(index + 1)
+        .ok_or_else(|| anyhow::anyhow!("{flag} requires a byte count"))?;
+    raw.parse::<u64>()
+        .map(Some)
+        .with_context(|| format!("{flag} must be an unsigned byte count"))
+}
+
+// ============================================================================
 // boot subcommand
 // ============================================================================
 
@@ -411,6 +700,21 @@ mod tests {
     }
 
     #[test]
+    fn guest_storage_budget_is_50_mb() {
+        assert_eq!(GUEST_STORAGE_MAX_BYTES, 50_000_000);
+    }
+
+    #[test]
+    fn guest_rootfs_closure_budget_is_two_store_paths() {
+        assert_eq!(GUEST_ROOTFS_MAX_STORE_PATHS, 2);
+    }
+
+    #[test]
+    fn guest_agent_rss_budget_is_eight_mib() {
+        assert_eq!(GUEST_AGENT_RSS_MAX_BYTES, 8 * 1024 * 1024);
+    }
+
+    #[test]
     fn firecracker_boot_budget_is_500ms() {
         assert_eq!(FIRECRACKER_BOOT_BUDGET, Duration::from_millis(500));
     }
@@ -483,6 +787,169 @@ mod tests {
         assert!(err.to_string().contains("not a regular file"));
     }
 
+    #[test]
+    fn footprint_check_sums_required_and_optional_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = write_sized_file(tmp.path(), "rootfs.ext4", 4);
+        let overlay = write_sized_file(tmp.path(), "overlay.ext4", 5);
+        let rootfs_verity = write_sized_file(tmp.path(), "rootfs.verity", 2);
+        let overlay_verity = write_sized_file(tmp.path(), "overlay.verity", 3);
+        let kernel = write_sized_file(tmp.path(), "vmlinux", 6);
+        let artifacts = vec![
+            FootprintArtifact {
+                name: "rootfs",
+                path: rootfs,
+            },
+            FootprintArtifact {
+                name: "overlay",
+                path: overlay,
+            },
+            FootprintArtifact {
+                name: "rootfs-verity",
+                path: rootfs_verity,
+            },
+            FootprintArtifact {
+                name: "overlay-verity",
+                path: overlay_verity,
+            },
+            FootprintArtifact {
+                name: "kernel",
+                path: kernel,
+            },
+        ];
+
+        let report = guest_storage_footprint_check(&artifacts, 20).unwrap();
+        assert_eq!(report.total_bytes, 20);
+        assert_eq!(report.entries.len(), 5);
+    }
+
+    #[test]
+    fn footprint_check_rejects_over_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = write_sized_file(tmp.path(), "rootfs.ext4", 8);
+        let overlay = write_sized_file(tmp.path(), "overlay.ext4", 7);
+        let artifacts = vec![
+            FootprintArtifact {
+                name: "rootfs",
+                path: rootfs,
+            },
+            FootprintArtifact {
+                name: "overlay",
+                path: overlay,
+            },
+        ];
+
+        let err = guest_storage_footprint_check(&artifacts, 14).unwrap_err();
+        assert!(err.to_string().contains("over the footprint budget"));
+    }
+
+    #[test]
+    fn guest_rss_check_accepts_the_budget_boundary() {
+        guest_rss_check(GUEST_AGENT_RSS_MAX_BYTES, GUEST_AGENT_RSS_MAX_BYTES).unwrap();
+    }
+
+    #[test]
+    fn guest_rss_check_rejects_one_byte_over_budget() {
+        let err =
+            guest_rss_check(GUEST_AGENT_RSS_MAX_BYTES + 1, GUEST_AGENT_RSS_MAX_BYTES).unwrap_err();
+        assert!(err.to_string().contains("over the guest-agent RSS budget"));
+    }
+
+    #[test]
+    fn closure_inventory_accepts_two_hash_anchored_store_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(
+            &path,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-busybox-static\n\
+             /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-mvm-setpriv-static\n",
+        )
+        .unwrap();
+
+        let inventory = read_closure_inventory(&path, 2).unwrap();
+        assert_eq!(inventory.store_path_count, 2);
+        assert_eq!(inventory.store_paths.len(), 2);
+    }
+
+    #[test]
+    fn closure_inventory_rejects_a_third_store_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(
+            &path,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a\n\
+             /nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b\n\
+             /nix/store/cccccccccccccccccccccccccccccccc-c\n",
+        )
+        .unwrap();
+
+        let err = read_closure_inventory(&path, 2).unwrap_err();
+        assert!(err.to_string().contains("over the closure budget"));
+    }
+
+    #[test]
+    fn closure_inventory_rejects_unanchored_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(&path, "glibc mentioned in a derivation name\n").unwrap();
+
+        let err = read_closure_inventory(&path, 2).unwrap_err();
+        assert!(err.to_string().contains("invalid Nix store path"));
+    }
+
+    #[test]
+    fn closure_inventory_rejects_duplicate_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(
+            &path,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-busybox-static\n\
+             /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-busybox-static\n",
+        )
+        .unwrap();
+
+        let err = read_closure_inventory(&path, 2).unwrap_err();
+        assert!(err.to_string().contains("duplicate store paths"));
+    }
+
+    #[test]
+    fn closure_inventory_rejects_empty_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rootfs-closure-paths");
+        std::fs::write(&path, "\n").unwrap();
+
+        let err = read_closure_inventory(&path, 2).unwrap_err();
+        assert!(err.to_string().contains("contains no store paths"));
+    }
+
+    #[test]
+    fn parse_footprint_requires_rootfs_and_overlay() {
+        let args = vec!["--rootfs".to_string(), "/tmp/rootfs.ext4".to_string()];
+        let err = parse_footprint_artifacts(&args).unwrap_err();
+        assert!(err.to_string().contains("--overlay"));
+    }
+
+    #[test]
+    fn parse_footprint_accepts_verity_sidecars_and_kernel() {
+        let args = vec![
+            "--rootfs".to_string(),
+            "/tmp/rootfs.ext4".to_string(),
+            "--overlay".to_string(),
+            "/tmp/overlay.ext4".to_string(),
+            "--rootfs-verity".to_string(),
+            "/tmp/rootfs.verity".to_string(),
+            "--overlay-verity".to_string(),
+            "/tmp/overlay.verity".to_string(),
+            "--kernel".to_string(),
+            "/tmp/vmlinux".to_string(),
+        ];
+        let artifacts = parse_footprint_artifacts(&args).unwrap();
+        assert_eq!(artifacts.len(), 5);
+        assert_eq!(artifacts[2].name, "rootfs-verity");
+        assert_eq!(artifacts[3].name, "overlay-verity");
+        assert_eq!(artifacts[4].name, "kernel");
+    }
+
     // ──────────────────────────────────────────────────────────────
     // Arg parsing
     // ──────────────────────────────────────────────────────────────
@@ -548,7 +1015,7 @@ mod tests {
         // The count is a tripwire — if someone adds a budget without
         // a corresponding constant-pin test, this assert pushes them
         // to update both.
-        assert_eq!(all_budgets().len(), 11);
+        assert_eq!(all_budgets().len(), 13);
     }
 
     #[test]
@@ -581,6 +1048,24 @@ mod tests {
             .find(|b| b.name == "rootfs_size")
             .expect("rootfs_size budget");
         assert_eq!(b.limit, ROOTFS_MAX_BYTES);
+    }
+
+    #[test]
+    fn all_budgets_pin_guest_storage_to_constant() {
+        let b = all_budgets()
+            .into_iter()
+            .find(|b| b.name == "guest_storage_size")
+            .expect("guest_storage_size budget");
+        assert_eq!(b.limit, GUEST_STORAGE_MAX_BYTES);
+    }
+
+    #[test]
+    fn all_budgets_pin_guest_agent_rss_to_constant() {
+        let budget = all_budgets()
+            .into_iter()
+            .find(|budget| budget.name == "guest_agent_rss")
+            .expect("guest_agent_rss budget");
+        assert_eq!(budget.limit, GUEST_AGENT_RSS_MAX_BYTES);
     }
 
     #[test]

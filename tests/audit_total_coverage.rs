@@ -444,6 +444,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("run", AuditPosture::InteractiveOrControl),
     ("__sdk-no-vm", AuditPosture::InteractiveOrControl),
     ("__builder-vm-bootstrap", AuditPosture::InteractiveOrControl),
+    (
+        "__builder-egress-supervisor",
+        AuditPosture::InteractiveOrControl,
+    ),
     // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
     // kernel grouped under `build <sub>`.
     ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),
