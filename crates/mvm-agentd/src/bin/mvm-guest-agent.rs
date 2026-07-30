@@ -44,10 +44,11 @@ mod signals;
 mod socket;
 #[path = "mvm-guest-agent/state.rs"]
 mod state;
+#[path = "mvm-guest-agent/transport.rs"]
+mod transport;
 
 use ed25519_dalek::SigningKey;
 use std::io::Write;
-use std::mem::size_of;
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -109,11 +110,9 @@ use crate::globals::{
 };
 use crate::monitoring::monitoring_loop;
 use crate::signals::{apply_reload, install_signal_handlers, shutdown_subsystems};
-use crate::socket::{
-    AF_VSOCK, AuthenticatedWriter, SOCK_STREAM, SockAddrVm, VMADDR_CID_ANY, accept, bind, close,
-    listen, peer_cid_is_authorized, socket, write_response,
-};
+use crate::socket::{AuthenticatedWriter, close, write_response};
 use crate::state::{ActivationState, AgentBootState, AgentState, IntegrationState, ProbeState};
+use crate::transport::{AgentListener, accept_control, bind_listener};
 
 use handlers::{
     handle_checkpoint_integrations, handle_entrypoint_status, handle_fs_diff, handle_fs_list,
@@ -537,10 +536,19 @@ fn main() {
         .unwrap_or_else(|| mvm_core::security::SecurityPolicy::dev_defaults().profile);
     eprintln!("mvm-guest-agent: profile={:?}", active_profile);
 
-    eprintln!(
-        "mvm-guest-agent: starting on vsock port {} (threshold={}, interval={}s)",
-        cfg.port, cfg.busy_threshold, cfg.sample_interval_secs
-    );
+    if crate::transport::unix_transport_selected() {
+        eprintln!(
+            "mvm-guest-agent: starting on unix socket {} (threshold={}, interval={}s)",
+            crate::transport::unix_socket_path().display(),
+            cfg.busy_threshold,
+            cfg.sample_interval_secs
+        );
+    } else {
+        eprintln!(
+            "mvm-guest-agent: starting on vsock port {} (threshold={}, interval={}s)",
+            cfg.port, cfg.busy_threshold, cfg.sample_interval_secs
+        );
+    }
 
     // PID-1 initramfs setup: mount early filesystems and install the
     // SIGCHLD reaper before the control plane comes up.  On non-PID-1
@@ -553,47 +561,18 @@ fn main() {
     // might want clean teardown.
     install_signal_handlers();
 
-    // SAFETY: libc call, arguments are constant values.
-    let fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
-    if fd < 0 {
-        eprintln!("failed to create vsock socket");
-        std::process::exit(1);
-    }
-
-    let addr = SockAddrVm {
-        svm_family: AF_VSOCK as u16,
-        svm_reserved1: 0,
-        svm_port: cfg.port,
-        svm_cid: VMADDR_CID_ANY,
-        svm_zero: [0; 4],
-    };
-
-    // SAFETY: pointers are valid for the specified size.
-    let bind_rc = unsafe {
-        bind(
-            fd,
-            &addr as *const SockAddrVm as *const core::ffi::c_void,
-            size_of::<SockAddrVm>() as u32,
-        )
-    };
-    if bind_rc != 0 {
-        eprintln!("failed to bind vsock port {}", cfg.port);
-        // SAFETY: `fd` is the vsock socket created above, not yet wrapped in an
-        // owning type; close takes no pointers.
-        unsafe {
-            close(fd);
+    // Bind the control-plane listener: AF_VSOCK on microVM backends,
+    // AF_UNIX on the shared-kernel container tier (see transport.rs).
+    let listener = match bind_listener(cfg.port) {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!(
+                "failed to bind control-plane listener (port {}): {e}",
+                cfg.port
+            );
+            std::process::exit(1);
         }
-        std::process::exit(1);
-    }
-
-    // SAFETY: fd is valid.
-    if unsafe { listen(fd, 16) } != 0 {
-        eprintln!("failed to listen on vsock socket");
-        unsafe {
-            close(fd);
-        }
-        std::process::exit(1);
-    }
+    };
 
     // Record boot time for startup grace period tracking.
     let boot_at = std::time::Instant::now();
@@ -722,10 +701,16 @@ fn main() {
     // Port forwarders are started on-demand via StartPortForward requests
     // from the host (works with all backends, no config drive needed).
 
-    eprintln!(
-        "mvm-guest-agent: listening on vsock port {} (entrypoint, warm pool, integrations, probes initializing in background)",
-        cfg.port
-    );
+    match &listener {
+        AgentListener::Vsock(_) => eprintln!(
+            "mvm-guest-agent: listening on vsock port {} (entrypoint, warm pool, integrations, probes initializing in background)",
+            cfg.port
+        ),
+        AgentListener::Unix(_) => eprintln!(
+            "mvm-guest-agent: listening on unix socket {} (entrypoint, warm pool, integrations, probes initializing in background)",
+            crate::transport::unix_socket_path().display()
+        ),
+    }
 
     // Every accepted connection gets its own bounded worker so a long-running
     // data stream cannot prevent Ping, readiness, sleep, or shutdown requests
@@ -751,56 +736,18 @@ fn main() {
         {
             apply_reload();
         }
-        // Accept into a `sockaddr_vm` so the peer CID is captured: the control
-        // port is host-only, and a guest-local workload on a loopback-capable
-        // kernel could otherwise dial it and inject any GuestRequest.
-        let mut peer = SockAddrVm {
-            svm_family: 0,
-            svm_reserved1: 0,
-            svm_port: 0,
-            svm_cid: 0,
-            svm_zero: [0; 4],
-        };
-        let mut peer_len = size_of::<SockAddrVm>() as u32;
-        // SAFETY: `peer` is a fully-owned, correctly-sized `sockaddr_vm`; the
-        // kernel writes at most `peer_len` bytes and updates it to the actual
-        // length.
-        let cfd = unsafe {
-            accept(
-                fd,
-                &mut peer as *mut SockAddrVm as *mut core::ffi::c_void,
-                &mut peer_len,
-            )
-        };
-        if cfd < 0 {
-            // Most common reason: EINTR from a signal. Re-check the
-            // flag immediately so a SIGTERM that landed mid-accept
-            // breaks the loop without waiting for the next accept
-            // to start.
+        // Accept one control connection; the transport applies its own
+        // peer authorization (the vsock host-CID gate, or the unix socket
+        // directory boundary — see transport.rs). `None` covers both EINTR
+        // and a rejected peer: re-check the shutdown flag and retry.
+        let Some(cfd) = accept_control(&listener) else {
             if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
                 break;
             }
             // Same fast-path for SIGHUP — apply the reload on the
             // next iteration's compare_exchange.
             continue;
-        }
-        // Fail closed: reject unless the kernel filled a full AF_VSOCK address
-        // whose peer CID is the host. A truncated/unfamiliar address leaves the
-        // peer unknown, so it is treated as unauthorized.
-        let peer_known =
-            peer_len >= size_of::<SockAddrVm>() as u32 && peer.svm_family == AF_VSOCK as u16;
-        if !peer_known || !peer_cid_is_authorized(peer.svm_cid) {
-            eprintln!(
-                "mvm-guest-agent: rejecting control connection from non-host peer (cid={}, family={})",
-                peer.svm_cid, peer.svm_family
-            );
-            // SAFETY: `cfd` is the just-accepted connection fd, not yet wrapped
-            // in an owning type; close takes no pointers.
-            unsafe {
-                close(cfd);
-            }
-            continue;
-        }
+        };
         // Stamp first-accept timing once. Idempotent inside
         // `AgentBootState` — subsequent calls are no-ops.
         boot_state.mark_first_accept();
@@ -832,9 +779,12 @@ fn main() {
 
     // Close the listening socket so any in-flight accept on a
     // peer thread (warm-process accept-thread-per-conn mode) wakes.
-    // SAFETY: fd was created by socket() and is owned by us.
-    unsafe {
-        close(fd);
+    if let AgentListener::Vsock(fd) = listener {
+        // SAFETY: fd was created by socket() and is owned by us. The AF_UNIX
+        // variant closes on drop.
+        unsafe {
+            close(fd);
+        }
     }
     shutdown_subsystems(DEFAULT_SHUTDOWN_GRACE);
 }

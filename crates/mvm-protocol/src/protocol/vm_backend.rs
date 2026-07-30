@@ -1058,6 +1058,13 @@ pub enum BackendKind {
     /// portability/demo backend: opt-in only, never returned by auto-detect,
     /// no hardware isolation boundary.
     Wasm,
+    /// Shared-kernel container dev tier: the workload runs in a Docker
+    /// container with `mvm-guest-agent` as PID 1, receiving activation over
+    /// a host bind-mounted Unix socket instead of vsock. Opt-in only, never
+    /// returned by auto-detect, refused by production admission; none of
+    /// the hardware-isolation claims hold (the guest shares the host
+    /// kernel).
+    Docker,
     /// Apple Containerization-framework tier: workloads run inside Apple's
     /// lightweight container VMs with `vminitd` as guest PID 1. The backend
     /// drives the same activation contract through vminitd's gRPC API rather

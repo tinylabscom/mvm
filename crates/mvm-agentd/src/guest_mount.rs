@@ -34,6 +34,9 @@ pub enum MountError {
     /// A required filesystem type is unavailable.
     #[error("unsupported filesystem: {0}")]
     UnsupportedFilesystem(String),
+    /// The activation message itself is contradictory or malformed.
+    #[error("invalid activation config: {0}")]
+    InvalidConfig(String),
 }
 
 impl MountError {
@@ -104,13 +107,33 @@ pub fn mount_early_filesystems() -> Result<()> {
 
 /// Mount the rootfs, returning the staging path (`/mnt/root`).
 ///
-/// Three shapes, selected by the config's optional fields: a dm-verity block
-/// root (`roothash` + `hash_dev` set — create the `root` target and mount it
-/// read-only), an unverified plain-block root (neither set — mount the data
-/// device read-only directly), or a virtio-fs root (`virtiofs_tag` set —
-/// mount the tag read-only).  On non-Linux platforms it is a no-op stub so
-/// the workspace compiles.
+/// Three mount shapes, selected by the config's optional fields: a
+/// dm-verity block root (`roothash` + `hash_dev` set — create the `root`
+/// target and mount it read-only), an unverified plain-block root
+/// (neither set — mount the data device read-only directly), or a
+/// virtio-fs root (`virtiofs_tag` set — mount the tag read-only). The
+/// fourth shape, `in_place`, mounts nothing and returns `/` directly: the
+/// runtime already owns the root (a shared-kernel container whose root is
+/// the image). On non-Linux platforms it is a no-op stub so the workspace
+/// compiles.
 pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
+    if rootfs.in_place {
+        // Mutually exclusive with every mount-carrying field: a host that
+        // sets both gets a loud validation error, never a silent choice
+        // between "mount this device" and "the root is already there".
+        if !rootfs.data_dev.is_empty()
+            || rootfs.hash_dev.is_some()
+            || rootfs.roothash.is_some()
+            || rootfs.virtiofs_tag.is_some()
+        {
+            return Err(MountError::InvalidConfig(
+                "rootfs.in_place is mutually exclusive with data_dev/hash_dev/roothash/virtiofs_tag"
+                    .to_string(),
+            ));
+        }
+        return Ok(PathBuf::from("/"));
+    }
+
     ensure_dir(ROOTFS_STAGING)?;
 
     #[cfg(not(target_os = "linux"))]
@@ -797,6 +820,58 @@ mod tests {
     #[test]
     fn validate_roothash_accepts_64_lowercase_hex() {
         assert!(validate_roothash(FAKE_HASH, "test").is_ok());
+    }
+
+    #[test]
+    fn in_place_rootfs_mounts_nothing_and_returns_root() {
+        let cfg = RootfsConfig {
+            data_dev: String::new(),
+            hash_dev: None,
+            roothash: None,
+            virtiofs_tag: None,
+            in_place: true,
+        };
+        assert_eq!(mount_rootfs(&cfg).unwrap(), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn in_place_rootfs_rejects_mount_carrying_fields() {
+        for cfg in [
+            RootfsConfig {
+                data_dev: "/dev/vda".to_string(),
+                hash_dev: None,
+                roothash: None,
+                virtiofs_tag: None,
+                in_place: true,
+            },
+            RootfsConfig {
+                data_dev: String::new(),
+                hash_dev: Some("/dev/vdb".to_string()),
+                roothash: None,
+                virtiofs_tag: None,
+                in_place: true,
+            },
+            RootfsConfig {
+                data_dev: String::new(),
+                hash_dev: None,
+                roothash: Some(FAKE_HASH.to_string()),
+                virtiofs_tag: None,
+                in_place: true,
+            },
+            RootfsConfig {
+                data_dev: String::new(),
+                hash_dev: None,
+                roothash: None,
+                virtiofs_tag: Some("mvmroot".to_string()),
+                in_place: true,
+            },
+        ] {
+            let err = mount_rootfs(&cfg).unwrap_err();
+            assert!(
+                matches!(err, MountError::InvalidConfig(_)),
+                "expected InvalidConfig, got: {err}"
+            );
+        }
     }
 
     #[test]

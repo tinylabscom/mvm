@@ -34,8 +34,8 @@ pub struct ActivateEnvironment {
     pub verb_grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
 }
 
-/// Root device the guest mounts as `/`.  Three shapes, selected by which
-/// optional fields are set:
+/// Root device the guest mounts as `/`.  Three mount shapes, selected by
+/// which optional fields are set, plus one mount-free shape:
 ///
 /// - **dm-verity block** (`roothash` + `hash_dev`): create the `root`
 ///   dm-verity target and mount it read-only.
@@ -43,6 +43,10 @@ pub struct ActivateEnvironment {
 ///   verification (unverified dev-tier boot).
 /// - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only
 ///   as the root — the block-less dev-tier boot.
+/// - **in place** (`in_place`): the runtime already owns `/` — a
+///   shared-kernel container whose root is the image itself. Nothing is
+///   mounted and no pivot happens; activation is the privilege drop and
+///   the gate flip only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -60,6 +64,12 @@ pub struct RootfsConfig {
     /// virtio-fs tag to mount as the root instead of a block device.
     #[serde(default)]
     pub virtiofs_tag: Option<String>,
+    /// The root is already in place (shared-kernel container tier): skip
+    /// the rootfs mount and the pivot entirely. Mutually exclusive with
+    /// every other field — a host that sets this alongside a device, hash,
+    /// or tag gets a validation error from the agent, not a silent choice.
+    #[serde(default)]
+    pub in_place: bool,
 }
 
 /// dm-verity runtime-overlay target.  The runtime overlay is always
@@ -102,6 +112,7 @@ mod tests {
                 hash_dev: Some("/dev/vdb".to_string()),
                 roothash: Some("a".repeat(64)),
                 virtiofs_tag: None,
+                in_place: false,
             },
             runtime: Some(RuntimeOverlayConfig {
                 data_dev: "/dev/vdc".to_string(),
@@ -136,6 +147,7 @@ mod tests {
                 hash_dev: None,
                 roothash: None,
                 virtiofs_tag: None,
+                in_place: false,
             },
             runtime: None,
             volumes: Vec::new(),
@@ -154,6 +166,7 @@ mod tests {
                 hash_dev: None,
                 roothash: None,
                 virtiofs_tag: Some("mvmroot".to_string()),
+                in_place: false,
             },
             runtime: None,
             volumes: Vec::new(),
@@ -162,6 +175,32 @@ mod tests {
         let json = serde_json::to_string(&env).expect("serialize");
         let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.rootfs.virtiofs_tag.as_deref(), Some("mvmroot"));
+    }
+
+    #[test]
+    fn in_place_root_roundtrips_and_defaults_absent() {
+        // In-place (container) root: only the flag is set.
+        let env = ActivateEnvironment {
+            rootfs: RootfsConfig {
+                data_dev: String::new(),
+                hash_dev: None,
+                roothash: None,
+                virtiofs_tag: None,
+                in_place: true,
+            },
+            runtime: None,
+            volumes: Vec::new(),
+            verb_grant_envelope: None,
+        };
+        let json = serde_json::to_string(&env).expect("serialize");
+        let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
+        assert!(parsed.rootfs.in_place);
+
+        // Older messages carry no `in_place` key at all; it defaults to the
+        // mount-owning boot shapes.
+        let legacy = r#"{"rootfs":{"data_dev":"/dev/vda"}}"#;
+        let parsed: ActivateEnvironment = serde_json::from_str(legacy).expect("deserialize");
+        assert!(!parsed.rootfs.in_place);
     }
 
     #[test]
