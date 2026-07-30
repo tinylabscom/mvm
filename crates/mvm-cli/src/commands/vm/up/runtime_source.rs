@@ -9,7 +9,7 @@
 //! attached only to workloads whose signed plan binds an SDK-served host
 //! service.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 pub(crate) use mvm_runtime::sdk_sidecar::SdkSidecarAttachment;
 
