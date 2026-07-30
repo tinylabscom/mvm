@@ -1025,6 +1025,11 @@ pub enum BackendKind {
     /// portability/demo backend: opt-in only, never returned by auto-detect,
     /// no hardware isolation boundary.
     Wasm,
+    /// Apple Containerization-framework tier: workloads run inside Apple's
+    /// lightweight container VMs with `vminitd` as guest PID 1. The backend
+    /// drives the same activation contract through vminitd's gRPC API rather
+    /// than an mvm initramfs. Opt-in only; never returned by auto-detect.
+    AppleContainer,
 }
 
 #[cfg(test)]

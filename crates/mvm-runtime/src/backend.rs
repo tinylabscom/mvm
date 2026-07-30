@@ -8,6 +8,7 @@ use mvm_core::vm_backend::{
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
+use crate::apple_container_backend::AppleContainerBackend;
 use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
 use crate::driver::{FcDriver, HvfDriver, LibkrunDriver};
@@ -410,6 +411,14 @@ pub enum AnyBackend {
     /// closed with a typed error the first time the backend is actually
     /// used, not at construction.
     Wasm(WasmBackend),
+    /// Apple Containerization-framework backend skeleton — see
+    /// [`crate::apple_container_backend`]. Selectable only via explicit
+    /// `--hypervisor apple-container` (alias `container`); `auto_select`
+    /// never falls through here. Always constructible and side-effect free;
+    /// every operation that would touch a real VM fails closed with a typed
+    /// error naming the milestone that provides it, since no
+    /// Containerization-framework integration exists yet.
+    AppleContainer(AppleContainerBackend),
 }
 
 impl AnyBackend {
@@ -560,6 +569,7 @@ impl AnyBackend {
             Self::Mock(backend) => backend,
             Self::Hvf(backend) => backend,
             Self::Wasm(backend) => backend,
+            Self::AppleContainer(backend) => backend,
         }
     }
 
@@ -576,6 +586,9 @@ impl AnyBackend {
             Self::Mock(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Wasm(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            Self::AppleContainer(backend) => {
+                std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
+            }
         }
     }
 
@@ -634,6 +647,11 @@ impl AnyBackend {
             // egress seam). Barred from the admitted launch funnel until
             // then, the same carve-out as `Qemu`.
             AnyBackend::Wasm(_) => None,
+            // The apple-container skeleton has no boot path at all — it
+            // cannot carry an untrusted workload until the framework shim
+            // and the activation channel land, so it is barred from the
+            // admitted launch funnel the same way `Qemu`/`Wasm` are.
+            AnyBackend::AppleContainer(_) => None,
         }
     }
 
@@ -687,7 +705,7 @@ impl AnyBackend {
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(backend) => backend.spawn_standby(spec),
             // Not workload-bearing backends — no warm pool, fail closed.
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) => {
+            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::AppleContainer(_) => {
                 Err(mvm_core::vm_backend::StandbyError::Unsupported {
                     backend: self.inner().name().to_string(),
                 })
@@ -729,7 +747,7 @@ impl AnyBackend {
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(backend) => backend.claim_standby(handle, claim),
             // Not workload-bearing backends — no warm pool, fail closed.
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) => {
+            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::AppleContainer(_) => {
                 Err(mvm_core::vm_backend::StandbyError::Unsupported {
                     backend: self.inner().name().to_string(),
                 })
@@ -1029,7 +1047,14 @@ mod tests {
 
     #[test]
     fn require_hypervisor_selectable_allows_every_other_name() {
-        for name in ["firecracker", "libkrun", "qemu", "hvf", "unknown-typo"] {
+        for name in [
+            "firecracker",
+            "libkrun",
+            "qemu",
+            "hvf",
+            "apple-container",
+            "unknown-typo",
+        ] {
             assert!(
                 AnyBackend::require_hypervisor_selectable(name).is_ok(),
                 "{name}: must never be refused"
@@ -1161,6 +1186,15 @@ mod tests {
     }
 
     #[test]
+    fn auto_select_never_returns_apple_container() {
+        assert_ne!(
+            AnyBackend::auto_select().kind(),
+            mvm_core::vm_backend::BackendKind::AppleContainer,
+            "auto_select must never fall through to the apple-container skeleton"
+        );
+    }
+
+    #[test]
     fn backend_catalog_matrix_is_stable() {
         let actual: Vec<_> = catalog::descriptors()
             .iter()
@@ -1235,6 +1269,16 @@ mod tests {
                     "wasm",
                     Vec::new(),
                     BackendTier::Tier3,
+                    None,
+                    None,
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    "apple-container",
+                    vec!["container"],
+                    BackendTier::Tier2,
                     None,
                     None,
                     true,
@@ -1332,6 +1376,7 @@ mod tests {
     #[test]
     fn recovery_capability_matrix_is_explicit_for_every_selectable_backend() {
         let mut expected = vec![
+            ("apple-container", SnapshotCapability::Unsupported, false),
             ("firecracker", SnapshotCapability::Unsupported, false),
             ("hvf", SnapshotCapability::Unsupported, false),
             ("libkrun", SnapshotCapability::Unsupported, false),
@@ -1424,6 +1469,7 @@ mod tests {
     #[test]
     fn tier_classification_locks_each_backend_variant() {
         let mut cases: Vec<(&str, BackendTier)> = vec![
+            ("apple-container", BackendTier::Tier2),
             ("firecracker", BackendTier::Tier1),
             ("libkrun", BackendTier::Tier2),
             ("qemu", BackendTier::Tier2),
@@ -1448,7 +1494,7 @@ mod tests {
         // long-standing per-backend tier declaration. `AnyBackend::tier()`
         // is the closed-enum view of the same fact. Bumping one without
         // the other is a regression — keep them wired.
-        let mut names = vec!["firecracker", "libkrun", "qemu"];
+        let mut names = vec!["apple-container", "firecracker", "libkrun", "qemu"];
         if cfg!(feature = "test-support") {
             names.push("mock");
         }
@@ -1500,6 +1546,17 @@ mod tests {
         assert!(
             backend.as_workload_backend().is_none(),
             "qemu: dev/test VMM must not be a workload backend"
+        );
+    }
+
+    #[test]
+    fn as_workload_backend_none_for_apple_container_skeleton() {
+        // The skeleton has no boot path; it must not carry an untrusted
+        // workload until the framework shim and activation channel land.
+        let backend = AnyBackend::from_hypervisor("apple-container");
+        assert!(
+            backend.as_workload_backend().is_none(),
+            "apple-container: skeleton must not be a workload backend"
         );
     }
 
@@ -1577,6 +1634,10 @@ mod tests {
             ("libkrun", AnyBackend::Libkrun(libkrun_runner())),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
             ("hvf", AnyBackend::Hvf(hvf_runner())),
+            (
+                "apple-container",
+                AnyBackend::AppleContainer(AppleContainerBackend::new()),
+            ),
         ];
         backends.extend(mock_variant_for_ssh_check());
         for (name, backend) in backends {
@@ -1714,7 +1775,7 @@ mod tests {
         #[test]
         fn fails_closed_for_non_workload_backends() {
             let s = Scaffold::new();
-            for name in ["qemu", "wasm"] {
+            for name in ["qemu", "wasm", "apple-container"] {
                 let backend = AnyBackend::from_hypervisor(name);
                 let err = backend
                     .claim_standby_via_runner(&s.ctx(), &idle_handle(), &minimal_claim())
@@ -1749,7 +1810,7 @@ mod tests {
                 image_sha256: None,
             };
 
-            for name in ["qemu", "wasm"] {
+            for name in ["qemu", "wasm", "apple-container"] {
                 let backend = AnyBackend::from_hypervisor(name);
                 let err = backend
                     .spawn_standby_via_runner(

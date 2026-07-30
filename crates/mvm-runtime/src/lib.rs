@@ -28,6 +28,7 @@ pub mod vsock_transport;
 
 pub mod vm;
 
+pub mod apple_container_backend;
 pub mod artifacts;
 pub mod audit_substrate;
 /// Shared resolve-or-build for the per-VM helper binaries `mvmctl` spawns
