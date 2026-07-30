@@ -1382,17 +1382,36 @@ pub mod vsock {
     /// Bind to any guest CID so any guest on this host can reach the endpoint.
     const VMADDR_CID_ANY: u32 = u32::MAX;
 
-    // Kernel uapi `struct sockaddr_vm`: family u16 + reserved u16 + port u32 +
-    // cid u32 + 4-byte pad = 16.
+    // Kernel uapi `struct sockaddr_vm`.
     #[repr(C)]
     struct SockaddrVm {
         svm_family: libc::sa_family_t,
         svm_reserved1: u16,
         svm_port: u32,
         svm_cid: u32,
-        svm_zero: [u8; 4],
+        /// `VMADDR_FLAG_TO_HOST` and friends. Zero for every address mvm
+        /// builds; carried so the mirror matches the header field-for-field.
+        svm_flags: u8,
+        svm_zero: [u8; 3],
     }
-    const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
+
+    // Layout contract with linux/vm_sockets.h, derived on Linux 6.8 with cc
+    // sizeof/offsetof/_Alignof rather than read off the Rust definition.
+    // Bytes 12..16: the header gained `svm_flags` at offset 12 in Linux 6.0,
+    // shrinking `svm_zero` to three bytes. The total is 16 either way, which
+    // is why the pre-6.0 shape went unnoticed here.
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(size_of::<SockaddrVm>() == 16);
+        assert!(align_of::<SockaddrVm>() == 4);
+        assert!(offset_of!(SockaddrVm, svm_family) == 0);
+        assert!(offset_of!(SockaddrVm, svm_reserved1) == 2);
+        assert!(offset_of!(SockaddrVm, svm_port) == 4);
+        assert!(offset_of!(SockaddrVm, svm_cid) == 8);
+        assert!(offset_of!(SockaddrVm, svm_flags) == 12);
+        assert!(offset_of!(SockaddrVm, svm_zero) == 13);
+    };
 
     /// A bound, listening host AF_VSOCK socket on a vsock port.
     pub struct VsockListener {
@@ -1416,7 +1435,8 @@ pub mod vsock {
                     svm_reserved1: 0,
                     svm_port: port,
                     svm_cid: VMADDR_CID_ANY,
-                    svm_zero: [0; 4],
+                    svm_flags: 0,
+                    svm_zero: [0; 3],
                 };
                 if libc::bind(
                     fd,
@@ -2031,14 +2051,30 @@ mod server_tests {
         rt.block_on(async {
             const AF_VSOCK: libc::c_int = 40;
             const VMADDR_CID_LOCAL: u32 = 1;
+            // A double of a kernel ABI type that is free to disagree with
+            // the kernel cannot falsify anything the real type does, so it
+            // carries the same contract as the production copy above.
             #[repr(C)]
             struct SockaddrVm {
                 svm_family: libc::sa_family_t,
                 svm_reserved1: u16,
                 svm_port: u32,
                 svm_cid: u32,
-                svm_zero: [u8; 4],
+                svm_flags: u8,
+                svm_zero: [u8; 3],
             }
+            const _: () = {
+                use std::mem::{align_of, offset_of, size_of};
+
+                assert!(size_of::<SockaddrVm>() == 16);
+                assert!(align_of::<SockaddrVm>() == 4);
+                assert!(offset_of!(SockaddrVm, svm_family) == 0);
+                assert!(offset_of!(SockaddrVm, svm_reserved1) == 2);
+                assert!(offset_of!(SockaddrVm, svm_port) == 4);
+                assert!(offset_of!(SockaddrVm, svm_cid) == 8);
+                assert!(offset_of!(SockaddrVm, svm_flags) == 12);
+                assert!(offset_of!(SockaddrVm, svm_zero) == 13);
+            };
 
             let port = 54000 + (std::process::id() % 2000);
             let listener = match VsockListener::bind(port) {
@@ -2066,7 +2102,8 @@ mod server_tests {
                     svm_reserved1: 0,
                     svm_port: port,
                     svm_cid: VMADDR_CID_LOCAL,
-                    svm_zero: [0; 4],
+                    svm_flags: 0,
+                    svm_zero: [0; 3],
                 };
                 let rc = unsafe {
                     libc::connect(

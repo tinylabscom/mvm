@@ -16,8 +16,33 @@ pub(crate) struct SockAddrVm {
     pub(crate) svm_reserved1: u16,
     pub(crate) svm_port: u32,
     pub(crate) svm_cid: u32,
-    pub(crate) svm_zero: [u8; 4],
+    /// `VMADDR_FLAG_TO_HOST` and friends. Zero for every address mvm
+    /// builds; carried so the mirror matches the header field-for-field.
+    pub(crate) svm_flags: u8,
+    pub(crate) svm_zero: [u8; 3],
 }
+
+// Layout contract with the kernel's `struct sockaddr_vm`
+// (linux/vm_sockets.h). The struct is handed to bind(2)/connect(2) as a
+// pointer plus an explicit length, so a size or offset mismatch binds the
+// wrong port or CID instead of returning an error.
+//
+// Derived on Linux 6.8 with cc sizeof/offsetof/_Alignof, not read off the
+// Rust definition. Note bytes 12..16: the header gained `svm_flags` at
+// offset 12 in Linux 6.0, shrinking `svm_zero` to three bytes. The total
+// is 16 either way, which is why the pre-6.0 shape went unnoticed here.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<SockAddrVm>() == 16);
+    assert!(align_of::<SockAddrVm>() == 4);
+    assert!(offset_of!(SockAddrVm, svm_family) == 0);
+    assert!(offset_of!(SockAddrVm, svm_reserved1) == 2);
+    assert!(offset_of!(SockAddrVm, svm_port) == 4);
+    assert!(offset_of!(SockAddrVm, svm_cid) == 8);
+    assert!(offset_of!(SockAddrVm, svm_flags) == 12);
+    assert!(offset_of!(SockAddrVm, svm_zero) == 13);
+};
 
 unsafe extern "C" {
     pub(crate) fn socket(domain: i32, typ: i32, protocol: i32) -> i32;

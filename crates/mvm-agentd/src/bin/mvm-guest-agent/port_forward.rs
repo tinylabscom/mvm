@@ -30,7 +30,8 @@ pub(crate) fn run_port_forwarder(vsock_port: u32, tcp_port: u16) {
         svm_reserved1: 0,
         svm_port: vsock_port,
         svm_cid: VMADDR_CID_ANY,
-        svm_zero: [0; 4],
+        svm_flags: 0,
+        svm_zero: [0; 3],
     };
 
     // SAFETY: valid pointer and size.

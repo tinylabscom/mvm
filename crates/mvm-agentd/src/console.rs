@@ -106,8 +106,30 @@ struct SockAddrVm {
     svm_reserved1: u16,
     svm_port: u32,
     svm_cid: u32,
-    svm_zero: [u8; 4],
+    /// `VMADDR_FLAG_TO_HOST` and friends. Zero for every address mvm
+    /// builds; carried so the mirror matches the header field-for-field.
+    svm_flags: u8,
+    svm_zero: [u8; 3],
 }
+
+// Layout contract with the kernel's `struct sockaddr_vm`
+// (linux/vm_sockets.h), derived on Linux 6.8 with cc
+// sizeof/offsetof/_Alignof rather than read off the Rust definition.
+// Bytes 12..16: the header gained `svm_flags` at offset 12 in Linux 6.0,
+// shrinking `svm_zero` to three bytes. The total is 16 either way, which
+// is why the pre-6.0 shape went unnoticed here.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<SockAddrVm>() == 16);
+    assert!(align_of::<SockAddrVm>() == 4);
+    assert!(offset_of!(SockAddrVm, svm_family) == 0);
+    assert!(offset_of!(SockAddrVm, svm_reserved1) == 2);
+    assert!(offset_of!(SockAddrVm, svm_port) == 4);
+    assert!(offset_of!(SockAddrVm, svm_cid) == 8);
+    assert!(offset_of!(SockAddrVm, svm_flags) == 12);
+    assert!(offset_of!(SockAddrVm, svm_zero) == 13);
+};
 
 /// Terminal window size (matches struct winsize in sys/ioctl.h).
 #[repr(C)]
@@ -118,6 +140,21 @@ pub struct Winsize {
     ws_xpixel: u16,
     ws_ypixel: u16,
 }
+
+// Layout contract with `struct winsize` (sys/ioctl.h). Passed by pointer
+// to the TIOCSWINSZ/TIOCGWINSZ ioctls, which read the four fields by
+// offset. Derived on Linux 6.8 with cc sizeof/offsetof/_Alignof; the
+// same four-u16 layout holds on macOS.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<Winsize>() == 8);
+    assert!(align_of::<Winsize>() == 2);
+    assert!(offset_of!(Winsize, ws_row) == 0);
+    assert!(offset_of!(Winsize, ws_col) == 2);
+    assert!(offset_of!(Winsize, ws_xpixel) == 4);
+    assert!(offset_of!(Winsize, ws_ypixel) == 6);
+};
 
 /// Open a PTY console session.
 ///
@@ -350,7 +387,8 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
         svm_reserved1: 0,
         svm_port: session.data_port,
         svm_cid: VMADDR_CID_ANY,
-        svm_zero: [0; 4],
+        svm_flags: 0,
+        svm_zero: [0; 3],
     };
 
     // SAFETY: `listen_fd` is the socket just created; `addr` points to the
@@ -397,7 +435,8 @@ pub fn run_console_relay(session: &ConsoleSession) -> i32 {
         svm_reserved1: 0,
         svm_port: 0,
         svm_cid: 0,
-        svm_zero: [0; 4],
+        svm_flags: 0,
+        svm_zero: [0; 3],
     };
     let expected_peer_len =
         u32::try_from(std::mem::size_of::<SockAddrVm>()).expect("vsock address size fits u32");
@@ -642,10 +681,11 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_winsize_layout() {
-        assert_eq!(std::mem::size_of::<Winsize>(), 8);
-    }
+    // `Winsize`'s layout is pinned by the `const _` contract next to the
+    // struct: a compile-time assertion that also covers alignment and every
+    // field offset, and that holds for cross-compiled targets which never
+    // run this host test suite. The runtime size check that used to live
+    // here was strictly weaker and is gone.
 
     #[test]
     fn test_console_error_display() {
