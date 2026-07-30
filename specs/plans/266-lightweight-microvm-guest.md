@@ -217,6 +217,13 @@ Tracked here per the deferred-work convention; each is its own future plan.
 - **WS-2 (lever E):** the custom static-musl `mvm-setpriv` helper is complete as a
   dedicated `mvm-agentd` binary and Nix package; the generated `mkGuest` init now
   uses it instead of util-linux.
+- **SDK-sidecar release acquisition:** the attachment chain is complete and
+  fails closed, but only a source checkout can satisfy it — `mvm-build` has no
+  sidecar acquisition module and no release workflow publishes a `sdk-sidecar`
+  asset, so an end-user on a downloaded `mvmctl` who binds an SDK-served host
+  service gets the refusal rather than a fetch. Planned at
+  `specs/plans/273-sdk-sidecar-release-acquisition.md`. Not started.
+
 - **WS-3 (lever B):** complete. The static-musl runtime-overlay cut, the
   separate SDK sidecar packaging, and automatic plan-driven sidecar attachment
   all landed. The overlay allocation is capped at 16 MiB, with a build-backed
@@ -260,7 +267,10 @@ The static runtime-overlay cut is implemented in the follow-up worktree:
   libgcc); both language SDKs default to `/mvm/sdk/lib`.
 - [x] Wire runtime attachment so a workload that uses host-service verbs is
   automatically opted into the SDK sidecar. The default static overlay
-  intentionally does not carry the SDK FFI or its glibc closure.
+  intentionally does not carry the SDK FFI or its glibc closure. Source
+  checkouts build the sidecar from the flake; publishing it as a release
+  artifact for downloaded `mvmctl` builds is
+  `specs/plans/273-sdk-sidecar-release-acquisition.md`.
 
   **How it landed.** The need is derived from the signed plan, never from the
   environment or application content:

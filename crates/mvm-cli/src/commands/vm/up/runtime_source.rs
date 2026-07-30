@@ -433,7 +433,7 @@ mod sdk_sidecar_host_resolution_tests {
     fn the_host_wrapper_resolves_nothing_when_no_sdk_service_is_bound() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", dir.path());
+        env.isolate_mvm_home(dir.path());
         assert_eq!(resolve_sdk_sidecar_attachment_for_host(&[]).unwrap(), None);
         assert_eq!(
             resolve_sdk_sidecar_attachment_for_host(&[svc("broker.v1")]).unwrap(),
@@ -445,7 +445,7 @@ mod sdk_sidecar_host_resolution_tests {
     fn the_host_wrapper_fails_closed_on_a_cold_cache() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", dir.path());
+        env.isolate_mvm_home(dir.path());
         assert!(
             resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")]).is_err(),
             "a bound SDK service with no cached sidecar must refuse the launch"

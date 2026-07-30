@@ -122,7 +122,9 @@
       (`runtime-overlay-no-glibc`, `sdk-sidecar-carries-glibc`), and
       `xtask perf footprint --sdk-sidecar` reports the sidecar on its own
       ledger line against its own 8 MiB ceiling, never folded into the base
-      50,000,000-byte contract.
+      50,000,000-byte contract. Source checkouts build the sidecar from the
+      flake; publishing it for downloaded `mvmctl` builds is planned at
+      `specs/plans/273-sdk-sidecar-release-acquisition.md`.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.

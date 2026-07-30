@@ -15,6 +15,12 @@ for detailed scope and acceptance criteria.
         KVM-box measurements recorded in the plan. SLO not cleared; remaining
         ~5–6 ms gap is Firecracker process startup + snapshot resume.
 
+- [ ] Plan 273 — SDK sidecar release acquisition
+  (`specs/plans/273-sdk-sidecar-release-acquisition.md`)
+  - [ ] Publish `sdk-sidecar-<arch>.tar.gz` per-arch release assets
+  - [ ] `mvm_build::sdk_sidecar` fetch + integrity-verify + atomic install
+  - [ ] Reach it from the launch path on the download-mode acquire path
+
 - [x] Plan 266 — lightweight microVM guest
   (`specs/plans/266-lightweight-microvm-guest.md`)
   - [x] WS-1/WS-2: static-musl privilege drop via the in-house `mvm-setpriv`
