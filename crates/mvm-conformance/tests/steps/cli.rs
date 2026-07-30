@@ -16,7 +16,7 @@ use crate::world::CliWorld;
 /// Build an `mvmctl` subprocess with the same binary discovery the rest of
 /// the conformance suite uses, plus the target directory on `PATH` so helper
 /// binaries built alongside `mvmctl` are visible during live boots.
-fn mvmctl_command() -> Command {
+pub(crate) fn mvmctl_command() -> Command {
     #[allow(deprecated)] // matches crates/mvm-cli/tests/cli.rs's use of this API
     let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
         panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
@@ -40,7 +40,7 @@ fn mvmctl_command() -> Command {
 /// Steps that reference workspace files (e.g. `examples/exit_code`) run `mvmctl`
 /// with this as the working directory so relative flake paths resolve the same
 /// way they do from a manual invocation at the project root.
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -111,7 +111,7 @@ fn warm_residency_enabled(world: &mut CliWorld) {
 }
 
 #[when(expr = "I run mvmctl in an isolated live home with {string}")]
-fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
+pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
     // microVM. The working directory is the workspace root so relative flake
     // paths (e.g. `examples/exit_code`) resolve the same way as a manual run

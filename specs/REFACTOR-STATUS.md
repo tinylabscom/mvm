@@ -1,11 +1,19 @@
 # Refactor status
 
-Last updated: 2026-07-27
+Last updated: 2026-07-29
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] Plan 265 — Fast-start SLO, backend sequencing & competitive positioning
+  (`specs/plans/265-fast-start-slo-sequencing-positioning.md`)
+  - [x] WS1 — Finish the FC warm-restore story (no-NIC guard, real
+        `FirecrackerIO`, un-bailed warm restore, teardown on refusal)
+  - [x] WS2 — The ≤30 ms p50 SLO: native API client, `api_put_socket`
+        privilege verdict, pooled/pre-staged FC saved-state claim, and live
+        KVM-box measurements recorded in the plan. SLO not cleared; remaining
+        ~5–6 ms gap is Firecracker process startup + snapshot resume.
 
 - [~] Plan 255 — vsock-first snapshot, egress, and warm-start adoption
   (`specs/plans/255-vsock-first-snapshot-egress-adoption.md`)

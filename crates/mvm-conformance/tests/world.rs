@@ -13,6 +13,44 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId};
 use mvm_runtime::checkpoint::CheckpointStore;
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 
+/// Points `MVM_HOME` at a scenario-local directory and restores the
+/// previous value when the guard drops.
+///
+/// Warm-restore scenarios call in-process seal/verify helpers that read
+/// `MVM_HOME` via [`mvm_core::config::mvm_home`], so they cannot pass a
+/// home directory as an argument. This guard keeps the override active
+/// across every step of a scenario while ensuring the override is undone
+/// afterwards. The BDD runner executes scenarios sequentially, so the
+/// process-global mutation is safe.
+pub struct MvmHomeGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl MvmHomeGuard {
+    pub fn new(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("MVM_HOME");
+        // SAFETY: the BDD runner executes scenarios sequentially, so no other
+        // thread observes the process environment while this guard is alive.
+        unsafe { std::env::set_var("MVM_HOME", path) };
+        Self { previous }
+    }
+}
+
+impl Drop for MvmHomeGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(prev) => {
+                // SAFETY: serial scenario execution; see `MvmHomeGuard::new`.
+                unsafe { std::env::set_var("MVM_HOME", prev) };
+            }
+            None => {
+                // SAFETY: serial scenario execution; see `MvmHomeGuard::new`.
+                unsafe { std::env::remove_var("MVM_HOME") };
+            }
+        }
+    }
+}
+
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
 /// workload identities parsed from successful `build address` runs, keyed by
@@ -90,6 +128,36 @@ pub struct CliWorld {
     pub warm_claim_registry_path: Option<PathBuf>,
     /// The outcome of the most recent `claim_standby` call.
     pub warm_claim_outcome: Option<WarmClaimOutcome>,
+
+    /// RAII guard that keeps a scenario-local `MVM_HOME` override active
+    /// across the warm-restore steps. Dropping it restores the previous
+    /// value so later scenarios see a clean environment.
+    pub warm_restore_home_guard: Option<MvmHomeGuard>,
+
+    /// Outcome of the most recent warm-restore guard step.
+    pub warm_restore_result: Option<Result<String, String>>,
+    /// Directory containing the sealed snapshot under test.
+    pub warm_restore_dir: Option<PathBuf>,
+    /// Which artifact file was tampered with (e.g. "vmstate.bin" or "mem.bin").
+    pub warm_restore_tampered_file: Option<String>,
+    /// Restored device model produced by the most recent restore probe.
+    pub warm_restore_device_model: Option<mvm_runtime::microvm::RestoredDeviceModel>,
+    /// Page-merge scopes staged for the most recent merge-decision step.
+    pub warm_merge_scopes: Vec<(String, mvm_core::page_merge::PageMergeScope)>,
+    /// The most recent page-merge decision.
+    pub warm_merge_decision: Option<mvm_core::page_merge::MergeDecision>,
+    /// Signer id that produced the plan under test.
+    pub warm_restore_plan_signer: Option<String>,
+    /// JSON of the most recently signed execution plan under test.
+    pub warm_restore_plan_json: Option<String>,
+    /// The isolated `MVM_HOME` backing the warm-restore guard scenarios;
+    /// kept alive so the sealed snapshot files survive the `Given` step.
+    pub warm_restore_home: Option<tempfile::TempDir>,
+
+    /// Outcome of the most recent plan-verification step.
+    pub warm_restore_verify_result: Option<Result<String, String>>,
+    /// Checkpoint id captured by the most recent `machine vm checkpoint create`.
+    pub warm_restore_checkpoint_id: Option<String>,
 }
 
 /// What a warm-claim `When` step observed from a `WorkloadRunner::claim_standby`
