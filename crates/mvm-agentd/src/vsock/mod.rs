@@ -59,8 +59,8 @@ pub use response_payloads::{
 };
 pub use rpc::{
     ControlSession, RpcError, call_streaming, call_unary, check_response, negotiate_protocol,
-    read_exec_stream, require_capabilities, send_exec_streaming, send_run_code_streaming,
-    send_run_detached, send_run_entrypoint,
+    probe_agent_ready, read_exec_stream, require_capabilities, send_exec_streaming,
+    send_run_code_streaming, send_run_detached, send_run_entrypoint,
 };
 pub use verb_grant::{
     HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant,

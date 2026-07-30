@@ -975,6 +975,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         if let Some(problem) = cmdline::cmdline_overflow(&cmdline) {
             anyhow::bail!("refusing to start VM {}: {problem}", config.name);
         }
+        tracing::debug!(vm = %config.name, %cmdline, "assembled workload kernel cmdline");
 
         let inputs = WorkloadLaunchInputs {
             config,

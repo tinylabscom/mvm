@@ -536,6 +536,11 @@ mod tests {
     /// The same guard, stated against the concrete symptoms the live run
     /// recorded, so a failure names what the guest will miss rather than only
     /// that two values differ.
+    ///
+    /// `sealed_launch` is the legacy sibling-initramfs shape, whose PID 1 reads
+    /// the roothashes and device paths off the kernel cmdline — it is never sent
+    /// `ActivateEnvironment`. A parent booted without those tokens aborts in PID
+    /// 1 and panics the kernel, so there is nothing left to capture.
     #[test]
     fn parent_carries_the_overlay_drives_and_runtime_tokens_the_guest_agent_needs() {
         let _home = isolated_home();
@@ -560,6 +565,40 @@ mod tests {
             "parent cmdline missing runtime-source policy: {}",
             parent.cmdline
         );
+        for token in [
+            "mvm.roothash=",
+            "mvm.data=/dev/vda",
+            "mvm.hash=/dev/vdb",
+            "mvm.runtime_roothash=",
+            "mvm.runtime_data=/dev/vdc",
+            "mvm.runtime_hash=/dev/vdd",
+        ] {
+            assert!(
+                parent.cmdline.contains(token),
+                "parent cmdline missing {token} its legacy PID 1 needs: {}",
+                parent.cmdline
+            );
+        }
+    }
+
+    /// The universal-initramfs counterpart: that PID 1 is handed the same
+    /// roothashes and device paths over vsock, so carrying them on the cmdline
+    /// would leak the boot secrets of a sealed image into a kernel argument the
+    /// guest can read from `/proc/cmdline`.
+    #[test]
+    fn parent_on_the_universal_initramfs_carries_no_roothash_tokens() {
+        let (_env, home, _lock) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut launch = sealed_launch(tmp.path());
+        launch.initrd_path = Some(cmdline::seed_universal_initramfs(home.path()));
+        let spec = standby_spec_for(&launch, tmp.path());
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+
+        assert!(
+            crate::microvm::booted_with_universal_initramfs(&parent_cfg),
+            "fixture must resolve as a universal-initramfs boot"
+        );
         for legacy in [
             "mvm.roothash=",
             "mvm.data=/dev/vda",
@@ -574,6 +613,13 @@ mod tests {
                 parent.cmdline
             );
         }
+        assert!(
+            parent
+                .cmdline
+                .contains("mvm.runtime_source_policy=required_overlay"),
+            "parent cmdline missing runtime-source policy: {}",
+            parent.cmdline
+        );
     }
 
     #[test]

@@ -182,6 +182,31 @@ pub fn call_streaming(
     let mut session = ControlSession::open(stream)?;
     session.call_streaming(stream, req, on_event)
 }
+/// Prove that a guest agent is serving RPCs on `stream`.
+///
+/// A bound socket is not a live agent. The host-side VMM binds the agent port
+/// before the guest kernel starts, so `connect()` keeps succeeding for the whole
+/// of the guest's boot — and succeeds just as well for a guest that panicked
+/// before userspace. Readiness therefore has to be settled on the wire, which is
+/// what this does: the authenticated session handshake plus one `Ping`, both real
+/// I/O against the guest.
+///
+/// Any answer means ready. A refusal (`Error`, an unsupported profile, a verb the
+/// session's grant withholds) still came from an agent that parsed, verified and
+/// replied to an authenticated frame, so the caller's next RPC reaches it too.
+/// Only a transport failure — EOF, timeout, a frame that won't decode — means
+/// "not yet"; callers poll on `Err`.
+///
+/// Unlike [`negotiate_protocol`], this is never satisfied by a host-local check:
+/// a probe that answers without touching the stream cannot tell a booting guest
+/// from a serving one.
+pub fn probe_agent_ready(stream: &mut UnixStream) -> Result<()> {
+    let mut session = connection::open_authenticated_session(stream)?;
+    session.write(stream, &GuestRequest::Ping)?;
+    let _: GuestResponse = session.read(stream)?;
+    Ok(())
+}
+
 /// Validate guest-agent protocol version and capabilities on an
 /// already-connected control stream.
 ///
@@ -987,6 +1012,92 @@ mod tests {
             other => panic!("expected typed RpcError::VerbNotAuthorized, got {other:?}"),
         }
     }
+    // ---- probe_agent_ready: readiness settled on the wire ----
+
+    use ed25519_dalek::SigningKey;
+
+    /// Seed a host signer key so `probe_agent_ready` can open its session, and
+    /// return it for the guest side of the fixture to pin as its trust anchor.
+    fn seeded_host_signer(home: &std::path::Path) -> SigningKey {
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        let keys = mvm_core::config::mvm_keys_dir();
+        assert!(
+            keys.starts_with(home),
+            "test must isolate MVM_HOME before seeding the host signer key"
+        );
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), seed).unwrap();
+        SigningKey::from_bytes(&seed)
+    }
+
+    /// The regression this guards: a probe that reports "ready" without touching
+    /// the stream cannot tell a serving agent from a socket the VMM bound before
+    /// the guest kernel even started. A peer that accepts and closes must read as
+    /// not-ready, so the caller keeps polling instead of issuing an RPC that dies
+    /// on EOF.
+    #[test]
+    fn probe_agent_ready_rejects_a_peer_that_answers_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let _signer = seeded_host_signer(home.path());
+
+        let (mut host, guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        // Nothing is serving: the peer end is gone. That is what the host sees
+        // from a socket the VMM bound for a guest still booting, or one that
+        // panicked before its agent ever ran.
+        drop(guest);
+
+        // Which transport error surfaces is an OS-timing detail — the handshake
+        // write may complete and the read then hit EOF, or the closed peer may
+        // fail the write with EPIPE first. Both mean "no agent answered", which
+        // is the whole property: the caller polls again instead of proceeding to
+        // an RPC. Pinning either one passes on macOS and fails on Linux.
+        let err = probe_agent_ready(&mut host).expect_err("a silent peer is not ready");
+        assert!(
+            !err.to_string().is_empty(),
+            "a refusal must carry a diagnosable transport error: {err:#}"
+        );
+    }
+
+    /// The positive case, against the real counterparty: a guest running the
+    /// production `AuthenticatedSession` reads as ready.
+    #[test]
+    fn probe_agent_ready_accepts_a_guest_serving_the_authenticated_session() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let host_key = seeded_host_signer(home.path());
+        let anchor = host_key.verifying_key();
+
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let mut guest_key_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut guest_key_seed);
+            let mut session = AuthenticatedSession::guest(
+                &mut guest,
+                SigningKey::from_bytes(&guest_key_seed),
+                &anchor,
+            )
+            .expect("guest handshake");
+            let req: GuestRequest = session.read(&mut guest).expect("read probe request");
+            assert!(matches!(req, GuestRequest::Ping), "got {req:?}");
+            session
+                .write(&mut guest, &GuestResponse::Pong)
+                .expect("write pong");
+        });
+
+        probe_agent_ready(&mut host).expect("a serving agent must read as ready");
+        guest_thread.join().unwrap();
+    }
+
     // ---- check_response: the pure contract enforcer ----
 
     #[test]

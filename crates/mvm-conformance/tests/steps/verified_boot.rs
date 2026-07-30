@@ -9,17 +9,42 @@ use mvm_runtime::driver::{
     ConsoleCapture, HvfDriver, KernelImage, LibkrunDriver, VmmDriver, VmmSpec,
 };
 
-use crate::world::CliWorld;
+use crate::world::{CliWorld, MvmHomeGuard};
 
-#[when(expr = "I assemble a sealed workload cmdline for {string}")]
-fn assemble_sealed_cmdline(world: &mut CliWorld, backend: String) {
+/// Materialize the initramfs this sealed boot attaches, and return its path.
+///
+/// The path is the discriminant between the two boot protocols, so the fixture
+/// has to produce a real one. `universal` lands in the shared initramfs cache —
+/// that PID 1 is handed its roothashes and device slots over vsock. `legacy` is
+/// a per-rootfs `rootfs.initrd` sibling, whose PID 1 can only read them off the
+/// kernel cmdline.
+fn sealed_initramfs_path(flavor: &str) -> String {
+    match flavor {
+        "universal" => {
+            let dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+            std::fs::create_dir_all(&dir).expect("create initramfs cache dir");
+            let image = dir.join("initramfs.cpio.gz");
+            std::fs::write(&image, b"initramfs").expect("write initramfs");
+            image.display().to_string()
+        }
+        "legacy" => "/image/rootfs.initrd".to_string(),
+        other => panic!("unsupported sealed initramfs flavor {other:?}"),
+    }
+}
+
+#[when(expr = "I assemble a sealed workload cmdline for {string} booting the {string} initramfs")]
+fn assemble_sealed_cmdline(world: &mut CliWorld, backend: String, flavor: String) {
     let state = tempfile::tempdir().expect("create cmdline state dir");
+    let home = tempfile::tempdir().expect("create scenario home");
+    // The universal flavor is recognized by its path under the cache root, and
+    // the grant tokens read this home too, so both need it pointed at a tempdir.
+    let _home_guard = MvmHomeGuard::new(home.path());
     let config = VmStartConfig {
         name: format!("bdd-{backend}-sealed-boot"),
         rootfs_path: "/image/rootfs.ext4".to_string(),
         verity_path: Some("/image/rootfs.verity".to_string()),
         roothash: Some("a".repeat(64)),
-        initrd_path: Some("/image/rootfs.initrd".to_string()),
+        initrd_path: Some(sealed_initramfs_path(&flavor)),
         runtime_overlay_path: Some("/image/runtime.ext4".to_string()),
         runtime_overlay_verity_path: Some("/image/runtime.verity".to_string()),
         runtime_overlay_roothash: Some("b".repeat(64)),

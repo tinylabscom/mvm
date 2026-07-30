@@ -616,7 +616,39 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    change. Updated `workload_runner::cmdline` and runner tests to assert
    the new token-free cmdline shape. `cargo nextest run -p mvm-runtime`
    (1091 passed) and `cargo nextest run -p mvm-agentd` (498 passed).
-7. [x] Initramfs cache resolver/builder and CLI attachment. Added
+   **Corrected — the shrink was unconditional and broke every host that
+   cannot resolve the universal artifact.**
+   `attach_universal_initramfs_if_cached` is non-fatal by design, and on
+   macOS it always fails (no `nix build` for a Linux initramfs, and the
+   published `initramfs-<arch>.tar.gz` 404s), so the boot falls back to the
+   legacy per-rootfs `rootfs.initrd` whose PID 1 is `mvm-verity-init` — which
+   reads those exact tokens off the cmdline and is never sent
+   `ActivateEnvironment`. Result on every macOS `machine run --image`:
+   `mvm-verity-init: FATAL: no mvm.roothash= on kernel cmdline` → `Kernel
+   panic - Attempted to kill init!` before userspace, no guest agent, and a
+   host-side `Failed to read frame length` out of the first RPC.
+   `workload_cmdline` now emits the tokens whenever
+   `microvm::booted_with_universal_initramfs(config)` is false, so each boot
+   protocol gets the channel its PID 1 actually reads. The unit tests and the
+   `s4_verified_boot` feature that asserted the tokens were absent were
+   themselves keyed to a legacy `rootfs.initrd` fixture, so they encoded the
+   panic; each now carries a universal-flavour case (tokens absent) and a
+   legacy-flavour case (tokens present).
+8. [x] Guest-agent readiness proven on the wire. `wait_for_agent` /
+   `wait_for_guest_agent` both documented "reachable means it speaks the
+   protocol, not just that the socket is open", but reached that verdict
+   through `negotiate_protocol`, which in a non-test build takes the
+   `negotiate_protocol_authenticated` arm and never touches the stream — so
+   in every shipped binary the probe degenerated to "did `connect()` succeed".
+   The VMM binds the agent port before the guest kernel starts, so that
+   succeeds throughout the guest's boot and equally for a guest that panicked
+   before userspace; both callers then issued their real RPC into a dead
+   socket and surfaced `Failed to read frame length` from the framing layer.
+   Added `mvm_agentd::vsock::probe_agent_ready` — authenticated handshake plus
+   one `Ping`, real I/O with no cfg-gated shortcut, any answer (including a
+   refusal) counting as ready and only a transport failure as not-yet — and
+   routed both waiters through it.
+9. [x] Initramfs cache resolver/builder and CLI attachment. Added
    `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs` Nix
    builder + cache installer, and `attach_universal_initramfs_if_cached` in
    `mvm-cli/src/commands/vm/up/runtime_source.rs`, wired from `exec.rs` and
@@ -640,7 +672,30 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    fallback can warm the cache automatically.  Added a BDD scenario for the
    cold-cache non-fatal fallback under `features/suites/s14_universal_initramfs`,
    and updated the verified-boot cmdline feature to assert that the legacy
-   `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots.
+   `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots
+   — narrowed by item 6's correction to *universal*-initramfs boots only.
+
+Live witness for items 6 and 8 on macOS 26.5.2 / arm64, HVF backend, after the
+corrections: `machine run --image alpine -- /bin/sh -c "echo TRANSIENT-OK; cat
+/etc/alpine-release"` prints `TRANSIENT-OK` + `3.24.1` in 5.8s, and
+`machine run --image alpine -it --allow-host google.com -- /bin/sh -c "ping -c 3
+google.com"` attaches its PTY, resolves `google.com` to a real address, and runs
+the command inside the guest. `ping` then fails with `can't create raw socket:
+Address family not supported by protocol` — the vsock-only data plane offers no
+raw IP by design, so ICMP is unreachable and a TCP client is the right probe.
+
+TCP egress over vsock is live on the same path: `--allow-host example.com:80`
+with `wget http://example.com`, and bare `--allow-host example.com` with
+`wget https://example.com`, both return the real page body from inside the
+guest.
+
+One diagnosability note worth a follow-up. A bare `--allow-host <host>` means
+`<host>:443` (`parse_allow_host` defaults to the https port), so pairing it with
+an `http://` URL is a port mismatch and the gate denies — correctly. What the
+guest sees is `HTTP/1.1 403 Forbidden` with `Content-Length: 0` from
+`http_forward::write_proxy_error_*`, carrying no reason, which reads as "egress
+is broken" rather than "port 80 was not admitted". The host knows exactly which
+`EgressVerdict::Deny` it took; none of it reaches the caller.
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
