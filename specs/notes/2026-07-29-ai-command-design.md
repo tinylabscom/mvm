@@ -98,9 +98,46 @@ candle's quantized/GGUF coverage is weaker than llama.cpp's. Under a pluggable
 design this is no longer a dead end — it is the specific gap a second runtime
 would fill, and the reason a GGUF-capable runtime is the obvious second entry.
 
-**Footprint risk to measure in week one:** the complete guest footprint budget
-is 50 MB, and it applies *per runtime image*. candle plus a tokenizer may exceed
-it. Measure before embedding.
+candle plus a tokenizer will not fit the default tier's 50 MB guest footprint
+budget. That budget is not relaxed — it is **tiered**; see "Footprint: a second
+tier, not an exemption".
+
+### Footprint: a second tier, not an exemption
+
+The 50 MB guest footprint budget is a *default-tier* number and it does not
+move. An inference runtime does not fit in it and should not be squeezed into
+it; AI guests get their own tier with its own ceiling.
+
+The distinction matters because the existing budgets are not advisory. They are
+pinned constants with tests that pin them (`guest_storage_budget_is_50_mb`,
+`all_budgets_pin_guest_storage_to_constant`), and the closure budget's error
+message tells you to bump the constant "with a one-line justification". The AI
+tier follows that same discipline rather than opting out of it:
+
+- `GUEST_STORAGE_BUDGET` (default tier, 50 MB) is unchanged. Nothing about this
+  work is allowed to move it.
+- A new `AI_GUEST_STORAGE_BUDGET` constant is added beside it, with its own
+  pinning test and its own entry in `all_budgets()`, so `xtask perf budgets`
+  lists both tiers and neither can drift silently.
+- **Initial ceiling: 256 MB.** Roughly five times the default, comfortably above
+  a realistic candle-plus-tokenizer image, and still an order of magnitude below
+  any model it will load.
+- The tier is declared in the runtime registry entry, so conformance check 5
+  asserts a runtime against *its own tier's* budget. A runtime that cannot fit
+  its declared tier is not admissible.
+- Raising the constant requires the same one-line justification the closure
+  budget already demands, visible in review.
+
+256 MB is a **starting** ceiling chosen without measurement, and the first
+implementation task is to measure the real image and *tighten the constant to
+the measured size plus headroom*. Set-generous-and-forget is how a budget stops
+being a budget; the ratchet is supposed to move down.
+
+This is a security number, not only a performance one. Everything inside the
+guest image sits inside the dm-verity boundary and is measured as part of the
+runtime digest, so a larger image is more attack surface within the sealed
+perimeter. That is precisely why the AI tier is a pinned, justified ceiling
+rather than an exemption from the gate.
 
 ### Format policy across runtimes
 
@@ -265,7 +302,10 @@ partially-enforced backend matrix.
 4. **Capability honesty** — declared capabilities match observed behaviour. A
    model using a declared-supported op runs; a model needing an undeclared op is
    refused *at admission*, not by failing mid-generation.
-5. **Footprint** — the guest image carrying this runtime stays within budget.
+5. **Footprint** — the guest image carrying this runtime stays within the budget
+   of the tier that runtime declares. A runtime that cannot fit its declared
+   tier is not admissible; declaring a larger tier is a reviewed constant bump,
+   not a per-runtime escape hatch.
 6. **No interactive surface** — the runtime binary links no console or exec
    path, mirroring the claim-15 symbol contract.
 7. **Frame discipline** — chunked `Generate` respects `MAX_FRAME_SIZE` in both
@@ -471,8 +511,9 @@ as a licence check.
 
 ## Open questions
 
-- Does candle plus a tokenizer fit the 50 MB guest footprint budget? Measure
-  before embedding. The budget applies per runtime image.
+- What is the real candle-plus-tokenizer image size? The AI tier ships with a
+  256 MB starting ceiling; measure first and tighten the constant to the
+  measured size plus headroom rather than leaving the initial guess in place.
 - How exactly does a capability profile attach to the template schema — a new
   optional section, or a separate file keyed by template name? Direction is
   settled (extend templates, do not fork a resource vocabulary); only the
