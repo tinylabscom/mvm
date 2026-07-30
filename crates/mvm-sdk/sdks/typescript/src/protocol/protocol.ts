@@ -643,13 +643,13 @@ response: GuestResponse
  */
 export interface ActivateEnvironment {
 /**
- * Rootfs dm-verity configuration.  The data device becomes the guest's `/` after activation.
+ * Rootfs configuration.  The data device (or virtio-fs tag) becomes the guest's `/` after activation.
  */
 rootfs: RootfsConfig
 /**
- * Runtime-overlay dm-verity configuration.  Mounted read-only at `/mvm/runtime` inside the rootfs before pivot.
+ * Runtime-overlay dm-verity configuration, when the boot carries an overlay.  Mounted read-only at `/mvm/runtime` inside the rootfs before pivot.  `None` for a rootfs-only boot.
  */
-runtime: RuntimeOverlayConfig
+runtime?: (RuntimeOverlayConfig | null)
 /**
  * Optional verb-grant envelope to pin before serving operational RPCs.  When present, the activation message itself must be signed by the host-signer trust anchor.
  */
@@ -660,24 +660,30 @@ verb_grant_envelope?: (VerbGrantEnvelope | null)
 volumes?: VolumeConfig[]
 }
 /**
- * dm-verity block-device target.
+ * Root device the guest mounts as `/`.  Three shapes, selected by which optional fields are set:
+ * 
+ * - **dm-verity block** (`roothash` + `hash_dev`): create the `root` dm-verity target and mount it read-only. - **plain block** (neither): mount `data_dev` read-only without verification (unverified dev-tier boot). - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only as the root — the block-less dev-tier boot.
  */
 export interface RootfsConfig {
 /**
- * Data device path, e.g. `/dev/vda`.
+ * Data device path, e.g. `/dev/vda`.  Empty for a virtio-fs root.
  */
 data_dev: string
 /**
- * Hash-tree device path, e.g. `/dev/vdb`.
+ * Hash-tree device path, e.g. `/dev/vdb`.  Present only for a dm-verity rootfs.
  */
-hash_dev: string
+hash_dev?: (string | null)
 /**
- * 64-character lowercase hex dm-verity root hash.
+ * 64-character lowercase hex dm-verity root hash.  Absent for an unverified plain-block root.
  */
-roothash: string
+roothash?: (string | null)
+/**
+ * virtio-fs tag to mount as the root instead of a block device.
+ */
+virtiofs_tag?: (string | null)
 }
 /**
- * dm-verity runtime-overlay target.
+ * dm-verity runtime-overlay target.  The runtime overlay is always verity-sealed, so its fields stay required when it is present.
  */
 export interface RuntimeOverlayConfig {
 /**

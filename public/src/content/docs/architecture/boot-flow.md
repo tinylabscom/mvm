@@ -36,14 +36,18 @@ When the initramfs is attached, the backend boots:
 - the runtime overlay and its dm-verity sidecar,
 - any virtio-fs or virtio-blk volumes.
 
-The block layout is fixed by the workload runner:
+The block layout is fixed by the workload runner (verity sidecars are
+attached only for verity-sealed boots):
 
 | Guest device | Content |
 | --- | --- |
 | `/dev/vda` | rootfs data |
-| `/dev/vdb` | rootfs dm-verity hash tree |
+| `/dev/vdb` | rootfs dm-verity hash tree (verity boots only) |
 | `/dev/vdc` | runtime overlay data |
 | `/dev/vdd` | runtime overlay dm-verity hash tree |
+
+A block-less virtiofs-root dev boot attaches no disks at all; the root comes
+from a virtio-fs tag instead.
 
 The kernel cmdline **does not carry roothash tokens**. The legacy
 `mvm.roothash=`, `mvm.data=`, `mvm.hash=`, and `mvm.runtime_*=` tokens are gone;
@@ -74,11 +78,15 @@ The guest exposes no operational RPC surface until the host activates it.
 
 After the VMM boots, the workload runner builds an `ActivateEnvironment`
 message from the admitted launch config and sends it over the guest-agent
-vsock port. The message carries:
+vsock port — for every boot that attached the universal initramfs, verified
+or not. The message carries:
 
-- **Rootfs config** — `/dev/vda`, `/dev/vdb`, and the rootfs roothash (from the
-  launch config or the `rootfs.roothash` sidecar next to the image).
-- **Runtime overlay config** — `/dev/vdc`, `/dev/vdd`, and its roothash.
+- **Rootfs config** — one of three shapes: a dm-verity block root (`/dev/vda`
+  + `/dev/vdb` + roothash, from the launch config or the `rootfs.roothash`
+  sidecar), an unverified plain-block root (`/dev/vda` only), or a virtio-fs
+  root tag (`mvmroot`).
+- **Runtime overlay config** — `/dev/vdc`, `/dev/vdd`, and its roothash, when
+  the boot carries an overlay. A rootfs-only boot sends no overlay.
 - **Volumes** — `DirShare` volumes translated to virtio-fs tags (`uvol0`,
   `uvol1`, …) with guest mountpoints and read-only flags. `Disk` volumes are
   already attached as block devices, so they are not part of the message.
@@ -86,17 +94,21 @@ vsock port. The message carries:
   `<MVM_HOME>/vms/<name>/verb-grant.json` when present.
 
 The host requires an `ActivateEnvironmentAck`. Any error or unexpected response
-fails the boot closed.
+fails the boot closed. A legacy per-rootfs verity initramfs (used when the
+universal artifact is not cached yet) keeps its own PID 1 and is never sent
+this verb.
 
 ## Guest applies activation and pivots into the workload
 
 On receiving `ActivateEnvironment`, the guest:
 
-1. Creates the `root` dm-verity target from `/dev/vda` + `/dev/vdb` and mounts
-   it read-only at `/mnt/root`.
-2. Mounts the runtime overlay read-only at `/mvm/runtime` inside the new root.
+1. Mounts the root: the `root` dm-verity target from `/dev/vda` + `/dev/vdb`
+   for a sealed boot, the plain block device read-only for an unverified boot,
+   or the virtio-fs tag for a block-less dev boot — staged at `/mnt/root`.
+2. Mounts the runtime overlay read-only at `/mvm/runtime` inside the new root,
+   when one was sent.
 3. Mounts any virtio-fs volumes.
-4. Pivots the root filesystem to the verified rootfs.
+4. Pivots the root filesystem to the mounted root.
 5. Drops privilege to the fixed workload UID/GID `901`.
 6. Flips the boot state to `Activated` and begins serving operational RPCs.
 
@@ -125,9 +137,11 @@ convergence work.
 ## Security properties
 
 - **Fail-closed guest** — no operational RPCs before a successful
-  `ActivateEnvironment`.
+  `ActivateEnvironment`, on every boot that attaches the universal initramfs.
 - **No roothash on the kernel cmdline** — verity parameters travel over the
   authenticated vsock channel instead of being visible in `/proc/cmdline`.
-- **Verified root** — the guest only pivots into a rootfs that passed dm-verity.
+- **Verified root where sealed** — a verity boot only pivots into a rootfs
+  that passed dm-verity; unverified dev-tier boots are mounted plainly and
+  are exactly as trustworthy as the legacy path they replace.
 - **Least privilege after activation** — the agent drops to UID 901 before
   running any workload code.

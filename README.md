@@ -443,10 +443,13 @@ Guest (its own Linux kernel)
 
 On boots that attach the universal initramfs, the kernel cmdline carries no
 roothash tokens. The guest PID 1 waits fail-closed for a signed
-`ActivateEnvironment` over vsock, mounts the dm-verity rootfs and runtime
-overlay from fixed block slots (`/dev/vda`…`/dev/vdd`), pivots into the
-verified root, and drops to the workload uid before serving operational RPCs.
-See [Boot flow](public/src/content/docs/architecture/boot-flow.md) for the
+`ActivateEnvironment` over vsock, then mounts the root — dm-verity for a
+sealed boot, plain-block for an unverified dev boot, or a virtio-fs tag for a
+block-less boot — plus the runtime overlay when one is attached, pivots into
+it, and drops to the workload uid before serving operational RPCs. The same
+initramfs serves Nix-built and OCI images on every runner backend
+(Firecracker, libkrun, HVF). See
+[Boot flow](public/src/content/docs/architecture/boot-flow.md) for the
 detailed sequence.
 
 Backend selection is automatic per host (`--hypervisor` overrides); all backends

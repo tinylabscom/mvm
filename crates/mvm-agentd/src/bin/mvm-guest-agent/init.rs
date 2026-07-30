@@ -69,7 +69,7 @@ pub(crate) fn apply_activation(
     boot_state.set_activation(ActivationState::Activating);
 
     let new_root = guest_mount::mount_rootfs(&env.rootfs)?;
-    guest_mount::mount_runtime_overlay(&env.runtime, &new_root)?;
+    guest_mount::mount_runtime_overlay(env.runtime.as_ref(), &new_root)?;
     guest_mount::mount_volumes(&env.volumes, &new_root)?;
     guest_mount::pivot_to_root(&new_root)?;
     guest_mount::drop_privilege(WORKLOAD_UID, WORKLOAD_GID)?;

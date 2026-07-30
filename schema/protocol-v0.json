@@ -20,12 +20,11 @@
       "description": "Host-to-guest activation message.  This is the only control verb accepted before privilege drop in PID-1 initramfs mode.",
       "type": "object",
       "required": [
-        "rootfs",
-        "runtime"
+        "rootfs"
       ],
       "properties": {
         "rootfs": {
-          "description": "Rootfs dm-verity configuration.  The data device becomes the guest's `/` after activation.",
+          "description": "Rootfs configuration.  The data device (or virtio-fs tag) becomes the guest's `/` after activation.",
           "allOf": [
             {
               "$ref": "#/definitions/RootfsConfig"
@@ -33,10 +32,14 @@
           ]
         },
         "runtime": {
-          "description": "Runtime-overlay dm-verity configuration.  Mounted read-only at `/mvm/runtime` inside the rootfs before pivot.",
-          "allOf": [
+          "description": "Runtime-overlay dm-verity configuration, when the boot carries an overlay.  Mounted read-only at `/mvm/runtime` inside the rootfs before pivot.  `None` for a rootfs-only boot.",
+          "default": null,
+          "anyOf": [
             {
               "$ref": "#/definitions/RuntimeOverlayConfig"
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -3517,25 +3520,39 @@
       "additionalProperties": false
     },
     "RootfsConfig": {
-      "description": "dm-verity block-device target.",
+      "description": "Root device the guest mounts as `/`.  Three shapes, selected by which optional fields are set:\n\n- **dm-verity block** (`roothash` + `hash_dev`): create the `root` dm-verity target and mount it read-only. - **plain block** (neither): mount `data_dev` read-only without verification (unverified dev-tier boot). - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only as the root — the block-less dev-tier boot.",
       "type": "object",
       "required": [
-        "data_dev",
-        "hash_dev",
-        "roothash"
+        "data_dev"
       ],
       "properties": {
         "data_dev": {
-          "description": "Data device path, e.g. `/dev/vda`.",
+          "description": "Data device path, e.g. `/dev/vda`.  Empty for a virtio-fs root.",
           "type": "string"
         },
         "hash_dev": {
-          "description": "Hash-tree device path, e.g. `/dev/vdb`.",
-          "type": "string"
+          "description": "Hash-tree device path, e.g. `/dev/vdb`.  Present only for a dm-verity rootfs.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "roothash": {
-          "description": "64-character lowercase hex dm-verity root hash.",
-          "type": "string"
+          "description": "64-character lowercase hex dm-verity root hash.  Absent for an unverified plain-block root.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "virtiofs_tag": {
+          "description": "virtio-fs tag to mount as the root instead of a block device.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false
@@ -3602,7 +3619,7 @@
       ]
     },
     "RuntimeOverlayConfig": {
-      "description": "dm-verity runtime-overlay target.",
+      "description": "dm-verity runtime-overlay target.  The runtime overlay is always verity-sealed, so its fields stay required when it is present.",
       "type": "object",
       "required": [
         "data_dev",

@@ -102,37 +102,56 @@ pub fn mount_early_filesystems() -> Result<()> {
     Ok(())
 }
 
-/// Mount the dm-verity rootfs, returning the staging path (`/mnt/root`).
+/// Mount the rootfs, returning the staging path (`/mnt/root`).
 ///
-/// On Linux this opens `/dev/mapper/control`, creates the `root` dm-verity
-/// target, and mounts it read-only.  On other platforms it is a no-op stub
-/// so the workspace compiles.
+/// Three shapes, selected by the config's optional fields: a dm-verity block
+/// root (`roothash` + `hash_dev` set — create the `root` target and mount it
+/// read-only), an unverified plain-block root (neither set — mount the data
+/// device read-only directly), or a virtio-fs root (`virtiofs_tag` set —
+/// mount the tag read-only).  On non-Linux platforms it is a no-op stub so
+/// the workspace compiles.
 pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
-    validate_roothash(&rootfs.roothash, "rootfs.roothash")?;
     ensure_dir(ROOTFS_STAGING)?;
 
+    #[cfg(not(target_os = "linux"))]
+    let _ = rootfs;
     #[cfg(target_os = "linux")]
     {
-        let ctrl = open_dm_control()?;
-        let fd = ctrl.as_raw_fd();
-        dm_version(fd)?;
-        setup_verity_target(
-            fd,
-            "root",
-            &rootfs.data_dev,
-            &rootfs.hash_dev,
-            &rootfs.roothash,
-        )?;
-        let root_dm = resolved_dm_device("root", 0)?;
-        mount(&root_dm, ROOTFS_STAGING, "ext4", libc::MS_RDONLY, "")?;
+        if let Some(tag) = &rootfs.virtiofs_tag {
+            mount(tag, ROOTFS_STAGING, "virtiofs", libc::MS_RDONLY, "")?;
+        } else if let Some(roothash) = &rootfs.roothash {
+            validate_roothash(roothash, "rootfs.roothash")?;
+            let hash_dev = rootfs.hash_dev.as_deref().ok_or_else(|| {
+                MountError::VeritySetup(
+                    "rootfs.roothash present but rootfs.hash_dev missing".to_string(),
+                )
+            })?;
+            let ctrl = open_dm_control()?;
+            let fd = ctrl.as_raw_fd();
+            dm_version(fd)?;
+            setup_verity_target(fd, "root", &rootfs.data_dev, hash_dev, roothash)?;
+            let root_dm = resolved_dm_device("root", 0)?;
+            mount(&root_dm, ROOTFS_STAGING, "ext4", libc::MS_RDONLY, "")?;
+        } else {
+            mount(
+                &rootfs.data_dev,
+                ROOTFS_STAGING,
+                "ext4",
+                libc::MS_RDONLY,
+                "",
+            )?;
+        }
     }
 
     Ok(PathBuf::from(ROOTFS_STAGING))
 }
 
 /// Mount the dm-verity runtime overlay inside the new root tree at
-/// `/mvm/runtime`.
-pub fn mount_runtime_overlay(runtime: &RuntimeOverlayConfig, root: &Path) -> Result<()> {
+/// `/mvm/runtime`.  `None` for a rootfs-only boot: nothing is mounted.
+pub fn mount_runtime_overlay(runtime: Option<&RuntimeOverlayConfig>, root: &Path) -> Result<()> {
+    let Some(runtime) = runtime else {
+        return Ok(());
+    };
     validate_roothash(&runtime.roothash, "runtime.roothash")?;
     let target = root.join("mvm/runtime");
     ensure_dir(&target.to_string_lossy())?;

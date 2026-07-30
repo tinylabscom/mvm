@@ -1281,14 +1281,15 @@ mod tests {
         let req = GuestRequest::ActivateEnvironment(ActivateEnvironment {
             rootfs: RootfsConfig {
                 data_dev: "/dev/vda".to_string(),
-                hash_dev: "/dev/vdb".to_string(),
-                roothash: "a".repeat(64),
+                hash_dev: Some("/dev/vdb".to_string()),
+                roothash: Some("a".repeat(64)),
+                virtiofs_tag: None,
             },
-            runtime: RuntimeOverlayConfig {
+            runtime: Some(RuntimeOverlayConfig {
                 data_dev: "/dev/vdc".to_string(),
                 hash_dev: "/dev/vdd".to_string(),
                 roothash: "b".repeat(64),
-            },
+            }),
             volumes: Vec::new(),
             verb_grant_envelope: None,
         });

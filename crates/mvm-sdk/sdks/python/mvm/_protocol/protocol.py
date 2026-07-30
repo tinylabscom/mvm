@@ -1148,8 +1148,9 @@ class ReadinessReport:
 @dataclass
 class RootfsConfig:
     data_dev: str
-    hash_dev: str
-    roothash: str
+    hash_dev: Optional[str] = None
+    roothash: Optional[str] = None
+    virtiofs_tag: Optional[str] = None
 
 
 class RunEntrypointError1(Enum):
@@ -1472,7 +1473,7 @@ class VerbGrantEnvelope:
 @dataclass
 class ActivateEnvironment:
     rootfs: RootfsConfig
-    runtime: RuntimeOverlayConfig
+    runtime: Optional[RuntimeOverlayConfig] = None
     verb_grant_envelope: Optional[VerbGrantEnvelope] = None
     volumes: Optional[List[VolumeConfig]] = field(default_factory=lambda: [])
 

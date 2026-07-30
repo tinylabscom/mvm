@@ -23,6 +23,23 @@ const ROOTFS_HASH_DEV: &str = "/dev/vdb";
 const RUNTIME_DATA_DEV: &str = "/dev/vdc";
 const RUNTIME_HASH_DEV: &str = "/dev/vdd";
 
+/// virtio-fs tag the backend assigns the root share on a block-less
+/// virtiofs-root dev boot.  Mirrors the driver's `root=<tag>` cmdline knob.
+const VIRTIOFS_ROOT_TAG: &str = "mvmroot";
+
+/// Whether this boot attached the universal initramfs (as opposed to a
+/// legacy per-rootfs verity initramfs or no initramfs at all).  The CLI
+/// resolves the artifact out of the shared initramfs cache, so the path
+/// itself is the discriminant — a cold-cache legacy boot keeps its
+/// `rootfs.initrd` sibling and is never sent `ActivateEnvironment`.
+pub fn booted_with_universal_initramfs(config: &VmStartConfig) -> bool {
+    let Some(initrd) = &config.initrd_path else {
+        return false;
+    };
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+    std::path::Path::new(initrd).starts_with(&cache_root)
+}
+
 /// Activate a workload that booted with the universal initramfs.
 ///
 /// Sends [`ActivateEnvironment`] over the agent vsock port and waits for an
@@ -49,26 +66,55 @@ pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<(
 
 /// Build an [`ActivateEnvironment`] from the admitted launch config.
 ///
-/// Roothashes are taken from the config sidecars; the virtio-blk slot layout
-/// is fixed by the runner. Custom volumes are translated to virtio-fs tags
-/// when the config carries directory shares.
+/// The rootfs is verity-sealed when the launch carries a roothash (config or
+/// sidecar), plain-block otherwise; a virtiofs-root launch mounts the root
+/// share by tag instead.  The runtime overlay rides along only when the full
+/// overlay triple is present — it is always verity-sealed.  Custom volumes
+/// are translated to virtio-fs tags when the config carries directory shares.
 fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnvironment> {
-    let rootfs_roothash = resolve_rootfs_roothash(config)?;
-    let runtime_roothash = config
-        .runtime_overlay_roothash
-        .as_deref()
-        .context("runtime overlay roothash is required for universal initramfs boot")?;
-
-    let rootfs = RootfsConfig {
-        data_dev: ROOTFS_DATA_DEV.to_string(),
-        hash_dev: ROOTFS_HASH_DEV.to_string(),
-        roothash: rootfs_roothash.to_string(),
+    // Verity is keyed off the hash device: `verity_path` set means the
+    // backend attached the Merkle sidecar at the hash slot, so the root mounts
+    // as dm-verity and must carry a roothash. No sidecar device means a plain
+    // unverified mount, whatever the config's roothash field says.
+    let rootfs = if config.virtiofs_root.is_some() {
+        RootfsConfig {
+            data_dev: String::new(),
+            hash_dev: None,
+            roothash: None,
+            virtiofs_tag: Some(VIRTIOFS_ROOT_TAG.to_string()),
+        }
+    } else if config.verity_path.is_some() {
+        let roothash = resolve_rootfs_roothash(config)
+            .context("verity rootfs attached but no roothash in config or sidecar")?;
+        RootfsConfig {
+            data_dev: ROOTFS_DATA_DEV.to_string(),
+            hash_dev: Some(ROOTFS_HASH_DEV.to_string()),
+            roothash: Some(roothash),
+            virtiofs_tag: None,
+        }
+    } else {
+        RootfsConfig {
+            data_dev: ROOTFS_DATA_DEV.to_string(),
+            hash_dev: None,
+            roothash: None,
+            virtiofs_tag: None,
+        }
     };
 
-    let runtime = RuntimeOverlayConfig {
-        data_dev: RUNTIME_DATA_DEV.to_string(),
-        hash_dev: RUNTIME_HASH_DEV.to_string(),
-        roothash: runtime_roothash.to_string(),
+    // The overlay rides only as a complete triple — the same all-three-or-none
+    // rule the block layout applies, so the guest never mounts a device the
+    // backend did not attach.
+    let runtime = match (
+        &config.runtime_overlay_path,
+        &config.runtime_overlay_verity_path,
+        &config.runtime_overlay_roothash,
+    ) {
+        (Some(_), Some(_), Some(roothash)) => Some(RuntimeOverlayConfig {
+            data_dev: RUNTIME_DATA_DEV.to_string(),
+            hash_dev: RUNTIME_HASH_DEV.to_string(),
+            roothash: roothash.clone(),
+        }),
+        _ => None,
     };
 
     let volumes = build_volume_configs(config);
@@ -82,24 +128,19 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
     })
 }
 
-/// Resolve the rootfs roothash from the host sidecar file when available.
-fn resolve_rootfs_roothash(config: &VmStartConfig) -> Result<String> {
+/// Resolve the rootfs roothash from the config or the host sidecar file, if
+/// either carries a well-formed one.  `None` means an unverified plain-block
+/// root — the guest mounts the data device without dm-verity.
+fn resolve_rootfs_roothash(config: &VmStartConfig) -> Option<String> {
     if let Some(hash) = &config.roothash
         && hash.len() == 64
         && hash
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
     {
-        return Ok(hash.clone());
+        return Some(hash.clone());
     }
-
-    let Some(sidecar) = probe_roothash_sidecar(&config.rootfs_path) else {
-        bail!(
-            "rootfs roothash missing: config.roothash is empty and no sidecar found for {}",
-            config.rootfs_path
-        );
-    };
-    Ok(sidecar)
+    probe_roothash_sidecar(&config.rootfs_path)
 }
 
 /// Read `<parent>/rootfs.roothash` next to the rootfs image, if it exists and
@@ -174,6 +215,7 @@ mod tests {
         let config = VmStartConfig {
             name: "test-vm".into(),
             rootfs_path: "/img/rootfs.ext4".into(),
+            verity_path: Some("/img/rootfs.verity".into()),
             roothash: Some(VALID_HASH.into()),
             runtime_overlay_path: Some("/img/runtime.ext4".into()),
             runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
@@ -183,11 +225,12 @@ mod tests {
 
         let env = build_activation_environment(&config).unwrap();
         assert_eq!(env.rootfs.data_dev, "/dev/vda");
-        assert_eq!(env.rootfs.hash_dev, "/dev/vdb");
-        assert_eq!(env.rootfs.roothash, VALID_HASH);
-        assert_eq!(env.runtime.data_dev, "/dev/vdc");
-        assert_eq!(env.runtime.hash_dev, "/dev/vdd");
-        assert_eq!(env.runtime.roothash, VALID_HASH);
+        assert_eq!(env.rootfs.hash_dev.as_deref(), Some("/dev/vdb"));
+        assert_eq!(env.rootfs.roothash.as_deref(), Some(VALID_HASH));
+        let runtime = env.runtime.as_ref().expect("overlay triple ⇒ runtime");
+        assert_eq!(runtime.data_dev, "/dev/vdc");
+        assert_eq!(runtime.hash_dev, "/dev/vdd");
+        assert_eq!(runtime.roothash, VALID_HASH);
         assert!(env.volumes.is_empty());
         assert!(env.verb_grant_envelope.is_none());
     }
@@ -206,16 +249,21 @@ mod tests {
         let config = VmStartConfig {
             name: "test-vm".into(),
             rootfs_path: rootfs.to_string_lossy().into_owned(),
-            runtime_overlay_roothash: Some(VALID_HASH.into()),
+            verity_path: Some(
+                dir.path()
+                    .join("rootfs.verity")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             ..Default::default()
         };
 
         let env = build_activation_environment(&config).unwrap();
-        assert_eq!(env.rootfs.roothash, VALID_HASH);
+        assert_eq!(env.rootfs.roothash.as_deref(), Some(VALID_HASH));
     }
 
     #[test]
-    fn build_env_rejects_missing_rootfs_roothash() {
+    fn build_env_without_roothash_is_an_unverified_plain_block_root() {
         let (_env, _dir) = test_env();
         let config = VmStartConfig {
             name: "test-vm".into(),
@@ -223,7 +271,51 @@ mod tests {
             ..base_config()
         };
 
-        assert!(build_activation_environment(&config).is_err());
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.rootfs.data_dev, "/dev/vda");
+        assert_eq!(env.rootfs.roothash, None);
+        assert_eq!(env.rootfs.hash_dev, None);
+        assert_eq!(env.rootfs.virtiofs_tag, None);
+        // An overlay roothash without its image/verity siblings is not a
+        // complete triple, so no overlay is mounted.
+        assert!(env.runtime.is_none());
+    }
+
+    #[test]
+    fn build_env_for_virtiofs_root_mounts_the_root_tag() {
+        let (_env, _dir) = test_env();
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            rootfs_path: String::new(),
+            virtiofs_root: Some("/host/unpacked-oci".into()),
+            ..Default::default()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert_eq!(env.rootfs.virtiofs_tag.as_deref(), Some("mvmroot"));
+        assert_eq!(env.rootfs.roothash, None);
+        assert!(env.runtime.is_none());
+    }
+
+    #[test]
+    fn universal_initramfs_gate_keys_on_the_cache_path() {
+        let (_env, dir) = test_env();
+        let cache_root =
+            std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+        let universal = cache_root
+            .join("0.18.0")
+            .join("aarch64")
+            .join("initramfs.cpio.gz");
+        let legacy = dir.path().join("rootfs.initrd");
+
+        let mut config = base_config();
+        assert!(!booted_with_universal_initramfs(&config));
+
+        config.initrd_path = Some(legacy.display().to_string());
+        assert!(!booted_with_universal_initramfs(&config));
+
+        config.initrd_path = Some(universal.display().to_string());
+        assert!(booted_with_universal_initramfs(&config));
     }
 
     #[test]

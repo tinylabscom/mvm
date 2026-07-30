@@ -15,12 +15,14 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ActivateEnvironment {
-    /// Rootfs dm-verity configuration.  The data device becomes the
-    /// guest's `/` after activation.
+    /// Rootfs configuration.  The data device (or virtio-fs tag) becomes
+    /// the guest's `/` after activation.
     pub rootfs: RootfsConfig,
-    /// Runtime-overlay dm-verity configuration.  Mounted read-only at
-    /// `/mvm/runtime` inside the rootfs before pivot.
-    pub runtime: RuntimeOverlayConfig,
+    /// Runtime-overlay dm-verity configuration, when the boot carries an
+    /// overlay.  Mounted read-only at `/mvm/runtime` inside the rootfs
+    /// before pivot.  `None` for a rootfs-only boot.
+    #[serde(default)]
+    pub runtime: Option<RuntimeOverlayConfig>,
     /// Optional virtio-fs volumes mounted after the rootfs and runtime
     /// overlay are in place.
     #[serde(default)]
@@ -32,20 +34,36 @@ pub struct ActivateEnvironment {
     pub verb_grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
 }
 
-/// dm-verity block-device target.
+/// Root device the guest mounts as `/`.  Three shapes, selected by which
+/// optional fields are set:
+///
+/// - **dm-verity block** (`roothash` + `hash_dev`): create the `root`
+///   dm-verity target and mount it read-only.
+/// - **plain block** (neither): mount `data_dev` read-only without
+///   verification (unverified dev-tier boot).
+/// - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only
+///   as the root — the block-less dev-tier boot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RootfsConfig {
-    /// Data device path, e.g. `/dev/vda`.
+    /// Data device path, e.g. `/dev/vda`.  Empty for a virtio-fs root.
     pub data_dev: String,
-    /// Hash-tree device path, e.g. `/dev/vdb`.
-    pub hash_dev: String,
-    /// 64-character lowercase hex dm-verity root hash.
-    pub roothash: String,
+    /// Hash-tree device path, e.g. `/dev/vdb`.  Present only for a dm-verity
+    /// rootfs.
+    #[serde(default)]
+    pub hash_dev: Option<String>,
+    /// 64-character lowercase hex dm-verity root hash.  Absent for an
+    /// unverified plain-block root.
+    #[serde(default)]
+    pub roothash: Option<String>,
+    /// virtio-fs tag to mount as the root instead of a block device.
+    #[serde(default)]
+    pub virtiofs_tag: Option<String>,
 }
 
-/// dm-verity runtime-overlay target.
+/// dm-verity runtime-overlay target.  The runtime overlay is always
+/// verity-sealed, so its fields stay required when it is present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -81,14 +99,15 @@ mod tests {
         let env = ActivateEnvironment {
             rootfs: RootfsConfig {
                 data_dev: "/dev/vda".to_string(),
-                hash_dev: "/dev/vdb".to_string(),
-                roothash: "a".repeat(64),
+                hash_dev: Some("/dev/vdb".to_string()),
+                roothash: Some("a".repeat(64)),
+                virtiofs_tag: None,
             },
-            runtime: RuntimeOverlayConfig {
+            runtime: Some(RuntimeOverlayConfig {
                 data_dev: "/dev/vdc".to_string(),
                 hash_dev: "/dev/vdd".to_string(),
                 roothash: "b".repeat(64),
-            },
+            }),
             volumes: vec![VolumeConfig {
                 tag: "data".to_string(),
                 mountpoint: "/mnt/data".to_string(),
@@ -99,9 +118,50 @@ mod tests {
         let json = serde_json::to_string(&env).expect("serialize");
         let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.rootfs.data_dev, "/dev/vda");
-        assert_eq!(parsed.runtime.roothash, "b".repeat(64));
+        assert_eq!(
+            parsed.runtime.as_ref().map(|r| r.roothash.as_str()),
+            Some("b".repeat(64).as_str())
+        );
         assert_eq!(parsed.volumes.len(), 1);
         assert!(parsed.volumes[0].read_only);
+    }
+
+    #[test]
+    fn activate_environment_roundtrips_unverified_and_rootfs_only() {
+        // Unverified plain-block root, no runtime overlay: every optional
+        // field absent, and the JSON carries none of them.
+        let env = ActivateEnvironment {
+            rootfs: RootfsConfig {
+                data_dev: "/dev/vda".to_string(),
+                hash_dev: None,
+                roothash: None,
+                virtiofs_tag: None,
+            },
+            runtime: None,
+            volumes: Vec::new(),
+            verb_grant_envelope: None,
+        };
+        let json = serde_json::to_string(&env).expect("serialize");
+        let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.rootfs.roothash, None);
+        assert_eq!(parsed.rootfs.hash_dev, None);
+        assert!(parsed.runtime.is_none());
+
+        // virtio-fs root.
+        let env = ActivateEnvironment {
+            rootfs: RootfsConfig {
+                data_dev: String::new(),
+                hash_dev: None,
+                roothash: None,
+                virtiofs_tag: Some("mvmroot".to_string()),
+            },
+            runtime: None,
+            volumes: Vec::new(),
+            verb_grant_envelope: None,
+        };
+        let json = serde_json::to_string(&env).expect("serialize");
+        let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.rootfs.virtiofs_tag.as_deref(), Some("mvmroot"));
     }
 
     #[test]
