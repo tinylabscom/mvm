@@ -996,39 +996,47 @@ fn closure_gates_pin_glibc_out_of_the_base_and_into_the_sidecar() {
         root.contains(anchored),
         "the rootfs no-glibc gate must anchor its grep on the glibc store path"
     );
+    // Both overlay-facing gates live in the root flake: the runtime-overlay
+    // flake reaches the workspace through a path outside its own flake root, so
+    // a closure query against its sources cannot resolve under a pure
+    // `nix flake check`.
     assert!(
-        overlay.contains(anchored),
-        "the overlay gates must anchor their greps on the glibc store path"
-    );
-
-    assert!(
-        overlay.contains("runtime-overlay-no-glibc = mkOverlayNoGlibcCheck system;"),
+        root.contains("runtime-overlay-no-glibc ="),
         "the overlay's staged executables need a build-backed no-glibc gate"
     );
     assert!(
-        overlay.contains("sdk-sidecar-carries-glibc = mkSidecarCarriesGlibcCheck system;"),
+        root.contains("sdk-sidecar-carries-glibc ="),
         "the sidecar needs the counterpart gate proving the glibc closure moved there"
     );
     // The overlay gate must close over the executables actually staged into the
     // image; an empty root-path set would make it vacuously green.
-    for staged in [
-        "guest",
-        "guestDev",
-        "runner",
-        "egressClient",
-        "addonDns",
-        "exitReport",
+    assert!(
+        root.contains("rootPaths = overlayStagedExecutablesFor system;"),
+        "the overlay no-glibc gate must close over the staged executables"
+    );
+    for recipe in [
+        "mvm-guest-agent.nix",
+        "mvm-egress-client.nix",
+        "mvm-addon-dns.nix",
+        "mvm-exit-report.nix",
     ] {
         assert!(
-            overlay.contains(&format!("          {staged}\n")),
-            "the overlay no-glibc closure must include the staged {staged} binary"
+            root.contains(recipe),
+            "the overlay no-glibc closure must include {recipe}"
         );
     }
-    // And the positive gate must assert the shipped files, not only the closure.
+    // Each of those must be instantiated from the static package set, or the
+    // gate would be asserting the wrong binaries.
+    assert!(
+        root.contains("pkgs = pkgs.pkgsStatic;"),
+        "the overlay no-glibc gate must build its root paths from pkgsStatic"
+    );
+    // And the sidecar's own payload assertions stay with the derivation that
+    // ships them.
     for required in ["libmvm_host_services.so", "libc.so.6", "libgcc_s.so.1"] {
         assert!(
             overlay.contains(required),
-            "the sidecar gate must assert {required} is shipped"
+            "the sidecar must ship {required}"
         );
     }
 }

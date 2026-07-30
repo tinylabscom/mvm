@@ -487,8 +487,8 @@ jobs:
         run: |
           set -euo pipefail
           nix build --print-build-logs \
-            ./nix/images/runtime-overlay#checks.x86_64-linux.runtime-overlay-no-glibc \
-            ./nix/images/runtime-overlay#checks.x86_64-linux.sdk-sidecar-carries-glibc
+            ./nix#checks.x86_64-linux.runtime-overlay-no-glibc \
+            ./nix#checks.x86_64-linux.sdk-sidecar-carries-glibc
 
       - name: Nix-built guest artifacts fit the 50 MB footprint
         run: |

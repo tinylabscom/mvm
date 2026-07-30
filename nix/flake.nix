@@ -151,6 +151,51 @@
           pkgs = nixpkgs.legacyPackages.${system};
           mvmSrc = workspaceSrc;
         };
+
+      # The overlay's staged guest executables that have their own package
+      # recipe, built from those same recipes and the same static package set
+      # the overlay flake instantiates them from. `mvm-runner` is built inline
+      # in that flake rather than from a recipe here, so it is covered by the
+      # overlay's own static-musl structural gate instead. The set below is
+      # what the no-glibc closure gate closes over; the doc guard in
+      # `tests/nix_flake_structure.rs` keeps the two lists in step.
+      overlayStagedExecutablesFor = system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          guestAgent = withInteractive:
+            import ./packages/mvm-guest-agent.nix {
+              pkgs = pkgs.pkgsStatic;
+              inherit (pkgs) lib;
+              mvmSrc = workspaceSrc;
+              inherit withInteractive;
+            };
+          staticPackage = recipe:
+            import recipe {
+              pkgs = pkgs.pkgsStatic;
+              inherit (pkgs) lib;
+              mvmSrc = workspaceSrc;
+            };
+        in
+        [
+          (guestAgent false)
+          (guestAgent true)
+          (staticPackage ./packages/mvm-egress-client.nix)
+          (staticPackage ./packages/mvm-addon-dns.nix)
+          (staticPackage ./packages/mvm-exit-report.nix)
+        ];
+
+      # The glibc SDK host-services cdylib the language SDKs dlopen. Not
+      # static: a cdylib the workload process loads needs the dynamic loader
+      # the sidecar ships alongside it.
+      sdkHostServicesFfiFor = system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        import ./packages/mvm-host-services-ffi.nix {
+          inherit pkgs;
+          inherit (pkgs) lib;
+          mvmSrc = workspaceSrc;
+        };
     in
     {
       # ── Host-installable package overlay ──────────────────────────
@@ -225,10 +270,9 @@
       # Scope: this covers the baked rootfs tree that ships inside the
       # guest image (busybox, init, setpriv, and friends). The runtime
       # overlay bind-mounted in at boot has its own matching gate,
-      # `runtime-overlay-no-glibc` in
-      # `nix/images/runtime-overlay/flake.nix`; the glibc SDK cdylib now
-      # lives in the separately-attached sidecar, gated in the same place
-      # by `sdk-sidecar-carries-glibc`. Green across all three means no
+      # `runtime-overlay-no-glibc` below; the glibc SDK cdylib now lives in
+      # the separately-attached sidecar, gated by
+      # `sdk-sidecar-carries-glibc`. Green across all three means no
       # ordinary guest carries glibc, and the workloads that need the SDK
       # get it from a disk they were admitted to mount.
       checks = nixpkgs.lib.genAttrs systems (system:
@@ -253,6 +297,55 @@
                 if grep -Eq -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths"; then
                   echo "glibc present in guest rootfs closure:" >&2
                   grep -E -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths" >&2
+                  exit 1
+                fi
+                echo ok > "$out"
+              '';
+
+          # The runtime overlay's staged guest executables are static-musl
+          # too. The overlay's own ext4 is an opaque image with no store
+          # references, so a closure over the *image* would be vacuously
+          # empty — this closes over the executables actually staged into
+          # it, which is the property that keeps glibc out of every guest.
+          #
+          # These live in the root flake rather than
+          # `nix/images/runtime-overlay/`: that flake reaches the workspace
+          # through a path outside its own flake root, so a closure query
+          # against its sources cannot resolve under a pure
+          # `nix flake check`. Here the workspace is the flake's own input.
+          runtime-overlay-no-glibc =
+            pkgs.runCommand "runtime-overlay-no-glibc"
+              {
+                closure = pkgs.closureInfo {
+                  rootPaths = overlayStagedExecutablesFor system;
+                };
+              }
+              ''
+                if grep -Eq -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths"; then
+                  echo "glibc present in the runtime overlay's staged-executable closure:" >&2
+                  grep -E -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths" >&2
+                  exit 1
+                fi
+                echo ok > "$out"
+              '';
+
+          # The counterpart assertion. Without it, a change that dropped the
+          # SDK cdylib entirely would satisfy every no-glibc gate above and
+          # look like a footprint win. The glibc closure has to still exist —
+          # in the separately-attached SDK sidecar, where only workloads whose
+          # signed plan binds an SDK-served host service pay for it.
+          sdk-sidecar-carries-glibc =
+            pkgs.runCommand "sdk-sidecar-carries-glibc"
+              {
+                closure = pkgs.closureInfo {
+                  rootPaths = [ (sdkHostServicesFfiFor system) ];
+                };
+              }
+              ''
+                if ! grep -Eq -- '/nix/store/[a-z0-9]+-glibc(-|$)' "$closure/store-paths"; then
+                  echo "the SDK host-services cdylib no longer depends on glibc — the" >&2
+                  echo "sidecar split is only meaningful while it does:" >&2
+                  cat "$closure/store-paths" >&2
                   exit 1
                 fi
                 echo ok > "$out"
