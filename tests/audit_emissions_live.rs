@@ -291,6 +291,21 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // The listener is non-blocking so the accept loop can poll
+                    // the stop channel. On macOS the accepted socket inherits
+                    // O_NONBLOCK from it, which makes the read below return
+                    // WouldBlock the instant the request bytes have not landed
+                    // yet — and the loop treats WouldBlock as "request
+                    // complete". The fixture then answers an empty request:
+                    // `path` falls back to "/", so it writes a 404 and
+                    // half-closes while the client may still be sending, which
+                    // the client sees as either that 404 or a reset mid-send.
+                    // Under no load the bytes are almost always already there,
+                    // which is what made this look like a load flake.
+                    //
+                    // Clearing the flag puts the read back under the timeout
+                    // below, which is what was meant to bound it all along.
+                    let _ = stream.set_nonblocking(false);
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
                     let mut req_bytes = Vec::with_capacity(2048);
                     let mut buf = [0u8; 512];

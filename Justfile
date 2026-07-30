@@ -152,7 +152,9 @@ test-crate CRATE:
 test-filter FILTER:
     cargo nextest run --workspace -E 'test({{FILTER}})'
 
-# Run tests with CI profile (retries, JUnit output)
+# Run tests under the `ci` profile: no retries, slow-test warnings, and a
+# JUnit report at target/nextest/ci/junit.xml carrying pass/fail structure
+# only (no captured test output — see .config/nextest.toml).
 test-ci:
     cargo nextest run --workspace --profile ci
 

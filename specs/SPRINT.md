@@ -81,11 +81,17 @@
       Reachability was measured empirically by running the suite against an
       empty vs. a populated fixture `$HOME` rather than inferred from the call
       graph. 8021/8021 nextest on a host with a populated `~/.mvm`.
-      **Deferred:** `mvmctl::audit_emissions_live
-      update_check_does_not_emit_audit_entry` fails intermittently under full
-      workspace concurrency and is *not* in this class — its `AuditSandbox`
-      already isolates both roots, and the test binary passed 47/47 across four
-      consecutive runs. Needs separate triage as a concurrency flake.
+      **Deferred → closed.** `mvmctl::audit_emissions_live
+      update_check_does_not_emit_audit_entry` failed intermittently under full
+      workspace concurrency and was correctly ruled out of the `$HOME` class.
+      Triaged in the nextest-profile work: not a concurrency flake but a bug in
+      the shared `serve_release_latest_fixture` helper it and its sibling use.
+      The fixture's listener is non-blocking, and on macOS the accepted socket
+      inherits `O_NONBLOCK` (proven against both platforms — Linux does not
+      inherit), so its read returned `WouldBlock` before the request landed and
+      the loop treated that as "request complete". The fixture then answered an
+      empty request with a 404 and half-closed, which the client saw as that
+      404 or as a reset mid-send. macOS-only, which is why CI never saw it.
 
 - [x] Cross-root cache-seed hardening (#1925, #1926, #1927, #1928). The three
       opportunistic seeds that populate an isolated cache root from the host's
