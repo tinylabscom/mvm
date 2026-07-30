@@ -1,7 +1,10 @@
 # Design: the `ai` command — models run only in profile-matched microVMs
 
 **Date:** 2026-07-29
-**Status:** Design approved; implementation plan pending.
+**Status:** **Draft — design settled, implementation deferred and unscheduled.**
+No implementation plan exists by choice: a plan written for unscheduled work
+goes stale before anyone reads it. The sequencing sketch at the end is the
+starting point if and when this is picked up.
 **Scope:** v1 is one-shot inference. Serving is phase 2, tool-calling is phase 3,
 and both are gated by the boundaries stated in "Deferred, with boundaries".
 
@@ -119,19 +122,23 @@ tier follows that same discipline rather than opting out of it:
 - A new `AI_GUEST_STORAGE_BUDGET` constant is added beside it, with its own
   pinning test and its own entry in `all_budgets()`, so `xtask perf budgets`
   lists both tiers and neither can drift silently.
-- **Initial ceiling: 256 MB.** Roughly five times the default, comfortably above
-  a realistic candle-plus-tokenizer image, and still an order of magnitude below
-  any model it will load.
+- **The ceiling is measured, never guessed.** No number is committed before a
+  measurement exists. The constant is set from the first real
+  runtime-plus-tokenizer image: measured size rounded up to the next 32 MB
+  boundary, with the measured figure recorded in the commit that introduces the
+  constant. The gate therefore lands in the same change as the evidence for its
+  value.
 - The tier is declared in the runtime registry entry, so conformance check 5
   asserts a runtime against *its own tier's* budget. A runtime that cannot fit
   its declared tier is not admissible.
 - Raising the constant requires the same one-line justification the closure
   budget already demands, visible in review.
 
-256 MB is a **starting** ceiling chosen without measurement, and the first
-implementation task is to measure the real image and *tighten the constant to
-the measured size plus headroom*. Set-generous-and-forget is how a budget stops
-being a budget; the ratchet is supposed to move down.
+An earlier draft of this design carried a 256 MB "initial ceiling" picked
+without measuring anything. That is precisely the set-generous-and-forget
+pattern this section exists to prevent, and it was removed rather than kept as a
+convenient default. The AI tier's number is an AI-specific measured fact, not a
+multiple of the default tier's.
 
 This is a security number, not only a performance one. Everything inside the
 guest image sits inside the dm-verity boundary and is measured as part of the
@@ -509,11 +516,37 @@ as a licence check.
   fixture model with no network access, plus the refusal ladder and the
   conformance suite.
 
+## Sequencing sketch
+
+Not a plan — a starting order if this is picked up. Pure and unit-testable work
+first, anything needing a booted VM last.
+
+- **WS-0 — measure the footprint.** Build the candle-plus-tokenizer guest image
+  and measure it; set `AI_GUEST_STORAGE_BUDGET` from that measurement. First
+  because it is the only result that can invalidate the runtime choice, and
+  everything downstream is wasted if it lands somewhere absurd.
+- **WS-1** — `mvm-protocol` DTOs; the bounded safetensors header reader in
+  `mvm-fs` plus its fuzz target. Pure, no VM.
+- **WS-2** — requirement derivation, `Profile::satisfies`, the runtime registry,
+  the three-party match. Pure, no I/O.
+- **WS-3** — the conformance suite, written *before* any runtime exists to pass
+  it. The design's claim that the suite is not shaped by its first
+  implementation only holds if it is written first.
+- **WS-4** — `ai pull`: OCI reuse, content sniffing, volume sealing with verity,
+  the `model.pulled` provenance entry.
+- **WS-5** — plan and admission: the `model` and `runtime` plan sections, the
+  conformance gate in `plan_admission`.
+- **WS-6** — the guest candle runtime, the `Generate` verb, chunked framing and
+  its fuzz target.
+- **WS-7** — the mock runtime, the `ai-model-admission` CI lane, and claims
+  ledger rows with `fn:`/`ci:` witnesses, which then enter the mutation surface
+  via the ledger-derived pin.
+
 ## Open questions
 
-- What is the real candle-plus-tokenizer image size? The AI tier ships with a
-  256 MB starting ceiling; measure first and tighten the constant to the
-  measured size plus headroom rather than leaving the initial guess in place.
+- What is the real candle-plus-tokenizer image size? This sets
+  `AI_GUEST_STORAGE_BUDGET` and is the first task if this is picked up, because
+  it is the one measurement that can invalidate the runtime choice.
 - How exactly does a capability profile attach to the template schema — a new
   optional section, or a separate file keyed by template name? Direction is
   settled (extend templates, do not fork a resource vocabulary); only the
