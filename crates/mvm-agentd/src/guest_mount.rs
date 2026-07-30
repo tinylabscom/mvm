@@ -370,7 +370,30 @@ mod linux_impl {
         }
     }
 
-    const _: () = assert!(DM_IOCTL_STRUCT_SIZE as usize == std::mem::size_of::<DmIoctl>());
+    // Layout contract with linux/dm-ioctl.h. `DmIoctl` is the fixed header
+    // of every device-mapper ioctl and `DmTargetSpec` is the target record
+    // that follows it in the same buffer; the kernel reads both by offset.
+    // These are the structs the dm-verity table is built from, so drift
+    // here is a verified-boot setup failure reported as an unrelated errno.
+    //
+    // Derived on Linux 6.8 with cc sizeof/offsetof/_Alignof, not read off
+    // the Rust definitions. The size assertion is kept in its original form
+    // as well: DM_IOCTL_STRUCT_SIZE is encoded into the ioctl request
+    // number, so the constant and the struct must agree or the kernel
+    // rejects the command.
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(DM_IOCTL_STRUCT_SIZE as usize == size_of::<DmIoctl>());
+        assert!(size_of::<DmIoctl>() == 312);
+        assert!(align_of::<DmIoctl>() == 8);
+        assert!(offset_of!(DmIoctl, version) == 0);
+        assert!(offset_of!(DmIoctl, data_size) == 12);
+        assert!(offset_of!(DmIoctl, data_start) == 16);
+        assert!(offset_of!(DmIoctl, target_count) == 20);
+        assert!(offset_of!(DmIoctl, dev) == 40);
+        assert!(offset_of!(DmIoctl, name) == 48);
+    };
 
     #[repr(C)]
     pub struct DmTargetSpec {
@@ -380,6 +403,18 @@ mod linux_impl {
         pub next: u32,
         pub target_type: [u8; 16],
     }
+
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(size_of::<DmTargetSpec>() == 40);
+        assert!(align_of::<DmTargetSpec>() == 8);
+        assert!(offset_of!(DmTargetSpec, sector_start) == 0);
+        assert!(offset_of!(DmTargetSpec, length) == 8);
+        assert!(offset_of!(DmTargetSpec, status) == 16);
+        assert!(offset_of!(DmTargetSpec, next) == 20);
+        assert!(offset_of!(DmTargetSpec, target_type) == 24);
+    };
 }
 
 #[cfg(target_os = "linux")]
