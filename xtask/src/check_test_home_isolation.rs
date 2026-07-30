@@ -56,16 +56,8 @@ const SEED_SITES: &[(&str, &str)] = &[
         "defines the resolver and owns the deliberate MVM_HOME bypass",
     ),
     (
-        "crates/mvm-build/src/libkrun_builder.rs",
-        "seeds the builder VM image from the host's shared cache",
-    ),
-    (
-        "crates/mvm-build/src/runtime_overlay.rs",
-        "seeds the runtime overlay from the host's shared cache",
-    ),
-    (
-        "crates/mvm-build/src/initramfs.rs",
-        "seeds the universal initramfs from the host's shared cache",
+        "crates/mvm-build/src/cache_install.rs",
+        "owns the only cross-root seed: the one derivation of the shared cache root",
     ),
     (
         "xtask/src/check_test_home_isolation.rs",
@@ -75,13 +67,17 @@ const SEED_SITES: &[(&str, &str)] = &[
 
 /// Symbols whose call reaches [`DEFAULT_CACHE_FN`]. A file naming any of
 /// them can seed from the real `$HOME`, so its tests must isolate `HOME`.
-/// `attach_runtime_overlay` is matched as a prefix so it also covers the
-/// `_if_cached` / `_if_cached_version` wrappers the CLI actually calls.
+/// `attach_runtime_overlay` and `attach_universal_initramfs` are matched as
+/// prefixes so they also cover the `_if_cached` / `_if_cached_version`
+/// wrappers the CLI actually calls.
 const SEED_ANCHORS: &[&str] = &[
     DEFAULT_CACHE_FN,
+    "default_cache_root",
+    "seed_on_miss",
     "ensure_builder_vm_image",
     "resolve_or_seed_from_default_cache",
     "attach_runtime_overlay",
+    "attach_universal_initramfs",
 ];
 
 /// Files exempt from `test-home-isolation`, with the reason.
@@ -321,7 +317,7 @@ mod tests {
     #[test]
     fn allows_declared_seed_sites_to_name_the_resolver() {
         let src = "fn seed() { let p = default_mvm_cache_dir(); }\n";
-        assert!(scan_source("crates/mvm-build/src/runtime_overlay.rs", src).is_empty());
+        assert!(scan_source("crates/mvm-build/src/cache_install.rs", src).is_empty());
     }
 
     #[test]
