@@ -150,12 +150,17 @@ mod tests {
 
     #[test]
     fn isolate_mvm_home_sets_both_roots_and_restores_them() {
-        let before_home = std::env::var_os("HOME");
-        let before_mvm_home = std::env::var_os("MVM_HOME");
         let root = "/tmp/mvm-test-env-isolate-both";
 
+        // The before-values must be read with the guard already held: an
+        // unlocked read can observe another thread's in-flight mutation and
+        // the final restore check would then compare against that thread's
+        // value rather than the value this thread will actually restore.
+        let mut env = TestEnv::new();
+        let before_home = std::env::var_os("HOME");
+        let before_mvm_home = std::env::var_os("MVM_HOME");
+
         {
-            let mut env = TestEnv::new();
             env.isolate_mvm_home(root);
             assert_eq!(std::env::var("MVM_HOME").as_deref(), Ok(root));
             // The whole point: HOME moves too, so the MVM_HOME-ignoring
@@ -163,6 +168,10 @@ mod tests {
             assert_eq!(std::env::var("HOME").as_deref(), Ok(root));
         }
 
+        drop(env);
+        // Re-acquire the guard for the restore assertions too: without it a
+        // concurrent mutation could land between the drop and the read.
+        let _guard = TestEnv::new();
         assert_eq!(std::env::var_os("MVM_HOME"), before_mvm_home);
         assert_eq!(std::env::var_os("HOME"), before_home);
     }

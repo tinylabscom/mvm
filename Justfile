@@ -176,6 +176,13 @@ build-supervisors:
     cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
     cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
 
+# Build the Apple Containerization shim (Swift) and install it codesigned
+# into the mvm cache (<MVM_HOME>/cache/apple-container/bin/). Kernel and
+# initfs artifacts land beside it; the backend's ArtifactMissing errors
+# name their fetch steps.
+apple-container-shim:
+    bash scripts/build-apple-container-shim.sh
+
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 kernel-workload:
     cargo run -- kernel build --which workload

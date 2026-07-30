@@ -36,17 +36,23 @@ backends").
 
 ## Apple Container
 
-- Today: the stage-1 backend skeleton exists — `BackendKind::AppleContainer`
-  and `AnyBackend::AppleContainer` behind `--hypervisor apple-container`
-  (alias `container`), opt-in only and never auto-selected. Every operation
-  fails closed with a typed error naming the milestone that provides it;
-  capabilities and the security profile report honestly (no snapshot, no
-  standby pool, all seven claims `DoesNotHold`). The staged design lives in
-  `specs/plans/271-apple-container-backend.md`. Two doc comments in
-  `crates/mvm-runtime/src/backend.rs` still name Apple Container
-  (`start` example, `for_started_vm` probe) — they describe the real
-  variant's eventual shape (no pid-file marker; the framework tracks VM
-  state out-of-band).
+- Today: stages 1–2 are implemented. Stage 1 registered the honest
+  skeleton (`BackendKind::AppleContainer`, opt-in, never auto-selected,
+  everything fail-closed). Stage 2 wires the real boot machinery: a per-VM
+  Swift shim (`swift/mvm-container-shim`, built + codesigned via `just
+  apple-container-shim`) creates and starts the framework VM from a JSON
+  boot spec (kernel + initfs from the mvm cache, rootfs, vda–vdd blocks,
+  virtio-fs shares, no NIC), drives `vminitd`'s API over vsock port 1024
+  through a newline-JSON + SCM_RIGHTS control protocol, and the backend
+  (`crates/mvm-runtime/src/apple_container/` + `apple_container_backend.rs`)
+  resolves artifacts with typed `ArtifactMissing` errors and injects the
+  static musl guest agent plus the serialized `ActivateEnvironment` — the
+  same message every other backend builds — through the container's
+  streaming copy channel. `stop`/`stop_all`/`status`/`list`/`wait`/`logs`
+  are real (shim ops + pid-file conventions); `start` still fails closed
+  after injection because the agent has no activation-file entry point
+  yet (stage 4). The Rust-side gRPC transport milestone collapsed into the
+  shim (the framework's own `Vminitd` client owns the wire).
 - Future support shape: Apple's Swift-only framework owns the kernel boot
   and `vminitd` as guest PID 1 (gRPC on vsock port 1024), so the universal
   initramfs does not apply verbatim — the **activation contract** rides

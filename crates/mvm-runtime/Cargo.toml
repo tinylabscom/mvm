@@ -127,6 +127,10 @@ storage-s3 = ["dep:object_store", "dep:futures"]
 # The claim-free host-wasmtime portability tier (`WasmBackend`). Off by
 # default; pulls the wasmtime + wasmtime-wasi closure only when enabled.
 wasm-backend = ["dep:wasmtime", "dep:wasmtime-wasi"]
+# Apple Containerization-framework tier's live-boot smoke test. Off by
+# default; the shim is a separate Swift build, so this gates only the
+# artifact-requiring e2e hook (itself `#[ignore]`d behind `MVM_AC_E2E`).
+apple-container = []
 # The hermetic in-memory `MockBackend`/`MockGuestAgent` test double + the
 # `AnyBackend::Mock` variant that selects it. Off by default so the mock — a
 # Tier-3 backend satisfying none of the security claims (no guest, no

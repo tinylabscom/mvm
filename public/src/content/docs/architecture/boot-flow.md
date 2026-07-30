@@ -164,10 +164,13 @@ model in adapted form — or honestly not at all:
   contract rather than sharing this one.
 - **Apple Container** — Apple's `container` framework boots lightweight Linux
   VMs with its own init (`vminitd` as guest PID 1, gRPC on vsock port 1024)
-  and networking/vsock stack. An honest, fail-closed backend skeleton now
-  exists behind `--hypervisor apple-container` (opt-in only, never
-  auto-selected; every operation fails with a typed error naming the
-  milestone that provides it) — see
+  and networking/vsock stack. The `--hypervisor apple-container` backend
+  (opt-in only, never auto-selected) now boots through a per-VM Swift shim
+  (`swift/mvm-container-shim`): it creates and starts the framework VM,
+  drives `vminitd`'s API, and injects the static guest agent plus the
+  serialized `ActivateEnvironment` every other backend builds. The agent's
+  own activation entry point is the remaining gap, so `start` still fails
+  closed with a typed error naming that milestone — see
   `specs/plans/271-apple-container-backend.md` for the staged design. Full
   support means driving the same activation contract through `vminitd`'s
   gRPC API rather than an mvm initramfs: the host writes the serialized
