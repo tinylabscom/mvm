@@ -13,33 +13,32 @@ use mvm_core::crypto::snapshot_hmac::{MEM_FILENAME, VMSTATE_FILENAME};
 use mvm_core::page_merge::{MergeDecision, PageMergeScope, may_merge};
 use mvm_core::plan::{SignedImageRef, TenantId};
 use mvm_runtime::microvm::{RestoredDeviceModel, assert_vsock_only_device_model};
-use mvm_runtime::vm::instance_snapshot::{CannedIO, pause_and_seal, verify_and_resume_from_dir};
+use mvm_runtime::vm::instance_snapshot::{
+    CannedIO, pause_and_seal, verify_and_resume, verify_and_resume_from_dir,
+};
 
-use crate::world::CliWorld;
+use crate::world::{CliWorld, MvmHomeGuard};
 
-/// Serialize `MVM_HOME` mutations and return an isolated temp home. The
-/// caller must store the returned `TempDir` in `world` so the snapshot files
-/// survive the `Given` step.
-fn isolated_mvm_home() -> (tempfile::TempDir, mvm_core::util::test_env::TestEnv) {
-    let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let mut env = mvm_core::util::test_env::TestEnv::new();
+/// Create an isolated temp home, point `MVM_HOME` at it, and return both
+/// the directory and an RAII guard that restores the previous `MVM_HOME`
+/// when the scenario ends. The caller must store both in `world` so the
+/// snapshot files and the override survive the `Given` step.
+fn isolated_mvm_home() -> (tempfile::TempDir, MvmHomeGuard) {
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
-    env.set("MVM_HOME", home.path());
-    // Move the guard into the env so it is released when the env drops.
-    (home, env)
+    let guard = MvmHomeGuard::new(home.path());
+    (home, guard)
 }
 
 #[given(expr = "a sealed warm snapshot for VM {string}")]
 fn sealed_warm_snapshot(world: &mut CliWorld, vm_name: String) {
-    let (home, _env) = isolated_mvm_home();
+    let (home, guard) = isolated_mvm_home();
     let io = CannedIO {
         vmstate_bytes: b"vmstate-for-seal".to_vec(),
         mem_bytes: b"mem-for-seal".to_vec(),
     };
     let sidecar = pause_and_seal(&vm_name, &io).expect("seal the warm snapshot");
     let dir = mvm_runtime::vm::instance_snapshot::snapshot_dir(&vm_name);
+    world.warm_restore_home_guard = Some(guard);
     world.warm_restore_home = Some(home);
     world.warm_restore_dir = Some(dir);
     world.warm_restore_result = Some(Ok(format!("sealed epoch {}", sidecar.epoch)));
@@ -50,7 +49,7 @@ fn sealed_warm_snapshot(world: &mut CliWorld, vm_name: String) {
 fn sealed_warm_snapshot_epoch_one(world: &mut CliWorld, vm_name: String) {
     // Capture the first sealed snapshot into a stable directory before a
     // second seal bumps the per-instance epoch high-water mark.
-    let (home, _env) = isolated_mvm_home();
+    let (home, guard) = isolated_mvm_home();
     let io = CannedIO {
         vmstate_bytes: b"vmstate-epoch1".to_vec(),
         mem_bytes: b"mem-epoch1".to_vec(),
@@ -60,6 +59,7 @@ fn sealed_warm_snapshot_epoch_one(world: &mut CliWorld, vm_name: String) {
     let live_dir = mvm_runtime::vm::instance_snapshot::snapshot_dir(&vm_name);
     let saved_dir = live_dir.with_file_name("epoch1-snapshot");
     copy_snapshot_dir(&live_dir, &saved_dir).expect("copy the epoch-1 snapshot");
+    world.warm_restore_home_guard = Some(guard);
     world.warm_restore_home = Some(home);
     world.warm_restore_dir = Some(saved_dir);
     world.warm_restore_result = Some(Ok(format!("sealed epoch {}", sidecar.epoch)));
@@ -121,17 +121,23 @@ fn warm_restore_from_that_snapshot(world: &mut CliWorld) {
 
 #[when(expr = "warm restore is attempted from the older-epoch snapshot")]
 fn warm_restore_from_dir(world: &mut CliWorld) {
-    let dir = world
+    let saved_dir = world
         .warm_restore_dir
         .as_ref()
         .expect("a Given step must create a sealed snapshot first")
         .clone();
+    let vm_name = "epoch-vm";
+    let live_dir = mvm_runtime::vm::instance_snapshot::snapshot_dir(vm_name);
+    // Simulate an operator (or attacker) replacing the live snapshot
+    // artifacts with an older-epoch copy, while the per-instance
+    // high-water mark keeps advancing.
+    copy_snapshot_dir(&saved_dir, &live_dir).expect("stage older-epoch snapshot over live dir");
     let io = CannedIO {
         vmstate_bytes: b"ignored-by-verify".to_vec(),
         mem_bytes: b"ignored-by-verify".to_vec(),
     };
     world.warm_restore_result = Some(
-        verify_and_resume_from_dir(&dir, &io)
+        verify_and_resume(vm_name, &io)
             .map(|sidecar| format!("restored epoch {}", sidecar.epoch))
             .map_err(|e| e.to_string()),
     );
