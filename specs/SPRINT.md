@@ -46,6 +46,24 @@
       #1876 and #1878; tracked in
       `specs/plans/266-vsock-overload-hardening.md`.
 
+- [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
+      only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
+      builder image / runtime overlay from the host's shared cache), so a test
+      that moved only `MVM_HOME` still read the developer's real cache — an
+      assertion that an artifact is *absent* then passed only on a machine that
+      had never built one. Added `TestEnv::isolate_mvm_home` (sets both roots),
+      migrated the 25 tests in files that provably reach a seed site, and added
+      the `check-test-home-isolation` xtask gate: `default_mvm_cache_dir` is now
+      allowlist-only, and tests in seed-reaching files must isolate `HOME`.
+      Reachability was measured empirically by running the suite against an
+      empty vs. a populated fixture `$HOME` rather than inferred from the call
+      graph. 8021/8021 nextest on a host with a populated `~/.mvm`.
+      **Deferred:** `mvmctl::audit_emissions_live
+      update_check_does_not_emit_audit_entry` fails intermittently under full
+      workspace concurrency and is *not* in this class — its `AuditSandbox`
+      already isolates both roots, and the test binary passed 47/47 across four
+      consecutive runs. Needs separate triage as a concurrency flake.
+
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
       #1888 (ARM64 `Image` kernels reach Firecracker), #1891 (guest reads the

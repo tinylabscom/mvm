@@ -2909,7 +2909,7 @@ mod tests {
 
         let cache = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", cache.path());
+        env.isolate_mvm_home(cache.path());
         env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "download");
         let initrd_dir = cache
             .path()

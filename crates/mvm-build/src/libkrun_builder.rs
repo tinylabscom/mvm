@@ -7082,7 +7082,7 @@ mod tests {
             Some(tempfile::tempdir().expect("bootstrap cache tempdir"))
         };
         if let Some(cache) = &bootstrap_cache {
-            env.set("MVM_HOME", cache.path());
+            env.isolate_mvm_home(cache.path());
         }
 
         let workspace_root =

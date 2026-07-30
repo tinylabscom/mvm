@@ -71,6 +71,11 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "defines the very patterns it scans for",
     ),
     (
+        "crates/mvm-core/src/util/test_env.rs",
+        &[Rule::HomeRead],
+        "the test env-guard's own unit test reads HOME to assert isolate_mvm_home sets it and Drop restores it; it derives no mvm path",
+    ),
+    (
         "crates/mvm-cli/src/shell_init.rs",
         &[Rule::HomeRead],
         "writes the user's shell rc file (~/.zshrc / ~/.bashrc); $HOME locates the rc file, not an mvm base dir",

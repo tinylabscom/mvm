@@ -123,6 +123,9 @@ jobs:
       - name: Single MVM_HOME root (no resolver bypass)
         run: cargo run -p xtask -- check-single-home
 
+      - name: Tests that move MVM_HOME also isolate HOME
+        run: cargo run -p xtask -- check-test-home-isolation
+
       - name: No baked network literals (IPs/ports/tmp-sockets)
         run: cargo run -p xtask -- check-no-network-literals
 
