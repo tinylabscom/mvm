@@ -34,10 +34,6 @@ pub fn run(workspace: &Path) -> Result<()> {
     let model_toml = std::fs::read_to_string(&model_path)
         .with_context(|| format!("reading {}", model_path.display()))?;
 
-    let model_path = workspace.join("model").join("claims.toml");
-    let model_toml = std::fs::read_to_string(&model_path)
-        .with_context(|| format!("reading {}", model_path.display()))?;
-
     let mut errors: Vec<String> = Vec::new();
     structural_checks(&rows, &mut errors);
     ledger_witnesses_are_known_to_the_model(&rows, &model_toml, &mut errors);

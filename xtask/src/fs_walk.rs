@@ -28,7 +28,10 @@ pub fn walk_files(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<()> {
     entries.sort();
     for path in entries {
         if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
             if SKIP_DIRS.contains(&name) {
                 continue;
             }
@@ -87,7 +90,10 @@ mod tests {
         .unwrap();
 
         // Sorted, not merely present: the mutation surface is committed.
-        assert_eq!(names, vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()]);
+        assert_eq!(
+            names,
+            vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -101,7 +107,10 @@ mod tests {
 
         let mut seen = Vec::new();
         for_each_file(&tmp, Some("rs"), &mut |p, t| {
-            seen.push((p.file_name().unwrap().to_string_lossy().into_owned(), t.to_string()));
+            seen.push((
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                t.to_string(),
+            ));
         })
         .unwrap();
 
