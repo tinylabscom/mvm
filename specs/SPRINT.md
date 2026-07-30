@@ -46,6 +46,29 @@
       #1876 and #1878; tracked in
       `specs/plans/266-vsock-overload-hardening.md`.
 
+- [x] Claim witnesses are now mutation-tested, not merely present.
+      `check-claim-catalog` proves a witness exists; nothing proved it can
+      fail. Added `xtask check-mutation-witnesses`, which derives the
+      mutation surface *from the claims ledger* (each `fn:` witness resolves
+      to its declaring file — this repo keeps `#[cfg(test)] mod tests`
+      beside the implementation, so a witness lands on the code it guards)
+      and pins it to `xtask/mutation-witness-baseline.json`: 26 files across
+      8 packages. The cheap default mode runs on every PR and fails when the
+      surface moves, so a claim quietly leaving mutation coverage is a
+      reviewable diff; `--run` mutates the surface nightly in `security.yml`
+      and ratchets survivors, failing only on a *new* hole. Claims that reach
+      no mutable file are reported and pinned rather than silently absent:
+      4, 5 and 7 are witnessed only by CI lanes, and claim 16's three
+      witnesses all live in an integration test, which cargo-mutants does not
+      mutate. The first real run (claim-10 anchor, 52 mutants) found **4
+      survivors** — including `NetworkPreset::is_deny_all` surviving
+      replacement by both `true` and `false`, because it has no production
+      caller anywhere in the tree and its only assertion lives in another
+      crate's tests. Seeded as triaged baseline entries; the nightly lane
+      ships `continue-on-error` until the baseline covers the whole surface.
+      Also extracted the shared ledger parser into `xtask/src/claims_ledger.rs`
+      so both gates read one table. `specs/plans/272-mutation-tested-claim-witnesses.md`.
+      307/307 xtask nextest.
 - [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
       only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
       builder image / runtime overlay from the host's shared cache), so a test
