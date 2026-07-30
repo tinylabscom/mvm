@@ -70,14 +70,16 @@ mvm runs on multiple backends. Not all backends carry all seven claims. The tier
 
 ### No container fallback
 
-mvm has **no Tier 3** and no container/Docker fallback. A shared-kernel container is not a microVM: its isolation comes from the host kernel's namespace and cgroup machinery, which is shared with the host. In 2024–2025 the container ecosystem produced multiple CVEs (Leaky Vessels, NVIDIAScape, runc race conditions, Docker Desktop priv-esc, runc masked-path) that yielded **host escape** from inside a container — none of which matter inside a microVM, where the guest kernel is isolated by hardware. If a host has no microVM-capable backend, mvm does not silently drop to a weaker boundary; it fails closed.
+On every default and production path, mvm has **no Tier 3** and no container/Docker fallback. A shared-kernel container is not a microVM: its isolation comes from the host kernel's namespace and cgroup machinery, which is shared with the host. In 2024–2025 the container ecosystem produced multiple CVEs (Leaky Vessels, NVIDIAScape, runc race conditions, Docker Desktop priv-esc, runc masked-path) that yielded **host escape** from inside a container — none of which matter inside a microVM, where the guest kernel is isolated by hardware. If a host has no microVM-capable backend, mvm does not silently drop to a weaker boundary; it fails closed.
+
+The one carve-out is an **explicitly selected dev tier** (ADR-034): `--hypervisor docker` runs the real `mvm-guest-agent` as a container's PID 1 with the real activation contract and RPC surface, so KVM-less dev and CI hosts can exercise workloads against the same code production runs. It is opt-in only (auto-detection never picks it), refused by production admission, labeled Tier 3 shared-kernel everywhere the tier is shown, and carries none of the hardware-isolation claims. It is a development substrate, not a fallback: nothing routes to it by default, by accident, or under production admission.
 
 ### Choosing a tier
 
 - **Production / untrusted code** → Tier 1. Linux + KVM + Firecracker. No exceptions.
 - **macOS dev or CI on Apple Silicon** → Tier 2 (HVF or libkrun). Verified boot is the open item.
 - **Linux dev/test without `/dev/kvm`** → Tier 2 QEMU (`--hypervisor qemu`, TCG software emulation). A real microVM, slower; dev/test only.
-- **macOS Intel / native Windows** → unsupported for local microVM isolation today (no container fallback). WSL2 with nested `/dev/kvm` is the supported Windows-adjacent libkrun workload path; a Hyper-V managed Linux builder remains future backend work.
+- **macOS Intel / native Windows** → unsupported for local microVM isolation today (no container fallback on any default path — only the explicitly selected ADR-034 dev tier). WSL2 with nested `/dev/kvm` is the supported Windows-adjacent libkrun workload path; a Hyper-V managed Linux builder remains future backend work.
 
 `mvmctl doctor` reports your current tier on the running host.
 

@@ -3520,7 +3520,7 @@
       "additionalProperties": false
     },
     "RootfsConfig": {
-      "description": "Root device the guest mounts as `/`.  Three shapes, selected by which optional fields are set:\n\n- **dm-verity block** (`roothash` + `hash_dev`): create the `root` dm-verity target and mount it read-only. - **plain block** (neither): mount `data_dev` read-only without verification (unverified dev-tier boot). - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only as the root — the block-less dev-tier boot.",
+      "description": "Root device the guest mounts as `/`.  Three mount shapes, selected by which optional fields are set, plus one mount-free shape:\n\n- **dm-verity block** (`roothash` + `hash_dev`): create the `root` dm-verity target and mount it read-only. - **plain block** (neither): mount `data_dev` read-only without verification (unverified dev-tier boot). - **virtio-fs root** (`virtiofs_tag`): mount the virtio-fs tag read-only as the root — the block-less dev-tier boot. - **in place** (`in_place`): the runtime already owns `/` — a shared-kernel container whose root is the image itself. Nothing is mounted and no pivot happens; activation is the privilege drop and the gate flip only.",
       "type": "object",
       "required": [
         "data_dev"
@@ -3537,6 +3537,11 @@
             "string",
             "null"
           ]
+        },
+        "in_place": {
+          "description": "The root is already in place (shared-kernel container tier): skip the rootfs mount and the pivot entirely. Mutually exclusive with every other field — a host that sets this alongside a device, hash, or tag gets a validation error from the agent, not a silent choice.",
+          "default": false,
+          "type": "boolean"
         },
         "roothash": {
           "description": "64-character lowercase hex dm-verity root hash.  Absent for an unverified plain-block root.",

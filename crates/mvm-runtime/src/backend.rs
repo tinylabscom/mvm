@@ -10,6 +10,7 @@ use mvm_core::vm_backend::{
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
 use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
+use crate::docker_backend::DockerBackend;
 use crate::driver::{FcDriver, HvfDriver, LibkrunDriver};
 use crate::image::RuntimeVolume;
 use crate::microvm::{DriveFile, FlakeRunConfig};
@@ -410,6 +411,13 @@ pub enum AnyBackend {
     /// closed with a typed error the first time the backend is actually
     /// used, not at construction.
     Wasm(WasmBackend),
+    /// Docker shared-kernel container dev tier — see
+    /// [`crate::docker_backend`]. Selectable only via explicit
+    /// `--hypervisor docker` / `MVM_BACKEND=docker`; `auto_select` never
+    /// falls through here, and production admission refuses it (no
+    /// workload-backend surface). Always constructible; every launch
+    /// request the tier cannot satisfy fails closed with a typed error.
+    Docker(DockerBackend),
 }
 
 impl AnyBackend {
@@ -560,6 +568,7 @@ impl AnyBackend {
             Self::Mock(backend) => backend,
             Self::Hvf(backend) => backend,
             Self::Wasm(backend) => backend,
+            Self::Docker(backend) => backend,
         }
     }
 
@@ -576,6 +585,7 @@ impl AnyBackend {
             Self::Mock(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Wasm(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            Self::Docker(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
         }
     }
 
@@ -634,6 +644,12 @@ impl AnyBackend {
             // egress seam). Barred from the admitted launch funnel until
             // then, the same carve-out as `Qemu`.
             AnyBackend::Wasm(_) => None,
+            // Docker is a shared-kernel container dev tier: namespaces are
+            // not a hardware boundary, so it must never carry an untrusted
+            // production workload. Barred from the admitted launch funnel
+            // permanently — the same carve-out as `Qemu`, with no
+            // promotion path.
+            AnyBackend::Docker(_) => None,
         }
     }
 
@@ -687,7 +703,7 @@ impl AnyBackend {
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(backend) => backend.spawn_standby(spec),
             // Not workload-bearing backends — no warm pool, fail closed.
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) => {
+            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::Docker(_) => {
                 Err(mvm_core::vm_backend::StandbyError::Unsupported {
                     backend: self.inner().name().to_string(),
                 })
@@ -729,7 +745,7 @@ impl AnyBackend {
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(backend) => backend.claim_standby(handle, claim),
             // Not workload-bearing backends — no warm pool, fail closed.
-            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) => {
+            AnyBackend::Qemu(_) | AnyBackend::Wasm(_) | AnyBackend::Docker(_) => {
                 Err(mvm_core::vm_backend::StandbyError::Unsupported {
                     backend: self.inner().name().to_string(),
                 })
@@ -1029,7 +1045,14 @@ mod tests {
 
     #[test]
     fn require_hypervisor_selectable_allows_every_other_name() {
-        for name in ["firecracker", "libkrun", "qemu", "hvf", "unknown-typo"] {
+        for name in [
+            "firecracker",
+            "libkrun",
+            "qemu",
+            "hvf",
+            "docker",
+            "unknown-typo",
+        ] {
             assert!(
                 AnyBackend::require_hypervisor_selectable(name).is_ok(),
                 "{name}: must never be refused"
@@ -1161,6 +1184,15 @@ mod tests {
     }
 
     #[test]
+    fn auto_select_never_returns_docker() {
+        assert_ne!(
+            AnyBackend::auto_select().kind(),
+            mvm_core::vm_backend::BackendKind::Docker,
+            "auto_select must never fall through to the docker shared-kernel dev tier"
+        );
+    }
+
+    #[test]
     fn backend_catalog_matrix_is_stable() {
         let actual: Vec<_> = catalog::descriptors()
             .iter()
@@ -1233,6 +1265,16 @@ mod tests {
                 ),
                 (
                     "wasm",
+                    Vec::new(),
+                    BackendTier::Tier3,
+                    None,
+                    None,
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    "docker",
                     Vec::new(),
                     BackendTier::Tier3,
                     None,
@@ -1332,6 +1374,7 @@ mod tests {
     #[test]
     fn recovery_capability_matrix_is_explicit_for_every_selectable_backend() {
         let mut expected = vec![
+            ("docker", SnapshotCapability::Unsupported, false),
             ("firecracker", SnapshotCapability::Unsupported, false),
             ("hvf", SnapshotCapability::Unsupported, false),
             ("libkrun", SnapshotCapability::Unsupported, false),
@@ -1424,6 +1467,7 @@ mod tests {
     #[test]
     fn tier_classification_locks_each_backend_variant() {
         let mut cases: Vec<(&str, BackendTier)> = vec![
+            ("docker", BackendTier::Tier3),
             ("firecracker", BackendTier::Tier1),
             ("libkrun", BackendTier::Tier2),
             ("qemu", BackendTier::Tier2),
@@ -1448,7 +1492,7 @@ mod tests {
         // long-standing per-backend tier declaration. `AnyBackend::tier()`
         // is the closed-enum view of the same fact. Bumping one without
         // the other is a regression — keep them wired.
-        let mut names = vec!["firecracker", "libkrun", "qemu"];
+        let mut names = vec!["docker", "firecracker", "libkrun", "qemu"];
         if cfg!(feature = "test-support") {
             names.push("mock");
         }
@@ -1500,6 +1544,17 @@ mod tests {
         assert!(
             backend.as_workload_backend().is_none(),
             "qemu: dev/test VMM must not be a workload backend"
+        );
+    }
+
+    #[test]
+    fn as_workload_backend_none_for_docker() {
+        // docker is a shared-kernel container dev tier: it must never carry
+        // an untrusted production workload.
+        let backend = AnyBackend::from_hypervisor("docker");
+        assert!(
+            backend.as_workload_backend().is_none(),
+            "docker: shared-kernel dev tier must not be a workload backend"
         );
     }
 
@@ -1577,6 +1632,7 @@ mod tests {
             ("libkrun", AnyBackend::Libkrun(libkrun_runner())),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
             ("hvf", AnyBackend::Hvf(hvf_runner())),
+            ("docker", AnyBackend::Docker(DockerBackend::new())),
         ];
         backends.extend(mock_variant_for_ssh_check());
         for (name, backend) in backends {
@@ -1714,7 +1770,7 @@ mod tests {
         #[test]
         fn fails_closed_for_non_workload_backends() {
             let s = Scaffold::new();
-            for name in ["qemu", "wasm"] {
+            for name in ["qemu", "wasm", "docker"] {
                 let backend = AnyBackend::from_hypervisor(name);
                 let err = backend
                     .claim_standby_via_runner(&s.ctx(), &idle_handle(), &minimal_claim())
@@ -1749,7 +1805,7 @@ mod tests {
                 image_sha256: None,
             };
 
-            for name in ["qemu", "wasm"] {
+            for name in ["qemu", "wasm", "docker"] {
                 let backend = AnyBackend::from_hypervisor(name);
                 let err = backend
                     .spawn_standby_via_runner(

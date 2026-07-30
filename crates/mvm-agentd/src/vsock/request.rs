@@ -1284,6 +1284,7 @@ mod tests {
                 hash_dev: Some("/dev/vdb".to_string()),
                 roothash: Some("a".repeat(64)),
                 virtiofs_tag: None,
+                in_place: false,
             },
             runtime: Some(RuntimeOverlayConfig {
                 data_dev: "/dev/vdc".to_string(),

@@ -240,6 +240,7 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_per_backend_tier() {
         let r = collect_warm_start_support();
+        assert_eq!(r.backends.get("docker"), Some(&"unsupported"));
         assert_eq!(r.backends.get("firecracker"), Some(&"unsupported"));
         assert_eq!(r.backends.get("libkrun"), Some(&"unsupported"));
         assert_eq!(r.backends.get("qemu"), Some(&"unsupported"));
@@ -254,6 +255,7 @@ mod tests {
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
 
         let mut expected_backends = vec![
+            ("docker".to_string(), "unsupported"),
             ("firecracker".to_string(), "unsupported"),
             ("hvf".to_string(), "unsupported"),
             ("libkrun".to_string(), "unsupported"),
@@ -261,6 +263,7 @@ mod tests {
             ("wasm".to_string(), "unsupported"),
         ];
         let mut expected_standby_pool = vec![
+            ("docker".to_string(), false),
             ("firecracker".to_string(), false),
             ("hvf".to_string(), false),
             ("libkrun".to_string(), false),
@@ -268,8 +271,8 @@ mod tests {
             ("wasm".to_string(), false),
         ];
         if cfg!(feature = "test-support") {
-            expected_backends.insert(3, ("mock".to_string(), "live-memory"));
-            expected_standby_pool.insert(3, ("mock".to_string(), false));
+            expected_backends.insert(4, ("mock".to_string(), "live-memory"));
+            expected_standby_pool.insert(4, ("mock".to_string(), false));
         }
         assert_eq!(ordered_backends, expected_backends);
         assert_eq!(ordered_standby_pool, expected_standby_pool);
@@ -291,7 +294,7 @@ mod tests {
         // Every selectable backend remains in the matrix, including explicit
         // unsupported recovery tiers.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
-        let mut expected = vec!["firecracker", "hvf", "libkrun", "qemu", "wasm"];
+        let mut expected = vec!["docker", "firecracker", "hvf", "libkrun", "qemu", "wasm"];
         if cfg!(feature = "test-support") {
             expected.push("mock");
             expected.sort_unstable();

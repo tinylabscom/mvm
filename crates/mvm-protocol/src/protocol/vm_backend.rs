@@ -1025,6 +1025,13 @@ pub enum BackendKind {
     /// portability/demo backend: opt-in only, never returned by auto-detect,
     /// no hardware isolation boundary.
     Wasm,
+    /// Shared-kernel container dev tier: the workload runs in a Docker
+    /// container with `mvm-guest-agent` as PID 1, receiving activation over
+    /// a host bind-mounted Unix socket instead of vsock. Opt-in only, never
+    /// returned by auto-detect, refused by production admission; none of
+    /// the hardware-isolation claims hold (the guest shares the host
+    /// kernel).
+    Docker,
 }
 
 #[cfg(test)]

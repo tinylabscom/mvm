@@ -222,6 +222,7 @@ nix = { version = "0.29", features = ["socket"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+mvm-core = { path = "../mvm-core", features = ["test-support"] }
 
 [lints]
 workspace = true
