@@ -176,7 +176,10 @@ fn build_volume_configs(config: &VmStartConfig) -> Vec<VolumeConfig> {
 }
 
 /// Load the signed verb-grant envelope written by the host signer, if present.
-fn read_verb_grant_envelope(vm_name: &str) -> Result<Option<VerbGrantEnvelope>> {
+///
+/// `pub(crate)` so the wasm tier's capability handshake reads the same
+/// sidecar through the same parser instead of re-rolling it.
+pub(crate) fn read_verb_grant_envelope(vm_name: &str) -> Result<Option<VerbGrantEnvelope>> {
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
     if !path.is_file() {
         return Ok(None);

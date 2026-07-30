@@ -14,11 +14,22 @@ backends").
   opt-in only, never auto-selected, honest capabilities, zero numbered
   claims, fail-closed on kernel/verified-boot/vsock requests, and
   engine-in-guest if it ever executes real workloads.
-- Boot contract: not applicable as-is (no Linux kernel, no initramfs, PID 1
-  is the wasmtime host process). The analog is a capability handshake over
-  the wasm import channel, extending the existing host-mediated `mvm:egress`
-  import seam: admission binds policy, the module receives exactly the host
-  functions the plan admits.
+- Boot contract: implemented in adapted form as the **capability
+  handshake** (`crates/mvm-runtime/src/wasm_activation.rs`). Preopens
+  instead of mounts: the runtime-overlay guest binaries are preopened
+  read-only at `/mvm/runtime`, each `DirShare` volume at its guest
+  mountpoint with read-only honored (`Disk` volumes fail closed, as do
+  volume paths that fail mount-path policy). Policy/grant delivery instead
+  of a vsock verb: an `activation.json` (overlay guest path, volume
+  mountpoints, network-policy posture label, grant presence) is written
+  into a per-run 0700 directory preopened read-only at `/run/mvm`, with
+  `MVM_ACTIVATION_FILE` set in the module's env. The grant itself is a
+  signed host artifact and only its presence travels — there is no
+  in-guest signature verification because the WASI host is the trust
+  boundary. The WASI capability model is the `NotActivated` analog: the
+  module receives exactly the capabilities the plan admits and nothing
+  else. Rootfs: WASI has no mountable root — the module's filesystem view
+  IS its root (the in-place analog of a container's image root).
 - Open design work (unwritten, per ADR-024 consequences): the promotion path
   from a demo session to a claims-bearing production microVM.
 

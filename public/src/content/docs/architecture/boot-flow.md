@@ -147,13 +147,20 @@ model in adapted form — or honestly not at all:
 
 - **Wasm** (`WasmBackend`, ADR-024) — no Linux kernel and no initramfs: the
   workload is a WASI module under host `wasmtime`, so `ActivateEnvironment`
-  does not apply. If this tier ever goes beyond demo/preview, the analogous
-  step is a capability handshake over the wasm import channel (the same seam
-  as today's host-mediated `mvm:egress` import): admission binds policy, the
-  module receives exactly the host functions the plan admits, and any
-  kernel/verified-boot/vsock request fails closed. Per ADR-024 it stays
-  opt-in, claim-free, and — if it ever executes real workloads — the engine
-  runs in-guest, never as a host process dependency.
+  does not apply verbatim. Its implemented analog is the **capability
+  handshake**: every run receives the same environment description adapted
+  to WASI — the runtime-overlay guest binaries and each directory-share
+  volume as preopened directories (read-only honored) at the same guest
+  paths the other backends mount them, and policy/grant delivery as an
+  `activation.json` (overlay path, volume mountpoints, policy posture
+  label, grant presence) preopened read-only at `/run/mvm` with
+  `MVM_ACTIVATION_FILE` in the module's env. The WASI capability model is
+  the gate: the module receives exactly the preopens, env, and host imports
+  the plan admits and nothing else; there is no in-guest signature
+  verification because the WASI host is the trust boundary. Kernel,
+  verified-boot, block-volume, and console requests still fail closed. Per
+  ADR-024 it stays opt-in, claim-free, and — if it ever executes real
+  workloads — the engine runs in-guest, never as a host process dependency.
 - **Docker / shared-kernel containers** — there is no container fallback and
   none is planned: a shared-kernel container is not a microVM (see
   [Matryoshka model](/security/matryoshka/)). Its init is not
