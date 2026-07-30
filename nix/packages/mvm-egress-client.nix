@@ -27,6 +27,8 @@ pkgs.rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
 
+  unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
+
   # Restrict the build to the egress-client binary; the workspace's heavier members
   # are not in this crate's closure, so the artifact stays small.
   cargoBuildFlags = [

@@ -22,6 +22,8 @@ pkgs.rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
 
+  unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
+
   # Restrict the build to the exit-report binary. The workspace's
   # heavier members (mvm-libkrun, mvm-providers, etc.) are not in the
   # closure of this crate, so the produced artifact stays small.

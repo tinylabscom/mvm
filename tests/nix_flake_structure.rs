@@ -1282,18 +1282,43 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
     );
 }
 
+/// Every recipe whose `src` is the whole workspace must normalize it before the
+/// generic unpacker runs: a `path:` input evaluated from the `nix/` subflake can
+/// retain a trailing `nix/..` shape and the unpacker then fails with
+/// "destination already exists". The workaround lives in one shared snippet, so
+/// this asserts both that the snippet does the normalization and that every such
+/// recipe uses it — a recipe that forgets it builds from the root flake's
+/// closure gates and fails only in CI.
 #[test]
-fn mvm_setpriv_package_normalizes_the_workspace_source() {
-    let path = nix_dir().join("packages/mvm-setpriv.nix");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-
+fn workspace_sourced_packages_normalize_the_workspace_source() {
+    let snippet_path = nix_dir().join("packages/workspace-unpack.nix");
+    let snippet = fs::read_to_string(&snippet_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", snippet_path.display()));
     assert!(
-        content.contains("unpackPhase")
-            && content.contains("cp -R ${mvmSrc}/. source")
-            && content.contains("sourceRoot=source"),
-        "mvm-setpriv must normalize path:.. workspace sources before buildRustPackage unpacks them"
+        snippet.contains("cp -R ${mvmSrc}/. source") && snippet.contains("sourceRoot=source"),
+        "the shared unpack snippet must copy the workspace into a plain source dir"
     );
+
+    for recipe in [
+        "mvm-setpriv.nix",
+        "mvm-guest-agent.nix",
+        "mvm-egress-client.nix",
+        "mvm-addon-dns.nix",
+        "mvm-exit-report.nix",
+        "mvm-host-services-ffi.nix",
+    ] {
+        let path = nix_dir().join("packages").join(recipe);
+        let content =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        assert!(
+            content.contains("src = mvmSrc;"),
+            "{recipe} is expected to build from the whole workspace"
+        );
+        assert!(
+            content.contains("unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };"),
+            "{recipe} must normalize its workspace source through the shared snippet"
+        );
+    }
 }
 
 #[test]

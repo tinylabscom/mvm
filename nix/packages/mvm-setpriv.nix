@@ -9,16 +9,7 @@ rustPlatform.buildRustPackage {
   src = mvmSrc;
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
 
-  # A path input evaluated from the nix subflake can retain a trailing
-  # `nix/..` source shape. Copy it into a normal directory before the generic
-  # unpacker sees it.
-  unpackPhase = ''
-    runHook preUnpack
-    cp -R ${mvmSrc}/. source
-    chmod -R u+w source
-    sourceRoot=source
-    runHook postUnpack
-  '';
+  unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
 
   # Stage 0 runs Nix without its normal sandbox. Keep Cargo from creating
   # Nix's sentinel home directory in the shared build root.
