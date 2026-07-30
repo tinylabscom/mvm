@@ -323,7 +323,16 @@ where
         })
         .context("requested standby-pool recovery"));
     }
-    let Some(handle) = pool.claim_idle_compatible(want)? else {
+    // Select without reserving. The runner reserves this parent itself, in the
+    // same locked section it verifies it in, and refuses a parent that is
+    // already `Claimed` — so reserving here too made every warm claim fail with
+    // "parent is not in a claimable state". One reservation owner, and it is the
+    // one that also verifies.
+    //
+    // Two launchers can still both select the same idle parent; the runner's
+    // lock serializes them and the loser is refused into a cold boot, which is
+    // the same outcome reserving here bought, without deadlocking the winner.
+    let Some(handle) = pool.select_idle_compatible(want)? else {
         return Ok(LaunchDecision::ColdBoot);
     };
     let claim = match make_claim(&handle) {
@@ -1080,6 +1089,77 @@ mod tests {
         other.rootfs_path = other_rootfs.display().to_string();
         let other_want = compat_for_launch(backend.as_vm_backend(), &other).unwrap();
         assert_ne!(other_want, want);
+    }
+
+    /// `claim_or_cold` must hand the runner a parent that is still claimable.
+    ///
+    /// The runner reserves the parent itself, in the same locked section it
+    /// verifies it in, and refuses one that is already `Claimed`. Reserving here
+    /// as well meant every warm claim on a runner-backed backend died with
+    /// "parent is not in a claimable state": the pool filled and never drained.
+    ///
+    /// Nothing caught it because the mock backend services a claim from its own
+    /// in-memory state and never runs the runner's reserve, so the two-layer
+    /// interaction only existed on a live host. This asserts the seam directly:
+    /// at the moment the claim is built the runner has not run, so the parent
+    /// must still be claimable on disk.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn claim_or_cold_leaves_the_parent_claimable_for_the_runner_to_reserve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"warm-kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"warm-rootfs").unwrap();
+        let key = tmp.path().join("host-signer.ed25519");
+        std::fs::write(&key, b"fake-key").unwrap();
+
+        let mut cfg = eligible_cfg();
+        cfg.kernel_path = Some(kernel.display().to_string());
+        cfg.rootfs_path = rootfs.display().to_string();
+
+        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
+        assert_eq!(
+            warm_to_target(
+                &pool,
+                &WarmParams {
+                    backend: &backend,
+                    template_id: cfg.template_id.as_deref(),
+                    kernel: &kernel,
+                    vcpus: 2,
+                    mem_mib: 1024,
+                    signer_id: "host:test",
+                    signing_key_path: &key,
+                    target: 1,
+                    launch: Some(&cfg),
+                },
+            )
+            .unwrap()
+            .spawned,
+            1,
+            "the fixture must warm one parent, or this asserts nothing"
+        );
+
+        let want = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
+        let observed: std::cell::Cell<Option<StandbyState>> = std::cell::Cell::new(None);
+        let decision = claim_or_cold(&pool, &backend, &want, |handle| {
+            observed.set(Some(pool.load(&handle.id).unwrap().state));
+            // Stop here: the reservation state is the whole subject of this test.
+            anyhow::bail!("halt after inspecting the reservation state")
+        })
+        .unwrap();
+
+        assert_eq!(
+            observed.get(),
+            Some(StandbyState::Idle),
+            "the parent must still be claimable when the runner is handed it; \
+             reserving it here is what made every warm claim refuse"
+        );
+        assert!(
+            matches!(decision, LaunchDecision::ColdBoot),
+            "a halted claim falls back to a cold boot"
+        );
     }
 
     #[cfg(feature = "test-support")]
