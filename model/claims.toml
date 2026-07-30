@@ -52,6 +52,7 @@ statement = "A tampered rootfs ext4 fails to boot"
 witnesses = [
     "ci:verified-boot-artifacts",
     "ci:check-abi-layout",
+    "fn:verify_and_resume_rejects_tampered_mem",
 ]
 
 [[claim]]
@@ -125,6 +126,9 @@ witnesses = [
     "fn:private_link_local_loopback_ula_metadata_are_forbidden",
     "fn:emits_resolved_query_with_ip_list",
     "ci:fuzz-dns-codec",
+    "fn:assert_vsock_only_device_model",
+    "fn:fork_restore_refuses_nic",
+    "fn:verify_and_resume_refuses_nic_on_restore",
 ]
 
 [[claim]]

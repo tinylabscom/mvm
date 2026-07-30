@@ -47,7 +47,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `ci:fuzz-dns-codec` |
+| `MVM-SEC-10` | `build` | No untrusted workload reaches the network unless policy-admitted | `fn:policy_default_is_deny_all`, `fn:run_net_default_is_deny_all`, `fn:private_link_local_loopback_ula_metadata_are_forbidden`, `fn:emits_resolved_query_with_ip_list`, `ci:fuzz-dns-codec`, `fn:assert_vsock_only_device_model`, `fn:fork_restore_refuses_nic`, `fn:verify_and_resume_refuses_nic_on_restore` |
 
 ## fuzz_surface
 
@@ -107,7 +107,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts`, `ci:check-abi-layout` |
+| `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts`, `ci:check-abi-layout`, `fn:verify_and_resume_rejects_tampered_mem` |
 
 ## Cited authorities
 

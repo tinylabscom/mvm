@@ -27,6 +27,7 @@ row below records a defect that was planted to prove the gate fires.
 | `check-deferrals` (R4) | Add `// TODO example` to a production source file outside an exemption | yes |
 | `check-abi-layout` | Add a `#[repr(C)]` struct with no `size_of`/`align_of` assertion | yes |
 | `check-abi-layout` | Mention `size_of::<T>()` in a comment instead of asserting it | yes |
+| `check-claim-catalog` | Name a witness in the ADR-001 ledger that `model/claims.toml` does not list | yes |
 
 The `meta` gate also catches the reverse direction: a scenario tagged with an
 unregistered ID, or a scenario whose level tag disagrees with the register.

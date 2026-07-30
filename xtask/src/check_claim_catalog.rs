@@ -34,6 +34,10 @@ pub fn run(workspace: &Path) -> Result<()> {
     let model_toml = std::fs::read_to_string(&model_path)
         .with_context(|| format!("reading {}", model_path.display()))?;
 
+    let model_path = workspace.join("model").join("claims.toml");
+    let model_toml = std::fs::read_to_string(&model_path)
+        .with_context(|| format!("reading {}", model_path.display()))?;
+
     let mut errors: Vec<String> = Vec::new();
     structural_checks(&rows, &mut errors);
     ledger_witnesses_are_known_to_the_model(&rows, &model_toml, &mut errors);
@@ -236,6 +240,91 @@ fn mark(needles: &mut [Needle], kind: Kind, content: &str) {
         if matches!(n.kind, Kind::Fn) == want && !n.found && content.contains(&n.search) {
             n.found = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod model_sync_tests {
+    use super::*;
+
+    const MODEL: &str = r#"
+spec = "mvm/1"
+
+[[claim]]
+id = "MVM-SEC-01"
+level = "build"
+suite = "s"
+statement = "st"
+witnesses = [
+    "fn:known_one",
+    "ci:known-lane",
+]
+
+[[claim]]
+id = "MVM-SEC-02"
+level = "build"
+suite = "s"
+statement = "st"
+witnesses = ["fn:other"]
+"#;
+
+    fn row(number: u32, witnesses: Vec<Witness>) -> Row {
+        Row {
+            number,
+            claim: "c".into(),
+            witnesses,
+            authority: "a".into(),
+            status: "Shipped".into(),
+        }
+    }
+
+    #[test]
+    fn ledger_witness_absent_from_the_model_is_rejected() {
+        let rows = vec![row(1, vec![Witness::Fn("ghost".into())])];
+        let mut errors = Vec::new();
+        ledger_witnesses_are_known_to_the_model(&rows, MODEL, &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("fn:ghost"), "{}", errors[0]);
+        assert!(errors[0].contains("MVM-SEC-01"), "{}", errors[0]);
+    }
+
+    #[test]
+    fn ledger_subset_of_the_model_is_accepted() {
+        // The ledger is documented as a representative anchor, so naming
+        // fewer witnesses than the model is legal.
+        let rows = vec![row(1, vec![Witness::Ci("known-lane".into())])];
+        let mut errors = Vec::new();
+        ledger_witnesses_are_known_to_the_model(&rows, MODEL, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn ledger_row_with_no_model_claim_is_rejected() {
+        let rows = vec![row(9, vec![Witness::Fn("known_one".into())])];
+        let mut errors = Vec::new();
+        ledger_witnesses_are_known_to_the_model(&rows, MODEL, &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("MVM-SEC-09"), "{}", errors[0]);
+    }
+
+    #[test]
+    fn witness_lookup_does_not_borrow_the_next_claims_list() {
+        // A claim whose own `witnesses` key is missing must not silently
+        // pick up the following claim's list.
+        let model = r#"
+[[claim]]
+id = "MVM-SEC-01"
+level = "build"
+
+[[claim]]
+id = "MVM-SEC-02"
+witnesses = ["fn:belongs_to_two"]
+"#;
+        assert_eq!(model_claim_witnesses(model, "MVM-SEC-01"), None);
+        assert_eq!(
+            model_claim_witnesses(model, "MVM-SEC-02"),
+            Some(vec!["fn:belongs_to_two".to_string()])
+        );
     }
 }
 
