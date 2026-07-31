@@ -47,6 +47,31 @@ pub enum WireResponse {
     },
 }
 
+/// A `SecretResolver` request over the fleet secret-resolution socket
+/// (mvmd's tenant vault, or the standalone `mvm-substitution-endpoint`'s
+/// local fallback): resolve `name` to its raw credential value, bound to
+/// `allowed_hosts` for this workload. `auth_type` is the snake_case
+/// `AuthType` label (kept as a bare string here so `mvm-core` doesn't need
+/// to depend on `mvm-sdk`'s IR).
+///
+/// `deny_unknown_fields` fails closed on an unexpected field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveWireRequest {
+    pub name: String,
+    pub allowed_hosts: Vec<String>,
+    pub auth_type: String,
+}
+
+/// The resolver's reply: the resolved value (base64) or a refusal. A
+/// refusal never carries a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ResolveWireResponse {
+    Ok { value_b64: String },
+    Refused { message: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +121,53 @@ mod tests {
     #[test]
     fn wire_response_refused_uses_snake_case_tag() {
         let json = serde_json::to_string(&WireResponse::Refused {
+            message: "x".into(),
+        })
+        .unwrap();
+        assert!(json.contains(r#""result":"refused""#), "got: {json}");
+    }
+
+    #[test]
+    fn resolve_wire_request_roundtrips() {
+        let req = ResolveWireRequest {
+            name: "openai".into(),
+            allowed_hosts: vec!["api.openai.com".into()],
+            auth_type: "bearer".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ResolveWireRequest>(&json).unwrap(),
+            req
+        );
+    }
+
+    #[test]
+    fn resolve_wire_request_rejects_unknown_fields() {
+        let bad = r#"{"name":"openai","allowed_hosts":[],"auth_type":"bearer","evil":1}"#;
+        assert!(serde_json::from_str::<ResolveWireRequest>(bad).is_err());
+    }
+
+    #[test]
+    fn resolve_wire_response_tagged_roundtrip() {
+        for resp in [
+            ResolveWireResponse::Ok {
+                value_b64: "c2stbGl2ZS14eHg=".into(),
+            },
+            ResolveWireResponse::Refused {
+                message: "secret not bound".into(),
+            },
+        ] {
+            let json = serde_json::to_string(&resp).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ResolveWireResponse>(&json).unwrap(),
+                resp
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_wire_response_refused_uses_snake_case_tag() {
+        let json = serde_json::to_string(&ResolveWireResponse::Refused {
             message: "x".into(),
         })
         .unwrap();

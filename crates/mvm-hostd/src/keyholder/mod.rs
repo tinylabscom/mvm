@@ -9,6 +9,7 @@
 pub mod admission;
 pub mod binding;
 pub mod injector;
+pub mod remote_resolver;
 pub mod resolver;
 pub mod signer;
 pub mod sigv4;
@@ -17,6 +18,7 @@ pub mod substitution;
 pub use admission::{AssembleError, HandedPlaceholders, assemble_registry, secret_placeholder_env};
 pub use binding::{BindingStore, FileBindingStore, SecretBindingMeta};
 pub use injector::{InjectError, Injector};
+pub use remote_resolver::RemoteResolver;
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
 pub use signer::{SigV4Input, SignError, Signature, Signer, SigningInput};
 pub use sigv4::{SigV4BuildError, build_sigv4_input};
