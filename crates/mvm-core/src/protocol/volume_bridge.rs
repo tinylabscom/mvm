@@ -13,10 +13,9 @@
 //!
 //! # Provisional contract
 //!
-//! This contract is **provisional pending the Phase 0 latency spike**
-//! (mvmd plan 59, issue tinylabscom/mvmd#184). In particular the payload
-//! encoding (JSON header + raw trailer, below) may change based on the
-//! spike's findings. Freeze fixtures against
+//! This contract is **provisional pending the latency spike**. In
+//! particular the payload encoding (JSON header + raw trailer, below)
+//! may change based on the spike's findings. Freeze fixtures against
 //! [`VOLUME_BRIDGE_PROTOCOL_VERSION`] and expect a bump before GA.
 //!
 //! # Node identity
@@ -76,10 +75,9 @@ use serde::{Deserialize, Serialize};
 /// Wire-protocol version for the volume bridge (guest FUSE server ↔
 /// host storage backend).
 ///
-/// **Provisional** — see the module docs: the Phase 0 latency spike
-/// (mvmd plan 59, tinylabscom/mvmd#184) may change the payload
-/// encoding, which would bump this. Bump policy otherwise follows
-/// [`super::PROTOCOL_VERSION`]: any change a peer at the previous
+/// **Provisional** — see the module docs: the latency spike may change
+/// the payload encoding, which would bump this. Bump policy otherwise
+/// follows [`super::PROTOCOL_VERSION`]: any change a peer at the previous
 /// version can't parse or safely ignore requires a bump; new
 /// `#[serde(default)]` fields do not.
 pub const VOLUME_BRIDGE_PROTOCOL_VERSION: u32 = 1;
