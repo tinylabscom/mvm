@@ -190,6 +190,19 @@ pub use mvm_vmm::host::host_agent_spawn::{
 /// `mvmctl` secrets-drive path. Re-exported from `mvm-vmm::host::substitution_spawn`.
 pub use mvm_vmm::host::substitution_spawn::{EndpointHandshake, record_secret_fingerprints};
 
+/// Spawn/reap the per-VM substitution-endpoint moat, its params, and the
+/// remote-resolver spawn config — re-exported at the crate root so fleet
+/// callers outside this crate (mvmd's tenant-secrets vault, Phase 1 egress
+/// broker / D8 spawn-wiring, reaching them via `mvmctl::backend`) can drive the
+/// same per-VM endpoint the libkrun/Vz/Firecracker backends use, instead of
+/// duplicating the subprocess spawn/handshake/PID-file logic. The
+/// `substitution_spawn` module is also re-exported above; these root aliases
+/// mirror the original `mvm-backend` crate-root surface those callers named.
+pub use mvm_vmm::host::substitution_spawn::{
+    RemoteResolverSpawnConfig, SubstitutionSpawnParams, reap_substitution_endpoint,
+    spawn_substitution_endpoint,
+};
+
 /// Crate-wide test serialization for tests that mutate `HOME` or
 /// other process-global env vars. Re-exported from
 /// [`crate::base::runtime_meta::HOME_TEST_LOCK`] so the
