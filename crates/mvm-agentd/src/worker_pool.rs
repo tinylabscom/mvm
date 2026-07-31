@@ -413,6 +413,18 @@ impl WorkerPool {
         thread::sleep(grace.min(Duration::from_secs(30)));
     }
 
+    /// How many callers are parked waiting for a slot.
+    ///
+    /// The queue cap is enforced against this number, so it is the only
+    /// thing that says whether a caller has actually reached the queue.
+    /// Without it an observer can only infer it from elapsed time, and a
+    /// time guess is either too short (spurious failure on a loaded host)
+    /// or too long (every run pays for the worst case).
+    pub fn queued_waiters(&self) -> usize {
+        let st = self.state.lock().expect("worker pool state mutex poisoned");
+        st.pending_waiters
+    }
+
     /// Snapshot of slot states for observability / tests.
     pub fn snapshot(&self) -> Vec<SlotSnapshot> {
         let st = self.state.lock().expect("worker pool state mutex poisoned");
@@ -689,12 +701,25 @@ impl WorkerPool {
     /// tick. Production callers should let the background recycler
     /// run on its own cadence.
     pub fn sweep_idle(self: &Arc<Self>) {
+        self.sweep_idle_at(Instant::now());
+    }
+
+    /// [`Self::sweep_idle`] against a supplied instant instead of the
+    /// wall clock.
+    ///
+    /// The threshold comparison is the whole behaviour here, and reading
+    /// the clock is the one part of it that cannot be asked a question.
+    /// Taking `now` as an argument lets a caller ask "what would this
+    /// sweep do ten minutes from now" in no time at all, so a test of an
+    /// idle *timeout* does not have to spend the timeout to run — and
+    /// can check the under-threshold side, which sleeping past the
+    /// threshold structurally cannot.
+    pub fn sweep_idle_at(self: &Arc<Self>, now: Instant) {
         let secs = self.idle_timeout_secs.load(Ordering::Acquire);
         if secs == 0 {
             return;
         }
         let max_idle = Duration::from_secs(secs);
-        let now = Instant::now();
 
         let mut to_recycle: Vec<usize> = Vec::new();
         {
