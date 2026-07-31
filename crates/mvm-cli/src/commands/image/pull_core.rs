@@ -505,11 +505,18 @@ mod tests {
     }
 
     fn seed_guest_runtime_cache(cache_root: &Path) {
-        use mvm_build::guest_agent_build::GuestAgentLayout;
+        use mvm_build::guest_agent_build::{GuestAgentLayout, guest_binary_source};
         use mvm_core::arch::GuestArch;
 
+        // Seed the key the resolver actually reads, not the one this fixture
+        // assumed. In a source checkout the resolver keys on a fingerprint of
+        // the guest sources, so a version-keyed seed misses — silently,
+        // because a miss is not an error, it is a real cross-compile of the
+        // guest agent. That is what made these tests take fifty-five seconds
+        // each while appearing to work from a seeded cache.
+        let source = guest_binary_source().expect("resolve the guest-binary cache key");
         let guest_layout =
-            GuestAgentLayout::under(cache_root, env!("CARGO_PKG_VERSION"), GuestArch::host());
+            GuestAgentLayout::under(cache_root, source.cache_key(), GuestArch::host());
         std::fs::create_dir_all(&guest_layout.dir).expect("create guest cache dir");
         for path in [
             &guest_layout.oci_init,

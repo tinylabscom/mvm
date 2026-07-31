@@ -380,19 +380,28 @@ pub fn resolve_guest_binaries(
         .context("install the embedded guest agent binaries");
     }
 
-    if let Some(ws) = crate::guest_agent_build::detect_source_workspace() {
-        let cache_key = crate::guest_agent_build::source_cache_key(&ws)
-            .context("fingerprint guest sources for the build cache")?;
-        return crate::guest_agent_build::resolve_or_build_guest_binaries(
-            cache_root, &cache_key, arch, &ws,
-        )
-        .context("build guest agent binaries from the source checkout");
-    }
-
-    let version = env!("CARGO_PKG_VERSION");
-    if let Some(cached) = crate::guest_agent_build::cached_guest_binaries(cache_root, version, arch)
+    match crate::guest_agent_build::guest_binary_source()
+        .context("resolve the guest-binary cache key for this host")?
     {
-        return Ok(cached);
+        crate::guest_agent_build::GuestBinarySource::SourceCheckout {
+            workspace_root,
+            cache_key,
+        } => {
+            return crate::guest_agent_build::resolve_or_build_guest_binaries(
+                cache_root,
+                &cache_key,
+                arch,
+                &workspace_root,
+            )
+            .context("build guest agent binaries from the source checkout");
+        }
+        crate::guest_agent_build::GuestBinarySource::EmbeddedVersion { cache_key } => {
+            if let Some(cached) =
+                crate::guest_agent_build::cached_guest_binaries(cache_root, &cache_key, arch)
+            {
+                return Ok(cached);
+            }
+        }
     }
 
     anyhow::bail!(
