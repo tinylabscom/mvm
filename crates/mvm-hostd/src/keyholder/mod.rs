@@ -30,5 +30,10 @@ pub use substitution::{
 /// Re-exported so a caller who only depends on `mvm-hostd` (e.g. mvmd,
 /// which registers `SecretBindingMeta`s for a VM's substitution endpoint)
 /// can name `SecretBindingMeta::auth_type`'s type without also taking a
-/// direct `mvm-sdk` dependency edge.
-pub use mvm_sdk::ir::{AuthType, Sigv4Params};
+/// direct `mvm-sdk` dependency edge. `SecretRef`/`SecretMount` are
+/// re-exported for the same reason: a fleet-side loopback caller
+/// driving `RemoteResolver::resolve(&SecretRef)` directly (e.g. mvmd's
+/// `secret_resolver_daemon` test) needs to construct a `SecretRef`
+/// literal, which requires naming its `mount: SecretMount` field's
+/// type too.
+pub use mvm_sdk::ir::{AuthType, SecretMount, SecretRef, Sigv4Params};
