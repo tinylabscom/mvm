@@ -43,7 +43,9 @@ fn spawn_mvmctl(args: &str, home: Option<PathBuf>) -> std::process::Output {
     if let Some(home) = home {
         // Reconcile-on-entry converges live-VM state; disable it so a refusal
         // guard runs against a clean slate with no host side effects.
-        cmd.env("MVM_HOME", home).env("MVM_SKIP_RECONCILE", "1");
+        cmd.env("HOME", &home)
+            .env("MVM_HOME", &home)
+            .env("MVM_SKIP_RECONCILE", "1");
     }
     cmd.args(args.split_whitespace())
         .output()

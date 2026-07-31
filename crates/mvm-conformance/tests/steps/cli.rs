@@ -94,6 +94,7 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     });
     let output = cmd
         .args(args.split_whitespace())
+        .env("HOME", home.path())
         .env("MVM_HOME", home.path())
         .output()
         .expect("failed to spawn mvmctl");
@@ -119,6 +120,7 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
     });
     let output = cmd
         .args(args.split_whitespace())
+        .env("HOME", home.path())
         .env("MVM_HOME", home.path())
         .output()
         .expect("failed to spawn mvmctl");
@@ -153,6 +155,7 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     command
         .current_dir(workspace_root())
         .args(args.split_whitespace())
+        .env("HOME", home.path())
         .env("MVM_HOME", home.path());
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
@@ -179,6 +182,7 @@ fn install_bundle_fixture(world: &mut CliWorld) {
         .current_dir(workspace_root())
         .args(["bundle", "install"])
         .arg(&fixture)
+        .env("HOME", home.path())
         .env("MVM_HOME", home.path())
         .output()
         .expect("failed to spawn mvmctl");
@@ -220,6 +224,7 @@ fn boot_installed_bundle(world: &mut CliWorld, args: String) {
         .current_dir(workspace_root())
         .args(["machine", "run", "--manifest", &sha])
         .args(args.split_whitespace())
+        .env("HOME", home.path())
         .env("MVM_HOME", home.path())
         .output()
         .expect("failed to spawn mvmctl");

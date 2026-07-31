@@ -222,6 +222,7 @@ fn machine_warm_restore_rejects_missing_checkpoint() {
     #[allow(deprecated)]
     let out = Command::cargo_bin("mvmctl")
         .unwrap()
+        .env("HOME", &tmp)
         .env("MVM_HOME", &tmp)
         .args(["machine", "warm-restore", "no-such-checkpoint"])
         .output()
@@ -248,6 +249,7 @@ fn machine_warm_restore_json_flag_parses() {
     #[allow(deprecated)]
     let out = Command::cargo_bin("mvmctl")
         .unwrap()
+        .env("HOME", &tmp)
         .env("MVM_HOME", &tmp)
         .args(["machine", "warm-restore", "no-such-checkpoint", "--json"])
         .output()
