@@ -650,4 +650,36 @@ mod tests {
             "all entries must land — flock serializes writers, no drops"
         );
     }
+
+    /// The key handed to operators has to be the key the chain was signed
+    /// with. Returning a default instead survived every test: nothing
+    /// asked this accessor to agree with the signer, so the audit chain
+    /// could have been verified against a key that signed nothing.
+    #[test]
+    fn the_published_verifying_key_is_the_one_the_chain_was_signed_with() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let key = fresh_key();
+        let expected = key.verifying_key();
+        let signer = FileAuditSigner::open(key, tmp.path()).expect("open signer");
+
+        assert_eq!(
+            signer.verifying_key().to_bytes(),
+            expected.to_bytes(),
+            "the published key must be the signing key's own public half"
+        );
+        assert_ne!(
+            signer.verifying_key().to_bytes(),
+            ed25519_dalek::VerifyingKey::default().to_bytes(),
+            "a default key verifies nothing this signer ever wrote"
+        );
+
+        // Two signers must not publish the same key, which a constant
+        // return would make them do.
+        let other_tmp = tempfile::tempdir().expect("tempdir");
+        let other = FileAuditSigner::open(fresh_key(), other_tmp.path()).expect("open signer");
+        assert_ne!(
+            signer.verifying_key().to_bytes(),
+            other.verifying_key().to_bytes()
+        );
+    }
 }
