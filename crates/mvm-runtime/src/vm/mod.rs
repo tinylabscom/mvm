@@ -7,8 +7,8 @@
 //     `snapshot_integrity`) lives in `mvm-backend::base`.
 //
 // What's left here is the orchestration layer — instance/pool/
-// template/tenant lifecycle, name + volume registries, vminitd
-// client, and the host-side rootfs snapshot helper.
+// template/tenant lifecycle, name + volume registries, and the host-side
+// rootfs snapshot helper.
 
 pub mod exec_builder;
 pub mod instance_snapshot;

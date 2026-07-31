@@ -1,13 +1,12 @@
 //! `xtask check-no-vz`
 //!
-//! Enforce the load-bearing invariant: **the Apple Container backend rides
-//! the in-house HVF VMM only — Apple's Virtualization.framework (VZ) and
-//! the Containerization Swift package are banned from the tree.** The
-//! backend boots Apple's container kernel and the `initfs.ext4` that
-//! carries `/sbin/vminitd` on mvm's own HVF supervisor; Apple's code runs
-//! only guest-side, unmodified, from the cached artifacts. Any guest-side
-//! vminitd need is routed through the builder-VM source build of the
-//! artifacts — never through a SwiftPM dependency or a VZ API.
+//! Enforce the load-bearing invariant: **the Apple Container backend is
+//! 100% Rust-native — no Swift anywhere, no Virtualization.framework (VZ)
+//! anywhere.** The backend boots Apple's prebuilt container kernel (a
+//! fetched binary artifact, no toolchain) with mvm's universal initramfs
+//! on the in-house HVF VMM; Apple's only presence in the tree is the
+//! guest-side kernel image itself, and the Containerization SwiftPM
+//! package — including its `vminitd` init — is banned outright.
 //!
 //! Flags VZ API symbols (`VZVirtualMachine*`, `VZLinuxBootLoader`,
 //! `VZDiskImage*`), Swift imports (`import Virtualization`,
@@ -72,11 +71,11 @@ pub fn run(workspace: &Path) -> Result<()> {
         return Ok(());
     }
     eprintln!(
-        "check-no-vz: {} VZ/Containerization mention(s) — the Apple Container backend boots \
-         Apple's container kernel + initfs on the in-house HVF VMM; Virtualization.framework and \
-         the Containerization SwiftPM package are banned from the tree. Route any guest-side \
-         vminitd need through the builder-VM source build of the artifacts. If this is a genuine \
-         historical design note, annotate with `// allow(no-vz): <reason>`:",
+        "check-no-vz: {} VZ/Containerization mention(s) — the Apple Container backend is 100% \
+         Rust-native: it boots Apple's prebuilt container kernel with the universal initramfs on \
+         the in-house HVF VMM. Virtualization.framework, SwiftPM, and the Containerization \
+         package (including vminitd) are banned from the tree. If this is a genuine historical \
+         design note, annotate with `// allow(no-vz): <reason>`:",
         findings.len()
     );
     for f in &findings {

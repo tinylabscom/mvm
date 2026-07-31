@@ -1,247 +1,92 @@
-//! Apple Container backend: Apple's guest stack booted on the in-house HVF VMM.
+//! Apple Container backend: Apple's prebuilt container kernel on the in-house HVF VMM.
 //!
-//! `AppleContainerBackend` runs mvm workloads inside an Apple Container VM:
-//! a lightweight, hardware-isolated Linux VM whose guest PID 1 is Apple's
-//! `vminitd` (serving gRPC on vsock port 1024). The kernel boot is owned by
-//! mvm's own HVF supervisor — the container kernel and the `initfs.ext4`
-//! that carries `/sbin/vminitd` are resolved from the local artifact cache
-//! ([`crate::apple_container::artifacts`]) and booted as described in
-//! [`crate::apple_container::boot_spec`]. No Virtualization.framework, no
-//! Swift shim: the only Apple-owned code in the picture is the guest-side
-//! kernel + vminitd, running unmodified inside mvm's VMM.
+//! `AppleContainerBackend` is the HVF workload runner with one substitution:
+//! the kernel image. It resolves Apple's prebuilt container kernel from the
+//! local artifact cache ([`crate::apple_container::artifacts`]), sets it as
+//! the launch config's `kernel_path` (which the runner maps to
+//! `KernelImage::Path`), and delegates the entire lifecycle — boot,
+//! activation, egress, broker, stop, wait, snapshots — to the same
+//! [`crate::backend::hvf_runner`] that serves `--hypervisor hvf`. The guest
+//! boots mvm's universal initramfs, the agent is PID 1, and activation is
+//! the standard `ActivateEnvironment` flow every runner backend uses.
 //!
-//! Because vminitd owns PID 1, the mvm initramfs does not apply verbatim
-//! here — activation rides vminitd's gRPC API instead
-//! ([`crate::apple_container::vminitd`]): the host injects the guest-agent
-//! binary and the activation environment JSON, then asks vminitd to run the
-//! agent. The agent binary, the mount logic, the uid-901 privilege drop,
-//! the `NotActivated` RPC gate, and the operational RPC surface stay shared
-//! verbatim with every other backend.
+//! The `initrd_path` contract is the runner's own: a sealed boot expects
+//! the universal-initramfs artifact attached by the caller (the CLI attach
+//! path), exactly as for HVF, and a boot without it behaves precisely as an
+//! HVF boot without it — this backend adds no gate of its own.
 //!
-//! What is wired today, and what is fail-closed: the full path through
-//! injection is real — resolve artifacts, assemble the supervisor config,
-//! boot the HVF supervisor, connect to vminitd, inject the agent and the
-//! activation environment, and `CreateProcess`/`StartProcess` the agent.
-//! The final step — the agent picking up its activation environment when it
-//! is *not* PID 1 of the workload root — has no implementation yet, so a
-//! successful `start` tears the VM back down and returns a typed
-//! [`AppleContainerError::NotImplemented`] naming that milestone. `stop`
-//! and `status` are real (pid-file based, same convention as the HVF
-//! driver); `wait`, `logs`, `pause`, and `resume` stay fail-closed.
-//!
-//! Honest reporting, not silent degradation: `capabilities()` advertises no
-//! snapshot, no standby pool, and no warm start; `security_profile()`
-//! reports every numbered claim as `DoesNotHold` until the backend can
-//! admit and activate a real workload; and the backend is opt-in only —
+//! Honest reporting, not silent degradation: `capabilities()` and the
+//! claims array of `security_profile()` are the HVF runner's verbatim
+//! (the isolation story is identical — only the kernel image differs);
+//! the profile's notes record that the kernel is a fetched artifact whose
+//! provenance is not an mvm build. The backend is opt-in only —
 //! `AnyBackend::auto_select` never returns this kind.
 
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
+use mvm_core::vm_backend::WarmStartError;
 use mvm_core::vm_backend::{
-    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, StartMode,
-    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, SnapshotCapability, StartMode, VmBackend, VmCapabilities,
+    VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
 };
 use thiserror::Error;
 
-use crate::apple_container::vminitd::VminitdClient;
-use crate::apple_container::{artifacts, boot_spec};
-use crate::hvf_backend::{
-    PID_FILE_NAME, PID_FILE_TIMEOUT, read_pid, resolve_supervisor_path, terminate_pid,
-};
-
-/// How long `start` waits for vminitd to answer on its vsock port after the
-/// supervisor confirms the boot. The guest has to boot the kernel, mount
-/// the initfs, and start the gRPC server, so this is far longer than the
-/// supervisor's own pid-file confirmation.
-const VMINITD_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// vminitd process id for the guest agent (vminitd-scoped, not a PID).
-const AGENT_PROCESS_ID: &str = "mvm-guest-agent";
+use crate::apple_container::artifacts;
+use crate::backend::HvfRunner;
 
 /// Typed, fail-closed errors for requests this backend cannot satisfy.
 /// Every error names what was refused and why, rather than silently falling
-/// back to another backend or panicking — see the module docs.
+/// back to another backend or panicking.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AppleContainerError {
-    /// The operation is part of the backend's design but has no
-    /// implementation yet; `milestone` names the work that provides it.
-    #[error("apple-container backend cannot {operation} yet — {milestone}")]
-    NotImplemented {
-        operation: &'static str,
-        milestone: &'static str,
-    },
-    /// A required boot artifact (kernel or initfs) is not in the cache;
-    /// `hint` names the build command that produces it.
+    /// The Apple container kernel is not in the cache; `hint` names where
+    /// to fetch it.
     #[error("apple-container artifact missing: {what} at {path} — {hint}")]
     ArtifactMissing {
         what: &'static str,
         path: String,
         hint: &'static str,
     },
-    /// The workload config asks for a shape this boot path does not
-    /// support; `reason` says why.
-    #[error("apple-container backend does not support {feature}: {reason}")]
-    UnsupportedConfig {
-        feature: &'static str,
-        reason: &'static str,
-    },
 }
 
-/// Apple Container backend. See the module docs for what is wired, what is
-/// fail-closed, and the opt-in/honest-reporting rules.
-#[derive(Debug, Default, Clone)]
-pub struct AppleContainerBackend;
+/// Apple Container backend — a thin kernel-substituting delegate over the
+/// HVF workload runner. See the module docs for the design and the
+/// honesty rules.
+pub struct AppleContainerBackend {
+    runner: HvfRunner,
+}
 
 impl AppleContainerBackend {
-    /// Construct the backend. Side-effect free — no artifact is probed and
-    /// no VM state is read at construction.
+    /// Construct the backend. Side-effect free — the runner is a pure
+    /// struct init and no artifact is probed until `start`.
     pub fn new() -> Self {
-        Self
+        Self {
+            runner: crate::backend::hvf_runner(),
+        }
     }
-
-    /// Boot the supervisor for an already-assembled config, connect to
-    /// vminitd, and run the injection sequence. On success the guest agent
-    /// process exists inside the VM; the caller owns the teardown and the
-    /// final fail-closed answer.
-    fn boot_and_activate(
-        &self,
-        config: &VmStartConfig,
-        artifacts: &artifacts::AppleContainerArtifacts,
-        state_dir: &Path,
-    ) -> Result<()> {
-        let spec = boot_spec::build_supervisor_config(&boot_spec::BootSpecInput {
-            config,
-            artifacts,
-            state_dir,
-            timeout_secs: 0,
-        })?;
-        let _supervisor = spawn_supervisor(state_dir, &spec)?;
-
-        let mut client =
-            connect_vminitd(state_dir).context("connect to vminitd inside the container VM")?;
-
-        let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
-        let binaries = mvm_build::run_image::resolve_guest_binaries(&cache_root, None)
-            .context("resolve the mvm-guest-agent binary for injection")?;
-        let agent_bytes = std::fs::read(&binaries.agent)
-            .with_context(|| format!("read guest agent binary {}", binaries.agent.display()))?;
-        let environment = crate::microvm::build_activation_environment(config)
-            .context("build the activation environment for the container VM")?;
-        let activation_json =
-            serde_json::to_vec(&environment).context("serialize the activation environment")?;
-
-        inject_agent(&mut client, &agent_bytes, &activation_json)
-            .context("vminitd injection sequence")?;
-        Ok(())
+    /// Resolve the kernel and return the launch config with `kernel_path`
+    /// pointing at it. Everything else about the config passes through
+    /// untouched — the runner maps it exactly as an HVF launch would.
+    fn config_with_kernel(&self, config: &VmStartConfig) -> Result<VmStartConfig> {
+        let kernel = artifacts::resolve()?;
+        Ok(kernel_override_config(config, &kernel))
     }
 }
 
-/// Spawn `mvm-hvf-supervisor` with `spec` on its stdin and wait for the pid
-/// file that confirms the boot, mirroring the HVF driver's launch pattern.
-/// The returned child may be dropped — the supervisor daemonizes its
-/// lifecycle behind the pid file, which is how `stop`/`status` find it.
-fn spawn_supervisor(
-    state_dir: &Path,
-    spec: &mvm_build::hvf_supervisor::HvfSupervisorConfig,
-) -> Result<Child> {
-    // Clear any prior run's exit file so a later `wait` reads only this
-    // launch's result.
-    let _ = std::fs::remove_file(state_dir.join("workload.exit"));
-    let json = serde_json::to_string(spec).context("serialize HvfSupervisorConfig")?;
-
-    let supervisor = resolve_supervisor_path()?;
-    let mut child = Command::new(&supervisor)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| anyhow!("spawn {}: {e}", supervisor.display()))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
-        .write_all(json.as_bytes())
-        .map_err(|e| anyhow!("pipe HvfSupervisorConfig to supervisor stdin: {e}"))?;
-
-    let pid_file = state_dir.join(PID_FILE_NAME);
-    let deadline = Instant::now() + PID_FILE_TIMEOUT;
-    loop {
-        if pid_file.exists() {
-            return Ok(child);
-        }
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| anyhow!("poll supervisor: {e}"))?
-        {
-            bail!(
-                "hvf supervisor exited before writing its PID file (status: {status}); see {}",
-                state_dir.join("console.log").display()
-            );
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            bail!(
-                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}",
-                state_dir.join("console.log").display()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
+impl Default for AppleContainerBackend {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-/// Connect to vminitd through the supervisor's host UDS, retrying until the
-/// guest has booted far enough to answer (or the deadline passes).
-fn connect_vminitd(state_dir: &Path) -> Result<VminitdClient> {
-    let sock = boot_spec::vminitd_host_socket(state_dir);
-    let deadline = Instant::now() + VMINITD_CONNECT_TIMEOUT;
-    loop {
-        match VminitdClient::connect(&sock) {
-            Ok(client) => return Ok(client),
-            Err(e) => {
-                if Instant::now() >= deadline {
-                    return Err(e).context(format!(
-                        "vminitd did not answer within {VMINITD_CONNECT_TIMEOUT:?}"
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-        }
-    }
-}
-
-/// The injection sequence against a live vminitd: stage the agent binary
-/// and the activation environment under `/run/mvm`, then register and start
-/// the agent process.
-fn inject_agent(
-    client: &mut VminitdClient,
-    agent_bytes: &[u8],
-    activation_json: &[u8],
-) -> Result<(), crate::apple_container::vminitd::VminitdError> {
-    client.mkdir(boot_spec::INJECTION_GUEST_DIR, true, 0o700)?;
-    client.write_file(boot_spec::AGENT_GUEST_PATH, agent_bytes, 0o755)?;
-    client.write_file(boot_spec::ACTIVATION_GUEST_PATH, activation_json, 0o644)?;
-    client.create_process(AGENT_PROCESS_ID, boot_spec::agent_process_config())?;
-    let pid = client.start_process(AGENT_PROCESS_ID)?;
-    if pid <= 0 {
-        return Err(crate::apple_container::vminitd::VminitdError::Transport(
-            format!("vminitd reported a non-positive pid ({pid}) for the guest agent"),
-        ));
-    }
-    Ok(())
-}
-
-/// Stop the VM owned by `state_dir`, if its supervisor is running. Errors
-/// are swallowed deliberately: teardown is best-effort cleanup on an error
-/// path whose original error is the one that matters.
-fn teardown(state_dir: &Path) {
-    let pid_file = state_dir.join(PID_FILE_NAME);
-    if let Some(pid) = read_pid(&pid_file) {
-        terminate_pid(pid);
-    }
+/// The pure config mapping behind [`AppleContainerBackend::start`]: clone
+/// the config and substitute the kernel image. Split out so the mapping is
+/// unit-testable without a runner.
+fn kernel_override_config(config: &VmStartConfig, kernel: &Path) -> VmStartConfig {
+    let mut cfg = config.clone();
+    cfg.kernel_path = Some(kernel.display().to_string());
+    cfg
 }
 
 impl VmBackend for AppleContainerBackend {
@@ -254,144 +99,86 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        VmCapabilities {
-            // The container VM routes egress through the same host-mediated
-            // vsock endpoint seam every other backend uses — no routable
-            // guest NIC.
-            no_routable_guest_nic: true,
-            // vminitd's control channel and the guest agent both ride vsock.
-            vsock: true,
-            snapshot_capability: SnapshotCapability::Unsupported,
-            standby_pool: false,
-            ..VmCapabilities::default()
-        }
+        self.runner.capabilities()
     }
 
-    fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
-        // Validation failures are typed and cheap; artifact resolution
-        // comes first so a missing cache reports before anything is
-        // created on disk.
-        let artifacts = artifacts::resolve()?;
-        let state_dir = mvm_core::config::vm_state_dir(&config.name);
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-        let _ = crate::libkrun::open_console_capture(&state_dir.join("console.log"));
-
-        let result = self.boot_and_activate(config, &artifacts, &state_dir);
-        // Whatever happened — boot failure, injection failure, or a fully
-        // successful agent launch — this branch keeps nothing running: the
-        // agent cannot finish activation on its own yet, so a booted VM
-        // would be an unreachable, unaudited guest.
-        teardown(&state_dir);
-        result?;
-
-        Err(AppleContainerError::NotImplemented {
-            operation: "finish guest-agent bring-up inside the container VM",
-            milestone: "the guest agent's non-PID-1 activation-file entry point",
-        }
-        .into())
+    fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        self.runner.start(&self.config_with_kernel(config)?)
     }
 
-    fn wait(&self, _id: &VmId) -> Result<VmExitStatus> {
-        Err(AppleContainerError::NotImplemented {
-            operation: "wait on a container VM",
-            milestone: "a workload-exit reporter on the vminitd boot path",
-        }
-        .into())
+    fn start_with_mode(&self, config: &VmStartConfig, mode: StartMode) -> Result<VmId> {
+        self.runner
+            .start_with_mode(&self.config_with_kernel(config)?, mode)
     }
 
-    fn pause(&self, _id: &VmId) -> Result<()> {
-        Err(AppleContainerError::NotImplemented {
-            operation: "pause a container VM",
-            milestone: "pause/resume support for the HVF supervisor boot path",
-        }
-        .into())
+    fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
+        self.runner.wait(id)
     }
 
-    fn resume(&self, _id: &VmId) -> Result<()> {
-        Err(AppleContainerError::NotImplemented {
-            operation: "resume a container VM",
-            milestone: "pause/resume support for the HVF supervisor boot path",
-        }
-        .into())
+    fn pause(&self, id: &VmId) -> Result<()> {
+        self.runner.pause(id)
+    }
+
+    fn resume(&self, id: &VmId) -> Result<()> {
+        self.runner.resume(id)
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        let pid_file = mvm_core::config::vm_state_dir(&id.0).join(PID_FILE_NAME);
-        if let Some(pid) = read_pid(&pid_file) {
-            terminate_pid(pid);
-        }
-        Ok(())
+        self.runner.stop(id)
     }
 
     fn stop_all(&self) -> Result<()> {
-        // `start` tears down every VM it boots before returning, so no VM
-        // this backend owns can still be running; individual leftovers from
-        // a crashed run are stopped by name via `stop`.
-        Ok(())
+        self.runner.stop_all()
     }
 
     fn status(&self, id: &VmId) -> Result<VmStatus> {
-        let pid_file = mvm_core::config::vm_state_dir(&id.0).join(PID_FILE_NAME);
-        let running = pid_file.exists() && read_pid(&pid_file).is_some();
-        Ok(if running {
-            VmStatus::Running
-        } else {
-            VmStatus::Stopped
-        })
+        self.runner.status(id)
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        // `start` never returns a VmId on this branch (every launch ends in
-        // teardown plus a typed error), so there is no running inventory to
-        // report.
-        Ok(Vec::new())
+        self.runner.list()
     }
 
-    fn logs(&self, _id: &VmId, _lines: u32, _hypervisor: bool) -> Result<String> {
-        Err(AppleContainerError::NotImplemented {
-            operation: "read container VM logs",
-            milestone: "console-log surfacing for the vminitd boot path",
-        }
-        .into())
+    fn logs(&self, id: &VmId, lines: u32, hypervisor: bool) -> Result<String> {
+        self.runner.logs(id, lines, hypervisor)
+    }
+
+    fn warm_start(
+        &self,
+        config: &VmStartConfig,
+        requested: SnapshotCapability,
+    ) -> std::result::Result<WarmStartOutcome, WarmStartError> {
+        self.runner.warm_start(config, requested)
     }
 
     fn is_available(&self) -> Result<bool> {
-        // The boot path is HVF-only (macOS) and needs both artifacts in the
-        // cache; reporting `true` without them would let a probe conclude a
-        // workload could start here.
-        Ok(cfg!(target_os = "macos") && artifacts::resolve().is_ok())
+        // Available when the HVF runner is and the kernel artifact is in
+        // the cache; a missing kernel reports at `start` with the typed
+        // fetch hint, but a probe should not conclude a workload could
+        // start here without it.
+        Ok(self.runner.is_available()? && artifacts::resolve().is_ok())
     }
 
     fn install(&self) -> Result<()> {
-        Err(AppleContainerError::NotImplemented {
-            operation: "install the Apple Container boot artifacts",
-            milestone: "an artifact-fetch command (build the kernel and initfs from \
-                        Apple's containerization package and copy them into the cache)",
-        }
-        .into())
+        self.runner.install()
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // Every numbered claim reports `DoesNotHold`: the boot path exists,
-        // but the agent cannot finish activation yet, so no untrusted
-        // workload may run here. Apple's container VMs are
-        // hardware-isolated lightweight Linux VMs, which is the Tier 2
-        // shape this backend is being built toward; the tier string says so
-        // honestly rather than rounding the posture up.
+        // The claims array is the HVF runner's verbatim: the boot, the
+        // isolation boundary, and the activation stack are identical — only
+        // the kernel image differs, and the notes say so honestly.
+        let inner = self.runner.security_profile();
         BackendSecurityProfile {
-            claims: [ClaimStatus::DoesNotHold; 7],
-            layer_coverage: LayerCoverage::default(),
-            tier: "Tier 2 (Apple Container guest stack on the in-house HVF VMM; agent bring-up not yet wired)",
+            claims: inner.claims,
+            layer_coverage: inner.layer_coverage,
+            tier: inner.tier,
             notes: &[
-                "Apple Container VMs are hardware-isolated lightweight Linux VMs; the guest \
-                 kernel and `vminitd` (PID 1, gRPC on vsock port 1024) come from Apple's \
-                 containerization package, booted unmodified by mvm's own HVF supervisor.",
-                "Activation rides vminitd's gRPC API (vsock port 1024) instead of an mvm \
-                 initramfs; the guest agent, mount logic, uid-901 drop, and RPC gate stay \
-                 shared with every other backend.",
-                "Every claim reports DoesNotHold until the agent finishes activation on this \
-                 boot path — nothing here may carry an untrusted workload yet.",
+                "This backend is the HVF workload runner booting Apple's prebuilt container \
+                 kernel: the same universal initramfs, guest agent, activation flow, egress \
+                 gate, and isolation boundary as the HVF backend — only the kernel image differs.",
+                "The kernel is a fetched binary artifact (Apple's container kernel), not an \
+                 mvm-built image: its provenance is the artifact cache, exactly like any \
+                 externally-sourced kernel a launch config names.",
                 "Opt-in only; never selected by auto-detect.",
             ],
         }
@@ -439,9 +226,9 @@ mod tests {
 
     #[test]
     fn auto_select_never_returns_apple_container() {
-        // Opt-in only, same discipline as the wasm tier: `auto_select`'s
-        // ladder constructs Firecracker/Hvf/Libkrun and nothing else, so this
-        // holds on every platform the ladder can resolve to.
+        // Opt-in only: `auto_select`'s ladder constructs Firecracker/Hvf/
+        // Libkrun and nothing else, so this holds on every platform the
+        // ladder can resolve to.
         assert_ne!(
             AnyBackend::auto_select().kind(),
             BackendKind::AppleContainer,
@@ -450,240 +237,153 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_are_honest_about_the_partial_boot_path() {
-        let caps = AppleContainerBackend::new().capabilities();
-        assert!(!caps.pause_resume);
-        assert!(!caps.snapshots);
-        assert_eq!(caps.snapshot_capability, SnapshotCapability::Unsupported);
-        assert!(!caps.standby_pool);
-        assert!(caps.vsock, "vminitd and the agent both ride vsock");
-        assert!(!caps.tap_networking);
-        assert!(!caps.balloon);
-        assert!(!caps.fs_quick_checkpoint);
-        assert!(!caps.host_vsock_proxy);
-        assert!(!caps.pty_exec);
-        assert!(!caps.production_ssh);
-        assert!(caps.no_routable_guest_nic);
+    fn kernel_override_substitutes_only_the_kernel_path() {
+        let config = VmStartConfig {
+            name: "ac-test".to_string(),
+            rootfs_path: "/img/rootfs.ext4".to_string(),
+            initrd_path: Some("/cache/initramfs/initrd.cpio".to_string()),
+            memory_mib: 1024,
+            ..Default::default()
+        };
+        let overridden =
+            kernel_override_config(&config, Path::new("/cache/apple-container/vmlinux"));
+        assert_eq!(
+            overridden.kernel_path.as_deref(),
+            Some("/cache/apple-container/vmlinux")
+        );
+        // Everything else passes through untouched — the runner maps the
+        // rest exactly as an HVF launch would.
+        assert_eq!(overridden.rootfs_path, config.rootfs_path);
+        assert_eq!(overridden.initrd_path, config.initrd_path);
+        assert_eq!(overridden.memory_mib, config.memory_mib);
+        assert_eq!(overridden.name, config.name);
     }
 
     #[test]
-    fn security_profile_carries_zero_numbered_claims() {
-        let profile = AppleContainerBackend::new().security_profile();
+    fn kernel_override_replaces_a_caller_supplied_kernel() {
+        let config = VmStartConfig {
+            kernel_path: Some("/other/Image".to_string()),
+            ..cfg("x")
+        };
+        let overridden =
+            kernel_override_config(&config, Path::new("/cache/apple-container/vmlinux"));
+        assert_eq!(
+            overridden.kernel_path.as_deref(),
+            Some("/cache/apple-container/vmlinux"),
+            "this backend's whole point is which kernel boots — a caller's kernel never wins"
+        );
+    }
+
+    #[test]
+    fn start_reports_missing_kernel_with_the_fetch_hint() {
+        // Point MVM_HOME (and HOME) at an empty tempdir so resolution
+        // deterministically finds no kernel — the typed error must surface
+        // before any delegation (and no VM is attempted).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let b = AppleContainerBackend::new();
+        let err = b.start(&cfg("x")).unwrap_err();
+        let AppleContainerError::ArtifactMissing { what, path, hint } = typed(&err);
+        assert!(what.contains("kernel"));
+        assert!(path.contains("apple-container"));
+        assert!(hint.contains("container kernel"));
+    }
+
+    #[test]
+    fn capabilities_and_claims_mirror_the_hvf_runner() {
+        let b = AppleContainerBackend::new();
+        let runner = crate::backend::hvf_runner();
+        let (mine, theirs) = (b.capabilities(), runner.capabilities());
+        assert_eq!(mine.vsock, theirs.vsock);
+        assert_eq!(mine.no_routable_guest_nic, theirs.no_routable_guest_nic);
+        assert_eq!(mine.standby_pool, theirs.standby_pool);
+        assert_eq!(mine.snapshot_capability, theirs.snapshot_capability);
+        assert_eq!(mine.pause_resume, theirs.pause_resume);
+
+        let profile = b.security_profile();
+        let runner_profile = runner.security_profile();
+        assert_eq!(
+            profile.claims, runner_profile.claims,
+            "the claims array is the HVF runner's verbatim — only the kernel image differs"
+        );
+        assert_eq!(profile.tier, runner_profile.tier);
         assert!(
             profile
-                .claims
+                .notes
                 .iter()
-                .all(|c| matches!(c, ClaimStatus::DoesNotHold)),
-            "the backend must not claim any numbered security guarantee"
-        );
-        assert_eq!(profile.dropped_claims(), vec![1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(profile.layer_coverage, LayerCoverage::default());
-        assert!(
-            profile.tier.starts_with("Tier 2"),
-            "the tier string must agree with the catalog's Tier 2 classification: {}",
-            profile.tier
+                .any(|n| n.contains("prebuilt container kernel")),
+            "the notes must record the kernel provenance honestly"
         );
     }
 
     #[test]
-    fn snapshot_capability_defaults_to_unsupported() {
-        assert_eq!(
-            AppleContainerBackend::new().snapshot_capability(),
-            SnapshotCapability::Unsupported
-        );
-    }
-
-    #[test]
-    fn warm_start_fails_closed() {
-        use mvm_core::vm_backend::{SnapshotCapability, WarmStartError};
-        let b = AppleContainerBackend::new();
-        match b.warm_start(&VmStartConfig::default(), SnapshotCapability::DiskOnly) {
-            Err(WarmStartError::Unsupported { .. }) => {}
-            other => panic!("expected Unsupported, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn standby_pool_fails_closed() {
-        assert!(!AppleContainerBackend::new().supports_standby_pool());
-    }
-
-    #[test]
-    fn start_fails_closed_with_a_typed_error() {
-        // With no artifacts in the cache, start fails at resolution with
-        // the typed ArtifactMissing (which also carries the build hint). If
-        // the cache *does* have artifacts, start instead fails closed at
-        // the final agent-bring-up step — either way it is a typed
-        // AppleContainerError and never a panic or a silent fallback.
-        let b = AppleContainerBackend::new();
-        let err = b.start(&cfg("x")).unwrap_err();
-        assert!(
-            matches!(
-                typed(&err),
-                AppleContainerError::ArtifactMissing { .. }
-                    | AppleContainerError::UnsupportedConfig { .. }
-                    | AppleContainerError::NotImplemented { .. }
-            ),
-            "expected a typed apple-container error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn start_reports_missing_artifacts_before_touching_disk() {
-        // Point MVM_HOME (and HOME) at an empty tempdir so resolution
-        // deterministically finds no artifacts, then assert the typed error
-        // names the kernel.
+    fn availability_tracks_the_runner_and_the_artifact() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
         let b = AppleContainerBackend::new();
-        let err = b.start(&cfg("x")).unwrap_err();
-        assert!(
-            matches!(
-                typed(&err),
-                AppleContainerError::ArtifactMissing { what, .. } if what.contains("kernel")
-            ),
-            "expected the kernel ArtifactMissing, got: {err}"
-        );
+        // No kernel in the isolated cache: unavailable regardless of platform.
+        assert!(!b.is_available().unwrap());
     }
 
     #[test]
-    fn pause_resume_wait_logs_fail_closed_with_typed_errors() {
-        let b = AppleContainerBackend::new();
-        let id = VmId("x".to_string());
-        for err in [
-            b.pause(&id).unwrap_err(),
-            b.resume(&id).unwrap_err(),
-            b.wait(&id).unwrap_err(),
-            b.logs(&id, 10, false).unwrap_err(),
-        ] {
-            assert!(
-                matches!(typed(&err), AppleContainerError::NotImplemented { .. }),
-                "expected a typed NotImplemented, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn stop_and_status_are_real_pid_file_answers() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.isolate_mvm_home(dir.path());
-        let b = AppleContainerBackend::new();
-        let id = VmId("ac-status-test".to_string());
-        // No pid file: stopped, and stop is a no-op success.
-        assert_eq!(b.status(&id).unwrap(), VmStatus::Stopped);
-        assert!(b.stop(&id).is_ok());
-        // A pid file with a live pid (this test process) reads as running.
-        let state_dir = mvm_core::config::vm_state_dir(&id.0);
-        std::fs::create_dir_all(&state_dir).expect("state dir");
-        std::fs::write(
-            state_dir.join(PID_FILE_NAME),
-            std::process::id().to_string(),
-        )
-        .expect("pid file");
-        assert_eq!(b.status(&id).unwrap(), VmStatus::Running);
-        // Do NOT call stop here — it would terminate this test process.
-        assert!(b.list().unwrap().is_empty());
-        assert!(b.stop_all().is_ok());
-    }
-
-    #[test]
-    fn availability_tracks_artifact_presence() {
-        let b = AppleContainerBackend::new();
-        let expect = cfg!(target_os = "macos") && artifacts::resolve().is_ok();
-        assert_eq!(b.is_available().unwrap(), expect);
-        assert!(matches!(
-            typed(&b.install().unwrap_err()),
-            AppleContainerError::NotImplemented { .. }
-        ));
-    }
-
-    #[test]
-    fn network_info_and_guest_channel_info_fail_closed_by_default() {
-        let b = AppleContainerBackend::new();
-        let id = VmId("x".to_string());
-        assert!(b.network_info(&id).is_err());
-        assert!(b.guest_channel_info(&id).is_err());
-    }
-
-    #[test]
-    fn balloon_ops_fail_closed_by_default() {
-        let b = AppleContainerBackend::new();
-        let id = VmId("x".to_string());
-        assert!(b.balloon_set_target(&id, 64).is_err());
-        assert!(b.balloon_state(&id).is_err());
-    }
-
-    #[test]
-    #[ignore = "requires the apple-container artifacts in the cache and HVF (MVM_AC_E2E=1)"]
-    fn start_boots_injects_then_fails_closed_at_agent_bringup() {
-        // End-to-end: boots the real container VM on the in-house HVF VMM,
-        // runs the full vminitd injection sequence, and asserts the final
-        // answer is the typed agent-bring-up milestone (the VM is torn down
-        // either way). Gated: needs both artifacts in the cache, macOS HVF,
-        // and a codesigned mvm-hvf-supervisor.
+    #[ignore = "live: needs the apple-container kernel, the universal initramfs, the runtime overlay, and a codesigned mvm-hvf-supervisor on macOS HVF (MVM_AC_E2E=1)"]
+    fn start_boots_a_sealed_workload_on_the_apple_container_kernel() {
+        // End-to-end: resolves the Apple container kernel from the cache, boots
+        // a sealed OCI rootfs with the universal initramfs on the in-house HVF
+        // VMM, drives the full ActivateEnvironment flow, and tears down.
+        // Artifacts resolve from the real cache — this test never isolates
+        // MVM_HOME. MVM_AC_E2E_ROOTFS names a sealed OCI ext4 with its
+        // rootfs.verity / rootfs.roothash sidecars beside it.
         if std::env::var("MVM_AC_E2E").ok().as_deref() != Some("1") {
             return;
         }
+        let root = std::path::PathBuf::from(
+            std::env::var("MVM_AC_E2E_ROOTFS").expect("MVM_AC_E2E_ROOTFS"),
+        );
+        let dir = root.parent().expect("rootfs parent").to_path_buf();
+        let sidecar = |name: &str| {
+            std::fs::read_to_string(dir.join(name))
+                .expect(name)
+                .trim()
+                .to_string()
+        };
+        let version = env!("CARGO_PKG_VERSION");
+        let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let overlay = cache.join("runtime-overlay").join(version).join("aarch64");
+        let initrd = cache
+            .join("initramfs")
+            .join(version)
+            .join("aarch64")
+            .join("initramfs.cpio.gz");
+        let config = VmStartConfig {
+            name: format!("ac-e2e-{}", std::process::id()),
+            rootfs_path: root.display().to_string(),
+            initrd_path: Some(initrd.display().to_string()),
+            verity_path: Some(dir.join("rootfs.verity").display().to_string()),
+            roothash: Some(sidecar("rootfs.roothash")),
+            runtime_overlay_path: Some(overlay.join("overlay.ext4").display().to_string()),
+            runtime_overlay_verity_path: Some(overlay.join("overlay.verity").display().to_string()),
+            runtime_overlay_roothash: Some(sidecar(
+                &overlay.join("overlay.roothash").display().to_string(),
+            )),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            cpus: 2,
+            memory_mib: 1024,
+            ..Default::default()
+        };
         let b = AppleContainerBackend::new();
-        let err = b.start(&cfg("ac-e2e")).unwrap_err();
+        let id = b
+            .start(&config)
+            .expect("bring-up must succeed on the apple container kernel");
+        assert_eq!(b.status(&id).unwrap(), VmStatus::Running);
         assert!(
-            matches!(
-                typed(&err),
-                AppleContainerError::NotImplemented { operation, .. }
-                    if operation.contains("bring-up")
-            ),
-            "expected the final fail-closed bring-up error, got: {err}"
+            b.list().unwrap().iter().any(|v| v.name == id.0),
+            "the running VM must appear in the inventory"
         );
-    }
-
-    #[test]
-    fn inject_agent_rejects_a_non_positive_pid() {
-        // A zero/negative pid from vminitd's StartProcess is a server-side
-        // bug; surface it as a transport error rather than reporting
-        // success for an agent that does not exist.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let (client_stream, server_stream) = tokio::io::duplex(1 << 20);
-        runtime.spawn(async move {
-            let mut connection = h2::server::handshake(server_stream)
-                .await
-                .expect("server handshake");
-            while let Some(accepted) = connection.accept().await {
-                let (request, mut respond) = accepted.expect("accept");
-                // Drain the request body, then answer every call with an
-                // empty ok — except StartProcess, which answers pid 0.
-                let mut body = request.into_body();
-                while let Some(chunk) = body.data().await {
-                    chunk.expect("body");
-                }
-                let response = http::Response::builder()
-                    .status(http::StatusCode::OK)
-                    .header("content-type", "application/grpc")
-                    .body(())
-                    .expect("response");
-                let mut send = respond.send_response(response, false).expect("respond");
-                send.send_data(bytes::Bytes::from_static(&[0, 0, 0, 0, 0]), false)
-                    .expect("data");
-                let mut trailers = http::HeaderMap::new();
-                trailers.insert("grpc-status", "0".parse().expect("status"));
-                send.send_trailers(trailers).expect("trailers");
-            }
-        });
-        let (send_request, connection) = runtime
-            .block_on(h2::client::handshake(client_stream))
-            .expect("client handshake");
-        runtime.spawn(async move {
-            let _ = connection.await;
-        });
-        let mut client = VminitdClient::new_for_test(runtime, send_request);
-        let err = inject_agent(&mut client, b"agent", b"{}").unwrap_err();
-        assert!(
-            err.to_string().contains("non-positive pid"),
-            "expected the pid guard to fire, got: {err}"
-        );
+        assert!(b.logs(&id, 5, false).is_ok());
+        b.stop(&id).expect("stop");
+        assert_eq!(b.status(&id).unwrap(), VmStatus::Stopped);
     }
 }

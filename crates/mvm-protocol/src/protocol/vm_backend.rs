@@ -1065,10 +1065,10 @@ pub enum BackendKind {
     /// the hardware-isolation claims hold (the guest shares the host
     /// kernel).
     Docker,
-    /// Apple Containerization-framework tier: workloads run inside Apple's
-    /// lightweight container VMs with `vminitd` as guest PID 1. The backend
-    /// drives the same activation contract through vminitd's gRPC API rather
-    /// than an mvm initramfs. Opt-in only; never returned by auto-detect.
+    /// Apple Container tier: workloads boot Apple's prebuilt container
+    /// kernel (a fetched binary artifact) with the same universal initramfs
+    /// and `ActivateEnvironment` flow as every other runner backend, on the
+    /// in-house HVF VMM. Opt-in only; never returned by auto-detect.
     AppleContainer,
 }
 

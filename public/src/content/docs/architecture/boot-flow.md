@@ -175,18 +175,18 @@ model in adapted form — or honestly not at all:
   [Matryoshka model](/security/matryoshka/)). A shared-kernel container is
   still not a microVM; this tier exists so KVM-less dev/CI hosts can
   exercise the real agent and RPC surface, never as an isolation story.
-- **Apple Container** — Apple's container kernel and `initfs.ext4` (which
-  carries `vminitd`, guest PID 1, gRPC on vsock port 1024) boot on mvm's own
-  HVF supervisor behind `--hypervisor apple-container` (opt-in only, never
-  auto-selected). The backend resolves the two artifacts from the local
-  cache, boots the initfs as the root block device with
-  `init=/sbin/vminitd`, and drives the same activation contract through
-  `vminitd`'s gRPC API rather than an mvm initramfs: the host writes the
-  guest agent and the serialized `ActivateEnvironment` into the container VM
-  and starts the agent as a root process. The final agent bring-up step is
-  still fail-closed (the agent's non-PID-1 activation entry point lands
-  next), so `start` reports that milestone with a typed error — see
-  `specs/plans/271-apple-container-backend.md` for the staged design.
+- **Apple Container** — Apple's prebuilt container kernel (a fetched binary
+  artifact, no toolchain) boots on mvm's own HVF supervisor behind
+  `--hypervisor apple-container` (opt-in only, never auto-selected). The
+  backend resolves the kernel from the local cache, sets it as the launch's
+  kernel image, and delegates the entire boot to the HVF workload runner:
+  the same universal initramfs, the same agent-as-PID-1, and the same
+  `ActivateEnvironment` flow as every other backend — only the kernel
+  differs. There is no Swift and no Virtualization.framework anywhere in
+  the design (the earlier vminitd line was dropped: it is Swift with no
+  prebuilt artifact). The kernel's provenance is the artifact cache rather
+  than an mvm build — recorded honestly in the backend's security profile,
+  see `specs/plans/271-apple-container-backend.md`.
 - **WHP (Windows Hypervisor Platform)** — a future Windows-host backend. The
   guest side is unchanged: the same kernel + universal initramfs boot and the
   same `ActivateEnvironment`. The work is entirely host-side — a WHP

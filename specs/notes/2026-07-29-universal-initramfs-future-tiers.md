@@ -67,31 +67,27 @@ backends").
 
 ## Apple Container
 
-- Today: the backend boots Apple's guest stack — the container kernel and
-  the `initfs.ext4` that carries `vminitd` — on mvm's own HVF supervisor
-  behind `--hypervisor apple-container` (alias `container`), opt-in only and
-  never auto-selected. The Swift/Virtualization.framework shim originally
-  planned for this stage was abandoned; Apple's code now runs only
-  guest-side, unmodified. The two artifacts resolve from
-  `<mvm-cache>/apple-container/` with typed, hint-carrying errors; the boot
-  attaches the initfs as the root block device (last slot, so the workload
-  disks keep the activation environment's fixed device names) with
-  `init=/sbin/vminitd`; and the host drives `vminitd`'s SandboxContext gRPC
-  (h2 transport over the supervisor's vsock port bridge, hand-written prost
-  wire types) to inject the guest agent and the serialized
-  `ActivateEnvironment` and start the agent as a root process. The final
-  agent bring-up step stays fail-closed — the agent has no non-PID-1
-  activation entry point yet — so `start` tears the VM down and returns a
-  typed error naming that milestone; `stop`/`status` are real (pid-file),
-  `wait`/`logs`/`pause`/`resume` fail closed, and the security profile still
-  reports all seven claims `DoesNotHold`. The staged design lives in
+- Today: the backend is the HVF workload runner with Apple's prebuilt
+  container kernel substituted for the boot image, behind
+  `--hypervisor apple-container` (alias `container`), opt-in only and never
+  auto-selected. Earlier designs — a Swift/Virtualization.framework shim,
+  then booting Apple's `vminitd` initfs and driving its gRPC API — were
+  both abandoned: vminitd is Swift with no prebuilt artifact, so the final
+  design is 100% Rust-native (zero Swift, zero Virtualization.framework;
+  `xtask check-no-vz` guards this). The kernel resolves from
+  `<mvm-cache>/apple-container/vmlinux` with a typed, hint-carrying error
+  when missing; the backend sets it as the launch's `kernel_path` and
+  delegates the entire lifecycle to `hvf_runner()` — the same universal
+  initramfs, the same agent-as-PID-1, the same `ActivateEnvironment`
+  flow, egress gate, and RPC surface as `--hypervisor hvf`.
+  `capabilities()` and the claims array mirror the HVF runner verbatim;
+  the profile notes record that the kernel is a fetched artifact whose
+  provenance is not an mvm build. The design lives in
   `specs/plans/271-apple-container-backend.md`.
-- Remaining shape: the agent's non-PID-1 activation entry (mount namespace
-  + `chroot` instead of `pivot_root`, reading the injected activation file),
-  then runner/driver parity (egress/broker relay sockets, virtio-fs shares
-  for `DirShare` volumes). The agent performs the same mounts and the
-  uid-901 drop unchanged. Capability and security-profile honesty rules from
-  ADR-024 apply verbatim.
+- Remaining shape: live e2e validation with a real fetched kernel (boot a
+  dev image to `Ping`, sealed-boot smoke), then a claim-by-claim review.
+  Capability and security-profile honesty rules from ADR-024 apply
+  verbatim.
 
 ## QEMU (converged onto the unified runner)
 
