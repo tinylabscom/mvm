@@ -70,18 +70,21 @@ fn default_resolve_timeout_secs() -> u64 {
 /// The registry (which placeholders exist, their `allowed_hosts`/`auth_type`)
 /// is always assembled from the local binding store regardless of backend —
 /// only *value* resolution moves off-host in `Remote` mode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Local` is a unit variant — deliberately. `EndpointConfig::secret_store_dir`
+/// is already the single source of truth for the local store dir (it also
+/// drives [`resolve_store_dirs`]'s Landlock confinement grant); a second,
+/// per-backend override here would let the two silently drift the moment
+/// anyone set it, so there is exactly one place to look.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 pub enum ResolverBackend {
-    /// Resolve locally via [`FileSecretStore`]. `store_dir` overrides
-    /// `EndpointConfig::secret_store_dir` when set; `None` (the default) falls
-    /// back to `EndpointConfig::secret_store_dir`, then the host default
-    /// (`~/.mvm/secrets`) — i.e. today's exact resolution rule.
-    Local {
-        #[serde(default)]
-        store_dir: Option<PathBuf>,
-    },
+    /// Resolve locally via [`FileSecretStore`] over
+    /// `EndpointConfig::secret_store_dir` (falling back to the host default,
+    /// `~/.mvm/secrets`, when unset) — today's exact resolution rule.
+    #[default]
+    Local,
     /// Resolve remotely over a Unix domain socket to a fleet-secrets daemon.
     Remote {
         /// Path to the daemon's UDS.
@@ -90,12 +93,6 @@ pub enum ResolverBackend {
         #[serde(default = "default_resolve_timeout_secs")]
         timeout_secs: u64,
     },
-}
-
-impl Default for ResolverBackend {
-    fn default() -> Self {
-        Self::Local { store_dir: None }
-    }
 }
 
 /// How the guest reaches this endpoint. Defined in `mvm-backend` (next to the
@@ -250,12 +247,12 @@ pub fn assemble(
     // inside `from_plan` from the same local binding store — only value
     // resolution moves off-host under `ResolverBackend::Remote`.
     let resolver: Arc<dyn SecretResolver> = match &cfg.resolver {
-        ResolverBackend::Local { store_dir } => {
-            // `store_dir` overrides `cfg.secret_store_dir` when set; absent
-            // (the default) preserves today's exact rule: fall back to
-            // `cfg.secret_store_dir`, then the host default.
-            let dir = store_dir.clone().or_else(|| cfg.secret_store_dir.clone());
-            let secret_store: Arc<dyn SecretStore> = Arc::new(match dir {
+        ResolverBackend::Local => {
+            // The single source of truth for the local store dir is
+            // `cfg.secret_store_dir` — the same field `resolve_store_dirs`
+            // uses to compute the Landlock confinement grant, so the two
+            // can never drift.
+            let secret_store: Arc<dyn SecretStore> = Arc::new(match &cfg.secret_store_dir {
                 Some(dir) => FileSecretStore::with_dir(dir),
                 None => FileSecretStore::with_dir(default_secrets_dir()?),
             });
@@ -844,7 +841,27 @@ mod tests {
             "transport": {"kind": "uds", "path": "/tmp/sub.sock"},
         });
         let cfg = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
-        assert_eq!(cfg.resolver, ResolverBackend::Local { store_dir: None });
+        assert_eq!(cfg.resolver, ResolverBackend::Local);
+    }
+
+    #[test]
+    fn resolver_backend_local_round_trips_as_unit_variant() {
+        // `Local` carries no fields — `cfg.secret_store_dir` remains the sole
+        // source of truth for the local store dir. Verify the wire shape is
+        // just the tag, and that it round-trips through `ResolverBackend`
+        // directly as well as inside a full `EndpointConfig`.
+        let json = serde_json::json!({ "backend": "local" });
+        assert_eq!(
+            serde_json::from_value::<ResolverBackend>(json).unwrap(),
+            ResolverBackend::Local
+        );
+
+        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        cfg.resolver = ResolverBackend::Local;
+        let bytes = serde_json::to_vec(&cfg).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), cfg);
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["resolver"], serde_json::json!({"backend": "local"}));
     }
 
     #[test]
