@@ -5,7 +5,7 @@
 **Owner:** mvm
 **Source:** [UOR-Foundation](https://github.com/UOR-Foundation) and [Hologram-Technologies](https://github.com/Hologram-Technologies) GitHub orgs, deep-read at code level (43 repos surveyed, 24 read in depth)
 **Related:** [`uor-addr-integration-assessment.md`](./uor-addr-integration-assessment.md), [`uor-framework-integration-exploration.md`](./uor-framework-integration-exploration.md)
-**Updated:** 2026-07-31 — added §7.6 (data-plane provability at the vsock chokepoint, from a code-grounded read of the sealed-transcript ↔ audit-chain binding) and a §9 note on a machine-checked Lean-4 reference spec as the third verifier.
+**Updated:** 2026-07-31 — added §7.6 (data-plane provability at the vsock chokepoint, from a code-grounded read of the sealed-transcript ↔ audit-chain binding), §7.7 (identity & permissions in the packet — signed capability vs hashed claim), and a §9 note on a machine-checked Lean-4 reference spec as the third verifier.
 
 ## TL;DR
 
@@ -397,6 +397,66 @@ migrate-by-κ-closure (§7.3(c)) at Phase 3, and even there address ≠ authoriz
 snapshot-fork parent/child — it is **already** content-addressed and chain-anchored, which
 validates the instinct in the one place it currently has teeth.
 
+### 7.7 Identity and permissions in the packet — signed capability vs hashed claim
+
+Follow-up on "can UOR hold identity and permissions in the data packet?" — the sharpest form
+of the address ≠ authorization question (§7.4). The answer differs by what "identity/permissions"
+means, so split it.
+
+**Three things, three different answers.** *Identity of the data* (what the bytes are): a
+content-address supplies it for free; mvm does this everywhere. *Identity of the principal* (who
+authored it): a hash **cannot** — an address says what the bytes are, never who signed them; that
+needs Ed25519 `key_id` (authenticity), which mvm has. *Permissions* (what may this do, where may
+it go): this is the trap.
+
+**The trap — content-addressing a capability is not authority.** Put `permissions: [...]` in a
+packet and content-address it, and κ certifies only "this packet *contains* this permission
+string," never that the permission was *granted*. Anyone can craft a packet asserting any
+permission and it gets a perfectly valid address; the hash authenticates the bytes, not the
+authority behind them. So this merely turns "trust the claim" into "trust the bytes of the claim"
+— zero elevation of trust. This is exactly the structural weakness of UOR/Hologram's
+capability-only, unsigned control plane (cf. the "restored child is unauthorizable" finding,
+§7.4), and why the standing rule is: κ layers *under* signed authority, never *as* it.
+
+**The form that works — a signed capability, which mvm already ships.** Carry the permission with
+the data, but signed rather than merely hashed: (1) **signed** by an authority the verifier
+trusts (authenticity); (2) **bound** to principal (`key_id`) + destination/scope + validity
+window + nonce (freshness, anti-replay); (3) **content-addressed underneath** (integrity), so κ
+is the tamper-check and reference handle while the *signature* is what makes it a permission.
+That is precisely what the `ExecutionPlan` is (signed, content-addressed, validity/nonce-bound —
+claim 8), what the broker enforces per-service from `ExecutionPlan.services` before dispatch
+(claim 12), and what the secrets path returns as destination- and time-bound *signed* credentials
+(claim 13). "Identity + permissions in the packet" is already the design — κ is the integrity
+layer under it, never the permission itself.
+
+**Where κ genuinely adds something in-packet** (additive, tenant-scoped): *content-address the
+capability object itself* → tamper-evident, referenceable-by-κ, cacheable/dedup within the tenant
+boundary (its identity is a κ, its authority is the signature over it); *bind data → authority in
+the transcript* (extends §7.6) → stamp each admitted flow with the κ of the signed capability
+that authorized it, so the chain records "this packet crossed under capability κ_X" — provable
+data→authority binding rather than just "a flow happened"; and, for delegation, *macaroons* — a
+signed root capability attenuated by appending hash-chained caveats (narrow the scope, add an
+expiry) without re-contacting the issuer. The macaroon root stays signed; κ/hash-chaining is the
+attenuation mechanism, not the trust root.
+
+**Caveats.** Per-packet signing on the hot vsock path is too expensive — bind the capability at
+*session/connection* admission and reference it by κ in per-frame metadata (the §7.6 perf point).
+A capability κ in a packet is a fingerprint; keep it within the tenant/trust boundary (the §7.4
+cross-tenant leak rule).
+
+**Concrete payoff — the restored-fork-child blocker (Plan 255).** This maps onto a live
+structural blocker in the warm-pool work: a restored fork child is currently unauthorizable
+because its verb-grant is bound to the *original* admission, not carried in a re-presentable form.
+A signed, attenuatable in-packet capability (macaroon-style, derived from the parent's grant) is
+exactly the shape that could let a restored child carry its own narrowed authority — the one
+place this is not theory but a candidate answer to an existing blocker.
+
+**Net.** Right read as "a *signed* capability travels with the data" (mvm already does this); a
+trap read as "content-addressing *is* the permission" (UOR/Hologram's gap). The genuinely new,
+in-house work it points at is (a) binding data→capability-κ into the transcript (rides with §7.6,
+Phase 1) and (b) a macaroon-style attenuatable capability to unblock the restored-child case
+(fleet, Phase 3).
+
 ## 8. Interop hazards and alignment points
 
 Concrete cross-project mechanics that decide whether mvm and the UOR/Hologram
@@ -502,7 +562,7 @@ should we consider this" is: Phase 1 now, the rest when its trigger fires.
 | **0 — Decide & scope** | Now (days) | Adopt "conform, don't consume" as explicit policy; pin SHA-256 as the canonical axis; turn §6 U1–U5 + §7.5 defensive coverage into a `specs/plans/` doc. | None. |
 | **1 — Methodology + defensive coverage** | Next 1–2 sprints | U1 tiers · U4 replay-vector lane · U2 prose over-claim gate · U3 falsifiability table · U5 ≥2-verifier oracle bar; content-address kernel + build cache with verify-on-read; anchor the sealed data-plane transcript root into the audit chain (§7.6). All in-house, no dependency. | Phase 0 plan approved. |
 | **2 — Interop alignment** | Mid-term, triggered | Agree axis + wire-form + in-toto/SLSA canonicalization with the sibling projects; read `uor-foundation` (the real κ engine); evaluate `uor-addr-1` (lighter crate). | A real second consumer of the addresses **and** a UOR/Hologram-side conversation. |
-| **3 — Runtime / fleet / AI** | Long-term, opportunistic | holospace object model (migrate-by-κ-closure) into mvmd; content-addressed inter-VM routing (mvmd only — no east-west path in mvm, §7.6); `hologram-ai` interop for the deferred `ai` command; distributed transport (RBSR / iroh-blobs). | A concrete mvmd migration/scale requirement, or the `ai` command leaving deferred status. |
+| **3 — Runtime / fleet / AI** | Long-term, opportunistic | holospace object model (migrate-by-κ-closure) into mvmd; content-addressed inter-VM routing (mvmd only — no east-west path in mvm, §7.6); a signed, attenuatable in-packet capability (macaroon-style) to unblock the restored-fork-child authorization gap (§7.7); `hologram-ai` interop for the deferred `ai` command; distributed transport (RBSR / iroh-blobs). | A concrete mvmd migration/scale requirement, or the `ai` command leaving deferred status. |
 
 **Bottom line:** consider **Phase 1 now** — it is the highest-ROI, lowest-risk, fully
 in-house work, and it doubles as security hardening (the two defensive pursuits). Hold
