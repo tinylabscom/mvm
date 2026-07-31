@@ -1583,4 +1583,180 @@ mod tests {
             "mandatory-deny wins over a permissive metadata rule"
         );
     }
+
+    fn udp_packet(dst_ip: std::net::IpAddr, dst_port: u16) -> ParsedPacket<'static> {
+        ParsedPacket {
+            five_tuple: FiveTuple {
+                proto: L4Proto::Udp,
+                src_ip: "10.0.0.2".parse().unwrap(),
+                dst_ip,
+                src_port: 5000,
+                dst_port,
+            },
+            l4_payload: b"",
+            raw_frame: b"",
+        }
+    }
+
+    /// The DNS carve-out is a conjunction — UDP *and* port 53 — and only
+    /// that pair may skip the L4 allow-list. Weakened to a disjunction it
+    /// passes **every UDP packet** and everything on port 53 regardless of
+    /// protocol, which is the allow-list backstop for claim 10 ceasing to
+    /// enforce. Existing coverage is all TCP on other ports, so neither
+    /// half of the disjunction was reachable.
+    #[test]
+    fn the_l4_dns_carve_out_is_only_udp_port_53() {
+        let scan = L4PolicyScan::new(CanonicalEgress::Rules(vec![]));
+        let dst: std::net::IpAddr = "1.1.1.1".parse().unwrap();
+
+        // The carve-out itself: deliberate, and it must keep working.
+        assert_eq!(
+            scan.scan(&egress_ctx(), &udp_packet(dst, 53)),
+            ScanOutcome::Pass,
+            "UDP/53 is the resolver carve-out"
+        );
+
+        // UDP on any other port is not carved out.
+        assert_eq!(
+            scan.scan(&egress_ctx(), &udp_packet(dst, 443)),
+            ScanOutcome::Drop { by: "l4-policy" },
+            "a deny-all policy must still drop non-DNS UDP"
+        );
+        assert_eq!(
+            scan.scan(&egress_ctx(), &udp_packet(dst, 5353)),
+            ScanOutcome::Drop { by: "l4-policy" }
+        );
+
+        // Port 53 over TCP is not carved out either.
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp_packet(dst, 53)),
+            ScanOutcome::Drop { by: "l4-policy" },
+            "the carve-out is UDP/53, not port 53"
+        );
+    }
+
+    /// "No SSH in microVMs, ever" is absolute, and this predicate is what
+    /// recognises the protocol on the wire. Flipping the `.` check makes
+    /// every real SSH banner unrecognised while matching nothing else —
+    /// the detector silently stops detecting.
+    #[test]
+    fn an_ssh_banner_is_recognised_and_near_misses_are_not() {
+        assert!(is_ssh_identification_line(b"SSH-2.0-OpenSSH_9.6"));
+        assert!(is_ssh_identification_line(b"SSH-1.5-Something"));
+        assert!(is_ssh_identification_line(b"SSH-1.0"));
+
+        // The dot is load-bearing: a version without it is not a banner.
+        assert!(!is_ssh_identification_line(b"SSH-20-OpenSSH"));
+        assert!(!is_ssh_identification_line(b"SSH-2x0-OpenSSH"));
+        // Non-digits around the dot.
+        assert!(!is_ssh_identification_line(b"SSH-a.b-OpenSSH"));
+        // Too short to carry a version at all.
+        assert!(!is_ssh_identification_line(b"SSH-"));
+        assert!(!is_ssh_identification_line(b""));
+        // Right shape, wrong protocol.
+        assert!(!is_ssh_identification_line(b"HTTP/1.1 200 OK"));
+        // Control bytes are not a banner even with the right prefix.
+        assert!(!is_ssh_identification_line(b"SSH-2.0-Open\x00SSH"));
+    }
+
+    /// The sinkhole stage inspects DNS over UDP/53 and nothing else. Its
+    /// guard is a disjunction of three "not the DNS case" tests; turned
+    /// into a conjunction it stops short-circuiting and starts parsing
+    /// arbitrary payloads as DNS — so a non-DNS packet that happens to
+    /// look like a query for a denied host gets sink-holed.
+    #[test]
+    fn the_sinkhole_stage_inspects_only_dns_over_udp_53() {
+        let scan = DnsSinkholeScan::new(vec!["allowed.test".to_string()]);
+        // A well-formed query for a host the policy does not allow.
+        let query = dns_query_for("denied.test");
+
+        let mut udp = udp_packet("1.1.1.1".parse().unwrap(), 53);
+        udp.l4_payload = &query;
+        udp.raw_frame = &query;
+        assert_eq!(
+            scan.scan(&egress_ctx(), &udp),
+            ScanOutcome::Drop { by: "dns-sinkhole" },
+            "a denied qname on UDP/53 is sink-holed"
+        );
+
+        // The identical bytes on TCP/443 are not a DNS query as far as
+        // this stage is concerned, and must pass untouched.
+        let mut tcp = tcp_packet("1.1.1.1".parse().unwrap(), 443);
+        tcp.l4_payload = &query;
+        tcp.raw_frame = &query;
+        assert_eq!(
+            scan.scan(&egress_ctx(), &tcp),
+            ScanOutcome::Pass,
+            "the stage must not parse non-DNS traffic as DNS"
+        );
+
+        // Same on UDP to another port.
+        let mut udp_other = udp_packet("1.1.1.1".parse().unwrap(), 5353);
+        udp_other.l4_payload = &query;
+        udp_other.raw_frame = &query;
+        assert_eq!(scan.scan(&egress_ctx(), &udp_other), ScanOutcome::Pass);
+    }
+
+    /// A minimal DNS query packet for `name`: 12-byte header with
+    /// qdcount=1, then the labels, root, qtype/qclass.
+    fn dns_query_for(name: &str) -> Vec<u8> {
+        let mut v = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        for label in name.split('.') {
+            v.push(label.len() as u8);
+            v.extend_from_slice(label.as_bytes());
+        }
+        v.push(0);
+        v.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        v
+    }
+
+    /// `merge` folds two passes' counts together, and the counters are what
+    /// the audit record reports. Every arithmetic mutation of the four
+    /// folds survived, because nothing merged two non-trivial hit sets.
+    #[test]
+    fn merging_redaction_hits_sums_every_category() {
+        let mut a = RedactionHits {
+            secrets: vec!["a"],
+            pii: vec!["p1"],
+            entropy: 2,
+            names: 3,
+        };
+        a.merge(RedactionHits {
+            secrets: vec!["b"],
+            pii: vec!["p2"],
+            entropy: 5,
+            names: 7,
+        });
+
+        assert_eq!(a.secrets, vec!["a", "b"]);
+        assert_eq!(a.pii, vec!["p1", "p2"]);
+        // Sums, not differences and not products: 2+5 and 3+7 are distinct
+        // from 2-5, 2*5, 3-7 and 3*7.
+        assert_eq!(a.entropy, 7);
+        assert_eq!(a.names, 10);
+
+        // Merging an empty set is the identity.
+        let before = (a.entropy, a.names, a.secrets.len(), a.pii.len());
+        a.merge(RedactionHits::default());
+        assert_eq!(
+            (a.entropy, a.names, a.secrets.len(), a.pii.len()),
+            before,
+            "folding in an empty set must change nothing"
+        );
+    }
+
+    /// The stage name is the `by` label on every drop and audit record it
+    /// produces, so a constant makes every stage's verdict look alike.
+    #[test]
+    fn the_redacting_stage_reports_its_own_name() {
+        assert_eq!(
+            RedactingSubstitution::with_default_rules().name(),
+            "redact-secrets-pii"
+        );
+        assert_ne!(RedactingSubstitution::with_default_rules().name(), "");
+        assert_ne!(
+            RedactingSubstitution::with_default_rules().name(),
+            L4PolicyScan::new(CanonicalEgress::Rules(vec![])).name()
+        );
+    }
 }
