@@ -27,6 +27,17 @@ const FUSE_KERNEL_VERSION: u32 = 7;
 // init-struct growth, keeping `fuse_init_out` at its classic 64-byte size.
 const FUSE_KERNEL_MINOR_VERSION: u32 = 31;
 
+/// Largest buffer a single request may make this server allocate.
+///
+/// `fuse_read_in.size` is a guest-controlled `u32`, so using it directly as an
+/// allocation length hands an untrusted guest a ~4 GiB `malloc` in the host
+/// VMM for the cost of one request — a denial of service that needs no
+/// privilege and touches no file. FUSE allows a short read reply and the
+/// kernel reissues for the remainder, so a cap costs an extra round trip and
+/// nothing else. This is also the `max_write` advertised at INIT: one bound
+/// for both directions means they cannot drift apart.
+const MAX_IO_LEN: usize = 1 << 20;
+
 // Opcodes we handle (others → ENOSYS/EROFS).
 const FUSE_LOOKUP: u32 = 1;
 const FUSE_FORGET: u32 = 2;
@@ -223,7 +234,7 @@ impl FuseServer {
         put_u32(&mut b, 0); // flags (negotiate nothing extra)
         b.extend_from_slice(&0u16.to_le_bytes()); // max_background
         b.extend_from_slice(&0u16.to_le_bytes()); // congestion_threshold
-        put_u32(&mut b, 1 << 20); // max_write (1 MiB)
+        put_u32(&mut b, MAX_IO_LEN as u32); // max_write
         put_u32(&mut b, 1); // time_gran (1 ns)
         b.extend_from_slice(&0u16.to_le_bytes()); // max_pages
         b.extend_from_slice(&0u16.to_le_bytes()); // map_alignment
@@ -421,7 +432,10 @@ fn read_range(path: &Path, offset: u64, size: usize) -> Result<Vec<u8>, i32> {
         .open(path)
         .map_err(|_| ENOENT)?;
     f.seek(SeekFrom::Start(offset)).map_err(|_| ENOENT)?;
-    let mut buf = vec![0u8; size];
+    // `size` reaches here straight off the wire, so it is clamped before it
+    // becomes an allocation length. A guest asking for more than the
+    // advertised maximum gets a short reply, which the protocol permits.
+    let mut buf = vec![0u8; size.min(MAX_IO_LEN)];
     let n = f.read(&mut buf).map_err(|_| ENOENT)?;
     buf.truncate(n);
     Ok(buf)
@@ -712,5 +726,61 @@ mod tests {
             !data.windows(4).any(|w| w == b"SECR"),
             "host file bytes must never leak"
         );
+    }
+
+    /// A guest-chosen `fuse_read_in.size` must not become the allocation
+    /// length. The fuzz harness found `size = 0xD6FF08FF` driving a single
+    /// 3.6 GB `malloc` in the host VMM — one request, from an untrusted
+    /// guest, before a byte of the file is touched.
+    #[test]
+    fn read_allocation_is_bounded_regardless_of_requested_size() {
+        let d = tree();
+        let path = d.path().join("hello");
+        // Far above the cap but cheap to allocate, so this test fails on the
+        // unbounded version by observing the capacity rather than by trying
+        // to reserve 4 GiB.
+        let huge = 64 * 1024 * 1024;
+        let got = read_range(&path, 0, huge).unwrap();
+        assert!(
+            got.capacity() <= MAX_IO_LEN,
+            "read allocated {} bytes for a {}-byte file; cap is {MAX_IO_LEN}",
+            got.capacity(),
+            got.len()
+        );
+        // Clamping must not corrupt the answer for a file under the cap.
+        assert_eq!(got, b"hi from virtiofs\n");
+    }
+
+    /// The clamp is on the allocation, not on correctness: a read asking for
+    /// more than the cap still returns every byte the file has.
+    #[test]
+    fn oversized_read_request_still_returns_the_whole_small_file() {
+        let d = tree();
+        let mut fs = FuseServer::new(d.path());
+        let (_, ent) = parse_reply(&fs.dispatch(&request(FUSE_LOOKUP, 1, ROOT_INO, b"hello\0")));
+        let ino = rd_u64(&ent, 0);
+
+        let mut read_in = Vec::new();
+        put_u64(&mut read_in, 0); // fh
+        put_u64(&mut read_in, 0); // offset
+        put_u32(&mut read_in, u32::MAX); // size — the hostile field
+        put_u32(&mut read_in, 0); // read_flags
+        put_u64(&mut read_in, 0); // lock_owner
+        put_u32(&mut read_in, 0); // flags
+        put_u32(&mut read_in, 0); // padding
+        let (err, data) = parse_reply(&fs.dispatch(&request(FUSE_READ, 4, ino, &read_in)));
+        assert_eq!(err, 0);
+        assert_eq!(data, b"hi from virtiofs\n");
+    }
+
+    /// A read at the cap boundary allocates the cap and no more.
+    #[test]
+    fn read_at_the_cap_boundary_allocates_exactly_the_cap() {
+        let d = tree();
+        let path = d.path().join("hello");
+        for requested in [MAX_IO_LEN - 1, MAX_IO_LEN, MAX_IO_LEN + 1] {
+            let got = read_range(&path, 0, requested).unwrap();
+            assert!(got.capacity() <= MAX_IO_LEN, "requested {requested}");
+        }
     }
 }
