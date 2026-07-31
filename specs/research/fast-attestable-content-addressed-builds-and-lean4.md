@@ -1,8 +1,8 @@
 # Research: Fast, Attestable, Content-Addressed Builds and Lean 4 Verification
 
 > **Status:** Research report — architecture recommendation, not an implementation plan.
-> **Branch:** `agent/brewfs-volume-assessment`
-> **Commit:** `128161b814ecfdeb34c23d795de801bb76df3f2f`
+> **Branch:** `docs/fast-attestable-builds`
+> **Commit:** current
 > **Date:** 2026-07-31
 
 ---
@@ -17,7 +17,9 @@ Concretely:
 
 1. **Action identity and artifact identity live in `mvm-core`/`mvm-protocol`, not in Nix.** A canonical `BuildPlan` type (§6.2) is hashed to an `ActionDigest`; the canonical Merkle tree of outputs is hashed to an `ArtifactDigest`. Nix remains one `BuildBackend` implementation that can produce artifacts matching this contract.
 2. **A small MVM-native content-addressed store (CAS) and action cache (AC) become first-class crates** (`mvm-cas` or a module inside `mvm-fs`/`mvm-core`). They store blobs and signed action-results locally first, with a stable seam for future `mvmd` shared storage.
-3. **Build execution happens inside MVM microVMs** (the existing builder VM / persistent builder path). The host, not the guest, signs the action→artifact binding after canonicalizing outputs. Network fetch is a separate, policy-controlled action; compile actions run without guest networking.
+3. **The builder VM itself is a first-class MVM microVM whose workload is to realize a `BuildPlan`.** It is not a generic Nix executor: MVM owns its guest image, boot policy, lifecycle, and output contract. Inside the VM, Nix may still run as the cold-path derivation engine, but the only outputs MVM accepts are the canonical MVM artifacts (vmlinux, rootfs.ext4, initramfs, sidecars) materialized into the host CAS and canonicalized before attestation. Network fetch is a separate, policy-controlled action; compile actions run without guest networking.
+
+This means the builder VM moves from "the place where we run `nix build`" to "an attestable MVM workload that produces MVM artifacts." Its identity in the admission/attestation graph is the same as any production microVM: a measured boot, a workload digest, and a policy. The only difference is that its allowed side effects are writing to the host CAS and action cache rather than serving user traffic.
 4. **Lean 4 verifies a small, stable verifier/policy checker once**, not every build. The per-build path supplies ordinary canonical evidence (Merkle proofs, signed attestations) that the Lean-verified Rust component checks quickly.
 5. **SLSA / in-toto / DSSE are adopted where they add interoperability**, but MVM keeps its own canonical action/artifact types because they must be cheap to compute, version, and check on edge devices.
 
@@ -30,6 +32,8 @@ If the CAS/AC seam proves too large to ship quickly, the fallback is **"optimize
 Nix should be **retained and wrapped**, not removed or replaced in the near term. It is currently the only complete derivation engine that produces the sealed NixOS-less microVM rootfs, kernel selection, runtime-overlay integration, and dependency closure that MVM's security model depends on. Removing it would require reimplementing: closure computation, source fetching, sandboxed package builds, Linux kernel configuration, and the `microvm.nix` integration.
 
 However, Nix should **not** be invoked on every warm path. Once an MVM action result exists for a canonical plan, MVM should bypass Nix entirely and verify the cached artifact. Nix becomes a cold-path backend that bootstraps the first build of a plan; MVM's CAS/AC becomes the hot path.
+
+The builder VM image should itself be an MVM-managed microVM image: it is built from a pinned Nix flake, admitted like other MVM workloads, and booted with no network access for compile actions. Nix remains the tool inside the VM, but MVM controls what the VM is allowed to produce and how its outputs enter the CAS.
 
 ---
 
