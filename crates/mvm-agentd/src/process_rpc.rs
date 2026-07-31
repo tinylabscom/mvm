@@ -13,7 +13,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -69,6 +70,85 @@ impl Default for Caps {
 // Registry
 // ============================================================================
 
+/// Completion signal for a record's drain threads.
+///
+/// The wait path drains a *buffer* that the drain threads fill from the child's
+/// pipes. Reaping the child proves the child is gone; it proves nothing about
+/// whether its bytes have made it out of the OS pipe and into that buffer yet.
+/// Without this, a child that writes and exits promptly — `echo hello` — can be
+/// reaped, drained, and reported as `Exit { code: 0 }` with no output at all,
+/// because the drain thread had not been scheduled. On an idle machine the
+/// drain thread wins that race; under load it does not, and a workload's final
+/// output is silently dropped.
+struct DrainLatch {
+    /// Drain threads that have not yet reached EOF on their pipe.
+    outstanding: Mutex<usize>,
+    /// Notified each time one finishes.
+    finished: Condvar,
+    /// Set once a wait has already run out the cap for this record.
+    gave_up: AtomicBool,
+}
+
+impl DrainLatch {
+    fn new(threads: usize) -> Self {
+        Self {
+            outstanding: Mutex::new(threads),
+            finished: Condvar::new(),
+            gave_up: AtomicBool::new(false),
+        }
+    }
+
+    fn mark_finished(&self) {
+        let mut n = self.outstanding.lock().expect("drain latch mutex");
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            self.finished.notify_all();
+        }
+    }
+
+    /// Wait until every drain thread has seen EOF, or `cap` elapses.
+    ///
+    /// Bounded because a grandchild that inherited the pipe's write end keeps
+    /// it open after the child exits, and an unbounded wait there would wedge
+    /// the agent. Exceeding the cap is **not** an error: the caller emits what
+    /// was buffered and reports the terminal state as before. So this only ever
+    /// adds output that would otherwise have been lost — it can never turn a
+    /// working call into a failing one.
+    fn wait_for_eof(&self, cap: Duration) {
+        // At most once per record. A pipe still open after the cap is one
+        // something outlived the child holding, and it will not close on a
+        // later call either — paying the cap again on every wait turns a
+        // one-off cost into a per-call one. `handle_proc_wait` is called
+        // repeatedly against the same record (a queue serializing callers hits
+        // it once per caller), so without this the cap multiplies.
+        if self.gave_up.load(Ordering::Acquire) {
+            return;
+        }
+        let deadline = Instant::now() + cap;
+        let mut n = self.outstanding.lock().expect("drain latch mutex");
+        while *n > 0 {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                self.gave_up.store(true, Ordering::Release);
+                return;
+            };
+            let (guard, timeout) = self
+                .finished
+                .wait_timeout(n, remaining)
+                .expect("drain latch condvar");
+            n = guard;
+            if timeout.timed_out() {
+                self.gave_up.store(true, Ordering::Release);
+                return;
+            }
+        }
+    }
+}
+
+/// How long a *dead* child's pipes are given to reach EOF before the wait path
+/// reports what it has. Only reachable when something outlived the child and
+/// still holds the write end, so it is a wedge guard rather than a budget.
+const PIPE_EOF_WAIT: Duration = Duration::from_secs(5);
+
 /// One tracked process. Held inside the registry's `HashMap`.
 struct ProcessRecord {
     /// Display-only argv\[0\]; full argv is dropped after spawn.
@@ -87,6 +167,8 @@ struct ProcessRecord {
     terminal: Mutex<Option<TerminalState>>,
     /// When the record becomes reapable (after terminal + grace).
     reap_after: Mutex<Option<Instant>>,
+    /// Signals when the drain threads have emptied the child's pipes.
+    drains: Arc<DrainLatch>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -268,7 +350,12 @@ fn build_command(
 
 /// Spawn a drain thread that copies bytes from `reader` into `buf`,
 /// truncating at `cap` so a chatty child can't exhaust agent memory.
-fn spawn_drain<R: Read + Send + 'static>(mut reader: R, buf: Arc<Mutex<Vec<u8>>>, cap: usize) {
+fn spawn_drain<R: Read + Send + 'static>(
+    mut reader: R,
+    buf: Arc<Mutex<Vec<u8>>>,
+    cap: usize,
+    latch: Arc<DrainLatch>,
+) {
     thread::spawn(move || {
         let mut chunk = [0u8; 4096];
         loop {
@@ -286,6 +373,7 @@ fn spawn_drain<R: Read + Send + 'static>(mut reader: R, buf: Arc<Mutex<Vec<u8>>>
                 Err(_) => break,
             }
         }
+        latch.mark_finished();
     });
 }
 
@@ -330,11 +418,26 @@ pub fn handle_proc_start(
 
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
-    if let Some(out) = child.stdout.take() {
-        spawn_drain(out, Arc::clone(&stdout_buf), caps.max_output_buffer);
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let drains = Arc::new(DrainLatch::new(
+        usize::from(stdout_pipe.is_some()) + usize::from(stderr_pipe.is_some()),
+    ));
+    if let Some(out) = stdout_pipe {
+        spawn_drain(
+            out,
+            Arc::clone(&stdout_buf),
+            caps.max_output_buffer,
+            Arc::clone(&drains),
+        );
     }
-    if let Some(err) = child.stderr.take() {
-        spawn_drain(err, Arc::clone(&stderr_buf), caps.max_output_buffer);
+    if let Some(err) = stderr_pipe {
+        spawn_drain(
+            err,
+            Arc::clone(&stderr_buf),
+            caps.max_output_buffer,
+            Arc::clone(&drains),
+        );
     }
     let stdin = child.stdin.take();
 
@@ -350,6 +453,7 @@ pub fn handle_proc_start(
         stderr_buf,
         terminal: Mutex::new(None),
         reap_after: Mutex::new(None),
+        drains,
     });
 
     if !initial_stdin.is_empty()
@@ -602,6 +706,10 @@ pub fn handle_proc_wait<W: FnMut(ProcWaitEvent)>(
         };
     };
     if let Some(terminal) = *record.terminal.lock().expect("terminal mutex") {
+        // Same ordering hazard as the reap path below: a caller that arrives
+        // after the terminal state was recorded but before the pipes drained
+        // would otherwise see the output vanish.
+        record.drains.wait_for_eof(PIPE_EOF_WAIT);
         for ev in drain_into_events(&record) {
             emit(ev);
         }
@@ -628,6 +736,11 @@ pub fn handle_proc_wait<W: FnMut(ProcWaitEvent)>(
             emit(ev);
         }
         if let Some(terminal) = try_reap(&record, caps.reap_grace) {
+            // The child is gone, but its bytes may still be in the pipe rather
+            // than in the buffer `drain_into_events` reads. Let the drain
+            // threads reach EOF first, or this reports a terminal state with
+            // output it simply had not collected yet.
+            record.drains.wait_for_eof(PIPE_EOF_WAIT);
             for ev in drain_into_events(&record) {
                 emit(ev);
             }
@@ -951,7 +1064,145 @@ mod tests {
             stderr_buf: Arc::new(Mutex::new(vec![0u8; stderr_bytes])),
             terminal: Mutex::new(None),
             reap_after: Mutex::new(None),
+            // No child, so no drain threads: the latch is already satisfied
+            // and `wait_for_eof` returns immediately.
+            drains: Arc::new(DrainLatch::new(0)),
         }
+    }
+
+    /// A reader that produces its bytes only after the wait path has already
+    /// had a chance to run — standing in for a drain thread the scheduler has
+    /// not got to yet, which is what happens under a loaded CI run.
+    struct SlowReader {
+        payload: Vec<u8>,
+        delivered: bool,
+    }
+
+    impl Read for SlowReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.delivered {
+                return Ok(0);
+            }
+            thread::sleep(Duration::from_millis(250));
+            let n = self.payload.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.payload[..n]);
+            self.delivered = true;
+            Ok(n)
+        }
+    }
+
+    /// Reaping the child proves the child is gone; it proves nothing about
+    /// whether its bytes have left the pipe. Without the EOF wait, the wait
+    /// path drains an empty buffer and reports a terminal state having dropped
+    /// the output — `Exit { code: 0 }` with nothing on stdout.
+    ///
+    /// The slow reader makes that ordering deterministic instead of relying on
+    /// a loaded machine to produce it.
+    #[test]
+    fn terminal_wait_captures_output_the_drain_thread_has_not_delivered_yet() {
+        let caps = small_caps();
+        let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+        let drains = Arc::new(DrainLatch::new(1));
+        spawn_drain(
+            SlowReader {
+                payload: b"hello".to_vec(),
+                delivered: false,
+            },
+            Arc::clone(&stdout_buf),
+            caps.max_output_buffer,
+            Arc::clone(&drains),
+        );
+
+        let record = Arc::new(ProcessRecord {
+            argv0: "/bin/echo".to_string(),
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            child: Mutex::new(None),
+            stdin: Mutex::new(None),
+            stdout_buf,
+            stderr_buf: Arc::new(Mutex::new(Vec::new())),
+            // Already terminal: the child exited before its pipe drained.
+            terminal: Mutex::new(Some(TerminalState::Exited(0))),
+            reap_after: Mutex::new(None),
+            drains,
+        });
+        let reg = Registry::new();
+        reg.insert("tok".to_string(), record);
+
+        let mut events = Vec::new();
+        let terminal = handle_proc_wait(&reg, &caps, "tok", Some(5), |ev| events.push(ev));
+
+        let stdout: Vec<u8> = events
+            .iter()
+            .flat_map(|e| match e {
+                ProcWaitEvent::Stdout { chunk } => chunk.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            String::from_utf8_lossy(&stdout),
+            "hello",
+            "a terminal wait must not report before the pipe has drained"
+        );
+        assert!(matches!(terminal, ProcWaitEvent::Exit { code: 0 }));
+    }
+
+    /// The wait is bounded: a grandchild holding the write end open must not
+    /// wedge the agent. Exceeding the cap emits what is buffered rather than
+    /// failing, so this can only ever add output, never remove it.
+    #[test]
+    fn eof_wait_is_bounded_when_a_pipe_never_closes() {
+        let latch = DrainLatch::new(1);
+        let started = Instant::now();
+        latch.wait_for_eof(Duration::from_millis(120));
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(100),
+            "must actually wait for the pipe, waited {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "must not wait unboundedly, waited {waited:?}"
+        );
+    }
+
+    /// The cap is paid at most once per record. `handle_proc_wait` runs once
+    /// per caller against the same record, so a per-call cap would multiply:
+    /// a queue serializing four callers against a pipe held open by something
+    /// that outlived the child would pay it four times.
+    #[test]
+    fn eof_wait_pays_the_cap_at_most_once() {
+        let latch = DrainLatch::new(1);
+        let first = Instant::now();
+        latch.wait_for_eof(Duration::from_millis(150));
+        let first_elapsed = first.elapsed();
+        assert!(
+            first_elapsed >= Duration::from_millis(100),
+            "the first wait must actually wait, got {first_elapsed:?}"
+        );
+
+        let second = Instant::now();
+        latch.wait_for_eof(Duration::from_millis(150));
+        let second_elapsed = second.elapsed();
+        assert!(
+            second_elapsed < Duration::from_millis(50),
+            "a later wait must not pay the cap again, got {second_elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn eof_wait_returns_as_soon_as_every_drain_finishes() {
+        let latch = Arc::new(DrainLatch::new(2));
+        let signaller = Arc::clone(&latch);
+        thread::spawn(move || {
+            signaller.mark_finished();
+            signaller.mark_finished();
+        });
+        let started = Instant::now();
+        latch.wait_for_eof(Duration::from_secs(30));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "wait must end on the signal, not on the cap"
+        );
     }
 
     #[test]
