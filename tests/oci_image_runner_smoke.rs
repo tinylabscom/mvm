@@ -131,6 +131,7 @@ impl Drop for SessionCleanup {
             return;
         };
         let _ = mvmctl_with_target_path()
+            .env("HOME", &self.data_dir)
             .env("MVM_HOME", &self.data_dir)
             .args(["session", "kill", session_id])
             .output();
@@ -629,6 +630,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let compile = mvmctl_with_target_path()
+        .env("HOME", &data_dir)
         .env("MVM_HOME", &data_dir)
         .args([
             "build",
@@ -649,6 +651,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
 
     let run = run_with_stdin(
         mvmctl_with_target_path()
+            .env("HOME", &data_dir)
             .env("MVM_HOME", &data_dir)
             .env("MVM_HYPERVISOR", "hvf")
             .args([
@@ -684,6 +687,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     cleanup.arm(session_id.clone());
 
     let info = mvmctl_with_target_path()
+        .env("HOME", &data_dir)
         .env("MVM_HOME", &data_dir)
         .args(["session", "info", &session_id])
         .output()
@@ -720,6 +724,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let denied = mvmctl_with_target_path()
+        .env("HOME", &data_dir)
         .env("MVM_HOME", &data_dir)
         .env("MVM_HYPERVISOR", "hvf")
         .args(["machine", "set-timeout", &vm_name, "349"])
@@ -738,6 +743,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let verify = mvmctl_with_target_path()
+        .env("HOME", &data_dir)
         .env("MVM_HOME", &data_dir)
         .args(["trust", "audit", "verify", "--tenant", "local"])
         .output()
@@ -759,6 +765,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let kill = mvmctl_with_target_path()
+        .env("HOME", &data_dir)
         .env("MVM_HOME", &data_dir)
         .args(["session", "kill", &session_id])
         .output()

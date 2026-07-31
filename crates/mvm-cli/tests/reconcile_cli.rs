@@ -66,6 +66,7 @@ fn reconcile_dry_run_json_runs_against_isolated_dirs() {
     let out = Command::cargo_bin("mvmctl")
         .expect("locate mvmctl")
         .args(["reconcile", "--dry-run", "--json"])
+        .env("HOME", tmp.path().join("mvm-root"))
         .env("MVM_HOME", tmp.path().join("mvm-root"))
         .output()
         .expect("spawn mvmctl");

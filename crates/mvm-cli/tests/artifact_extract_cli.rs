@@ -24,6 +24,7 @@ fn artifact_extract_round_trips_a_packed_dev_artifact() {
     #[allow(deprecated)]
     let pack = Command::cargo_bin("mvmctl")
         .unwrap()
+        .env("HOME", &data)
         .env("MVM_HOME", &data)
         .args([
             "artifact",
@@ -54,6 +55,7 @@ fn artifact_extract_round_trips_a_packed_dev_artifact() {
     #[allow(deprecated)]
     let extract = Command::cargo_bin("mvmctl")
         .unwrap()
+        .env("HOME", &data)
         .env("MVM_HOME", &data)
         .args([
             "artifact",
