@@ -840,6 +840,63 @@ status line and discards the body, so a wget user still needs the host log
 (`/tmp/mvm-substitution-endpoint-<vm>.log`). Surfacing a failed run's egress
 denials through `mvmctl` itself is the follow-up.
 
+### ICMP echo over vsock
+
+`ping` could not work in a NIC-less guest: no route, no raw socket, so busybox
+`ping` fails at `socket()` before a packet exists. The vsock egress path carries
+TCP streams (`host:port` + ack + splice) and DNS (its own frame marker), and had
+nothing for ICMP — not a misconfiguration, an absent transport.
+
+The host now echoes on the guest's behalf behind an `MVM_ICMP/1` frame on the
+shared egress stream, decided by the same claim-10 gate every other verb uses.
+`EgressGate::decide_icmp_request` admits a host the allow-list named on *any*
+port (ICMP has none), refuses one it did not, and keeps mandatory-deny above the
+allow-list so a pinned loopback address cannot turn ping into a probe of the
+host's own networks. The socket is the unprivileged `SOCK_DGRAM`/`IPPROTO_ICMP`
+ping socket, never `SOCK_RAW`: raw would need `CAP_NET_RAW` and would let this
+code read every ICMP packet on the host.
+
+Delivery is a **bind mount, not an image edit**. `mvm-ping` ships in the runtime
+overlay and is mounted over the image's own `/bin/ping`, so the rootfs keeps
+exactly the bytes the registry served (which is what the recorded OCI provenance
+refers to), `/proc/mounts` records the substitution, and an absolute-path caller
+still reaches the working tool. An earlier attempt copied over the image
+instead; the mount is both more honest and materially smaller — `ping` leaves the
+four OCI-injection lists entirely and lives only in the overlay.
+
+Two findings the tests could not have produced:
+
+- **Batched round trips measure the reader's buffer, not the network.** The
+  first working run reported `seq=0 36.6ms, seq=1 0.1ms, seq=2 0.0ms`: later
+  reply lines were already in memory. Each echo is now its own request, the way
+  `ping` times each packet.
+- **The audit emitted nothing while compiling cleanly.** `EventCategory::Flow`
+  is mandatorily plan-bound and the per-VM egress endpoint holds no
+  `ExecutionPlan`, so every entry was dropped with a warning only the endpoint's
+  own log carried. ICMP now has its own category, as DNS does and for the same
+  reason.
+
+Live on macOS 26.5.2 / arm64 / HVF, `--allow-host google.com` with
+`/bin/ping -c 2 google.com`:
+
+```
+PING google.com (56 bytes) via host
+56 bytes from 142.251.218.174: seq=0 time=13.8 ms (host leg 8.9 ms)
+2 sent, 2 received, 0% packet loss
+```
+
+with `icmp.admitted` in the chain-signed log carrying host, pinned IP and count.
+An unadmitted host answers `example.com is not admitted; allowed: google.com`.
+
+**Blocking, and not caused by this work:** once `~/.mvm/cache/initramfs/` is
+seeded, boots take the universal-initramfs path and fail with `send
+ActivateEnvironment to guest: Failed to read frame length`. Setting that cache
+aside restores working boots, which isolates it: the universal-initramfs boot is
+broken independently of ICMP, and anyone who seeds that cache gets a dead guest.
+This is the other half of the legacy-cmdline story — the legacy path now works,
+and the path meant to replace it does not.
+
+
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
 ## 5. Definition of done

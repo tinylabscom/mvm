@@ -2,61 +2,20 @@
 
 use std::future::Future;
 use std::net::IpAddr;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use mvm_core::protocol::dns::{
     DnsQuestion, DnsRcode, MAX_DNS_MESSAGE, decode_query, encode_response,
 };
-use mvm_core::rate_limit::TokenBucket;
 use mvm_runtime::vmm::egress_gate::{DnsVerdict, EgressGate};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::supervisor::audit_recorder::Recorder;
+use crate::supervisor::egress_rate::EgressRateGuard;
 use crate::supervisor::{dns_audit, raw_egress};
 
 /// First-line marker that selects DNS framing on the shared egress stream.
 pub const FRAME_LINE: &str = mvm_core::guest_netd::DNS_FRAME_LINE;
-/// Default DNS query rate for one workload endpoint.
-pub const DEFAULT_DNS_QUERIES_PER_SEC: u32 = 100;
-/// Default number of simultaneous DNS queries for one workload endpoint.
-pub const DEFAULT_DNS_MAX_INFLIGHT: usize = 32;
-
-/// Shared per-workload DNS admission guard.
-pub struct DnsRateGuard {
-    bucket: Mutex<TokenBucket>,
-    inflight: Semaphore,
-}
-
-impl DnsRateGuard {
-    /// Build a guard with an explicit sustained rate and concurrency cap.
-    pub fn new(queries_per_sec: u32, max_inflight: usize) -> Self {
-        Self {
-            bucket: Mutex::new(TokenBucket::new(queries_per_sec)),
-            inflight: Semaphore::new(max_inflight),
-        }
-    }
-
-    /// Admit one query, or return `None` without waiting when either limit is full.
-    pub async fn admit(&self) -> Option<SemaphorePermit<'_>> {
-        self.try_admit()
-    }
-
-    fn try_admit(&self) -> Option<SemaphorePermit<'_>> {
-        let permit = self.inflight.try_acquire().ok()?;
-        let Ok(mut bucket) = self.bucket.lock() else {
-            return None;
-        };
-        bucket.try_take().then_some(permit)
-    }
-}
-
-impl Default for DnsRateGuard {
-    fn default() -> Self {
-        Self::new(DEFAULT_DNS_QUERIES_PER_SEC, DEFAULT_DNS_MAX_INFLIGHT)
-    }
-}
 
 /// Serve one length-prefixed DNS query over an asynchronous guest stream.
 ///
@@ -67,7 +26,7 @@ pub async fn serve_dns<S>(
     guest: S,
     gate: &EgressGate,
     recorder: Option<&Recorder>,
-    rate_guard: &DnsRateGuard,
+    rate_guard: &EgressRateGuard,
     timeout: Duration,
 ) -> std::io::Result<()>
 where
@@ -88,7 +47,7 @@ async fn serve_dns_with_resolver<S, F>(
     mut guest: S,
     gate: &EgressGate,
     recorder: Option<&Recorder>,
-    rate_guard: &DnsRateGuard,
+    rate_guard: &EgressRateGuard,
     timeout: Duration,
     resolve: F,
 ) -> std::io::Result<()>
@@ -220,7 +179,7 @@ pub fn serve_dns_blocking(
     mut guest: std::fs::File,
     gate: &EgressGate,
     recorder: Option<&Recorder>,
-    rate_guard: &DnsRateGuard,
+    rate_guard: &EgressRateGuard,
     timeout: Duration,
 ) -> std::io::Result<()> {
     use std::io::{Read, Write};
@@ -327,7 +286,7 @@ mod tests {
                 server,
                 &gate,
                 None,
-                &DnsRateGuard::default(),
+                &EgressRateGuard::default(),
                 Duration::from_secs(1),
             )
             .await
@@ -352,7 +311,7 @@ mod tests {
                 server,
                 &gate,
                 Some(&handler_recorder),
-                &DnsRateGuard::default(),
+                &EgressRateGuard::default(),
                 Duration::from_secs(1),
             )
             .await
@@ -383,7 +342,7 @@ mod tests {
                 server,
                 &gate,
                 Some(&handler_recorder),
-                &DnsRateGuard::default(),
+                &EgressRateGuard::default(),
                 Duration::from_secs(1),
             )
             .await
@@ -413,7 +372,7 @@ mod tests {
                 server,
                 &gate,
                 None,
-                &DnsRateGuard::default(),
+                &EgressRateGuard::default(),
                 Duration::from_secs(1),
                 |_name, _timeout| {
                     Ok(vec![
@@ -441,7 +400,7 @@ mod tests {
                 server,
                 &gate,
                 None,
-                &DnsRateGuard::default(),
+                &EgressRateGuard::default(),
                 Duration::from_secs(1),
             )
             .await
@@ -454,13 +413,13 @@ mod tests {
 
     #[tokio::test]
     async fn rate_guard_denies_when_bucket_is_empty() {
-        let guard = DnsRateGuard::new(0, 1);
+        let guard = EgressRateGuard::new(0, 1);
         assert!(guard.admit().await.is_none());
     }
 
     #[tokio::test]
     async fn rate_guard_caps_concurrent_queries() {
-        let guard = DnsRateGuard::new(10, 1);
+        let guard = EgressRateGuard::new(10, 1);
         let first = guard.admit().await.expect("first query is admitted");
         assert!(guard.admit().await.is_none());
         drop(first);
@@ -480,7 +439,7 @@ mod tests {
                 server,
                 &gate,
                 Some(&recorder),
-                &DnsRateGuard::new(0, 1),
+                &EgressRateGuard::new(0, 1),
                 Duration::from_secs(1),
                 move |_name, _timeout| {
                     handler_lookups.fetch_add(1, Ordering::Relaxed);

@@ -55,6 +55,7 @@ pub mod host_cost;
 /// In-guest `host.time.v1` typed method: `now` host wall-clock query over the
 /// broker transport.
 pub mod host_time;
+pub mod icmp_client;
 pub mod integrations;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`

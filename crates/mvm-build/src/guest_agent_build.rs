@@ -136,6 +136,7 @@ pub struct RuntimeOverlayGuestBinaries {
     pub egress_client: PathBuf,
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
+    pub ping: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +151,7 @@ pub struct RuntimeOverlayGuestLayout {
     pub egress_client: PathBuf,
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
+    pub ping: PathBuf,
 }
 
 impl RuntimeOverlayGuestLayout {
@@ -169,6 +171,7 @@ impl RuntimeOverlayGuestLayout {
             egress_client: dir.join("egress-client"),
             addon_dns: dir.join("addon-dns"),
             exit_report: dir.join("exit-report"),
+            ping: dir.join("ping"),
             dir,
         }
     }
@@ -183,6 +186,7 @@ impl RuntimeOverlayGuestLayout {
             && self.egress_client.is_file()
             && self.addon_dns.is_file()
             && self.exit_report.is_file()
+            && self.ping.is_file()
     }
 
     fn binaries(&self) -> RuntimeOverlayGuestBinaries {
@@ -196,6 +200,7 @@ impl RuntimeOverlayGuestLayout {
             egress_client: self.egress_client.clone(),
             addon_dns: self.addon_dns.clone(),
             exit_report: self.exit_report.clone(),
+            ping: self.ping.clone(),
         }
     }
 }
@@ -579,6 +584,8 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--bin".to_string(),
         "mvm-verity-init".to_string(),
         "--bin".to_string(),
+        "mvm-ping".to_string(),
+        "--bin".to_string(),
         "mvm-runner".to_string(),
         "--bin".to_string(),
         "mvm-egress-client".to_string(),
@@ -598,6 +605,7 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     install_one(&output_dir.join("mvm-guest-netinit"), &layout.netinit)?;
     install_one(&output_dir.join("mvm-seccomp-apply"), &layout.seccomp_apply)?;
     install_one(&output_dir.join("mvm-verity-init"), &layout.verity_init)?;
+    install_one(&output_dir.join("mvm-ping"), &layout.ping)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
     install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;

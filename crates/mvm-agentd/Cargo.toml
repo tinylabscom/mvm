@@ -91,6 +91,14 @@ name = "mvm-egress-client"
 path = "src/bin/mvm-egress-client.rs"
 required-features = ["addons"]
 
+# In-guest `ping`, shadowing busybox's on PATH. Host-mediated ICMP echo over
+# vsock, because a NIC-less guest has no raw socket of its own. No `addons`
+# feature: this is a workload-facing tool, not an async loopback daemon, and it
+# links only the sync vsock client.
+[[bin]]
+name = "mvm-ping"
+path = "src/bin/mvm-ping.rs"
+
 # In-guest one-shot workload-exit-code reporter over AF_VSOCK.
 [[bin]]
 name = "mvm-exit-report"

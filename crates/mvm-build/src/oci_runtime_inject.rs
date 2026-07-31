@@ -145,6 +145,7 @@ pub fn inject_mvm_runtime(
 
     let entrypoint_runner_dest = rootfs_dir.join(ENTRYPOINT_RUNNER_DEST);
     copy_file_with_mode(&bins.entrypoint_runner, &entrypoint_runner_dest, 0o555)?;
+
     if let Some(entrypoint) = entrypoint
         && !entrypoint.argv.is_empty()
     {
