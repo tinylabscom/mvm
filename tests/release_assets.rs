@@ -80,6 +80,70 @@ fn the_release_job_attaches_the_sdk_sidecar_assets() {
     }
 }
 
+/// The downloader fetches `<asset>.bundle`; the release has to attach it under
+/// exactly that name or every download refuses as unsigned.
+#[test]
+fn release_attaches_the_signature_bundle_the_verifier_fetches() {
+    let workflow = release_workflow();
+    let sidecar = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_arch("*");
+    let overlay = mvmctl::build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch("*");
+    for asset in [sidecar.archive, overlay.archive] {
+        let bundle = mvmctl::build::release_signature::bundle_asset_name(&asset);
+        assert!(
+            workflow.contains(&format!("artifacts/{bundle}")),
+            "the release job's asset list must attach {bundle:?}"
+        );
+    }
+}
+
+/// The image tarballs must be signed with `--new-bundle-format`. The in-binary
+/// Rust verifier parses only that shape; a legacy `--bundle` here fails to
+/// parse on every download, and nothing would catch it until a real release
+/// shipped. The binary tarballs must NOT move — those are read by the cosign
+/// CLI (`install.sh`, `mvmctl update`), which wants the legacy shape.
+#[test]
+fn image_tarballs_are_signed_in_the_format_the_in_binary_verifier_parses() {
+    let workflow = release_workflow();
+    let step = workflow
+        .split("- name: Sign release tarballs and SBOM")
+        .nth(1)
+        .expect("release.yml must define the tarball signing step");
+    let step = step
+        .split("\n      - name:")
+        .next()
+        .expect("the signing step is non-empty");
+
+    let image_sign = step
+        .split("for tarball in artifacts/runtime-overlay-*.tar.gz artifacts/sdk-sidecar-*.tar.gz")
+        .nth(1)
+        .expect("the image tarballs must be signed by their own loop")
+        .split("done")
+        .next()
+        .expect("the image signing loop is non-empty");
+    assert!(
+        image_sign.contains("--new-bundle-format"),
+        "image tarballs must be signed with --new-bundle-format: {image_sign}"
+    );
+
+    // The generic loop produces the cosign-CLI-consumed bundles, so it must
+    // skip the image tarballs rather than double-signing them legacy.
+    let generic_sign = step
+        .split("for tarball in artifacts/*.tar.gz")
+        .nth(1)
+        .expect("the binary tarballs keep their own loop")
+        .split("done")
+        .next()
+        .expect("the generic signing loop is non-empty");
+    assert!(
+        generic_sign.contains("runtime-overlay-*|sdk-sidecar-*"),
+        "the legacy-format loop must skip the image tarballs: {generic_sign}"
+    );
+    assert!(
+        !generic_sign.contains("--new-bundle-format"),
+        "the cosign-CLI-consumed bundles must stay on the legacy format"
+    );
+}
+
 /// Both published architectures must be built, or a whole platform's users get
 /// the fail-closed refusal this artifact exists to prevent.
 #[test]

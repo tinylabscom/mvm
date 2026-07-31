@@ -100,20 +100,25 @@ pub enum SdkSidecarBuildError {
 ///    fetched *before* the payload, so an artifact whose hash cannot be pinned
 ///    costs no bandwidth and reaches no disk.
 /// 2. The downloaded archive must hash to that digest.
-/// 3. Every archive member must be one of the three canonical files, named by a
+/// 3. The archive must verify against the release workflow's cosign-keyless
+///    signing identity — the digest alone authenticates the transport, not the
+///    publisher. Checked before extraction, so an unauthenticated tar is never
+///    parsed.
+/// 4. Every archive member must be one of the three canonical files, named by a
 ///    single unprefixed path component (no traversal, no absolute, no nesting),
 ///    and all three must be present.
-/// 4. The archive's own `checksums-sha256.txt` must agree with the bytes it
+/// 5. The archive's own `checksums-sha256.txt` must agree with the bytes it
 ///    carried.
-/// 5. The *installed* entry must satisfy [`SdkSidecarResolver::resolve`] — the
+/// 6. The *installed* entry must satisfy [`SdkSidecarResolver::resolve`] — the
 ///    same check the launch path runs — so a transport bug cannot produce a
 ///    cache entry that only fails later at boot.
 ///
-/// `MVM_SKIP_HASH_VERIFY=1` bypasses rung 2 only, and is the documented
-/// emergency-rotation escape shared with every other mvm downloader. Never set
-/// it in CI. The release base URL is the runtime overlay's
-/// (`MVM_OVERLAY_BASE_URL` overrides it for a private mirror or a test fixture)
-/// because both artifacts ship in the same release.
+/// `MVM_SKIP_HASH_VERIFY=1` bypasses rung 2 and `MVM_SKIP_COSIGN_VERIFY=1`
+/// bypasses rung 3; both are documented emergency-rotation escapes shared with
+/// every other mvm downloader, and neither is ever set in CI. The release base
+/// URL is the runtime overlay's (`MVM_OVERLAY_BASE_URL` overrides it for a
+/// private mirror or a test fixture) because both artifacts ship in the same
+/// release.
 pub fn download_sdk_sidecar(
     version: &str,
     arch: GuestArch,
@@ -135,6 +140,15 @@ pub fn download_sdk_sidecar(
         &archive_local,
         &names.archive,
         expected.get(&names.archive),
+    )?;
+    // Before extraction: an unauthenticated tar is never parsed.
+    crate::release_signature::verify_release_archive_signature(
+        &crate::release_signature::ReleaseSignatureRequest {
+            base_url: &base,
+            asset: &names.archive,
+            archive_path: &archive_local,
+            version,
+        },
     )?;
 
     let extracted = tmp.path().join("extracted");
@@ -416,12 +430,30 @@ mod tests {
     /// Point the downloader at a staged release directory and give it a cold
     /// cache root. The caller owns the `TestEnv` so its process-wide env lock
     /// spans the whole test, not just the download call.
+    ///
+    /// The signature rung is skipped here via its documented escape hatch: a
+    /// valid Sigstore signature cannot be minted offline, and these tests are
+    /// about the digest, extraction, and install rungs. The signature rung has
+    /// its own witnesses below and in [`crate::release_signature`].
     fn download_from(
         env: &mut TestEnv,
         fixture: &ReleaseFixture,
         cache: &Path,
     ) -> Result<SdkSidecarArtifact, String> {
         env.set("MVM_OVERLAY_BASE_URL", fixture.base_url());
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), cache).map_err(|e| format!("{e}"))
+    }
+
+    /// Same, but with the signature rung live — so a test can prove the
+    /// download refuses an archive the release never signed.
+    fn download_with_signature_check(
+        env: &mut TestEnv,
+        fixture: &ReleaseFixture,
+        cache: &Path,
+    ) -> Result<SdkSidecarArtifact, String> {
+        env.set("MVM_OVERLAY_BASE_URL", fixture.base_url());
+        env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
         download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), cache).map_err(|e| format!("{e}"))
     }
 
@@ -444,6 +476,53 @@ mod tests {
                 .is_err(),
             "a refused download must leave nothing the resolver accepts"
         );
+    }
+
+    /// The rung that matters most for an end user: a release that publishes an
+    /// archive with no signature beside it is refused, and nothing is cached —
+    /// even though the archive's digest matches what the release pinned.
+    #[test]
+    fn an_unsigned_release_archive_is_refused_and_caches_nothing() {
+        let mut env = TestEnv::new();
+        let cache = tempfile::tempdir().unwrap();
+        let fixture = ReleaseFixture::sound();
+
+        let err = download_with_signature_check(&mut env, &fixture, cache.path())
+            .expect_err("an unsigned archive must not install");
+
+        assert!(
+            err.contains("signature") || err.contains("bundle"),
+            "the refusal must be about the signature: {err}"
+        );
+        assert!(err.contains(&fixture.names.archive), "{err}");
+        assert_cache_holds_no_artifact(cache.path());
+    }
+
+    /// Ordering witness: the signature is checked before any tar member is
+    /// read. An archive that is both unsigned *and* full of hostile members
+    /// must fail on the signature — proving extraction never ran.
+    #[test]
+    fn the_signature_is_checked_before_the_archive_is_extracted() {
+        let mut env = TestEnv::new();
+        let cache = tempfile::tempdir().unwrap();
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        append_raw_named(&mut tar, "../escaped", b"payload");
+        let archive = tar.into_inner().unwrap().finish().unwrap();
+        let fixture = ReleaseFixture::stage(&archive, Some(&archive));
+
+        let err = download_with_signature_check(&mut env, &fixture, cache.path())
+            .expect_err("an unsigned archive must not be extracted at all");
+
+        assert!(
+            err.contains("signature") || err.contains("bundle"),
+            "extraction ran before the signature check: {err}"
+        );
+        assert!(
+            !err.contains("unsafe or unexpected path"),
+            "the tar was parsed before its signature was checked: {err}"
+        );
+        assert_cache_holds_no_artifact(cache.path());
     }
 
     #[test]

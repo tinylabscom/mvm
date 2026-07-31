@@ -569,8 +569,16 @@ mod tests {
     #[test]
     fn resolve_returns_missing_when_cache_empty() {
         let dir = tempfile::tempdir().unwrap();
+        // HOME has to move with the cache root: a miss is seeded from
+        // `$HOME/.mvm/cache`, so without this the assertion holds only on a
+        // machine that has never built an initramfs — which CI is and a
+        // contributor's laptop is not.
+        let _lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let cache = dir.path().join("cache");
         let err =
-            resolve_or_build_local_initramfs(&NoopShell, dir.path(), "0.18.0", GuestArch::Aarch64)
+            resolve_or_build_local_initramfs(&NoopShell, &cache, "0.18.0", GuestArch::Aarch64)
                 .unwrap_err();
         assert!(!format!("{err}").is_empty());
     }

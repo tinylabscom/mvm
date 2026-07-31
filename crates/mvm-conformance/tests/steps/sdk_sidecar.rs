@@ -175,6 +175,10 @@ fn acquire_sidecar_from_release(world: &mut CliWorld) {
     // download and cannot stall a concurrently-running scenario.
     let mut env = mvm_core::util::test_env::TestEnv::new();
     env.set("MVM_OVERLAY_BASE_URL", format!("file://{}", base.display()));
+    // The scenario is the acquire-and-boot workflow; a valid Sigstore
+    // signature cannot be minted offline, so the signature rung is exercised
+    // by `mvm_build::release_signature`'s own witnesses instead.
+    env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
     world.sdk_sidecar_result = Some(
         mvm_build::sdk_sidecar::download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), &cache)
