@@ -530,11 +530,17 @@ jobs:
   mutation-witnesses:
     name: Claim witnesses — mutation-tested (ADR-001 claims ledger)
     runs-on: ubuntu-latest
-    # NON-BLOCKING for now: accepted_misses is seeded only for the
-    # claim-10 anchor, so the first full runs will report holes in the
-    # not-yet-triaged files. Flip this off once the baseline covers the
-    # whole surface — tracked in specs/plans/272.
-    continue-on-error: true
+    # BLOCKING. The baseline now covers all 26 surface files: each has
+    # been observed to actually test mutants, and every survivor was
+    # triaged. A failure here means a claim witness has stopped detecting
+    # its own property being violated, which is what this lane is for.
+    #
+    # It was non-blocking because accepted_misses had been seeded for one
+    # anchor file only. Establishing the rest found that eight files could
+    # not be measured at all — their packages' suites did not pass
+    # package-scoped, and this lane is always package-scoped — and that
+    # two of those reported themselves clean. Both fixed; see
+    # specs/VERIFICATION.md §"Mutation-tested witnesses".
     steps:
       - uses: actions/checkout@v6
 

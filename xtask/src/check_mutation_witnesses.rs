@@ -504,6 +504,7 @@ fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile]) -> Result<Vec<Mis
     let out_root = std::env::temp_dir().join("mvm-mutation-witnesses");
     std::fs::create_dir_all(&out_root)
         .with_context(|| format!("creating {}", out_root.display()))?;
+    let isolation = MutationIsolation::establish(&out_root)?;
 
     let mut all = Vec::new();
     for (i, file) in surface.iter().enumerate() {
@@ -516,16 +517,92 @@ fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile]) -> Result<Vec<Mis
             file.claims
         );
         let out_dir = out_root.join(file.path.replace('/', "_"));
-        all.extend(run_mutants_for_file(workspace, file, &out_dir)?);
+        all.extend(run_mutants_for_file(workspace, file, &out_dir, &isolation)?);
     }
     all.sort();
     all.dedup();
     Ok(all)
 }
 
-fn run_mutants_for_file(workspace: &Path, file: &SurfaceFile, out_dir: &Path) -> Result<Vec<Miss>> {
-    let status = std::process::Command::new("cargo")
-        .current_dir(workspace)
+/// The state roots a mutation run is confined to.
+///
+/// `--run` executes security code with its check removed: plan verification
+/// that no longer verifies, the host signer, seccomp construction. It must
+/// not reach a real mvm state root — the mutation may be *in* the path or
+/// mode logic, so it can mint a key at the wrong path or leave firewall
+/// rules behind.
+///
+/// Applied here, at the one place cargo-mutants is spawned, rather than in
+/// each caller's shell. A caller that forgets is the whole failure mode,
+/// and there is no reason for the nightly lane, the Justfile recipe and a
+/// bare `cargo run -p xtask` to each carry their own copy of it.
+struct MutationIsolation {
+    home: std::path::PathBuf,
+    cargo_home: std::path::PathBuf,
+    rustup_home: std::path::PathBuf,
+}
+
+impl MutationIsolation {
+    fn establish(under: &Path) -> Result<Self> {
+        // Resolve the toolchain roots from the *real* home before
+        // redirecting: `~` follows `HOME`, so a subprocess whose `HOME`
+        // moved would look for cargo and rustup inside the empty temp
+        // root and find no toolchain at all.
+        let real_home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| real_home.as_ref().map(|h| h.join(".cargo")))
+            .context("resolving CARGO_HOME: neither CARGO_HOME nor HOME is set")?;
+        let rustup_home = std::env::var_os("RUSTUP_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| real_home.as_ref().map(|h| h.join(".rustup")))
+            .context("resolving RUSTUP_HOME: neither RUSTUP_HOME nor HOME is set")?;
+
+        let home = under.join("state-root");
+        std::fs::create_dir_all(&home)
+            .with_context(|| format!("creating the isolated state root {}", home.display()))?;
+
+        // A reachable keystore under the redirected root means the
+        // redirect did not take. Refuse rather than mutate against keys.
+        let keys = home.join(".mvm").join("keys");
+        if keys.exists() {
+            bail!(
+                "refusing to mutate against a reachable keystore at {} — the isolated \
+                 state root is supposed to be empty",
+                keys.display()
+            );
+        }
+        eprintln!(
+            "check-mutation-witnesses: mutating under an isolated HOME/MVM_HOME at {}",
+            home.display()
+        );
+        Ok(Self {
+            home,
+            cargo_home,
+            rustup_home,
+        })
+    }
+
+    fn apply(&self, cmd: &mut std::process::Command) {
+        // Both roots move together. `MVM_HOME` alone is not enough:
+        // `default_mvm_cache_dir` deliberately reads the home directory to
+        // seed from the shared cache, which is the one door `MVM_HOME`
+        // does not close.
+        cmd.env("MVM_HOME", &self.home)
+            .env("HOME", &self.home)
+            .env("CARGO_HOME", &self.cargo_home)
+            .env("RUSTUP_HOME", &self.rustup_home);
+    }
+}
+
+fn run_mutants_for_file(
+    workspace: &Path,
+    file: &SurfaceFile,
+    out_dir: &Path,
+    isolation: &MutationIsolation,
+) -> Result<Vec<Miss>> {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.current_dir(workspace)
         .arg("mutants")
         .args(["-p", &file.package])
         .args(["--file", &file.path])
@@ -543,9 +620,9 @@ fn run_mutants_for_file(workspace: &Path, file: &SurfaceFile, out_dir: &Path) ->
         // The embedded host-vm binaries are cross-compiled by
         // mvm-cli's build.rs; a mutation run rebuilds per mutant and
         // does not boot a VM, so paying that cost every time is waste.
-        .env("MVM_SKIP_EMBED_BINARIES", "1")
-        .status()
-        .context("spawning `cargo mutants`")?;
+        .env("MVM_SKIP_EMBED_BINARIES", "1");
+    isolation.apply(&mut cmd);
+    let status = cmd.status().context("spawning `cargo mutants`")?;
 
     // Exit status is deliberately not the signal: cargo-mutants exits
     // nonzero merely because mutants survived, which is the case this

@@ -265,13 +265,12 @@ pub fn verify_sealed_volume(volume_dir: &Path) -> Result<String, VolumeError> {
         });
     }
 
+    // No separate existence check for the content directory: the loop
+    // below refuses a missing artifact with exactly this error and exactly
+    // this name. A duplicate guard ahead of it made the loop's `content`
+    // arm unreachable, so nothing could establish whether that arm was
+    // even correct.
     let content_dir = volume_dir.join(FILE_CONTENT_DIR);
-    if !content_dir.exists() {
-        return Err(VolumeError::ArtifactMissing {
-            volume: volume_dir.to_path_buf(),
-            artifact: FILE_CONTENT_DIR,
-        });
-    }
     let pairs: &[(&'static str, &str, PathBuf)] = &[
         ("content", &manifest.content_sha256, content_dir.clone()),
         ("sbom", &manifest.sbom_sha256, volume_dir.join(FILE_SBOM)),
@@ -652,5 +651,41 @@ mod tests {
         });
         let err = serde_json::from_value::<VolumeManifest>(bad).unwrap_err();
         assert!(err.to_string().contains("future_field"));
+    }
+
+    /// A deleted artifact must be refused *and* named correctly.
+    ///
+    /// The tamper tests above cover every artifact, but they all leave the
+    /// file in place, so nothing exercised the missing-artifact arm and
+    /// nothing pinned the kind-to-filename mapping it reports. Deleting
+    /// any of three mapping arms left `verify_sealed_volume` still failing
+    /// closed while telling the operator `<unknown>` was missing — the
+    /// refusal is the security property, but the name is the only thing
+    /// that says which file to go and look at.
+    #[test]
+    fn a_missing_artifact_is_refused_and_named() {
+        for (artifact_file, expected) in [
+            (FILE_CONTENT_DIR, FILE_CONTENT_DIR),
+            (FILE_SBOM, FILE_SBOM),
+            (FILE_FETCH_LOG, FILE_FETCH_LOG),
+            (FILE_CVE, FILE_CVE),
+        ] {
+            let fx = Fixture::new();
+            let (v, _) = fx.build_sealed("vol-missing");
+            let target = v.join(artifact_file);
+            if target.is_dir() {
+                fs::remove_dir_all(&target).unwrap();
+            } else {
+                fs::remove_file(&target).unwrap();
+            }
+
+            match verify_sealed_volume(&v) {
+                Err(VolumeError::ArtifactMissing { artifact, .. }) => assert_eq!(
+                    artifact, expected,
+                    "a missing {artifact_file} must be reported as {expected}"
+                ),
+                other => panic!("expected ArtifactMissing for {artifact_file}, got {other:?}"),
+            }
+        }
     }
 }

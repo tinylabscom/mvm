@@ -260,31 +260,12 @@ mutation-surface:
 # HOURS: this is the nightly lane's command, not an inner-loop check.
 # Needs `cargo install cargo-mutants cargo-nextest`.
 #
-# Runs under a redirected HOME and MVM_HOME, matching security.yml.
-# `--run` executes security code with its check removed — plan
-# verification that no longer verifies, the host signer, seccomp
-# construction — so it must not reach a real mvm state root. The mutation
-# may be *in* the path or mode logic, so it could mint a key at the wrong
-# path or leave firewall rules behind. MVM_HOME alone is not enough,
-# because `default_mvm_cache_dir` deliberately reads the home directory to
-# seed from the shared cache.
-#
-# CARGO_HOME/RUSTUP_HOME resolve from the real home *first*: `~` follows
-# HOME, so without this cargo and rustup follow the redirect into an empty
-# temp dir and the toolchain disappears mid-run.
+# No isolation wrapper here on purpose. `--run` executes security code with
+# its check removed, so it must not reach a real mvm state root — and that
+# confinement lives where cargo-mutants is actually spawned, so every
+# caller gets it rather than each one carrying its own copy. This recipe
+# had no wrapper at all until that landed, which is the failure mode.
 mutation-witnesses:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-    export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-    MUTANTS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/mvm-mutants-home.XXXXXX")"
-    export MVM_HOME="$MUTANTS_HOME"
-    export HOME="$MUTANTS_HOME"
-    if [ -e "$HOME/.mvm/keys" ]; then
-        echo "refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
-        exit 1
-    fi
-    echo "mutating under an isolated HOME/MVM_HOME at $MUTANTS_HOME"
     cargo run -p xtask -- check-mutation-witnesses --run
 
 # Re-pin the surface after a witness legitimately moved. Cheap, and keeps

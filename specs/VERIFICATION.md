@@ -95,6 +95,72 @@ symbol. It also carries a canary (`handle_run_entrypoint` must be
 present) so a stripped symbol table cannot make the absence check
 vacuously true. Both pass today.
 
+### Mutation-tested witnesses: what the first full run found
+
+`check-mutation-witnesses --run` breaks each claim-surface file on purpose
+and asks whether any witness notices. Its nightly lane ran
+`continue-on-error` until a baseline covered the whole surface. Producing
+that baseline is recorded here, because most of what it found was not
+surviving mutants.
+
+**Four of eight packages could not be measured at all.** The lane runs
+`cargo mutants -p <package> --file <path>` in a fresh copy of the tree, so
+a package whose own suite does not pass *on its own* never reaches a
+mutant. Three packages were in that state, each green under `--workspace`
+and red alone:
+
+| Package | Why the package-scoped suite failed | Surface files |
+| --- | --- | --- |
+| `mvm-sdk` | uses `mvm-core`'s `TestEnv` without enabling `test-support`; the feature arrived only through workspace-wide feature unification, so the crate's tests did not compile | 1 |
+| `mvm-cli` | 42 tests drive the `mvmctl` binary, which belongs to the root package — `CARGO_BIN_EXE_mvmctl` is only set for tests in the package declaring the bin | 4 |
+| `mvm-runtime` | a test spawned the real `mvm-substitution-endpoint`, an `mvm-hostd` binary; it passed only when another package's build had populated the shared `target/` | 3 |
+
+Eight of the twenty-six surface files — claims 1, 3, 10, 11, 14 and 15 —
+were therefore unmeasured while the lane reported no new misses.
+
+**And two of them read as clean.** A file whose baseline never runs
+reports `total_mutants: 0, missed: 0, caught: 0`, which is what a
+fully-covered file reports. `ensure_mutants_actually_ran` was written for
+exactly this, but it enumerated the one baseline verdict it had seen —
+`Failure` — and `crates/mvm-build/src/app_deps_gate.rs` came back
+`Timeout`. cargo-mutants found 33 mutants there and tested none of them.
+
+The check now requires the baseline verdict to *be* `Success` rather than
+to not be one of a known list, and requires `total_mutants` to be nonzero.
+A verdict this code has never seen is not evidence that anything ran.
+
+| Guard | Planted defect | Reported |
+| --- | --- | --- |
+| `ensure_mutants_actually_ran` | `outcomes.json` with a `Baseline`/`Timeout` verdict and zero counts (verbatim from the observed run) | yes |
+| `ensure_mutants_actually_ran` | a baseline verdict string the code has never seen | yes |
+| `ensure_mutants_actually_ran` | a passing baseline with `total_mutants: 0` | yes |
+
+**Every surviving mutant was a real hole.** No equivalent mutants were
+found on the first full pass; `accepted_misses` did not grow. Each of the
+tests below was verified by planting its mutant by hand and confirming the
+new test fails, then reverting.
+
+| Claim | File | Survivors | Sharpest one |
+| --- | --- | --- | --- |
+| 10 | `policy/network_policy.rs` | 4 | `is_banned_ssh_port` pinned to `false` — the crate asserted only the negative direction, so disarming the SSH ban failed nothing |
+| 12 | `protocol/broker.rs` | 4 | `Display` blanked and `as_str` pinned to a constant on identifiers that are rendered into audit entries |
+| 13 | `protocol/vm_backend.rs` | 6 | `LayerCoverage::is_microvm` with `&&` weakened to `||` — fail-open, since it gates the Tier 3 shared-kernel banner |
+| 9 | `plan/bundle.rs` | 5 | four `e.kind() == NotFound` guards pinned to `true`, merging "absent" with "unreadable" in resolve, remove and list |
+| 12 | `broker/registry.rs` | 1 | `Registry::is_empty` pinned to `true`, read by the broker's startup readiness gate |
+
+The four `network_policy` entries had been sitting in `accepted_misses`
+recorded as untriaged. They were holes, so they are closed rather than
+explained.
+
+**One measurement was of the wrong thing.** `mvm-build`'s baseline timed
+out because `runtime_overlay_build.rs` shells out to a real `nix build`.
+The lane does not install `nix`, so those tests skip there — the timeout
+was an artifact of the host used to produce the baseline. The baseline is
+therefore produced with `nix` off `PATH`, matching the lane. The
+consequence is recorded rather than hidden: on the lane, no nix-gated
+integration test participates, so a mutant only those tests would catch
+survives.
+
 ### Does device-mapper layout drift fail open?
 
 Asked because `DmIoctl`/`DmTargetSpec` build the dm-verity table, and a

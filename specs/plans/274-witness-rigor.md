@@ -1261,23 +1261,64 @@ seeded only for the claim-10 anchor today. Establishing that baseline and
 reading the survivors is the human work, and it is where the findings
 actually are. The score is bookkeeping.
 
-- [ ] **Step 1: Establish the baseline hermetically**
+- [x] **Step 1: Establish the baseline hermetically**
 
-  Blocked on #1946. `--run` executes mutated security code and neither
-  the nightly lane nor `just mutation-witnesses` isolates `MVM_HOME` and
-  `HOME` today. Do not run it against a real `~/.mvm`.
+  **Unblocked, not blocked.** #1946 is closed and `security.yml`'s
+  `mutation-witnesses` job already redirects both `MVM_HOME` and `HOME`,
+  with `CARGO_HOME`/`RUSTUP_HOME` pinned to the real home first. The
+  precondition this step was waiting on had already been met when it was
+  written down.
 
-- [ ] **Step 2: Triage every survivor**
+  Run on the Linux box under the same isolation, one file at a time and
+  resumable, since the sweep is hours long.
 
-  For each: a **real hole** gets the test that catches it; an
-  **equivalent mutant** gets an `accepted_misses` entry with a stated
-  reason. `check_accepted_reasons` already refuses an unexplained entry,
-  so the reason is enforced rather than merely encouraged.
+- [x] **Step 2: Make the surface measurable — the actual finding**
 
-- [ ] **Step 3: Arm the lane**
+  The first full run did not mostly produce surviving mutants. It
+  produced the fact that **eight of the twenty-six files could not be
+  measured at all**, and that two of them reported themselves clean.
 
-  Once the baseline covers the surface, drop `continue-on-error: true`
-  from the `mutation-witnesses` job in `security.yml`.
+  The lane runs `cargo mutants -p <pkg> --file <path>` in a fresh copy of
+  the tree, so a package whose suite does not pass *package-scoped* never
+  reaches a mutant. Three packages were in that state, each green under
+  `--workspace` and red alone — `mvm-sdk` (never enabled
+  `mvm-core/test-support`, so its tests did not compile), `mvm-cli` (42
+  tests drive the root package's binary, so `CARGO_BIN_EXE_mvmctl` is
+  unset), `mvm-runtime` (a test spawned an `mvm-hostd` binary). Claims 1,
+  3, 10, 11, 14 and 15 were affected.
+
+  `ensure_mutants_actually_ran` exists to catch the resulting zero-count
+  reports and caught only one of the two: it enumerated the `Failure`
+  verdict, and a baseline that *times out* reports `Timeout`. It now
+  requires the verdict to be `Success` and `total_mutants` to be nonzero.
+  Full record in `specs/VERIFICATION.md`.
+
+  Two further defects, which decide whether the lane is affordable rather
+  than whether it is correct:
+
+  - The flat 300s per-mutant timeout was too short for the packages whose
+    own suite exceeds it and five times too long for one whose suite runs
+    in fourteen seconds. Now derived from the package's measured
+    baseline.
+  - `seed_guest_runtime_cache` seeded the guest-binary cache under the
+    crate version while the resolver reads a source fingerprint, so three
+    `pull_core` tests silently cross-compiled the guest agent — 55s each,
+    multiplied by every mutant in mvm-cli's four surface files. One
+    `guest_binary_source()` now serves both sides. mvm-cli's package
+    suite: 86s → 2s.
+
+- [x] **Step 3: Triage every survivor**
+
+  Every survivor was a **real hole**; none was an equivalent mutant, so
+  `accepted_misses` did not grow. Each fix was verified by planting its
+  mutant by hand and confirming the new test fails. The four pre-existing
+  `network_policy` entries, recorded as untriaged, are closed rather than
+  explained. Table in `specs/VERIFICATION.md`.
+
+- [x] **Step 4: Arm the lane**
+
+  `continue-on-error: true` removed from the `mutation-witnesses` job in
+  `security.yml`.
 
 ---
 
