@@ -476,6 +476,70 @@ jobs:
             staging/runtime-overlay-${{ matrix.arch }}.tar.gz
             staging/runtime-overlay-${{ matrix.arch }}.tar.gz.sha256
 
+  # ADR-018: the optional glibc SDK-sidecar disk. Mounted read-only at
+  # /mvm/sdk, and only for workloads whose signed plan binds an SDK-served
+  # host service — so a workload that never calls one never pays for the glibc
+  # closure. Built per-arch from the same `nix/images/runtime-overlay/` flake
+  # as the overlay.
+  #
+  # The host-side downloader (`mvm_build::sdk_sidecar::download_sdk_sidecar`)
+  # fetches one arch-qualified tarball plus its sha256 sidecar, and installs the
+  # extracted canonical names (`sdk.ext4`, `VERSION`, `checksums-sha256.txt`)
+  # into `~/.mvm/cache/sdk-sidecar/<mvmctl-version>/<arch>/`. The asset names
+  # here are pinned against that Rust constructor by `tests/release_assets.rs`.
+  #
+  # Unlike the overlay job this does NOT regenerate the manifest: the
+  # `sdk-sidecar-image` derivation writes its own `checksums-sha256.txt`, so
+  # copying it through keeps the bytes the resolver verifies byte-identical to
+  # the bytes Nix produced.
+  sdk-sidecar-image:
+    # Skipped on a dry-run dispatch (see builder-vm-image).
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+          - arch: x86_64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Build SDK sidecar image
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          SYSTEM="${ARCH}-linux"
+          nix build "./nix/images/runtime-overlay#packages.${SYSTEM}.sdk-sidecar-image" \
+            --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          mkdir -p "staging/sdk-sidecar-${ARCH}"
+          # cp -L so the payload resolves through nix-store symlinks into the
+          # actual blobs; the artifact uploader doesn't follow symlinks.
+          cp -L "$STORE_PATH/sdk.ext4"             "staging/sdk-sidecar-${ARCH}/sdk.ext4"
+          cp -L "$STORE_PATH/VERSION"              "staging/sdk-sidecar-${ARCH}/VERSION"
+          cp -L "$STORE_PATH/checksums-sha256.txt" "staging/sdk-sidecar-${ARCH}/checksums-sha256.txt"
+          tar -C "staging/sdk-sidecar-${ARCH}" \
+            -czf "staging/sdk-sidecar-${ARCH}.tar.gz" \
+            sdk.ext4 VERSION checksums-sha256.txt
+          (
+            cd staging
+            sha256sum "sdk-sidecar-${ARCH}.tar.gz" \
+              > "sdk-sidecar-${ARCH}.tar.gz.sha256"
+          )
+
+      - name: Upload SDK sidecar image artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdk-sidecar-image-${{ matrix.arch }}
+          path: |
+            staging/sdk-sidecar-${{ matrix.arch }}.tar.gz
+            staging/sdk-sidecar-${{ matrix.arch }}.tar.gz.sha256
+
   # Plan 158: the bundled default microVM image `mvmctl up`/`exec` boots when
   # no --flake/--template/--image is given. Ships the PROD variant only
   # (sealed + verity-sealed rootfs); the dev variant is built locally in dev
@@ -621,7 +685,7 @@ jobs:
             staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
 
   release:
-    needs: [bdd, build, builder-vm-image, runtime-overlay-image, default-microvm]
+    needs: [bdd, build, builder-vm-image, runtime-overlay-image, sdk-sidecar-image, default-microvm]
     # Gate the published release on the mvmctl binary build ONLY. The Nix
     # image jobs still run and their artifacts are attached when present,
     # but an image-build failure must not block the binary download
@@ -741,6 +805,8 @@ jobs:
             artifacts/builder-vm-*-checksums-sha256.txt
             artifacts/runtime-overlay-*.tar.gz
             artifacts/runtime-overlay-*.tar.gz.sha256
+            artifacts/sdk-sidecar-*.tar.gz
+            artifacts/sdk-sidecar-*.tar.gz.sha256
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*

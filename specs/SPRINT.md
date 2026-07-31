@@ -194,8 +194,25 @@
       `xtask perf footprint --sdk-sidecar` reports the sidecar on its own
       ledger line against its own 8 MiB ceiling, never folded into the base
       50,000,000-byte contract. Source checkouts build the sidecar from the
-      flake; publishing it for downloaded `mvmctl` builds is planned at
-      `specs/plans/273-sdk-sidecar-release-acquisition.md`.
+      flake.
+- [x] Plan 273 — SDK sidecar release acquisition. Closes the end-user half of
+      the WS-3 follow-up: `release.yml`'s new `sdk-sidecar-image` job publishes
+      a per-arch `sdk-sidecar-<arch>.tar.gz` plus its `.sha256`, copying the
+      derivation's own `checksums-sha256.txt` through rather than regenerating
+      it so the bytes the resolver verifies are the bytes Nix produced. The new
+      `mvm_build::sdk_sidecar` fetches the archive checksum before the payload,
+      hash-verifies the archive, safe-extracts it through the runtime overlay's
+      now-generalized entry validator, re-checks the archive's own manifest
+      against the extracted bytes, installs stage-then-rename, and ends with a
+      `SdkSidecarResolver::resolve` against the *installed* entry so a transport
+      bug cannot cache something that only fails at boot. The launch path
+      consults the overlay's own build-vs-download resolver, so a contributor
+      never silently downloads; a source checkout keeps the fail-closed refusal
+      naming `nix build ./nix/images/runtime-overlay#sdk-sidecar-image`.
+      `tests/release_assets.rs` pins the workflow's asset names to the Rust
+      constructor that requests them. 10 downloader unit tests, 5 launch-path
+      tests, 4 release-asset gates, and 2 BDD scenarios (acquire-and-boot,
+      checksum-drift refusal), taking the BDD suite to 57 scenarios / 279 steps.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.

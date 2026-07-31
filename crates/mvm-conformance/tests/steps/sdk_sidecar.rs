@@ -92,6 +92,120 @@ fn byte_flip_sidecar(world: &mut CliWorld) {
     std::fs::write(&layout.image, &image).expect("write the tampered sidecar image");
 }
 
+/// Build the tarball the `sdk-sidecar-image` release job publishes: the ext4,
+/// the VERSION marker, and the derivation's own manifest over both.
+fn sidecar_release_archive() -> Vec<u8> {
+    let image = sidecar_ext4_bytes();
+    let version_text = format!("{FIXTURE_VERSION}\n").into_bytes();
+    let manifest = format!(
+        "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
+        sha256_hex(&image),
+        sha256_hex(&version_text),
+    )
+    .into_bytes();
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut tar = tar::Builder::new(encoder);
+    for (name, bytes) in [
+        (SDK_SIDECAR_IMAGE_FILE, image),
+        (SDK_SIDECAR_VERSION_FILE, version_text),
+        (mvm_fs::overlay::CHECKSUM_MANIFEST_FILE, manifest),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(u64::try_from(bytes.len()).expect("fixture member size"));
+        header.set_cksum();
+        tar.append_data(&mut header, name, bytes.as_slice())
+            .expect("append the release archive member");
+    }
+    tar.into_inner()
+        .expect("finish the tar stream")
+        .finish()
+        .expect("finish the gzip stream")
+}
+
+/// Stage the two assets a release publishes for this arch. `checksum_over`
+/// picks which bytes the `.sha256` sidecar commits to, so a scenario can make
+/// the recorded digest disagree with the shipped archive.
+fn stage_release(world: &mut CliWorld, checksum_over: &[u8]) {
+    let archive = sidecar_release_archive();
+    let base = world
+        .sdk_sidecar_release
+        .get_or_insert_with(|| tempfile::tempdir().expect("create the release dir"))
+        .path()
+        .to_path_buf();
+    let release_dir = base.join(format!("v{FIXTURE_VERSION}"));
+    std::fs::create_dir_all(&release_dir).expect("create the versioned release dir");
+    let names =
+        mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(&GuestArch::host().to_string());
+    std::fs::write(release_dir.join(&names.archive), &archive).expect("write the release archive");
+    std::fs::write(
+        release_dir.join(&names.archive_checksum),
+        format!("{}  {}\n", sha256_hex(checksum_over), names.archive),
+    )
+    .expect("write the release archive checksum");
+}
+
+#[given(expr = "a published SDK sidecar release artifact")]
+fn published_release_artifact(world: &mut CliWorld) {
+    stage_release(world, &sidecar_release_archive());
+}
+
+#[given(expr = "a published SDK sidecar release artifact whose archive checksum does not match")]
+fn published_release_artifact_with_drifted_checksum(world: &mut CliWorld) {
+    stage_release(world, b"bytes the release never shipped");
+}
+
+/// Drive the acquire ladder an installed `mvmctl` runs on a cold cache: fetch
+/// and verify the published artifact, then resolve the attachment from the
+/// entry it installed. The release base URL is overridden to the staged fixture
+/// for the duration of this step, so no scenario reaches the network.
+#[when(expr = "the launch path acquires the SDK sidecar from the published release")]
+fn acquire_sidecar_from_release(world: &mut CliWorld) {
+    let cache = cache_root(world);
+    let base = world
+        .sdk_sidecar_release
+        .as_ref()
+        .expect("a prior step must stage the release")
+        .path()
+        .to_path_buf();
+    let services = world.sdk_sidecar_services.clone();
+
+    // `TestEnv` serializes process-wide env mutation and restores it on drop.
+    // Nothing awaits inside this step, so the guard is held only for the
+    // download and cannot stall a concurrently-running scenario.
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.set("MVM_OVERLAY_BASE_URL", format!("file://{}", base.display()));
+
+    world.sdk_sidecar_result = Some(
+        mvm_build::sdk_sidecar::download_sdk_sidecar(FIXTURE_VERSION, GuestArch::host(), &cache)
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|_installed| {
+                let resolver = SdkSidecarResolver::new(cache.clone(), FIXTURE_VERSION.to_string());
+                mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+                    &services,
+                    &resolver,
+                    GuestArch::host(),
+                )
+                .map_err(|e| format!("{e:#}"))
+            }),
+    );
+}
+
+#[then(expr = "the launch is refused and the SDK sidecar cache stays empty")]
+fn launch_refused_cache_empty(world: &mut CliWorld) {
+    let message = match resolved(world) {
+        Err(message) => message.clone(),
+        Ok(_) => panic!("expected the acquire to be refused"),
+    };
+    assert!(!message.is_empty(), "a refusal must carry a reason");
+    let layout = layout(world);
+    assert!(
+        !layout.artifact_dir.exists(),
+        "a refused acquire must leave no artifact dir at {}",
+        layout.artifact_dir.display()
+    );
+}
+
 #[given(expr = "a workload plan that binds no host service")]
 fn plan_binds_nothing(world: &mut CliWorld) {
     world.sdk_sidecar_services = Vec::new();

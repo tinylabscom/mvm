@@ -88,6 +88,21 @@ carries no dm-verity target: integrity comes from the checksum manifest and the
 version pin, which is the same bar the cached overlay artifact meets before its
 roothash reaches the guest, and a malicious host is out of scope by ADR-001.
 
+**It is acquired the same two ways the overlay is, and by the same decision.**
+A source checkout builds it (`nix build
+./nix/images/runtime-overlay#sdk-sidecar-image`); a downloaded `mvmctl` fetches
+the per-arch `sdk-sidecar-<arch>.tar.gz` published beside the overlay's tarball
+in the same release, verifies it against the release's `.sha256` sidecar and
+then against the archive's own `checksums-sha256.txt`, and installs it
+stage-then-rename so a crash can never leave a half-written cache entry. The
+build-vs-download choice is the overlay's — one resolver, so a contributor whose
+overlay is source-built never silently downloads a sidecar. The download ends
+with a `SdkSidecarResolver::resolve` against the *installed* entry, which is the
+same check the launch path runs: a transport bug cannot produce a cache entry
+that only fails later at boot. On a source checkout a cold cache still refuses
+the launch rather than acquiring implicitly, because building the sidecar needs
+the builder VM and a launch must not spawn one.
+
 Its size is budgeted and reported **outside** the 50,000,000-byte
 complete-artifact contract, because only workloads that bind an SDK-served host
 service pay for it. Two build-backed CI gates pin the split in both directions:

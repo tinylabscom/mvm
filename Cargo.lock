@@ -2797,6 +2797,7 @@ dependencies = [
  "assert_cmd",
  "cucumber",
  "ed25519-dalek",
+ "flate2",
  "hex",
  "mvm-build",
  "mvm-core",
