@@ -64,9 +64,9 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine session start <template> --agent-verb <verb>` | Boot a prod session with an explicit ProdSafe agent-verb allow-list instead of the computed sealed-image default. Repeatable; refused with `--dev` |
 | `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
 | `mvmctl machine stop [name...]` | Stop one or more VMs by name, or `--all` |
-| `mvmctl ls` | List running VMs (aliases: `ps`, `status`) |
-| `mvmctl ls -a` | Show all VMs including stopped |
-| `mvmctl ls --json` | Output as JSON |
+| `mvmctl machine ls` | List every microVM: persistent machines and running transients (alias: `ps`) |
+| `mvmctl machine ls -a` | Also show transient machines that are no longer running |
+| `mvmctl machine ls --json` | Output as JSON |
 | `mvmctl machine forward <name> -p PORT` | Forward a port from a running VM to localhost |
 | `mvmctl machine logs <name>` | View guest console logs (`-f` to follow, `-n` for line count) |
 | `mvmctl machine logs <name> --hypervisor` | View Firecracker hypervisor logs |

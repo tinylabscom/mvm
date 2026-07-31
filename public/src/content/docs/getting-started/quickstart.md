@@ -82,7 +82,7 @@ in-repo flakes.
 ## 3. Day-to-Day Commands
 
 ```bash
-mvmctl ls         # List running VMs (aliases: ps, status)
+mvmctl machine ls # List every microVM (alias: ps)
 mvmctl machine stop --all       # Stop all running VMs
 mvmctl doctor     # Check system dependencies and configuration
 mvmctl machine console vm # Interactive shell into a running VM (PTY-over-vsock)

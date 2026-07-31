@@ -35,6 +35,33 @@ workload) and the SDK-only `run` transport, kept but hidden from
 `--help`, retained solely because the Python/TS SDKs shell to it as their
 launch mechanism — not a user-facing command.
 
+### One listing, over every store
+
+`machine ls` (alias `ps`) is the only listing verb. There is no top-level
+`ls`.
+
+A microVM is described by three stores and none is complete on its own:
+the persisted spec registry (machines created by name), the VM name
+registry, and the live per-backend state-dir scan. The historical split —
+a top-level `ls` reading the live scan and a `machine ls` reading the spec
+registry — meant neither command answered "what do I have?". A running
+transient VM appeared only in the former, a stopped persistent machine
+only in the latter, and the two listings shared no rows.
+
+`machine ls` joins them by name and labels each row's `KIND`:
+
+- **persistent** — backed by a spec, listed whether or not it is booted,
+  because the spec is the only record that it exists.
+- **transient** — live only (a `machine run`, a direct boot). It exists
+  only while it runs, so a stopped one is leftover state and is hidden
+  unless `--all` is passed.
+
+`--json` keeps the shape SDK facades already parse: the persisted spec
+flattened at the top level, with `status` (snake_case) and `build_mode`
+beside it. `Sandbox.connect(id)` reads `build_mode` from this listing to
+inherit the dev-only exec guard, so a transient row resolves it too and
+fails closed to `prod`.
+
 ### Image source is a flag, not a command
 
 `machine run`, `machine create`, and `machine build` accept the source
@@ -68,7 +95,7 @@ command, not separate verbs:
 ### Hidden internals, visible daily drivers
 
 `machine`, `build`, `kernel`, `init`, `doctor`, plus a handful of
-reporting verbs (`ls`, `explain`, `prepare`, `pack`, `bootstrap`) are the
+reporting verbs (`explain`, `prepare`, `pack`, `bootstrap`) are the
 visible top-level surface. Every other historical top-level command —
 `env`, `manifest`, `image`, `storage`, `ops`, `network`, `catalog`,
 `cache`, `pool`, `reconcile`, `secret`, `bundle`, `trust`, `deps`,

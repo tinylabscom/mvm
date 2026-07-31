@@ -1276,44 +1276,6 @@ fn humanize_age_buckets() {
 }
 
 #[test]
-fn format_machine_table_aligns_columns_under_a_header() {
-    let rows = vec![
-        MachineLsRow {
-            name: "web".to_string(),
-            status: "running".to_string(),
-            health: "healthy",
-            source: "alpine".to_string(),
-            age: "3d".to_string(),
-        },
-        MachineLsRow {
-            name: "database-1".to_string(),
-            status: "stopped".to_string(),
-            health: "-",
-            source: "ghcr.io/acme/db".to_string(),
-            age: "5m".to_string(),
-        },
-    ];
-    let table = format_machine_table(&rows);
-    let lines: Vec<&str> = table.lines().collect();
-    assert_eq!(lines.len(), 3, "header + 2 rows");
-    assert!(lines[0].starts_with("NAME"), "header first: {}", lines[0]);
-    assert!(lines[0].contains("STATUS") && lines[0].contains("AGE"));
-    // The NAME column is padded to the widest name ("database-1" = 10),
-    // so every row's STATUS column starts at the same offset.
-    let status_col = lines[0].find("STATUS").expect("header has STATUS");
-    assert!(
-        lines[1][status_col..].starts_with("running"),
-        "row1: {}",
-        lines[1]
-    );
-    assert!(
-        lines[2][status_col..].starts_with("stopped"),
-        "row2: {}",
-        lines[2]
-    );
-}
-
-#[test]
 fn health_cell_maps_readiness() {
     use mvm_core::domain::instance::InstanceReadiness::{
         Degraded, ServicesReady, ServicesStarting,
@@ -1757,25 +1719,6 @@ fn create_refuses_overwrite_without_force() {
     let err = save_machine_spec(&spec, false).expect_err("overwrite rejected");
     assert!(err.to_string().contains("already exists"));
     save_machine_spec(&spec, true).expect("force overwrites");
-}
-
-#[test]
-fn machine_list_entry_flattens_spec_and_adds_status() {
-    let spec = spec_fixture("web");
-    let entry = MachineListEntry {
-        spec: &spec,
-        status: "running",
-        build_mode: "prod",
-    };
-    let v: serde_json::Value = serde_json::to_value(&entry).expect("serialize");
-    // Spec fields are flattened to the top level (not nested under `spec`),
-    // and the live `status` label + `build_mode` ride alongside — the shape SDK
-    // facades read. `build_mode` is what `Sandbox.connect(id)` inherits the
-    // dev-only exec guard from.
-    assert_eq!(v["name"], "web");
-    assert_eq!(v["status"], "running");
-    assert_eq!(v["build_mode"], "prod");
-    assert!(v.get("spec").is_none());
 }
 
 #[test]

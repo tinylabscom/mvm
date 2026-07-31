@@ -1407,16 +1407,13 @@ fn test_parse_port_spec_invalid() {
 // hidden as the SDK Sandbox transport (`run_kept_hidden_as_sdk_transport`).
 // -------------------------------------------------------------------------
 
+/// Listing is `machine ls` alone. A top-level `ls` (and the `ps` it once
+/// aliased) would be a second listing over a different store — the split this
+/// command surface exists to remove.
 #[test]
-fn test_ls_command() {
-    let cli = Cli::try_parse_from(["mvmctl", "ls"]).unwrap();
-    assert!(matches!(cli.command, Commands::Ls(_)));
-}
-
-#[test]
-fn test_ps_verb_is_unrecognized() {
-    let result = Cli::try_parse_from(["mvmctl", "ps"]);
-    assert!(result.is_err(), "`ps` was dropped in plan 40");
+fn top_level_listing_verbs_are_unrecognized() {
+    assert!(Cli::try_parse_from(["mvmctl", "ls"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "ps"]).is_err());
 }
 
 #[test]
@@ -4068,7 +4065,7 @@ fn state_touching_commands_trigger_entry_convergence() {
     assert!(touches(&["mvmctl", "machine", "pause", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "save", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "restore", "ckpt-myvm"]));
-    assert!(touches(&["mvmctl", "ls"]));
+    assert!(touches(&["mvmctl", "machine", "ls"]));
 }
 
 #[test]
@@ -4077,9 +4074,9 @@ fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
     assert!(!touches(&["mvmctl", "catalog", "list"]));
     assert!(!touches(&["mvmctl", "trust", "audit", "tail"]));
     assert!(!touches(&["mvmctl", "cache", "info"]));
-    // `ls --all` must preserve registry-only stopped rows for rendering.
-    assert!(!touches(&["mvmctl", "ls", "--all"]));
-    assert!(!touches(&["mvmctl", "ls", "--all", "--json"]));
+    // `machine ls --all` must preserve registry-only stopped rows for rendering.
+    assert!(!touches(&["mvmctl", "machine", "ls", "--all"]));
+    assert!(!touches(&["mvmctl", "machine", "ls", "--all", "--json"]));
     // Foreground transient image runs are throwaway launches. They must not
     // auto-resume unrelated dev/persistent machines before booting the image.
     assert!(!touches(&[
@@ -4108,10 +4105,10 @@ fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
 
 #[test]
 fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
-    // Regression: `ls --json` runs reconcile-on-entry before dispatch; if
-    // chrome is still stdout-routed, a dev-VM hint can precede the JSON array.
+    // Regression: `machine ls --json` runs reconcile-on-entry before dispatch;
+    // if chrome is still stdout-routed, a dev-VM hint can precede the JSON.
     assert!(emits_machine_readable_stdout(&[
-        "mvmctl", "ls", "--all", "--json"
+        "mvmctl", "machine", "ls", "--all", "--json"
     ]));
     // `mvmctl up` is retired; `run` survives hidden as the SDK transport and
     // keeps its `--json` reservation. The user-facing machine-readable channel
@@ -4133,7 +4130,7 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
         "mvmctl", "machine", "snapshot", "ls", "--json"
     ]));
 
-    assert!(!emits_machine_readable_stdout(&["mvmctl", "ls"]));
+    assert!(!emits_machine_readable_stdout(&["mvmctl", "machine", "ls"]));
     // `mvmctl up` is retired; `up_removed` pins the removal separately.
 }
 

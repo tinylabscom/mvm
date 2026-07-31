@@ -11,7 +11,7 @@ mvmctl build --flake .
 mvmctl up --flake . --cpus 2 --memory 1024
 
 # Confirm it's running
-mvmctl ls`;
+mvmctl machine ls`;
 
 const nixFlake = `{
   inputs = {
