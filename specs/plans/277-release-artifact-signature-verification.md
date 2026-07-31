@@ -147,3 +147,38 @@ is reintroduced and green when restored.
 The cost, stated plainly: a host verifying by hand needs cosign >= v2.4 (when
 `--new-bundle-format` landed). There is no legacy fallback and that is
 intentional.
+
+## Amendment (2026-07-31, second) — close the loop before a release, not after
+
+Everything above is proven against staged fixtures and static workflow
+assertions. Nothing had ever exercised the real chain — Nix build → tarball →
+`--new-bundle-format` sign → attach → fetch → sha256 → signature → extract →
+install → resolve — because no published release has ever carried these
+tarballs. The first real run would have been a `v*` tag push, and because the
+ladder is fail-closed, a mistake there strands every download rather than
+degrading.
+
+Two lanes now cover it, at different costs and different times:
+
+- **`pack-signing-smoke.yml`** (dispatch) signs a release-shaped tarball with the
+  exact `cosign sign-blob --new-bundle-format` invocation `release.yml` uses and
+  feeds the real bundle through the downloader's verifier via the
+  `verify-release-archive-signature` example. A companion step asserts a
+  *legacy* bundle is **refused** — without it the gate would still pass if the
+  verifier ever silently accepted both shapes, and would be measuring nothing.
+  Scope: the signature-format contract, against a real bundle. Extraction,
+  manifest re-check, install, and resolve stay fixture-covered.
+
+- **`release.yml`** runs the whole ladder over its own artifacts, after signing
+  and before `gh release create`, via the `download-release-artifact` example
+  over a `file://` URL. That is the one context where the signing identity
+  genuinely is the tagged release workflow's, so it needs no trust override.
+  A missing artifact is skipped — image jobs are best-effort — but an artifact
+  that is present and cannot be consumed fails the release before publish.
+
+`verify_release_archive_bytes` is the seam that makes the first lane possible:
+the identity set is a parameter, the same shape `mvm_core::packs::verify` takes
+a `KeylessTrust`. Production always passes `release_trust`'s set.
+
+`tests/release_assets.rs::the_release_consumes_its_own_artifacts_before_publishing_them`
+pins the ordering so the self-check cannot drift after signing or before publish.

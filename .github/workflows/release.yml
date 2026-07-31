@@ -752,6 +752,67 @@ jobs:
             echo "Signed: ${blob}"
           done
 
+      # Consume what we are about to publish, before publishing it.
+      #
+      # The runtime overlay and SDK sidecar are acquired by an installed mvmctl
+      # through a fail-closed ladder: checksum, cosign signature, safe-extract,
+      # inner-manifest re-check, atomic install, resolve. Every rung refuses
+      # rather than degrades, so an artifact this pipeline builds slightly wrong
+      # does not degrade the user experience — it strands every download.
+      #
+      # This runs that exact production path over the staged artifacts via a
+      # file:// URL. It is the only place the identity genuinely is this tagged
+      # release workflow's, so it needs no trust override and proves the whole
+      # chain rather than one rung. A missing artifact is skipped (image jobs
+      # are best-effort and the release gates only on the binary build); a
+      # PRESENT artifact that cannot be consumed fails the release here.
+      - name: Verify the published artifacts survive the consumer path
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          VERSION="${TAG_NAME#v}"
+          STAGE="consumer-check/v${VERSION}"
+          mkdir -p "${STAGE}"
+
+          checked=0
+          for kind in runtime-overlay sdk-sidecar; do
+            for arch in aarch64 x86_64; do
+              archive="artifacts/${kind}-${arch}.tar.gz"
+              [ -f "${archive}" ] || continue
+              for suffix in "" ".sha256" ".bundle"; do
+                src="${archive}${suffix}"
+                if [ ! -f "${src}" ]; then
+                  echo "::error::${src} is missing — a published archive without its checksum and signature cannot be acquired" >&2
+                  exit 1
+                fi
+                cp "${src}" "${STAGE}/"
+              done
+
+              case "${kind}" in
+                runtime-overlay) example_kind=overlay ;;
+                sdk-sidecar)     example_kind=sidecar ;;
+              esac
+              echo "Consuming ${kind}-${arch} through the production download path..."
+              cargo run --release -p mvm-build --example download-release-artifact \
+                --features manifest-verify -- \
+                --kind "${example_kind}" \
+                --base-url "file://$(pwd)/consumer-check" \
+                --version "${VERSION}" \
+                --arch "${arch}" \
+                --cache "$(mktemp -d)"
+              checked=$((checked + 1))
+            done
+          done
+
+          if [ "${checked}" -eq 0 ]; then
+            echo "::warning::no runtime-overlay or sdk-sidecar archives present — image jobs likely failed; publishing without them" >&2
+          else
+            echo "ok: ${checked} artifact(s) verified through the end-user acquisition path."
+          fi
+
       # Plan 36 / ADR 005: cosign-keyless-sign each per-(arch, variant)
       # SignedManifest JSON. The bundle (.bundle) carries the signature,
       # the Fulcio short-lived cert, and the Rekor inclusion proof —

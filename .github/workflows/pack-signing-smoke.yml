@@ -159,3 +159,61 @@ jobs:
           cargo run --release -p mvm-core --example verify-pack-revocation-list --features manifest-verify -- \
             --list smoke/pack-revocations.json --bundle smoke/pack-revocations.json.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+      - name: Round-trip a release archive through the downloader's verifier
+        # The runtime overlay and SDK sidecar are cosign-verified before an
+        # installed mvmctl will extract them, and the verifier parses ONLY the
+        # Sigstore bundle shape. Offline fixtures cannot cover that contract —
+        # a valid signature needs Fulcio and Rekor — so without this step a
+        # bundle-format regression in release.yml stays invisible until a real
+        # release strands every download, fail-closed, for every user.
+        #
+        # Scope, stated plainly: this proves the SIGNATURE FORMAT round-trip
+        # against a real bundle. Extraction, manifest re-check, atomic install,
+        # and resolve are covered by the offline suite; release.yml runs the
+        # full ladder over its own artifacts before publishing them.
+        run: |
+          set -euo pipefail
+          # A tarball shaped like the one the release publishes. Contents are
+          # irrelevant to a signature check, but keeping the real member set
+          # means this fails the same way a real artifact would.
+          mkdir -p smoke/sidecar
+          printf 'dummy-ext4'   > smoke/sidecar/sdk.ext4
+          printf '0.0.0-smoke'  > smoke/sidecar/VERSION
+          ( cd smoke/sidecar && sha256sum sdk.ext4 VERSION > checksums-sha256.txt )
+          tar -C smoke/sidecar -czf smoke/sdk-sidecar-x86_64.tar.gz \
+            sdk.ext4 VERSION checksums-sha256.txt
+
+          # The exact invocation release.yml signs release archives with.
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/sdk-sidecar-x86_64.tar.gz.bundle \
+            smoke/sdk-sidecar-x86_64.tar.gz
+
+          cargo run --release -p mvm-build --example verify-release-archive-signature \
+            --features manifest-verify -- \
+            --archive smoke/sdk-sidecar-x86_64.tar.gz \
+            --bundle smoke/sdk-sidecar-x86_64.tar.gz.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+      - name: A legacy-format bundle must be refused
+        # The failure this lane exists to catch, asserted directly: signing
+        # without --new-bundle-format must NOT verify. Without this, the step
+        # above would still pass if the verifier ever silently accepted both
+        # shapes, and the gate would be measuring nothing.
+        run: |
+          set -euo pipefail
+          cosign sign-blob \
+            --yes \
+            --bundle smoke/legacy.bundle \
+            smoke/sdk-sidecar-x86_64.tar.gz
+          if cargo run --release -p mvm-build --example verify-release-archive-signature \
+            --features manifest-verify -- \
+            --archive smoke/sdk-sidecar-x86_64.tar.gz \
+            --bundle smoke/legacy.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"; then
+            echo "::error::a legacy-format bundle verified — the format gate is not discriminating" >&2
+            exit 1
+          fi
+          echo "ok: legacy-format bundle refused, as the release contract requires"
