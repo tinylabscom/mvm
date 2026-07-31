@@ -2,7 +2,10 @@
 
 **Status:** implemented (thin HVF-runner delegation + kernel artifact resolution); live e2e validation remaining.
 **Owner:** mvm core.
-**Depends on:** universal initramfs + `ActivateEnvironment` (PR #1914).
+**Depends on:** universal initramfs + `ActivateEnvironment` (PR #1914) —
+the initramfs itself is a deterministic cargo artifact (reproducible
+`cargo zigbuild` of the pinned agent source + deterministic cpio +
+content hash), not a Nix build.
 
 > **Design history.** Stage 1 was the fail-closed backend skeleton. Stage 2
 > booted Apple's container kernel + the `initfs.ext4` carrying `/sbin/vminitd`
