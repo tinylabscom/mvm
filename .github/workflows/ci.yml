@@ -1,13 +1,13 @@
 name: CI
 
 on:
-  # Keep pull-request validation cheap and predictable. This workflow is
-  # intentionally capped at four runner jobs:
-  # lint, test, MCP smoke, and Nix eval. Expensive platform, live-VM,
-  # OCI ratification, security, Windows, and release artifact jobs live
-  # in release/manual workflows.
+  # Keep pull-request validation cheap and predictable. On a pull request this
+  # workflow runs two jobs: lint and test. MCP smoke and Nix eval run only in
+  # the merge queue and on manual dispatch, so ordinary PR updates do not pay
+  # for them on every push. Expensive platform, live-VM, OCI ratification,
+  # security, Windows, and release artifact jobs live in release/manual workflows.
   pull_request:
-  # Required for the merge queue: checks must run against the merge_group event.
+  # Required for the merge queue: all checks must run against the merge_group event.
   merge_group:
   workflow_dispatch:
 
@@ -474,6 +474,8 @@ jobs:
 
   mcp-server-smoke:
     name: MCP server stdio roundtrip
+    # Not needed on every PR push; the merge queue exercises it once before merge.
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -503,6 +505,9 @@ jobs:
 
   nix-flake-check:
     name: Nix flake check (Linux eval)
+    # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
+    # not on every PR update.
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
