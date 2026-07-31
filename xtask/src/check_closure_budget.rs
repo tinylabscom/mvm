@@ -59,11 +59,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// `vmm-sys-util` 0.12.1 stays, so the closure target counts both) — while
 /// `vm-memory`/`log` are already present. Lower it freely as deps drop.
 ///
-/// 279 (was 272): the Apple Container backend's vminitd gRPC client
-/// (`prost`/`prost-types`/`h2`/`http` + their small transitive set) — the
-/// SandboxContext transport the backend needs in the default build. The
-/// measured delta is +7. Lower it freely as deps drop.
-const CLOSURE_BUDGET: usize = 279;
+/// 270 (was 279): the Apple Container backend's pivot to kernel-on-HVF
+/// removed the vminitd gRPC client (`prost`/`prost-types`/`h2`/`http`) and
+/// their exclusive transitive set from the default closure. Lower it freely
+/// as deps drop.
+const CLOSURE_BUDGET: usize = 270;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

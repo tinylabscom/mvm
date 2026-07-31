@@ -40,17 +40,73 @@ pub fn booted_with_universal_initramfs(config: &VmStartConfig) -> bool {
     std::path::Path::new(initrd).starts_with(&cache_root)
 }
 
+/// How long activation waits for the guest agent to come up before failing.
+/// The HVF boot confirms the VM process (pid file) in well under a second,
+/// but the guest agent takes a few seconds to mount the early filesystems and
+/// bind its control port, so a single immediate handshake lands before the
+/// agent is listening. Mirrors the Firecracker driver's agent-ready wait.
+const ACTIVATION_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Activate a workload that booted with the universal initramfs.
 ///
 /// Sends [`ActivateEnvironment`] over the agent vsock port and waits for an
 /// ACK. If the guest replies with an error or an unexpected response, the
-/// boot fails closed.
+/// boot fails closed. The guest agent takes a few seconds to come up after
+/// the VM process starts, so the connect+handshake retries on transient
+/// "agent not listening yet" failures until [`ACTIVATION_READY_TIMEOUT`]
+/// rather than failing the first attempt; a genuine activation rejection
+/// (an `ActivateEnvironmentError` or an unexpected response) is returned
+/// immediately, never retried.
 pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<()> {
     let env = build_activation_environment(config)?;
+    let deadline = std::time::Instant::now() + ACTIVATION_READY_TIMEOUT;
+    let mut attempt = 0u32;
+    loop {
+        attempt = attempt.saturating_add(1);
+        match activate_once(vm, &env) {
+            Ok(()) => return Ok(()),
+            Err(e) if is_retryable_activation_error(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(activation_retry_delay(attempt));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// One connect + handshake + `ActivateEnvironment` round-trip.
+fn activate_once(vm: &dyn RunningVm, env: &ActivateEnvironment) -> Result<()> {
     let mut stream = vm
         .vsock_connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .context("connect to guest agent for activation")?;
-    activate_over_stream(&mut stream, &env)
+    activate_over_stream(&mut stream, env)
+}
+
+/// Whether an activation failure is a transient "agent isn't listening yet"
+/// transport error worth retrying (as opposed to a real rejection or bug).
+fn is_retryable_activation_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::AddrNotAvailable
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        })
+    })
+}
+
+/// Backoff between activation attempts: grows from 50 ms, capped at 500 ms.
+fn activation_retry_delay(attempt: u32) -> std::time::Duration {
+    let scaled = 50u64.saturating_mul(1u64 << attempt.min(16));
+    std::time::Duration::from_millis(scaled.min(500))
 }
 
 /// Send a pre-built [`ActivateEnvironment`] over an already-connected
@@ -111,9 +167,7 @@ pub fn build_container_activation_environment(
 /// overlay triple is present — it is always verity-sealed.  Custom volumes
 /// are translated to virtio-fs tags when the config carries directory shares.
 ///
-/// `pub(crate)` so the Apple Container backend builds the identical message
-/// for its vminitd injection instead of re-rolling it.
-pub(crate) fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnvironment> {
+fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnvironment> {
     // Verity is keyed off the hash device: `verity_path` set means the
     // backend attached the Merkle sidecar at the hash slot, so the root mounts
     // as dm-verity and must carry a roothash. No sidecar device means a plain

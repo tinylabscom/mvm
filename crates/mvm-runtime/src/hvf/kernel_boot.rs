@@ -737,14 +737,12 @@ unsafe fn run(
                 v.set_broker_activity(egress_active.clone());
                 v.set_broker_endpoint(broker);
             }
-            // Dev-only interactive console (`machine run -it`) — and, on the
-            // Apple Container boot, vminitd's control channel: bind one host
-            // listener per guest data port so the driver/client can reach
-            // the in-guest listener. The list is populated only for a
-            // `dev_console` machine or the opt-in container boot; a sealed
-            // prod config carries none, so nothing is bound (claim 15).
-            // Shares the heartbeat counter so an open console stream keeps
-            // the loop waking an idle guest.
+            // Dev-only interactive console (`machine run -it`): bind one host
+            // listener per guest console data port so the console driver can reach
+            // the agent-allocated PTY channel. The list is populated only for a
+            // `dev_console` machine; a sealed prod config carries none, so nothing
+            // is bound (claim 15). Shares the heartbeat counter so an open console
+            // stream keeps the loop waking an idle guest.
             if !console_data_sockets.is_empty() {
                 v.set_console_activity(egress_active.clone());
                 let ports = console_data_sockets

@@ -29,7 +29,7 @@ use crate::{firecracker, microvm};
 /// `examples/hvf-backend-*.rs` witnesses, unreached via this enum. One alias
 /// keeps the long generic instantiation readable at the enum variant and its
 /// construction site.
-type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;
+pub(crate) type HvfRunner = WorkloadRunner<HvfDriver, RealEndpointSpawner, RealBrokerRegistrar>;
 
 /// Construct the hvf VMM's workload runner. Like [`libkrun_runner`] and
 /// [`fc_runner`] the runner is not const-constructible, so this helper is the
@@ -434,13 +434,12 @@ pub enum AnyBackend {
     /// used, not at construction.
     Wasm(WasmBackend),
     /// Apple Container backend — see [`crate::apple_container_backend`].
-    /// Boots Apple's container kernel + vminitd initfs on the in-house HVF
-    /// supervisor. Selectable only via explicit
+    /// The HVF workload runner with Apple's prebuilt container kernel
+    /// substituted for the boot image. Selectable only via explicit
     /// `--hypervisor apple-container` (alias `container`); `auto_select`
     /// never falls through here. Always constructible and side-effect free;
-    /// `start` fails closed with a typed error (missing artifact,
-    /// unsupported config, or the final agent-bring-up milestone) rather
-    /// than silently falling back.
+    /// a missing kernel artifact fails `start` closed with a typed error
+    /// naming the fetch source.
     AppleContainer(AppleContainerBackend),
     /// Docker shared-kernel container dev tier — see
     /// [`crate::docker_backend`]. Selectable only via explicit
@@ -527,11 +526,16 @@ impl AnyBackend {
             return Self::Firecracker(fc_runner());
         }
 
-        // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`); the hvf path
-        //    routes egress to its per-VM gating endpoint over vsock, where
-        //    claim-10 and claims 12/13 are enforced — no guest-NIC helper
-        //    sidecar.
+        // 2. macOS 26+ Apple Silicon → the HVF VMM. Prefer the Apple
+        //    Container backend when its container kernel is cached: it boots
+        //    Apple's prebuilt container kernel through the same HVF runner,
+        //    so a plain `machine run` uses it without `--hypervisor`. Without
+        //    the artifact, fall back to the workload-kernel hvf runner.
         if plat.is_hvf_default_tier() {
+            let apple = AppleContainerBackend::new();
+            if apple.is_available().unwrap_or(false) {
+                return Self::AppleContainer(apple);
+            }
             return Self::Hvf(hvf_runner());
         }
 
@@ -811,8 +815,8 @@ impl AnyBackend {
     ///
     /// Each backend converts `VmStartConfig` into its own internal
     /// configuration (e.g., Firecracker allocates a VmSlot and builds
-    /// a `FlakeRunConfig`; Apple Container assembles an HVF supervisor
-    /// config for the container kernel + vminitd initfs).
+    /// a `FlakeRunConfig`; Apple Container substitutes Apple's prebuilt
+    /// container kernel into the HVF runner's launch).
     pub fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         self.inner().start(config)
     }
@@ -1229,11 +1233,17 @@ mod tests {
     }
 
     #[test]
-    fn auto_select_never_returns_apple_container() {
+    fn auto_select_skips_apple_container_without_its_kernel_artifact() {
+        // With an isolated, empty cache there is no container kernel, so
+        // auto_select must not pick the apple-container backend on any
+        // platform — on the HVF tier it falls back to the plain hvf runner.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
         assert_ne!(
             AnyBackend::auto_select().kind(),
             mvm_core::vm_backend::BackendKind::AppleContainer,
-            "auto_select must never fall through to the apple-container skeleton"
+            "without the container kernel artifact, auto_select must not select apple-container"
         );
     }
 

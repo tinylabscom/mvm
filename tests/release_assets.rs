@@ -80,6 +80,54 @@ fn the_release_job_attaches_the_sdk_sidecar_assets() {
     }
 }
 
+/// The downloader fetches `<asset>.bundle`; the release has to attach it under
+/// exactly that name or every download refuses as unsigned.
+#[test]
+fn release_attaches_the_signature_bundle_the_verifier_fetches() {
+    let workflow = release_workflow();
+    let sidecar = mvmctl::build::sdk_sidecar::SdkSidecarArtifactNames::for_arch("*");
+    let overlay = mvmctl::build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch("*");
+    for asset in [sidecar.archive, overlay.archive] {
+        let bundle = mvmctl::build::release_signature::bundle_asset_name(&asset);
+        assert!(
+            workflow.contains(&format!("artifacts/{bundle}")),
+            "the release job's asset list must attach {bundle:?}"
+        );
+    }
+}
+
+/// Every signed blob in the release uses the one bundle format this project
+/// ships: `--new-bundle-format`.
+///
+/// The in-binary Rust sigstore stack parses only that shape, and
+/// `cosign verify-blob --bundle` documents it as the preferred input — so a
+/// single format serves both consumers and there is no legacy fallback to keep
+/// in step. A bare `--bundle` left behind would sign an artifact the in-binary
+/// verifier cannot read, and nothing surfaces that until a real release ships.
+#[test]
+fn every_signed_release_blob_uses_the_one_bundle_format() {
+    let workflow = release_workflow();
+    let mut checked = 0usize;
+    for (offset, _) in workflow.match_indices("cosign sign-blob") {
+        // The invocation is a line-continued shell command; its flags run up to
+        // the first line that is not a continuation.
+        let invocation: String = workflow[offset..]
+            .lines()
+            .take_while(|line| line.trim_end().ends_with('\\'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            invocation.contains("--new-bundle-format"),
+            "every `cosign sign-blob` must use --new-bundle-format; found one without it:\n{invocation}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 4,
+        "expected to find the release's signing invocations, found {checked}"
+    );
+}
+
 /// Both published architectures must be built, or a whole platform's users get
 /// the fail-closed refusal this artifact exists to prevent.
 #[test]

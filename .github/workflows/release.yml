@@ -730,22 +730,27 @@ jobs:
       - name: Sign release tarballs and SBOM
         shell: bash
         run: |
-          # Sign each tarball — keyless OIDC, no secret key needed.
-          # Produces a .bundle file per tarball containing signature + certificate chain.
-          for tarball in artifacts/*.tar.gz; do
+          set -euo pipefail
+          shopt -s nullglob
+
+          # One bundle format for every signed blob in this release:
+          # --new-bundle-format, the Sigstore bundle carrying
+          # verificationMaterial. Both consumers read it — the in-binary Rust
+          # sigstore stack (mvm_build::release_signature -> image_verify) parses
+          # ONLY this shape, and `cosign verify-blob --bundle` documents it as
+          # the preferred input, so install.sh / `mvmctl update` /
+          # verify-release-assets.sh keep working unchanged.
+          #
+          # Requires cosign >= v2.4 on any host that verifies by hand; that is
+          # the floor this project targets and there is no legacy fallback.
+          for blob in artifacts/*.tar.gz sbom.cdx.json; do
             cosign sign-blob \
               --yes \
-              --bundle "${tarball}.bundle" \
-              "${tarball}"
-            echo "Signed: ${tarball}"
+              --new-bundle-format \
+              --bundle "${blob}.bundle" \
+              "${blob}"
+            echo "Signed: ${blob}"
           done
-
-          # Sign the SBOM
-          cosign sign-blob \
-            --yes \
-            --bundle sbom.cdx.json.bundle \
-            sbom.cdx.json
-          echo "Signed: sbom.cdx.json"
 
       # Plan 36 / ADR 005: cosign-keyless-sign each per-(arch, variant)
       # SignedManifest JSON. The bundle (.bundle) carries the signature,
@@ -807,6 +812,8 @@ jobs:
             artifacts/runtime-overlay-*.tar.gz.sha256
             artifacts/sdk-sidecar-*.tar.gz
             artifacts/sdk-sidecar-*.tar.gz.sha256
+            artifacts/runtime-overlay-*.tar.gz.bundle
+            artifacts/sdk-sidecar-*.tar.gz.bundle
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*

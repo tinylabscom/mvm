@@ -94,6 +94,31 @@ pub enum RuntimeOverlayError {
     #[error("checksum manifest at {checksums_url} did not list an entry for {name}")]
     ChecksumMissing { name: String, checksums_url: String },
 
+    /// The release published an archive with no signature bundle beside it.
+    /// Refused rather than treated as unsigned: a digest fetched over the same
+    /// channel as the archive authenticates the transport, not the publisher.
+    #[error(
+        "release archive {asset} has no signature bundle at {bundle_url} — \
+         refusing to install an unsigned artifact"
+    )]
+    SignatureMissing {
+        /// Published asset name that could not be authenticated.
+        asset: String,
+        /// Where the bundle was expected.
+        bundle_url: String,
+    },
+
+    /// The archive did not verify under any accepted release signing identity.
+    /// The reason is the verifier's own message; neither archive nor bundle
+    /// bytes are echoed, so this is safe to surface verbatim.
+    #[error("release archive {asset} failed signature verification: {reason}")]
+    SignatureInvalid {
+        /// Published asset name whose signature was rejected.
+        asset: String,
+        /// Verifier's description of the failure.
+        reason: String,
+    },
+
     /// A downloaded release tarball was malformed or unsafe to extract.
     /// Always fail closed — tar extraction is an attack surface.
     #[error("release archive invalid at {archive_path:?}: {reason}")]
@@ -873,15 +898,24 @@ pub fn download_runtime_overlay(
     // spend bandwidth on the payload.
     let expected = fetch_expected_hashes(&archive_checksum_url, &[&names.archive])?;
 
-    // Step 2: download the tarball into a temp dir, verify the tarball's
-    // checksum, then safely extract it into canonical filenames so
-    // `install_overlay_into_cache` can consume the extracted directory
-    // directly.
+    // Step 2: download the tarball into a temp dir, prove it against both the
+    // digest and the release signing identity, then safely extract it into
+    // canonical filenames so `install_overlay_into_cache` can consume the
+    // extracted directory directly. The signature rung sits before extraction
+    // so an unauthenticated tar is never parsed.
     let tmp = tempfile::tempdir()?;
     let stage = tmp.path();
     let archive_local = stage.join(&names.archive);
     curl_download(&format!("{base}/{}", names.archive), &archive_local)?;
     verify_file_sha256(&archive_local, &names.archive, expected.get(&names.archive))?;
+    crate::release_signature::verify_release_archive_signature(
+        &crate::release_signature::ReleaseSignatureRequest {
+            base_url: &base,
+            asset: &names.archive,
+            archive_path: &archive_local,
+            version,
+        },
+    )?;
     extract_release_archive(&archive_local, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
     verify_overlay_dir_integrity(stage)?;
 
@@ -1769,6 +1803,10 @@ mod tests {
 
         let base_url = format!("file://{}", upstream.path().display());
         env.set("MVM_OVERLAY_BASE_URL", &base_url);
+        // A valid Sigstore signature cannot be minted offline, and this test is
+        // about the digest, extraction, and install rungs. The signature rung
+        // has its own witnesses in `crate::release_signature` and below.
+        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
         let cache = TempDir::new().unwrap();
         let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
@@ -1794,6 +1832,53 @@ mod tests {
         assert_eq!(
             std::fs::read(cache_dir.join("overlay.ext4")).unwrap(),
             ext4_bytes
+        );
+    }
+
+    /// The overlay carries the same signature rung the sidecar does: a release
+    /// that publishes an archive with no signature beside it is refused, and
+    /// nothing lands in the cache — even though its digest matches.
+    #[test]
+    fn download_runtime_overlay_refuses_an_unsigned_archive() {
+        let mut env = TestEnv::new();
+        let upstream = TempDir::new().unwrap();
+        let release_dir = upstream.path().join("v9.9.9");
+        std::fs::create_dir_all(&release_dir).unwrap();
+
+        let archive_bytes = b"not-even-a-real-archive".to_vec();
+        write_fixture(
+            &release_dir,
+            "runtime-overlay-aarch64.tar.gz",
+            &archive_bytes,
+        );
+        write_fixture(
+            &release_dir,
+            "runtime-overlay-aarch64.tar.gz.sha256",
+            format!(
+                "{}  runtime-overlay-aarch64.tar.gz\n",
+                sha256_hex(&archive_bytes)
+            )
+            .as_bytes(),
+        );
+
+        env.set(
+            "MVM_OVERLAY_BASE_URL",
+            format!("file://{}", upstream.path().display()),
+        );
+        env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
+
+        let cache = TempDir::new().unwrap();
+        let err = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path())
+            .expect_err("an unsigned overlay archive must not install");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("signature") || rendered.contains("bundle"),
+            "the refusal must be about the signature: {rendered}"
+        );
+        assert!(
+            !cache.path().join("runtime-overlay/9.9.9/aarch64").exists(),
+            "a refused download must cache nothing"
         );
     }
 

@@ -120,6 +120,10 @@ pub mod pipeline;
 /// Host-side resolver for the mvm runtime overlay disk. Picks the right
 /// ext4 + verity sidecar + roothash for the running mvmctl version and
 /// host arch from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
+/// Cosign-verify a downloaded release archive against the release workflow's
+/// keyless signing identity before anything reads it. Shared by every
+/// release-artifact downloader.
+pub mod release_signature;
 pub mod runtime_overlay;
 /// Acquire the published SDK-sidecar disk for hosts that cannot build one.
 /// Fetches the per-arch release tarball, proves it against the release's

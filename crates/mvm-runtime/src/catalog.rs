@@ -246,10 +246,10 @@ backend_catalog![
         aliases: ["container"],
         constructor: AnyBackend::AppleContainer(AppleContainerBackend::new()),
         tier: Tier2,
-        // No marker of its own: `start` tears down every VM it boots
-        // before returning (the agent bring-up is fail-closed), and a live
-        // one would surface under the HVF supervisor's `hvf.pid` marker,
-        // which the probe already maps to the HVF descriptor.
+        // No marker of its own: this backend IS the HVF runner with a
+        // substituted kernel, so its VMs carry the HVF supervisor's
+        // `hvf.pid` marker, which the probe already maps to the HVF
+        // descriptor (mechanically correct — same supervisor).
         marker_file: None,
         started_vm_probe_order: None,
         list_all: true,

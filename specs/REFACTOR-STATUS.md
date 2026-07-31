@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-07-30
+Last updated: 2026-07-31
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -25,6 +25,16 @@ for detailed scope and acceptance criteria.
         archive-entry validator
   - [x] Reach it from the launch path on the download-mode acquire path; a
         source checkout keeps the fail-closed refusal
+
+- [x] Plan 277 — release-artifact signature verification
+  (`specs/plans/277-release-artifact-signature-verification.md`)
+  - [x] Sign the image tarballs with `--new-bundle-format`, the only shape the
+        in-binary Rust verifier parses; binary tarballs stay legacy for the
+        cosign-CLI consumers (`install.sh`, `mvmctl update`)
+  - [x] `mvm_build::release_signature` — fetch the bundle, verify against the
+        versioned release identity, fail closed with no digest-only downgrade
+  - [x] Wire the rung into both download paths, before extraction
+  - [x] Docs + rollup; closes plan 273's one deferred gap
 
 - [x] Plan 266 — lightweight microVM guest
   (`specs/plans/266-lightweight-microvm-guest.md`)

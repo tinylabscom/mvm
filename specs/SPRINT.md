@@ -289,6 +289,23 @@
       constructor that requests them. 10 downloader unit tests, 5 launch-path
       tests, 4 release-asset gates, and 2 BDD scenarios (acquire-and-boot,
       checksum-drift refusal), taking the BDD suite to 57 scenarios / 279 steps.
+- [x] Plan 277 — cosign-verify the downloaded runtime overlay and SDK sidecar.
+      Closes plan 273's one deferred gap. Both archives are now verified against
+      the release workflow's cosign-keyless signing identity before extraction,
+      through `mvm_core::crypto::image_verify` and the existing
+      `release_trust` root — no new dependency. Two findings shaped it: the
+      published `*.tar.gz.bundle` files are in the legacy cosign format the
+      in-binary Rust verifier *rejects*, so `release.yml`'s signing step is
+      split (binary tarballs keep legacy for the cosign-CLI consumers,
+      image tarballs move to `--new-bundle-format`); and no released version has
+      ever shipped a runtime-overlay tarball, so mandatory verification costs
+      zero compatibility. Fails closed: a build without `manifest-verify`
+      refuses the download rather than downgrading to digest-only, and
+      `MVM_SKIP_COSIGN_VERIFY` — documented but until now never read by any
+      code — is the emergency escape. Drive-by: made
+      `initramfs::resolve_returns_missing_when_cache_empty` hermetic; it read
+      the developer's real `$HOME` cache and failed on any machine that had
+      built an initramfs.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.
@@ -900,6 +917,24 @@ status line and discards the body, so a wget user still needs the host log
 denials through `mvmctl` itself is the follow-up.
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
+
+### Deferred: a dry run should not require a bootable backend
+
+`machine run --dry-run` with egress enabled (`--allow-host` / `--net`) resolves an
+*available* egress-capable backend before printing the plan, so it exits 1 on a
+host with no usable VMM. That makes the command's outcome a fact about the host
+rather than about the request, and it is why two otherwise-valuable hermetic
+scenarios — that a bare `--allow-host <host>` resolves to `<host>:443`, and that
+`--net` resolves to the dev preset — could not be gated: they pass on a developer
+machine and fail on a CI runner, and the reverse assertion has the same problem
+inverted.
+
+Whether that check belongs in a dry run is a real question. A dry run exists to
+show the resolved plan without booting, and needing a bootable backend defeats it
+exactly where it is most useful — CI, a laptop without a VMM, planning a run
+before provisioning. Against that, a plan you could never execute is arguably
+worth refusing. Not decided here, and deliberately not changed inside a test
+change.
 
 ## 5. Definition of done
 

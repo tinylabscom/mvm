@@ -541,12 +541,65 @@ fn run_mutants_for_file(workspace: &Path, file: &SurfaceFile, out_dir: &Path) ->
             caught.display()
         );
     }
+    // Both report files exist and are empty when the baseline failed, so
+    // their presence proves nothing. The counts do.
+    let outcomes_path = out_dir.join("mutants.out").join("outcomes.json");
+    let outcomes = std::fs::read_to_string(&outcomes_path)
+        .with_context(|| format!("reading {}", outcomes_path.display()))?;
+    ensure_mutants_actually_ran(&outcomes, &file.path)?;
+
     let report = if missed.exists() {
         std::fs::read_to_string(&missed).with_context(|| format!("reading {}", missed.display()))?
     } else {
         String::new()
     };
     Ok(parse_missed(&report))
+}
+
+/// Reject a run that never tested a mutant.
+///
+/// When the unmutated tree does not build or its tests fail,
+/// cargo-mutants stops before mutating anything and reports
+/// `cargo test failed in an unmutated tree, so no mutants were tested`.
+/// It still writes `missed.txt` and `caught.txt` — both **empty** — so the
+/// obvious "did it produce a report" guard passes and `parse_missed` on an
+/// empty file yields zero misses. A surface file that contributed no
+/// coverage then reads exactly like one that is fully covered.
+///
+/// That is the failure this whole gate exists to prevent, one level up: a
+/// green result standing in for evidence that was never collected. So the
+/// counts in `outcomes.json` are the signal, not the presence of a file. A
+/// completed run carries `total_mutants`; a baseline failure carries only
+/// an `outcomes` array whose sole entry is the failed `Baseline` scenario.
+fn ensure_mutants_actually_ran(outcomes_json: &str, path: &str) -> Result<u64> {
+    let v: serde_json::Value = serde_json::from_str(outcomes_json)
+        .with_context(|| format!("parsing cargo-mutants outcomes.json for {path}"))?;
+
+    let baseline_failed = v
+        .get("outcomes")
+        .and_then(|o| o.as_array())
+        .is_some_and(|entries| {
+            entries.iter().any(|e| {
+                e.get("scenario").and_then(|s| s.as_str()) == Some("Baseline")
+                    && e.get("summary").and_then(|s| s.as_str()) == Some("Failure")
+            })
+        });
+    if baseline_failed {
+        bail!(
+            "{path}: the unmutated tree failed its own tests, so cargo-mutants tested \
+             no mutants. This file contributed no coverage — it is not clean, it is \
+             unmeasured. Fix the failing tests for its package and re-run."
+        );
+    }
+
+    let Some(total) = v.get("total_mutants").and_then(|t| t.as_u64()) else {
+        bail!(
+            "{path}: cargo-mutants wrote no `total_mutants` count, so the run did not \
+             complete. Treating this as clean would report coverage that was never \
+             measured."
+        );
+    };
+    Ok(total)
 }
 
 fn ensure_cargo_mutants() -> Result<()> {
@@ -962,5 +1015,72 @@ a.rs:5:1: replace x with y
         let surface = resolve_surface(tmp.path()).unwrap();
         assert_eq!(surface.files.len(), 1);
         assert_eq!(surface.files[0].claims, vec![1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod baseline_guard_tests {
+    use super::*;
+
+    /// Verbatim shape cargo-mutants 27.1 writes when the unmutated tree
+    /// fails its own tests: an `outcomes` array carrying only the failed
+    /// Baseline scenario, and no counts at all.
+    const BASELINE_FAILED: &str = r#"{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Failure",
+      "log_path": "log/baseline.log"
+    }
+  ]
+}"#;
+
+    /// The same file from a completed run, trimmed to its counts.
+    const COMPLETED: &str = r#"{
+  "outcomes": [],
+  "total_mutants": 17,
+  "missed": 0,
+  "caught": 17,
+  "timeout": 0,
+  "unviable": 0
+}"#;
+
+    #[test]
+    fn a_failed_baseline_is_an_error_not_a_clean_file() {
+        let err = ensure_mutants_actually_ran(BASELINE_FAILED, "crates/x/src/y.rs")
+            .expect_err("a run that tested no mutants must not read as clean");
+        let msg = err.to_string();
+        assert!(msg.contains("crates/x/src/y.rs"), "{msg}");
+        assert!(msg.contains("unmeasured"), "{msg}");
+    }
+
+    #[test]
+    fn a_completed_run_reports_its_mutant_count() {
+        assert_eq!(
+            ensure_mutants_actually_ran(COMPLETED, "crates/x/src/y.rs").unwrap(),
+            17
+        );
+    }
+
+    /// A run that stopped before writing counts, without a Baseline entry
+    /// to explain why, is still unmeasured.
+    #[test]
+    fn missing_counts_are_an_error() {
+        let err = ensure_mutants_actually_ran(r#"{"outcomes": []}"#, "crates/x/src/y.rs")
+            .expect_err("no total_mutants means the run did not complete");
+        assert!(err.to_string().contains("total_mutants"), "{err}");
+    }
+
+    #[test]
+    fn unparseable_outcomes_are_an_error() {
+        assert!(ensure_mutants_actually_ran("not json", "crates/x/src/y.rs").is_err());
+    }
+
+    /// Zero surviving mutants out of a real total is the genuinely clean
+    /// case and must stay distinguishable from the two above.
+    #[test]
+    fn a_clean_file_is_still_accepted() {
+        assert_eq!(ensure_mutants_actually_ran(COMPLETED, "p").unwrap(), 17);
+        assert!(parse_missed("").is_empty());
     }
 }

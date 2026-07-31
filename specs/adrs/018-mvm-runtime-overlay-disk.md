@@ -92,9 +92,14 @@ roothash reaches the guest, and a malicious host is out of scope by ADR-001.
 A source checkout builds it (`nix build
 ./nix/images/runtime-overlay#sdk-sidecar-image`); a downloaded `mvmctl` fetches
 the per-arch `sdk-sidecar-<arch>.tar.gz` published beside the overlay's tarball
-in the same release, verifies it against the release's `.sha256` sidecar and
-then against the archive's own `checksums-sha256.txt`, and installs it
-stage-then-rename so a crash can never leave a half-written cache entry. The
+in the same release, verifies it against the release's `.sha256` sidecar, then
+against the release workflow's cosign-keyless signing identity, then against the
+archive's own `checksums-sha256.txt`, and installs it stage-then-rename so a
+crash can never leave a half-written cache entry. The signature rung is what
+authenticates the *publisher* rather than the transport — a digest fetched over
+the same channel as the archive is served by whoever serves the archive — and it
+is checked before extraction, so an unauthenticated tar is never parsed. Both
+artifacts carry it, since both become code inside the guest. The
 build-vs-download choice is the overlay's — one resolver, so a contributor whose
 overlay is source-built never silently downloads a sidecar. The download ends
 with a `SdkSidecarResolver::resolve` against the *installed* entry, which is the
