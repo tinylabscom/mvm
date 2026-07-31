@@ -1219,11 +1219,29 @@ mounts the runtime overlay, reaches its guest agent, and `capture_vm_full`
 writes a `vm_full` checkpoint carrying a 512 MiB `memory.bin` — the pool
 populated for the first time. The claim half is still unexercised.
 
-Four blockers now gate this step, not one: BUG-2 and BLOCKER-3 each stop a claim
-from completing at all, BLOCKER-4 lets one complete but returns a child missing
-the host channels a cold boot gets, and the deferred failed-stop hole leaves an
-untracked live VM on the refusal path. The ordered gate list — the one to work
-from — is "What must happen before `standby_pool` can flip to `true`" in
+**Updated by the fifth live run (2026-07-31).** Three boot blockers had to be
+cleared before any Firecracker workload could boot at all — #1948 (merged),
+#1959 and #1961. With those, a guest boots and fully activates, and the claim
+executes for the first time. It is **refused, fail-closed**:
+
+```
+error=claim standby: parent has no signed audit entry;
+      refusing to fork an un-audited parent
+```
+
+Correct behaviour meeting a missing emit: nothing on the spawn path writes the
+`checkpoint.created` entry the claim's parent verification requires, so every
+captured parent is unclaimable by construction (issue #1962). BUG-2 and the
+double-reserve no longer block the claim; BLOCKER-3's boot half is fixed by
+#1959; BLOCKER-4 remains open and unexercised.
+
+Cold boot to activation, measured over 10 reps: median 1837.5 ms (min 1766,
+p90 2027, max 2119, spread 353), 10/10 activated. Warm is **not** measurable
+through the claim path while #1962 stands — the ~60 ms figure is the driver-seam
+restore, not a claim latency.
+
+The ordered gate list — the one to work from — is "What must happen before
+`standby_pool` can flip to `true`" in
 `specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`.
 
 ## Done when
