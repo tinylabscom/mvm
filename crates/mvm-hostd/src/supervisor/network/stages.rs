@@ -1773,4 +1773,67 @@ mod tests {
             L4PolicyScan::new(CanonicalEgress::Rules(vec![])).name()
         );
     }
+
+    /// Audit mode counts without masking, and it is a separate arm from
+    /// Redact — the existing entropy test opts into Redact, so the Audit
+    /// arm's counter had no coverage and every arithmetic mutation of it
+    /// survived. The distinguishing assertion is that the payload comes
+    /// back *unmasked* while the count still rises.
+    #[test]
+    fn audit_mode_counts_entropy_and_names_without_masking() {
+        use mvm_core::policy::{EntropyMode, NameMode, RedactionAction};
+        let r = RedactingSubstitution::with_default_rules();
+
+        let body = b"k=Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9 e";
+        let audit_entropy = RedactionAction {
+            entropy: EntropyMode::Audit {
+                min_bits_per_char: 4.0,
+                min_run_len: 20,
+            },
+            ..Default::default()
+        };
+        let (out, hits) = r
+            .redact_bytes_for(body, &audit_entropy)
+            .expect("an audited entropy run is still a hit");
+        assert_eq!(hits.entropy, 1, "the audit arm must count the run");
+        assert!(
+            String::from_utf8_lossy(&out).contains("Xa9Kf2pQ7vL0mZ3rT8wB1nC4yH6dJ5sG2eU0iO9"),
+            "audit counts but must not mask"
+        );
+
+        let named = b"a message from Alice Johnson to Bob Smith";
+        let audit_names = RedactionAction {
+            names: NameMode::Audit,
+            ..Default::default()
+        };
+        if let Some((out, hits)) = r.redact_bytes_for(named, &audit_names) {
+            assert!(hits.names > 0, "the audit arm must count name spans");
+            assert!(
+                String::from_utf8_lossy(&out).contains("Alice Johnson"),
+                "audit counts but must not mask"
+            );
+        }
+    }
+
+    /// `redact_bytes` reports both categories it fired. Dropping the `pii`
+    /// field from the constructed hits leaves it defaulted to empty, so a
+    /// payload masked for PII is reported as having matched nothing — the
+    /// bytes are still scrubbed, but the audit record loses the reason.
+    #[test]
+    fn redact_bytes_reports_the_pii_it_fired_on() {
+        let r = RedactingSubstitution::with_default_rules();
+        let (out, hits) = r
+            .redact_bytes(b"contact alice@example.com please")
+            .expect("an email is PII and must be redacted");
+
+        assert!(
+            !hits.pii.is_empty(),
+            "a PII-only payload must report which PII rule fired"
+        );
+        assert!(
+            hits.secrets.is_empty(),
+            "no secret pattern is present in this payload"
+        );
+        assert!(!String::from_utf8_lossy(&out).contains("alice@example.com"));
+    }
 }
