@@ -526,11 +526,16 @@ impl AnyBackend {
             return Self::Firecracker(fc_runner());
         }
 
-        // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`); the hvf path
-        //    routes egress to its per-VM gating endpoint over vsock, where
-        //    claim-10 and claims 12/13 are enforced — no guest-NIC helper
-        //    sidecar.
+        // 2. macOS 26+ Apple Silicon → the HVF VMM. Prefer the Apple
+        //    Container backend when its container kernel is cached: it boots
+        //    Apple's prebuilt container kernel through the same HVF runner,
+        //    so a plain `machine run` uses it without `--hypervisor`. Without
+        //    the artifact, fall back to the workload-kernel hvf runner.
         if plat.is_hvf_default_tier() {
+            let apple = AppleContainerBackend::new();
+            if apple.is_available().unwrap_or(false) {
+                return Self::AppleContainer(apple);
+            }
             return Self::Hvf(hvf_runner());
         }
 
@@ -1228,11 +1233,17 @@ mod tests {
     }
 
     #[test]
-    fn auto_select_never_returns_apple_container() {
+    fn auto_select_skips_apple_container_without_its_kernel_artifact() {
+        // With an isolated, empty cache there is no container kernel, so
+        // auto_select must not pick the apple-container backend on any
+        // platform — on the HVF tier it falls back to the plain hvf runner.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
         assert_ne!(
             AnyBackend::auto_select().kind(),
             mvm_core::vm_backend::BackendKind::AppleContainer,
-            "auto_select must never fall through to the apple-container skeleton"
+            "without the container kernel artifact, auto_select must not select apple-container"
         );
     }
 
