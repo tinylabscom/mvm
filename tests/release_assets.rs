@@ -96,51 +96,35 @@ fn release_attaches_the_signature_bundle_the_verifier_fetches() {
     }
 }
 
-/// The image tarballs must be signed with `--new-bundle-format`. The in-binary
-/// Rust verifier parses only that shape; a legacy `--bundle` here fails to
-/// parse on every download, and nothing would catch it until a real release
-/// shipped. The binary tarballs must NOT move — those are read by the cosign
-/// CLI (`install.sh`, `mvmctl update`), which wants the legacy shape.
+/// Every signed blob in the release uses the one bundle format this project
+/// ships: `--new-bundle-format`.
+///
+/// The in-binary Rust sigstore stack parses only that shape, and
+/// `cosign verify-blob --bundle` documents it as the preferred input — so a
+/// single format serves both consumers and there is no legacy fallback to keep
+/// in step. A bare `--bundle` left behind would sign an artifact the in-binary
+/// verifier cannot read, and nothing surfaces that until a real release ships.
 #[test]
-fn image_tarballs_are_signed_in_the_format_the_in_binary_verifier_parses() {
+fn every_signed_release_blob_uses_the_one_bundle_format() {
     let workflow = release_workflow();
-    let step = workflow
-        .split("- name: Sign release tarballs and SBOM")
-        .nth(1)
-        .expect("release.yml must define the tarball signing step");
-    let step = step
-        .split("\n      - name:")
-        .next()
-        .expect("the signing step is non-empty");
-
-    let image_sign = step
-        .split("for tarball in artifacts/runtime-overlay-*.tar.gz artifacts/sdk-sidecar-*.tar.gz")
-        .nth(1)
-        .expect("the image tarballs must be signed by their own loop")
-        .split("done")
-        .next()
-        .expect("the image signing loop is non-empty");
+    let mut checked = 0usize;
+    for (offset, _) in workflow.match_indices("cosign sign-blob") {
+        // The invocation is a line-continued shell command; its flags run up to
+        // the first line that is not a continuation.
+        let invocation: String = workflow[offset..]
+            .lines()
+            .take_while(|line| line.trim_end().ends_with('\\'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            invocation.contains("--new-bundle-format"),
+            "every `cosign sign-blob` must use --new-bundle-format; found one without it:\n{invocation}"
+        );
+        checked += 1;
+    }
     assert!(
-        image_sign.contains("--new-bundle-format"),
-        "image tarballs must be signed with --new-bundle-format: {image_sign}"
-    );
-
-    // The generic loop produces the cosign-CLI-consumed bundles, so it must
-    // skip the image tarballs rather than double-signing them legacy.
-    let generic_sign = step
-        .split("for tarball in artifacts/*.tar.gz")
-        .nth(1)
-        .expect("the binary tarballs keep their own loop")
-        .split("done")
-        .next()
-        .expect("the generic signing loop is non-empty");
-    assert!(
-        generic_sign.contains("runtime-overlay-*|sdk-sidecar-*"),
-        "the legacy-format loop must skip the image tarballs: {generic_sign}"
-    );
-    assert!(
-        !generic_sign.contains("--new-bundle-format"),
-        "the cosign-CLI-consumed bundles must stay on the legacy format"
+        checked >= 4,
+        "expected to find the release's signing invocations, found {checked}"
     );
 }
 

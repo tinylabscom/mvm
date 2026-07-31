@@ -19,12 +19,23 @@ Each release includes, alongside the `.tar.gz` archives:
 | `mvmctl-<target>.tar.gz.bundle` | Cosign signature bundle for each platform archive |
 | `sbom.cdx.json` | Software Bill of Materials (CycloneDX JSON) |
 | `sbom.cdx.json.bundle` | Cosign signature bundle for the SBOM |
+| `runtime-overlay-<arch>.tar.gz.bundle` | Cosign signature bundle for the runtime overlay (verified in-binary before install) |
+| `sdk-sidecar-<arch>.tar.gz.bundle` | Cosign signature bundle for the SDK sidecar (verified in-binary before install) |
+
+Every bundle is a [Sigstore bundle](https://docs.sigstore.dev/about/bundle/)
+(`--new-bundle-format`). There is one format across the whole release — the
+in-binary verifier `mvmctl` uses for the overlay and sidecar reads only this
+shape, and `cosign verify-blob --bundle` takes it directly.
 
 ---
 
 ## Prerequisites
 
 Install cosign:
+
+**cosign v2.4 or newer** is required — that is when Sigstore-bundle support
+landed in `verify-blob`. Older cosign cannot read this release's bundles and
+there is no legacy fallback.
 
 ```bash
 # macOS
