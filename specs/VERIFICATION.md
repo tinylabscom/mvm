@@ -28,7 +28,7 @@ row below records a defect that was planted to prove the gate fires.
 | `check-abi-layout` | Add a `#[repr(C)]` struct with no `size_of`/`align_of` assertion | yes |
 | `check-abi-layout` | Mention `size_of::<T>()` in a comment instead of asserting it | yes |
 | `check-claim-catalog` | Name a witness in the ADR-001 ledger that `model/claims.toml` does not list | yes |
-| `check-workflow-paths` | Point a fuzz matrix entry at `crates/mvm-oci` (the pre-consolidation path that made the fuzz lane dead for ten nightlies) | yes |
+| `check-workflow-paths` | Point a fuzz step's `working-directory` at `crates/mvm-oci` (the pre-consolidation path that made the fuzz lane dead for ten nightlies) | yes |
 | `check-mvm-host-binaries-sync` | Drop `--bin mvm-builderd` from the builder-VM cross-compile step, reproducing the "path does not exist" image-build failure | yes |
 
 The `meta` gate also catches the reverse direction: a scenario tagged with an

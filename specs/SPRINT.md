@@ -77,11 +77,11 @@
       living in `crates/mvm-hostd/tests/`, so it needs a planted defect in the
       enforcement code rather than a CI-lane falsification. Keeping the sweep
       beside the gate that computes the list is what stops the two diverging
-      again. `--run` now confines `HOME` and `MVM_HOME` to a temp root deleted
-      on drop (#1946), applied where cargo-mutants is spawned so the nightly
-      job and `just mutation-witnesses` cannot drift apart on it;
-      `CARGO_HOME`/`RUSTUP_HOME` are carried across so an hours-long run does
-      not re-download the registry and toolchain.
+      again. #1946 was closed by #1958, which exports `HOME`/`MVM_HOME` to a
+      runner temp dir in the nightly job and carries `CARGO_HOME`/
+      `RUSTUP_HOME` across. That covers the CI lane; `just
+      mutation-witnesses` still runs against a developer's real `~/.mvm`,
+      which is the entry point #1946 called the sharper of the two.
 - [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
       only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
       builder image / runtime overlay from the host's shared cache), so a test
@@ -154,10 +154,16 @@
       later target was skipped too. Four of the nine directories were stale
       (`mvm-guest`, `mvm-oci`, `mvm-vm-host`, `mvm-ext4`); the corpus-upload
       block had been updated to the new paths, so the rename was done
-      halfway. Rebuilt as a `fail-fast: false` matrix, one cell per target:
-      a stale entry now breaks only itself, and the fourteen targets no
-      longer serialize into 7 hours against a 6-hour job ceiling — which is
-      why simply correcting the paths would not have produced a green lane.
+      halfway. Fixed independently and first in #1958, which corrected the
+      fourteen `working-directory` values in place; this branch's matrix
+      rebuild was dropped in favour of it.
+      **Residual:** the targets remain sequential steps in one job at the
+      nightly `secs=1800` budget, and the job sets no `timeout-minutes`, so
+      14 x 1800s is 7 hours of fuzzing against GitHub's 6-hour default
+      ceiling — before per-target sanitizer builds. The lane should be
+      expected to time out rather than pass, and a matrix (one cell per
+      target, `fail-fast: false`) is the shape that both fits the ceiling
+      and stops one stale entry skipping every target after it.
 
       **MVM-SEC-07's two witnesses failed for unrelated reasons.**
       `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
@@ -165,12 +171,11 @@
       release requiring `quick-xml >= 0.41`. Fixed, not ignored — and the
       step's ten `--ignore` flags, whose comment claimed to mirror
       `deny.toml`'s `ignore = []`, were removed after confirming none still
-      matched anything in the graph. `cargo-deny`: `x25519-dalek 2` held
-      `curve25519-dalek` at 4 against the workspace's 5, duplicating
-      `cpufeatures` and `fiat-crypto` too; `x25519-dalek 3` collapses all
-      three. `deny.toml` had never carried these while
-      `check-duplicate-majors` had — the two-gate drift that let the
-      PR-visible gate stay green while the nightly stayed red.
+      matched anything in the graph. `cargo-deny`'s duplicate-dalek failure
+      was diagnosed independently and fixed first in #1952; `deny.toml` had
+      never carried those entries while `check-duplicate-majors` had — the
+      two-gate drift that let the PR-visible gate stay green while the
+      nightly stayed red.
 
       Also restored: the flake-lock gate (two probe examples pinning
       `inputs.mvm` to this repo were missing from a hardcoded exclusion list
@@ -265,8 +270,25 @@
       `xtask perf footprint --sdk-sidecar` reports the sidecar on its own
       ledger line against its own 8 MiB ceiling, never folded into the base
       50,000,000-byte contract. Source checkouts build the sidecar from the
-      flake; publishing it for downloaded `mvmctl` builds is planned at
-      `specs/plans/273-sdk-sidecar-release-acquisition.md`.
+      flake.
+- [x] Plan 273 — SDK sidecar release acquisition. Closes the end-user half of
+      the WS-3 follow-up: `release.yml`'s new `sdk-sidecar-image` job publishes
+      a per-arch `sdk-sidecar-<arch>.tar.gz` plus its `.sha256`, copying the
+      derivation's own `checksums-sha256.txt` through rather than regenerating
+      it so the bytes the resolver verifies are the bytes Nix produced. The new
+      `mvm_build::sdk_sidecar` fetches the archive checksum before the payload,
+      hash-verifies the archive, safe-extracts it through the runtime overlay's
+      now-generalized entry validator, re-checks the archive's own manifest
+      against the extracted bytes, installs stage-then-rename, and ends with a
+      `SdkSidecarResolver::resolve` against the *installed* entry so a transport
+      bug cannot cache something that only fails at boot. The launch path
+      consults the overlay's own build-vs-download resolver, so a contributor
+      never silently downloads; a source checkout keeps the fail-closed refusal
+      naming `nix build ./nix/images/runtime-overlay#sdk-sidecar-image`.
+      `tests/release_assets.rs` pins the workflow's asset names to the Rust
+      constructor that requests them. 10 downloader unit tests, 5 launch-path
+      tests, 4 release-asset gates, and 2 BDD scenarios (acquire-and-boot,
+      checksum-drift refusal), taking the BDD suite to 57 scenarios / 279 steps.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.

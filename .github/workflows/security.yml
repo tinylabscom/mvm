@@ -287,99 +287,9 @@ jobs:
   # SupervisorConfig parser, and the OCI layer-unpack ingress.
   # Run for 5 minutes per tag-push / dispatch; the nightly cron
   # extends to 30 minutes.
-  #
-  # One matrix cell per target. Two reasons this is a matrix and not a
-  # sequence of steps: 14 targets × the nightly 30-minute budget is 7
-  # hours of wall clock, past the 6-hour job ceiling; and a single bad
-  # cell (a moved crate, a renamed target) used to abort every target
-  # after it in the same job, so the lane reported one failure and ran
-  # nothing. Cells are independent — `fail-fast: false` — so a break is
-  # scoped to the target that broke.
   fuzz:
-    name: Fuzz — ${{ matrix.target }}
+    name: Fuzz — parsers (vsock + OCI)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # ADR-001 §W4.1/W4.2 — the guest-side vsock parsers. `crate` is
-          # the cargo package dir, `dir` its cargo-fuzz directory.
-          - { crate: crates/mvm-agentd, dir: fuzz, target: fuzz_guest_request }
-          - { crate: crates/mvm-agentd, dir: fuzz, target: fuzz_authenticated_frame }
-          - { crate: crates/mvm-agentd, dir: fuzz, target: fuzz_dns_codec }
-          # Drives `verify_authenticated_frame` past sig check, asserting
-          # tampered frames never reach the inner deserializer. Catches
-          # regressions where a refactor reorders the verify/deserialize
-          # steps in vsock.rs.
-          - { crate: crates/mvm-agentd, dir: fuzz, target: fuzz_authed_path }
-          # The `mvm-libkrun-supervisor` binary reads `SupervisorConfig`
-          # JSON on stdin before any libkrun call. This target asserts the
-          # deserializer never panics on adversarial bytes; same contract
-          # as `fuzz_guest_request` for the guest-side `GuestRequest`
-          # parser.
-          - { crate: crates/deps/libkrun-sys, dir: fuzz, target: fuzz_supervisor_config }
-          # The prelaunched supervisor reads a `SupervisorAttachConfig` off
-          # a same-uid control UDS. It is the only attacker-reachable
-          # surface after spawn; any panic is a hard process death before
-          # the plan re-verify can fail closed.
-          - { crate: crates/deps/libkrun-sys, dir: fuzz, target: fuzz_attach_message }
-          # `mvm_fs::oci::unpack::unpack_layer` is the single ingress point
-          # for adversarial OCI layer tarballs (path traversal, hardlink
-          # chains, device-node sneak-ins, xattr privilege carry, setuid
-          # surprise).
-          - { crate: crates/mvm-fs, dir: fuzz-oci, target: unpack_layer }
-          # The pure-Rust ext4 writer turns an OCI-derived node set into the
-          # rootfs image the run path boots. It is forbid(unsafe), so no
-          # input can corrupt memory; this target asserts the next
-          # guarantee — no node set panics build_image (a run-path DoS), and
-          # every image it emits is block-aligned and carries the ext4
-          # superblock magic. Impossible trees must return Err, never abort.
-          - { crate: crates/mvm-fs, dir: fuzz-ext4, target: fuzz_build_image }
-          # The `mvm-bridge` sidecar reads a `BridgeConfigJson` document on
-          # stdin BEFORE installing `mvm-jailer-lite` confinement or
-          # touching the parent-inherited socketpair fds. The producer is
-          # trusted, but the bytes traverse a pipe the bridge must defend; a
-          # panic here is a hard process death before the parent's watchdog
-          # has a sentinel to react to. `#[serde(deny_unknown_fields)]` on
-          # `BridgeConfigJson` means unknown keys fail-closed inside
-          # deserialization.
-          - { crate: crates/mvm-hostd, dir: fuzz-vmhost, target: fuzz_bridge_config_json }
-          # `verify_passt_hash` reads `~/.mvm/passt-hashes.toml` BEFORE
-          # confinement so a missing or malformed allowlist surfaces as a
-          # clean operator hint instead of an opaque EACCES. A panic in the
-          # TOML parser at this leaf is a hard process death before the
-          # FlowEvent pipeline is up; this target asserts the no-panic
-          # complement of the `verify_passt_hash_rejects_*` unit-test suite.
-          - { crate: crates/mvm-hostd, dir: fuzz-vmhost, target: fuzz_passt_hashes_toml }
-          # `packet::parse` is the first real parse on the guest's network
-          # path (the bridge byte-copied opaquely before); `rebuild_with_payload`
-          # re-serializes observer-modified frames. Both run on
-          # attacker-influenced bytes. "Never panic on any input": parse
-          # fails closed to None on garbage, and re-emitting an accepted
-          # frame's own payload round-trips without panicking (Err on
-          # extension/over-MTU frames is the fail-closed path, not a panic).
-          - { crate: crates/mvm-hostd, dir: fuzz, target: fuzz_packet_parse }
-          # The recording JSON is the Tier-0 promotion input: user-spawned
-          # code writes it to a tmpfile the CLI reads back.
-          # `deny_unknown_fields` must fail closed on garbage, and every
-          # lowering refusal (op limits, duplicate paths, oversize or
-          # malformed FilesWrite b64, missing entrypoint) must surface as
-          # Err, not a panic.
-          - { crate: crates/mvm-sdk, dir: fuzz, target: fuzz_runtime_recording }
-          # The virtio-fs device hands guest-supplied bytes to
-          # `FuseServer::dispatch`; the guest is untrusted, so a byte pattern
-          # that panics the parser is a guest-triggerable host DoS. This
-          # target asserts dispatch never panics on any input and always
-          # emits a well-formed fuse_out_header.
-          - { crate: crates/mvm-runtime, dir: fuzz-backend, target: fuse_dispatch }
-          # The guest programs the virtio-vsock queue size, ring base
-          # addresses, and descriptor table through untrusted MMIO writes +
-          # guest RAM. A hostile geometry (a QueueNum whose low 16 bits are
-          # zero, truncating to a zero modulus) or a hostile descriptor chain
-          # (cyclic next links, oversized lengths) must not panic the host
-          # VMM or drive it into unbounded allocation — both are
-          # guest-triggerable host DoS.
-          - { crate: crates/mvm-runtime, dir: fuzz-backend, target: fuzz_virtqueue_geometry }
     steps:
       - uses: actions/checkout@v6
 
@@ -409,29 +319,202 @@ jobs:
             echo "secs=300" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fuzz ${{ matrix.target }}
-        working-directory: ${{ matrix.crate }}
+      - name: Fuzz GuestRequest
+        working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
-          FUZZ_DIR: ${{ matrix.dir }}
-          FUZZ_TARGET: ${{ matrix.target }}
           # `cargo fuzz` requires nightly (-Z sanitizer flags). The
           # repo-root `rust-toolchain.toml` pins stable, and rustup walks
           # up from this `working-directory` so it would otherwise win.
           # RUSTUP_TOOLCHAIN bypasses the toolchain-file lookup entirely.
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        run: |
-          cargo fuzz run --fuzz-dir "$FUZZ_DIR" "$FUZZ_TARGET" \
-            -- -max_total_time="$DURATION"
+        run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
+
+      - name: Fuzz AuthenticatedFrame
+        working-directory: crates/mvm-agentd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
+
+      - name: Fuzz bounded DNS codec (fuzz-dns-codec)
+        working-directory: crates/mvm-agentd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_dns_codec -- -max_total_time="$DURATION"
+
+      - name: Fuzz authed path (signed-side)
+        working-directory: crates/mvm-agentd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # Drives `verify_authenticated_frame` past sig check, asserting
+        # tampered frames never reach the inner deserializer. Catches
+        # regressions where a refactor reorders the verify/deserialize
+        # steps in vsock.rs.
+        run: cargo fuzz run fuzz_authed_path -- -max_total_time="$DURATION"
+
+      - name: Fuzz SupervisorConfig (host-side)
+        working-directory: crates/deps/libkrun-sys
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # Plan 88 W6 / ADR-055 §"New untrusted-input surfaces" — the
+        # `mvm-libkrun-supervisor` binary reads `SupervisorConfig`
+        # JSON on stdin before any libkrun call. This target asserts
+        # the deserializer never panics on adversarial bytes; same
+        # contract as `fuzz_guest_request` for the guest-side
+        # `GuestRequest` parser.
+        run: cargo fuzz run fuzz_supervisor_config -- -max_total_time="$DURATION"
+
+      - name: Fuzz SupervisorAttachConfig (prelaunch attach)
+        working-directory: crates/deps/libkrun-sys
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # Plan 118 WS-1 1a — the prelaunched supervisor reads a
+        # `SupervisorAttachConfig` off a same-uid control UDS. It is the
+        # only attacker-reachable surface after spawn; any panic is a
+        # hard process death before the plan re-verify can fail closed.
+        # Same "never panic on any input" contract as fuzz_supervisor_config.
+        run: cargo fuzz run fuzz_attach_message -- -max_total_time="$DURATION"
+
+      - name: Fuzz OCI unpack_layer
+        working-directory: crates/mvm-fs
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # Plan 85 §R1 — `mvm_oci::unpack::unpack_layer` is the single
+        # ingress point for adversarial OCI layer tarballs (path
+        # traversal, hardlink chains, device-node sneak-ins, xattr
+        # privilege carry, setuid surprise). The Phase A.2 PR landed
+        # this harness; A.3 through A.6 added corpus entries. Moved
+        # here from ci.yml's per-PR lane (commit 304b5c9c+) so the
+        # 30-min budget only burns on release-tag pushes and the
+        # nightly cron, not on every mvm-oci PR.
+        run: cargo fuzz run --fuzz-dir fuzz-oci unpack_layer -- -max_total_time="$DURATION"
+
+      - name: Fuzz mvm-bridge — BridgeConfigJson (host-side)
+        working-directory: crates/mvm-hostd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # Plan 113 §Task 15 / ADR-064 — the `mvm-bridge`
+        # sidecar reads a `BridgeConfigJson` document on stdin BEFORE
+        # installing `mvm-jailer-lite` confinement or touching the
+        # parent-inherited socketpair fds. The producer (Task 13's
+        # `FirecrackerBackend`) is trusted, but the bytes traverse a
+        # pipe the bridge must defend; a panic here is a hard process
+        # death before the parent's watchdog has a sentinel to react
+        # to. Same contract as `fuzz_supervisor_config`: "never panic
+        # on any input." `#[serde(deny_unknown_fields)]` on
+        # `BridgeConfigJson` (Task 12 — `crates/mvm-hostd/
+        # src/parse.rs`) means unknown keys fail-closed inside
+        # deserialization.
+        run: cargo fuzz run --fuzz-dir fuzz-vmhost fuzz_bridge_config_json -- -max_total_time="$DURATION"
+
+      - name: Fuzz mvm-bridge — passt-hashes TOML
+        working-directory: crates/mvm-hostd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # Plan 113 §Task 15 / ADR-064 — `verify_passt_hash` reads
+        # `~/.mvm/passt-hashes.toml` BEFORE confinement so a missing
+        # or malformed allowlist surfaces as a clean operator hint
+        # instead of an opaque EACCES. A panic in the TOML parser at
+        # this leaf is a hard process death before the FlowEvent
+        # pipeline is up; this fuzz target asserts the no-panic
+        # complement of the `verify_passt_hash_rejects_*` unit-test
+        # suite.
+        run: cargo fuzz run --fuzz-dir fuzz-vmhost fuzz_passt_hashes_toml -- -max_total_time="$DURATION"
+
+      - name: Fuzz gateway packet parse + rebuild (host-side)
+        working-directory: crates/mvm-hostd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # Plan 141 / ADR-064 — `packet::parse` is the first real parse on
+        # the guest's network path (the bridge byte-copied opaquely before
+        # this plan); `rebuild_with_payload` re-serializes observer-modified
+        # frames. Both run on attacker-influenced bytes (claim 5). "Never
+        # panic on any input": parse fails closed to None on garbage, and
+        # re-emitting an accepted frame's own payload round-trips without
+        # panicking (Err on extension/over-MTU frames is the fail-closed
+        # path, not a panic).
+        run: cargo fuzz run fuzz_packet_parse -- -max_total_time="$DURATION"
+
+      - name: Fuzz runtime recording (SDK trace)
+        working-directory: crates/mvm-sdk
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # Plan 186 — the recording JSON is the Tier-0 promotion input:
+        # user-spawned code writes it to a tmpfile the CLI reads back.
+        # `deny_unknown_fields` must fail closed on garbage, and every
+        # lowering refusal (op limits, duplicate paths, oversize or
+        # malformed FilesWrite b64, missing entrypoint) must surface as
+        # Err, not a panic. Same "never panic on any input" contract as
+        # the other config-parser targets.
+        run: cargo fuzz run fuzz_runtime_recording -- -max_total_time="$DURATION"
+
+      - name: Fuzz ext4 build_image (rootfs writer)
+        working-directory: crates/mvm-fs
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # The pure-Rust ext4 writer turns an OCI-derived node set into the
+        # rootfs image the run path boots. It is forbid(unsafe), so no input
+        # can corrupt memory; this target asserts the next guarantee — no node
+        # set panics build_image (a run-path DoS), and every image it emits is
+        # block-aligned and carries the ext4 superblock magic. Impossible trees
+        # must return Err, never abort.
+        run: cargo fuzz run --fuzz-dir fuzz-ext4 fuzz_build_image -- -max_total_time="$DURATION"
+
+      - name: Fuzz FUSE dispatch (virtio-fs request parser)
+        working-directory: crates/mvm-runtime
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # The virtio-fs device hands guest-supplied bytes to
+        # `FuseServer::dispatch`; the guest is untrusted, so a byte pattern that
+        # panics the parser is a guest-triggerable host DoS. This target asserts
+        # dispatch never panics on any input and always emits a well-formed
+        # fuse_out_header. Path-confinement is a separate structural property
+        # pinned by a unit test.
+        run: cargo fuzz run --fuzz-dir fuzz-backend fuse_dispatch -- -max_total_time="$DURATION"
+
+      - name: Fuzz virtqueue geometry (virtio-vsock ring walk)
+        working-directory: crates/mvm-runtime
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # The guest programs the virtio-vsock queue size, ring base addresses, and
+        # descriptor table through untrusted MMIO writes + guest RAM. A hostile
+        # geometry (a QueueNum whose low 16 bits are zero, truncating to a zero
+        # modulus) or a hostile descriptor chain (cyclic next links, oversized
+        # lengths) must not panic the host VMM or drive it into unbounded
+        # allocation — both are guest-triggerable host DoS. This target is the
+        # regression guard for the validated-geometry gate and the bounded
+        # descriptor walk; it stays green once those hold.
+        run: cargo fuzz run --fuzz-dir fuzz-backend fuzz_virtqueue_geometry -- -max_total_time="$DURATION"
 
       - name: Upload corpus on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-corpus-${{ github.run_id }}-${{ matrix.target }}
+          name: fuzz-corpus-${{ github.run_id }}
           path: |
-            ${{ matrix.crate }}/${{ matrix.dir }}/corpus/
-            ${{ matrix.crate }}/${{ matrix.dir }}/artifacts/
+            crates/mvm-agentd/fuzz/corpus/
+            crates/mvm-agentd/fuzz/artifacts/
+            crates/deps/libkrun-sys/fuzz/corpus/
+            crates/deps/libkrun-sys/fuzz/artifacts/
+            crates/mvm-fs/fuzz-oci/corpus/
+            crates/mvm-fs/fuzz-oci/artifacts/
+            crates/mvm-hostd/fuzz-vmhost/corpus/
+            crates/mvm-hostd/fuzz-vmhost/artifacts/
+            crates/mvm-sdk/fuzz/corpus/
+            crates/mvm-sdk/fuzz/artifacts/
 
   # ── Lane 4b: Claim witnesses are mutation-tested ──────────────────
   # check-claim-catalog (ci.yml) proves a claim's witness EXISTS. This
@@ -471,11 +554,35 @@ jobs:
       - name: Install cargo-mutants and nextest
         run: cargo install --locked cargo-mutants cargo-nextest
 
-      # HOME and MVM_HOME are confined to a temp root by the gate itself,
-      # at the point cargo-mutants is spawned, so this job and the local
-      # `just mutation-witnesses` recipe cannot drift apart on it.
       - name: Mutate the claim surface and ratchet survivors
-        run: cargo run -p xtask -- check-mutation-witnesses --run
+        # `--run` mutates the claim-enforcement surface and runs the suite
+        # against each mutant — plan verification that no longer verifies, a
+        # seccomp filter that no longer filters, the host signer. That is
+        # security code with its check removed, so it must not reach a real
+        # mvm state root: it could mint a key at the wrong path or mode (the
+        # mutation may be *in* the path/mode logic) or leave firewall rules
+        # behind.
+        #
+        # MVM_HOME alone is not enough — `default_mvm_cache_dir` deliberately
+        # reads the home directory to seed from the shared cache, which is the
+        # leak `check-test-home-isolation` exists to catch. So both roots move.
+        #
+        # CARGO_HOME/RUSTUP_HOME are pinned to the real home *before* the
+        # redirect: `~` follows HOME, so without this the toolchain the earlier
+        # steps installed would vanish mid-job and the cache step above would
+        # be keyed on a path that only exists here.
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export MVM_HOME="$RUNNER_TEMP/mutants-mvm-home"
+          export HOME="$MVM_HOME"
+          mkdir -p "$HOME"
+          if [ -e "$HOME/.mvm/keys" ]; then
+            echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
+            exit 1
+          fi
+          cargo run -p xtask -- check-mutation-witnesses --run
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-001 §W5.1 — the unit tests that exercise the
@@ -656,10 +763,8 @@ jobs:
             # instead of naming the directories — the previous name list
             # went stale the moment a fifth such example was added, and
             # the gate then reported a missing lockfile for a flake that
-            # must not have one.
-            # Anchored to a real assignment: nix/flake.nix documents this
-            # exact line in a comment showing users how to consume the
-            # flake, and an unanchored match would skip the root flake.
+            # must not have one. Anchored to a real assignment:
+            # nix/flake.nix documents this exact line in a comment.
             if grep -qE '^[[:space:]]*inputs\.mvm\.url = "github:tinylabscom/mvm' "$flake"; then
               echo "skipped — self-referential mvm input, resolved at build time"
               echo "::endgroup::"

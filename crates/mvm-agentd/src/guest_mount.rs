@@ -99,12 +99,19 @@ pub fn mount_early_filesystems() -> Result<()> {
             libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
             "",
         )?;
-        // devtmpfs gives us /dev/console, /dev/null, etc. without a static
-        // device table in the initramfs.
-        if !Path::new("/dev/console").exists() {
-            ensure_dir("/dev")?;
-            mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, "")?;
-        }
+        // devtmpfs supplies every device node the initramfs has no static
+        // table for — /dev/null, and the /dev/mapper/control that dm-verity
+        // needs to bring the sealed rootfs up at activation.
+        //
+        // Mounted unconditionally. The kernel creates a bare /dev/console in
+        // the initramfs rootfs so init has stdio, so a "is /dev/console
+        // already there?" guard reads as "devtmpfs is already mounted" when
+        // in fact nothing is — and then activation dies on a missing
+        // /dev/mapper/control. A shared-kernel container runtime, the one case
+        // where /dev really is pre-mounted, never reaches here: that path is
+        // branched off before the early mounts.
+        ensure_dir("/dev")?;
+        mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, "")?;
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -899,6 +906,51 @@ mod tests {
                 "{target}: ensure_dir must come before the mount, not after"
             );
         }
+    }
+
+    /// devtmpfs must be mounted unconditionally, never gated on `/dev/console`.
+    ///
+    /// The kernel creates a bare `/dev/console` in the initramfs rootfs so init
+    /// has stdio — which is precisely why the agent's own output reaches the
+    /// serial console. A `if !Path::new("/dev/console").exists()` guard around
+    /// the devtmpfs mount therefore always skips it, `/dev` keeps that single
+    /// node, and activation dies on a missing `/dev/mapper/control` the moment
+    /// dm-verity tries to bring the sealed rootfs up. That shipped, and it reads
+    /// as a verity bug rather than a mount bug.
+    ///
+    /// The one case where `/dev` genuinely is pre-mounted — a shared-kernel
+    /// container runtime — branches off before the early mounts entirely, so it
+    /// needs no guard here.
+    ///
+    /// Asserted against the source for the same reason as the test above: the
+    /// real path needs to be PID 1 inside a guest.
+    #[test]
+    fn devtmpfs_is_not_gated_on_a_kernel_supplied_console_node() {
+        let src = include_str!("guest_mount.rs");
+        let body = src
+            .split("pub fn mount_early_filesystems")
+            .nth(1)
+            .expect("mount_early_filesystems must exist")
+            .split("\npub fn ")
+            .next()
+            .expect("function body is delimited by the next item");
+        // Comments explain the trap by naming the node, so judge the code only.
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            code.contains("\"devtmpfs\""),
+            "devtmpfs must still be mounted; without it there is no /dev/mapper/control"
+        );
+        assert!(
+            !code.contains("/dev/console"),
+            "devtmpfs must not be gated on /dev/console — the kernel always supplies \
+             that node, so the guard skips the mount every time and dm-verity then \
+             fails to open /dev/mapper/control"
+        );
     }
 
     #[test]

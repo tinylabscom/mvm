@@ -217,12 +217,15 @@ Tracked here per the deferred-work convention; each is its own future plan.
 - **WS-2 (lever E):** the custom static-musl `mvm-setpriv` helper is complete as a
   dedicated `mvm-agentd` binary and Nix package; the generated `mkGuest` init now
   uses it instead of util-linux.
-- **SDK-sidecar release acquisition:** the attachment chain is complete and
-  fails closed, but only a source checkout can satisfy it — `mvm-build` has no
-  sidecar acquisition module and no release workflow publishes a `sdk-sidecar`
-  asset, so an end-user on a downloaded `mvmctl` who binds an SDK-served host
-  service gets the refusal rather than a fetch. Planned at
-  `specs/plans/273-sdk-sidecar-release-acquisition.md`. Not started.
+- **SDK-sidecar release acquisition:** complete. `release.yml`'s
+  `sdk-sidecar-image` job publishes a per-arch `sdk-sidecar-<arch>.tar.gz` plus
+  its sha256 sidecar; `mvm_build::sdk_sidecar` fetches and integrity-verifies it
+  through the runtime overlay's own transport helpers; and the launch path
+  reaches it on the download-mode acquire path — so an end-user on a downloaded
+  `mvmctl` who binds an SDK-served host service now gets a fetch instead of the
+  refusal. A source checkout keeps the fail-closed refusal, because building the
+  sidecar needs the builder VM and a launch must not spawn one implicitly.
+  Shipped by `specs/plans/273-sdk-sidecar-release-acquisition.md`.
 
 - **WS-3 (lever B):** complete. The static-musl runtime-overlay cut, the
   separate SDK sidecar packaging, and automatic plan-driven sidecar attachment

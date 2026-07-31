@@ -244,14 +244,6 @@ mutation-surface:
 # Mutate the claim surface and ratchet survivors against the baseline.
 # HOURS: this is the nightly lane's command, not an inner-loop check.
 # Needs `cargo install cargo-mutants cargo-nextest`.
-#
-# A mutant is the enforcement code with a check removed, run against the
-# suite, so it can mint keys and write audit state at paths the mutated
-# logic chose. The run confines HOME and MVM_HOME to a temp root that is
-# deleted afterwards — applied where cargo-mutants is spawned, so this
-# recipe and the nightly job get it from the same place rather than each
-# setting it and drifting. CARGO_HOME/RUSTUP_HOME stay put so the
-# registry and toolchain are not re-downloaded.
 mutation-witnesses:
     cargo run -p xtask -- check-mutation-witnesses --run
 

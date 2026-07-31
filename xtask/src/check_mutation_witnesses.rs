@@ -32,7 +32,7 @@ use crate::claims_ledger::{self, Witness};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Where the pinned surface and accepted misses live.
 const BASELINE_REL: &str = "xtask/mutation-witness-baseline.json";
@@ -490,11 +490,6 @@ fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile]) -> Result<Vec<Mis
     let out_root = std::env::temp_dir().join("mvm-mutation-witnesses");
     std::fs::create_dir_all(&out_root)
         .with_context(|| format!("creating {}", out_root.display()))?;
-    let sandbox = Sandbox::new()?;
-    eprintln!(
-        "mutation run confined to {} (HOME + MVM_HOME)",
-        sandbox.root.display()
-    );
 
     let mut all = Vec::new();
     for (i, file) in surface.iter().enumerate() {
@@ -507,82 +502,16 @@ fn run_mutants_over(workspace: &Path, surface: &[SurfaceFile]) -> Result<Vec<Mis
             file.claims
         );
         let out_dir = out_root.join(file.path.replace('/', "_"));
-        all.extend(run_mutants_for_file(workspace, file, &out_dir, &sandbox)?);
+        all.extend(run_mutants_for_file(workspace, file, &out_dir)?);
     }
     all.sort();
     all.dedup();
     Ok(all)
 }
 
-/// A throwaway state root for the mutation run.
-///
-/// A mutant is the enforcement code with a check removed, and the suite is
-/// then run against it — so the run can write audit chains, mint a signer
-/// key at whatever path or mode the mutated logic picks, and leave state
-/// behind. None of that may touch the invoking user's `~/.mvm` or `$HOME`.
-///
-/// `CARGO_HOME` and `RUSTUP_HOME` are carried across explicitly: moving
-/// `HOME` alone would send cargo looking for a registry and a toolchain
-/// under the sandbox, re-downloading both on a run that already costs
-/// hours.
-struct Sandbox {
-    root: PathBuf,
-    home: PathBuf,
-    mvm_home: PathBuf,
-    cargo_home: PathBuf,
-    rustup_home: PathBuf,
-    // Deleted on drop; the run's state must not outlive it.
-    _dir: tempfile::TempDir,
-}
-
-impl Sandbox {
-    fn new() -> Result<Self> {
-        let dir = tempfile::Builder::new()
-            .prefix("mvm-mutation-sandbox-")
-            .tempdir()
-            .context("creating the mutation-run sandbox")?;
-        let root = dir.path().to_path_buf();
-        let home = root.join("home");
-        let mvm_home = root.join("mvm");
-        for p in [&home, &mvm_home] {
-            std::fs::create_dir_all(p).with_context(|| format!("creating {}", p.display()))?;
-        }
-        let real_home = std::env::var_os("HOME").map(PathBuf::from);
-        let inherited = |var: &str, fallback: &str| -> Result<PathBuf> {
-            if let Some(v) = std::env::var_os(var) {
-                return Ok(PathBuf::from(v));
-            }
-            real_home
-                .as_ref()
-                .map(|h| h.join(fallback))
-                .with_context(|| format!("neither {var} nor HOME is set; cannot locate {fallback}"))
-        };
-        Ok(Self {
-            cargo_home: inherited("CARGO_HOME", ".cargo")?,
-            rustup_home: inherited("RUSTUP_HOME", ".rustup")?,
-            root,
-            home,
-            mvm_home,
-            _dir: dir,
-        })
-    }
-
-    fn apply(&self, cmd: &mut std::process::Command) {
-        cmd.env("HOME", &self.home)
-            .env("MVM_HOME", &self.mvm_home)
-            .env("CARGO_HOME", &self.cargo_home)
-            .env("RUSTUP_HOME", &self.rustup_home);
-    }
-}
-
-fn run_mutants_for_file(
-    workspace: &Path,
-    file: &SurfaceFile,
-    out_dir: &Path,
-    sandbox: &Sandbox,
-) -> Result<Vec<Miss>> {
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.current_dir(workspace)
+fn run_mutants_for_file(workspace: &Path, file: &SurfaceFile, out_dir: &Path) -> Result<Vec<Miss>> {
+    let status = std::process::Command::new("cargo")
+        .current_dir(workspace)
         .arg("mutants")
         .args(["-p", &file.package])
         .args(["--file", &file.path])
@@ -593,9 +522,9 @@ fn run_mutants_for_file(
         // The embedded host-vm binaries are cross-compiled by
         // mvm-cli's build.rs; a mutation run rebuilds per mutant and
         // does not boot a VM, so paying that cost every time is waste.
-        .env("MVM_SKIP_EMBED_BINARIES", "1");
-    sandbox.apply(&mut cmd);
-    let status = cmd.status().context("spawning `cargo mutants`")?;
+        .env("MVM_SKIP_EMBED_BINARIES", "1")
+        .status()
+        .context("spawning `cargo mutants`")?;
 
     // Exit status is deliberately not the signal: cargo-mutants exits
     // nonzero merely because mutants survived, which is the case this
@@ -1033,57 +962,5 @@ a.rs:5:1: replace x with y
         let surface = resolve_surface(tmp.path()).unwrap();
         assert_eq!(surface.files.len(), 1);
         assert_eq!(surface.files[0].claims, vec![1, 2]);
-    }
-
-    #[test]
-    fn sandbox_moves_home_and_mvm_home_off_the_real_roots() {
-        let sb = Sandbox::new().unwrap();
-        let mut cmd = std::process::Command::new("true");
-        sb.apply(&mut cmd);
-        let env: std::collections::BTreeMap<_, _> = cmd
-            .get_envs()
-            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
-            .collect();
-
-        assert_eq!(env["HOME"], sb.home.to_str().unwrap());
-        assert_eq!(env["MVM_HOME"], sb.mvm_home.to_str().unwrap());
-        // The point of the sandbox: both roots sit under the temp root, so
-        // neither can be the caller's. Containment is the property that
-        // actually matters — stronger than inequality against one known
-        // path, and it asserts without reading the real HOME at all.
-        assert!(sb.home.starts_with(&sb.root));
-        assert!(sb.mvm_home.starts_with(&sb.root));
-    }
-
-    #[test]
-    fn sandbox_keeps_cargo_and_rustup_on_the_real_roots() {
-        // Moving HOME without pinning these sends cargo hunting for a
-        // registry and a toolchain inside the sandbox, re-downloading both.
-        let sb = Sandbox::new().unwrap();
-        let mut cmd = std::process::Command::new("true");
-        sb.apply(&mut cmd);
-        let env: std::collections::BTreeMap<_, _> = cmd
-            .get_envs()
-            .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
-            .collect();
-
-        for var in ["CARGO_HOME", "RUSTUP_HOME"] {
-            let v = PathBuf::from(&env[var]);
-            assert!(
-                !v.starts_with(&sb.root),
-                "{var} must not resolve inside the sandbox, got {}",
-                v.display()
-            );
-        }
-    }
-
-    #[test]
-    fn sandbox_state_does_not_outlive_the_run() {
-        let path = {
-            let sb = Sandbox::new().unwrap();
-            std::fs::write(sb.mvm_home.join("audit.jsonl"), b"x").unwrap();
-            sb.root.clone()
-        };
-        assert!(!path.exists(), "sandbox must be removed on drop");
     }
 }

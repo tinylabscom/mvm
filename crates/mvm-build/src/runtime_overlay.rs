@@ -94,9 +94,9 @@ pub enum RuntimeOverlayError {
     #[error("checksum manifest at {checksums_url} did not list an entry for {name}")]
     ChecksumMissing { name: String, checksums_url: String },
 
-    /// The downloaded runtime-overlay tarball was malformed or unsafe to
-    /// extract. Always fail closed — tar extraction is an attack surface.
-    #[error("runtime overlay archive invalid at {archive_path:?}: {reason}")]
+    /// A downloaded release tarball was malformed or unsafe to extract.
+    /// Always fail closed — tar extraction is an attack surface.
+    #[error("release archive invalid at {archive_path:?}: {reason}")]
     InvalidArchive {
         archive_path: PathBuf,
         reason: String,
@@ -801,14 +801,14 @@ fn write_checksum_manifest(dir: &Path) -> Result<(), RuntimeOverlayError> {
 }
 
 #[cfg(unix)]
-fn set_cache_perms(p: &Path) -> Result<(), RuntimeOverlayError> {
+pub(crate) fn set_cache_perms(p: &Path) -> Result<(), RuntimeOverlayError> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_cache_perms(_p: &Path) -> Result<(), RuntimeOverlayError> {
+pub(crate) fn set_cache_perms(_p: &Path) -> Result<(), RuntimeOverlayError> {
     // Windows mvmctl is a non-goal for the boot path; the cache
     // exists for completeness but permission semantics are
     // platform-defined. No-op.
@@ -882,7 +882,7 @@ pub fn download_runtime_overlay(
     let archive_local = stage.join(&names.archive);
     curl_download(&format!("{base}/{}", names.archive), &archive_local)?;
     verify_file_sha256(&archive_local, &names.archive, expected.get(&names.archive))?;
-    extract_runtime_overlay_archive(&archive_local, stage)?;
+    extract_release_archive(&archive_local, stage, &OVERLAY_ARCHIVE_MEMBERS)?;
     verify_overlay_dir_integrity(stage)?;
 
     // Step 3: read the roothash text so the returned
@@ -913,9 +913,30 @@ pub fn download_runtime_overlay(
     )
 }
 
-fn extract_runtime_overlay_archive(
+/// Exactly the members the overlay's release tarball may carry. Doubles as the
+/// extraction allow-list and the completeness check — an archive carrying
+/// anything else, or missing any of these, is refused.
+const OVERLAY_ARCHIVE_MEMBERS: [&str; 5] = [
+    "overlay.ext4",
+    "overlay.verity",
+    "overlay.roothash",
+    "VERSION",
+    CHECKSUM_MANIFEST_FILE,
+];
+
+/// Safely extract a published release tarball into `stage`, flattening it to the
+/// canonical filenames in `expected`.
+///
+/// Shared by every release-artifact downloader so there is one set of refusals
+/// rather than one per artifact: a member whose path escapes `stage` (traversal
+/// or absolute), a member outside `expected`, a nested path, a non-regular entry
+/// type, or a missing required member all fail closed. `expected` is both the
+/// allow-list and the required set — a release artifact set is complete or it is
+/// not installed at all.
+pub(crate) fn extract_release_archive(
     archive_path: &Path,
     stage: &Path,
+    expected: &[&'static str],
 ) -> Result<(), RuntimeOverlayError> {
     let file = std::fs::File::open(archive_path)?;
     let decoder = flate2::read::GzDecoder::new(file);
@@ -940,7 +961,7 @@ fn extract_runtime_overlay_archive(
                 reason: format!("read tar path: {e}"),
             })?
             .into_owned();
-        let Some(name) = canonical_archive_member_name(&path) else {
+        let Some(name) = canonical_archive_member_name(&path, expected) else {
             return Err(RuntimeOverlayError::InvalidArchive {
                 archive_path: archive_path.to_path_buf(),
                 reason: format!("unsafe or unexpected path {:?}", path.display()),
@@ -967,14 +988,8 @@ fn extract_runtime_overlay_archive(
         }
     }
 
-    for required in [
-        "overlay.ext4",
-        "overlay.verity",
-        "overlay.roothash",
-        "VERSION",
-        CHECKSUM_MANIFEST_FILE,
-    ] {
-        if !seen.contains(required) && !stage.join(required).is_file() {
+    for required in expected {
+        if !seen.contains(*required) && !stage.join(required).is_file() {
             return Err(RuntimeOverlayError::InvalidArchive {
                 archive_path: archive_path.to_path_buf(),
                 reason: format!("missing required archive member {required}"),
@@ -984,27 +999,28 @@ fn extract_runtime_overlay_archive(
     Ok(())
 }
 
-fn canonical_archive_member_name(path: &Path) -> Option<&'static str> {
+/// Map a tar member path to the canonical filename it may be written as, or
+/// `None` when it must be refused. Only a single unprefixed component that
+/// appears in `expected` is accepted, so `../x`, `/x`, and `dir/x` are all
+/// rejected by construction rather than by string inspection.
+fn canonical_archive_member_name(path: &Path, expected: &[&'static str]) -> Option<&'static str> {
     let mut components = path.components();
     let component = match (components.next(), components.next()) {
         (Some(std::path::Component::Normal(name)), None) => name,
         _ => return None,
     };
-    match component.to_str()? {
-        "overlay.ext4" => Some("overlay.ext4"),
-        "overlay.verity" => Some("overlay.verity"),
-        "overlay.roothash" => Some("overlay.roothash"),
-        "VERSION" => Some("VERSION"),
-        CHECKSUM_MANIFEST_FILE => Some(CHECKSUM_MANIFEST_FILE),
-        _ => None,
-    }
+    let name = component.to_str()?;
+    expected
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == name)
 }
 
 /// HTTP GET the per-release `sha256sum`-format checksums file and
 /// return a `name -> hex-digest` map for the artifacts we need.
 /// Filenames that aren't in `wanted` are dropped; any name in
 /// `wanted` that's absent from the manifest is a hard failure.
-fn fetch_expected_hashes(
+pub(crate) fn fetch_expected_hashes(
     checksums_url: &str,
     wanted: &[&str],
 ) -> Result<std::collections::HashMap<String, String>, RuntimeOverlayError> {
@@ -1028,7 +1044,7 @@ fn fetch_expected_hashes(
 /// mismatch, delete the file (so retry can't pick up tainted
 /// bytes) and return a `ChecksumMismatch`. Honors
 /// `MVM_SKIP_HASH_VERIFY=1`.
-fn verify_file_sha256(
+pub(crate) fn verify_file_sha256(
     path: &Path,
     name: &str,
     expected: Option<&String>,
@@ -1068,7 +1084,7 @@ fn verify_file_sha256(
 /// `mvm-cli::commands::env::artifact_verify` so operator
 /// expectations stay uniform across the three downloaders
 /// (dev image, builder VM image, runtime overlay).
-fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {
+pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {
     let output = std::process::Command::new("curl")
         .args(["-fSL", "--silent", "--show-error", "-o"])
         .arg(dest)

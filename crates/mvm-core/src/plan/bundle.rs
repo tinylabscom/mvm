@@ -1369,6 +1369,95 @@ mod tests {
         }
     }
 
+    /// The signature blob read back is the exact one written.
+    ///
+    /// Nothing asserted the *contents* of what this returns, so
+    /// `read_signature_from_archive -> Ok(vec![])` survived mutation:
+    /// the install path would have copied an empty signature into the
+    /// extracted directory and no test noticed. Matching the filename is
+    /// also load-bearing — inverting that comparison picks up the
+    /// manifest instead.
+    #[test]
+    fn read_signature_from_archive_returns_the_signature_verbatim() {
+        let sk = fresh_key();
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
+        let manifest = make_manifest(key_id, vec![]);
+        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
+        let sig = sk.sign(&manifest_bytes).to_bytes().to_vec();
+
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        {
+            let mut tar = tar::Builder::new(&mut buf);
+            append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes).unwrap();
+            append_bytes(&mut tar, SIGNATURE_FILENAME, &sig).unwrap();
+            tar.finish().unwrap();
+        }
+
+        let got = read_signature_from_archive(&buf.into_inner()).expect("signature present");
+        assert_eq!(got, sig, "must return the signature bytes verbatim");
+        assert_eq!(got.len(), 64, "an ed25519 signature is 64 bytes");
+        assert_ne!(got, manifest_bytes, "must not return the manifest");
+    }
+
+    /// A signature-less archive is an error, not an empty signature.
+    #[test]
+    fn read_signature_from_archive_errors_when_absent() {
+        let sk = fresh_key();
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
+        let manifest_bytes = canonical_manifest_bytes(&make_manifest(key_id, vec![])).unwrap();
+
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        {
+            let mut tar = tar::Builder::new(&mut buf);
+            append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes).unwrap();
+            tar.finish().unwrap();
+        }
+        assert!(read_signature_from_archive(&buf.into_inner()).is_err());
+    }
+
+    /// Each unsafe shape rejected on its own.
+    ///
+    /// `unsafe_path_rejected_in_manifest` below accepts either
+    /// `UnsafePath` *or* `ArtifactMissing`, because the `../` entry never
+    /// makes it into the tar. That acceptance is wider than the property,
+    /// so deleting the guard entirely still satisfies it — mutation
+    /// testing caught `ensure_safe_path -> Ok(())` surviving. This
+    /// exercises the function directly, one clause per case, so each
+    /// disjunct in the condition is independently load-bearing.
+    #[test]
+    fn ensure_safe_path_rejects_each_unsafe_shape() {
+        for bad in [
+            "",                   // empty
+            "/etc/passwd",        // absolute
+            "a\\b",               // backslash separator
+            "../etc/passwd",      // leading traversal
+            "a/../../etc/passwd", // interior traversal
+            "./a",                // leading single-dot segment
+            "a/./b",              // interior single-dot segment
+        ] {
+            assert!(
+                matches!(
+                    ensure_safe_path(bad),
+                    Err(BundleVerifyError::UnsafePath { .. })
+                ),
+                "expected {bad:?} to be rejected as an unsafe archive path"
+            );
+        }
+    }
+
+    /// The positive half: an ordinary relative path is admitted. Without
+    /// this, a guard that rejected everything would also pass the case
+    /// above.
+    #[test]
+    fn ensure_safe_path_admits_ordinary_relative_paths() {
+        for good in ["kernel.bin", "artifacts/kernel.bin", "a/b/c.img"] {
+            assert!(
+                ensure_safe_path(good).is_ok(),
+                "expected {good:?} to be admitted"
+            );
+        }
+    }
+
     #[test]
     fn unsafe_path_rejected_in_manifest() {
         // The path validator runs both at write time and at read

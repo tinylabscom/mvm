@@ -121,6 +121,12 @@ pub mod pipeline;
 /// ext4 + verity sidecar + roothash for the running mvmctl version and
 /// host arch from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
+/// Acquire the published SDK-sidecar disk for hosts that cannot build one.
+/// Fetches the per-arch release tarball, proves it against the release's
+/// checksum and its own manifest, and installs it under
+/// `~/.mvm/cache/sdk-sidecar/<version>/<arch>/` for
+/// [`mvm_fs::sdk_sidecar::SdkSidecarResolver`] to pick up.
+pub mod sdk_sidecar;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.
 pub use nix::manifest as nix_manifest;

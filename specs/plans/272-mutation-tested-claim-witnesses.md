@@ -1,8 +1,8 @@
 # Plan 272: Mutation-tested claim witnesses
 
 **Status:** WS-1 (gate + surface pin) shipped. WS-2 (full-surface baseline)
-unblocked — the `--run` sandbox landed; the baseline itself is pending a
-nightly run. WS-3 (the four claims this gate cannot reach) folded in from
+unblocked — #1958 isolated the `--run` lane's state roots in the workflow;
+the baseline itself is pending a nightly run. WS-3 (the four claims this gate cannot reach) folded in from
 plan 274, whose WS3/WS4 are struck in favour of this plan.
 **Owner:** mvm core.
 **Depends on:** the claims ledger in `specs/adrs/001-microvm-security-posture.md`
@@ -147,15 +147,18 @@ within a day", not "within a PR".
 - [x] Seed `accepted_misses` from a real run of the claim-10 anchor
       (`crates/mvm-protocol/src/policy/network_policy.rs`): 52 mutants,
       35 caught, 12 unviable, 1 timeout, **4 missed**.
-- [x] Confine `--run` to a throwaway `HOME` + `MVM_HOME`. A mutant is the
-      enforcement code with a check removed, so running the suite against
-      one can mint a signer key at whatever path the mutated logic picks
-      and leave audit state behind; neither the nightly job nor
-      `just mutation-witnesses` isolated the state roots. The sandbox is
-      applied where cargo-mutants is spawned, so both entry points get it
-      from one place. `CARGO_HOME`/`RUSTUP_HOME` are carried across, or a
-      moved `HOME` would re-download the registry and toolchain on an
-      hours-long run.
+- [x] Confine `--run` to a throwaway `HOME` + `MVM_HOME` (#1958, closing
+      \#1946). A mutant is the enforcement code with a check removed, so
+      running the suite against one can mint a signer key at whatever path
+      the mutated logic picks and leave audit state behind. The nightly job
+      now exports both roots to a runner temp dir, carrying
+      `CARGO_HOME`/`RUSTUP_HOME` across so an hours-long run does not
+      re-download the registry and toolchain.
+      **Residual:** the isolation is in the workflow step, so it does not
+      reach `just mutation-witnesses` — the local recipe #1946 called the
+      sharper of the two, since a developer's real `~/.mvm` is not a
+      discarded VM. Moving it into the gate itself, where cargo-mutants is
+      spawned, would cover both entry points from one place.
 - [ ] Populate `accepted_misses` for the remaining 25 surface files from
       the first full nightly runs, then drop `continue-on-error` so a new
       hole fails the lane. **Triage rule:** a **real hole** gets the test
@@ -228,11 +231,11 @@ treatment that 274's WS3 originally described for everything.
       surface today. A more specific witness token would narrow it.
 - [ ] Three cargo-fuzz harnesses exist and no workflow runs them:
       `fuzz_builder_request` and `fuzz_entrypoint_event` (mvm-agentd) and
-      `fuzz_snapshot_frame` (mvm-core). They were left out of the matrix
-      rebuild deliberately — the lane had run nothing for ten nightlies, so
-      adding never-executed targets to the change that restores it would
-      have made a first-run failure indistinguishable from the restoration
-      being wrong. Add them once the matrix is observed green.
+      `fuzz_snapshot_frame` (mvm-core). Left out of the lane restoration
+      deliberately — it had run nothing for ten nightlies, so adding
+      never-executed targets to the change that revives it would make a
+      first-run failure indistinguishable from the restoration being wrong.
+      Add them once the lane is observed green.
 - [ ] `check-duplicate-majors` is wired into `ci.yml`'s Lint job but not
       `ci-full.yml`'s, against the standing rule that a gate lives in both
       lists. It happens to be the gate that would have caught the dalek
