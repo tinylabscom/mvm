@@ -2060,4 +2060,108 @@ mod tests {
         mvm_fs::overlay::validate_overlay_payload(&artifact.overlay_ext4)
             .expect("direct overlay carries all required guest paths");
     }
+
+    /// The overlay's per-file mode is copied from the staged file, masked
+    /// to the permission bits. Nothing asserted that, and the mutants it
+    /// admitted are not cosmetic: turning the mask `&` into `|` yields
+    /// 0o7777 for *every* file in the overlay — world-writable, setuid,
+    /// setgid, sticky — and `^` inverts whatever the real mode was.
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn overlay_mode_is_the_files_own_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        for mode in [0o644u32, 0o755, 0o600] {
+            let f = tmp.path().join(format!("f{mode:o}"));
+            std::fs::write(&f, b"x").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+            let got = overlay_mode_of(&f, 0o400);
+            assert_eq!(
+                u32::from(got),
+                mode,
+                "the overlay mode must be the file's own permission bits"
+            );
+            // The masked-widening mutant lands here: 0o7777 is every
+            // permission bit including setuid and setgid.
+            assert_ne!(got, 0o7777, "the overlay must never widen a file to 0o7777");
+        }
+
+        // An absent path falls back to the caller's default rather than
+        // inventing a mode.
+        let absent = tmp.path().join("not-there");
+        assert_eq!(overlay_mode_of(&absent, 0o644), 0o644);
+        assert_eq!(overlay_mode_of(&absent, 0o755), 0o755);
+    }
+
+    /// The guest path is the staged path made absolute relative to the
+    /// overlay root. A constant here silently collapses every file in the
+    /// overlay onto one guest path.
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn overlay_guest_path_is_rooted_and_distinct_per_file() {
+        let root = Path::new("/stage/overlay");
+        assert_eq!(
+            overlay_guest_path(root, Path::new("/stage/overlay/usr/bin/agent")),
+            "/usr/bin/agent"
+        );
+        assert_eq!(
+            overlay_guest_path(root, Path::new("/stage/overlay/init")),
+            "/init"
+        );
+        // Two different staged files must not map to the same guest path.
+        assert_ne!(
+            overlay_guest_path(root, Path::new("/stage/overlay/a")),
+            overlay_guest_path(root, Path::new("/stage/overlay/b"))
+        );
+        // A path outside the root is still rooted rather than dropped.
+        assert_eq!(
+            overlay_guest_path(root, Path::new("elsewhere")),
+            "/elsewhere"
+        );
+    }
+
+    /// Completeness is a conjunction: every one of the five artifacts has
+    /// to be there. Weakened to a disjunction, a cache holding one file
+    /// reads as a complete overlay and the resolver serves it.
+    #[test]
+    fn a_cache_is_complete_only_when_every_artifact_is_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Build the layout the way production does, so the test cannot
+        // drift from the real artifact names.
+        let layout = RuntimeOverlayLayout::under(tmp.path(), "1.2.3", "aarch64");
+        std::fs::create_dir_all(&layout.artifact_dir).unwrap();
+        let every = [
+            &layout.overlay_ext4,
+            &layout.sidecar,
+            &layout.roothash_file,
+            &layout.version_file,
+            &layout.checksum_manifest_file,
+        ];
+
+        assert!(
+            !all_required_files_present(&layout),
+            "an empty cache dir is not a complete overlay"
+        );
+
+        // Each artifact alone is still incomplete — this is the half a
+        // disjunction gets wrong, and it needs every file tried, not one.
+        for present in every {
+            std::fs::write(present, b"x").unwrap();
+            assert!(
+                !all_required_files_present(&layout),
+                "{} alone is not a complete overlay",
+                present.display()
+            );
+            std::fs::remove_file(present).unwrap();
+        }
+
+        for f in every {
+            std::fs::write(f, b"x").unwrap();
+        }
+        assert!(
+            all_required_files_present(&layout),
+            "all five artifacts present is a complete overlay"
+        );
+    }
 }
