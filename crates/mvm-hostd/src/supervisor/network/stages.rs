@@ -1695,6 +1695,20 @@ mod tests {
         udp_other.l4_payload = &query;
         udp_other.raw_frame = &query;
         assert_eq!(scan.scan(&egress_ctx(), &udp_other), ScanOutcome::Pass);
+
+        // Ingress UDP/53 — the stage is egress-only, so a denied qname
+        // arriving inbound is still none of its business.
+        //
+        // This is the one case that separates the guard's disjunction from
+        // a conjunction: `&&` binds tighter than `||`, so the mutated form
+        // differs from the original only when the direction test is true
+        // while both the protocol and port tests are false. Every
+        // egress-direction case agrees under both spellings.
+        assert_eq!(
+            scan.scan(&ingress_ctx(), &udp),
+            ScanOutcome::Pass,
+            "the sinkhole stage inspects egress only"
+        );
     }
 
     /// A minimal DNS query packet for `name`: 12-byte header with
