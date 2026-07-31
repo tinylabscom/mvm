@@ -180,16 +180,30 @@ mod tests {
     use crate::driver::mock::MockDriver;
     use mvm_core::util::test_env::TestEnv;
 
-    #[test]
-    fn build_packs_inputs_boots_the_builder_spec_and_extracts_the_output() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut env = TestEnv::new();
+    /// The on-disk inputs a builder run reads, materialized under one
+    /// tempdir.
+    struct BuilderFixture {
+        tmp: tempfile::TempDir,
+        job: PathBuf,
+        work: PathBuf,
+        bins: PathBuf,
+        kernel: PathBuf,
+        rootfs: PathBuf,
+        nix_store: PathBuf,
+    }
+
+    /// Materialize those inputs and point the substitution endpoint at a
+    /// shell stub.
+    ///
+    /// The stub is not a convenience: without it the run spawns the real
+    /// `mvm-substitution-endpoint`, which is an `mvm-hostd` binary. A
+    /// package-scoped `cargo nextest run -p mvm-runtime` never builds it,
+    /// so a test that omits the stub passes only when something else in
+    /// the same target dir happened to build another package's binary.
+    fn builder_fixture(env: &mut TestEnv) -> BuilderFixture {
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_HOME", tmp.path());
 
-        // Real input trees + placeholder image files on disk.
         let job = tmp.path().join("job");
         let work = tmp.path().join("work");
         let bins = tmp.path().join("bins");
@@ -205,6 +219,7 @@ mod tests {
         for f in [&kernel, &rootfs, &nix_store] {
             std::fs::write(f, b"x").unwrap();
         }
+
         let stub = tmp.path().join("stub-endpoint.sh");
         std::fs::write(
             &stub,
@@ -217,18 +232,38 @@ mod tests {
         }
         env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
 
+        BuilderFixture {
+            tmp,
+            job,
+            work,
+            bins,
+            kernel,
+            rootfs,
+            nix_store,
+        }
+    }
+
+    #[test]
+    fn build_packs_inputs_boots_the_builder_spec_and_extracts_the_output() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = TestEnv::new();
+        let fx = builder_fixture(&mut env);
+        let tmp = &fx.tmp;
+
         // A run-to-completion builder: the mock VM reports Stopped so the
         // poll-until-off loop returns at once.
         let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
         let outcome = runner
             .build(&BuilderBuild {
                 name: "bld-unit",
-                kernel: &kernel,
-                rootfs: &rootfs,
-                nix_store: &nix_store,
-                job_dir: &job,
-                work_src: &work,
-                host_bin_dir: &bins,
+                kernel: &fx.kernel,
+                rootfs: &fx.rootfs,
+                nix_store: &fx.nix_store,
+                job_dir: &fx.job,
+                work_src: &fx.work,
+                host_bin_dir: &fx.bins,
                 runtime_overlay: None,
                 closure_nar: None,
                 output_size: 1 << 20,
@@ -259,24 +294,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
-
-        let job = tmp.path().join("job");
-        let work = tmp.path().join("work");
-        let bins = tmp.path().join("bins");
-        for d in [&job, &work, &bins] {
-            std::fs::create_dir_all(d).unwrap();
-        }
-        std::fs::write(job.join("cmd.sh"), b"#!/bin/sh\nnix build\n").unwrap();
-        std::fs::write(work.join("flake.nix"), b"{}").unwrap();
-        std::fs::write(bins.join("mvm-host-vm-init"), b"ELF").unwrap();
-        let kernel = tmp.path().join("Image");
-        let rootfs = tmp.path().join("rootfs.ext4");
-        let nix_store = tmp.path().join("nix-store.img");
-        for f in [&kernel, &rootfs, &nix_store] {
-            std::fs::write(f, b"x").unwrap();
-        }
+        let fx = builder_fixture(&mut env);
+        let tmp = &fx.tmp;
         let closure = tmp.path().join("nix-closure.nar");
         std::fs::write(&closure, b"pretend-nar-bytes").unwrap();
 
@@ -284,12 +303,12 @@ mod tests {
         let outcome = runner
             .build(&BuilderBuild {
                 name: "bld-closure",
-                kernel: &kernel,
-                rootfs: &rootfs,
-                nix_store: &nix_store,
-                job_dir: &job,
-                work_src: &work,
-                host_bin_dir: &bins,
+                kernel: &fx.kernel,
+                rootfs: &fx.rootfs,
+                nix_store: &fx.nix_store,
+                job_dir: &fx.job,
+                work_src: &fx.work,
+                host_bin_dir: &fx.bins,
                 runtime_overlay: None,
                 closure_nar: Some(&closure),
                 output_size: 1 << 20,
