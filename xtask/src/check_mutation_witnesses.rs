@@ -37,10 +37,24 @@ use std::path::Path;
 /// Where the pinned surface and accepted misses live.
 const BASELINE_REL: &str = "xtask/mutation-witness-baseline.json";
 
-/// Per-mutant test timeout handed to cargo-mutants. A mutant that hangs
-/// is a caught mutant as far as this gate cares, but without a bound a
-/// single infinite loop stalls the whole lane.
-const MUTANT_TIMEOUT_SECS: u32 = 300;
+/// Per-mutant test timeout, as a multiple of the package's own measured
+/// baseline. A mutant that hangs is a caught mutant as far as this gate
+/// cares, but without a bound a single infinite loop stalls the lane.
+///
+/// Relative rather than absolute because the packages on this surface
+/// differ by two orders of magnitude in suite time, and one fixed number
+/// is wrong for all of them in both directions at once. A flat 300s was
+/// **too short** for the packages whose own suite runs longer than that —
+/// their baseline timed out, so no mutant was ever tested and the file
+/// read as covered — and **five times too long** for a package whose
+/// suite takes fourteen seconds, where every hanging mutant burned the
+/// full five minutes.
+const MUTANT_TIMEOUT_MULTIPLIER: u32 = 5;
+
+/// Floor under the derived timeout, so a package whose suite runs in
+/// milliseconds does not get a timeout measured in milliseconds and start
+/// reporting scheduler noise as caught mutants.
+const MUTANT_MINIMUM_TIMEOUT_SECS: u32 = 60;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -516,7 +530,14 @@ fn run_mutants_for_file(workspace: &Path, file: &SurfaceFile, out_dir: &Path) ->
         .args(["-p", &file.package])
         .args(["--file", &file.path])
         .args(["--test-tool", "nextest"])
-        .args(["--timeout", &MUTANT_TIMEOUT_SECS.to_string()])
+        .args([
+            "--timeout-multiplier",
+            &MUTANT_TIMEOUT_MULTIPLIER.to_string(),
+        ])
+        .args([
+            "--minimum-test-timeout",
+            &MUTANT_MINIMUM_TIMEOUT_SECS.to_string(),
+        ])
         .arg("--output")
         .arg(out_dir)
         // The embedded host-vm binaries are cross-compiled by
