@@ -133,7 +133,7 @@ jobs:
       - name: No forbidden dependency families
         run: cargo run -p xtask -- check-forbidden-deps
 
-      - name: repr(C) types carry a layout contract
+      - name: repr(C) types carry a layout contract (check-abi-layout)
         run: cargo run -p xtask -- check-abi-layout
 
       - name: SDK crate split guard
