@@ -368,6 +368,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         audit_labels: Default::default(),
         agent_verbs: None,
+        services: Vec::new(),
     })
 }
 
@@ -555,6 +556,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            host_service: Vec::new(),
         }
     }
 

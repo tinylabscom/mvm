@@ -82,6 +82,18 @@ pub struct CliWorld {
     pub kernel_upstream: BTreeMap<String, String>,
     /// The verdict from the most recent freshness assessment.
     pub kernel_advisory: Option<KernelAdvisory>,
+    /// Per-scenario SDK-sidecar cache root, so a developer's populated cache
+    /// can never satisfy a scenario for the wrong reason.
+    pub sdk_sidecar_cache: Option<tempfile::TempDir>,
+    /// Host-service bindings the scenario's plan carries.
+    pub sdk_sidecar_services: Vec<mvm_protocol::protocol::broker::ServiceId>,
+    /// The signed-plan fixture the sidecar scenarios gate against.
+    pub sdk_sidecar_plan: Option<mvm_core::plan::ExecutionPlan>,
+    /// Outcome of the most recent sidecar resolution: `Ok(None)` for "not
+    /// needed", `Ok(Some(_))` for an attachment, `Err(rendered)` for a
+    /// fail-closed refusal.
+    pub sdk_sidecar_result:
+        Option<Result<Option<mvm_runtime::sdk_sidecar::SdkSidecarAttachment>, String>>,
     /// Root directory for the OCI unpack scenarios.
     pub unpack_root: Option<tempfile::TempDir>,
     /// Paths written by prior layers when unpacking multiple layers.

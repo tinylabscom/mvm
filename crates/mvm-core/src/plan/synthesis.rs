@@ -167,6 +167,11 @@ pub struct SynthesisInput<'a> {
     /// Per-workload agent verb allow-list threaded verbatim into the plan.
     /// `None` preserves the current class/profile-gate-only behavior.
     pub agent_verbs: Option<Vec<crate::plan::VerbId>>,
+    /// Host services this workload is authorized to call over the broker
+    /// channel, threaded verbatim into the plan. Empty (the common case) means
+    /// the workload calls none: the broker answers `NotBound` and the launch
+    /// path attaches no SDK sidecar.
+    pub services: Vec<mvm_protocol::protocol::broker::ServiceId>,
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -287,6 +292,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         // deps-volume gate is skipped).
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
+        services: input.services.clone(),
     };
 
     // Content-address the finished plan. The fresh nonce makes this unique per
@@ -397,6 +403,7 @@ mod tests {
             reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
             audit_labels: Default::default(),
             agent_verbs: None,
+            services: Vec::new(),
         }
     }
 

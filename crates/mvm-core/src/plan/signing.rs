@@ -275,6 +275,7 @@ pub mod test_support {
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
+            services: Vec::new(),
         }
     }
 }

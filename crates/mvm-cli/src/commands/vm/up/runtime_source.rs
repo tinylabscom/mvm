@@ -1,8 +1,17 @@
 //! Runtime-overlay attachment + status resolution for `mvmctl up` boots —
 //! the verity-sealed guest-binary overlay every workload backend consumes,
 //! and the audit label describing which source strategy actually landed.
+//!
+//! The optional glibc SDK sidecar rides the same seam: it is resolved from the
+//! same version-keyed cache discipline and attached through the same
+//! plan-admitted read-only disk mechanism, so there is one attachment path, not
+//! two. Where the runtime overlay is attached to every workload, the sidecar is
+//! attached only to workloads whose signed plan binds an SDK-served host
+//! service.
 
 use anyhow::{Context, Result};
+
+pub(crate) use mvm_runtime::sdk_sidecar::SdkSidecarAttachment;
 
 use crate::commands::runtime_overlay::{
     RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
@@ -301,6 +310,147 @@ pub(crate) fn attach_universal_initramfs_if_cached(
         }
     }
     Ok(())
+}
+
+// ── SDK sidecar ──────────────────────────────────────────────────────────────
+
+/// Production wrapper: build the sidecar resolver from the mvm cache dir + the
+/// running mvmctl version, then resolve for `services`.
+///
+/// The decision, the resolution, and the attachment shape live in
+/// `mvm_runtime::sdk_sidecar` so every driver — not just the CLI — reaches one
+/// contract; this only supplies the host's cache root and version.
+pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
+    services: &[mvm_protocol::protocol::broker::ServiceId],
+) -> Result<Option<SdkSidecarAttachment>> {
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let resolver = mvm_fs::sdk_sidecar::SdkSidecarResolver::new(
+        cache_root,
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+        services,
+        &resolver,
+        mvm_core::arch::GuestArch::host(),
+    )
+}
+
+#[cfg(test)]
+mod sdk_sidecar_host_resolution_tests {
+    use super::*;
+    use mvm_core::arch::GuestArch;
+    use mvm_fs::sdk_sidecar::{
+        SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
+    };
+    use mvm_protocol::protocol::broker::ServiceId;
+    use sha2::{Digest, Sha256};
+
+    fn svc(raw: &str) -> ServiceId {
+        ServiceId::parse(raw).expect("fixture service id")
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    fn sidecar_ext4_bytes() -> Vec<u8> {
+        use mvm_fs::ext4::Node;
+        let nodes = vec![
+            Node::Dir {
+                path: "/lib".into(),
+                mode: 0o555,
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/lib/libmvm_host_services.so".into(),
+                mode: 0o555,
+                data: b"\x7fELF-stub".to_vec(),
+                xattrs: Vec::new(),
+            },
+        ];
+        mvm_fs::ext4::build_image(&nodes).expect("build sidecar ext4 fixture")
+    }
+
+    fn seed_sidecar_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
+        let layout = SdkSidecarLayout::under(cache, version, &arch.to_string());
+        std::fs::create_dir_all(&layout.artifact_dir).unwrap();
+        let image = sidecar_ext4_bytes();
+        let version_text = format!("{version}\n");
+        std::fs::write(&layout.image, &image).unwrap();
+        std::fs::write(&layout.version_file, &version_text).unwrap();
+        std::fs::write(
+            &layout.checksum_manifest_file,
+            format!(
+                "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
+                sha256_hex(&image),
+                sha256_hex(version_text.as_bytes()),
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The grant + volume pair the attachment produces is exactly what the
+    /// shared admission gate admits — proven against the real gate, not a
+    /// restatement of its rules.
+    #[test]
+    fn the_attachment_satisfies_the_shared_admission_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let arch = GuestArch::host();
+        seed_sidecar_cache(dir.path(), "1.2.3", arch);
+        let resolver = SdkSidecarResolver::new(dir.path().to_path_buf(), "1.2.3".into());
+        let attached = mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+            &[svc("host.audit.v1")],
+            &resolver,
+            arch,
+        )
+        .unwrap()
+        .unwrap();
+
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .services(vec![svc("host.audit.v1")])
+            .build();
+        mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
+            std::slice::from_ref(&attached.volume),
+            &plan,
+        )
+        .expect("the resolved attachment must satisfy the admission gate");
+
+        // And the same volume is refused for a plan that binds no SDK service.
+        let unbound = mvm_core::plan::test_support::PlanFixture::new().build();
+        assert!(
+            mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(
+                std::slice::from_ref(&attached.volume),
+                &unbound,
+            )
+            .is_err()
+        );
+    }
+
+    /// The host wrapper reads the mvm cache dir, so an isolated `MVM_HOME` is
+    /// what makes this assertion about the wrapper rather than about whatever
+    /// the developer happens to have cached.
+    #[test]
+    fn the_host_wrapper_resolves_nothing_when_no_sdk_service_is_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        assert_eq!(resolve_sdk_sidecar_attachment_for_host(&[]).unwrap(), None);
+        assert_eq!(
+            resolve_sdk_sidecar_attachment_for_host(&[svc("broker.v1")]).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_host_wrapper_fails_closed_on_a_cold_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        assert!(
+            resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")]).is_err(),
+            "a bound SDK service with no cached sidecar must refuse the launch"
+        );
+    }
 }
 
 #[cfg(test)]

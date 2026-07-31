@@ -23,6 +23,8 @@ pkgs.rustPlatform.buildRustPackage {
 
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
 
+  unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
+
   # Only the cdylib crate; the workspace's heavier members are not in its
   # closure, so the artifact stays small.
   cargoBuildFlags = [

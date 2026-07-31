@@ -27,6 +27,7 @@
 //! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --kernel result/vmlinux --closure-paths result/rootfs-closure-paths
 //! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --guest-rss-bytes 4194304
+//! cargo xtask perf footprint --rootfs result/rootfs.ext4 --overlay overlay/overlay.ext4 --sdk-sidecar sidecar/sdk.ext4
 //! ```
 //!
 //! ## What this does NOT do (yet)
@@ -73,6 +74,16 @@ pub const GUEST_ROOTFS_MAX_STORE_PATHS: usize = 2;
 /// Maximum current RSS for the idle guest-agent process.
 pub const GUEST_AGENT_RSS_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Maximum size of the optional SDK sidecar image (the glibc host-services
+/// cdylib plus its loader closure).
+///
+/// Deliberately budgeted and reported **outside** [`GUEST_STORAGE_MAX_BYTES`]:
+/// the sidecar is attached only to workloads whose signed plan binds an
+/// SDK-served host service, so folding it into the base ledger would report a
+/// footprint no ordinary workload actually pays. Mirrors `sdkSidecarSizeBytes`
+/// in `nix/images/runtime-overlay/flake.nix`.
+pub const SDK_SIDECAR_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Cold-boot wall-clock budget for the Firecracker backend.
 /// The floor is 300ms; the strict gate is 500ms p50.
 pub const FIRECRACKER_BOOT_BUDGET: Duration = Duration::from_millis(500);
@@ -101,7 +112,7 @@ pub fn run(args: &[String]) -> Result<()> {
                 "  rootfs-size --rootfs <PATH>    Assert rootfs is ≤ {ROOTFS_MAX_BYTES} bytes"
             );
             eprintln!(
-                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>] [--closure-paths <PATH>] [--guest-rss-bytes <N>]"
+                "  footprint --rootfs <PATH> --overlay <PATH> [--rootfs-verity <PATH>] [--overlay-verity <PATH>] [--kernel <PATH>] [--closure-paths <PATH>] [--guest-rss-bytes <N>] [--sdk-sidecar <PATH>]"
             );
             eprintln!(
                 "                                 Assert the supplied guest artifacts total ≤ {GUEST_STORAGE_MAX_BYTES} bytes"
@@ -359,6 +370,11 @@ struct FootprintReport {
     rootfs_closure: Option<ClosureInventory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     guest_agent_rss_bytes: Option<u64>,
+    /// The optional SDK sidecar, budgeted on its own and excluded from
+    /// `total_bytes` — it ships only to workloads that bind an SDK-served host
+    /// service, so it is not part of the base guest footprint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sdk_sidecar: Option<FootprintEntry>,
 }
 
 fn footprint_subcommand(args: &[String]) -> Result<()> {
@@ -372,9 +388,13 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
     if let Some(rss_bytes) = guest_agent_rss_bytes {
         guest_rss_check(rss_bytes, GUEST_AGENT_RSS_MAX_BYTES)?;
     }
+    let sdk_sidecar = optional_path_arg(args, "--sdk-sidecar")?
+        .map(|path| sdk_sidecar_check(&path, SDK_SIDECAR_MAX_BYTES))
+        .transpose()?;
     let mut report = guest_storage_footprint_check(&artifacts, GUEST_STORAGE_MAX_BYTES)?;
     report.rootfs_closure = rootfs_closure;
     report.guest_agent_rss_bytes = guest_agent_rss_bytes;
+    report.sdk_sidecar = sdk_sidecar;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -407,8 +427,41 @@ fn footprint_subcommand(args: &[String]) -> Result<()> {
                 "guest-agent-rss", rss_bytes, GUEST_AGENT_RSS_MAX_BYTES
             );
         }
+        if let Some(entry) = &report.sdk_sidecar {
+            eprintln!(
+                "  {:<16} {} bytes  {} (optional; NOT counted in the base footprint above)",
+                "sdk-sidecar",
+                entry.bytes,
+                entry.path.display()
+            );
+        }
     }
     Ok(())
+}
+
+/// Measure the optional SDK sidecar against its own budget.
+///
+/// Separate from [`guest_storage_footprint_check`] on purpose: the sidecar has
+/// its own ceiling and never contributes to the base total, so a growing sidecar
+/// can't quietly consume the base guest's headroom and a base regression can't
+/// hide behind an absent sidecar.
+fn sdk_sidecar_check(path: &Path, max_bytes: u64) -> Result<FootprintEntry> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("stat sdk-sidecar at {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("sdk-sidecar at {} is not a regular file", path.display());
+    }
+    let bytes = metadata.len();
+    if bytes > max_bytes {
+        bail!(
+            "SDK sidecar is {bytes} bytes — over the sidecar budget of {max_bytes} bytes (8 MiB)"
+        );
+    }
+    Ok(FootprintEntry {
+        name: "sdk-sidecar".to_string(),
+        path: path.to_path_buf(),
+        bytes,
+    })
 }
 
 fn parse_footprint_artifacts(args: &[String]) -> Result<Vec<FootprintArtifact>> {
@@ -483,6 +536,7 @@ fn guest_storage_footprint_check(
         entries,
         rootfs_closure: None,
         guest_agent_rss_bytes: None,
+        sdk_sidecar: None,
     })
 }
 
@@ -821,6 +875,78 @@ mod tests {
         let report = guest_storage_footprint_check(&artifacts, 20).unwrap();
         assert_eq!(report.total_bytes, 20);
         assert_eq!(report.entries.len(), 5);
+    }
+
+    #[test]
+    fn sdk_sidecar_is_budgeted_on_its_own_and_kept_out_of_the_base_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let overlay = dir.path().join("overlay.ext4");
+        let sidecar = dir.path().join("sdk.ext4");
+        std::fs::write(&rootfs, vec![0u8; 10]).unwrap();
+        std::fs::write(&overlay, vec![0u8; 4]).unwrap();
+        std::fs::write(&sidecar, vec![0u8; 7]).unwrap();
+
+        let artifacts = vec![
+            FootprintArtifact {
+                name: "rootfs",
+                path: rootfs,
+            },
+            FootprintArtifact {
+                name: "overlay",
+                path: overlay,
+            },
+        ];
+        let base = guest_storage_footprint_check(&artifacts, 20).unwrap();
+        assert_eq!(base.total_bytes, 14);
+        assert!(base.sdk_sidecar.is_none());
+
+        // The sidecar has its own ceiling and never lands in the base total, so
+        // an 8 MiB sidecar can't consume the base guest's 50 MB headroom.
+        let entry = sdk_sidecar_check(&sidecar, SDK_SIDECAR_MAX_BYTES).unwrap();
+        assert_eq!(entry.bytes, 7);
+        assert_eq!(entry.name, "sdk-sidecar");
+        let mut with_sidecar = base.clone();
+        with_sidecar.sdk_sidecar = Some(entry);
+        assert_eq!(
+            with_sidecar.total_bytes, base.total_bytes,
+            "attaching a sidecar must not change the base footprint"
+        );
+    }
+
+    #[test]
+    fn sdk_sidecar_over_its_own_budget_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("sdk.ext4");
+        std::fs::write(&sidecar, vec![0u8; 9]).unwrap();
+        let err = sdk_sidecar_check(&sidecar, 8).unwrap_err();
+        assert!(err.to_string().contains("over the sidecar budget"), "{err}");
+    }
+
+    #[test]
+    fn sdk_sidecar_budget_matches_the_nix_allocation() {
+        // The Nix derivation pre-allocates the sidecar at a fixed size; the
+        // ledger's ceiling must not drift below what the build emits.
+        assert_eq!(SDK_SIDECAR_MAX_BYTES, 8 * 1024 * 1024);
+        let flake = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("workspace root")
+                .join("nix/images/runtime-overlay/flake.nix"),
+        )
+        .expect("read the runtime-overlay flake");
+        assert!(
+            flake.contains("sdkSidecarSizeBytes = 8 * 1024 * 1024;"),
+            "the flake's sidecar allocation drifted from SDK_SIDECAR_MAX_BYTES"
+        );
+    }
+
+    #[test]
+    fn a_missing_sdk_sidecar_path_is_an_error_not_a_silent_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            sdk_sidecar_check(&dir.path().join("absent.ext4"), SDK_SIDECAR_MAX_BYTES).unwrap_err();
+        assert!(err.to_string().contains("stat sdk-sidecar"), "{err}");
     }
 
     #[test]

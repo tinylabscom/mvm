@@ -177,8 +177,25 @@
 - [x] Lightweight guest WS-3: runtime-overlay guest executables now build
       static-musl without the shared loader bundle; the glibc SDK FFI is
       published as a separate `sdk-sidecar` output with an explicit
-      `/mvm/sdk/lib` contract. Sidecar attachment remains opt-in for workloads
-      that use host-service verbs.
+      `/mvm/sdk/lib` contract.
+- [x] Lightweight guest WS-3 follow-up — automatic SDK-sidecar attachment. The
+      signed `ExecutionPlan` now carries a `services` host-service binding set
+      (surfaced by `--host-service`), and the launch path attaches the sidecar
+      read-only at `/mvm/sdk` if and only if one of those bindings is
+      SDK-served. `mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment`
+      gates both directions on the one admission path every backend reaches, so
+      a dev or mock backend cannot acquire a posture production would refuse.
+      The artifact ships as `sdk-sidecar-image` (ext4 + VERSION + checksum
+      manifest) and is resolved through the same version-keyed,
+      manifest-verified discipline as the runtime overlay; missing, drifted,
+      tampered, unreadable, and cdylib-less artifacts all fail closed. Two
+      build-backed CI gates pin the split in both directions
+      (`runtime-overlay-no-glibc`, `sdk-sidecar-carries-glibc`), and
+      `xtask perf footprint --sdk-sidecar` reports the sidecar on its own
+      ledger line against its own 8 MiB ceiling, never folded into the base
+      50,000,000-byte contract. Source checkouts build the sidecar from the
+      flake; publishing it for downloaded `mvmctl` builds is planned at
+      `specs/plans/273-sdk-sidecar-release-acquisition.md`.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.

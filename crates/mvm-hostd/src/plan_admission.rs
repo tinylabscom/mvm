@@ -482,6 +482,91 @@ pub fn enforce_admitted_shares(
     Ok(())
 }
 
+/// Admission enforcement for the optional glibc SDK sidecar.
+///
+/// The sidecar carries the host-services cdylib the language SDKs `dlopen`. It
+/// is not in the base rootfs or the static-musl runtime overlay, so it has to be
+/// attached per-workload — and the attachment is authorized by the plan's
+/// host-service bindings, never by an environment variable or a guess about
+/// application content.
+///
+/// Both directions fail closed, and both are checked on the one admission path
+/// every backend reaches — including the mock and dev-tier backends, so a
+/// dev/test launch can't quietly acquire a posture production wouldn't:
+///
+/// - The plan binds an SDK-served host service, but no read-only sidecar
+///   attachment is present → refuse. Booting anyway strands the workload with a
+///   `dlopen` failure it cannot act on.
+/// - The plan binds none, but something attached a volume at the sidecar mount
+///   point anyway → refuse. That would smuggle the glibc closure (and a
+///   host-services transport) into a workload the plan never authorized.
+///
+/// A sidecar attachment must additionally be read-only and a disk image: the
+/// guest never writes to it, and a writable or directory-share attachment is a
+/// different, unadmitted shape.
+pub fn enforce_sdk_sidecar_attachment(
+    volumes: &[mvm_core::vm_backend::VmVolume],
+    plan: &ExecutionPlan,
+) -> Result<()> {
+    use mvm_core::plan::{SDK_SIDECAR_GUEST_PATH, sdk_host_services_in, sdk_sidecar_required};
+    use mvm_core::vm_backend::VmVolumeKind;
+
+    let attached: Vec<_> = volumes
+        .iter()
+        .filter(|v| v.guest == SDK_SIDECAR_GUEST_PATH)
+        .collect();
+    let required = sdk_sidecar_required(plan);
+
+    if !required {
+        if let Some(stray) = attached.first() {
+            anyhow::bail!(
+                "refusing to attach '{}' at {SDK_SIDECAR_GUEST_PATH}: the signed ExecutionPlan \
+                 binds no SDK host service, so this workload must not carry the SDK sidecar",
+                stray.host,
+            );
+        }
+        return Ok(());
+    }
+
+    let bound: Vec<&str> = sdk_host_services_in(&plan.services)
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
+    let Some(sidecar) = attached.first() else {
+        anyhow::bail!(
+            "refusing to launch: the signed ExecutionPlan binds SDK host service(s) [{}], which \
+             need the SDK sidecar mounted read-only at {SDK_SIDECAR_GUEST_PATH}, and no such \
+             attachment is present. The launch path resolves the sidecar from the version-keyed \
+             cache under the mvm cache dir; build it with \
+             `nix build ./nix/images/runtime-overlay#sdk-sidecar-image` and retry.",
+            bound.join(", "),
+        );
+    };
+    if attached.len() > 1 {
+        anyhow::bail!(
+            "refusing to launch: {} attachments target {SDK_SIDECAR_GUEST_PATH}; exactly one \
+             read-only SDK sidecar is admissible",
+            attached.len(),
+        );
+    }
+    if !sidecar.read_only {
+        anyhow::bail!(
+            "refusing to attach '{}' at {SDK_SIDECAR_GUEST_PATH} read-write: the SDK sidecar is \
+             read-only by contract",
+            sidecar.host,
+        );
+    }
+    if !matches!(sidecar.kind, VmVolumeKind::Disk) {
+        anyhow::bail!(
+            "refusing to attach '{}' at {SDK_SIDECAR_GUEST_PATH}: the SDK sidecar is a read-only \
+             disk image, not a host-directory share",
+            sidecar.host,
+        );
+    }
+    Ok(())
+}
+
 /// Inputs for [`admit_and_start`]. The `synthesis` describes the plan to admit
 /// (the signed authority) and `config` is the launch shape to boot; they come
 /// from one source in a well-formed caller, and [`enforce_admitted_shares`]
@@ -532,6 +617,7 @@ pub fn admit_and_start(
     let mut config = params.config;
     populate_audit_substrate(&mut config, &admitted, params.policy_bundle)?;
     enforce_admitted_shares(&config.volumes, &admitted.plan)?;
+    enforce_sdk_sidecar_attachment(&config.volumes, &admitted.plan)?;
 
     let vm_id = backend
         .start(&config)
@@ -577,7 +663,30 @@ mod tests {
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             audit_labels: Default::default(),
             agent_verbs: None,
+            services: Vec::new(),
         }
+    }
+
+    fn sdk_sidecar_volume() -> mvm_core::vm_backend::VmVolume {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        VmVolume {
+            host: "/cache/sdk-sidecar/1.2.3/aarch64/sdk.ext4".into(),
+            guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
+            read_only: true,
+            kind: VmVolumeKind::Disk,
+            ..Default::default()
+        }
+    }
+
+    fn plan_binding(services: &[&str]) -> ExecutionPlan {
+        let mut input = fixture_input("vm-sdk");
+        input.services = services
+            .iter()
+            .map(|s| {
+                mvm_protocol::protocol::broker::ServiceId::parse(*s).expect("fixture service id")
+            })
+            .collect();
+        synthesize_plan(&input).expect("fixture plan synthesizes")
     }
 
     struct FixedClock(DateTime<Utc>);
@@ -632,6 +741,124 @@ mod tests {
             ..admitted_vol
         };
         assert!(enforce_admitted_shares(&[escalated], &plan).is_err());
+    }
+
+    /// A workload that binds no SDK host service gets no sidecar, and nothing
+    /// may attach one behind the plan's back.
+    #[test]
+    fn no_sdk_binding_means_no_sidecar_attachment() {
+        let plan = plan_binding(&[]);
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan).is_ok());
+
+        let err = enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan)
+            .expect_err("an unauthorized sidecar must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("binds no SDK host service"), "{msg}");
+    }
+
+    /// An unrelated host-service binding is not an SDK binding: it must not pull
+    /// the glibc sidecar into an ordinary workload.
+    #[test]
+    fn unrelated_service_binding_does_not_require_the_sidecar() {
+        let plan = plan_binding(&["broker.v1", "host.other.v1"]);
+        assert!(enforce_sdk_sidecar_attachment(&[], &plan).is_ok());
+        assert!(enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan).is_err());
+    }
+
+    /// A bound SDK host service with the sidecar attached read-only is admitted.
+    #[test]
+    fn sdk_binding_with_a_read_only_sidecar_is_admitted() {
+        for service in mvm_core::plan::SDK_HOST_SERVICES {
+            let plan = plan_binding(&[service]);
+            assert!(
+                enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &plan).is_ok(),
+                "{service} bound + sidecar attached read-only must be admitted"
+            );
+        }
+    }
+
+    /// A bound SDK host service with no sidecar attachment fails closed, and the
+    /// message names the binding that demanded it without leaking file bytes.
+    #[test]
+    fn sdk_binding_without_the_sidecar_fails_closed() {
+        let plan = plan_binding(&["host.secrets.v1"]);
+        let err = enforce_sdk_sidecar_attachment(&[], &plan)
+            .expect_err("a required-but-absent sidecar must refuse the launch");
+        let msg = err.to_string();
+        assert!(msg.contains("host.secrets.v1"), "{msg}");
+        assert!(
+            msg.contains(mvm_core::plan::SDK_SIDECAR_GUEST_PATH),
+            "{msg}"
+        );
+    }
+
+    /// The sidecar is read-only by contract: a writable or directory-share
+    /// attachment at the sidecar mount point is a different, unadmitted shape.
+    #[test]
+    fn a_writable_or_dir_share_sidecar_fails_closed() {
+        use mvm_core::vm_backend::VmVolumeKind;
+        let plan = plan_binding(&["host.audit.v1"]);
+
+        let writable = mvm_core::vm_backend::VmVolume {
+            read_only: false,
+            ..sdk_sidecar_volume()
+        };
+        let err = enforce_sdk_sidecar_attachment(&[writable], &plan).expect_err("rw refused");
+        assert!(err.to_string().contains("read-only"), "{err}");
+
+        let share = mvm_core::vm_backend::VmVolume {
+            kind: VmVolumeKind::DirShare,
+            ..sdk_sidecar_volume()
+        };
+        let err = enforce_sdk_sidecar_attachment(&[share], &plan).expect_err("share refused");
+        assert!(err.to_string().contains("disk image"), "{err}");
+    }
+
+    /// Two attachments racing for the same mount point is ambiguous — refuse
+    /// rather than let mount order decide which cdylib the workload loads.
+    #[test]
+    fn duplicate_sidecar_attachments_fail_closed() {
+        let plan = plan_binding(&["host.time.v1"]);
+        let dup = [sdk_sidecar_volume(), sdk_sidecar_volume()];
+        let err = enforce_sdk_sidecar_attachment(&dup, &plan).expect_err("duplicates refused");
+        assert!(err.to_string().contains("exactly one"), "{err}");
+    }
+
+    /// Unrelated volumes are untouched by the sidecar gate in either direction.
+    #[test]
+    fn unrelated_volumes_are_ignored_by_the_sidecar_gate() {
+        use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
+        let other = VmVolume {
+            host: "/h/data.img".into(),
+            guest: "/data".into(),
+            read_only: false,
+            kind: VmVolumeKind::Disk,
+            ..Default::default()
+        };
+        assert!(
+            enforce_sdk_sidecar_attachment(std::slice::from_ref(&other), &plan_binding(&[]))
+                .is_ok()
+        );
+        let bound = plan_binding(&["host.cost.v1"]);
+        assert!(
+            enforce_sdk_sidecar_attachment(&[other.clone(), sdk_sidecar_volume()], &bound).is_ok()
+        );
+        assert!(
+            enforce_sdk_sidecar_attachment(std::slice::from_ref(&other), &bound).is_err(),
+            "an unrelated volume must not satisfy the sidecar requirement"
+        );
+    }
+
+    /// The signed plan round-trips its service bindings, so the gate decides on
+    /// the same bytes the signature covers.
+    #[test]
+    fn service_bindings_survive_plan_serialization() {
+        let plan = plan_binding(&["host.audit.v1", "broker.v1"]);
+        let json = serde_json::to_string(&plan).expect("plan serializes");
+        let back: ExecutionPlan = serde_json::from_str(&json).expect("plan round-trips");
+        assert_eq!(back.services, plan.services);
+        assert!(mvm_core::plan::sdk_sidecar_required(&back));
+        assert!(enforce_sdk_sidecar_attachment(&[sdk_sidecar_volume()], &back).is_ok());
     }
 
     #[test]

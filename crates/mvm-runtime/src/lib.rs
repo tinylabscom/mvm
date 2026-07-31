@@ -22,6 +22,7 @@
 
 pub mod build_env;
 pub mod machine;
+pub mod sdk_sidecar;
 pub mod security;
 pub mod storage;
 pub mod vsock_transport;

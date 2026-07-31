@@ -1008,6 +1008,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
                 false,
                 super::agent_verbs::image_is_sealed(&rootfs_blob),
             ),
+        services: Vec::new(),
     })?;
 
     let child_plan_json = admission.as_ref().map(|ctx| {
@@ -1244,6 +1245,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
                 false,
                 super::agent_verbs::image_is_sealed(p.instance_rootfs),
             ),
+        services: Vec::new(),
     })?;
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig {

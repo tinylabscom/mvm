@@ -1270,6 +1270,7 @@ mod tests {
             deps_volume: None,
             shares: Vec::new(),
             agent_verbs: None,
+            services: Vec::new(),
         };
         plan.plan_id = mvm_core::plan::compute_plan_id(&plan);
         plan

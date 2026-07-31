@@ -91,6 +91,10 @@ pub(in crate::commands) struct Args {
     /// `RunArgs::hypervisor` via `into_exec_args`.
     #[arg(skip)]
     pub hypervisor: Option<String>,
+    /// Internal (not a CLI flag): raw `--host-service` values forwarded from
+    /// `RunArgs::host_service` via `into_exec_args`.
+    #[arg(skip)]
+    pub host_service: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -226,6 +230,12 @@ pub(in crate::commands) struct RunArgs {
     /// the admit site.
     #[arg(skip)]
     pub agent_verb: Vec<String>,
+    /// Bind a host service this workload may call over the broker channel
+    /// (repeatable). Baked into the signed `ExecutionPlan`; the broker refuses
+    /// any service absent from the set, and binding an SDK-served service
+    /// attaches the optional SDK sidecar read-only.
+    #[arg(long = "host-service", value_name = "SERVICE")]
+    pub host_service: Vec<String>,
     /// Internal (not a CLI flag): stdin bytes to forward into the guest `Exec`
     /// frame. Empty ⇒ no stdin (`Exec.stdin = None`). Populated at the
     /// dispatch site when the host stdin pipe is non-empty.
@@ -297,6 +307,7 @@ impl RunArgs {
             stdin: self.stdin,
             healthcheck: self.healthcheck,
             hypervisor: self.hypervisor,
+            host_service: self.host_service,
         }
     }
 }
@@ -381,6 +392,9 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_mem_mib = u64::from(parse_human_size(&args.memory).context("Invalid --memory")?);
     let admit_network_policy = network_policy.clone();
     let admit_agent_verb = args.agent_verb.clone();
+    let (admit_host_services, admit_sidecar) =
+        super::host_services::resolve_bindings_and_sidecar(&args.host_service)?;
+    let admit_sdk_sidecar_grant = admit_sidecar.map(|a| a.grant);
     let admit_pty = args.pty;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
@@ -414,7 +428,7 @@ pub(in crate::commands) fn run_secure_with_source(
             policy_dir: None,
             bundle_pin: None,
             deps_volume: None,
-            shares: vec![],
+            shares: admit_sdk_sidecar_grant.clone().into_iter().collect(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             network_policy: admit_network_policy.clone(),
             agent_verb_override: admit_agent_verb.clone(),
@@ -424,6 +438,7 @@ pub(in crate::commands) fn run_secure_with_source(
                 admit_is_dev,
                 crate::commands::vm::agent_verbs::image_is_sealed(rootfs),
             ),
+            services: admit_host_services.clone(),
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it
@@ -869,6 +884,7 @@ fn build_exec_request(
             },
         }
     };
+    let (_, sdk_sidecar) = super::host_services::resolve_bindings_and_sidecar(&args.host_service)?;
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,
         image,
@@ -888,6 +904,7 @@ fn build_exec_request(
         stdin: args.stdin,
         healthcheck: args.healthcheck,
         hypervisor: args.hypervisor,
+        sdk_sidecar,
     })
 }
 
@@ -934,6 +951,7 @@ fn emit_oci_run_admission(
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         audit_labels: Default::default(),
         agent_verbs: None,
+        services: Vec::new(),
     };
     let ledger = InMemoryNonceLedger::new();
     let admitted = admit_for_run(&input, &SystemClock, &ledger, None, None)?;
@@ -1577,6 +1595,35 @@ fn test_run_security_summary_from_parts(
 }
 
 #[cfg(test)]
+mod host_service_flag_tests {
+    #[test]
+    fn machine_run_forwards_the_flag_into_the_transient_run_args() {
+        use clap::Parser as _;
+        let cli = crate::commands::Cli::try_parse_from([
+            "mvmctl",
+            "machine",
+            "run",
+            "--host-service",
+            "host.audit.v1",
+            "--host-service",
+            "host.time.v1",
+            "--",
+            "true",
+        ])
+        .expect("machine run --host-service parses");
+        let crate::commands::Commands::Machine(group) = cli.command else {
+            panic!("expected the machine group");
+        };
+        let crate::commands::machine::MachineAction::Run(run) = group.action else {
+            panic!("expected machine run");
+        };
+        assert_eq!(run.host_service, ["host.audit.v1", "host.time.v1"]);
+        let forwarded = run.into_run_args_for_test().into_exec_args();
+        assert_eq!(forwarded.host_service, ["host.audit.v1", "host.time.v1"]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1776,6 +1823,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            host_service: Vec::new(),
         }
     }
 

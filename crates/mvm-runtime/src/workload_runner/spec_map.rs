@@ -85,6 +85,29 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
     blocks
 }
 
+/// The guest device node the SDK sidecar lands on for this launch config, or
+/// `None` when no sidecar is attached.
+///
+/// Derived from [`workload_blocks`] rather than recomputed, so the device the
+/// guest is told to mount is by construction the device the VMM attached. The
+/// guest cannot derive this itself: the sidecar's slot depends on whether the
+/// boot carries a verity sidecar, a runtime overlay, and how many user volumes
+/// precede it.
+pub fn sdk_sidecar_block_device(config: &VmStartConfig) -> Option<String> {
+    let sidecar_host = config
+        .volumes
+        .iter()
+        .find(|v| {
+            v.guest == mvm_core::plan::SDK_SIDECAR_GUEST_PATH
+                && matches!(v.kind, VmVolumeKind::Disk)
+        })
+        .map(|v| v.host.as_str())?;
+    workload_blocks(config)
+        .iter()
+        .find(|b| b.source.as_os_str() == std::ffi::OsStr::new(sidecar_host))
+        .map(crate::driver::BlockDev::device_node)
+}
+
 /// Refuse a `DirShare` volume before a `VmmSpec` is assembled: the runner's
 /// `VmmSpec` has no virtio-fs device, so a directory share can't be expressed
 /// on this path (unlike a `Disk` volume, which becomes a `BlockDev`). Fails
@@ -370,6 +393,95 @@ mod tests {
         assert_eq!(vol_block.source, PathBuf::from("/vol/data.img"));
         assert!(vol_block.read_only);
         assert!(!vol_block.ephemeral);
+    }
+
+    fn sdk_sidecar_volume(host: &str) -> mvm_core::vm_backend::VmVolume {
+        disk_volume(host, mvm_core::plan::SDK_SIDECAR_GUEST_PATH, true)
+    }
+
+    #[test]
+    fn no_sidecar_volume_resolves_no_sidecar_device() {
+        let cfg = VmStartConfig {
+            verity_path: Some("/img/rootfs.verity".into()),
+            runtime_overlay_path: Some("/img/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
+            runtime_overlay_roothash: Some("ab".repeat(32)),
+            volumes: vec![disk_volume("/vol/data.img", "/data", true)],
+            ..base()
+        };
+        assert_eq!(sdk_sidecar_block_device(&cfg), None);
+    }
+
+    #[test]
+    fn a_sealed_boot_lands_the_sidecar_at_slot_4() {
+        let cfg = VmStartConfig {
+            verity_path: Some("/img/rootfs.verity".into()),
+            runtime_overlay_path: Some("/img/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
+            runtime_overlay_roothash: Some("ab".repeat(32)),
+            volumes: vec![sdk_sidecar_volume("/cache/sdk.ext4")],
+            ..base()
+        };
+        let blocks = workload_blocks(&cfg);
+        assert_eq!(
+            nodes(&blocks),
+            vec!["/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd", "/dev/vde"]
+        );
+        assert!(blocks[4].read_only, "the sidecar attaches read-only");
+        assert_eq!(sdk_sidecar_block_device(&cfg).as_deref(), Some("/dev/vde"));
+    }
+
+    /// A user volume ahead of the sidecar shifts the sidecar's device, and the
+    /// resolved token follows it — this is exactly why the guest can't derive
+    /// the slot on its own.
+    #[test]
+    fn a_preceding_user_volume_shifts_the_sidecar_device() {
+        let cfg = VmStartConfig {
+            verity_path: Some("/img/rootfs.verity".into()),
+            runtime_overlay_path: Some("/img/overlay.ext4".into()),
+            runtime_overlay_verity_path: Some("/img/overlay.verity".into()),
+            runtime_overlay_roothash: Some("ab".repeat(32)),
+            volumes: vec![
+                disk_volume("/vol/data.img", "/data", false),
+                sdk_sidecar_volume("/cache/sdk.ext4"),
+            ],
+            ..base()
+        };
+        assert_eq!(
+            nodes(&workload_blocks(&cfg)),
+            vec![
+                "/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd", "/dev/vde", "/dev/vdf"
+            ]
+        );
+        assert_eq!(sdk_sidecar_block_device(&cfg).as_deref(), Some("/dev/vdf"));
+    }
+
+    /// An unsealed boot has no verity or overlay pair, so the sidecar lands
+    /// immediately after the rootfs. The device the guest is told to mount must
+    /// track that, not a baked constant.
+    #[test]
+    fn an_unsealed_boot_lands_the_sidecar_right_after_the_rootfs() {
+        let cfg = VmStartConfig {
+            volumes: vec![sdk_sidecar_volume("/cache/sdk.ext4")],
+            ..base()
+        };
+        assert_eq!(nodes(&workload_blocks(&cfg)), vec!["/dev/vda", "/dev/vdb"]);
+        assert_eq!(sdk_sidecar_block_device(&cfg).as_deref(), Some("/dev/vdb"));
+    }
+
+    /// A directory share at the sidecar mount point is not a sidecar
+    /// attachment; the admission gate already refuses it, and this resolver
+    /// must not paper over it by naming a block device that was never attached.
+    #[test]
+    fn a_dir_share_at_the_sidecar_path_resolves_no_device() {
+        let cfg = VmStartConfig {
+            volumes: vec![dir_share_volume(
+                "/cache/sdk",
+                mvm_core::plan::SDK_SIDECAR_GUEST_PATH,
+            )],
+            ..base()
+        };
+        assert_eq!(sdk_sidecar_block_device(&cfg), None);
     }
 
     #[test]

@@ -383,6 +383,12 @@ pub struct ExecRequest {
     /// Recorded liveness declaration (phase A: presence only). Persisted with a
     /// persistent machine so it survives + is inspectable; not yet probed.
     pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
+    /// Resolved SDK-sidecar attachment for this run, or `None` when the
+    /// workload binds no SDK-served host service. Resolved (and verified)
+    /// before admission so the signed plan's grant and the launch config's
+    /// volume describe the same bytes; the shared admission gate refuses the
+    /// launch if they ever disagree.
+    pub sdk_sidecar: Option<crate::commands::vm::up::SdkSidecarAttachment>,
     /// Requested workload hypervisor (from `--hypervisor`), or `None` to
     /// auto-detect. Kept here so `run_inner`'s backend selection agrees with the
     /// admit/build sites that read it off `RunArgs`.
@@ -1340,6 +1346,10 @@ fn build_start_config(
         memory_mib: req.memory_mib,
         mem_initial_mib: req.mem_initial_mib,
         ports: Vec::new(),
+        // User `--add-dir` volumes first, then the SDK sidecar. The order is
+        // the block-device order every backend assigns, so keeping the
+        // host-resolved sidecar last means adding or removing it never
+        // renumbers a user volume's device.
         volumes: volumes
             .iter()
             .map(|v| VmVolume {
@@ -1350,6 +1360,7 @@ fn build_start_config(
                 kind: v.kind,
                 encrypted: v.encrypted,
             })
+            .chain(req.sdk_sidecar.iter().map(|a| a.volume.clone()))
             .collect(),
         config_files: Vec::new(),
         secret_files: Vec::new(),
@@ -1925,6 +1936,7 @@ pub fn dispatch_in_session(
         stdin: Vec::new(),
         healthcheck: None,
         hypervisor: None,
+        sdk_sidecar: None,
     };
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
@@ -2243,6 +2255,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
     }
@@ -2267,6 +2280,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(script.starts_with("set -e\n"));
@@ -2299,6 +2313,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         assert!(script.contains("mkdir -p '/g'"));
@@ -2331,6 +2346,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         // RW mount is unqualified — no `-o ro`.
@@ -2361,6 +2377,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
 
         let pty = pty_console_request(&req, &[], "set -e\nexec '/bin/sh'\n".to_string());
@@ -2393,6 +2410,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let wrapper = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
 
@@ -2422,6 +2440,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let wrapper = build_guest_wrapper(&req, &[]);
 
@@ -2658,6 +2677,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
     }
@@ -2689,6 +2709,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         // Env from entrypoint exported.
@@ -2731,6 +2752,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));

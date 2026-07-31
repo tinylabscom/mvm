@@ -38,8 +38,9 @@ pub(in crate::commands) use oci_persist::{
 pub(crate) use oci_persist::{persistent_oci_effective_initrd, persists_plan_before_start};
 
 pub(crate) use runtime_source::{
-    attach_runtime_overlay_if_cached, attach_runtime_overlay_if_cached_version,
-    attach_universal_initramfs_if_cached, emit_runtime_source_status,
+    SdkSidecarAttachment, attach_runtime_overlay_if_cached,
+    attach_runtime_overlay_if_cached_version, attach_universal_initramfs_if_cached,
+    emit_runtime_source_status, resolve_sdk_sidecar_attachment_for_host,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
