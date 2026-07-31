@@ -531,10 +531,39 @@ mod tests {
         }
     }
 
+    /// The contract that made the ordering above load-bearing: a timestamp
+    /// ahead of `now` is clock skew, and `idle_elapsed` reports `None` rather
+    /// than a negative — so any caller handing it a future timestamp gets
+    /// `None`, which is a panic away for a caller that unwraps.
+    #[test]
+    fn idle_elapsed_reports_none_for_a_future_timestamp() {
+        let mut reg = registry_with_one(None);
+        let now = Utc::now();
+        let ahead = (now + chrono::Duration::seconds(30))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        reg.touch_last_active("vm1", ahead).unwrap();
+
+        assert!(
+            idle_elapsed(reg.lookup("vm1").unwrap(), now).is_none(),
+            "a timestamp ahead of now is clock skew, not negative idleness"
+        );
+    }
+
     #[test]
     fn idle_elapsed_prefers_last_active_then_registered_at() {
-        let now = Utc::now();
         let mut reg = registry_with_one(None);
+        // Sample `now` *after* registering. `registered_at` is stamped inside
+        // the registry and stored truncated to whole seconds, so truncation
+        // only ever moves it earlier — which makes `now >= registered_at` hold
+        // by construction once `now` is taken later in real time.
+        //
+        // Sampling `now` first instead let the two `Utc::now()` calls straddle
+        // a second boundary: `registered_at` then truncated to the *next*
+        // second, `idle_elapsed` saw a future timestamp, returned `None` per
+        // its clock-skew contract, and the unwrap below panicked. Same-second
+        // truncation hid it on almost every run.
+        let now = Utc::now();
         // No last_active → falls back to registered_at (~now) → tiny elapsed.
         let e = idle_elapsed(reg.lookup("vm1").unwrap(), now).unwrap();
         assert!(e < Duration::from_secs(5));
