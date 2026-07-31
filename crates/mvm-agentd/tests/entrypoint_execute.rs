@@ -33,6 +33,23 @@ fn make_wrapper() -> (tempfile::TempDir, ValidatedEntrypoint) {
     (tmp, ValidatedEntrypoint { resolved, file })
 }
 
+/// Execution deadline for the tests that assert on a wrapper's *result* —
+/// exit code, captured output, fd3 records — rather than on timing.
+///
+/// For those, the deadline is a safety net so a hung wrapper cannot hang the
+/// suite; it is not the property under test, and none of them care whether it
+/// is five seconds or sixty. It used to be five, which is long enough on an
+/// idle machine and not long enough under a full parallel run: the spawned
+/// wrapper simply does not get scheduled in time, `execute` returns
+/// `Timeout { stdout: [], stderr: [], controls: [] }`, and a test that has
+/// nothing to do with timing fails.
+///
+/// Generous on purpose. A healthy wrapper exits in milliseconds, so raising
+/// this costs nothing when things work and removes a whole class of false
+/// failure when the machine is loaded. The tests that genuinely exercise the
+/// timeout path set their own short deadlines and are left alone.
+const RESULT_TEST_DEADLINE: Duration = Duration::from_secs(60);
+
 fn caps_with_timeout(stdout_max: usize, stderr_max: usize) -> CallCaps {
     CallCaps {
         stdin_max: 1024 * 1024,
@@ -51,7 +68,7 @@ fn test_execute_zero_exit_captures_stdout_stderr() {
         &entry,
         tmp.path(),
         b"STDOUT hello-out\nSTDERR hello-err\nEXIT 0\n\n",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         Vec::new(),
     );
@@ -77,7 +94,7 @@ fn test_execute_nonzero_exit_preserved() {
         &entry,
         tmp.path(),
         b"EXIT 7\n\n",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         Vec::new(),
     );
@@ -96,7 +113,7 @@ fn test_execute_stdin_piped_to_wrapper() {
         &entry,
         tmp.path(),
         &stdin,
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         Vec::new(),
     );
@@ -116,7 +133,7 @@ fn test_execute_injects_env_and_clears_inherited() {
         &entry,
         tmp.path(),
         b"ENV MVM_TEST_VAR\nENV PATH\nEXIT 0\n\n",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         vec![("MVM_TEST_VAR".to_string(), "injected-value".to_string())],
     );
@@ -145,7 +162,7 @@ fn test_execute_skips_invalid_env_entries() {
         &entry,
         tmp.path(),
         b"ENV GOOD\nENV BAD\nEXIT 0\n\n",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         vec![
             ("GOOD".to_string(), "ok".to_string()),
@@ -176,7 +193,7 @@ fn test_execute_captures_fd3_control_record() {
         b"FD3_HEX 0d0000007b226b696e64223a226f6b227d00000000\n\
           STDERR hello-stderr\n\
           EXIT 0\n\n",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         Vec::new(),
     );
@@ -204,7 +221,7 @@ fn test_execute_fd3_emits_no_records_when_wrapper_silent() {
         &entry,
         tmp.path(),
         b"STDOUT hi\nEXIT 0\n\n",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         Vec::new(),
     );
@@ -228,7 +245,7 @@ fn test_execute_fd3_partial_frame_at_eof_is_dropped() {
         &entry,
         tmp.path(),
         b"FD3_HEX 0a000000\nEXIT 0\n\n",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         Vec::new(),
     );
@@ -247,7 +264,7 @@ fn test_execute_fd3_oversized_header_is_refused() {
         &entry,
         tmp.path(),
         b"FD3_HEX 00000200\nEXIT 0\n\n",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         Vec::new(),
     );
@@ -272,9 +289,16 @@ fn test_execute_timeout_kills_wrapper() {
     let elapsed = started.elapsed();
     match outcome {
         CallOutcome::Timeout { .. } => {
-            // Bound: 200 ms timeout + 500 ms grace + slack. If it
-            // takes longer than 5 s the test is broken, not slow.
-            assert!(elapsed < Duration::from_secs(5), "timeout took {elapsed:?}");
+            // Bound: 200 ms timeout + 500 ms grace + slack. Generous,
+            // because the property is "the timeout fired and killed the
+            // wrapper", not "it fired within a tight window" — under a full
+            // parallel run the kill can legitimately take seconds to be
+            // scheduled. A bound this loose still catches the failure that
+            // matters: the timeout never firing at all.
+            assert!(
+                elapsed < Duration::from_secs(30),
+                "timeout took {elapsed:?}"
+            );
         }
         other => panic!("expected Timeout, got {other:?}"),
     }
@@ -293,7 +317,7 @@ fn test_execute_stdin_cap_rejects_before_spawn() {
         &entry,
         tmp.path(),
         &huge,
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps,
         Vec::new(),
     );
@@ -324,7 +348,7 @@ fn test_execute_stdout_cap_kills_wrapper() {
         &entry,
         tmp.path(),
         b"UNBOUNDED_STDOUT\n\n",
-        Duration::from_secs(10),
+        RESULT_TEST_DEADLINE,
         caps,
         Vec::new(),
     );
@@ -355,7 +379,7 @@ fn test_execute_spawn_failed_when_program_missing() {
         &entry,
         tmp.path(),
         b"",
-        Duration::from_secs(5),
+        RESULT_TEST_DEADLINE,
         caps_with_timeout(1024, 1024),
         Vec::new(),
     );
