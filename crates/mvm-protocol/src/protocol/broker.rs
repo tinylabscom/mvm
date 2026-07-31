@@ -414,4 +414,36 @@ mod tests {
             AuditDurability::Batched(Duration::from_millis(100))
         );
     }
+
+    /// `ServiceId` and `CorrelationId` are rendered into audit entries and
+    /// used to match a reply to its call. A `Display` that writes nothing
+    /// blanks the audit label; an `as_str` that returns a constant makes
+    /// every call look like the same one.
+    #[test]
+    fn identifiers_render_their_own_value() {
+        let service = ServiceId::parse("host.secrets.v1".to_string()).unwrap();
+        assert_eq!(service.as_str(), "host.secrets.v1");
+        assert_eq!(service.to_string(), "host.secrets.v1");
+
+        let correlation = CorrelationId::new("01JABCDEF0123456789ABCDEFG");
+        assert_eq!(correlation.as_str(), "01JABCDEF0123456789ABCDEFG");
+        assert_eq!(correlation.to_string(), "01JABCDEF0123456789ABCDEFG");
+    }
+
+    /// Two distinct ids must not render alike — a constant `as_str` or an
+    /// empty `Display` passes the single-value check above only because it
+    /// is never asked to tell two values apart.
+    #[test]
+    fn distinct_identifiers_do_not_render_alike() {
+        let a = CorrelationId::new("call-a");
+        let b = CorrelationId::new("call-b");
+        assert_ne!(a.as_str(), b.as_str());
+        assert_ne!(a.to_string(), b.to_string());
+        assert!(!a.to_string().is_empty());
+
+        let s1 = ServiceId::parse("host.audit.v1".to_string()).unwrap();
+        let s2 = ServiceId::parse("host.time.v1".to_string()).unwrap();
+        assert_ne!(s1.to_string(), s2.to_string());
+        assert!(!s1.to_string().is_empty());
+    }
 }
