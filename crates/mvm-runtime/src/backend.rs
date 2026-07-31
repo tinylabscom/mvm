@@ -374,6 +374,66 @@ impl BackendTier {
     }
 }
 
+/// The three host capabilities the auto-detect ladder branches on,
+/// resolved once so the ladder itself can be a pure function of them.
+///
+/// Probing and deciding are separated because the decision is the part
+/// worth testing and the probe is the part that pins a test to whatever
+/// host runs it. With them fused, "an opt-in tier is never auto-selected"
+/// could only ever be checked for the tier the test machine happened to
+/// be — which is how a macOS-only regression stayed invisible to a Linux
+/// CI runner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HostTiers {
+    /// Native Linux with `/dev/kvm` — the Firecracker production tier.
+    native_runner: bool,
+    /// macOS 26+ Apple Silicon, where HVF is the auto-detect default.
+    hvf_default: bool,
+    /// libkrun is installed.
+    libkrun: bool,
+}
+
+impl HostTiers {
+    fn probe() -> Self {
+        let plat = mvm_core::platform::current();
+        Self {
+            native_runner: plat.supports_native_runner(),
+            hvf_default: plat.is_hvf_default_tier(),
+            libkrun: plat.has_libkrun(),
+        }
+    }
+}
+
+/// The auto-detect ladder.
+///
+/// Only production-tier backends appear here. Every other backend —
+/// apple-container, qemu, docker, wasm, mock — is opt-in, reachable only
+/// through an explicit `--hypervisor` / `MVM_BACKEND` selection, and must
+/// never be reachable from this function. Adding a return site for one
+/// silently moves a workload onto a backend the caller did not ask for.
+fn select_kind(tiers: HostTiers) -> catalog::BackendKind {
+    use catalog::BackendKind;
+
+    // 1. Native Linux KVM → the Firecracker workload runner (vsock-only
+    //    egress; fastest — dev & production). WSL2 nested KVM is
+    //    future/experimental and is not auto-selected today.
+    if tiers.native_runner {
+        return BackendKind::Firecracker;
+    }
+    // 2. macOS 26+ Apple Silicon → the HVF VMM.
+    if tiers.hvf_default {
+        return BackendKind::Hvf;
+    }
+    // 3. libkrun installed → the libkrun workload runner (vsock-only egress).
+    if tiers.libkrun {
+        return BackendKind::Libkrun;
+    }
+    // Final default. Reachable when no tier is available; start() then
+    // fails with the production-path error message rather than silently
+    // picking a backend the caller didn't ask for.
+    BackendKind::Firecracker
+}
+
 /// Backend-agnostic dispatch enum.
 ///
 /// Wraps concrete backends so CLI commands don't need to know which
@@ -517,37 +577,7 @@ impl AnyBackend {
     /// which is a clearer failure mode than picking a backend the
     /// caller didn't ask for.
     pub fn auto_select() -> Self {
-        let plat = mvm_core::platform::current();
-
-        // 1. Native Linux KVM → the Firecracker workload runner (vsock-only
-        //    egress; fastest — dev & production). WSL2 nested KVM is
-        //    future/experimental and is not auto-selected today.
-        if plat.supports_native_runner() {
-            return Self::Firecracker(fc_runner());
-        }
-
-        // 2. macOS 26+ Apple Silicon → the HVF VMM. Prefer the Apple
-        //    Container backend when its container kernel is cached: it boots
-        //    Apple's prebuilt container kernel through the same HVF runner,
-        //    so a plain `machine run` uses it without `--hypervisor`. Without
-        //    the artifact, fall back to the workload-kernel hvf runner.
-        if plat.is_hvf_default_tier() {
-            let apple = AppleContainerBackend::new();
-            if apple.is_available().unwrap_or(false) {
-                return Self::AppleContainer(apple);
-            }
-            return Self::Hvf(hvf_runner());
-        }
-
-        // 3. libkrun installed → the libkrun workload runner (vsock-only egress).
-        if plat.has_libkrun() {
-            return Self::Libkrun(libkrun_runner());
-        }
-
-        // Final default. Reachable when no tier is available; start()
-        // then fails with the production-path error message rather than
-        // silently picking a backend the caller didn't ask for.
-        Self::Firecracker(fc_runner())
+        catalog::descriptor(select_kind(HostTiers::probe())).instantiate()
     }
 
     /// Resolve the backend that owns an already-started VM by its per-VM
@@ -1232,18 +1262,72 @@ mod tests {
         );
     }
 
+    /// Every host tier the ladder can see, enumerated. `auto_select` on
+    /// its own can only ever exercise the one tier the test machine
+    /// happens to be, so a return site added under a `macOS 26+` branch
+    /// is unreachable — and therefore untested — on a Linux CI runner.
+    fn every_host_tier() -> Vec<HostTiers> {
+        let mut all = Vec::new();
+        for native_runner in [false, true] {
+            for hvf_default in [false, true] {
+                for libkrun in [false, true] {
+                    all.push(HostTiers {
+                        native_runner,
+                        hvf_default,
+                        libkrun,
+                    });
+                }
+            }
+        }
+        all
+    }
+
+    /// The ladder resolves to a production tier and nothing else, on
+    /// every host it can see — not just this one.
+    ///
+    /// apple-container, qemu, docker, wasm, and mock are opt-in tiers
+    /// reachable only through an explicit `--hypervisor`. A branch
+    /// returning one of them moves a workload onto a backend nobody asked
+    /// for, which is exactly the shape of defect this enumerates against.
     #[test]
-    fn auto_select_skips_apple_container_without_its_kernel_artifact() {
-        // With an isolated, empty cache there is no container kernel, so
-        // auto_select must not pick the apple-container backend on any
-        // platform — on the HVF tier it falls back to the plain hvf runner.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.isolate_mvm_home(dir.path());
-        assert_ne!(
-            AnyBackend::auto_select().kind(),
-            mvm_core::vm_backend::BackendKind::AppleContainer,
-            "without the container kernel artifact, auto_select must not select apple-container"
+    fn the_ladder_never_yields_an_opt_in_tier_on_any_host() {
+        use mvm_core::vm_backend::BackendKind;
+        for tiers in every_host_tier() {
+            let kind = select_kind(tiers);
+            assert!(
+                matches!(
+                    kind,
+                    BackendKind::Firecracker | BackendKind::Hvf | BackendKind::Libkrun
+                ),
+                "auto-detect on {tiers:?} yielded the opt-in backend {kind:?}"
+            );
+        }
+    }
+
+    /// The ladder's priority order, pinned per tier. Without this the
+    /// test above passes for any permutation of the three production
+    /// backends, including one that would pick libkrun over KVM.
+    #[test]
+    fn the_ladder_prefers_kvm_then_hvf_then_libkrun() {
+        use mvm_core::vm_backend::BackendKind;
+        let tiers = |native_runner, hvf_default, libkrun| HostTiers {
+            native_runner,
+            hvf_default,
+            libkrun,
+        };
+        // Native KVM wins even when every other tier is also present.
+        assert_eq!(
+            select_kind(tiers(true, true, true)),
+            BackendKind::Firecracker
+        );
+        // HVF outranks libkrun on the macOS 26+ tier where both exist.
+        assert_eq!(select_kind(tiers(false, true, true)), BackendKind::Hvf);
+        assert_eq!(select_kind(tiers(false, false, true)), BackendKind::Libkrun);
+        // Nothing available: Firecracker, so start() fails pointing at the
+        // production path rather than at a backend nobody selected.
+        assert_eq!(
+            select_kind(tiers(false, false, false)),
+            BackendKind::Firecracker
         );
     }
 

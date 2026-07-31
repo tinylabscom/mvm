@@ -12,7 +12,7 @@
 //! reads green in CI while the same test is red for everyone else — and a
 //! genuine regression in the code under test is masked either way.
 //!
-//! Two rules keep that class closed:
+//! Three rules keep that class closed:
 //!
 //! 1. `default-cache-caller` — `default_mvm_cache_dir` is the only resolver
 //!    that reads `$HOME` while `MVM_HOME` is set, so it is the only door the
@@ -22,11 +22,15 @@
 //! 2. `test-home-isolation` — in a file that can reach a seed site, a test
 //!    that moves `MVM_HOME` must move `HOME` with it.
 //!    `TestEnv::isolate_mvm_home` does both; an explicit `HOME` set counts.
+//! 3. `subprocess-home-isolation` — in an integration test, a `Command`
+//!    handed `MVM_HOME` must be handed `HOME` too.
 //!
-//! Scope, stated plainly: rule 2 reads `#[test]` bodies, so it covers the
-//! in-process `TestEnv` pattern that the known failures came from. A
-//! subprocess fixture that exports `MVM_HOME` from a shared helper outside
-//! any `#[test]` body is not matched.
+//! Rule 3 deliberately does no reachability analysis, and that is the point:
+//! the child is a whole `mvmctl`, so it reaches *every* seed regardless of
+//! what the spawning test file imports. Rule 2 cannot see these at all — such
+//! a fixture names none of the seed symbols, and it builds its `Command` in a
+//! shared helper rather than inside a `#[test]` body, which is the second
+//! thing rule 2 keys on.
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -35,6 +39,7 @@ use std::path::Path;
 enum Rule {
     DefaultCacheCaller,
     TestHomeIsolation,
+    SubprocessHomeIsolation,
 }
 
 impl Rule {
@@ -42,6 +47,7 @@ impl Rule {
         match self {
             Rule::DefaultCacheCaller => "default-cache-caller",
             Rule::TestHomeIsolation => "test-home-isolation",
+            Rule::SubprocessHomeIsolation => "subprocess-home-isolation",
         }
     }
 }
@@ -157,6 +163,25 @@ fn scan_source(rel: &str, src: &str) -> Vec<String> {
         }
     }
 
+    // Rule 3 first: it applies to any integration test, with no dependence on
+    // what the file imports, so the seed-anchor early return below must not
+    // short-circuit it.
+    if is_integration_test(rel) {
+        for block in fn_blocks(src) {
+            if spawns_with_mvm_home(block.body) && !spawns_with_home(block.body) {
+                push(
+                    &mut hits,
+                    block.line,
+                    Rule::SubprocessHomeIsolation,
+                    format!(
+                        "`{}` gives a subprocess MVM_HOME but not HOME, so the child reads the developer's real cache",
+                        block.name
+                    ),
+                );
+            }
+        }
+    }
+
     if ISOLATION_EXEMPT.iter().any(|(path, _)| *path == rel) {
         return hits;
     }
@@ -227,6 +252,40 @@ fn isolates_home(body: &str) -> bool {
         || ["set(\"HOME\"", "set_var(\"HOME\"", "env(\"HOME\""]
             .iter()
             .any(|pattern| body.contains(pattern))
+}
+
+/// Is this an integration test — a file under a `tests/` directory?
+///
+/// Those are where subprocess fixtures live. Unit tests inside `src/` drive
+/// the code in-process and are rule 2's business.
+fn is_integration_test(rel: &str) -> bool {
+    rel.starts_with("tests/") || rel.contains("/tests/")
+}
+
+/// Split `src` into one block per `fn`, so a fixture that builds its
+/// `Command` in a helper is judged as a unit rather than per line.
+fn fn_blocks(src: &str) -> Vec<TestBlock<'_>> {
+    let starts: Vec<usize> = src.match_indices("fn ").map(|(at, _)| at).collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(n, &start)| {
+            let end = starts.get(n + 1).copied().unwrap_or(src.len());
+            TestBlock {
+                line: src[..start].lines().count() + 1,
+                name: test_fn_name(&src[start..end]).unwrap_or("<unnamed>"),
+                body: &src[start..end],
+            }
+        })
+        .collect()
+}
+
+fn spawns_with_mvm_home(body: &str) -> bool {
+    body.contains("env(\"MVM_HOME\"")
+}
+
+fn spawns_with_home(body: &str) -> bool {
+    body.contains("env(\"HOME\"") || body.contains("env_clear()")
 }
 
 fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<()> {
@@ -327,6 +386,53 @@ mod tests {
              #[test]\nfn ignores_override() {{\n    env.set(\"MVM_HOME\", d);\n}}\n"
         );
         assert!(scan_source("crates/mvm-core/src/config.rs", &src).is_empty());
+    }
+
+    #[test]
+    fn flags_a_subprocess_fixture_that_moves_only_mvm_home() {
+        let src = "fn mvmctl(&self) -> Command {\n    c.env(\"MVM_HOME\", self.root())\n}\n";
+        let hits = scan_source("tests/oci_smoke.rs", src);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].contains("subprocess-home-isolation"), "{hits:?}");
+        assert!(hits[0].contains("mvmctl"), "{hits:?}");
+    }
+
+    #[test]
+    fn subprocess_rule_fires_without_any_seed_anchor_in_the_file() {
+        // The whole point of rule 3: the child is a full mvmctl, so the
+        // spawning file naming no seed symbol proves nothing.
+        let src = "fn spawn() {\n    c.env(\"MVM_HOME\", d);\n}\n";
+        assert!(!SEED_ANCHORS.iter().any(|a| src.contains(a)));
+        assert_eq!(scan_source("tests/whatever.rs", src).len(), 1);
+    }
+
+    #[test]
+    fn accepts_a_subprocess_given_both_roots() {
+        let src = "fn mvmctl() -> Command {\n    c.env(\"HOME\", h).env(\"MVM_HOME\", r)\n}\n";
+        assert!(scan_source("tests/oci_smoke.rs", src).is_empty());
+    }
+
+    #[test]
+    fn accepts_a_subprocess_with_a_cleared_environment() {
+        let src = "fn mvmctl() -> Command {\n    c.env_clear().env(\"MVM_HOME\", r)\n}\n";
+        assert!(
+            scan_source("tests/oci_smoke.rs", src).is_empty(),
+            "env_clear drops the inherited HOME, which is stricter than setting it"
+        );
+    }
+
+    #[test]
+    fn subprocess_rule_covers_crate_local_integration_tests() {
+        let src = "fn mvmctl() -> Command {\n    c.env(\"MVM_HOME\", d)\n}\n";
+        assert_eq!(scan_source("crates/mvm-cli/tests/cli.rs", src).len(), 1);
+    }
+
+    #[test]
+    fn subprocess_rule_leaves_in_process_unit_tests_to_rule_two() {
+        // A `src/` file driving code in-process is rule 2's business; applying
+        // rule 3 there would flag every Command-shaped helper in the tree.
+        let src = "fn helper() {\n    c.env(\"MVM_HOME\", d)\n}\n";
+        assert!(scan_source("crates/mvm-runtime/src/vm/name_registry.rs", src).is_empty());
     }
 
     #[test]

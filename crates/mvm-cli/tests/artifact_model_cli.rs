@@ -167,6 +167,7 @@ fn artifact_model_validate_exits_nonzero_on_failed_check() {
     let out = Command::cargo_bin("mvmctl")
         .expect("locate mvmctl")
         .args(["artifact", "model-validate", artifact_id])
+        .env("HOME", tmp.path().to_str().unwrap())
         .env("MVM_HOME", tmp.path().to_str().unwrap())
         .output()
         .expect("spawn mvmctl");

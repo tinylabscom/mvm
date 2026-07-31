@@ -21,7 +21,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"
-ed25519-dalek = "2"
+# Must track the workspace major. This harness hands a VerifyingKey across
+# the mvm-agentd path dep, so a second major here is not merely a duplicate
+# dependency — it is a different type, and the target stops compiling.
+ed25519-dalek = "3"
 
 [dependencies.mvm-agentd]
 path = ".."
