@@ -471,6 +471,9 @@ jobs:
       - name: Install cargo-mutants and nextest
         run: cargo install --locked cargo-mutants cargo-nextest
 
+      # HOME and MVM_HOME are confined to a temp root by the gate itself,
+      # at the point cargo-mutants is spawned, so this job and the local
+      # `just mutation-witnesses` recipe cannot drift apart on it.
       - name: Mutate the claim surface and ratchet survivors
         run: cargo run -p xtask -- check-mutation-witnesses --run
 
