@@ -53,8 +53,8 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 ///   forces mvmd-side fixture refresh because byte output changes
 ///   when defaults are present (JSON keys appear with default values).
 /// - `2` (unchanged): `MountVolume` / `UnmountVolume` added
-///   variant-additively (Plan 59 Stage 0 — distributed-volume mount
-///   contract). No existing-variant bytes change, so mvmd's frozen
+///   variant-additively for the distributed-volume mount contract. No
+///   existing-variant bytes change, so mvmd's frozen
 ///   fixtures stay valid. An older hostd refuses the new frames at
 ///   deserialization (unknown variant), which the agent surfaces as a
 ///   clean error; the coordinator gates sending these verbs on node
@@ -132,7 +132,7 @@ pub enum HostdRequest {
     /// Tear down per-tenant bridge and NAT rules.
     TeardownNetwork { tenant_id: String, net: TenantNet },
     /// Mount a distributed volume (S3/NFS/FUSE-backed bucket) at a
-    /// host-side mountpoint (Plan 59 Stage 0 — **contract only**).
+    /// host-side mountpoint (**contract only**).
     ///
     /// On success hostd replies `HostdResponse::Ok`. Until the mount
     /// executor lands, hostd implementations MUST refuse this verb
@@ -154,8 +154,8 @@ pub enum HostdRequest {
         /// exposed to guests.
         host_mountpoint: String,
     },
-    /// Unmount a previously mounted distributed volume (Plan 59
-    /// Stage 0 — **contract only**; refused with
+    /// Unmount a previously mounted distributed volume (**contract
+    /// only**; refused with
     /// `HostdResponse::Error` until the mount executor lands).
     ///
     /// Carries the same source identity as `MountVolume` so
@@ -635,8 +635,8 @@ mod tests {
         }
     }
 
-    /// An mvm-hostd at PROTOCOL_VERSION 2 built before Plan 59 refuses
-    /// the new mount verbs at deserialization (serde unknown-variant),
+    /// An mvm-hostd at PROTOCOL_VERSION 2 built before the mount verbs
+    /// were added refuses them at deserialization (serde unknown-variant),
     /// which `recv_request` surfaces as a clean error — the fail-closed
     /// behavior the variant-additive (no-bump) rollout relies on. This
     /// test pins that an unknown verb is indeed a refusal, not a silent

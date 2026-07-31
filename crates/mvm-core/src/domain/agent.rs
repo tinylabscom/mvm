@@ -87,8 +87,7 @@ pub struct DesiredPool {
     /// a local Nix build. Falls back to local build if the pull fails.
     #[serde(default)]
     pub registry_artifact: Option<RegistryArtifact>,
-    /// Distributed-volume mounts attached to every instance of this pool
-    /// (Plan 59 Stage 0).
+    /// Distributed-volume mounts attached to every instance of this pool.
     ///
     /// Schema evolution: `#[serde(default)]` keeps the old-coordinator →
     /// new-agent direction parsing (missing field ⇒ no mounts). The
@@ -111,9 +110,9 @@ fn default_compression() -> String {
 /// A distributed-volume mount (S3/NFS/FUSE-backed bucket) attached to
 /// every instance of a pool.
 ///
-/// Part of the signed desired state (Plan 59 Stage 0 contract freeze).
-/// The coordinator resolves a tenant bucket into this shape; agents
-/// reconcile it via the hostd `MountVolume` / `UnmountVolume` verbs.
+/// Part of the signed desired-state contract. The coordinator resolves a
+/// tenant bucket into this shape; agents reconcile it via the hostd
+/// `MountVolume` / `UnmountVolume` verbs.
 ///
 /// This is deliberately a separate type from the IR `Mount`
 /// (`mvm-protocol::ir::workload`) — the IR describes a single workload's
@@ -1324,7 +1323,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Tests for distributed-volume mounts (Plan 59 Stage 0)
+    // Tests for distributed-volume mounts
     // ========================================================================
 
     /// Old coordinator → new agent: a `DesiredPool` payload that predates
