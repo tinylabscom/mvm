@@ -27,7 +27,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     let mut hits: Vec<String> = Vec::new();
 
     for root in ["crates", "xtask", "nix", "src"] {
-        walk(&workspace.join(root), &mut |path| {
+        crate::fs_walk::walk_files(&workspace.join(root), &mut |path| {
             scan_file(workspace, path, &token, &mut hits);
         })?;
     }
@@ -244,25 +244,6 @@ fn hash_comment_on_line(line: &str) -> Option<String> {
         i += 1;
     }
     None
-}
-
-fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if path.is_dir() {
-            if matches!(name, "target" | ".git" | "node_modules") {
-                continue;
-            }
-            walk(&path, f)?;
-        } else {
-            f(&path);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

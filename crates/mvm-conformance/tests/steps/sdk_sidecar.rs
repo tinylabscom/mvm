@@ -1,0 +1,288 @@
+//! Steps for the optional SDK-sidecar attachment workflow.
+//!
+//! These drive the real decision, resolution, attachment-shape, admission-gate,
+//! and cmdline-assembly seams — no VM starts, so they run in the hermetic BDD
+//! gate. The sidecar cache is staged in a per-scenario tempdir so a developer's
+//! populated cache can never make a scenario pass for the wrong reason.
+
+use cucumber::{given, then, when};
+use mvm_core::arch::GuestArch;
+use mvm_core::plan::test_support::PlanFixture;
+use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+use mvm_fs::sdk_sidecar::{
+    SDK_SIDECAR_IMAGE_FILE, SDK_SIDECAR_VERSION_FILE, SdkSidecarLayout, SdkSidecarResolver,
+};
+use mvm_protocol::protocol::broker::ServiceId;
+use mvm_runtime::driver::{HvfDriver, VmmDriver};
+
+use crate::world::CliWorld;
+
+const FIXTURE_VERSION: &str = "1.2.3";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// A sidecar ext4 carrying the one path the SDKs load, built with the in-repo
+/// pure-Rust writer so the fixture needs no `mkfs`.
+fn sidecar_ext4_bytes() -> Vec<u8> {
+    use mvm_fs::ext4::Node;
+    let nodes = vec![
+        Node::Dir {
+            path: "/lib".into(),
+            mode: 0o555,
+            xattrs: Vec::new(),
+        },
+        Node::File {
+            path: "/lib/libmvm_host_services.so".into(),
+            mode: 0o555,
+            data: b"\x7fELF-stub".to_vec(),
+            xattrs: Vec::new(),
+        },
+    ];
+    mvm_fs::ext4::build_image(&nodes).expect("build the sidecar ext4 fixture")
+}
+
+fn cache_root(world: &mut CliWorld) -> std::path::PathBuf {
+    world
+        .sdk_sidecar_cache
+        .get_or_insert_with(|| tempfile::tempdir().expect("create the sidecar cache dir"))
+        .path()
+        .to_path_buf()
+}
+
+fn layout(world: &mut CliWorld) -> SdkSidecarLayout {
+    let root = cache_root(world);
+    SdkSidecarLayout::under(&root, FIXTURE_VERSION, &GuestArch::host().to_string())
+}
+
+#[given(expr = "a verified SDK sidecar in the cache")]
+fn verified_sidecar_in_cache(world: &mut CliWorld) {
+    let layout = layout(world);
+    std::fs::create_dir_all(&layout.artifact_dir).expect("create the artifact dir");
+    let image = sidecar_ext4_bytes();
+    let version_text = format!("{FIXTURE_VERSION}\n");
+    std::fs::write(&layout.image, &image).expect("write the sidecar image");
+    std::fs::write(&layout.version_file, &version_text).expect("write VERSION");
+    std::fs::write(
+        &layout.checksum_manifest_file,
+        format!(
+            "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
+            sha256_hex(&image),
+            sha256_hex(version_text.as_bytes()),
+        ),
+    )
+    .expect("write the checksum manifest");
+}
+
+#[given(expr = "an empty SDK sidecar cache")]
+fn empty_sidecar_cache(world: &mut CliWorld) {
+    // Touch the cache root so the scenario is explicit about being cold rather
+    // than relying on lazy creation later.
+    let _ = cache_root(world);
+}
+
+#[given(expr = "the cached SDK sidecar image is byte-flipped")]
+fn byte_flip_sidecar(world: &mut CliWorld) {
+    let layout = layout(world);
+    let mut image = std::fs::read(&layout.image).expect("read the staged sidecar image");
+    let last = image.len() - 1;
+    image[last] ^= 0xff;
+    std::fs::write(&layout.image, &image).expect("write the tampered sidecar image");
+}
+
+#[given(expr = "a workload plan that binds no host service")]
+fn plan_binds_nothing(world: &mut CliWorld) {
+    world.sdk_sidecar_services = Vec::new();
+    world.sdk_sidecar_plan = Some(PlanFixture::new().build());
+}
+
+#[given(expr = "a workload plan that binds host service {string}")]
+fn plan_binds_service(world: &mut CliWorld, service: String) {
+    let id = ServiceId::parse(service.as_str()).expect("a well-formed fixture service id");
+    world.sdk_sidecar_services = vec![id.clone()];
+    world.sdk_sidecar_plan = Some(PlanFixture::new().services(vec![id]).build());
+}
+
+#[when(expr = "the launch path resolves the SDK sidecar")]
+fn resolve_sidecar(world: &mut CliWorld) {
+    let root = cache_root(world);
+    let resolver = SdkSidecarResolver::new(root, FIXTURE_VERSION.to_string());
+    let services = world.sdk_sidecar_services.clone();
+    world.sdk_sidecar_result = Some(
+        mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+            &services,
+            &resolver,
+            GuestArch::host(),
+        )
+        .map_err(|e| format!("{e:#}")),
+    );
+}
+
+fn resolved(
+    world: &CliWorld,
+) -> &Result<Option<mvm_runtime::sdk_sidecar::SdkSidecarAttachment>, String> {
+    world
+        .sdk_sidecar_result
+        .as_ref()
+        .expect("a prior step must resolve the SDK sidecar")
+}
+
+#[then(expr = "no SDK sidecar is attached")]
+fn no_sidecar_attached(world: &mut CliWorld) {
+    match resolved(world) {
+        Ok(None) => {}
+        Ok(Some(a)) => panic!("expected no sidecar, got one at {}", a.volume.host),
+        Err(e) => panic!("expected no sidecar, got an error: {e}"),
+    }
+}
+
+#[then(expr = "the SDK sidecar is attached read-only at {string}")]
+fn sidecar_attached_read_only(world: &mut CliWorld, guest_path: String) {
+    let attached = resolved(world)
+        .as_ref()
+        .expect("resolution must succeed")
+        .as_ref()
+        .expect("a sidecar must be attached");
+    assert_eq!(attached.volume.guest, guest_path);
+    assert!(attached.volume.read_only, "the sidecar must be read-only");
+    assert_eq!(
+        attached.volume.kind,
+        mvm_core::vm_backend::VmVolumeKind::Disk
+    );
+    // The plan grant must describe the same attachment, or the admission gate
+    // below would refuse a launch the launch path built.
+    assert_eq!(attached.grant.guest_path, attached.volume.guest);
+    assert_eq!(attached.grant.host_path, attached.volume.host);
+    assert!(attached.grant.read_only);
+}
+
+fn plan_of(world: &CliWorld) -> &mvm_core::plan::ExecutionPlan {
+    world
+        .sdk_sidecar_plan
+        .as_ref()
+        .expect("a prior step must build the workload plan")
+}
+
+fn attached_volumes(world: &CliWorld) -> Vec<mvm_core::vm_backend::VmVolume> {
+    match resolved(world) {
+        Ok(Some(a)) => vec![a.volume.clone()],
+        _ => Vec::new(),
+    }
+}
+
+#[then(expr = "admission accepts the launch with no sidecar attachment")]
+fn admission_accepts_without_sidecar(world: &mut CliWorld) {
+    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&[], plan_of(world))
+        .expect("a plan binding no SDK host service must admit with no sidecar");
+}
+
+#[then(expr = "admission accepts the launch with the sidecar attachment")]
+fn admission_accepts_with_sidecar(world: &mut CliWorld) {
+    let volumes = attached_volumes(world);
+    assert!(!volumes.is_empty(), "no sidecar volume was resolved");
+    mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&volumes, plan_of(world))
+        .expect("the resolved attachment must satisfy the admission gate");
+}
+
+#[then(expr = "admission refuses a sidecar attachment for this plan")]
+fn admission_refuses_sidecar(world: &mut CliWorld) {
+    // Hand the gate a well-formed sidecar volume the plan never authorized.
+    let smuggled = mvm_core::vm_backend::VmVolume {
+        host: "/cache/sdk-sidecar/1.2.3/host/sdk.ext4".into(),
+        guest: mvm_core::plan::SDK_SIDECAR_GUEST_PATH.into(),
+        size: String::new(),
+        read_only: true,
+        kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+        encrypted: false,
+    };
+    let err =
+        mvm_hostd::plan_admission::enforce_sdk_sidecar_attachment(&[smuggled], plan_of(world))
+            .expect_err("an unauthorized sidecar must be refused");
+    assert!(
+        err.to_string().contains("binds no SDK host service"),
+        "unexpected refusal reason: {err}"
+    );
+}
+
+#[then(expr = "the launch is refused and the error names the binding that required it")]
+fn launch_refused_naming_binding(world: &mut CliWorld) {
+    let bound = world
+        .sdk_sidecar_services
+        .first()
+        .expect("a prior step must bind a host service")
+        .as_str()
+        .to_string();
+    let Err(message) = resolved(world) else {
+        panic!("expected the launch to be refused");
+    };
+    assert!(
+        message.contains(&bound),
+        "the refusal must name the binding that required the sidecar: {message}"
+    );
+    assert!(
+        message.contains(mvm_core::plan::SDK_SIDECAR_GUEST_PATH),
+        "the refusal must name the sidecar mount point: {message}"
+    );
+}
+
+#[then(expr = "the launch is refused and the error reports an integrity mismatch")]
+fn launch_refused_integrity(world: &mut CliWorld) {
+    let Err(message) = resolved(world) else {
+        panic!("expected the launch to be refused");
+    };
+    assert!(
+        message.contains("integrity mismatch"),
+        "the refusal must report the integrity mismatch: {message}"
+    );
+}
+
+/// Build the launch config this scenario's resolution implies and assemble a
+/// real sealed workload cmdline from it, so the guest-visible half of the
+/// contract is asserted, not assumed.
+fn assembled_cmdline(world: &mut CliWorld) -> String {
+    let state = tempfile::tempdir().expect("create the cmdline state dir");
+    let config = VmStartConfig {
+        name: "bdd-sdk-sidecar".to_string(),
+        rootfs_path: "/image/rootfs.ext4".to_string(),
+        verity_path: Some("/image/rootfs.verity".to_string()),
+        roothash: Some("a".repeat(64)),
+        initrd_path: Some("/image/rootfs.initrd".to_string()),
+        runtime_overlay_path: Some("/image/runtime.ext4".to_string()),
+        runtime_overlay_verity_path: Some("/image/runtime.verity".to_string()),
+        runtime_overlay_roothash: Some("b".repeat(64)),
+        runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+        volumes: attached_volumes(world),
+        ..Default::default()
+    };
+    let driver = HvfDriver::new();
+    mvm_runtime::workload_runner::assemble_workload_cmdline_for_test(
+        &driver as &dyn VmmDriver,
+        &config,
+        state.path(),
+    )
+}
+
+#[then(expr = "the assembled workload cmdline names no SDK sidecar device")]
+fn cmdline_names_no_sidecar(world: &mut CliWorld) {
+    let cmdline = assembled_cmdline(world);
+    assert!(
+        !cmdline.contains("mvm.sdk_dev="),
+        "a workload with no sidecar must carry no sidecar device token: {cmdline}"
+    );
+}
+
+#[then(expr = "the assembled workload cmdline names the SDK sidecar device the backend attached")]
+fn cmdline_names_sidecar(world: &mut CliWorld) {
+    let volumes = attached_volumes(world);
+    assert!(!volumes.is_empty(), "no sidecar volume was resolved");
+    let cmdline = assembled_cmdline(world);
+    // A sealed boot carries rootfs + verity + overlay pair, so the sidecar is
+    // the fifth block device. Asserting the exact device — rather than just the
+    // token's presence — is what proves the guest is told where to look.
+    assert!(
+        cmdline.contains("mvm.sdk_dev=/dev/vde"),
+        "the cmdline must name the device the backend attached: {cmdline}"
+    );
+}

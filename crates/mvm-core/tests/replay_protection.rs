@@ -70,6 +70,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         bundle: None,
         deps_volume: None,
         shares: Vec::new(),
+        services: Vec::new(),
     }
 }
 

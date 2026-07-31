@@ -905,6 +905,7 @@ mod tests {
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             audit_labels: Default::default(),
             agent_verbs: None,
+            services: Vec::new(),
         };
         let plan = synthesize_plan(&input).expect("synthesize plan with secret");
         let json = serde_json::to_string(&plan).expect("serialize plan");

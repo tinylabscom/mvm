@@ -129,10 +129,23 @@ pub(crate) fn workload_cmdline(
     } else {
         base_bootargs(virtiofs_root, has_disk)
     };
-    // Legacy per-rootfs initramfs boot: removed. The universal initramfs passes the rootfs
-    // and runtime-overlay roothashes/device paths via vsock `ActivateEnvironment`
-    // after boot, so the kernel cmdline no longer carries `mvm.roothash`,
-    // `mvm.data`, `mvm.hash`, or the runtime overlay equivalents.
+    // The universal initramfs receives the rootfs and runtime-overlay
+    // roothashes/device paths over vsock via `ActivateEnvironment` after boot, so
+    // its cmdline carries none of them. A legacy per-rootfs verity initramfs
+    // (`mvm-verity-init` as PID 1) is never sent that verb — the cmdline is its
+    // only channel, and without these tokens it aborts before userspace and the
+    // kernel panics on a dead PID 1. Hosts that cannot yet resolve the universal
+    // artifact still boot the legacy initramfs, so both shapes stay live.
+    if verity_is_enabled
+        && !crate::microvm::booted_with_universal_initramfs(config)
+        && let Some(verity_args) = crate::microvm::build_verity_cmdline_args(
+            config.roothash.as_deref(),
+            runtime_overlay(config).map(|(_, _, roothash)| roothash),
+        )
+    {
+        cmdline.push(' ');
+        cmdline.push_str(&verity_args);
+    }
     // Non-verity boots carry the runtime overlay as a plain read-only
     // `/dev/vdb` (attached by the backend's disk layout); emit the token its
     // `/init` mounts from. Verity boots already emitted the dm-verity variant
@@ -176,17 +189,47 @@ pub(crate) fn runner_cmdline(
     base_bootargs: impl Fn(bool, bool) -> String,
 ) -> String {
     let base = workload_cmdline(config, state_dir, &base_bootargs);
-    let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) else {
+    let mut tokens: Vec<String> = Vec::new();
+    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
+        tokens.push(uvols);
+    }
+    // Tell the guest which device the SDK sidecar landed on. The guest can't
+    // derive the slot itself — it shifts with verity, the runtime overlay, and
+    // any preceding user volumes — so the host names it, exactly as it already
+    // does for the runtime overlay's `mvm.runtime_data=` device.
+    if let Some(dev) = super::spec_map::sdk_sidecar_block_device(config) {
+        tokens.push(format!("mvm.sdk_dev={dev}"));
+    }
+    if tokens.is_empty() {
         return base.unwrap_or_default();
-    };
+    }
+    let extra = tokens.join(" ");
     match base {
-        Some(base) => format!("{base} {uvols}"),
+        Some(base) => format!("{base} {extra}"),
         None => {
             let virtiofs_root = config.virtiofs_root.is_some();
             let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
-            format!("{} {uvols}", base_bootargs(virtiofs_root, has_disk))
+            format!("{} {extra}", base_bootargs(virtiofs_root, has_disk))
         }
     }
+}
+
+/// Materialize an initramfs inside the shared initramfs cache that
+/// [`crate::microvm::booted_with_universal_initramfs`] recognizes, and return its
+/// path. `home` must already be the active `MVM_HOME`. Shared by the boot-shape
+/// tests here and in [`crate::workload_runner::standby_boot`], which both need a
+/// launch config that resolves as a universal-initramfs boot.
+#[cfg(test)]
+pub(crate) fn seed_universal_initramfs(home: &Path) -> String {
+    let dir = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+    assert!(
+        dir.starts_with(home),
+        "test must isolate MVM_HOME before seeding the initramfs cache"
+    );
+    std::fs::create_dir_all(&dir).expect("create initramfs cache dir");
+    let image = dir.join("initramfs.cpio.gz");
+    std::fs::write(&image, b"initramfs").expect("write initramfs");
+    image.display().to_string()
 }
 
 #[cfg(test)]
@@ -252,20 +295,27 @@ mod tests {
         assert!(cmdline.contains("mvm.vsock_egress=1"));
     }
 
+    /// A verity boot whose initramfs is the *universal* one (resolved out of the
+    /// shared initramfs cache) gets its roothashes and device paths over vsock
+    /// via `ActivateEnvironment`, so the kernel cmdline must not carry them.
     #[test]
-    fn workload_cmdline_for_verity_boot_emits_console_and_policy_only() {
+    fn workload_cmdline_for_universal_initramfs_verity_boot_emits_console_and_policy_only() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         let verity = dir.path().join("rootfs.verity");
-        let initrd = dir.path().join("rootfs.initrd");
         std::fs::write(&rootfs, b"rootfs").unwrap();
         std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
 
         let config = VmStartConfig {
             rootfs_path: rootfs.display().to_string(),
             verity_path: Some(verity.display().to_string()),
             roothash: Some("a".repeat(64)),
+            initrd_path: Some(seed_universal_initramfs(dir.path())),
             runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
             runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
             runtime_overlay_roothash: Some("b".repeat(64)),
@@ -274,8 +324,10 @@ mod tests {
         };
         let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
             .expect("cmdline");
-        // The initramfs PID-1 receives roothashes and device paths
-        // over vsock, so the kernel cmdline must not carry them.
+        assert!(
+            crate::microvm::booted_with_universal_initramfs(&config),
+            "fixture must resolve as a universal-initramfs boot"
+        );
         assert!(!cmdline.contains("root=/dev/vda"));
         assert!(!cmdline.contains("init=/init"));
         assert!(!cmdline.contains("mvm.roothash="));
@@ -284,6 +336,60 @@ mod tests {
         assert!(!cmdline.contains("mvm.runtime_roothash="));
         assert!(!cmdline.contains("mvm.runtime_data=/dev/vdc"));
         assert!(!cmdline.contains("mvm.runtime_hash=/dev/vdd"));
+        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
+    }
+
+    /// The counterpart: a legacy per-rootfs verity initramfs (`mvm-verity-init`
+    /// as PID 1) is never sent `ActivateEnvironment`, so the kernel cmdline is
+    /// its only channel for the roothashes and device paths. Dropping those
+    /// tokens makes `mvm-verity-init` fatal ("no mvm.roothash= on kernel
+    /// cmdline") and panics the guest before userspace.
+    #[test]
+    fn workload_cmdline_for_legacy_verity_initramfs_boot_carries_the_roothash_tokens() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let rootfs_hash = "a".repeat(64);
+        let overlay_hash = "b".repeat(64);
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some(rootfs_hash.clone()),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some(overlay_hash.clone()),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        assert!(
+            !crate::microvm::booted_with_universal_initramfs(&config),
+            "fixture must resolve as a legacy-initramfs boot"
+        );
+        let cmdline = workload_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs)
+            .expect("cmdline");
+        for token in [
+            format!("mvm.roothash={rootfs_hash}"),
+            "mvm.data=/dev/vda".to_string(),
+            "mvm.hash=/dev/vdb".to_string(),
+            format!("mvm.runtime_roothash={overlay_hash}"),
+            "mvm.runtime_data=/dev/vdc".to_string(),
+            "mvm.runtime_hash=/dev/vdd".to_string(),
+        ] {
+            assert!(
+                cmdline.contains(&token),
+                "legacy verity cmdline missing {token}: {cmdline}"
+            );
+        }
         assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
     }
 
@@ -403,6 +509,58 @@ mod tests {
             cmdline.contains("mvm.uvols=uvol0:"),
             "cmdline missing uvols token: {cmdline}"
         );
+    }
+
+    fn sdk_sidecar_volume(host: &str) -> mvm_core::vm_backend::VmVolume {
+        let mut v = disk_volume(host, mvm_core::plan::SDK_SIDECAR_GUEST_PATH);
+        v.read_only = true;
+        v
+    }
+
+    #[test]
+    fn runner_cmdline_emits_no_sidecar_token_without_a_sidecar_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        let config = VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            volumes: vec![disk_volume("/vol/data.img", "/data")],
+            ..Default::default()
+        };
+        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        assert!(
+            !cmdline.contains("mvm.sdk_dev="),
+            "a workload with no SDK sidecar must carry no sidecar token: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn runner_cmdline_names_the_sidecar_device_the_backend_attached() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        let config = VmStartConfig {
+            rootfs_path: "/img/rootfs.ext4".into(),
+            volumes: vec![
+                disk_volume("/vol/data.img", "/data"),
+                sdk_sidecar_volume("/cache/sdk.ext4"),
+            ],
+            ..Default::default()
+        };
+        let cmdline = runner_cmdline(&config, dir.path(), crate::hvf_bootargs::workload_bootargs);
+        // Two disks after the rootfs on an unsealed boot: the user volume takes
+        // /dev/vdb, so the sidecar is /dev/vdc. The token must match the block
+        // list, not a baked constant.
+        let attached = super::super::spec_map::sdk_sidecar_block_device(&config)
+            .expect("the sidecar resolves a device");
+        assert_eq!(attached, "/dev/vdc");
+        assert!(
+            cmdline.contains("mvm.sdk_dev=/dev/vdc"),
+            "cmdline missing the sidecar device token: {cmdline}"
+        );
+        // Both tokens ride together, and the cmdline stays single-token-safe.
+        assert!(cmdline.contains("mvm.uvols=uvol0:"), "cmdline: {cmdline}");
+        assert_eq!(cmdline_overflow(&cmdline), None);
     }
 
     #[test]

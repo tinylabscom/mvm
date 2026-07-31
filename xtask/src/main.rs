@@ -8,6 +8,7 @@ use anyhow::Context;
 use std::path::Path;
 
 mod build_dev_image;
+mod check_abi_layout;
 mod check_adr_coverage;
 mod check_audit_positional;
 mod check_binary_size;
@@ -31,6 +32,7 @@ mod check_honesty;
 mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
 mod check_machine_doc_guards;
+mod check_mutation_witnesses;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
 mod check_no_host_nix;
@@ -47,6 +49,8 @@ mod check_trust_gradient;
 mod check_two_surfaces;
 mod check_uniform_vsock_egress;
 mod check_vsock_only_egress;
+mod claims_ledger;
+mod fs_walk;
 mod gen_stubs;
 mod ir_parity;
 mod perf;
@@ -179,9 +183,28 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_cli_runtime_surface::run(&workspace)
         }
+        Some("check-abi-layout") => {
+            let workspace = workspace_root();
+            check_abi_layout::run(&workspace)
+        }
         Some("check-claim-catalog") => {
             let workspace = workspace_root();
             check_claim_catalog::run(&workspace)
+        }
+        Some("check-mutation-witnesses") => {
+            let workspace = workspace_root();
+            // Default is the cheap surface pin, so the PR lint lane can
+            // run this without cargo-mutants installed. The mutation run
+            // itself is opt-in because it costs hours.
+            let write = args.iter().any(|a| a == "--write-baseline");
+            let run = args.iter().any(|a| a == "--run");
+            let mode = match (write, run) {
+                (true, true) => check_mutation_witnesses::Mode::RewriteBaseline,
+                (true, false) => check_mutation_witnesses::Mode::RepinSurface,
+                (false, true) => check_mutation_witnesses::Mode::Run,
+                (false, false) => check_mutation_witnesses::Mode::PinOnly,
+            };
+            check_mutation_witnesses::run(&workspace, mode)
         }
         Some("check-conformance") => {
             let workspace = workspace_root();
@@ -244,7 +267,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -332,7 +355,13 @@ fn main() -> Result<()> {
                 "  check-no-network-literals              Reject baked IPs/ports/tmp-sockets — route through mvm-core::dev_network / guest_netd"
             );
             eprintln!(
+                "  check-abi-layout                       Verify every #[repr(C)] type carries a compile-time size + alignment contract"
+            );
+            eprintln!(
                 "  check-claim-catalog                    Verify the claims ledger embedded in specs/adrs/001-microvm-security-posture.md — witnesses still exist in the tree"
+            );
+            eprintln!(
+                "  check-mutation-witnesses               Pin the mutation surface derived from the claims ledger; --run mutates it and ratchets survivors; --write-baseline re-pins (add --run to also re-record misses)"
             );
             eprintln!(
                 "  check-conformance                      Verify model/*.toml is the single source and CONFORMANCE.md is up to date"

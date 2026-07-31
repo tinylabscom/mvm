@@ -1,0 +1,229 @@
+{
+  "surface": [
+    {
+      "path": "crates/mvm-agentd/src/bin/mvm-seccomp-apply.rs",
+      "package": "mvm-agentd",
+      "claims": [
+        2
+      ]
+    },
+    {
+      "path": "crates/mvm-agentd/src/substitution_client.rs",
+      "package": "mvm-agentd",
+      "claims": [
+        13
+      ]
+    },
+    {
+      "path": "crates/mvm-build/src/app_deps_gate.rs",
+      "package": "mvm-build",
+      "claims": [
+        11
+      ]
+    },
+    {
+      "path": "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+      "package": "mvm-build",
+      "claims": [
+        2
+      ]
+    },
+    {
+      "path": "crates/mvm-build/src/runtime_overlay.rs",
+      "package": "mvm-build",
+      "claims": [
+        6
+      ]
+    },
+    {
+      "path": "crates/mvm-cli/src/commands/image/pull_core.rs",
+      "package": "mvm-cli",
+      "claims": [
+        14
+      ]
+    },
+    {
+      "path": "crates/mvm-cli/src/commands/shared/parse.rs",
+      "package": "mvm-cli",
+      "claims": [
+        1
+      ]
+    },
+    {
+      "path": "crates/mvm-cli/src/commands/shared/resolve.rs",
+      "package": "mvm-cli",
+      "claims": [
+        10
+      ]
+    },
+    {
+      "path": "crates/mvm-cli/src/commands/vm/console.rs",
+      "package": "mvm-cli",
+      "claims": [
+        15
+      ]
+    },
+    {
+      "path": "crates/mvm-core/src/plan/bundle.rs",
+      "package": "mvm-core",
+      "claims": [
+        9
+      ]
+    },
+    {
+      "path": "crates/mvm-core/src/plan/synthesis.rs",
+      "package": "mvm-core",
+      "claims": [
+        8
+      ]
+    },
+    {
+      "path": "crates/mvm-core/src/policy/dns_guard.rs",
+      "package": "mvm-core",
+      "claims": [
+        10
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/broker/registry.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        12
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/keyholder/substitution.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        13
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/plan_admission.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        1,
+        8
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        8
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/supervisor/dns_audit.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        10
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/supervisor/network/pipeline.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        13
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/supervisor/network/stages.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        13
+      ]
+    },
+    {
+      "path": "crates/mvm-protocol/src/policy/network_policy.rs",
+      "package": "mvm-protocol",
+      "claims": [
+        10
+      ]
+    },
+    {
+      "path": "crates/mvm-protocol/src/protocol/broker.rs",
+      "package": "mvm-protocol",
+      "claims": [
+        12
+      ]
+    },
+    {
+      "path": "crates/mvm-protocol/src/protocol/vm_backend.rs",
+      "package": "mvm-protocol",
+      "claims": [
+        13
+      ]
+    },
+    {
+      "path": "crates/mvm-runtime/src/libkrun.rs",
+      "package": "mvm-runtime",
+      "claims": [
+        1,
+        15
+      ]
+    },
+    {
+      "path": "crates/mvm-runtime/src/microvm/snapshot.rs",
+      "package": "mvm-runtime",
+      "claims": [
+        10
+      ]
+    },
+    {
+      "path": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
+      "package": "mvm-runtime",
+      "claims": [
+        3,
+        10
+      ]
+    },
+    {
+      "path": "crates/mvm-sdk/src/compile/deps_audit.rs",
+      "package": "mvm-sdk",
+      "claims": [
+        11
+      ]
+    }
+  ],
+  "uncovered_claims": [
+    {
+      "number": 4,
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+    },
+    {
+      "number": 5,
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+    },
+    {
+      "number": 7,
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+    },
+    {
+      "number": 16,
+      "why": "every fn: witness lives in crates/*/tests/, which cargo-mutants does not mutate"
+    }
+  ],
+  "accepted_misses": [
+    {
+      "file": "crates/mvm-protocol/src/policy/network_policy.rs",
+      "mutant": "replace is_banned_ssh_port -> bool with false",
+      "reason": "Observed 2026-07-29. mvm-protocol's own tests only assert the negative direction (a non-22 port is not banned), so pinning the predicate to false survives while flipping its == does not. The SSH ban has production callers in mvm-core and mvm-cli; the owning crate should assert port 22 IS banned. Untriaged."
+    },
+    {
+      "file": "crates/mvm-protocol/src/policy/network_policy.rs",
+      "mutant": "replace NetworkPreset::is_deny_all -> bool with false",
+      "reason": "Observed 2026-07-29. NetworkPreset::is_deny_all has no production caller anywhere in the tree; its only use is an assertion inside mvm-core's security_profile tests. Nothing in mvm-protocol calls it, so the constant survives. Untriaged: either give the predicate a caller or drop it."
+    },
+    {
+      "file": "crates/mvm-protocol/src/policy/network_policy.rs",
+      "mutant": "replace NetworkPreset::is_deny_all -> bool with true",
+      "reason": "Observed 2026-07-29. Same uncalled predicate as the `with false` entry; neither constant is detectable from the owning crate. Untriaged."
+    },
+    {
+      "file": "crates/mvm-protocol/src/policy/network_policy.rs",
+      "mutant": "replace NetworkPolicy::trusted_build_egress -> Self with Default::default()",
+      "reason": "Observed 2026-07-29. No mvm-protocol test asserts the shape of the trusted-build egress policy. The mutant substitutes the deny-all default, so it makes the policy stricter, not weaker — a functional coverage gap rather than a security hole. Untriaged."
+    }
+  ]
+}

@@ -222,6 +222,9 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Allow a production-safe guest-agent verb (repeatable).
     #[arg(long = "agent-verb", value_name = "VERB")]
     pub agent_verb: Vec<String>,
+    /// Bind a host service the workload may call (repeatable).
+    #[arg(long = "host-service", value_name = "SERVICE")]
+    pub host_service: Vec<String>,
     /// Mount HOST_PATH at GUEST_PATH[:MODE].
     #[arg(long = "mount", visible_alias = "volume")]
     pub volume: Vec<String>,
@@ -321,6 +324,13 @@ impl MachineRunArgs {
     /// launch-plan and OCI prod-pin surfaces are pinned off — they are not
     /// part of the beginner contract (the SDK live/plan/record transport was
     /// retired with the top-level `run` verb).
+    /// Test-visible alias for [`Self::into_run_args`] so the flag-forwarding
+    /// contract can be asserted from the transient-run module that consumes it.
+    #[cfg(test)]
+    pub(crate) fn into_run_args_for_test(self) -> RunArgs {
+        self.into_run_args()
+    }
+
     fn into_run_args(self) -> RunArgs {
         RunArgs {
             manifest: self.manifest,
@@ -361,6 +371,7 @@ impl MachineRunArgs {
                 self.health_start_period,
             ),
             hypervisor: self.hypervisor,
+            host_service: self.host_service,
         }
     }
 
@@ -1433,6 +1444,7 @@ fn run_args_for_image_revert(
             detach: false,
             kernel_pin: None,
             argv: Vec::new(),
+            host_service: Vec::new(),
         },
         source,
     )

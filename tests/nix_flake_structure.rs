@@ -16,7 +16,7 @@
 //! Documented in `specs/runbooks/cross-platform-install.md` (Phase 5).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn nix_dir() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
@@ -934,6 +934,143 @@ fn runtime_overlay_exposes_sdk_sidecar_separately() {
     );
 }
 
+/// The sidecar has to ship as an attachable read-only ext4 with the exact file
+/// set `mvm_fs::sdk_sidecar::SdkSidecarResolver` verifies. A directory output
+/// alone can't be attached to a microVM.
+#[test]
+fn runtime_overlay_publishes_an_attachable_sdk_sidecar_image() {
+    let path = nix_dir()
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+
+    assert!(
+        content.contains("mkSdkSidecarImage = system:"),
+        "the sidecar must have an ext4-image derivation, not just a directory tree"
+    );
+    assert!(
+        content.contains("sdk-sidecar-image = mkSdkSidecarImage system;"),
+        "the flake must publish the attachable sidecar image output"
+    );
+    // Exactly the resolver's canonical file set, and the manifest that covers it.
+    for required in [
+        "$out/sdk.ext4",
+        "$out/VERSION",
+        "sha256sum sdk.ext4 VERSION > checksums-sha256.txt",
+    ] {
+        assert!(
+            content.contains(required),
+            "the sidecar image must emit {required} for the host-side resolver"
+        );
+    }
+    assert!(
+        content.contains("-L mvm-sdk-sidecar"),
+        "the sidecar image must carry a distinct filesystem label"
+    );
+    assert!(
+        content.contains("sdkSidecarSizeBytes = 8 * 1024 * 1024;"),
+        "the sidecar allocation must stay pinned to the ledger's separate budget"
+    );
+}
+
+/// Both closure gates, and the direction of each. A change that deleted the SDK
+/// cdylib outright would satisfy every no-glibc assertion and look like a
+/// footprint win, so the positive gate is what makes the split meaningful.
+///
+/// The overlay-facing gates run as a CI step rather than a flake `check`: the
+/// runtime-overlay flake reaches the workspace through a path outside its own
+/// flake root, so `closureInfo` against its sources cannot be instantiated under
+/// a pure `nix flake check`. Querying the closure of the artifacts CI has
+/// already built is equally build-backed and does not rebuild them.
+#[test]
+fn closure_gates_pin_glibc_out_of_the_base_and_into_the_sidecar() {
+    let root = fs::read_to_string(nix_dir().join("flake.nix")).expect("root flake must be present");
+    let ci = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml"),
+    )
+    .expect("ci.yml must be present");
+
+    // Hash-anchored matches only: a bare `-glibc` pattern would fire on any
+    // derivation whose *name* happens to contain the string.
+    assert!(
+        root.contains(r"'/nix/store/[a-z0-9]+-glibc(-|$)'"),
+        "the rootfs no-glibc gate must anchor its grep on the glibc store path"
+    );
+    assert!(
+        ci.contains(r"glibc_re='/nix/store/[a-z0-9]+-glibc(-|$)'"),
+        "the overlay/sidecar gates must anchor their grep on the glibc store path"
+    );
+
+    // The negative direction must close over the executables actually staged
+    // into the overlay; an empty root-path set would make it vacuously green.
+    for staged in [
+        "guest",
+        "guestDev",
+        "runner",
+        "egressClient",
+        "addonDns",
+        "exitReport",
+    ] {
+        assert!(
+            ci.contains(staged),
+            "the overlay no-glibc closure must include the staged {staged} binary"
+        );
+    }
+    assert!(
+        ci.contains("nix path-info -r"),
+        "the gates must query a realized closure, not a bare evaluation"
+    );
+
+    // And the positive direction, plus the files the sidecar has to ship.
+    assert!(
+        ci.contains("sdk-sidecar.passthru.hostsvc"),
+        "the positive gate must query the SDK cdylib's own closure"
+    );
+    assert!(
+        ci.contains("no longer depends on glibc"),
+        "the positive gate must fail when the cdylib stops depending on glibc"
+    );
+    for required in ["libmvm_host_services.so", "libc.so.6", "libgcc_s.so.1"] {
+        assert!(
+            ci.contains(required),
+            "the sidecar gate must assert {required} is shipped"
+        );
+    }
+}
+
+/// The guest mounts the sidecar from the device the host names on the cmdline.
+/// Without the mountpoint on the read-only rootfs the mount fails with an
+/// unactionable EACCES, so both halves are pinned here.
+#[test]
+fn mk_guest_mounts_the_sdk_sidecar_read_only_from_the_host_named_device() {
+    let content = fs::read_to_string(nix_dir().join("lib").join("mk-guest.nix"))
+        .expect("nix/lib/mk-guest.nix must be present");
+
+    assert!(
+        content.contains(r"mvm\.sdk_dev="),
+        "the generated init must read the sidecar device from the kernel cmdline"
+    );
+    assert!(
+        content.contains(r#"mount -t ext4 -o ro,nosuid,nodev "$MVM_SDK_DEV" /mvm/sdk"#),
+        "the sidecar must be mounted read-only, nosuid, nodev"
+    );
+    assert!(
+        content.contains(r#"mkdir -p "$out/mvm/sdk""#),
+        "the read-only rootfs must carry the sidecar mountpoint"
+    );
+    // The cdylib is dlopen'd, so the mount must not be noexec — assert the
+    // option set explicitly rather than trusting the absence of a token.
+    assert!(
+        !content.contains(r#"mount -t ext4 -o ro,noexec,nosuid,nodev "$MVM_SDK_DEV""#),
+        "the sidecar mount must not be noexec: the workload dlopens the cdylib"
+    );
+}
+
 #[test]
 fn mk_guest_accepts_compact_and_legacy_egress_ca_cmdline_tokens() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
@@ -1147,18 +1284,43 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
     );
 }
 
+/// Every recipe whose `src` is the whole workspace must normalize it before the
+/// generic unpacker runs: a `path:` input evaluated from the `nix/` subflake can
+/// retain a trailing `nix/..` shape and the unpacker then fails with
+/// "destination already exists". The workaround lives in one shared snippet, so
+/// this asserts both that the snippet does the normalization and that every such
+/// recipe uses it — a recipe that forgets it builds from the root flake's
+/// closure gates and fails only in CI.
 #[test]
-fn mvm_setpriv_package_normalizes_the_workspace_source() {
-    let path = nix_dir().join("packages/mvm-setpriv.nix");
-    let content =
-        fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-
+fn workspace_sourced_packages_normalize_the_workspace_source() {
+    let snippet_path = nix_dir().join("packages/workspace-unpack.nix");
+    let snippet = fs::read_to_string(&snippet_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", snippet_path.display()));
     assert!(
-        content.contains("unpackPhase")
-            && content.contains("cp -R ${mvmSrc}/. source")
-            && content.contains("sourceRoot=source"),
-        "mvm-setpriv must normalize path:.. workspace sources before buildRustPackage unpacks them"
+        snippet.contains("cp -R ${mvmSrc}/. source") && snippet.contains("sourceRoot=source"),
+        "the shared unpack snippet must copy the workspace into a plain source dir"
     );
+
+    for recipe in [
+        "mvm-setpriv.nix",
+        "mvm-guest-agent.nix",
+        "mvm-egress-client.nix",
+        "mvm-addon-dns.nix",
+        "mvm-exit-report.nix",
+        "mvm-host-services-ffi.nix",
+    ] {
+        let path = nix_dir().join("packages").join(recipe);
+        let content =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        assert!(
+            content.contains("src = mvmSrc;"),
+            "{recipe} is expected to build from the whole workspace"
+        );
+        assert!(
+            content.contains("unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };"),
+            "{recipe} must normalize its workspace source through the shared snippet"
+        );
+    }
 }
 
 #[test]

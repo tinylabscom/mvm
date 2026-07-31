@@ -217,6 +217,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             profile == "dev",
             image_sealed,
         ),
+        services: Vec::new(),
     })?;
     let mut start_config = VmStartParams {
         name: name.to_string(),

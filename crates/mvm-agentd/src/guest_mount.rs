@@ -75,9 +75,15 @@ pub fn validate_roothash(roothash: &str, name: &str) -> Result<()> {
 
 /// Basic early-boot filesystems the PID-1 agent needs before it can
 /// receive `ActivateEnvironment` over vsock.
+///
+/// Each target is created before it is mounted. The universal initramfs
+/// carries the init binary and nothing else — no `/proc`, no `/sys`, no
+/// `/dev` — so there is no directory to mount onto unless PID 1 makes one,
+/// and `mount` fails before the agent can report anything useful.
 pub fn mount_early_filesystems() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
+        ensure_dir("/proc")?;
         mount(
             "proc",
             "/proc",
@@ -85,6 +91,7 @@ pub fn mount_early_filesystems() -> Result<()> {
             libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
             "",
         )?;
+        ensure_dir("/sys")?;
         mount(
             "sysfs",
             "/sys",
@@ -95,6 +102,7 @@ pub fn mount_early_filesystems() -> Result<()> {
         // devtmpfs gives us /dev/console, /dev/null, etc. without a static
         // device table in the initramfs.
         if !Path::new("/dev/console").exists() {
+            ensure_dir("/dev")?;
             mount("devtmpfs", "/dev", "devtmpfs", libc::MS_NOSUID, "")?;
         }
     }
@@ -436,7 +444,30 @@ mod linux_impl {
         }
     }
 
-    const _: () = assert!(DM_IOCTL_STRUCT_SIZE as usize == std::mem::size_of::<DmIoctl>());
+    // Layout contract with linux/dm-ioctl.h. `DmIoctl` is the fixed header
+    // of every device-mapper ioctl and `DmTargetSpec` is the target record
+    // that follows it in the same buffer; the kernel reads both by offset.
+    // These are the structs the dm-verity table is built from, so drift
+    // here is a verified-boot setup failure reported as an unrelated errno.
+    //
+    // Derived on Linux 6.8 with cc sizeof/offsetof/_Alignof, not read off
+    // the Rust definitions. The size assertion is kept in its original form
+    // as well: DM_IOCTL_STRUCT_SIZE is encoded into the ioctl request
+    // number, so the constant and the struct must agree or the kernel
+    // rejects the command.
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(DM_IOCTL_STRUCT_SIZE as usize == size_of::<DmIoctl>());
+        assert!(size_of::<DmIoctl>() == 312);
+        assert!(align_of::<DmIoctl>() == 8);
+        assert!(offset_of!(DmIoctl, version) == 0);
+        assert!(offset_of!(DmIoctl, data_size) == 12);
+        assert!(offset_of!(DmIoctl, data_start) == 16);
+        assert!(offset_of!(DmIoctl, target_count) == 20);
+        assert!(offset_of!(DmIoctl, dev) == 40);
+        assert!(offset_of!(DmIoctl, name) == 48);
+    };
 
     #[repr(C)]
     pub struct DmTargetSpec {
@@ -446,6 +477,18 @@ mod linux_impl {
         pub next: u32,
         pub target_type: [u8; 16],
     }
+
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(size_of::<DmTargetSpec>() == 40);
+        assert!(align_of::<DmTargetSpec>() == 8);
+        assert!(offset_of!(DmTargetSpec, sector_start) == 0);
+        assert!(offset_of!(DmTargetSpec, length) == 8);
+        assert!(offset_of!(DmTargetSpec, status) == 16);
+        assert!(offset_of!(DmTargetSpec, next) == 20);
+        assert!(offset_of!(DmTargetSpec, target_type) == 24);
+    };
 }
 
 #[cfg(target_os = "linux")]
@@ -882,6 +925,47 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
 
     const FAKE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// Every early mount target must be created before it is mounted.
+    ///
+    /// The universal initramfs carries the init binary and nothing else, so
+    /// there is no `/proc`, `/sys` or `/dev` to mount onto unless PID 1 makes
+    /// one. Without that, `mount` fails with ENOENT, init exits, and the kernel
+    /// panics before the agent can report anything — which is what shipped.
+    ///
+    /// Asserted against the source because the real function issues syscalls
+    /// that no unit test can run: it needs PID 1 in a guest, and the host it is
+    /// compiled on may not even be Linux.
+    #[test]
+    fn every_early_mount_target_is_created_before_it_is_mounted() {
+        let src = include_str!("guest_mount.rs");
+        let body = src
+            .split("pub fn mount_early_filesystems")
+            .nth(1)
+            .expect("mount_early_filesystems must exist");
+        let body = body
+            .split("\npub fn ")
+            .next()
+            .expect("function body is delimited by the next item");
+
+        for target in ["/proc", "/sys", "/dev"] {
+            let created = body
+                .find(&format!("ensure_dir(\"{target}\")"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{target} is mounted but never created; the initramfs has no \
+                     directory to mount onto, so PID 1 dies on ENOENT"
+                    )
+                });
+            let mounted = body
+                .find(&format!("\"{target}\","))
+                .unwrap_or_else(|| panic!("{target} should still be mounted here"));
+            assert!(
+                created < mounted,
+                "{target}: ensure_dir must come before the mount, not after"
+            );
+        }
+    }
 
     #[test]
     fn validate_roothash_accepts_64_lowercase_hex() {

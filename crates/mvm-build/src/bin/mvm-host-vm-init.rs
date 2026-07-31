@@ -1849,8 +1849,29 @@ mod linux {
         svm_reserved1: u16,
         svm_port: u32,
         svm_cid: u32,
-        svm_zero: [u8; 4],
+        /// `VMADDR_FLAG_TO_HOST` and friends. Zero for every address mvm
+        /// builds; carried so the mirror matches the header field-for-field.
+        svm_flags: u8,
+        svm_zero: [u8; 3],
     }
+
+    // Layout contract with linux/vm_sockets.h, derived on Linux 6.8 with cc
+    // sizeof/offsetof/_Alignof rather than read off the Rust definition.
+    // The header gained `svm_flags` at offset 12 in Linux 6.0, shrinking
+    // `svm_zero` to three bytes; the total is 16 either way, which is why
+    // the pre-6.0 shape went unnoticed here.
+    const _: () = {
+        use core::mem::{align_of, offset_of, size_of};
+
+        assert!(size_of::<SockAddrVm>() == 16);
+        assert!(align_of::<SockAddrVm>() == 4);
+        assert!(offset_of!(SockAddrVm, svm_family) == 0);
+        assert!(offset_of!(SockAddrVm, svm_reserved1) == 2);
+        assert!(offset_of!(SockAddrVm, svm_port) == 4);
+        assert!(offset_of!(SockAddrVm, svm_cid) == 8);
+        assert!(offset_of!(SockAddrVm, svm_flags) == 12);
+        assert!(offset_of!(SockAddrVm, svm_zero) == 13);
+    };
 
     unsafe extern "C" {
         fn socket(domain: i32, typ: i32, protocol: i32) -> i32;
@@ -1885,7 +1906,8 @@ mod linux {
             svm_reserved1: 0,
             svm_port: port,
             svm_cid: VMADDR_CID_ANY,
-            svm_zero: [0; 4],
+            svm_flags: 0,
+            svm_zero: [0; 3],
         };
         let rc = unsafe {
             bind(

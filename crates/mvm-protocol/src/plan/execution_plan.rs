@@ -21,6 +21,7 @@ use crate::plan::types::{
     SignedImageRef, TenantId, WorkloadId,
 };
 use crate::plan::verb::VerbId;
+use crate::protocol::broker::ServiceId;
 
 /// Wire-format version of the `ExecutionPlan`. New fields are additive with
 /// `#[serde(default)]`; the verifier rejects any plan whose `schema_version`
@@ -202,6 +203,16 @@ pub struct ExecutionPlan {
     /// any share the plan didn't name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<HostShareGrant>,
+
+    /// Host services this workload is authorized to call over the broker
+    /// channel. The broker's dispatch gate refuses any service that is not
+    /// listed here, and the launch path reads the same list to decide whether
+    /// the optional glibc SDK sidecar has to be attached — see
+    /// [`crate::plan::sdk_sidecar`]. Empty (the default) means the workload
+    /// calls no host service: the broker answers every call `NotBound` and no
+    /// sidecar is attached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceId>,
 }
 
 #[cfg(test)]
@@ -281,7 +292,59 @@ mod tests {
             bundle: None,
             deps_volume: None,
             shares: Vec::new(),
+            services: Vec::new(),
         }
+    }
+
+    #[test]
+    fn services_default_empty_and_roundtrip() {
+        use crate::protocol::broker::ServiceId;
+
+        let plan = minimal_plan();
+        assert!(
+            plan.services.is_empty(),
+            "a plan that binds no host service must default to an empty set"
+        );
+
+        // Empty => key omitted entirely, so existing signatures over plans
+        // without the field stay byte-identical.
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            !json.contains("services"),
+            "an empty services set must be omitted, not serialized as []"
+        );
+
+        // Absent in JSON => empty (serde default), preserving old plans.
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("services");
+        let back: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert!(back.services.is_empty());
+
+        // Present => preserved, in order.
+        let mut bound = plan.clone();
+        bound.services = vec![
+            ServiceId::parse("host.audit.v1").unwrap(),
+            ServiceId::parse("host.time.v1").unwrap(),
+        ];
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&bound).unwrap()).unwrap();
+        assert_eq!(round.services, bound.services);
+        assert!(crate::plan::sdk_sidecar::sdk_sidecar_required(&round));
+        assert!(!crate::plan::sdk_sidecar::sdk_sidecar_required(&plan));
+    }
+
+    #[test]
+    fn a_malformed_service_id_fails_the_plan_closed() {
+        let plan = minimal_plan();
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "services".to_string(),
+            serde_json::json!(["host.audit"]), // no version segment
+        );
+        assert!(
+            serde_json::from_value::<ExecutionPlan>(value).is_err(),
+            "an unversioned service id must refuse to deserialize"
+        );
     }
 
     #[test]

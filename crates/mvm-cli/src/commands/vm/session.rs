@@ -1032,6 +1032,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             agent_verb_override: agent_verb_override.clone(),
             restrict_agent_verbs: !is_dev
                 && crate::commands::vm::agent_verbs::image_is_sealed(rootfs),
+            services: Vec::new(),
         })?;
         let Some(ctx) = ctx else { return Ok(None) };
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();

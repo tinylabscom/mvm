@@ -6,13 +6,15 @@ Feature: Verified boot rejects a tampered rootfs
   kernel format it can actually boot, without changing the shared verity
   device contract.
 
-  With the universal initramfs, roothashes and block-device slots travel over
-  vsock from the host to PID 1, so the sealed workload cmdline must no longer
-  carry the legacy `mvm.roothash`, `mvm.data`, `mvm.hash`, or runtime-overlay
-  equivalents.
+  Which channel carries the roothashes depends on which initramfs is PID 1.
+  Under the universal initramfs they travel over vsock, so the sealed cmdline
+  must not carry the legacy `mvm.roothash`, `mvm.data`, `mvm.hash`, or
+  runtime-overlay equivalents. A legacy per-rootfs initramfs is never sent that
+  vsock command, so for it the cmdline is the only channel and those same tokens
+  are mandatory — without them PID 1 aborts and the kernel panics on a dead init.
 
-  Scenario: A sealed libkrun workload uses its virtio console
-    When I assemble a sealed workload cmdline for "libkrun"
+  Scenario: A sealed libkrun workload on the universal initramfs uses its virtio console
+    When I assemble a sealed workload cmdline for "libkrun" booting the "universal" initramfs
     Then the sealed workload cmdline contains "console=hvc0"
     And the sealed workload cmdline contains "mvm.runtime_source_policy=required_overlay"
     And the sealed workload cmdline omits "mvm.roothash="
@@ -24,13 +26,31 @@ Feature: Verified boot rejects a tampered rootfs
     But the sealed workload cmdline omits "console=ttyAMA0"
     And the sealed workload cmdline omits "earlycon=pl011"
 
-  Scenario: A sealed HVF workload keeps its pl011 console
-    When I assemble a sealed workload cmdline for "hvf"
+  Scenario: A sealed HVF workload on the universal initramfs keeps its pl011 console
+    When I assemble a sealed workload cmdline for "hvf" booting the "universal" initramfs
     Then the sealed workload cmdline contains "console=ttyAMA0"
     And the sealed workload cmdline contains "earlycon=pl011"
     And the sealed workload cmdline contains "mvm.runtime_source_policy=required_overlay"
     And the sealed workload cmdline omits "mvm.roothash="
     But the sealed workload cmdline omits "console=hvc0"
+
+  Scenario: A sealed libkrun workload on the legacy initramfs carries its verity tokens
+    When I assemble a sealed workload cmdline for "libkrun" booting the "legacy" initramfs
+    Then the sealed workload cmdline contains "console=hvc0"
+    And the sealed workload cmdline contains "mvm.runtime_source_policy=required_overlay"
+    And the sealed workload cmdline contains "mvm.roothash="
+    And the sealed workload cmdline contains "mvm.data=/dev/vda"
+    And the sealed workload cmdline contains "mvm.hash=/dev/vdb"
+    And the sealed workload cmdline contains "mvm.runtime_roothash="
+    And the sealed workload cmdline contains "mvm.runtime_data=/dev/vdc"
+    And the sealed workload cmdline contains "mvm.runtime_hash=/dev/vdd"
+
+  Scenario: A sealed HVF workload on the legacy initramfs carries its verity tokens
+    When I assemble a sealed workload cmdline for "hvf" booting the "legacy" initramfs
+    Then the sealed workload cmdline contains "console=ttyAMA0"
+    And the sealed workload cmdline contains "mvm.roothash="
+    And the sealed workload cmdline contains "mvm.data=/dev/vda"
+    And the sealed workload cmdline contains "mvm.hash=/dev/vdb"
 
   Scenario: Libkrun maps the workload kernel to its host-loadable format
     When I map an existing ELF workload kernel through the libkrun driver

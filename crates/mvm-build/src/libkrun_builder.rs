@@ -2302,12 +2302,50 @@ fn seed_builder_vm_image_from_default_cache(arch_dir: &Path) -> Result<bool, Bui
             // shared cache is stale or malformed, skip it and let
             // source-checkout auto-bootstrap build a fresh image into the
             // isolated target cache. A missing dir fails validation too.
-            validate_builder_vm_image_cache(source_arch_dir)
-                .ok()
-                .map(|_| source_arch_dir.to_path_buf())
+            validate_builder_vm_image_cache(source_arch_dir).ok()?;
+            // Same policy for a shared cache whose recorded digests no longer
+            // describe its bytes: decline the seed rather than propagate it.
+            // Declining (not erroring) matters — an error here would abort the
+            // build instead of falling through to a fresh local build.
+            if !shared_cache_digests_are_trustworthy(source_arch_dir) {
+                return None;
+            }
+            Some(source_arch_dir.to_path_buf())
         },
         |source_arch_dir| copy_builder_vm_image_files(&source_arch_dir, arch_dir),
     )
+}
+
+/// Does the host's shared cache still match the digests it recorded?
+///
+/// This is the admission boundary — the one moment bytes cross from the shared
+/// cache into an isolated root — so it is where the check belongs. It is
+/// deliberately not in `validate_builder_vm_image_cache`, which runs on every
+/// builder VM start: re-hashing a multi-hundred-megabyte rootfs per start is
+/// not a trade worth making on a host the threat model already trusts.
+///
+/// A cache carrying no manifest at all predates the sidecar or came from
+/// another populator. Absence is not evidence of tampering, so it passes.
+fn shared_cache_digests_are_trustworthy(source_arch_dir: &Path) -> bool {
+    let check = crate::cache_install::verify_digest_manifest(
+        source_arch_dir,
+        crate::cache_install::BUILDER_VM_ARTIFACT_DIGEST_FILE,
+        crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS,
+    );
+    match check {
+        crate::cache_install::DigestManifestCheck::Match
+        | crate::cache_install::DigestManifestCheck::ManifestAbsent => true,
+        rejected => {
+            // A silently declined seed is invisible otherwise, and this one
+            // means someone's shared cache is damaged.
+            tracing::debug!(
+                source = %source_arch_dir.display(),
+                verdict = ?rejected,
+                "declining to seed builder image from shared cache: recorded digests do not match"
+            );
+            false
+        }
+    }
 }
 
 fn copy_builder_vm_image_files(
@@ -2318,7 +2356,7 @@ fn copy_builder_vm_image_files(
         BuilderVmError::ExtractionFailed(format!("create {}: {e}", arch_dir.display()))
     })?;
 
-    for name in ["vmlinux", "rootfs.ext4", "cmdline.txt", "manifest.json"] {
+    for name in crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
         let src = source_arch_dir.join(name);
         let dst = arch_dir.join(name);
         std::fs::copy(&src, &dst).map_err(|e| {
@@ -2328,6 +2366,15 @@ fn copy_builder_vm_image_files(
                 dst.display(),
             ))
         })?;
+    }
+    // Sidecars are best-effort: a source lacking them still yields a bootable
+    // image, and failing the seed over an absent provenance file would be
+    // worse than seeding without it.
+    for name in crate::cache_install::BUILDER_VM_CACHE_SIDECARS {
+        let src = source_arch_dir.join(name);
+        if src.is_file() {
+            let _ = std::fs::copy(&src, arch_dir.join(name));
+        }
     }
     Ok(())
 }
@@ -5726,6 +5773,111 @@ mod tests {
             }
             BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
         }
+    }
+
+    /// A shared-cache source dir as the real populators write it: the four
+    /// artifacts plus the digest and provenance sidecars.
+    fn write_shared_cache_source(source_arch_dir: &Path) {
+        std::fs::create_dir_all(source_arch_dir).unwrap();
+        std::fs::write(source_arch_dir.join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(source_arch_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        std::fs::write(
+            source_arch_dir.join("cmdline.txt"),
+            "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source_arch_dir.join("manifest.json"),
+            r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+        )
+        .unwrap();
+        let sums = crate::cache_install::digest_manifest(
+            source_arch_dir,
+            crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS,
+        )
+        .unwrap();
+        std::fs::write(
+            source_arch_dir.join(crate::cache_install::BUILDER_VM_ARTIFACT_DIGEST_FILE),
+            sums,
+        )
+        .unwrap();
+        std::fs::write(source_arch_dir.join(".mvm-provenance.json"), b"{}").unwrap();
+        std::fs::write(source_arch_dir.join(".mvm-source.sha256"), b"fingerprint\n").unwrap();
+    }
+
+    #[test]
+    fn seeding_carries_the_integrity_sidecars_into_the_isolated_cache() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path().join("isolated-cache"));
+
+        let arch = host_arch_tag().to_string();
+        write_shared_cache_source(
+            &crate::cache_install::default_cache_root()
+                .join("builder-vm")
+                .join(&arch),
+        );
+
+        ensure_builder_vm_image().expect("seed from default cache");
+
+        // Without these the seeded copy cannot be verified afterwards, and the
+        // bootstrap readiness check reads it as incomplete and rebuilds over
+        // the image the seed just copied.
+        let target_arch_dir = scratch
+            .path()
+            .join("isolated-cache")
+            .join("cache")
+            .join("builder-vm")
+            .join(&arch);
+        for name in crate::cache_install::BUILDER_VM_CACHE_SIDECARS {
+            assert!(
+                target_arch_dir.join(name).is_file(),
+                "seeded cache is missing {name}"
+            );
+        }
+        assert!(matches!(
+            crate::cache_install::verify_digest_manifest(
+                &target_arch_dir,
+                crate::cache_install::BUILDER_VM_ARTIFACT_DIGEST_FILE,
+                crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS,
+            ),
+            crate::cache_install::DigestManifestCheck::Match
+        ));
+    }
+
+    #[test]
+    fn seeding_declines_a_shared_cache_whose_digests_no_longer_match() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path().join("isolated-cache"));
+
+        let arch = host_arch_tag().to_string();
+        let source_arch_dir = crate::cache_install::default_cache_root()
+            .join("builder-vm")
+            .join(&arch);
+        write_shared_cache_source(&source_arch_dir);
+        // Same length, so only the digest can catch it.
+        std::fs::write(source_arch_dir.join("rootfs.ext4"), b"r00tfs").unwrap();
+
+        let err = ensure_builder_vm_image().expect_err("drifted shared cache must not seed");
+
+        // Declined, not propagated: the caller falls through to a fresh local
+        // build, so the surfaced error is the original cache miss rather than
+        // a digest complaint.
+        let target_arch_dir = scratch
+            .path()
+            .join("isolated-cache")
+            .join("cache")
+            .join("builder-vm")
+            .join(&arch);
+        assert!(
+            !target_arch_dir.join("rootfs.ext4").exists(),
+            "drifted bytes must not reach the isolated cache: {err}"
+        );
     }
 
     #[test]

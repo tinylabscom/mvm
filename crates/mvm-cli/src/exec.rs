@@ -383,6 +383,12 @@ pub struct ExecRequest {
     /// Recorded liveness declaration (phase A: presence only). Persisted with a
     /// persistent machine so it survives + is inspectable; not yet probed.
     pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
+    /// Resolved SDK-sidecar attachment for this run, or `None` when the
+    /// workload binds no SDK-served host service. Resolved (and verified)
+    /// before admission so the signed plan's grant and the launch config's
+    /// volume describe the same bytes; the shared admission gate refuses the
+    /// launch if they ever disagree.
+    pub sdk_sidecar: Option<crate::commands::vm::up::SdkSidecarAttachment>,
     /// Requested workload hypervisor (from `--hypervisor`), or `None` to
     /// auto-detect. Kept here so `run_inner`'s backend selection agrees with the
     /// admit/build sites that read it off `RunArgs`.
@@ -1340,6 +1346,10 @@ fn build_start_config(
         memory_mib: req.memory_mib,
         mem_initial_mib: req.mem_initial_mib,
         ports: Vec::new(),
+        // User `--add-dir` volumes first, then the SDK sidecar. The order is
+        // the block-device order every backend assigns, so keeping the
+        // host-resolved sidecar last means adding or removing it never
+        // renumbers a user volume's device.
         volumes: volumes
             .iter()
             .map(|v| VmVolume {
@@ -1350,6 +1360,7 @@ fn build_start_config(
                 kind: v.kind,
                 encrypted: v.encrypted,
             })
+            .chain(req.sdk_sidecar.iter().map(|a| a.volume.clone()))
             .collect(),
         config_files: Vec::new(),
         secret_files: Vec::new(),
@@ -1925,6 +1936,7 @@ pub fn dispatch_in_session(
         stdin: Vec::new(),
         healthcheck: None,
         hypervisor: None,
+        sdk_sidecar: None,
     };
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
@@ -1984,30 +1996,26 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         // Re-pick the transport on each iteration: a Firecracker VM
         // that's still booting may not show up in
         // resolve_running_vm_dir until the daemon registers it.
-        // "agent reachable" means it speaks the protocol, not just that
-        // the socket is open. We require a
-        // successful hello (with at least the `Ping` capability) before
-        // reporting ready, since under hard cutover a pre-hello agent
-        // would only answer `ProtocolMismatch` to the next request and
-        // that is *not* "reachable" from the caller's perspective.
+        // "agent reachable" means it answered on the wire, not just that the
+        // socket is open — the VMM binds the agent port before the guest kernel
+        // starts, so a connect alone also succeeds against a guest that is still
+        // booting or that panicked before userspace. `probe_agent_ready`
+        // handshakes and pings, so returning true here means the caller's next
+        // RPC reaches a live agent instead of reading EOF.
         if let Ok(transport) = vsock_transport::for_vm(vm_name)
             && let Ok(mut stream) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             && {
                 // Bound each probe: a transport whose socket is bound but whose
                 // guest agent hasn't replied yet (e.g. still booting, or an
                 // hvf VMM whose relay isn't answering) must not block the
-                // whole hello read forever — otherwise this loop never gets back
-                // to the deadline check and hangs instead of timing out. A short
-                // per-attempt read timeout lets `negotiate_protocol` fail fast so
+                // whole handshake read forever — otherwise this loop never gets
+                // back to the deadline check and hangs instead of timing out. A
+                // short per-attempt read timeout lets the probe fail fast so
                 // the outer loop retries and ultimately honours `timeout_secs`.
                 // The stream is a throwaway probe (dropped below), so the timeout
                 // never touches a real agent-RPC data stream.
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
-                mvm_agentd::vsock::negotiate_protocol(
-                    &mut stream,
-                    vec![mvm_agentd::vsock::GuestCapability::Ping],
-                )
-                .is_ok()
+                mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok()
             }
         {
             return true;
@@ -2247,6 +2255,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         assert_eq!(req.target_command(), "exec 'uname' '-a'");
     }
@@ -2271,6 +2280,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(script.starts_with("set -e\n"));
@@ -2303,6 +2313,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         assert!(script.contains("mkdir -p '/g'"));
@@ -2335,6 +2346,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
         // RW mount is unqualified — no `-o ro`.
@@ -2365,6 +2377,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
 
         let pty = pty_console_request(&req, &[], "set -e\nexec '/bin/sh'\n".to_string());
@@ -2397,6 +2410,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let wrapper = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
 
@@ -2426,6 +2440,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let wrapper = build_guest_wrapper(&req, &[]);
 
@@ -2662,6 +2677,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         assert_eq!(req.target_command(), "exec 'python' '-m' 'x'");
     }
@@ -2693,6 +2709,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         // Env from entrypoint exported.
@@ -2735,6 +2752,7 @@ mod tests {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
+            sdk_sidecar: None,
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));

@@ -414,7 +414,25 @@ mod linux {
     // constant to the real struct size so the `dm_ioctl_fixed` soundness
     // argument (a `&mut DmIoctl` fully backs the access) can't silently rot if
     // the layout changes.
-    const _: () = assert!(DM_IOCTL_STRUCT_SIZE as usize == std::mem::size_of::<DmIoctl>());
+    //
+    // The offsets extend that to the field level: this is the struct the
+    // dm-verity table is built from on the verified-boot path, so drift is a
+    // verity setup failure reported as an unrelated errno. Derived on Linux
+    // 6.8 from linux/dm-ioctl.h with cc sizeof/offsetof/_Alignof, not read
+    // off the Rust definition.
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(DM_IOCTL_STRUCT_SIZE as usize == size_of::<DmIoctl>());
+        assert!(size_of::<DmIoctl>() == 312);
+        assert!(align_of::<DmIoctl>() == 8);
+        assert!(offset_of!(DmIoctl, version) == 0);
+        assert!(offset_of!(DmIoctl, data_size) == 12);
+        assert!(offset_of!(DmIoctl, data_start) == 16);
+        assert!(offset_of!(DmIoctl, target_count) == 20);
+        assert!(offset_of!(DmIoctl, dev) == 40);
+        assert!(offset_of!(DmIoctl, name) == 48);
+    };
 
     #[repr(C)]
     struct DmTargetSpec {
@@ -425,6 +443,18 @@ mod linux {
         target_type: [u8; 16],
         // followed by NUL-terminated parameter string + alignment padding
     }
+
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(size_of::<DmTargetSpec>() == 40);
+        assert!(align_of::<DmTargetSpec>() == 8);
+        assert!(offset_of!(DmTargetSpec, sector_start) == 0);
+        assert!(offset_of!(DmTargetSpec, length) == 8);
+        assert!(offset_of!(DmTargetSpec, status) == 16);
+        assert!(offset_of!(DmTargetSpec, next) == 20);
+        assert!(offset_of!(DmTargetSpec, target_type) == 24);
+    };
 
     pub fn run() -> Result<(), String> {
         msg("mvm-verity-init: starting");

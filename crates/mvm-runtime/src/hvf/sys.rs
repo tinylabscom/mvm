@@ -75,6 +75,42 @@ pub struct hv_vcpu_exit_t {
     pub exception: hv_vcpu_exit_exception_t,
 }
 
+// Layout contract with Hypervisor.framework. The framework writes these
+// structs; we only read them. A size, alignment, or field-offset mismatch
+// therefore misreads the exit reason and the fault addresses rather than
+// failing loudly, and the exit reason is what drives the whole vCPU loop.
+//
+// Values are the framework's, not this file's — derived from
+// <Hypervisor/Hypervisor.h> on arm64 with:
+//
+//   clang -framework Hypervisor -x c - <<'EOF'
+//   #include <Hypervisor/Hypervisor.h>
+//   #include <stddef.h>
+//   #include <stdio.h>
+//   int main(void){ printf("%zu %zu %zu\n", sizeof(hv_vcpu_exit_t),
+//       _Alignof(hv_vcpu_exit_t), offsetof(hv_vcpu_exit_t, exception)); }
+//   EOF
+//
+// Re-derive against the SDK header before changing any number below.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<hv_vcpu_exit_exception_t>() == 24);
+    assert!(align_of::<hv_vcpu_exit_exception_t>() == 8);
+    assert!(offset_of!(hv_vcpu_exit_exception_t, syndrome) == 0);
+    assert!(offset_of!(hv_vcpu_exit_exception_t, virtual_address) == 8);
+    assert!(offset_of!(hv_vcpu_exit_exception_t, physical_address) == 16);
+
+    assert!(size_of::<hv_vcpu_exit_t>() == 32);
+    assert!(align_of::<hv_vcpu_exit_t>() == 8);
+    assert!(offset_of!(hv_vcpu_exit_t, reason) == 0);
+    // 4 bytes of tail padding after the u32 reason: the framework aligns
+    // the nested exception to 8. Asserting this offset is the point of the
+    // block — a reason widened to u64 would still size to 32 and silently
+    // shift every field the fault handler reads.
+    assert!(offset_of!(hv_vcpu_exit_t, exception) == 8);
+};
+
 #[link(name = "Hypervisor", kind = "framework")]
 unsafe extern "C" {
     pub fn hv_vm_create(config: hv_config_t) -> hv_return_t;

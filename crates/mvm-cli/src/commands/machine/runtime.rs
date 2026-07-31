@@ -350,6 +350,7 @@ pub(in crate::commands) fn boot_persistent_by_name(
             from_workload_ir: None,
             attach: false,
             argv: Vec::new(),
+            host_service: Vec::new(),
         },
         cfg,
     )

@@ -51,6 +51,8 @@ pkgs.rustPlatform.buildRustPackage {
   # we only build mvm-agentd; the unused deps compile zero code.
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
 
+  unpackPhase = import ./workspace-unpack.nix { inherit mvmSrc; };
+
   # Restrict the build to the mvm-agentd binaries. The workspace
   # has heavier members (libkrun via mvm-build, libkrun via
   # mvm-providers, etc.) that aren't in the guest closure.

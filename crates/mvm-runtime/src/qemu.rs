@@ -1001,19 +1001,38 @@ fn serve_guest_dial(listener: VsockListener, target_uds: PathBuf) {
 }
 
 /// The Linux `struct sockaddr_vm` wire layout, hoisted so the dial and the
-/// listener share one definition. Pinned against the kernel uapi (family
-/// u16 + reserved u16 + port u32 + cid u32 + 4-byte pad = 16, ==
-/// sizeof(struct sockaddr)): a future field edit that desyncs the `socklen`
-/// passed to connect(2)/bind(2) trips this at compile time.
+/// listener share one definition. A field edit that desyncs the `socklen`
+/// passed to connect(2)/bind(2) trips the layout contract below.
 #[repr(C)]
 struct SockaddrVm {
     svm_family: libc::sa_family_t,
     svm_reserved1: u16,
     svm_port: u32,
     svm_cid: u32,
-    svm_zero: [u8; 4],
+    /// `VMADDR_FLAG_TO_HOST` and friends. Zero for every address mvm
+    /// builds; carried so the mirror matches the header field-for-field.
+    svm_flags: u8,
+    svm_zero: [u8; 3],
 }
-const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
+
+// Layout contract with the kernel's `struct sockaddr_vm`
+// (linux/vm_sockets.h), derived on Linux 6.8 with cc
+// sizeof/offsetof/_Alignof rather than read off the Rust definition.
+// Bytes 12..16: the header gained `svm_flags` at offset 12 in Linux 6.0,
+// shrinking `svm_zero` to three bytes. The total is 16 either way, which
+// is why the pre-6.0 shape went unnoticed here.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+
+    assert!(size_of::<SockaddrVm>() == 16);
+    assert!(align_of::<SockaddrVm>() == 4);
+    assert!(offset_of!(SockaddrVm, svm_family) == 0);
+    assert!(offset_of!(SockaddrVm, svm_reserved1) == 2);
+    assert!(offset_of!(SockaddrVm, svm_port) == 4);
+    assert!(offset_of!(SockaddrVm, svm_cid) == 8);
+    assert!(offset_of!(SockaddrVm, svm_flags) == 12);
+    assert!(offset_of!(SockaddrVm, svm_zero) == 13);
+};
 
 const AF_VSOCK: libc::c_int = 40;
 
@@ -1023,7 +1042,8 @@ fn sockaddr_vm(cid: u32, port: u32) -> SockaddrVm {
         svm_reserved1: 0,
         svm_port: port,
         svm_cid: cid,
-        svm_zero: [0; 4],
+        svm_flags: 0,
+        svm_zero: [0; 3],
     }
 }
 
