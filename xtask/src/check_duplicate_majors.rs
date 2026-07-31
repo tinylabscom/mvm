@@ -28,12 +28,6 @@ use std::process::Command;
 /// into the build.
 const ALLOWLIST: &[&str] = &[
     "bitflags",
-    // x25519-dalek 2.x still uses curve25519-dalek 4.x while the workspace's
-    // Ed25519 stack uses curve25519-dalek 5.x; the authenticated control path
-    // requires both until the upstream stacks converge.
-    "cpufeatures",
-    "curve25519-dalek",
-    "fiat-crypto",
     "getrandom",
     "hashbrown",
     // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;
