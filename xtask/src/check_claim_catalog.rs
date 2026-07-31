@@ -225,7 +225,7 @@ fn resolve_ci_needles(workspace: &Path, needles: &mut [Needle]) -> Result<()> {
     }
     let workflows = workspace.join(".github").join("workflows");
     claims_ledger::for_each_file(&workflows, None, &mut |_, content| {
-        let anchors = ci_anchors(content);
+        let anchors = claims_ledger::ci_anchors(content);
         for n in needles.iter_mut() {
             if matches!(n.kind, Kind::Ci) && !n.found {
                 n.found = anchors.iter().any(|a| a == &n.search);
@@ -233,82 +233,6 @@ fn resolve_ci_needles(workspace: &Path, needles: &mut [Needle]) -> Result<()> {
         }
     })?;
     Ok(())
-}
-
-/// The exact names a `ci:` witness may resolve to: a job key, or a token
-/// written in parentheses inside a step name.
-///
-/// This used to be a substring search over the whole file, so a witness
-/// matched a mention in a comment as happily as a live job — `ci:fuzz`
-/// resolved against the word "fuzz" anywhere in any workflow, including the
-/// prose explaining why the job exists. A deleted job kept its witness green.
-///
-/// Matching is by equality, not containment, which is what makes a rename
-/// visible. A job's descriptive `name:` — say `Supply chain — cargo-deny
-/// (with a bracketed spec citation)` — deliberately does *not* anchor
-/// `cargo-deny`; only the `cargo-deny:` key does. Renaming that key now
-/// fails the gate even though the words survive in the display name.
-///
-/// The parenthesised form exists because the ledger points at steps as well
-/// as jobs, and the repo already has a convention for it: a step backing a
-/// claim carries its token in parentheses, as in
-/// `Fuzz bounded DNS codec (fuzz-dns-codec)`.
-fn ci_anchors(content: &str) -> Vec<String> {
-    let mut anchors = Vec::new();
-    let mut in_jobs = false;
-    for line in content.lines() {
-        if line.starts_with("jobs:") {
-            in_jobs = true;
-            continue;
-        }
-        if in_jobs && !line.trim().is_empty() && !line.starts_with(' ') {
-            in_jobs = false;
-        }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        if in_jobs
-            && let Some(key) = line.strip_prefix("  ")
-            && !key.starts_with(' ')
-            && let Some(name) = key.strip_suffix(':')
-            && !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            anchors.push(name.to_string());
-        }
-        let step_name = trimmed
-            .strip_prefix("- name:")
-            .or_else(|| trimmed.strip_prefix("name:"));
-        if let Some(rest) = step_name {
-            anchors.extend(parenthesised_tokens(rest));
-        }
-    }
-    anchors
-}
-
-/// Tokens written `(like-this)` inside a step name. Only bare
-/// identifier-shaped contents count, so a bracketed spec citation with
-/// spaces and punctuation contributes nothing.
-fn parenthesised_tokens(name: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = name;
-    while let Some(open) = rest.find('(') {
-        let after = &rest[open + 1..];
-        let Some(close) = after.find(')') else { break };
-        let inner = &after[..close];
-        if !inner.is_empty()
-            && inner
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            out.push(inner.to_string());
-        }
-        rest = &after[close + 1..];
-    }
-    out
 }
 
 fn mark(needles: &mut [Needle], kind: Kind, content: &str) {
@@ -512,86 +436,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod ci_anchor_tests {
-    use super::*;
-
-    const WORKFLOW: &str = r#"name: Security
-# A comment mentioning ghost-job and fuzz-in-prose.
-on:
-  schedule:
-    - cron: "17 4 * * *"
-jobs:
-  cargo-deny:
-    name: Supply chain — cargo-deny
-    steps:
-      - name: cargo deny check
-        run: cargo deny check
-  fuzz:
-    name: Fuzz — parsers
-    steps:
-      - name: Fuzz bounded DNS codec (fuzz-dns-codec)
-        run: cargo fuzz run fuzz_dns_codec
-"#;
-
-    #[test]
-    fn a_job_key_is_an_anchor() {
-        let a = ci_anchors(WORKFLOW);
-        assert!(a.iter().any(|x| x == "cargo-deny"), "{a:?}");
-        assert!(a.iter().any(|x| x == "fuzz"), "{a:?}");
-    }
-
-    #[test]
-    fn a_parenthesised_step_token_is_an_anchor() {
-        assert!(ci_anchors(WORKFLOW).iter().any(|x| x == "fuzz-dns-codec"));
-    }
-
-    /// A job's descriptive name must not anchor its key. This is what makes
-    /// renaming `cargo-deny:` visible even though the words survive in
-    /// `name: Supply chain — cargo-deny`.
-    #[test]
-    fn a_descriptive_name_does_not_anchor_the_key() {
-        let a = ci_anchors("jobs:\n  renamed:\n    name: Supply chain — cargo-deny (ADR-001)\n");
-        assert!(a.iter().any(|x| x == "renamed"), "{a:?}");
-        assert!(
-            !a.iter().any(|x| x == "cargo-deny"),
-            "the display name must not stand in for the key: {a:?}"
-        );
-    }
-
-    /// Only identifier-shaped parentheticals count, so citation text is not
-    /// mistaken for a witness token.
-    #[test]
-    fn non_identifier_parentheticals_are_ignored() {
-        assert!(parenthesised_tokens("Supply chain (ADR-001 §W5.2)").is_empty());
-        assert_eq!(
-            parenthesised_tokens("Codec (fuzz-dns-codec)"),
-            vec!["fuzz-dns-codec".to_string()]
-        );
-    }
-
-    /// The whole point. A witness naming a job that does not exist used to
-    /// resolve against the word appearing in a comment.
-    #[test]
-    fn a_comment_mention_is_not_an_anchor() {
-        let a = ci_anchors(WORKFLOW);
-        assert!(
-            !a.iter().any(|x| x.contains("ghost-job")),
-            "a comment must not anchor a witness: {a:?}"
-        );
-    }
-
-    /// `run:` bodies are not anchors either — otherwise renaming a step but
-    /// keeping its command would still look witnessed.
-    #[test]
-    fn a_run_body_is_not_an_anchor() {
-        let a = ci_anchors(WORKFLOW);
-        assert!(!a.iter().any(|x| x.starts_with("cargo fuzz run")), "{a:?}");
-    }
-
-    /// Top-level keys that merely sit at some indent are not job keys.
-    #[test]
-    fn only_keys_inside_jobs_count() {
-        let a = ci_anchors(WORKFLOW);
-        assert!(!a.iter().any(|x| x == "schedule"), "{a:?}");
-    }
-}
+mod ci_anchor_tests {}

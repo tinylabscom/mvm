@@ -240,9 +240,17 @@ treatment that 274's WS3 originally described for everything.
       `ci-full.yml`'s, against the standing rule that a gate lives in both
       lists. It happens to be the gate that would have caught the dalek
       duplication early.
-- [ ] `ci:NAME` witnesses resolve by literal string match anywhere in
-      `.github/workflows/*`, so `ci:fuzz` matched a job key while the job
-      ran nothing, and `ci:fuzz-dns-codec` matched a step's display text.
-      Claims 5 and 10 now name fuzz targets, which `check-workflow-paths`
-      resolves to a file — but the token kind still cannot express "this
-      lane passed". That is the gap the claim-witness health check is for.
+- [x] `ci:NAME` witnesses resolved by literal string match anywhere in
+      `.github/workflows/*`. Closed in #1980: a token now resolves to a real
+      job key or a parenthesised step token, so a deleted job no longer keeps
+      a green witness.
+- [x] A claim's CI lane can stop backing it two ways — going red, and
+      ceasing to run. #1970 (`Security lane watch`) reports the first, but
+      triggers on `workflow_run: completed`, so it is structurally blind to
+      the second: Security ran nightly to 2026-06-16 and not again until
+      2026-07-21, and nothing could have said so.
+      `check-claim-witness-freshness` covers absence on its own schedule.
+- [ ] The freshness gate reasons only about crons that fire at least daily;
+      a lane moved to a weekly schedule silently drops out of its scope
+      (reported as a note, not a failure). Deriving a weekly interval needs
+      calendar arithmetic the gate deliberately does not attempt yet.
