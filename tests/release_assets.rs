@@ -128,6 +128,35 @@ fn every_signed_release_blob_uses_the_one_bundle_format() {
     );
 }
 
+/// The release must consume its own artifacts through the production download
+/// ladder *before* publishing them.
+///
+/// That ladder is fail-closed at every rung, so an artifact this pipeline builds
+/// slightly wrong does not degrade — it strands every download. The self-check
+/// is the only thing that turns that into a failed release instead of a shipped
+/// one, and it has to run after signing and before `gh release create`.
+#[test]
+fn the_release_consumes_its_own_artifacts_before_publishing_them() {
+    let workflow = release_workflow();
+    let verify = workflow
+        .find("- name: Verify the published artifacts survive the consumer path")
+        .expect("release.yml must consume its artifacts before publishing them");
+    let sign = workflow
+        .find("- name: Sign release tarballs and SBOM")
+        .expect("release.yml must sign the tarballs");
+    let publish = workflow
+        .find("- name: Create GitHub Release")
+        .expect("release.yml must create the release");
+    assert!(
+        sign < verify && verify < publish,
+        "the consumer check must run after signing and before publishing"
+    );
+    assert!(
+        workflow.contains("--example download-release-artifact"),
+        "the check must drive the real downloader, not a restatement of it"
+    );
+}
+
 /// Both published architectures must be built, or a whole platform's users get
 /// the fail-closed refusal this artifact exists to prevent.
 #[test]

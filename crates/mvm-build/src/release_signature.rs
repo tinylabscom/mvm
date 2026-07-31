@@ -101,27 +101,51 @@ fn fetch_bundle(request: &ReleaseSignatureRequest<'_>) -> Result<Vec<u8>, Runtim
     Ok(std::fs::read(tmp.path())?)
 }
 
-/// Try every accepted release identity, accepting on the first that verifies.
-///
-/// The identity set is a list rather than a single value because the release
-/// trust root allows more than one template; a rotation that adds one must not
-/// require a code change here.
 fn verify_against_release_identities(
     archive: &[u8],
     bundle: &[u8],
     request: &ReleaseSignatureRequest<'_>,
 ) -> Result<(), RuntimeOverlayError> {
-    let identities = mvm_core::release_trust::accepted_release_identities(request.version);
-    let issuer = mvm_core::release_trust::RELEASE_OIDC_ISSUER;
+    verify_release_archive_bytes(
+        archive,
+        bundle,
+        request.asset,
+        &mvm_core::release_trust::accepted_release_identities(request.version),
+        mvm_core::release_trust::RELEASE_OIDC_ISSUER,
+    )
+}
+
+/// Verify `archive` against `bundle` under any of `identities`, accepting on
+/// the first that verifies.
+///
+/// The trust root is a parameter rather than baked in — the same shape
+/// `mvm_core::packs::verify` takes a `KeylessTrust` — so a signer other than
+/// the tagged release workflow can be checked without a second implementation.
+/// Production always passes [`mvm_core::release_trust`]'s set; the
+/// `verify-release-archive-signature` example passes an explicit identity so a
+/// CI lane can round-trip a *real* cosign bundle signed under that lane's own
+/// OIDC identity. That is the only way to prove the format the release
+/// publishes is one this verifier can actually parse — offline fixtures cannot,
+/// because a valid Sigstore signature needs Fulcio and Rekor.
+///
+/// The identity set is a list because the release trust root allows more than
+/// one template; a rotation that adds one must not require a code change here.
+pub fn verify_release_archive_bytes(
+    archive: &[u8],
+    bundle: &[u8],
+    asset: &str,
+    identities: &[String],
+    issuer: &str,
+) -> Result<(), RuntimeOverlayError> {
     let mut last_failure: Option<String> = None;
 
-    for identity in &identities {
+    for identity in identities {
         match mvm_core::crypto::image_verify::verify_signed_payload(
             archive, bundle, identity, issuer,
         ) {
             Ok(()) => {
                 tracing::debug!(
-                    asset = request.asset,
+                    asset,
                     identity = identity.as_str(),
                     "release archive signature verified"
                 );
@@ -132,7 +156,7 @@ fn verify_against_release_identities(
     }
 
     Err(RuntimeOverlayError::SignatureInvalid {
-        asset: request.asset.to_string(),
+        asset: asset.to_string(),
         reason: last_failure.unwrap_or_else(|| {
             "no release signing identity is configured for this version".to_string()
         }),

@@ -130,6 +130,21 @@ nix = { version = "0.29", features = ["mount", "reboot", "signal", "ioctl"] }
 name = "mvm-builder-pack-tool"
 path = "examples/mvm-builder-pack-tool.rs"
 
+# Round-trips a REAL cosign bundle through the downloader's verifier under an
+# explicit identity, so `pack-signing-smoke.yml` can prove the release's bundle
+# format is one this stack parses. Needs the verifier compiled in.
+[[example]]
+name = "verify-release-archive-signature"
+path = "examples/verify-release-archive-signature.rs"
+required-features = ["manifest-verify"]
+
+# Drives the production download ladder against a staged release. `release.yml`
+# runs it over its own artifacts before publishing them.
+[[example]]
+name = "download-release-artifact"
+path = "examples/download-release-artifact.rs"
+required-features = ["manifest-verify"]
+
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
 # Test-only: `PackTrustConfig` (the operator trust config the producer's output
