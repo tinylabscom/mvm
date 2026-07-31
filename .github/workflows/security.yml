@@ -315,7 +315,7 @@ jobs:
           fi
 
       - name: Fuzz GuestRequest
-        working-directory: crates/mvm-guest
+        working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           # `cargo fuzz` requires nightly (-Z sanitizer flags). The
@@ -326,7 +326,7 @@ jobs:
         run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
 
       - name: Fuzz AuthenticatedFrame
-        working-directory: crates/mvm-guest
+        working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
@@ -340,7 +340,7 @@ jobs:
         run: cargo fuzz run fuzz_dns_codec -- -max_total_time="$DURATION"
 
       - name: Fuzz authed path (signed-side)
-        working-directory: crates/mvm-guest
+        working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
@@ -376,7 +376,7 @@ jobs:
         run: cargo fuzz run fuzz_attach_message -- -max_total_time="$DURATION"
 
       - name: Fuzz OCI unpack_layer
-        working-directory: crates/mvm-oci
+        working-directory: crates/mvm-fs
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
@@ -388,10 +388,10 @@ jobs:
         # here from ci.yml's per-PR lane (commit 304b5c9c+) so the
         # 30-min budget only burns on release-tag pushes and the
         # nightly cron, not on every mvm-oci PR.
-        run: cargo fuzz run unpack_layer -- -max_total_time="$DURATION"
+        run: cargo fuzz run --fuzz-dir fuzz-oci unpack_layer -- -max_total_time="$DURATION"
 
       - name: Fuzz mvm-bridge — BridgeConfigJson (host-side)
-        working-directory: crates/mvm-vm-host
+        working-directory: crates/mvm-hostd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
@@ -407,10 +407,10 @@ jobs:
         # `BridgeConfigJson` (Task 12 — `crates/mvm-hostd/
         # src/parse.rs`) means unknown keys fail-closed inside
         # deserialization.
-        run: cargo fuzz run fuzz_bridge_config_json -- -max_total_time="$DURATION"
+        run: cargo fuzz run --fuzz-dir fuzz-vmhost fuzz_bridge_config_json -- -max_total_time="$DURATION"
 
       - name: Fuzz mvm-bridge — passt-hashes TOML
-        working-directory: crates/mvm-vm-host
+        working-directory: crates/mvm-hostd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
@@ -422,7 +422,7 @@ jobs:
         # pipeline is up; this fuzz target asserts the no-panic
         # complement of the `verify_passt_hash_rejects_*` unit-test
         # suite.
-        run: cargo fuzz run fuzz_passt_hashes_toml -- -max_total_time="$DURATION"
+        run: cargo fuzz run --fuzz-dir fuzz-vmhost fuzz_passt_hashes_toml -- -max_total_time="$DURATION"
 
       - name: Fuzz gateway packet parse + rebuild (host-side)
         working-directory: crates/mvm-hostd
@@ -454,7 +454,7 @@ jobs:
         run: cargo fuzz run fuzz_runtime_recording -- -max_total_time="$DURATION"
 
       - name: Fuzz ext4 build_image (rootfs writer)
-        working-directory: crates/mvm-ext4
+        working-directory: crates/mvm-fs
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
@@ -464,7 +464,7 @@ jobs:
         # set panics build_image (a run-path DoS), and every image it emits is
         # block-aligned and carries the ext4 superblock magic. Impossible trees
         # must return Err, never abort.
-        run: cargo fuzz run fuzz_build_image -- -max_total_time="$DURATION"
+        run: cargo fuzz run --fuzz-dir fuzz-ext4 fuzz_build_image -- -max_total_time="$DURATION"
 
       - name: Fuzz FUSE dispatch (virtio-fs request parser)
         working-directory: crates/mvm-runtime
@@ -550,7 +550,34 @@ jobs:
         run: cargo install --locked cargo-mutants cargo-nextest
 
       - name: Mutate the claim surface and ratchet survivors
-        run: cargo run -p xtask -- check-mutation-witnesses --run
+        # `--run` mutates the claim-enforcement surface and runs the suite
+        # against each mutant — plan verification that no longer verifies, a
+        # seccomp filter that no longer filters, the host signer. That is
+        # security code with its check removed, so it must not reach a real
+        # mvm state root: it could mint a key at the wrong path or mode (the
+        # mutation may be *in* the path/mode logic) or leave firewall rules
+        # behind.
+        #
+        # MVM_HOME alone is not enough — `default_mvm_cache_dir` deliberately
+        # reads the home directory to seed from the shared cache, which is the
+        # leak `check-test-home-isolation` exists to catch. So both roots move.
+        #
+        # CARGO_HOME/RUSTUP_HOME are pinned to the real home *before* the
+        # redirect: `~` follows HOME, so without this the toolchain the earlier
+        # steps installed would vanish mid-job and the cache step above would
+        # be keyed on a path that only exists here.
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export MVM_HOME="$RUNNER_TEMP/mutants-mvm-home"
+          export HOME="$MVM_HOME"
+          mkdir -p "$HOME"
+          if [ -e "$HOME/.mvm/keys" ]; then
+            echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
+            exit 1
+          fi
+          cargo run -p xtask -- check-mutation-witnesses --run
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-001 §W5.1 — the unit tests that exercise the
