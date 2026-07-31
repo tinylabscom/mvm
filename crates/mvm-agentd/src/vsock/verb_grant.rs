@@ -85,6 +85,60 @@ pub fn load_host_signer_verifying_key(
     verifying_key_from_hex(raw.trim_ascii()).map(Some)
 }
 
+/// Kernel-cmdline token carrying the host-signer's Ed25519 public key as hex.
+///
+/// A vsock-only guest has no config drive to copy the key off, so the launcher
+/// rides it here instead.
+pub const HOST_SIGNER_PUB_CMDLINE_KEY: &str = "mvm.host_signer_pub";
+
+/// The `mvm.host_signer_pub=<hex>` value in a kernel cmdline, if present.
+pub fn host_signer_pub_token(cmdline: &str) -> Option<&str> {
+    let prefix = format!("{HOST_SIGNER_PUB_CMDLINE_KEY}=");
+    cmdline
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(prefix.as_str()))
+}
+
+/// Write the host-signer anchor to [`HOST_SIGNER_PUBKEY_PATH`] under `root`.
+///
+/// The token is decoded and validated as an Ed25519 key *before* anything is
+/// written, so a file that exists is always a usable anchor and a malformed
+/// token leaves the guest anchorless — refusing control connections — rather
+/// than holding a key that fails to parse later.
+///
+/// `root` is a test seam; production passes `/`.
+pub fn write_host_signer_anchor(root: &std::path::Path, hex: &str) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let key = verifying_key_from_hex(hex)?;
+    // Derive from the constant so the writer and the reader can never drift.
+    let path = root.join(HOST_SIGNER_PUBKEY_PATH.trim_start_matches('/'));
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("host-signer anchor path has no parent directory"))?;
+    std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("mkdir {}: {e}", dir.display()))?;
+    std::fs::write(&path, key.to_bytes())
+        .map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .map_err(|e| anyhow::anyhow!("chmod {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Provision the anchor from `/proc/cmdline` into the live root.
+///
+/// Returns `Ok(false)` when the cmdline carries no token — a launch that ships
+/// no anchor is a valid (if unreachable) boot, not an error. Requires `/proc`
+/// to be mounted, so PID 1 must call this after its early mounts.
+pub fn provision_host_signer_anchor_from_cmdline() -> anyhow::Result<bool> {
+    let cmdline = std::fs::read_to_string("/proc/cmdline")
+        .map_err(|e| anyhow::anyhow!("read /proc/cmdline: {e}"))?;
+    let Some(hex) = host_signer_pub_token(&cmdline) else {
+        return Ok(false);
+    };
+    write_host_signer_anchor(std::path::Path::new("/"), hex)?;
+    Ok(true)
+}
+
 /// Decode a single ASCII hex nibble ('0'-'9', 'a'-'f') to its value.
 /// Returns `None` for any other character (including uppercase).
 fn hex_nibble(b: u8) -> Option<u8> {
@@ -704,9 +758,9 @@ mod tests {
         );
     }
 
-    /// The shipped anchor form: `mvm-oci-init` writes `host-signer.pub` as the
-    /// RAW 32 pubkey bytes, not hex. Exercise that byte layout end-to-end
-    /// through the reader into `load_pinned_verb_grant`.
+    /// The shipped anchor form: [`write_host_signer_anchor`] writes
+    /// `host-signer.pub` as the RAW 32 pubkey bytes, not hex. Exercise that byte
+    /// layout end-to-end through the reader into `load_pinned_verb_grant`.
     #[test]
     fn load_pinned_verb_grant_accepts_raw_32_byte_pubkey() {
         let dir = tempfile::tempdir().unwrap();
@@ -723,6 +777,117 @@ mod tests {
             "raw 32-byte host-signer pubkey must pin the grant (not the anchor-absent None path)"
         );
         assert_eq!(result.unwrap().session_id, "sess-raw");
+    }
+
+    /// A real Firecracker cmdline carries the anchor among a dozen other
+    /// tokens, and the value must be lifted out of exactly the right one.
+    #[test]
+    fn host_signer_pub_token_is_lifted_out_of_a_full_cmdline() {
+        let hex = "c5".repeat(32);
+        let cmdline = format!(
+            "console=ttyS0 reboot=k panic=1 root=/dev/vda rw \
+             {HOST_SIGNER_PUB_CMDLINE_KEY}={hex} mvm.require_grant=1 init=/init"
+        );
+        assert_eq!(host_signer_pub_token(&cmdline), Some(hex.as_str()));
+        assert_eq!(
+            host_signer_pub_token("console=ttyS0 root=/dev/vda rw"),
+            None,
+            "a launch that ships no anchor must not be mistaken for one that does"
+        );
+        // A token that merely *contains* the key name is not the key.
+        assert_eq!(
+            host_signer_pub_token(&format!("not.{HOST_SIGNER_PUB_CMDLINE_KEY}=deadbeef")),
+            None
+        );
+    }
+
+    /// The writer must land the anchor at exactly the path the reader opens,
+    /// in the raw byte form the reader accepts.
+    #[test]
+    fn write_host_signer_anchor_round_trips_through_the_reader() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[41u8; 32]);
+        let hex: String = signer
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        write_host_signer_anchor(dir.path(), &hex).unwrap();
+
+        let path = dir
+            .path()
+            .join(HOST_SIGNER_PUBKEY_PATH.trim_start_matches('/'));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            signer.verifying_key().to_bytes(),
+            "the anchor is written as raw key bytes"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(
+            load_host_signer_verifying_key(&path).unwrap(),
+            Some(signer.verifying_key()),
+            "the reader must accept exactly what the writer produced"
+        );
+    }
+
+    /// Fail closed: a malformed token leaves no file behind, so the guest stays
+    /// anchorless and keeps refusing control rather than holding a key that
+    /// cannot be parsed at the point it is needed.
+    #[test]
+    fn write_host_signer_anchor_refuses_a_malformed_token_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(HOST_SIGNER_PUBKEY_PATH.trim_start_matches('/'));
+
+        for bad in ["", "zz", &"ab".repeat(31), &"ab".repeat(33)] {
+            assert!(
+                write_host_signer_anchor(dir.path(), bad).is_err(),
+                "{bad:?} must be refused"
+            );
+            assert!(
+                !path.exists(),
+                "a refused token must never leave an anchor behind ({bad:?})"
+            );
+        }
+    }
+
+    /// The universal initramfs makes the agent itself PID 1, so no
+    /// `mvm-oci-init` runs to copy the anchor off a config drive. If PID-1
+    /// early setup does not provision it, `host_signer_key()` stays `None`,
+    /// every control connection is refused, and the run dies at
+    /// `ActivateEnvironment` — its first RPC. That shipped.
+    ///
+    /// Asserted against the source because the real path needs to be PID 1
+    /// inside a guest, which no unit test can be.
+    #[test]
+    fn pid1_early_setup_provisions_the_host_signer_anchor() {
+        let src = include_str!("../bin/mvm-guest-agent/init.rs");
+        let body = src
+            .split("pub(crate) fn early_setup")
+            .nth(1)
+            .expect("early_setup must exist")
+            .split("\nfn ")
+            .next()
+            .expect("function body is delimited by the next item");
+
+        let mounted = body
+            .find("mount_early_filesystems")
+            .expect("early setup must mount /proc");
+        let provisioned = body
+            .find("provision_host_signer_anchor")
+            .expect("PID-1 early setup must provision the host-signer anchor from the cmdline");
+        assert!(
+            mounted < provisioned,
+            "the anchor is read off /proc/cmdline, so /proc must be mounted first"
+        );
     }
 
     #[test]
