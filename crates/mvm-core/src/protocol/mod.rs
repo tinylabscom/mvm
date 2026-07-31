@@ -6,6 +6,7 @@ pub mod handler;
 pub mod protocol;
 pub mod signed_config;
 pub mod vm_backend;
+pub mod volume_bridge;
 
 // `audit_signer`, `broker`, `host_audit`, `host_cost`, `host_signer`,
 // `host_time`, `routing`, `signing` are pure-DTO leaves
