@@ -32,11 +32,11 @@
 - Produces: `sdk-sidecar-<arch>.tar.gz` + `sdk-sidecar-<arch>.tar.gz.sha256` release assets, per arch, whose tarball contains `sdk.ext4`, `VERSION`, and `checksums-sha256.txt`.
 - Consumes: `./nix/images/runtime-overlay#packages.<system>.sdk-sidecar-image`, which already emits exactly those three files.
 
-- [ ] **Step 1: Add the release job**
+- [x] **Step 1: Add the release job**
 
 Copy the `runtime-overlay-image` job's shape (same `if:`, same aarch64/x86_64 matrix and runners, same `nix-installer-action`) and swap the flake attribute and file list. The `sdk-sidecar-image` derivation already writes `checksums-sha256.txt` itself, so — unlike the overlay job — do **not** regenerate it; copy it through and let the archive carry the derivation's own manifest. That keeps the bytes the resolver verifies identical to the bytes Nix produced.
 
-- [ ] **Step 2: Assert the asset names match the Rust side**
+- [x] **Step 2: Assert the asset names match the Rust side**
 
 The names come from a Rust constructor (Task 2). Add the naming assertion to `tests/release_assets.rs` if that harness exists, or to the `verify-release-assets` pack-gate the Lint job already runs (it reported "11 passed" as of this writing). A mismatch between the workflow's filename and the downloader's expected filename is the failure mode this catches.
 
@@ -56,7 +56,7 @@ The names come from a Rust constructor (Task 2). Add the naming assertion to `te
   - `resolve_or_seed_from_default_cache(&SdkSidecarResolver, GuestArch)` for the cache-hit fast path.
 - Consumes: `mvm_fs::sdk_sidecar::{SdkSidecarLayout, SdkSidecarResolver, SdkSidecarArtifact, verify_sidecar_dir_integrity, validate_sidecar_payload}`.
 
-- [ ] **Step 1: Write the failing tests first**
+- [x] **Step 1: Write the failing tests first**
 
 In `crates/mvm-build/src/sdk_sidecar.rs`'s `#[cfg(test)] mod tests`, against a local `MVM_SIDECAR_BASE_URL` served from a tempdir (mirror how the overlay download tests stage a release fixture — see `seed_release_fixture` in `crates/mvm-cli/src/commands/vm/up/runtime_source.rs` for the archive-building pattern):
 
@@ -68,11 +68,11 @@ In `crates/mvm-build/src/sdk_sidecar.rs`'s `#[cfg(test)] mod tests`, against a l
 - an archive whose inner `checksums-sha256.txt` disagrees with the extracted bytes is refused;
 - a crash between stage and rename leaves no partial artifact dir (assert only `.tmp.*` remains).
 
-- [ ] **Step 2: Implement against those tests**
+- [x] **Step 2: Implement against those tests**
 
 Follow `download_runtime_overlay`'s four steps verbatim in structure: fetch the archive checksum, download + verify the archive, safe-extract into canonical filenames, verify the extracted dir, then atomically install. Reuse the overlay's extraction guard rather than writing a second entry validator — if `extract_runtime_overlay_archive`'s allow-list is generalizable, lift it to take the expected file set; if not, say why in a comment and write the sidecar's own with the same refusals.
 
-- [ ] **Step 3: Verify after install, not just before**
+- [x] **Step 3: Verify after install, not just before**
 
 End with a `SdkSidecarResolver::resolve` call against the installed cache entry and return its `SdkSidecarArtifact`. The transport already checked the archive; this proves the *installed* bytes satisfy the same contract the launch path will enforce, so a transport bug cannot produce a cache entry that only fails later at boot.
 
@@ -87,18 +87,18 @@ End with a `SdkSidecarResolver::resolve` call against the installed cache entry 
 **Interfaces:**
 - Consumes: `runtime_overlay_acquire_mode()` / `runtime_overlay_source_checkout_root()`, the existing build-vs-download resolver the overlay uses. The sidecar must make the *same* choice for the same host, so a contributor never silently downloads while their overlay is source-built.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 - a cold cache on a host resolving to `DownloadPublishedArtifact` calls the downloader and attaches the result;
 - a cold cache on a host resolving to `BuildFromSourceCheckout` keeps today's behaviour: refuse with the `nix build` instruction, since building the sidecar needs the builder VM and must not happen implicitly inside a launch;
 - a warm cache never touches the network (assert with an unreachable base URL);
 - the refusal message still names the binding that required the sidecar in both modes.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Mirror `attach_runtime_overlay_if_cached_version`'s ladder: resolve from cache, and only on a miss consult the acquire mode. Keep the existing fail-closed message as the source-checkout arm.
 
-- [ ] **Step 3: BDD**
+- [x] **Step 3: BDD**
 
 Add a scenario to `features/suites/s21_host_services/sdk_sidecar_attachment.feature`: a workload binding an SDK host service on a host with a published artifact and a cold cache acquires it and boots. Wire it in `crates/mvm-conformance/tests/steps/sdk_sidecar.rs` against a staged local release fixture, not the real network.
 
@@ -112,7 +112,7 @@ Add a scenario to `features/suites/s21_host_services/sdk_sidecar_attachment.feat
 - Modify: `specs/plans/266-lightweight-microvm-guest.md` — tick the deferred entry that points here.
 - Modify: `specs/SPRINT.md`, `specs/REFACTOR-STATUS.md`.
 
-- [ ] **Step 1: Update all five in the same change as Task 3.** Per the Definition of Done, the plan checkboxes, `specs/SPRINT.md`, and `specs/REFACTOR-STATUS.md` move together; leaving one stale is not done.
+- [x] **Step 1: Update all five in the same change as Task 3.** Per the Definition of Done, the plan checkboxes, `specs/SPRINT.md`, and `specs/REFACTOR-STATUS.md` move together; leaving one stale is not done.
 
 ---
 

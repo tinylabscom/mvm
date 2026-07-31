@@ -319,19 +319,66 @@ pub(crate) fn attach_universal_initramfs_if_cached(
 ///
 /// The decision, the resolution, and the attachment shape live in
 /// `mvm_runtime::sdk_sidecar` so every driver — not just the CLI — reaches one
-/// contract; this only supplies the host's cache root and version.
+/// contract; this supplies the host's cache root and version, and owns the
+/// cold-cache acquisition ladder the same way
+/// [`attach_runtime_overlay_if_cached_version`] does for the overlay:
+///
+/// 1. Resolve from cache. A warm cache never touches the network.
+/// 2. On a miss, seed from the default cache — a worktree-isolated `MVM_HOME`
+///    inherits the host's artifact rather than re-acquiring it. Still offline.
+/// 3. Still missing: consult the *same* build-vs-download decision the overlay
+///    makes on this host, so a contributor whose overlay is source-built never
+///    silently downloads a sidecar.
 pub(crate) fn resolve_sdk_sidecar_attachment_for_host(
     services: &[mvm_protocol::protocol::broker::ServiceId],
 ) -> Result<Option<SdkSidecarAttachment>> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let resolver = mvm_fs::sdk_sidecar::SdkSidecarResolver::new(
-        cache_root,
-        env!("CARGO_PKG_VERSION").to_string(),
-    );
-    mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
-        services,
-        &resolver,
-        mvm_core::arch::GuestArch::host(),
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host();
+    let resolver =
+        mvm_fs::sdk_sidecar::SdkSidecarResolver::new(cache_root.clone(), version.to_string());
+
+    let cache_miss =
+        match mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch) {
+            Ok(resolved) => return Ok(resolved),
+            Err(e) => e,
+        };
+
+    if mvm_build::sdk_sidecar::resolve_or_seed_from_default_cache(&resolver, arch).is_ok() {
+        return mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch);
+    }
+
+    match runtime_overlay_acquire_mode() {
+        // Building the sidecar needs the builder VM, which must not be spawned
+        // implicitly inside a launch. Keep the fail-closed refusal, which
+        // already names the binding and the `nix build` that satisfies it.
+        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => Err(cache_miss),
+        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
+            ui::info("SDK sidecar missing from cache; downloading the published artifact now...");
+            mvm_build::sdk_sidecar::download_sdk_sidecar(version, arch, &cache_root)
+                .with_context(|| sdk_sidecar_download_failure_context(services, version, arch))?;
+            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch)
+        }
+    }
+}
+
+/// A failed download must read like the cache-miss refusal it replaces: name
+/// the bindings that demanded the sidecar and where it was going to be mounted,
+/// not just the URL that 404'd.
+fn sdk_sidecar_download_failure_context(
+    services: &[mvm_protocol::protocol::broker::ServiceId],
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> String {
+    let bound: Vec<&str> = mvm_core::plan::sdk_host_services_in(services)
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    format!(
+        "this workload binds SDK host service(s) [{}], which need the SDK sidecar mounted \
+         read-only at {}; downloading the published sidecar {version} for {arch} failed",
+        bound.join(", "),
+        mvm_core::plan::SDK_SIDECAR_GUEST_PATH,
     )
 }
 
@@ -446,10 +493,171 @@ mod sdk_sidecar_host_resolution_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
+        env.set(
+            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            "build",
+        );
         assert!(
             resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")]).is_err(),
             "a bound SDK service with no cached sidecar must refuse the launch"
         );
+    }
+
+    /// A base URL no transport can reach. Any test asserting "the network was
+    /// not touched" points here: if the acquire path ran, the call fails.
+    const UNREACHABLE_BASE_URL: &str = "file:///nonexistent/mvm-sdk-sidecar-release-fixture";
+
+    fn sidecar_archive_bytes(version: &str) -> Vec<u8> {
+        let image = sidecar_ext4_bytes();
+        let version_text = format!("{version}\n").into_bytes();
+        let manifest = format!(
+            "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
+            sha256_hex(&image),
+            sha256_hex(&version_text),
+        )
+        .into_bytes();
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        for (name, bytes) in [
+            (SDK_SIDECAR_IMAGE_FILE, image),
+            (SDK_SIDECAR_VERSION_FILE, version_text),
+            (mvm_fs::overlay::CHECKSUM_MANIFEST_FILE, manifest),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(u64::try_from(bytes.len()).unwrap());
+            header.set_cksum();
+            tar.append_data(&mut header, name, bytes.as_slice())
+                .unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Stage the two assets `release.yml` publishes for this arch, so the
+    /// download path runs end to end against local bytes instead of the network.
+    fn seed_sidecar_release_fixture(base: &std::path::Path, version: &str, arch: GuestArch) {
+        let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_arch(&arch.to_string());
+        let release_dir = base.join(format!("v{version}"));
+        std::fs::create_dir_all(&release_dir).unwrap();
+        let archive = sidecar_archive_bytes(version);
+        std::fs::write(release_dir.join(&names.archive), &archive).unwrap();
+        std::fs::write(
+            release_dir.join(&names.archive_checksum),
+            format!("{}  {}\n", sha256_hex(&archive), names.archive),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_download_mode_host_acquires_the_sidecar_on_a_cold_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let release_root = tempfile::tempdir().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_sidecar_release_fixture(release_root.path(), version, arch);
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        env.set(
+            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            "download",
+        );
+        env.set(
+            "MVM_OVERLAY_BASE_URL",
+            format!("file://{}", release_root.path().display()),
+        );
+
+        let attached = resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")])
+            .expect("a published sidecar must satisfy the binding")
+            .expect("a bound SDK service must attach the sidecar");
+
+        let layout = SdkSidecarLayout::under(&dir.path().join("cache"), version, &arch.to_string());
+        assert_eq!(attached.volume.host, layout.image.display().to_string());
+        assert!(attached.volume.read_only);
+        assert_eq!(attached.version, version);
+        assert!(
+            layout.image.is_file(),
+            "the artifact must land in the cache"
+        );
+        assert!(layout.checksum_manifest_file.is_file());
+    }
+
+    /// Building the sidecar needs the builder VM, which a launch must never
+    /// spawn implicitly — so a source checkout keeps the fail-closed refusal
+    /// and never falls through to the network.
+    #[test]
+    fn a_source_checkout_host_refuses_instead_of_downloading() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        env.set(
+            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            "build",
+        );
+        env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
+
+        let err = resolve_sdk_sidecar_attachment_for_host(&[svc("host.secrets.v1")])
+            .expect_err("a source-checkout host must refuse rather than download");
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("host.secrets.v1"), "{msg}");
+        assert!(
+            msg.contains(mvm_core::plan::SDK_SIDECAR_GUEST_PATH),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("nix build ./nix/images/runtime-overlay#sdk-sidecar-image"),
+            "the refusal must still name the build that satisfies it: {msg}"
+        );
+    }
+
+    /// The download-mode refusal has to read like the cache-miss one it
+    /// replaces: an operator needs the binding that demanded the sidecar, not
+    /// just a failed URL.
+    #[test]
+    fn a_failed_download_still_names_the_binding_that_required_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        env.set(
+            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            "download",
+        );
+        env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
+
+        let err = resolve_sdk_sidecar_attachment_for_host(&[svc("host.time.v1")])
+            .expect_err("an unreachable release must refuse the launch");
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains("host.time.v1"), "{msg}");
+        assert!(
+            msg.contains(mvm_core::plan::SDK_SIDECAR_GUEST_PATH),
+            "{msg}"
+        );
+    }
+
+    /// A warm cache is a pure local read. Pointing the transport at an
+    /// unreachable base URL is what proves it: if the acquire path ran at all,
+    /// this call would fail.
+    #[test]
+    fn a_warm_cache_never_touches_the_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_sidecar_cache(&dir.path().join("cache"), version, arch);
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        env.set(
+            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            "download",
+        );
+        env.set("MVM_OVERLAY_BASE_URL", UNREACHABLE_BASE_URL);
+
+        let attached = resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")])
+            .expect("a warm cache resolves without any transport")
+            .expect("a bound SDK service must attach the sidecar");
+        assert_eq!(attached.version, version);
     }
 }
 

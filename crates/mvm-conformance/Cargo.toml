@@ -69,6 +69,10 @@ mvm-hostd.workspace = true
 mvm-protocol.workspace = true
 sha2.workspace = true
 hex.workspace = true
+# The sidecar acquire scenarios build the gzipped release tarball the
+# `sdk-sidecar-image` job publishes, so the download path runs against staged
+# local bytes instead of the network.
+flate2.workspace = true
 
 [lints]
 workspace = true

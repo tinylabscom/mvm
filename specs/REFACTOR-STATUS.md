@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-07-29
+Last updated: 2026-07-30
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -15,11 +15,16 @@ for detailed scope and acceptance criteria.
         KVM-box measurements recorded in the plan. SLO not cleared; remaining
         ~5–6 ms gap is Firecracker process startup + snapshot resume.
 
-- [ ] Plan 273 — SDK sidecar release acquisition
+- [x] Plan 273 — SDK sidecar release acquisition
   (`specs/plans/273-sdk-sidecar-release-acquisition.md`)
-  - [ ] Publish `sdk-sidecar-<arch>.tar.gz` per-arch release assets
-  - [ ] `mvm_build::sdk_sidecar` fetch + integrity-verify + atomic install
-  - [ ] Reach it from the launch path on the download-mode acquire path
+  - [x] Publish `sdk-sidecar-<arch>.tar.gz` per-arch release assets, with
+        `tests/release_assets.rs` pinning the workflow's names to the Rust
+        constructor that requests them
+  - [x] `mvm_build::sdk_sidecar` fetch + integrity-verify + atomic install,
+        reusing the runtime overlay's transport helpers and one generalized
+        archive-entry validator
+  - [x] Reach it from the launch path on the download-mode acquire path; a
+        source checkout keeps the fail-closed refusal
 
 - [x] Plan 266 — lightweight microVM guest
   (`specs/plans/266-lightweight-microvm-guest.md`)
