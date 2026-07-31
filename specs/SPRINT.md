@@ -10,6 +10,34 @@
 
 ## Current issue delivery
 
+- [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
+      basename deny-list over the whole workspace root to an allow-list of the
+      top-level entries cargo can actually read. The filtered tree is `mvmSrc`,
+      so every surviving file was a cache key for every guest binary — a
+      Markdown edit, which the contribution rules require on essentially every
+      change, forced a full guest-agent rebuild. 416 of 1872 files (22%) stop
+      being cache keys, including all 111 spec files and 167 doc-site pages.
+      The soundness binding inverts with the list (the fingerprint's walked
+      entries must now be a *superset* of the filter's, not a subset), so both
+      directions are enforced by tests that parse the specific named nix list;
+      both were planted against and recorded in `specs/VERIFICATION.md`.
+
+- [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
+      <rev>/` is served on a hit if `rootfs.ext4` merely exists as a file: no
+      digest, no signature, so content substitution is undetected, and the
+      provenance recorder then signs whatever bytes are on disk. The audit log
+      faithfully records a substituted image as legitimate. Plan 276 is written
+      and Proposed; this moves WS6 into the sprint. Prerequisite for plan 279
+      WS1 so the new cache key and the new verification do not land together.
+
+- [ ] Build action identity + artifact manifest — **plan 279**
+      (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).
+      Sourced from `specs/research/deterministic-attestable-builds-and-lean4.md`.
+      Wrap Nix rather than replace it: the CAS, the SLSA-shaped pack manifest,
+      the deterministic ext4 writer and the signing chain already exist; what is
+      missing is a typed action identity and a tree manifest that can see a
+      permission bit.
+
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added
       `xtask` gates for R1 (`check-conformance`), R2 (`check-honesty`), and R4
