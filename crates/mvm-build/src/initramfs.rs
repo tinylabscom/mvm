@@ -750,11 +750,6 @@ mod tests {
         // cannot find the developer's real cache — the assertion is that a
         // truly cold cache errors, which only holds when the default cache
         // is cold too.
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let home = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(home.path());
-        let dir = tempfile::tempdir().unwrap();
         // HOME has to move with the cache root: a miss is seeded from
         // `$HOME/.mvm/cache`, so without this the assertion holds only on a
         // machine that has never built an initramfs — which CI is and a
@@ -767,8 +762,13 @@ mod tests {
         // test ran for 20,000+ seconds in CI and took the job to its six-hour
         // limit. Isolating HOME is what made it reachable — before that the test
         // passed on Linux by finding an artifact it was supposed to prove absent.
+        //
+        // One lock, taken once: `ENV_TEST_LOCK` is a plain `std::sync::Mutex`
+        // and is not reentrant, so acquiring it twice on this thread deadlocks
+        // the test rather than failing it.
         let _lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(dir.path());
         let cache = dir.path().join("cache");
         let err = resolve_or_seed_from_default_cache(&cache, "0.18.0", GuestArch::Aarch64)
