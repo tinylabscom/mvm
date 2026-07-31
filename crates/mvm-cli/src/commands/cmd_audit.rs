@@ -42,11 +42,9 @@ use super::vm::host_signer;
 /// a `tracing::warn`) when any setup step fails — the CLI runs
 /// without cmd-level audit in that case.
 ///
-/// Also used by `commands::ops::mcp::build_tool_registry` to wire
-/// the same chain-signed audit stream into the host-mediated
-/// `ToolRegistry`. The Recorder is category-agnostic (callers pass
-/// `EventCategory::Cmd` for both `cmd.<verb>` and
-/// `cmd.tool.<verb>` events) so one builder serves both consumers.
+/// The Recorder is category-agnostic (callers pass
+/// `EventCategory::Cmd` for both `cmd.<verb>` and `cmd.tool.<verb>`
+/// events), so one builder serves every consumer.
 pub(crate) fn build_cmd_recorder() -> Option<Recorder> {
     let signer = match host_signer::load_or_init() {
         Ok(s) => s,
@@ -222,7 +220,7 @@ impl Commands {
             // `build <sub>` delegates to the per-op verb (image/compile/validate/kernel).
             Commands::Build(a) => a.action.verb_name(),
             Commands::ShellInit(_) => "shell-init",
-            // `ops <sub>` delegates to the per-op verb (metrics/bench/config/mcp).
+            // `ops <sub>` delegates to the per-op verb (metrics/bench/config).
             Commands::Ops(a) => a.action.verb_name(),
             Commands::Network(_) => "network",
             Commands::Catalog(_) => "catalog",

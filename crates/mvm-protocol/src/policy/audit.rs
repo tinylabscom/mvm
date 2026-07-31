@@ -51,19 +51,6 @@ pub enum LocalAuditKind {
     ConfigChange,
     ConsoleSessionStart,
     ConsoleSessionEnd,
-    // --- MCP server ---
-    /// `tools/call run` invocation — every LLM-driven code execution
-    /// against a microVM is auditable.
-    McpToolsCallRun,
-    /// `tools/call run` failed before completing (orchestration error,
-    /// not a non-zero guest exit code).
-    McpToolsCallRunError,
-    /// MCP session opened — first call with a previously-unseen
-    /// `session=ID` parameter.
-    McpSessionStarted,
-    /// MCP session closed by the client (`close: true`) or reaped
-    /// by the server (idle / max-lifetime / shutdown drain).
-    McpSessionClosed,
     // --- Reserved future verbs ----------------------------------
     // These kinds are reserved here so the wire format is stable
     // before the corresponding CLI verbs ship. Each will be emitted
@@ -996,10 +983,6 @@ mod tests {
             LocalAuditKind::ConfigChange,
             LocalAuditKind::ConsoleSessionStart,
             LocalAuditKind::ConsoleSessionEnd,
-            LocalAuditKind::McpToolsCallRun,
-            LocalAuditKind::McpToolsCallRunError,
-            LocalAuditKind::McpSessionStarted,
-            LocalAuditKind::McpSessionClosed,
             // Reserved future verbs.
             LocalAuditKind::PlanSubmit,
             LocalAuditKind::PolicyApply,
