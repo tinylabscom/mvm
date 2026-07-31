@@ -2821,6 +2821,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
+ "mvm-net",
  "mvm-protocol",
  "mvm-runtime",
  "serde",

@@ -66,6 +66,10 @@ serde.workspace = true
 # than restating its rules, and stage a sidecar cache the resolver verifies.
 # Dev-only: `cargo tree -p mvm-conformance -e no-dev` must not gain these.
 mvm-hostd.workspace = true
+# The L3 policy core the l3-vsock witnesses drive directly: admission,
+# sessions, leases, and the guest-channel service map are all pure, so the
+# scenarios decide without a VM.
+mvm-net.workspace = true
 mvm-protocol.workspace = true
 sha2.workspace = true
 hex.workspace = true

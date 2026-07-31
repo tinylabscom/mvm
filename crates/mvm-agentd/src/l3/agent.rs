@@ -16,6 +16,7 @@ use mvm_protocol::l3::{
 };
 
 use super::netcfg::{InterfaceConfigurator, InterfacePlan};
+use super::privdrop::{PrivilegeDropper, SystemPrivilegeDropper};
 use super::tun::{TunDevice, TunError};
 
 /// Where the agent is in its lifecycle. A workload supervisor reads this to
@@ -80,6 +81,9 @@ pub enum AgentError {
 pub struct NetAgent<T: TunDevice, C: InterfaceConfigurator> {
     tun: T,
     configurator: C,
+    /// Injected because the drop is a process-global, one-way side effect:
+    /// a test that performed the real one would disarm its own runner.
+    privileges: Box<dyn PrivilegeDropper>,
     state: AgentState,
     session_id: u64,
     plan: Option<InterfacePlan>,
@@ -102,6 +106,7 @@ impl<T: TunDevice, C: InterfaceConfigurator> NetAgent<T, C> {
         Self {
             tun,
             configurator,
+            privileges: Box::new(SystemPrivilegeDropper),
             state: AgentState::Init,
             session_id: 0,
             plan: None,
@@ -114,6 +119,13 @@ impl<T: TunDevice, C: InterfaceConfigurator> NetAgent<T, C> {
             frame_buf: Vec::with_capacity(limits::MAX_WIRE_LEN),
             rx_buf: Vec::with_capacity(limits::MAX_WIRE_LEN * 2),
         }
+    }
+
+    /// Replace the privilege dropper. Tests use this; the production agent
+    /// keeps the default, which performs the real drop.
+    pub fn with_privilege_dropper(mut self, dropper: Box<dyn PrivilegeDropper>) -> Self {
+        self.privileges = dropper;
+        self
     }
 
     pub fn state(&self) -> AgentState {
@@ -216,7 +228,7 @@ impl<T: TunDevice, C: InterfaceConfigurator> NetAgent<T, C> {
         // Privileges bought the interface; they are not needed to move
         // packets across an fd that is already open. Refuse to continue on a
         // partial drop rather than pumping with CAP_NET_ADMIN still held.
-        let report = super::privdrop::drop_privileges();
+        let report = self.privileges.drop_privileges();
         if !report.is_complete() {
             return Err(AgentError::PrivilegeDropIncomplete(report.shortfall()));
         }
@@ -485,6 +497,9 @@ mod tests {
 
     fn agent() -> NetAgent<MemoryTun, RecordingConfigurator> {
         NetAgent::new(MemoryTun::new("mvm0"), RecordingConfigurator::default())
+            .with_privilege_dropper(Box::new(
+                crate::l3::privdrop::RecordingPrivilegeDropper::default(),
+            ))
     }
 
     fn config() -> Config {
@@ -633,7 +648,10 @@ mod tests {
                 fail_resolv: true,
                 ..Default::default()
             },
-        );
+        )
+        .with_privilege_dropper(Box::new(
+            crate::l3::privdrop::RecordingPrivilegeDropper::default(),
+        ));
         let mut control = ScriptedControl::with_config(&config(), SESSION);
         agent.handshake(&mut control).unwrap();
         assert_eq!(agent.state(), AgentState::Ready);
@@ -652,7 +670,10 @@ mod tests {
                 fail_apply: true,
                 ..Default::default()
             },
-        );
+        )
+        .with_privilege_dropper(Box::new(
+            crate::l3::privdrop::RecordingPrivilegeDropper::default(),
+        ));
         let mut control = ScriptedControl::with_config(&config(), SESSION);
         let err = agent.handshake(&mut control).unwrap_err();
         assert!(matches!(err, AgentError::Interface(_)));

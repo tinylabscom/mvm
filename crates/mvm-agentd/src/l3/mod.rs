@@ -15,7 +15,10 @@ pub mod tun;
 
 pub use agent::{AgentCounters, AgentError, AgentState, NetAgent};
 pub use netcfg::{InterfaceConfigurator, InterfacePlan, RecordingConfigurator};
-pub use privdrop::{DropReport, drop_privileges};
+pub use privdrop::{
+    DropReport, PrivilegeDropper, RecordingPrivilegeDropper, SystemPrivilegeDropper,
+    drop_privileges,
+};
 pub use tun::{MemoryTun, TunDevice, TunError};
 
 #[cfg(target_os = "linux")]

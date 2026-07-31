@@ -41,17 +41,64 @@ impl DropReport {
     }
 }
 
+/// Performs the privilege drop.
+///
+/// A trait because the drop is a process-global, one-way side effect. The
+/// production agent uses [`SystemPrivilegeDropper`]; tests use
+/// [`RecordingPrivilegeDropper`], because a test process that really
+/// cleared its own bounding set would disarm the rest of the run.
+pub trait PrivilegeDropper: Send {
+    fn drop_privileges(&mut self) -> DropReport;
+}
+
+/// The real drop.
+#[derive(Debug, Default)]
+pub struct SystemPrivilegeDropper;
+
+impl PrivilegeDropper for SystemPrivilegeDropper {
+    fn drop_privileges(&mut self) -> DropReport {
+        drop_privileges()
+    }
+}
+
+/// Records that a drop was requested without performing one.
+#[derive(Debug, Default)]
+pub struct RecordingPrivilegeDropper {
+    pub calls: usize,
+    /// Report an incomplete drop, to exercise the agent's fail-closed path.
+    pub incomplete: bool,
+}
+
+impl PrivilegeDropper for RecordingPrivilegeDropper {
+    fn drop_privileges(&mut self) -> DropReport {
+        self.calls += 1;
+        DropReport {
+            no_new_privs: !self.incomplete,
+            capabilities_cleared: true,
+            bounding_set_cleared: true,
+        }
+    }
+}
+
 /// Drop every privilege the agent no longer needs.
 ///
 /// Fail-closed is the caller's job: this reports what happened, and the
 /// agent refuses to proceed on an incomplete drop rather than running the
 /// packet pump with `CAP_NET_ADMIN` still held.
+///
+/// **Order matters.** The bounding set goes first: clearing the capability
+/// sets drops `CAP_SETPCAP`, and without it `PR_CAPBSET_DROP` can only
+/// return `EPERM`. Doing it the other way round leaves the bounding set
+/// fully populated while reporting a failure — the worst of both.
 #[cfg(target_os = "linux")]
 pub fn drop_privileges() -> DropReport {
+    let no_new_privs = linux::set_no_new_privs();
+    let bounding_set_cleared = linux::clear_bounding_set();
+    let capabilities_cleared = linux::clear_all_capabilities();
     DropReport {
-        no_new_privs: linux::set_no_new_privs(),
-        capabilities_cleared: linux::clear_all_capabilities(),
-        bounding_set_cleared: linux::clear_bounding_set(),
+        no_new_privs,
+        capabilities_cleared,
+        bounding_set_cleared,
     }
 }
 

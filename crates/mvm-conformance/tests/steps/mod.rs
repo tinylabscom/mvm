@@ -4,6 +4,7 @@ mod apple_container;
 mod cli;
 mod initramfs;
 mod kernel_pin;
+mod l3_vsock;
 mod oci_unpack;
 mod readme_contract;
 mod sdk_sidecar;

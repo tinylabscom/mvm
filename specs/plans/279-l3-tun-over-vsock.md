@@ -118,8 +118,13 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
 - [x] unprivileged end-to-end over an in-memory transport: real
       protocol, real policy, real gateway, mock datapath — covers
       scenarios 1–8 of the brief
-- [x] privileged Linux end-to-end with real TUN/netns/nftables, gated
-      behind `MVM_L3_PRIVILEGED_TESTS=1`
+- [x] privileged Linux end-to-end with real TUN/nftables, gated behind
+      `MVM_L3_PRIVILEGED_TESTS=1`; executed on a Linux/KVM host — 6/6 green,
+      including a live forwarding witness that reads the kernel's own RX
+      counter, and a verified-clean teardown
+- [x] BDD suite `s25_l3_vsock` (23 scenarios) in the hermetic lane: launch
+      guard, admission, controlled DNS, session lifecycle, lease identity,
+      capability gating, and control/data channel separation
 
 ## W8 — Documentation
 
@@ -128,17 +133,54 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       L3 mode cannot inspect or substitute inside encrypted traffic
 - [x] claim catalog: the mode's guarantees and its named limits
 
+## W9 — Amendment: backend-neutral transport, identity, and leases
+
+- [x] `GuestChannelProvider` + typed `GuestService` normalize Firecracker
+      UDS, libkrun UDS, HVF streams, native AF_VSOCK, and a future
+      AF_HYPERV behind one abstraction
+- [x] `VmInstanceIdentity { node_id, vm_id, boot_id, plan_digest }` — the
+      host-owned per-boot identity everything authorizes against; a CID,
+      a socket path, and a port are never authorization inputs
+- [x] `NetworkLease` + `LocalLeaseAuthority`: one signed grant per boot,
+      the same object a control plane will later issue; replay, transfer,
+      wrong-node, epoch drift, and expiry all fail closed
+- [x] `ControlPlaneLossPolicy` — hold-existing / hold-until-expiry /
+      deny-immediately, none of which permit anything after expiry
+- [x] `ForwardingCapabilities` — admission refuses a plan the selected
+      backend cannot serve instead of degrading
+- [x] `nic_guard` — the launch specification carries no guest
+      network-device field, regression-gated, and `l3-vsock` is refused on
+      any backend that does not advertise both `l3_vsock` and
+      `no_routable_guest_nic`
+- [x] launch-path audit recorded in ADR-035 §"Launch-path convergence"
+- [x] macOS: `MacosUserspaceGateway` declares its intended capabilities and
+      refuses until implemented
+- [x] platform matrix (Linux / macOS / WSL2 / native Windows) documented
+      without overclaiming
+- [ ] node-to-node transport for cross-host VM traffic — interface
+      described in the ADR, not implemented; the local path does not
+      depend on it
+- [ ] `mvmd`-facing node-control API — the responsibility split is
+      documented and the lease is the contract, but no RPC surface exists
+
 ## Deferred (explicitly not in this change)
 
 - [ ] **UDP ingress.** TCP ingress ships; UDP ingress needs a
       per-mapping datagram association table with its own bounds and is
       not implemented. Declaring a UDP ingress mapping is rejected at
       admission rather than silently ignored.
-- [ ] **macOS `utun` + PF datapath.** Requires a privileged host helper
-      mvm does not have. ADR-035 §macOS names the exact four privileged
-      operations. Follow-up must add a helper whose API is only those
-      operations plus status and cleanup — no arbitrary exec, no
-      arbitrary PF rules, no file access.
+- [ ] **macOS userspace socket gateway.** The intended first macOS
+      backend: TCP, UDP, and controlled DNS translated into host sockets,
+      needing no privileges at all. Capability declaration and refusal
+      ship; the flow translator does not.
+- [ ] **macOS `utun` + PF datapath.** The later full-packet backend.
+      Requires a privileged host helper mvm does not have. ADR-035 §macOS
+      names the exact four privileged operations. Follow-up must add a
+      helper whose API is only those operations plus status and cleanup —
+      no arbitrary exec, no arbitrary PF rules, no file access.
+- [ ] **WSL2 validation.** Architecturally supported; no runner has
+      executed the suite there, so it is not claimed as tested.
+- [ ] **Native Windows.** No Windows VMM backend exists to attach to.
 - [ ] **Multi-queue.** The header field, the port base, and the
       negotiation slots exist in v1; the runtime opens one queue.
 - [ ] **IPv6 datapath.** Blocked on `CONFIG_IPV6` in the workload

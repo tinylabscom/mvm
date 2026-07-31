@@ -12,7 +12,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use mvm_agentd::l3::{AgentState, MemoryTun, NetAgent, RecordingConfigurator};
+use mvm_agentd::l3::{
+    AgentState, MemoryTun, NetAgent, RecordingConfigurator, RecordingPrivilegeDropper,
+};
 use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
 use mvm_hostd::netd::{Gateway, GatewayConfig, GatewayEvent, LoopbackDatapath, StaticResolver};
 use mvm_net::channel::{GuestService, VmInstanceIdentity};
@@ -82,7 +84,10 @@ impl Tunnel {
             config.ingress.declare(mapping).expect("declare ingress");
         }
         let mut gateway = Gateway::open(config, session, datapath, resolver).expect("open gateway");
-        let mut agent = NetAgent::new(MemoryTun::new("mvm0"), RecordingConfigurator::default());
+        // The real drop is a process-global, one-way side effect; a test
+        // that performed it would disarm the rest of the run.
+        let mut agent = NetAgent::new(MemoryTun::new("mvm0"), RecordingConfigurator::default())
+            .with_privilege_dropper(Box::new(RecordingPrivilegeDropper::default()));
 
         // The handshake, over the control channel, byte for byte.
         let mut control = ControlChannel::default();

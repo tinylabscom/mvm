@@ -111,7 +111,7 @@ impl L3Datapath for LinuxDatapath {
         }
 
         let mut handle = LinuxHandle {
-            file,
+            file: Some(file),
             iface: iface.clone(),
             table: table.clone(),
             machine_id: req.machine_id.clone(),
@@ -164,7 +164,11 @@ impl L3Datapath for LinuxDatapath {
 
 /// One machine's open datapath.
 pub struct LinuxHandle {
-    file: std::fs::File,
+    /// `Option` because closing must *drop* the descriptor: a TUN device
+    /// created with `TUNSETIFF` lives exactly as long as its last open fd,
+    /// so a `close()` that leaves the file alive leaves the interface on
+    /// the host until the handle is eventually dropped.
+    file: Option<std::fs::File>,
     iface: String,
     table: String,
     machine_id: String,
@@ -206,7 +210,10 @@ impl DatapathHandle for LinuxHandle {
                 std::io::ErrorKind::BrokenPipe,
             )));
         }
-        self.file.write_all(packet.bytes())?;
+        self.file
+            .as_mut()
+            .ok_or_else(|| DatapathError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))?
+            .write_all(packet.bytes())?;
         Ok(())
     }
 
@@ -216,7 +223,11 @@ impl DatapathHandle for LinuxHandle {
                 std::io::ErrorKind::BrokenPipe,
             )));
         }
-        Ok(self.file.read(buf)?)
+        Ok(self
+            .file
+            .as_mut()
+            .ok_or_else(|| DatapathError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))?
+            .read(buf)?)
     }
 
     fn close(&mut self) -> Result<(), DatapathError> {
@@ -225,17 +236,21 @@ impl DatapathHandle for LinuxHandle {
         }
         self.closed = true;
         if self.dry_run {
+            self.file = None;
             return Ok(());
         }
-        // Deterministic teardown: the rules go, then the device. Deleting
-        // the TUN's last fd removes the interface and its routes with it,
-        // so there is nothing left to leak. Each step is best-effort
-        // because this also runs on the failed-setup path, where some of
-        // it was never created.
+        // Deterministic teardown: the rules go, then the device. Dropping
+        // the TUN's last fd is what removes the interface — and its
+        // addresses and routes with it — so the descriptor has to go here
+        // rather than whenever the handle happens to be dropped.
+        //
+        // Each step is best-effort because this also runs on the
+        // failed-setup path, where some of it was never created.
         if self.nft_applied {
             let _ = delete_nft_table(&self.table);
             self.nft_applied = false;
         }
+        self.file = None;
         Ok(())
     }
 
@@ -247,7 +262,21 @@ impl DatapathHandle for LinuxHandle {
     }
 }
 
-/// Device name for a machine. Slug-validated and length-bounded so it can
+impl Drop for LinuxHandle {
+    /// Teardown must not depend on anyone remembering to call `close`.
+    /// A panic, an early return, or a dropped supervisor would otherwise
+    /// leave an interface and an nftables table on the host, and host state
+    /// that outlives the machine it belonged to is exactly what the cleanup
+    /// guarantee exists to prevent.
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+/// Device name for a machine.
+///
+/// Public so the privileged test lane can assert on the exact device the
+/// datapath created rather than guessing at it. Slug-validated and length-bounded so it can
 /// never be steered into another interface's name.
 pub fn device_name(machine_id: &str) -> String {
     // IFNAMSIZ is 16 including the NUL, so the suffix budget is 15 minus

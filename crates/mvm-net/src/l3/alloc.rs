@@ -59,6 +59,20 @@ impl AddressLease {
     pub fn index(&self) -> u32 {
         self.index
     }
+
+    /// A lease over an explicit gateway/guest pair, for tests and for the
+    /// privileged lane, which needs a lease matching a datapath it set up
+    /// directly rather than one the allocator chose.
+    pub fn for_test(gateway: std::net::Ipv4Addr, guest: std::net::Ipv4Addr) -> Self {
+        let base = u32::from(gateway) & !3;
+        Self {
+            subnet: Ipv4Net::new(std::net::Ipv4Addr::from(base), 30)
+                .expect("a /30 from an aligned base is valid"),
+            gateway,
+            guest,
+            index: 0,
+        }
+    }
 }
 
 /// Allocation refusals.
