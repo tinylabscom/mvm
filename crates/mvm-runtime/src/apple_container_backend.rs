@@ -326,4 +326,64 @@ mod tests {
         // No kernel in the isolated cache: unavailable regardless of platform.
         assert!(!b.is_available().unwrap());
     }
+
+    #[test]
+    #[ignore = "live: needs the apple-container kernel, the universal initramfs, the runtime overlay, and a codesigned mvm-hvf-supervisor on macOS HVF (MVM_AC_E2E=1)"]
+    fn start_boots_a_sealed_workload_on_the_apple_container_kernel() {
+        // End-to-end: resolves the Apple container kernel from the cache, boots
+        // a sealed OCI rootfs with the universal initramfs on the in-house HVF
+        // VMM, drives the full ActivateEnvironment flow, and tears down.
+        // Artifacts resolve from the real cache — this test never isolates
+        // MVM_HOME. MVM_AC_E2E_ROOTFS names a sealed OCI ext4 with its
+        // rootfs.verity / rootfs.roothash sidecars beside it.
+        if std::env::var("MVM_AC_E2E").ok().as_deref() != Some("1") {
+            return;
+        }
+        let root = std::path::PathBuf::from(
+            std::env::var("MVM_AC_E2E_ROOTFS").expect("MVM_AC_E2E_ROOTFS"),
+        );
+        let dir = root.parent().expect("rootfs parent").to_path_buf();
+        let sidecar = |name: &str| {
+            std::fs::read_to_string(dir.join(name))
+                .expect(name)
+                .trim()
+                .to_string()
+        };
+        let version = env!("CARGO_PKG_VERSION");
+        let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let overlay = cache.join("runtime-overlay").join(version).join("aarch64");
+        let initrd = cache
+            .join("initramfs")
+            .join(version)
+            .join("aarch64")
+            .join("initramfs.cpio.gz");
+        let config = VmStartConfig {
+            name: format!("ac-e2e-{}", std::process::id()),
+            rootfs_path: root.display().to_string(),
+            initrd_path: Some(initrd.display().to_string()),
+            verity_path: Some(dir.join("rootfs.verity").display().to_string()),
+            roothash: Some(sidecar("rootfs.roothash")),
+            runtime_overlay_path: Some(overlay.join("overlay.ext4").display().to_string()),
+            runtime_overlay_verity_path: Some(overlay.join("overlay.verity").display().to_string()),
+            runtime_overlay_roothash: Some(sidecar(
+                &overlay.join("overlay.roothash").display().to_string(),
+            )),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            cpus: 2,
+            memory_mib: 1024,
+            ..Default::default()
+        };
+        let b = AppleContainerBackend::new();
+        let id = b
+            .start(&config)
+            .expect("bring-up must succeed on the apple container kernel");
+        assert_eq!(b.status(&id).unwrap(), VmStatus::Running);
+        assert!(
+            b.list().unwrap().iter().any(|v| v.name == id.0),
+            "the running VM must appear in the inventory"
+        );
+        assert!(b.logs(&id, 5, false).is_ok());
+        b.stop(&id).expect("stop");
+        assert_eq!(b.status(&id).unwrap(), VmStatus::Stopped);
+    }
 }
