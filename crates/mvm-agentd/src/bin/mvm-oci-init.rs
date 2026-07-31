@@ -585,31 +585,9 @@ mod linux {
             assert!(!loopback_flags_indicate_up("garbage"));
         }
 
-        #[test]
-        fn write_host_signer_pub_writes_bytes_mode_0644() {
-            use std::os::unix::fs::PermissionsExt;
-            let dir = tempfile::tempdir().unwrap();
-            let pubkey = [0xABu8; 32];
-            let hex: String = pubkey.iter().map(|b| format!("{b:02x}")).collect();
-
-            write_host_signer_pub(dir.path(), &hex).unwrap();
-
-            let path = dir.path().join("run/mvm/host-signer.pub");
-            let written = fs::read(&path).unwrap();
-            assert_eq!(written, pubkey.to_vec(), "raw key bytes must round-trip");
-            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o644, "host-signer.pub must be mode 0644");
-        }
-
-        #[test]
-        fn write_host_signer_pub_rejects_malformed_hex() {
-            let dir = tempfile::tempdir().unwrap();
-            assert!(write_host_signer_pub(dir.path(), "zz").is_err());
-            assert!(
-                !dir.path().join("run/mvm/host-signer.pub").exists(),
-                "no file written on malformed input"
-            );
-        }
+        // The anchor writer moved to `mvm_agentd::vsock::write_host_signer_anchor`
+        // so both inits share one implementation; its byte layout, 0644 mode and
+        // malformed-token refusal are covered there rather than duplicated here.
 
         #[test]
         fn resolve_guest_agent_for_dev_required_overlay_prefers_interactive_overlay() {
