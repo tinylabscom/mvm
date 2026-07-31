@@ -26,3 +26,9 @@ pub use substitution::{
     PLACEHOLDER_PREFIX, Placeholder, SignDispatchError, SubstituteError, SubstitutionEndpoint,
     SubstitutionRegistry, find_placeholder,
 };
+
+/// Re-exported so a caller who only depends on `mvm-hostd` (e.g. mvmd,
+/// which registers `SecretBindingMeta`s for a VM's substitution endpoint)
+/// can name `SecretBindingMeta::auth_type`'s type without also taking a
+/// direct `mvm-sdk` dependency edge.
+pub use mvm_sdk::ir::{AuthType, Sigv4Params};
