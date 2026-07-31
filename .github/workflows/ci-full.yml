@@ -158,6 +158,25 @@ jobs:
       - name: workflow paths and fuzz targets still exist
         run: cargo run -p xtask -- check-workflow-paths
 
+      # The cargo-fuzz crates are workspace-excluded (libfuzzer-sys needs
+      # cargo-fuzz's linker flags), so `cargo clippy --workspace` and every
+      # other lane skip them entirely. Nothing compiles these files until the
+      # nightly runs them, and that lane aborts on its first failure, so one
+      # broken target hides every target after it — a fuzz harness left
+      # syntactically invalid by a scripted edit survived eleven days that
+      # way. `cargo check` needs no sanitizer and catches that class.
+      - name: cargo-fuzz crates still compile
+        run: |
+          set -uo pipefail
+          fail=0
+          for manifest in crates/*/fuzz*/Cargo.toml crates/deps/*/fuzz*/Cargo.toml; do
+            [ -f "$manifest" ] || continue
+            echo "::group::$manifest"
+            cargo check --manifest-path "$manifest" --all-targets || fail=1
+            echo "::endgroup::"
+          done
+          exit "$fail"
+
       - name: SDK stubs match the Rust schemas (no drift)
         run: cargo run -p xtask -- check-stubs
 

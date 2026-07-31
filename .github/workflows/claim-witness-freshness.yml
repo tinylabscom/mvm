@@ -1,0 +1,128 @@
+name: Claim witness freshness
+
+# A claim whose witness is a CI lane stops being backed in two ways: the lane
+# goes red, or the lane stops running. Those need different detectors.
+#
+# `Security lane watch` covers the first. It triggers on
+# `workflow_run: [Security] completed`, so it fires when Security finishes —
+# and when the schedule itself stops firing, nothing completes, nothing
+# reports, and the silence reads exactly like health. That is not
+# hypothetical: Security ran nightly until 2026-06-16 and did not run again
+# until 2026-07-21. Five weeks in which every claim kept a green ledger entry
+# with no evidence behind it, and no watcher could have said so.
+#
+# This covers the second. It runs on its own schedule — deliberately not
+# `workflow_run`, since the whole point is to notice absence — and asks
+# whether each claim-bearing scheduled lane ran at all.
+#
+# It never blocks a merge. These lanes do not run on pull requests, so there
+# is nothing to block; the tracking issue is the enforcement surface, the
+# same shape `Kernel pin CVE watch` and `Security lane watch` already use.
+
+on:
+  schedule:
+    # Offset well clear of Security (04:17) and the kernel watch (05:37) so a
+    # slow nightly is never mistaken for a missing one.
+    - cron: "23 9 * * *"
+  workflow_dispatch: {}
+  # Changes to the gate or to a watched schedule get checked on the PR that
+  # makes them — cheap, and it catches a cron edit that silently drops a lane
+  # out of scope.
+  pull_request:
+    paths:
+      - "xtask/src/check_claim_witness_freshness.rs"
+      - "xtask/src/claims_ledger.rs"
+      - ".github/workflows/claim-witness-freshness.yml"
+      - ".github/workflows/security.yml"
+
+permissions:
+  contents: read
+  issues: write # the scheduled run opens/updates/closes the tracking issue
+  actions: read # reads watched workflows' run history
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  freshness:
+    name: Claim-bearing lanes are still running
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-freshness-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-freshness-
+
+      - name: Check that every claim-bearing scheduled lane still runs
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          if cargo run -p xtask -- check-claim-witness-freshness 2>&1 | tee freshness.log; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A pull-request run reports through the job status; only the scheduled
+      # run owns the issue, so a PR cannot open or close one.
+      - name: Open or update the tracking issue
+        if: steps.check.outputs.stale == 'true' && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "Claim-bearing CI lane has stopped running"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "A workflow that backs one or more numbered security claims has not run"
+            echo "recently enough for its own schedule."
+            echo
+            echo "This is the failure mode a red-lane watcher cannot see: nothing failed,"
+            echo "because nothing ran. The claims below currently have a green ledger entry"
+            echo "and no evidence behind it."
+            echo
+            echo '```'
+            cat freshness.log
+            echo '```'
+            echo
+            echo "Watcher run: $RUN_URL"
+          } > issue-body.md
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file issue-body.md
+          else
+            gh issue create --title "$TITLE" --body-file issue-body.md
+          fi
+
+      - name: Close the tracking issue once every lane is running again
+        if: steps.check.outputs.stale == 'false' && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "Claim-bearing CI lane has stopped running"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" \
+              --comment "Every claim-bearing scheduled lane is running again. Watcher run: $RUN_URL"
+          fi
+
+      # The gate's own verdict decides the job, so a pull-request run that
+      # breaks it is visible without waiting for a nightly.
+      - name: Fail the job when a lane has stopped running
+        if: steps.check.outputs.stale == 'true'
+        run: |
+          echo "::error::a claim-bearing lane has stopped running — see the log above" >&2
+          exit 1

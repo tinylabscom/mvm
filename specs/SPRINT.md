@@ -221,6 +221,34 @@
       from `ci:fuzz` — which matched the job key and stayed green through
       all ten dead nightlies — to the three fuzz targets it actually names.
 
+- [x] A claim-bearing CI lane can stop backing its claim two ways, and only
+      one was watched. #1970 reports a *red* Security lane, but it triggers on
+      `workflow_run: completed`, so it fires only when Security finishes —
+      when the schedule itself stops firing, nothing completes, nothing
+      reports, and silence reads as health. That is not hypothetical: Security
+      ran nightly to 2026-06-16 and not again until 2026-07-21. Five weeks in
+      which sixteen claims kept green ledger entries with no evidence behind
+      them, and no watcher could have said so.
+
+      `xtask check-claim-witness-freshness` covers absence, on its own
+      schedule rather than on `workflow_run`, because the whole point is to
+      notice a lane that never ran. It maps each `ci:` witness onto the
+      workflow anchoring it (reusing #1980's resolver, lifted into
+      `claims_ledger` so one implementation serves both gates), derives the
+      allowance from the cron, and fails when the newest run is older than
+      three missed firings. It deliberately does *not* re-check conclusions —
+      that is #1970's job, and two gates on one property would eventually
+      disagree. Lanes with no daily-or-better cron are reported as notes, not
+      judged: a pull-request lane is legitimately idle. Falsified by making
+      Security's cron hourly, which reported it 14h stale and named all eight
+      claims it backs.
+
+      Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
+      are workspace-excluded, so no lane compiled them and the nightly aborts
+      on its first failure — which is how a syntactically invalid harness
+      survived eleven days. Run against main the step rediscovered both real
+      defects in seconds.
+
 - [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
       (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
       contract and the other four asserted size only, so nothing was protected
