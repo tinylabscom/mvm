@@ -70,6 +70,28 @@ pub struct CliWorld {
     /// An isolated `MVM_HOME` created by a `Given` step and reused by later
     /// steps that need to inspect the filesystem after a run.
     pub isolated_home: Option<tempfile::TempDir>,
+    /// Process-wide `MVM_HOME` override held across the steps of one
+    /// scenario (dropped — and the previous value restored — when the
+    /// world is dropped at scenario end).
+    pub mvm_home_guard: Option<MvmHomeGuard>,
+    /// The typed artifact-missing triple (`what`, `path`, `hint`) captured
+    /// from the apple-container backend's start failure.
+    pub apple_container_error: Option<(String, String, String)>,
+    /// The backend kind auto-select resolved to, as its `Debug` token.
+    pub auto_selected_kind: Option<String>,
+    /// The kernel path after the apple-container backend's substitution.
+    pub overridden_kernel_path: Option<String>,
+    /// Fixed stand-in guest-agent bytes an initramfs scenario builds from.
+    pub initramfs_agent_bytes: Option<Vec<u8>>,
+    /// The two deterministic cpio builds a determinism scenario compares.
+    pub initramfs_cpio_a: Option<Vec<u8>>,
+    /// Second deterministic cpio build (see `initramfs_cpio_a`).
+    pub initramfs_cpio_b: Option<Vec<u8>>,
+    /// Sidecar contents (`hash`, `size`, `VERSION`) read back after an
+    /// initramfs artifact assembly + install.
+    pub initramfs_sidecars: Option<(String, String, String)>,
+    /// The resolved image path after installing the assembled initramfs.
+    pub initramfs_resolved_image: Option<PathBuf>,
     /// Whether live CLI steps should keep one warm standby for the next run.
     pub warm_residency: bool,
     /// Content address of the bundle a `bundle install` step registered, so the
