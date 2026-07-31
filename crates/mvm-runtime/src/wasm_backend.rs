@@ -279,6 +279,8 @@ fn wasm_substitution_spawn_params<'a>(
         tls_intermediate: None,
         network_policy: Some(network_policy),
         raw_egress: false,
+        resolver_remote: None,
+        binding_store_dir: None,
     }
 }
 
