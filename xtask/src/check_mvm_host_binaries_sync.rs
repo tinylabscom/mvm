@@ -5,6 +5,14 @@
 //! attrset at `nix/lib/mvm-host-binaries.nix` agree on the set of
 //! entries and their install paths. Adding or renaming a binary
 //! requires updating both files in the same PR.
+//!
+//! A third mirror is checked here too: the workflow steps that
+//! cross-compile these binaries for the builder-VM image. The flake reads
+//! every manifest entry out of `$MVM_HOST_BIN_DIR`, so a binary added to
+//! the manifest but not to the `cargo zigbuild --bin` list makes the
+//! image build fail on a missing path — and that build only runs on tags
+//! and the nightly cron, so the gap is invisible on the PR that opens
+//! it.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -25,11 +33,80 @@ pub fn run(workspace: &Path) -> Result<()> {
         );
     }
 
+    let expected: Vec<&str> = rust_entries.keys().map(String::as_str).collect();
+    let mut missing = Vec::new();
+    for (file, step_args) in zigbuild_steps(workspace)? {
+        for name in &expected {
+            if !step_args.contains(&format!("--bin {name}")) {
+                missing.push(format!("{file}: cross-compile step omits --bin {name}"));
+            }
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "manifest entries are not cross-compiled by every workflow that builds the builder-VM image:\n  {}\n\n\
+             Fix: add the missing `--bin <name>` to the `cargo zigbuild` step. \
+             The flake reads each manifest entry from $MVM_HOST_BIN_DIR and \
+             fails on a missing path.",
+            missing.join("\n  ")
+        );
+    }
+
     eprintln!(
-        "check-mvm-host-binaries-sync: manifests agree ({} entries)",
+        "check-mvm-host-binaries-sync: manifests agree ({} entries), cross-compiled by every builder-VM workflow step",
         rust_entries.len()
     );
     Ok(())
+}
+
+/// `(workflow file name, joined step text)` for every `cargo zigbuild`
+/// invocation that builds `-p mvm-build` host binaries.
+fn zigbuild_steps(root: &Path) -> Result<Vec<(String, String)>> {
+    let dir = root.join(".github/workflows");
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let src =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for step in split_zigbuild_steps(&src) {
+            out.push((name.clone(), step));
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Collapse each `cargo zigbuild ... -p mvm-build ...` invocation — which
+/// wraps across backslash-continued lines — into one whitespace-normalized
+/// string.
+fn split_zigbuild_steps(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.contains("cargo zigbuild") {
+            current = Some(String::new());
+        }
+        if let Some(buf) = current.as_mut() {
+            buf.push(' ');
+            buf.push_str(t.trim_end_matches('\\').trim());
+            if !t.ends_with('\\') {
+                let done = buf.split_whitespace().collect::<Vec<_>>().join(" ");
+                if done.contains("-p mvm-build") {
+                    out.push(done);
+                }
+                current = None;
+            }
+        }
+    }
+    out
 }
 
 /// Parse `name:` / `install_path:` field pairs from the Rust struct literal

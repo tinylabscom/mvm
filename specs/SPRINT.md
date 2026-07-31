@@ -69,6 +69,19 @@
       Also extracted the shared ledger parser into `xtask/src/claims_ledger.rs`
       so both gates read one table. `specs/plans/272-mutation-tested-claim-witnesses.md`.
       307/307 xtask nextest.
+
+      **Now also owns the witnesses this gate cannot reach,** folded in from
+      plan 274 whose WS3/WS4 are struck. That plan's prose named three such
+      claims; the gate derives four. The fourth, MVM-SEC-16, is qualitatively
+      different — its witnesses are ordinary Rust functions skipped only for
+      living in `crates/mvm-hostd/tests/`, so it needs a planted defect in the
+      enforcement code rather than a CI-lane falsification. Keeping the sweep
+      beside the gate that computes the list is what stops the two diverging
+      again. #1946 was closed by #1958, which exports `HOME`/`MVM_HOME` to a
+      runner temp dir in the nightly job and carries `CARGO_HOME`/
+      `RUSTUP_HOME` across. That covers the CI lane; `just
+      mutation-witnesses` still runs against a developer's real `~/.mvm`,
+      which is the entry point #1946 called the sharper of the two.
 - [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
       only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
       builder image / runtime overlay from the host's shared cache), so a test
@@ -127,6 +140,59 @@
       memory (775 MB) instead of streaming, and compared whole manifest
       strings, so a reordered manifest read as tampering.
 
+- [x] Restore the claim witnesses that had gone red in the nightly. The
+      `security.yml` cron had failed **ten consecutive nights** (2026-07-21
+      through 07-30), starting the night after the crate consolidation
+      (`d115fcebe`) merged. Two of the five red jobs were the named witness
+      for a numbered claim, so those claims had been unwitnessed the whole
+      time, not merely noisy.
+
+      **MVM-SEC-05's only witness ran nothing at all.** The fuzz lane's
+      first step still declared `working-directory: crates/mvm-guest`, a
+      crate the consolidation deleted; the step failed to *start*, and
+      because the fourteen targets were sequential steps in one job, every
+      later target was skipped too. Four of the nine directories were stale
+      (`mvm-guest`, `mvm-oci`, `mvm-vm-host`, `mvm-ext4`); the corpus-upload
+      block had been updated to the new paths, so the rename was done
+      halfway. Fixed independently and first in #1958, which corrected the
+      fourteen `working-directory` values in place; this branch's matrix
+      rebuild was dropped in favour of it.
+      **Residual:** the targets remain sequential steps in one job at the
+      nightly `secs=1800` budget, and the job sets no `timeout-minutes`, so
+      14 x 1800s is 7 hours of fuzzing against GitHub's 6-hour default
+      ceiling — before per-target sanitizer builds. The lane should be
+      expected to time out rather than pass, and a matrix (one cell per
+      target, `fail-fast: false`) is the shape that both fits the ceiling
+      and stops one stale entry skipping every target after it.
+
+      **MVM-SEC-07's two witnesses failed for unrelated reasons.**
+      `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
+      7.5) via `object_store 0.11`; bumped to `object_store 0.14`, the first
+      release requiring `quick-xml >= 0.41`. Fixed, not ignored — and the
+      step's ten `--ignore` flags, whose comment claimed to mirror
+      `deny.toml`'s `ignore = []`, were removed after confirming none still
+      matched anything in the graph. `cargo-deny`'s duplicate-dalek failure
+      was diagnosed independently and fixed first in #1952; `deny.toml` had
+      never carried those entries while `check-duplicate-majors` had — the
+      two-gate drift that let the PR-visible gate stay green while the
+      nightly stayed red.
+
+      Also restored: the flake-lock gate (two probe examples pinning
+      `inputs.mvm` to this repo were missing from a hardcoded exclusion list
+      — replaced with a check for the property itself, anchored so
+      `nix/flake.nix`'s documentation comment does not match) and
+      builder-VM reproducibility (`mvm-builderd` joined the host-binary
+      manifest but not the cross-compile step).
+
+      Two new gates make both rot classes PR-visible, each with a planted
+      defect recorded in `specs/VERIFICATION.md`:
+      `check-workflow-paths` resolves every workflow `working-directory`
+      and `cargo fuzz run` target against the tree, and
+      `check-mvm-host-binaries-sync` now treats the cross-compile step as a
+      third mirror of the binary manifest. Claim 5's witness was retyped
+      from `ci:fuzz` — which matched the job key and stayed green through
+      all ten dead nightlies — to the three fuzz targets it actually names.
+
 - [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
       (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
       contract and the other four asserted size only, so nothing was protected
@@ -145,13 +211,23 @@
       concurrency flake at all but a macOS-only fixture bug — an accepted
       socket inherits `O_NONBLOCK` there but not on Linux, so the fixture read
       an empty request and answered 404. Fixed; that deferral is closed.
-      **WS3 re-scoped:** `check-mutation-witnesses` (#1934) shipped the
-      mutation-testing idea mid-flight and does it better than this plan's
-      WS4, which is struck. WS3 is now the three claims whose only witness is
-      a CI lane (MVM-SEC-04/05/07), which mutation testing structurally cannot
-      reach, plus triaging #1934's first full run — blocked on #1946, since
-      `--run` currently executes mutated security code against the real
-      `~/.mvm`.
+      **WS3 and WS4 struck; plan closed.** `check-mutation-witnesses`
+      (#1934) shipped the mutation-testing idea mid-flight and does it
+      better, so both workstreams fold into
+      `specs/plans/272-mutation-tested-claim-witnesses.md` §WS-3. The
+      deciding argument was a live drift: WS3 hand-copied the list of
+      claims mutation testing cannot reach and recorded **three**
+      (MVM-SEC-04/05/07), while the gate *derives* that list from the
+      ledger and reports **four** — it also names MVM-SEC-16, whose three
+      witnesses are ordinary Rust functions cargo-mutants skips only
+      because they live in `crates/mvm-hostd/tests/`. Claim 16 therefore
+      needs a planted defect in the enforcement code rather than a CI-lane
+      falsification, which is a different task from the other three. The
+      corrected four-claim sweep now sits next to the gate that computes
+      the list, so the two cannot drift again. #1946 is fixed: `--run`
+      confines `HOME` and `MVM_HOME` to a temp root, applied where
+      cargo-mutants is spawned so the nightly job and the local recipe
+      share one implementation.
 
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
@@ -230,6 +306,22 @@
       `initramfs::resolve_returns_missing_when_cache_empty` hermetic; it read
       the developer's real `$HOME` cache and failed on any machine that had
       built an initramfs.
+- [ ] Plan 278 — transparent connect interception for non-cooperative
+      workloads. Proposed, nothing implemented. Closes the app-compat gap left
+      by cooperative interception (proxy env + loopback SOCKS5h): a workload
+      that ignores proxy env fails closed today, which is correct security and a
+      real compatibility wall. Design is seccomp user-notify on `connect(2)`,
+      redirected into the existing loopback proxy via `ADDFD_FLAG_SETFD`, adding
+      no NIC and no second egress gate. Two findings shaped it: `seccompiler`
+      0.5 can express no notify action and its install helper discards the
+      listener fd, so the notify filter stacks as a second hand-written BPF
+      program alongside the tier filter; and the notify TOCTOU is harmless here
+      because the authorization decision is made at the host endpoint from the
+      SOCKS request, not from the address read out of guest memory. **W0 is
+      blocking**: reading the destination needs `ptrace_may_access` to pass
+      against a workload the guest currently sets `PR_SET_DUMPABLE = 0` on, and
+      the choice between a co-uid supervisor and relaxing `DUMPABLE` is an
+      explicit hardening decision that must be settled before any code lands.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.
@@ -896,8 +988,64 @@ broken independently of ICMP, and anyone who seeds that cache gets a dead guest.
 This is the other half of the legacy-cmdline story — the legacy path now works,
 and the path meant to replace it does not.
 
+### The universal-initramfs cache could not see source fixes
 
+A boot that attached the universal initramfs died at its first RPC with
+`send ActivateEnvironment to guest: Failed to read frame length`, and the guest
+console said `rejecting control connection without a pinned host key` — the
+symptom #1959 had already fixed.
+
+It kept happening because the cache could not see that fix.
+`<cache>/initramfs/<version>/<arch>/` is keyed on a version that only moves at
+release, so an artifact built from older guest sources outlives every change to
+them: the fix lands, the cache still serves the binary from before it, and the
+fix looks inert. The runtime overlay and the verity initramfs both record a
+`SOURCE_FINGERPRINT` for this reason; this one did not. It does now — a mismatch
+**evicts** rather than ignores, so the next resolve rebuilds instead of
+re-finding the same bytes, and an artifact with no fingerprint is treated as
+unknown provenance rather than assumed fresh. Trusting those is what let the
+stale one survive.
+
+The activation race underneath — `activate_workload` sending before the agent
+had bound its port — was fixed independently on main by #1985 while this was in
+review, so only the cache work remains here.
+
+Live on macOS: the stale artifact is discarded, the host falls back to the legacy
+initramfs (macOS cannot build the universal one), and the workload runs. A
+working universal-initramfs boot is **not** verified here — this host cannot
+produce the artifact, so what is proven is the eviction and the fallback.
+
+`initramfs::tests::resolve_returns_missing_when_cache_empty` is also fixed. Its
+`HOME` isolation had made it genuinely hermetic, which exposed what that was
+hiding: on Linux the empty-cache path falls through to a real `nix build`, and
+with a shell double that reports success without producing an artifact the call
+never returns. It ran for 20,000+ seconds and took a CI job to its six-hour
+limit. It had been passing on Linux only by finding an artifact it was supposed
+to prove absent. It now exercises `resolve_or_seed_from_default_cache`, whose
+contract is the one the name claims, and completes in milliseconds.
+
+That a shell double reporting success can make the nix path hang rather than
+error is worth closing separately: a build producing no artifact should fail,
+not wait.
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
+
+### Deferred: a dry run should not require a bootable backend
+
+`machine run --dry-run` with egress enabled (`--allow-host` / `--net`) resolves an
+*available* egress-capable backend before printing the plan, so it exits 1 on a
+host with no usable VMM. That makes the command's outcome a fact about the host
+rather than about the request, and it is why two otherwise-valuable hermetic
+scenarios — that a bare `--allow-host <host>` resolves to `<host>:443`, and that
+`--net` resolves to the dev preset — could not be gated: they pass on a developer
+machine and fail on a CI runner, and the reverse assertion has the same problem
+inverted.
+
+Whether that check belongs in a dry run is a real question. A dry run exists to
+show the resolved plan without booting, and needing a bootable backend defeats it
+exactly where it is most useful — CI, a laptop without a VMM, planning a run
+before provisioning. Against that, a plan you could never execute is arguably
+worth refusing. Not decided here, and deliberately not changed inside a test
+change.
 
 ## 5. Definition of done
 

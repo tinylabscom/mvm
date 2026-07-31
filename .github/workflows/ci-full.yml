@@ -133,7 +133,7 @@ jobs:
       - name: No forbidden dependency families
         run: cargo run -p xtask -- check-forbidden-deps
 
-      - name: repr(C) types carry a layout contract
+      - name: repr(C) types carry a layout contract (check-abi-layout)
         run: cargo run -p xtask -- check-abi-layout
 
       - name: SDK crate split guard
@@ -151,6 +151,12 @@ jobs:
       # nix/lib/mvm-host-binaries.nix in the same PR.
       - name: host-binaries manifest parity (Plan 115 / ADR-065)
         run: cargo run -p xtask -- check-mvm-host-binaries-sync
+
+      # security.yml runs on tags + cron, so a step pointing at a renamed
+      # crate is invisible on a PR and dead until someone reads a nightly.
+      # This resolves those paths here, where the rename happens.
+      - name: workflow paths and fuzz targets still exist
+        run: cargo run -p xtask -- check-workflow-paths
 
       - name: SDK stubs match the Rust schemas (no drift)
         run: cargo run -p xtask -- check-stubs

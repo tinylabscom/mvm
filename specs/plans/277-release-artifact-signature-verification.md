@@ -35,10 +35,10 @@ image manifests, packs, revocation lists) is signed that way. Pointing the
 verifier at today's `runtime-overlay-<arch>.tar.gz.bundle` would fail to parse
 100% of the time.
 
-The legacy bundles cannot simply be switched wholesale: `mvmctl-*.tar.gz.bundle`
-is consumed by the **cosign CLI** (`install.sh`, and `mvmctl update`, which
-shells out to `cosign verify-blob`), which reads both shapes. So the binary
-tarballs keep the legacy format and the image tarballs move to the new one.
+The legacy bundles were initially kept for `mvmctl-*.tar.gz.bundle`, which is
+consumed by the **cosign CLI** (`install.sh`, and `mvmctl update`, which shells
+out to `cosign verify-blob`). That split was then collapsed — see the amendment
+below.
 
 **2. Nothing is at risk of breaking.** The latest release (v0.17.0) publishes
 the runtime overlay as *loose files* (`.ext4`/`.verity`/`.roothash`/`.VERSION`),
@@ -82,8 +82,8 @@ extraction**, so an unauthenticated tar is never parsed:
 ## Tasks
 
 - [x] **Task 1 — Sign the image tarballs in the format the verifier parses.**
-  Split `release.yml`'s signing step: binary tarballs keep legacy `--bundle`
-  (cosign-CLI consumers), image tarballs get `--new-bundle-format`. Attach
+  (Amended — see below: the split this task introduced was collapsed to a single
+  format.) Attach
   `runtime-overlay-*.tar.gz.bundle` / `sdk-sidecar-*.tar.gz.bundle` to the
   release. Extend `tests/release_assets.rs` to pin the bundle asset names and
   assert the image tarballs are signed in the new format — the failure mode is
@@ -121,3 +121,64 @@ Rekor — so the positive path is exercised with the documented skip hatch and t
 real signature check is witnessed in the rejecting direction plus the existing
 `pack-signing-smoke.yml` lane, which already round-trips a genuine keyless
 signature through this same verifier.
+
+## Amendment (2026-07-31) — one bundle format, no legacy
+
+The two-format split above was deliberate but unnecessary, and this project does
+not carry backwards compatibility. It is collapsed: **every** `cosign sign-blob`
+in `release.yml` now passes `--new-bundle-format`, including the mvmctl binary
+tarballs and the SBOM.
+
+The split rested on an assumption that was never tested — that the cosign CLI
+consumers needed the legacy shape. They do not. `cosign verify-blob --bundle`
+documents the Sigstore bundle as its *preferred* input, and a keypair round-trip
+against cosign v3.1.1 confirms it: signing with `--new-bundle-format` and
+verifying with a plain `cosign verify-blob --bundle` reports `Verified OK`. So
+`install.sh`, `mvmctl update`, and `verify-release-assets.sh` all keep working
+unchanged, against one format instead of two.
+
+What this buys: no per-artifact branching in the signing step, no way to sign an
+artifact with the shape its verifier cannot read, and one invariant to gate
+instead of a two-sided split. `tests/release_assets.rs::
+every_signed_release_blob_uses_the_one_bundle_format` asserts every signing
+invocation carries the flag; it was confirmed to go red when a bare `--bundle`
+is reintroduced and green when restored.
+
+The cost, stated plainly: a host verifying by hand needs cosign >= v2.4 (when
+`--new-bundle-format` landed). There is no legacy fallback and that is
+intentional.
+
+## Amendment (2026-07-31, second) — close the loop before a release, not after
+
+Everything above is proven against staged fixtures and static workflow
+assertions. Nothing had ever exercised the real chain — Nix build → tarball →
+`--new-bundle-format` sign → attach → fetch → sha256 → signature → extract →
+install → resolve — because no published release has ever carried these
+tarballs. The first real run would have been a `v*` tag push, and because the
+ladder is fail-closed, a mistake there strands every download rather than
+degrading.
+
+Two lanes now cover it, at different costs and different times:
+
+- **`pack-signing-smoke.yml`** (dispatch) signs a release-shaped tarball with the
+  exact `cosign sign-blob --new-bundle-format` invocation `release.yml` uses and
+  feeds the real bundle through the downloader's verifier via the
+  `verify-release-archive-signature` example. A companion step asserts a
+  *legacy* bundle is **refused** — without it the gate would still pass if the
+  verifier ever silently accepted both shapes, and would be measuring nothing.
+  Scope: the signature-format contract, against a real bundle. Extraction,
+  manifest re-check, install, and resolve stay fixture-covered.
+
+- **`release.yml`** runs the whole ladder over its own artifacts, after signing
+  and before `gh release create`, via the `download-release-artifact` example
+  over a `file://` URL. That is the one context where the signing identity
+  genuinely is the tagged release workflow's, so it needs no trust override.
+  A missing artifact is skipped — image jobs are best-effort — but an artifact
+  that is present and cannot be consumed fails the release before publish.
+
+`verify_release_archive_bytes` is the seam that makes the first lane possible:
+the identity set is a parameter, the same shape `mvm_core::packs::verify` takes
+a `KeylessTrust`. Production always passes `release_trust`'s set.
+
+`tests/release_assets.rs::the_release_consumes_its_own_artifacts_before_publishing_them`
+pins the ordering so the self-check cannot drift after signing or before publish.

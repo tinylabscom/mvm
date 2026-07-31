@@ -733,45 +733,85 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          # Two bundle formats, because two different verifiers consume them.
+          # One bundle format for every signed blob in this release:
+          # --new-bundle-format, the Sigstore bundle carrying
+          # verificationMaterial. Both consumers read it — the in-binary Rust
+          # sigstore stack (mvm_build::release_signature -> image_verify) parses
+          # ONLY this shape, and `cosign verify-blob --bundle` documents it as
+          # the preferred input, so install.sh / `mvmctl update` /
+          # verify-release-assets.sh keep working unchanged.
           #
-          # The mvmctl binary tarballs and the SBOM are verified by the cosign
-          # CLI (install.sh, and `mvmctl update`, which shells out to
-          # `cosign verify-blob`). That reads both shapes, so they stay on the
-          # legacy `--bundle` format they have always shipped.
-          #
-          # The image tarballs are verified IN-BINARY by the Rust sigstore
-          # stack (mvm_build::release_signature -> image_verify), which parses
-          # only the newer Sigstore bundle carrying verificationMaterial. A
-          # legacy bundle here would fail to parse on every download, so these
-          # must be signed with --new-bundle-format — same as every other
-          # artifact that stack verifies (image manifests, packs, revocations).
-          for tarball in artifacts/*.tar.gz; do
-            case "$(basename "${tarball}")" in
-              runtime-overlay-*|sdk-sidecar-*) continue ;;
-            esac
-            cosign sign-blob \
-              --yes \
-              --bundle "${tarball}.bundle" \
-              "${tarball}"
-            echo "Signed (legacy bundle, cosign-CLI consumers): ${tarball}"
-          done
-
-          for tarball in artifacts/runtime-overlay-*.tar.gz artifacts/sdk-sidecar-*.tar.gz; do
+          # Requires cosign >= v2.4 on any host that verifies by hand; that is
+          # the floor this project targets and there is no legacy fallback.
+          for blob in artifacts/*.tar.gz sbom.cdx.json; do
             cosign sign-blob \
               --yes \
               --new-bundle-format \
-              --bundle "${tarball}.bundle" \
-              "${tarball}"
-            echo "Signed (new bundle format, in-binary verifier): ${tarball}"
+              --bundle "${blob}.bundle" \
+              "${blob}"
+            echo "Signed: ${blob}"
           done
 
-          # Sign the SBOM
-          cosign sign-blob \
-            --yes \
-            --bundle sbom.cdx.json.bundle \
-            sbom.cdx.json
-          echo "Signed: sbom.cdx.json"
+      # Consume what we are about to publish, before publishing it.
+      #
+      # The runtime overlay and SDK sidecar are acquired by an installed mvmctl
+      # through a fail-closed ladder: checksum, cosign signature, safe-extract,
+      # inner-manifest re-check, atomic install, resolve. Every rung refuses
+      # rather than degrades, so an artifact this pipeline builds slightly wrong
+      # does not degrade the user experience — it strands every download.
+      #
+      # This runs that exact production path over the staged artifacts via a
+      # file:// URL. It is the only place the identity genuinely is this tagged
+      # release workflow's, so it needs no trust override and proves the whole
+      # chain rather than one rung. A missing artifact is skipped (image jobs
+      # are best-effort and the release gates only on the binary build); a
+      # PRESENT artifact that cannot be consumed fails the release here.
+      - name: Verify the published artifacts survive the consumer path
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          VERSION="${TAG_NAME#v}"
+          STAGE="consumer-check/v${VERSION}"
+          mkdir -p "${STAGE}"
+
+          checked=0
+          for kind in runtime-overlay sdk-sidecar; do
+            for arch in aarch64 x86_64; do
+              archive="artifacts/${kind}-${arch}.tar.gz"
+              [ -f "${archive}" ] || continue
+              for suffix in "" ".sha256" ".bundle"; do
+                src="${archive}${suffix}"
+                if [ ! -f "${src}" ]; then
+                  echo "::error::${src} is missing — a published archive without its checksum and signature cannot be acquired" >&2
+                  exit 1
+                fi
+                cp "${src}" "${STAGE}/"
+              done
+
+              case "${kind}" in
+                runtime-overlay) example_kind=overlay ;;
+                sdk-sidecar)     example_kind=sidecar ;;
+              esac
+              echo "Consuming ${kind}-${arch} through the production download path..."
+              cargo run --release -p mvm-build --example download-release-artifact \
+                --features manifest-verify -- \
+                --kind "${example_kind}" \
+                --base-url "file://$(pwd)/consumer-check" \
+                --version "${VERSION}" \
+                --arch "${arch}" \
+                --cache "$(mktemp -d)"
+              checked=$((checked + 1))
+            done
+          done
+
+          if [ "${checked}" -eq 0 ]; then
+            echo "::warning::no runtime-overlay or sdk-sidecar archives present — image jobs likely failed; publishing without them" >&2
+          else
+            echo "ok: ${checked} artifact(s) verified through the end-user acquisition path."
+          fi
 
       # Plan 36 / ADR 005: cosign-keyless-sign each per-(arch, variant)
       # SignedManifest JSON. The bundle (.bundle) carries the signature,

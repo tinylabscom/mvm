@@ -25,8 +25,10 @@ use std::sync::Arc;
 use futures::StreamExt;
 use mvm_core::volume::VolumeError;
 use mvm_protocol::ir::MountSource;
-use object_store::ObjectStore;
 use object_store::path::Path as ObjPath;
+// `get` lives on the extension trait; `ObjectStore` itself stays in scope
+// for the `&dyn ObjectStore` receiver.
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use crate::storage::volume::mount_provider::{MountError, MountProvider, Mountable};
 

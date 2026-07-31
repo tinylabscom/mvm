@@ -96,51 +96,64 @@ fn release_attaches_the_signature_bundle_the_verifier_fetches() {
     }
 }
 
-/// The image tarballs must be signed with `--new-bundle-format`. The in-binary
-/// Rust verifier parses only that shape; a legacy `--bundle` here fails to
-/// parse on every download, and nothing would catch it until a real release
-/// shipped. The binary tarballs must NOT move — those are read by the cosign
-/// CLI (`install.sh`, `mvmctl update`), which wants the legacy shape.
+/// Every signed blob in the release uses the one bundle format this project
+/// ships: `--new-bundle-format`.
+///
+/// The in-binary Rust sigstore stack parses only that shape, and
+/// `cosign verify-blob --bundle` documents it as the preferred input — so a
+/// single format serves both consumers and there is no legacy fallback to keep
+/// in step. A bare `--bundle` left behind would sign an artifact the in-binary
+/// verifier cannot read, and nothing surfaces that until a real release ships.
 #[test]
-fn image_tarballs_are_signed_in_the_format_the_in_binary_verifier_parses() {
+fn every_signed_release_blob_uses_the_one_bundle_format() {
     let workflow = release_workflow();
-    let step = workflow
-        .split("- name: Sign release tarballs and SBOM")
-        .nth(1)
-        .expect("release.yml must define the tarball signing step");
-    let step = step
-        .split("\n      - name:")
-        .next()
-        .expect("the signing step is non-empty");
-
-    let image_sign = step
-        .split("for tarball in artifacts/runtime-overlay-*.tar.gz artifacts/sdk-sidecar-*.tar.gz")
-        .nth(1)
-        .expect("the image tarballs must be signed by their own loop")
-        .split("done")
-        .next()
-        .expect("the image signing loop is non-empty");
+    let mut checked = 0usize;
+    for (offset, _) in workflow.match_indices("cosign sign-blob") {
+        // The invocation is a line-continued shell command; its flags run up to
+        // the first line that is not a continuation.
+        let invocation: String = workflow[offset..]
+            .lines()
+            .take_while(|line| line.trim_end().ends_with('\\'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            invocation.contains("--new-bundle-format"),
+            "every `cosign sign-blob` must use --new-bundle-format; found one without it:\n{invocation}"
+        );
+        checked += 1;
+    }
     assert!(
-        image_sign.contains("--new-bundle-format"),
-        "image tarballs must be signed with --new-bundle-format: {image_sign}"
+        checked >= 4,
+        "expected to find the release's signing invocations, found {checked}"
     );
+}
 
-    // The generic loop produces the cosign-CLI-consumed bundles, so it must
-    // skip the image tarballs rather than double-signing them legacy.
-    let generic_sign = step
-        .split("for tarball in artifacts/*.tar.gz")
-        .nth(1)
-        .expect("the binary tarballs keep their own loop")
-        .split("done")
-        .next()
-        .expect("the generic signing loop is non-empty");
+/// The release must consume its own artifacts through the production download
+/// ladder *before* publishing them.
+///
+/// That ladder is fail-closed at every rung, so an artifact this pipeline builds
+/// slightly wrong does not degrade — it strands every download. The self-check
+/// is the only thing that turns that into a failed release instead of a shipped
+/// one, and it has to run after signing and before `gh release create`.
+#[test]
+fn the_release_consumes_its_own_artifacts_before_publishing_them() {
+    let workflow = release_workflow();
+    let verify = workflow
+        .find("- name: Verify the published artifacts survive the consumer path")
+        .expect("release.yml must consume its artifacts before publishing them");
+    let sign = workflow
+        .find("- name: Sign release tarballs and SBOM")
+        .expect("release.yml must sign the tarballs");
+    let publish = workflow
+        .find("- name: Create GitHub Release")
+        .expect("release.yml must create the release");
     assert!(
-        generic_sign.contains("runtime-overlay-*|sdk-sidecar-*"),
-        "the legacy-format loop must skip the image tarballs: {generic_sign}"
+        sign < verify && verify < publish,
+        "the consumer check must run after signing and before publishing"
     );
     assert!(
-        !generic_sign.contains("--new-bundle-format"),
-        "the cosign-CLI-consumed bundles must stay on the legacy format"
+        workflow.contains("--example download-release-artifact"),
+        "the check must drive the real downloader, not a restatement of it"
     );
 }
 

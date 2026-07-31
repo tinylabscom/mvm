@@ -69,8 +69,14 @@ id = "MVM-SEC-05"
 level = "build"
 suite = "fuzz_surface"
 statement = "Vsock framing + supervisor-config JSON are fuzzed"
+# Named per fuzz target rather than by the lane, so each witness points at
+# something check-workflow-paths resolves to a real fuzz_targets/<name>.rs.
+# A bare lane name matched the job key and stayed green through ten
+# nightlies in which the lane ran no target at all.
 witnesses = [
-    "ci:fuzz",
+    "ci:fuzz_guest_request",
+    "ci:fuzz_authenticated_frame",
+    "ci:fuzz_supervisor_config",
 ]
 
 [[claim]]
@@ -125,7 +131,7 @@ witnesses = [
     "fn:run_net_default_is_deny_all",
     "fn:private_link_local_loopback_ula_metadata_are_forbidden",
     "fn:emits_resolved_query_with_ip_list",
-    "ci:fuzz-dns-codec",
+    "ci:fuzz_dns_codec",
     "fn:assert_vsock_only_device_model",
     "fn:fork_restore_refuses_nic",
     "fn:verify_and_resume_refuses_nic_on_restore",

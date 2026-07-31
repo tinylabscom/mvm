@@ -5,6 +5,7 @@
 **Owner:** mvm
 **Source:** [UOR-Foundation](https://github.com/UOR-Foundation) and [Hologram-Technologies](https://github.com/Hologram-Technologies) GitHub orgs, deep-read at code level (43 repos surveyed, 24 read in depth)
 **Related:** [`uor-addr-integration-assessment.md`](./uor-addr-integration-assessment.md), [`uor-framework-integration-exploration.md`](./uor-framework-integration-exploration.md)
+**Updated:** 2026-07-31 — added §7.6 (data-plane provability at the vsock chokepoint, from a code-grounded read of the sealed-transcript ↔ audit-chain binding) and a §9 note on a machine-checked Lean-4 reference spec as the third verifier.
 
 ## TL;DR
 
@@ -220,6 +221,10 @@ and each aligns with a lesson mvm already learned the hard way.
   ≥2 independent verifiers. Realizes UOR's "external oracle" bar with implementations
   mvm already ships — near-zero new code, high assurance.
 - **Risk/effort:** low / small — wiring existing verifiers to a shared corpus.
+- **Logical endpoint:** the strongest form of this bar swaps "≥2 independent *implementations*"
+  for "≥1 machine-checked *specification* the implementations conform to" — a Lean-4 reference
+  spec over the same U4 corpus, with the golden vectors as the model↔code bridge. Recorded in
+  §9; it is a bounded spike, not Phase-1 work.
 
 ### Sequencing
 U1 and U4 first (foundational, lowest risk). U2 and U3 build on the U1 tier field.
@@ -327,6 +332,71 @@ Both reinforce §6 and require no UOR/Hologram dependency:
    content-address surface + the ≥2-verifier oracle bar (§6 U4/U5), reframed as the
    anti-parser-differential control (§7.4).
 
+### 7.6 Data-plane provability at the vsock chokepoint
+
+Follow-up analysis on two questions raised after the first pass: since mvm mediates *all*
+vsock, is the chokepoint a place content-addressing earns a property it can't get elsewhere;
+and does content-addressing help with "routing traffic between microVMs." Both were grounded
+in a fresh code read of the data-plane topology and the audit-chain binding.
+
+**The chokepoint is architecturally special — and that is the whole leverage.** mvm is strict
+hub-and-spoke: every guest talks *only* to its own host supervisor over AF_VSOCK (host CID is
+the sole peer), and there is **no VM↔VM data path** — east-west guest-to-guest flow is
+explicitly out of scope in the audit layer. Unlike a diffuse network, one trusted point
+mediates 100% of the data plane. That is exactly the condition under which a content-addressed,
+ordered, chain-anchored *transcript* of the data plane is actually achievable — on an open
+network it is not.
+
+**What the chain covers today.** The chain-signed + RFC-6962 Merkle audit log already binds the
+control plane and data-plane *metadata* — flow open/close (`FlowEvent`), service-call facts,
+and (already content-addressed **and** chain-anchored) checkpoint/image/fork lineage digests
+(`emit_checkpoint_forked` records `parent_digest`/`child_digest` and fails closed on a tampered
+parent). Data-plane *bytes* are captured separately by `transcript_sink` as encrypted chunks
+sealed under the host KEK, deliberately kept off the chain ("raw payload bytes never touch the
+chain-signed audit log").
+
+**The gap (code-grounded, decisive).** The sealed transcript is not bound to the chain in *any*
+form. No aggregate content-address of the manifest is ever computed — each `ChunkRecord` carries
+the sha256 of its own on-disk ciphertext for local tamper-checking, but nothing rolls those into
+a manifest root. The only seal record is a `TranscriptSealed` line carrying an opaque,
+operator-assigned `capture_id` + a chunk count, written to the **local, unsigned** `audit.jsonl`
+— not the host-signed chain. Consequence: an operator with filesystem access could delete or
+swap a sealed capture (or individual chunks) and the tamper-evident chain would show **no**
+discrepancy, because it never recorded the transcript's content-address. The metadata is
+chain-bound; the payload transcript is orphaned from it.
+
+**The fix that respects the deliberate off-chain-bytes decision.** Compute a content-address — a
+Merkle root over the manifest's per-chunk digests + capture binding — and emit it as an
+`AuditEmitter` label. The chain then commits to "here is the κ of the exact byte-transcript that
+crossed between this guest and host," while the plaintext stays sealed under the KEK and off the
+chain. That upgrades the chokepoint from proving *that* a flow happened (metadata) to binding
+*what* crossed: provable execution of the **data flow**, not only the admission decision — the
+"provable execution with content-addressable claims" property, realized at the one point that
+sees every byte.
+
+**Why not the tempting version** (hash each payload straight onto the chain): a hash of a
+low-entropy or secret payload on a third-party-verifiable chain is a confirmation oracle — the
+same leak class as the cross-tenant dedup side channel (§7.4). Content-address the *sealed
+manifest root*, never the plaintext; the bytes stay under the KEK.
+
+**Invariants preserved.** Address ≠ authorization (§7.4): the transcript κ attests what crossed,
+never authorizes it — the signed, plan-bound admission stays the sole authority. Verify-on-read
+fails closed: a manifest whose recomputed root ≠ the chained value is a tamper signal, reject
+never serve. dm-verity roothash chain (claim 3) is unchanged. This is in-house, no dependency —
+the same "content-address a coverage gap, anchor it, verify on read" family as §7.2, touching
+only `mvm-hostd`'s emitter + the transcript manifest; it slots into Phase-1 defensive coverage
+(§11).
+
+**On "routing between microVMs."** There is no VM↔VM data path in mvm — a guest reaches another
+only by transiting the host's north-south gateway as ordinary (default-deny, policy-gated)
+egress; the "routing" surfaces are per-VM host-terminated chokepoints (vsock port allowlist,
+`gateway_bridge`, `NetworkProvider` egress policy, egress proxy), not a central message router.
+So **content-addressed routing is a mvmd fleet concern, not an mvm one** — it maps to Hologram's
+migrate-by-κ-closure (§7.3(c)) at Phase 3, and even there address ≠ authorization holds (κ says
+*what*, the signed plan says *whether*). Where inter-VM *lineage* does exist in mvm — warm
+snapshot-fork parent/child — it is **already** content-addressed and chain-anchored, which
+validates the instinct in the one place it currently has teeth.
+
 ## 8. Interop hazards and alignment points
 
 Concrete cross-project mechanics that decide whether mvm and the UOR/Hologram
@@ -373,6 +443,23 @@ mvmd identity work:
   from the trace alone, sharing no evaluation code. A clean framing of "the audit
   verifier must not share code with the emitter" — reinforces §6 U5's ≥2-implementation
   bar.
+- **Machine-checked reference spec (Lean 4) as the third oracle.** The endpoint of §6 U5:
+  model the small, pure, `no_std` audit-chain verifier (`mvm_protocol::verify`) plus the
+  canonicalization/address algebra (JCS+NFC, RFC-6962 Merkle) as a Lean-4 *specification*, and
+  make the host + wasm + ESP32 Rust verifiers conform to it over the U4 golden-vector corpus.
+  Lean becomes a machine-checked oracle — exactly the shape of UOR's `F1`, a serious Lean-4
+  formalization that is scrupulously honest that its RH payload stays *open*. **Honesty
+  boundary** (why this is filed, not claimed): Lean proves properties of the *model* —
+  canonicalization total/deterministic/injective, verifier sound-and-complete, Merkle inclusion
+  sound — **not** that builds are *hermetic* (an operational property discharged by the microVM
+  sandbox + nix pins + the reproducibility double-build, claim 7, never by a theorem) and
+  **not** SHA-256 collision resistance (assumed, and named the F1 way). With no mature Rust
+  extraction, model↔code correspondence is a *tested* bridge (the vectors), not a proof. So the
+  precise answer to "can Lean 4 prove our hermetic/hashable/attestable builds?" is: it proves
+  the *verifier and address algebra* sound and yields a formal reference oracle; the sandbox
+  proves hermeticity; the two compose and neither substitutes. Cost — a heavy toolchain + a
+  proof-maintenance burden against the "limit dependencies" rule — makes this a bounded spike on
+  one target (the `no_std` verifier), not a proof lane.
 - **Compile-time seal regime.** prism's `Validated`/`Grounded`/`Certified` are
   constructible only through the sanctioned path (`pub(crate)` ctors), so *holding the
   type is proof it came through admission* — a compile-time analog to mvm's runtime
@@ -413,9 +500,9 @@ should we consider this" is: Phase 1 now, the rest when its trigger fires.
 | Phase | Timing | Work | Gate / trigger |
 | --- | --- | --- | --- |
 | **0 — Decide & scope** | Now (days) | Adopt "conform, don't consume" as explicit policy; pin SHA-256 as the canonical axis; turn §6 U1–U5 + §7.5 defensive coverage into a `specs/plans/` doc. | None. |
-| **1 — Methodology + defensive coverage** | Next 1–2 sprints | U1 tiers · U4 replay-vector lane · U2 prose over-claim gate · U3 falsifiability table · U5 ≥2-verifier oracle bar; content-address kernel + build cache with verify-on-read. All in-house, no dependency. | Phase 0 plan approved. |
+| **1 — Methodology + defensive coverage** | Next 1–2 sprints | U1 tiers · U4 replay-vector lane · U2 prose over-claim gate · U3 falsifiability table · U5 ≥2-verifier oracle bar; content-address kernel + build cache with verify-on-read; anchor the sealed data-plane transcript root into the audit chain (§7.6). All in-house, no dependency. | Phase 0 plan approved. |
 | **2 — Interop alignment** | Mid-term, triggered | Agree axis + wire-form + in-toto/SLSA canonicalization with the sibling projects; read `uor-foundation` (the real κ engine); evaluate `uor-addr-1` (lighter crate). | A real second consumer of the addresses **and** a UOR/Hologram-side conversation. |
-| **3 — Runtime / fleet / AI** | Long-term, opportunistic | holospace object model (migrate-by-κ-closure) into mvmd; `hologram-ai` interop for the deferred `ai` command; distributed transport (RBSR / iroh-blobs). | A concrete mvmd migration/scale requirement, or the `ai` command leaving deferred status. |
+| **3 — Runtime / fleet / AI** | Long-term, opportunistic | holospace object model (migrate-by-κ-closure) into mvmd; content-addressed inter-VM routing (mvmd only — no east-west path in mvm, §7.6); `hologram-ai` interop for the deferred `ai` command; distributed transport (RBSR / iroh-blobs). | A concrete mvmd migration/scale requirement, or the `ai` command leaving deferred status. |
 
 **Bottom line:** consider **Phase 1 now** — it is the highest-ROI, lowest-risk, fully
 in-house work, and it doubles as security hardening (the two defensive pursuits). Hold

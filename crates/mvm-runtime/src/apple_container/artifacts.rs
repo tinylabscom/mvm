@@ -18,8 +18,10 @@ pub const ARTIFACT_DIR_NAME: &str = "apple-container";
 pub const KERNEL_FILE_NAME: &str = "vmlinux";
 
 /// Hint for a missing kernel artifact.
-const KERNEL_HINT: &str = "fetch Apple's container kernel (the Kata container-kernel package \
-     the containerization project recommends) or copy any compatible arm64 Linux Image here";
+const KERNEL_HINT: &str = "copy an arm64 Linux Image with device-mapper + dm-verity built in \
+     (CONFIG_BLK_DEV_DM=y, CONFIG_DM_VERITY=y) here — the stock Apple/Kata container kernels \
+     ship no device-mapper, so the universal-initramfs verified boot needs a dm-capable kernel \
+     (e.g. build github.com/apple/containerization's kernel with those options enabled)";
 
 /// The cache directory the kernel is resolved from.
 pub fn artifact_dir() -> PathBuf {

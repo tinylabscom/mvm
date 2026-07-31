@@ -90,7 +90,7 @@ pub fn serve_icmp_blocking<S>(
 where
     S: std::io::Read + std::io::Write,
 {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Read};
 
     let mut reader = BufReader::new(&mut guest);
     let mut line = String::new();

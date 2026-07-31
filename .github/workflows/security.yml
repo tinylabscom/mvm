@@ -67,10 +67,15 @@ jobs:
         run: cargo install --locked cargo-audit
 
       - name: cargo audit
-        # Ignored advisories must mirror deny.toml's `[advisories].ignore`.
-        # cargo-audit doesn't read deny.toml; CLI flags are the
-        # discoverable way to keep the two tools in sync.
-        run: cargo audit --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2025-0052 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2025-0134
+        # No `--ignore` flags, mirroring deny.toml's empty
+        # `[advisories].ignore`. cargo-audit does not read deny.toml, so
+        # the two suppression lists can drift apart silently — and did:
+        # this step carried ten `--ignore` entries that deny.toml had
+        # never held, none of which still matched anything in the graph.
+        # A dead ignore is worse than none, because it reads as "we
+        # looked at this" when nothing looks at it. An advisory that
+        # fires here gets fixed, not listed.
+        run: cargo audit
 
   # ── Lane 2: Production-agent symbol contract ─────────────────────
   # ADR-001 §W4.3 + ADR-005 §W5 — combined contract on the production
@@ -314,7 +319,7 @@ jobs:
             echo "secs=300" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fuzz GuestRequest
+      - name: Fuzz GuestRequest (fuzz_guest_request)
         working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
@@ -325,14 +330,14 @@ jobs:
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
 
-      - name: Fuzz AuthenticatedFrame
+      - name: Fuzz AuthenticatedFrame (fuzz_authenticated_frame)
         working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
 
-      - name: Fuzz bounded DNS codec (fuzz-dns-codec)
+      - name: Fuzz bounded DNS codec (fuzz_dns_codec)
         working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
@@ -350,7 +355,7 @@ jobs:
         # steps in vsock.rs.
         run: cargo fuzz run fuzz_authed_path -- -max_total_time="$DURATION"
 
-      - name: Fuzz SupervisorConfig (host-side)
+      - name: Fuzz SupervisorConfig (fuzz_supervisor_config)
         working-directory: crates/deps/libkrun-sys
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
@@ -751,6 +756,20 @@ jobs:
           while IFS= read -r flake; do
             d=$(dirname "$flake")
             echo "::group::$d"
+            # A flake whose only registry input is this repo's own GitHub
+            # URL has no stable remote rev to lock against: a source
+            # checkout resolves it at build time with
+            # `--override-input mvm path:...`. Detect that property
+            # instead of naming the directories — the previous name list
+            # went stale the moment a fifth such example was added, and
+            # the gate then reported a missing lockfile for a flake that
+            # must not have one. Anchored to a real assignment:
+            # nix/flake.nix documents this exact line in a comment.
+            if grep -qE '^[[:space:]]*inputs\.mvm\.url = "github:tinylabscom/mvm' "$flake"; then
+              echo "skipped — self-referential mvm input, resolved at build time"
+              echo "::endgroup::"
+              continue
+            fi
             if [ ! -f "$d/flake.lock" ]; then
               echo "::error::missing $d/flake.lock — every flake must commit its lockfile (plan 36 §Layer 0)" >&2
               fail=1
@@ -776,18 +795,14 @@ jobs:
           # plan-89-baseline is an intentionally input-less throw-at-eval
           # boot-timing fixture (see its flake.nix) — no inputs means no
           # lockfile to keep in sync, so exclude it like template_scaffold.
-          # examples/exit_code and examples/sleeper pin inputs.mvm to this
-          # repo's own GitHub URL; their lock is resolved at build time via
-          # --override-input mvm path:... (mvmctl up source-checkout mode),
-          # not from a published release. No stable remote rev to lock against.
+          # Flakes that pin inputs.mvm to this repo are skipped by the
+          # content check above, not by path.
           done < <(find . -name flake.nix \
             -not -path './target/*' \
             -not -path './.git/*' \
             -not -path './node_modules/*' \
             -not -path './*/resources/template_scaffold/*' \
-            -not -path './tests/fixtures/plan-89-baseline/*' \
-            -not -path './examples/exit_code/*' \
-            -not -path './examples/sleeper/*')
+            -not -path './tests/fixtures/plan-89-baseline/*')
           exit "$fail"
 
   # ── Lane 9: Builder-VM image reproducibility (Plan 107 A2.5) ───────
@@ -823,7 +838,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo zigbuild --release --locked --target x86_64-unknown-linux-musl \
-            -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy
+            -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy \
+            --bin mvm-builderd
           # The flake reads `$MVM_HOST_BIN_DIR/<name>` (flat, by manifest name);
           # the cargo --bin outputs land here under those exact names.
           echo "MVM_HOST_BIN_DIR=$PWD/target/x86_64-unknown-linux-musl/release" >> "$GITHUB_ENV"
@@ -962,7 +978,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo zigbuild --release --locked --target "$MUSL_TARGET" \
-            -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy
+            -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy \
+            --bin mvm-builderd
           echo "MVM_HOST_BIN_DIR=$PWD/target/${MUSL_TARGET}/release" >> "$GITHUB_ENV"
 
       - name: Rebuild builder VM image from source at the target tag

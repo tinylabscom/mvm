@@ -16,7 +16,13 @@ Feature: Transient sandbox boot
     When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code --timeout 120"
     Then the command exits with code 7
 
-  @live
+  # This scenario does not pass today and is not expected to: a NIC-less guest
+  # has no raw socket, so busybox `ping` fails at `socket()` before a packet
+  # exists, and `--allow-host` admits TCP to :443 rather than ICMP. Host-mediated
+  # echo over vsock is what will make it true. Two details have to line up when
+  # it does: the invocation is `/bin/ping` by absolute path, so a PATH-order shim
+  # will not satisfy it, and `-c 1` must produce busybox's "1 received" wording.
+  @live @wip
   Scenario: machine run reaches an admitted host with ping
     When I run mvmctl in an isolated live home with "machine run --name bdd-egress-ping --image alpine --allow-host google.com --timeout 120 -- /bin/ping -c 1 google.com"
     Then the command exits with code 0
