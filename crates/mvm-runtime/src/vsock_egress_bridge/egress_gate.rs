@@ -27,9 +27,119 @@ pub enum EgressVerdict {
     /// may send to each and accept the first valid response.
     Allow { ips: Vec<IpAddr>, port: u16 },
     /// Refused — policy did not admit it (claim-10 default-deny / mandatory-deny).
-    Deny,
+    /// Carries which refusal it was, so a caller can tell the guest.
+    Deny(DenyReason),
     /// The guest's connect request was malformed (not `<ip>:<port>` or `<hostname>:<port>`).
     Malformed,
+}
+
+impl EgressVerdict {
+    /// Whether this verdict refuses the request, whatever the reason. For
+    /// callers (and assertions) that care that the gate said no, not why.
+    pub fn is_deny(&self) -> bool {
+        matches!(self, Self::Deny(_))
+    }
+}
+
+/// Which claim-10 refusal a [`EgressVerdict::Deny`] is.
+///
+/// The decision and its reason are one value because a caller that has to
+/// explain the refusal cannot recompute it: the gate holds the pins and the
+/// canonical rules, and by the time a 403 is being written they are gone. The
+/// distinctions here are the ones a caller acts on differently — a host absent
+/// from the allow-list is a different fix from the same host on an unadmitted
+/// port, which is the pair a bare `--allow-host <host>` (meaning `<host>:443`)
+/// most often lands a caller in.
+///
+/// This is deliberately about *policy shape*, not about the destination: it
+/// names hosts and ports the operator already wrote on the command line, never
+/// anything learned from the network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DenyReason {
+    /// The workload admits no egress at all (claim-10 default-deny).
+    NoEgressAdmitted,
+    /// The destination host is not in the allow-list — no admission pin exists
+    /// for it. `admitted_hosts` are the names that are pinned.
+    HostNotAdmitted {
+        /// The refused name, as the guest asked for it.
+        host: String,
+        /// Every host name the policy does admit.
+        admitted_hosts: Vec<String>,
+    },
+    /// The host is admitted but not on this port. `admitted_ports` are the
+    /// ports the policy admits for it.
+    PortNotAdmitted {
+        /// The admitted host.
+        host: String,
+        /// The refused port.
+        port: u16,
+        /// Ports the policy admits for `host`.
+        admitted_ports: Vec<u16>,
+    },
+    /// A numeric destination outside every rule, or one under mandatory-deny
+    /// (loopback / private / link-local) or a banned flow.
+    AddressNotAdmitted {
+        /// The refused address.
+        ip: IpAddr,
+        /// The refused port.
+        port: u16,
+    },
+    /// An unrestricted gate could not resolve the name.
+    ResolutionFailed {
+        /// The name that would not resolve.
+        host: String,
+    },
+}
+
+impl std::fmt::Display for DenyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoEgressAdmitted => {
+                write!(f, "egress is deny-all for this workload")
+            }
+            Self::HostNotAdmitted {
+                host,
+                admitted_hosts,
+            } if admitted_hosts.is_empty() => {
+                write!(f, "{host} is not admitted; no hosts are admitted")
+            }
+            Self::HostNotAdmitted {
+                host,
+                admitted_hosts,
+            } => {
+                write!(
+                    f,
+                    "{host} is not admitted; allowed: {}",
+                    admitted_hosts.join(", ")
+                )
+            }
+            Self::PortNotAdmitted {
+                host,
+                port,
+                admitted_ports,
+            } if admitted_ports.is_empty() => {
+                write!(f, "{host}:{port} is not admitted")
+            }
+            Self::PortNotAdmitted {
+                host,
+                port,
+                admitted_ports,
+            } => {
+                let allowed = admitted_ports
+                    .iter()
+                    .map(|p| format!("{host}:{p}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "{host}:{port} is not admitted; allowed: {allowed}")
+            }
+            Self::AddressNotAdmitted { ip, port } => {
+                write!(f, "{ip}:{port} is not admitted")
+            }
+            Self::ResolutionFailed { host } => {
+                write!(f, "could not resolve {host}")
+            }
+        }
+    }
 }
 
 /// Policy result for a guest DNS question.
@@ -144,9 +254,47 @@ impl EgressGate {
         self.decide_udp_request_with(target, resolve_hostname_ips)
     }
 
+    /// Host names the policy admits, in registry order. The pin registry is the
+    /// admission record — a name is pinned exactly when the allow-list named it —
+    /// so this is what a caller can suggest instead of the refused destination.
+    fn admitted_hosts(&self) -> Vec<String> {
+        self.pins.pins.keys().cloned().collect()
+    }
+
+    /// Ports the policy admits for an already-pinned host, ascending. Derived by
+    /// probing the canonical rules with the host's own pinned addresses, so it
+    /// reports what the gate would actually admit rather than re-parsing the
+    /// operator's input.
+    fn admitted_ports_for(&self, proto: &Proto, ips: &[IpAddr]) -> Vec<u16> {
+        let CanonicalEgress::Rules(rules) = &self.egress else {
+            return Vec::new();
+        };
+        let mut ports: Vec<u16> = rules
+            .iter()
+            .filter(|rule| rule.proto == *proto)
+            .filter(|rule| ips.iter().any(|ip| rule.net.contains(ip)))
+            // A rule is a range; report its endpoints rather than expanding a
+            // range that can span the whole port space.
+            .flat_map(|rule| [rule.port_lo, rule.port_hi])
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
     fn decide_addr_for_proto(&self, proto: Proto, ip: IpAddr, port: u16) -> EgressVerdict {
         if !self.egress.permits(&proto, ip, port) {
-            return EgressVerdict::Deny;
+            // A pinned address on the wrong port is the port-mismatch case even
+            // when the guest dialled it numerically, so name the host it belongs
+            // to rather than reporting a bare address.
+            return match self.pins.pin_containing(&ip) {
+                Some(pin) => EgressVerdict::Deny(DenyReason::PortNotAdmitted {
+                    host: pin.dest.clone(),
+                    port,
+                    admitted_ports: self.admitted_ports_for(&proto, &pin.ips),
+                }),
+                None => EgressVerdict::Deny(DenyReason::AddressNotAdmitted { ip, port }),
+            };
         }
         let ips = match self.pins.pin_containing(&ip) {
             Some(pin) => admitted_ips(&self.egress, &proto, &pin.ips, port),
@@ -188,22 +336,47 @@ impl EgressGate {
     where
         F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
     {
+        let pinned = self.pins.lookup(host).is_some();
         let candidates = if let Some(pin) = self.pins.lookup(host) {
             pin.ips.clone()
         } else if matches!(self.egress, CanonicalEgress::Unrestricted) {
             match resolve(host) {
                 Ok(ips) => ips,
-                Err(_) => return EgressVerdict::Deny,
+                Err(_) => {
+                    return EgressVerdict::Deny(DenyReason::ResolutionFailed {
+                        host: host.to_string(),
+                    });
+                }
             }
         } else {
-            return EgressVerdict::Deny;
+            return EgressVerdict::Deny(if self.admitted_hosts().is_empty() {
+                DenyReason::NoEgressAdmitted
+            } else {
+                DenyReason::HostNotAdmitted {
+                    host: host.to_string(),
+                    admitted_hosts: self.admitted_hosts(),
+                }
+            });
         };
         let ips = admitted_ips(&self.egress, &proto, &candidates, port);
-        if ips.is_empty() {
-            EgressVerdict::Deny
-        } else {
-            EgressVerdict::Allow { ips, port }
+        if !ips.is_empty() {
+            return EgressVerdict::Allow { ips, port };
         }
+        // Pinned but nothing admitted for this port is the port mismatch; an
+        // unpinned name only reaches here on an unrestricted gate, where the
+        // refusal came from the address filter rather than the allow-list.
+        EgressVerdict::Deny(if pinned {
+            DenyReason::PortNotAdmitted {
+                host: host.to_string(),
+                port,
+                admitted_ports: self.admitted_ports_for(&proto, &candidates),
+            }
+        } else {
+            DenyReason::HostNotAdmitted {
+                host: host.to_string(),
+                admitted_hosts: self.admitted_hosts(),
+            }
+        })
     }
 
     /// Resolve an admitted DNS name through the same policy seam as TCP egress.
@@ -281,11 +454,85 @@ mod tests {
         }
     }
 
+    /// The refusal a caller most often meets, and the one that reads as a
+    /// broken network rather than a policy answer: a bare `--allow-host <host>`
+    /// means `<host>:443`, so an `http://` URL asks for port 80 and is correctly
+    /// denied. The verdict has to carry enough to say which port was asked for
+    /// and which the policy admits, because that difference is the whole answer.
+    #[test]
+    fn wrong_port_on_an_admitted_host_explains_the_port_mismatch() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec!["93.184.216.34".parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort {
+            host: "example.com".into(),
+            port: 443,
+        }]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        let verdict = gate.decide_request("example.com:80");
+        let EgressVerdict::Deny(reason) = verdict else {
+            panic!("port 80 must be denied, got {verdict:?}");
+        };
+        assert_eq!(
+            reason,
+            DenyReason::PortNotAdmitted {
+                host: "example.com".to_string(),
+                port: 80,
+                admitted_ports: vec![443],
+            }
+        );
+        let rendered = reason.to_string();
+        assert!(rendered.contains("example.com:80"), "{rendered}");
+        assert!(rendered.contains("example.com:443"), "{rendered}");
+    }
+
+    /// A host absent from the allow-list is a different answer from a wrong
+    /// port, and naming the admitted hosts is what turns it into one.
+    #[test]
+    fn unlisted_host_names_the_hosts_that_are_admitted() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec!["93.184.216.34".parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort {
+            host: "example.com".into(),
+            port: 443,
+        }]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        let verdict = gate.decide_request("evil.test:443");
+        let EgressVerdict::Deny(reason) = verdict else {
+            panic!("an unlisted host must be denied, got {verdict:?}");
+        };
+        assert_eq!(
+            reason,
+            DenyReason::HostNotAdmitted {
+                host: "evil.test".to_string(),
+                admitted_hosts: vec!["example.com".to_string()],
+            }
+        );
+        assert!(reason.to_string().contains("example.com"));
+    }
+
     #[test]
     fn default_deny_refuses_everything() {
         let gate = EgressGate::default_deny();
-        assert_eq!(gate.decide_request("1.1.1.1:443"), EgressVerdict::Deny);
-        assert_eq!(gate.decide_request("93.184.216.34:80"), EgressVerdict::Deny);
+        assert!(gate.decide_request("1.1.1.1:443").is_deny());
+        assert!(gate.decide_request("93.184.216.34:80").is_deny());
     }
 
     #[test]
@@ -299,15 +546,15 @@ mod tests {
             }
         );
         // Wrong port / wrong host → still denied.
-        assert_eq!(gate.decide_request("1.1.1.1:80"), EgressVerdict::Deny);
-        assert_eq!(gate.decide_request("8.8.8.8:443"), EgressVerdict::Deny);
+        assert!(gate.decide_request("1.1.1.1:80").is_deny());
+        assert!(gate.decide_request("8.8.8.8:443").is_deny());
     }
 
     #[test]
     fn ssh_flow_is_refused_even_when_listed() {
         // A grant that names port 22 must still be refused (claim-10 banned-SSH).
         let gate = EgressGate::new(CanonicalEgress::Rules(vec![allow_rule("1.1.1.1/32", 22)]));
-        assert_eq!(gate.decide_request("1.1.1.1:22"), EgressVerdict::Deny);
+        assert!(gate.decide_request("1.1.1.1:22").is_deny());
     }
 
     #[test]
@@ -344,7 +591,7 @@ mod tests {
                 port: 5353,
             }
         );
-        assert_eq!(gate.decide_request("192.0.2.1:5353"), EgressVerdict::Deny);
+        assert!(gate.decide_request("192.0.2.1:5353").is_deny());
     }
 
     #[test]
@@ -371,7 +618,7 @@ mod tests {
         let verdict = gate.decide_hostname_request(Proto::Tcp, "cache.nixos.org", 443, |_host| {
             Ok(vec!["151.101.1.91".parse().unwrap()])
         });
-        assert_eq!(verdict, EgressVerdict::Deny);
+        assert!(verdict.is_deny());
     }
 
     /// The gate composes with the real `NetworkPolicy` projection — the path the
@@ -386,9 +633,10 @@ mod tests {
         let now = "2026-01-01T00:00:00Z";
 
         let deny = canonicalize_network_policy(&NetworkPolicy::deny_all(), &pins, now).unwrap();
-        assert_eq!(
-            EgressGate::new(deny).decide_request("1.1.1.1:443"),
-            EgressVerdict::Deny
+        assert!(
+            EgressGate::new(deny)
+                .decide_request("1.1.1.1:443")
+                .is_deny()
         );
 
         let open = canonicalize_network_policy(&NetworkPolicy::unrestricted(), &pins, now).unwrap();
@@ -412,7 +660,7 @@ mod tests {
         let now = "2026-01-01T00:00:00Z";
 
         let deny = EgressGate::from_network_policy(&NetworkPolicy::deny_all(), &pins, now);
-        assert_eq!(deny.decide_request("1.1.1.1:443"), EgressVerdict::Deny);
+        assert!(deny.decide_request("1.1.1.1:443").is_deny());
 
         let open = EgressGate::from_network_policy(&NetworkPolicy::unrestricted(), &pins, now);
         assert_eq!(
@@ -430,10 +678,7 @@ mod tests {
             port: 443,
         }]);
         let gate = EgressGate::from_network_policy(&unpinned, &pins, now);
-        assert_eq!(
-            gate.decide_request("93.184.216.34:443"),
-            EgressVerdict::Deny
-        );
+        assert!(gate.decide_request("93.184.216.34:443").is_deny());
     }
 
     /// An IP-host allow-list with the matching pin admits exactly that
@@ -464,8 +709,8 @@ mod tests {
                 port: 19099
             }
         );
-        assert_eq!(gate.decide_request("192.168.4.23:80"), EgressVerdict::Deny);
-        assert_eq!(gate.decide_request("8.8.8.8:19099"), EgressVerdict::Deny);
+        assert!(gate.decide_request("192.168.4.23:80").is_deny());
+        assert!(gate.decide_request("8.8.8.8:19099").is_deny());
     }
 
     /// DNS-over-vsock: a `socks5h` client sends a *hostname*; the gate resolves it
@@ -501,15 +746,9 @@ mod tests {
             }
         );
         // right host, disallowed port → deny.
-        assert_eq!(
-            gate.decide_request("api.example.test:80"),
-            EgressVerdict::Deny
-        );
+        assert!(gate.decide_request("api.example.test:80").is_deny());
         // unknown host (no pin) → deny, not malformed.
-        assert_eq!(
-            gate.decide_request("evil.example.test:443"),
-            EgressVerdict::Deny
-        );
+        assert!(gate.decide_request("evil.example.test:443").is_deny());
         // unparseable → malformed.
         assert_eq!(
             gate.decide_request("not-a-target"),
@@ -566,9 +805,9 @@ mod tests {
                 assert_eq!(ips, vec![v4, v6]);
                 assert_eq!(port, 443);
             }
-            EgressVerdict::Deny | EgressVerdict::Malformed => panic!("expected allow"),
+            EgressVerdict::Deny(_) | EgressVerdict::Malformed => panic!("expected allow"),
         }
-        assert_eq!(gate.decide_request("example.com:80"), EgressVerdict::Deny);
+        assert!(gate.decide_request("example.com:80").is_deny());
     }
 
     /// A guest that resolved a dual-stack pinned host locally (macOS getaddrinfo
@@ -606,7 +845,7 @@ mod tests {
                     "numeric IPv6 connect must offer the pinned IPv4 sibling first"
                 );
             }
-            EgressVerdict::Deny | EgressVerdict::Malformed => {
+            EgressVerdict::Deny(_) | EgressVerdict::Malformed => {
                 panic!("expected Allow with fallover candidates")
             }
         }

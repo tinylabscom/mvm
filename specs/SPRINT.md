@@ -777,13 +777,34 @@ with `wget http://example.com`, and bare `--allow-host example.com` with
 `wget https://example.com`, both return the real page body from inside the
 guest.
 
-One diagnosability note worth a follow-up. A bare `--allow-host <host>` means
+One diagnosability note, now closed. A bare `--allow-host <host>` means
 `<host>:443` (`parse_allow_host` defaults to the https port), so pairing it with
 an `http://` URL is a port mismatch and the gate denies — correctly. What the
-guest sees is `HTTP/1.1 403 Forbidden` with `Content-Length: 0` from
-`http_forward::write_proxy_error_*`, carrying no reason, which reads as "egress
-is broken" rather than "port 80 was not admitted". The host knows exactly which
-`EgressVerdict::Deny` it took; none of it reaches the caller.
+guest saw was `HTTP/1.1 403 Forbidden` with `Content-Length: 0` and no reason,
+which reads as "egress is broken" rather than "port 80 was not admitted"; the
+host knew exactly which `EgressVerdict::Deny` it took and discarded it. That cost
+three rounds of misdiagnosis in this very session, including two wrong
+attributions of the refusing component.
+
+`EgressVerdict::Deny` now carries a typed `DenyReason` (no-egress / host not
+admitted / port not admitted / address not admitted / resolution failed), so a
+deny site cannot fail to say why — the compiler asks at each one.
+`http_forward` renders it into the 403 body and logs it host-side; the raw-TCP
+and SOCKS-UDP paths, whose wire formats have no room for a reason, log it rather
+than dropping it. Live: `--allow-host example.com` with `http://example.com`
+answers
+
+```
+HTTP/1.1 403 Forbidden
+Content-Type: text/plain
+
+example.com:80 is not admitted; allowed: example.com:443
+```
+
+Remaining gap, deliberately not chased here: busybox `wget` prints only the
+status line and discards the body, so a wget user still needs the host log
+(`/tmp/mvm-substitution-endpoint-<vm>.log`). Surfacing a failed run's egress
+denials through `mvmctl` itself is the follow-up.
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 

@@ -108,8 +108,17 @@ where
         EgressVerdict::Allow { ips, port } => {
             splice(guest, &target, &ips, port, leftover, timeout).await
         }
-        EgressVerdict::Deny | EgressVerdict::Malformed => {
-            eprintln!("raw-egress: refusing target {target}");
+        // A raw tunnel's only reply is a one-byte nack, so the reason cannot
+        // reach the guest here the way it does on the HTTP forward path. Log it
+        // host-side rather than discarding it — otherwise the operator's only
+        // signal is a connection that failed.
+        verdict @ (EgressVerdict::Deny(_) | EgressVerdict::Malformed) => {
+            match verdict {
+                EgressVerdict::Deny(reason) => {
+                    eprintln!("raw-egress: refusing target {target}: {reason}")
+                }
+                _ => eprintln!("raw-egress: refusing malformed target {target}"),
+            }
             // Refused: nack the guest and close without ever opening a host socket.
             write_connect_ack_async(&mut guest, ConnectAck::Fail).await?;
             Ok(())
@@ -324,8 +333,15 @@ fn handle_raw_conn_blocking(
     let (ips, port) =
         match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
             EgressVerdict::Allow { ips, port } => (ips, port),
-            EgressVerdict::Deny | EgressVerdict::Malformed => {
-                eprintln!("raw-egress: refusing target {target}");
+            // As on the async path: a raw tunnel answers with a one-byte nack,
+            // so the reason is logged host-side rather than discarded.
+            verdict @ (EgressVerdict::Deny(_) | EgressVerdict::Malformed) => {
+                match verdict {
+                    EgressVerdict::Deny(reason) => {
+                        eprintln!("raw-egress: refusing target {target}: {reason}")
+                    }
+                    _ => eprintln!("raw-egress: refusing malformed target {target}"),
+                }
                 write_connect_ack_blocking(&mut guest, ConnectAck::Fail)?;
                 return Ok(());
             }
