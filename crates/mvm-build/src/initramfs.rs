@@ -1083,6 +1083,32 @@ mod tests {
         assert_eq!(resolved.image_path, artifact.image_path);
     }
 
+    /// Shell double that fails loudly if the warm-cache resolve below ever
+    /// reaches for the shell — the point of that test is that a warm cache
+    /// resolves without one. A silent no-op double is what let the old
+    /// empty-cache resolve test fall into a real build and hang, so an empty
+    /// cache is exercised through `resolve_or_seed_from_default_cache`
+    /// instead of this path.
+    struct PanicShell;
+
+    impl ShellEnvironment for PanicShell {
+        fn shell_exec(&self, _script: &str) -> anyhow::Result<()> {
+            panic!("a warm-cache resolve must not run shell commands")
+        }
+
+        fn shell_exec_stdout(&self, _script: &str) -> anyhow::Result<String> {
+            panic!("a warm-cache resolve must not run shell commands")
+        }
+
+        fn shell_exec_visible(&self, _script: &str) -> anyhow::Result<()> {
+            panic!("a warm-cache resolve must not run shell commands")
+        }
+
+        fn log_info(&self, _msg: &str) {}
+
+        fn log_success(&self, _msg: &str) {}
+    }
+
     #[test]
     fn warm_cache_resolve_skips_any_build_or_download() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1092,10 +1118,14 @@ mod tests {
         install_initramfs_into_cache(&source, &cache_root, "0.18.0", GuestArch::Aarch64).unwrap();
 
         // A warm cache resolves without touching the shell environment
-        // (NoopShell would silently succeed anyway) and without network.
-        let artifact =
-            resolve_or_build_local_initramfs(&NoopShell, &cache_root, "0.18.0", GuestArch::Aarch64)
-                .unwrap();
+        // (PanicShell proves it) and without network.
+        let artifact = resolve_or_build_local_initramfs(
+            &PanicShell,
+            &cache_root,
+            "0.18.0",
+            GuestArch::Aarch64,
+        )
+        .unwrap();
         assert_eq!(
             artifact.image_path,
             cache_root
