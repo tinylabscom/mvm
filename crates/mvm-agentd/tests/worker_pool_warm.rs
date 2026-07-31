@@ -68,6 +68,33 @@ fn dispatch(pool: &Arc<WorkerPool>, payload: &[u8]) -> DispatchOutcome {
         .expect("dispatch returns outcome")
 }
 
+/// Block until `cond` holds, or fail the test.
+///
+/// A fixed sleep used as a readiness wait is wrong in both directions:
+/// too short and the test fails on a loaded host for no reason, too long
+/// and every run pays the worst case. The deadline here is generous
+/// because it is only ever reached when something is genuinely broken;
+/// the poll interval is what sets the common-case cost.
+fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    const LIMIT: Duration = Duration::from_secs(10);
+    const POLL: Duration = Duration::from_millis(5);
+    let deadline = Instant::now() + LIMIT;
+    while Instant::now() < deadline {
+        if cond() {
+            return;
+        }
+        std::thread::sleep(POLL);
+    }
+    panic!("timed out after {LIMIT:?} waiting for {what}");
+}
+
+/// True once at least one slot is mid-call.
+fn any_slot_busy(pool: &Arc<WorkerPool>) -> bool {
+    pool.snapshot()
+        .iter()
+        .any(|s| matches!(s, SlotSnapshot::Busy))
+}
+
 fn idle_pid(pool: &Arc<WorkerPool>) -> u32 {
     let snap = pool.snapshot();
     snap.iter()
@@ -157,31 +184,44 @@ fn set_idle_timeout_returns_previous_value() {
 
 #[test]
 fn idle_timeout_zero_disables_recycle() {
-    // With timeout=0, even if the worker has been "idle" for a while,
-    // sweep should not touch it. PID remains stable.
+    // With timeout=0 no amount of idleness recycles. Sweeping against an
+    // instant an hour out states that far more strongly than sleeping
+    // 100ms did, and costs nothing.
     let pool = start_pool(cfg(1, 100, 1024));
+    let started = Instant::now();
     let pid_before = idle_pid(&pool);
     assert_eq!(pool.set_idle_timeout(0), 0);
-    std::thread::sleep(Duration::from_millis(100));
-    pool.sweep_idle();
+    pool.sweep_idle_at(started + Duration::from_secs(3600));
     assert_eq!(idle_pid(&pool), pid_before, "no recycle when timeout=0");
 }
 
 #[test]
-fn idle_timeout_recycles_idle_workers_past_threshold() {
-    // 1-second idle timeout. A freshly-spawned worker, given 1.5
-    // seconds of nothing-to-do, should be recycled by an explicit
-    // sweep — `sweep_idle` is the deterministic test hook for what
-    // the background recycler thread does on its 10s tick.
+fn idle_timeout_recycles_idle_workers_only_past_the_threshold() {
+    // 60-second idle timeout, swept against both sides of it.
+    //
+    // The under-threshold half is the half that discriminates: a sweep
+    // that recycled everything unconditionally would pass a
+    // past-threshold-only test. Reaching it by sleeping is not an
+    // option — the wait would have to be shorter than the timeout, so
+    // the timeout would have to be short, and a short timeout is
+    // precisely what makes the other half racy.
     let pool = start_pool(cfg(1, 100, 1024));
+    let started = Instant::now();
     let pid_before = idle_pid(&pool);
-    pool.set_idle_timeout(1);
-    std::thread::sleep(Duration::from_millis(1500));
-    pool.sweep_idle();
-    let pid_after = idle_pid(&pool);
+    pool.set_idle_timeout(60);
+
+    pool.sweep_idle_at(started + Duration::from_secs(59));
+    assert_eq!(
+        idle_pid(&pool),
+        pid_before,
+        "a worker idle for less than the timeout must survive the sweep"
+    );
+
+    pool.sweep_idle_at(started + Duration::from_secs(61));
     assert_ne!(
-        pid_after, pid_before,
-        "expected idle-recycle to replace the worker"
+        idle_pid(&pool),
+        pid_before,
+        "expected idle-recycle to replace the worker past the timeout"
     );
 }
 
@@ -191,6 +231,7 @@ fn idle_timeout_skips_busy_workers() {
     // it — recycling a busy worker would yank the call's pipe and
     // surface as a transport error to the caller.
     let pool = start_pool_with_behavior(cfg(1, 100, 1024), Some("slow_secs=2"));
+    let started = Instant::now();
     pool.set_idle_timeout(1);
 
     // Dispatch a 2s call on a background thread; it'll be Busy
@@ -202,10 +243,14 @@ fn idle_timeout_skips_busy_workers() {
             .expect("dispatch")
     });
 
-    // Give the worker time to enter Busy state (acquire flips the
-    // slot) and pass the 1s idle threshold from spawn.
-    std::thread::sleep(Duration::from_millis(1200));
-    pool.sweep_idle();
+    // Two separate conditions, so two separate mechanisms: wait for the
+    // slot to actually flip to Busy, then sweep against an instant well
+    // past the idle threshold. The old single 1200ms sleep stood in for
+    // both and guaranteed neither.
+    wait_until("the dispatched call to occupy the slot", || {
+        any_slot_busy(&pool)
+    });
+    pool.sweep_idle_at(started + Duration::from_secs(60));
 
     // Slot should still be Busy (the call is in-flight). If the
     // sweep had recycled, the slot would be Idle with a fresh PID.
@@ -335,7 +380,6 @@ fn fifo_queue_serializes_callers() {
     wpc.max_queue_depth = Some(4);
     let pool = start_pool(wpc);
     let pool_clone = Arc::clone(&pool);
-    let start = Instant::now();
     let mut handles = Vec::new();
     for i in 0..5u8 {
         let p = Arc::clone(&pool_clone);
@@ -351,9 +395,16 @@ fn fifo_queue_serializes_callers() {
     for out in &outs {
         assert!(matches!(out.outcome, WorkerOutcome::Exit { code: 0 }));
     }
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "5 quick calls under pool_size=1 finish promptly"
+    // Serialization is the claim, so assert serialization: one slot,
+    // and every one of the five calls went through it. The previous
+    // `start.elapsed() < 10s` asserted nothing about ordering — it was
+    // a wall-clock budget, and the only thing it ever caught was a
+    // loaded CI host.
+    let pid = idle_pid(&pool);
+    assert_eq!(
+        idle_call_count(&pool, pid),
+        5,
+        "all five callers must have queued through the single worker"
     );
 }
 
@@ -388,11 +439,16 @@ fn queue_full_returns_error() {
     let p1 = Arc::clone(&pool);
     let p2 = Arc::clone(&pool);
     let h1 = std::thread::spawn(move || p1.dispatch(b"a".to_vec(), 10, Vec::new()));
-    // Give the first dispatch time to enter the worker (occupy slot).
-    std::thread::sleep(Duration::from_millis(200));
+    // The first caller must hold the only slot before the second can
+    // queue behind it; the second must be parked in the queue before a
+    // third can overflow it. Both are observable, so neither is timed.
+    wait_until("the first caller to occupy the only slot", || {
+        any_slot_busy(&pool)
+    });
     let h2 = std::thread::spawn(move || p2.dispatch(b"b".to_vec(), 10, Vec::new()));
-    // Give the second dispatch time to enter the queue.
-    std::thread::sleep(Duration::from_millis(200));
+    wait_until("the second caller to park in the queue", || {
+        pool.queued_waiters() == 1
+    });
 
     // Third should hit QueueFull.
     let res = pool.dispatch(b"c".to_vec(), 10, Vec::new());
@@ -455,8 +511,11 @@ fn wait_for_ready_succeeds_against_passing_probe() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let probe = write_probe(tmp.path(), "after_start.sh", "#!/bin/sh\nexit 0\n");
     let pool = start_pool_unready(cfg(1, 100, 1024));
+    // Generous bound: this test asserts the probe *succeeds*, so the
+    // timeout is only here to stop a hang. Sizing it tightly turns a
+    // busy host into a red test without telling anyone anything.
     let cfg_probe = ReadinessConfig::new(probe)
-        .with_timeout(Duration::from_secs(2))
+        .with_timeout(Duration::from_secs(60))
         .with_interval(Duration::from_millis(50));
     pool.wait_for_ready(&cfg_probe).expect("ready");
     assert!(pool.is_ready());
@@ -477,8 +536,11 @@ fn wait_for_ready_succeeds_after_initial_failures() {
     );
     let probe = write_probe(tmp.path(), "after_start.sh", &body);
     let pool = start_pool_unready(cfg(1, 100, 1024));
+    // Generous for the same reason as the passing-probe test: three
+    // probe attempts at a 50ms interval, so the subject is the retry,
+    // not the deadline.
     let cfg_probe = ReadinessConfig::new(probe)
-        .with_timeout(Duration::from_secs(3))
+        .with_timeout(Duration::from_secs(60))
         .with_interval(Duration::from_millis(50));
 
     // While warming, dispatch should fail-closed.

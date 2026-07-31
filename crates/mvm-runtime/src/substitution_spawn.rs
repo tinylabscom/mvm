@@ -563,25 +563,36 @@ mod tests {
 
         assert!(result.is_err(), "invalid MVM_HOME must fail sidecar setup");
         assert!(!state_dir.join(SUBST_PID_FILE).exists());
-        for _ in 0..100 {
-            if stopped.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // The stub is a shell script: it has to take the SIGTERM, run the
+        // trap body and write the sentinel. One second of budget for that
+        // is not a property of the rollback, it is a bet on how loaded the
+        // host is. The deadline here is only a hang guard, so it is
+        // generous; the poll interval sets the common-case cost.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !stopped.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        if !stopped.exists()
-            && let Ok(pid) = std::fs::read_to_string(&pid_capture)
+        let sentinel_written = stopped.exists();
+
+        // Reap the stub whatever happened, but only after reading the
+        // sentinel. SIGKILL cannot fire a TERM trap, so killing first
+        // turns "the stub was slow" into "the sentinel can never appear"
+        // — the previous order did exactly that, then asserted on the
+        // outcome it had just foreclosed.
+        if let Ok(pid) = std::fs::read_to_string(&pid_capture)
             && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
         {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }
         }
+        std::fs::remove_dir_all(&dir).ok();
+
         assert!(
-            stopped.exists(),
+            sentinel_written,
             "rollback must terminate the endpoint process"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // Build a minimal params (empty secrets, default redaction, UDS transport,
