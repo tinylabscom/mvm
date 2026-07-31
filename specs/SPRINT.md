@@ -69,6 +69,19 @@
       Also extracted the shared ledger parser into `xtask/src/claims_ledger.rs`
       so both gates read one table. `specs/plans/272-mutation-tested-claim-witnesses.md`.
       307/307 xtask nextest.
+
+      **Now also owns the witnesses this gate cannot reach,** folded in from
+      plan 274 whose WS3/WS4 are struck. That plan's prose named three such
+      claims; the gate derives four. The fourth, MVM-SEC-16, is qualitatively
+      different — its witnesses are ordinary Rust functions skipped only for
+      living in `crates/mvm-hostd/tests/`, so it needs a planted defect in the
+      enforcement code rather than a CI-lane falsification. Keeping the sweep
+      beside the gate that computes the list is what stops the two diverging
+      again. `--run` now confines `HOME` and `MVM_HOME` to a temp root deleted
+      on drop (#1946), applied where cargo-mutants is spawned so the nightly
+      job and `just mutation-witnesses` cannot drift apart on it;
+      `CARGO_HOME`/`RUSTUP_HOME` are carried across so an hours-long run does
+      not re-download the registry and toolchain.
 - [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
       only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
       builder image / runtime overlay from the host's shared cache), so a test
@@ -193,13 +206,23 @@
       concurrency flake at all but a macOS-only fixture bug — an accepted
       socket inherits `O_NONBLOCK` there but not on Linux, so the fixture read
       an empty request and answered 404. Fixed; that deferral is closed.
-      **WS3 re-scoped:** `check-mutation-witnesses` (#1934) shipped the
-      mutation-testing idea mid-flight and does it better than this plan's
-      WS4, which is struck. WS3 is now the three claims whose only witness is
-      a CI lane (MVM-SEC-04/05/07), which mutation testing structurally cannot
-      reach, plus triaging #1934's first full run — blocked on #1946, since
-      `--run` currently executes mutated security code against the real
-      `~/.mvm`.
+      **WS3 and WS4 struck; plan closed.** `check-mutation-witnesses`
+      (#1934) shipped the mutation-testing idea mid-flight and does it
+      better, so both workstreams fold into
+      `specs/plans/272-mutation-tested-claim-witnesses.md` §WS-3. The
+      deciding argument was a live drift: WS3 hand-copied the list of
+      claims mutation testing cannot reach and recorded **three**
+      (MVM-SEC-04/05/07), while the gate *derives* that list from the
+      ledger and reports **four** — it also names MVM-SEC-16, whose three
+      witnesses are ordinary Rust functions cargo-mutants skips only
+      because they live in `crates/mvm-hostd/tests/`. Claim 16 therefore
+      needs a planted defect in the enforcement code rather than a CI-lane
+      falsification, which is a different task from the other three. The
+      corrected four-claim sweep now sits next to the gate that computes
+      the list, so the two cannot drift again. #1946 is fixed: `--run`
+      confines `HOME` and `MVM_HOME` to a temp root, applied where
+      cargo-mutants is spawned so the nightly job and the local recipe
+      share one implementation.
 
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through

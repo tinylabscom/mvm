@@ -1,6 +1,9 @@
 # Plan 272: Mutation-tested claim witnesses
 
-**Status:** WS-1 (gate + surface pin) implemented; WS-2 (full-surface baseline) pending a nightly run.
+**Status:** WS-1 (gate + surface pin) shipped. WS-2 (full-surface baseline)
+unblocked — the `--run` sandbox landed; the baseline itself is pending a
+nightly run. WS-3 (the four claims this gate cannot reach) folded in from
+plan 274, whose WS3/WS4 are struck in favour of this plan.
 **Owner:** mvm core.
 **Depends on:** the claims ledger in `specs/adrs/001-microvm-security-posture.md`
 (`<!-- claims-catalog:begin -->`) and `xtask check-claim-catalog`.
@@ -144,9 +147,21 @@ within a day", not "within a PR".
 - [x] Seed `accepted_misses` from a real run of the claim-10 anchor
       (`crates/mvm-protocol/src/policy/network_policy.rs`): 52 mutants,
       35 caught, 12 unviable, 1 timeout, **4 missed**.
+- [x] Confine `--run` to a throwaway `HOME` + `MVM_HOME`. A mutant is the
+      enforcement code with a check removed, so running the suite against
+      one can mint a signer key at whatever path the mutated logic picks
+      and leave audit state behind; neither the nightly job nor
+      `just mutation-witnesses` isolated the state roots. The sandbox is
+      applied where cargo-mutants is spawned, so both entry points get it
+      from one place. `CARGO_HOME`/`RUSTUP_HOME` are carried across, or a
+      moved `HOME` would re-download the registry and toolchain on an
+      hours-long run.
 - [ ] Populate `accepted_misses` for the remaining 25 surface files from
       the first full nightly runs, then drop `continue-on-error` so a new
-      hole fails the lane.
+      hole fails the lane. **Triage rule:** a **real hole** gets the test
+      that catches it; an **equivalent mutant** gets an `accepted_misses`
+      entry with a stated reason. `check_accepted_reasons` already refuses
+      an unexplained entry, so the reason is enforced, not encouraged.
 - [ ] Triage the four seeded misses. What the first run already shows:
   - [ ] `is_banned_ssh_port -> false` survives. Only the negative
         direction is asserted inside mvm-protocol, so pinning the
@@ -163,7 +178,43 @@ within a day", not "within a PR".
         makes the policy *stricter*: a functional coverage gap, not a
         security hole. Worth recording as exactly that.
 
-### WS-3 — deferred follow-ups
+### WS-3 — the witnesses this gate cannot reach (folded in from plan 274)
+
+Plan 274's WS3 covered the same ground and is struck in favour of this
+section; 274 keeps only WS1 (ABI layout contracts) and WS2 (the nextest
+profile), both shipped. The merge is not tidiness: 274 hand-copied the
+list of unreachable claims into prose and recorded **three**, while this
+gate *derives* the list from the ledger and reports **four**. Keeping the
+follow-up next to the code that computes it is what stops the two from
+drifting again.
+
+`check-mutation-witnesses` reports four claims reaching no mutable file,
+for two different reasons — and the reason decides the treatment:
+
+| Claim | Why unreachable | How to falsify it |
+| --- | --- | --- |
+| 4 (no `do_exec` in prod) | no `fn:` witness — a symbol grep | build the agent *with* `interactive`, confirm the job fails |
+| 5 (fuzz targets) | no `fn:` witness — a fuzz lane | break the `GuestRequest` framing, confirm a short local run finds it |
+| 7 (dependency audit) | no `fn:` witness — a `cargo deny` job | add a crate with a disallowed licence, confirm `cargo deny` fails |
+| 16 (egress substitution) | **has** `fn:` witnesses, but all three live in `crates/mvm-hostd/tests/`, which cargo-mutants does not mutate | plant a defect in the *enforcement* code and confirm the integration test fires |
+
+Claim 16 is the one 274 missed, and it is not a CI-lane falsification at
+all — its witnesses are real Rust functions that mutation testing skips
+only because they sit in a test target. It needs the hand planted-defect
+treatment that 274's WS3 originally described for everything.
+
+- [ ] Falsify claims 4, 5 and 7 against their CI lanes. Each needs a
+      pushed branch to observe, since the lane is the thing under test.
+      Record wall-clock-to-detect for claim 5: a lane that needs hours to
+      find a planted defect is weaker evidence than one that finds it in
+      seconds.
+- [ ] Falsify claim 16 by planting a defect in the egress-substitution
+      enforcement path and confirming
+      `crates/mvm-hostd/tests/egress_secret_leak_gate.rs` goes red.
+- [ ] Record all four in `specs/VERIFICATION.md` §"Falsifiability". A
+      *did not fire* is a finding, not a failed task.
+
+### WS-4 — deferred follow-ups
 
 - [ ] Consolidate the seven private `walk()` helpers duplicated across
       `xtask/src/check_*.rs` into one shared xtask util. This plan adds no
