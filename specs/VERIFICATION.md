@@ -135,10 +135,31 @@ A verdict this code has never seen is not evidence that anything ran.
 | `ensure_mutants_actually_ran` | a baseline verdict string the code has never seen | yes |
 | `ensure_mutants_actually_ran` | a passing baseline with `total_mutants: 0` | yes |
 
-**Every surviving mutant was a real hole.** No equivalent mutants were
-found on the first full pass; `accepted_misses` did not grow. Each of the
-tests below was verified by planting its mutant by hand and confirming the
-new test fails, then reverting.
+**A witness can also resolve to a file that is not its subject.** The
+surface maps each `fn:` witness to its declaring file, assuming the file
+is the enforcement code the witness guards. That holds for a cohesive
+module and fails for a large multi-purpose binary.
+`crates/mvm-build/src/bin/mvm-host-vm-init.rs` is 4476 lines and sits on
+claim 2's surface only because the witness test
+`virtiofs_mount_flags_keep_workspace_read_only` is declared in it. That
+witness guards one function, which is fully caught; the file's other 164
+surviving mutants are vsock framing, nix-store seeding and ext4 probing,
+none of which claim 2 asserts.
+
+Narrowing a claim's surface is a weakening move that reads as routine in
+a diff, so `SurfaceScope` makes it expensive rather than convenient: a
+scope cannot be produced by resolution, only added by hand to the
+committed baseline; `why` and `excluded_tracked_by` are both mandatory
+and enforced exactly as an accepted miss's reason is; and a re-pin carries
+scopes forward so maintenance cannot silently widen one back out. The 164
+excluded mutants are filed as #2006 with the measurement attached.
+
+**Most surviving mutants were real holes.** Each of the tests below was
+verified by planting its mutant by hand and confirming the new test fails,
+then reverting. Two categories of genuine non-hole turned up, both
+recorded as accepted misses naming their mechanism rather than asserted to
+be equivalent: a read-buffer size (`64 * 1024` versus `64 + 1024`, same
+digest either way) and the feature-gated mutants above.
 
 | Claim | File | Survivors | Sharpest one |
 | --- | --- | --- | --- |
@@ -151,6 +172,28 @@ new test fails, then reverting.
 The four `network_policy` entries had been sitting in `accepted_misses`
 recorded as untriaged. They were holes, so they are closed rather than
 explained.
+
+**A mutant in code the run does not compile cannot be killed by
+anything.** cargo-mutants generates mutants by parsing source, and `syn`
+does not evaluate `cfg`. A function behind a feature the mutation build
+does not enable is therefore mutated, never compiled, and reported as a
+survivor — indistinguishable from a real hole, and unkillable by any test.
+
+Measured on `overlay_mode_of`, which copies a staged file's permission
+bits into the runtime overlay and lives behind the non-default
+`pure-mkfs`:
+
+| Build | `& 0o7777` → `| 0o7777` |
+| --- | --- |
+| default features — what the lane runs | survives, against 720 passing tests |
+| `--features pure-mkfs` | caught |
+
+The mutant is not cosmetic: it makes every file in the overlay
+world-writable and setuid. The test that catches it exists and passes;
+the lane simply does not build the code. Until the run compiles the
+features its surface needs, these are recorded as accepted misses naming
+that mechanism, which is falsifiable — enable the feature and they become
+catchable.
 
 **One measurement was of the wrong thing.** `mvm-build`'s baseline timed
 out because `runtime_overlay_build.rs` shells out to a real `nix build`.
