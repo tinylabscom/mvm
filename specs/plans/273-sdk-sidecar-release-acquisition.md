@@ -118,7 +118,7 @@ Add a scenario to `features/suites/s21_host_services/sdk_sidecar_attachment.feat
 
 ## Deferred follow-ups (not built in this plan)
 
-- **Cosign-verified sidecar.** The overlay's artifacts are sha256-pinned but not signature-verified at fetch. Extending the `manifest-verify` cosign path to both the overlay and the sidecar is one workstream covering both, and should not be bolted onto the sidecar alone.
+- **Cosign-verified sidecar.** ~~The overlay's artifacts are sha256-pinned but not signature-verified at fetch.~~ **Closed by `specs/plans/277-release-artifact-signature-verification.md`** — the overlay and the sidecar are both verified against the release workflow's keyless signing identity before extraction, as one workstream covering both.
 - **Sidecar closure minimization.** The 8 MiB allocation is a fixed cap, not a measured floor; the loader + `libc.so.6` + `libgcc_s.so.1` + the cdylib have not been closure-audited the way the base rootfs was. Worth a measurement pass before the cap is treated as tight.
 
 ## Self-review

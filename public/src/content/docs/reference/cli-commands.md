@@ -867,7 +867,7 @@ All commands accept these global options:
 | `MVM_MCP_MAX_INFLIGHT` | Max concurrent in-flight `tools/call run` invocations | `8` |
 | `MVM_MCP_MEM_CEILING_MIB` | Per-call memory ceiling enforced before dispatching to a microVM | `8192` |
 | `MVM_TENANT_KEY_<ID>` | Compatibility hook for tenant-scoped key material consumed by shared policy/keystore primitives. Fleet operators should configure tenant keys through `mvmd`. | None |
-| `MVM_SKIP_COSIGN_VERIFY` | Set to `1` to bypass cosign signature verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production. | Unset |
+| `MVM_SKIP_COSIGN_VERIFY` | Set to `1` to bypass cosign signature verification on prebuilt-image downloads and on the runtime-overlay / SDK-sidecar release archives. Documented emergency-rotation escape only; never set in CI or production. | Unset |
 | `MVM_SKIP_HASH_VERIFY` | Set to `1` to bypass SHA-256 verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production. | Unset |
 | `MVM_OVERLAY_BASE_URL` | Release base URL the runtime overlay **and** the SDK sidecar are fetched from (both ship in the same release). Point it at a private mirror; `/v<version>` is appended for you. | GitHub Releases |
 | `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE` | `build` or `download` — force how a cold cache is populated for the runtime overlay and the SDK sidecar alike, instead of auto-detecting from whether this is a source checkout. | Auto-detect |

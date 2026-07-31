@@ -730,14 +730,40 @@ jobs:
       - name: Sign release tarballs and SBOM
         shell: bash
         run: |
-          # Sign each tarball — keyless OIDC, no secret key needed.
-          # Produces a .bundle file per tarball containing signature + certificate chain.
+          set -euo pipefail
+          shopt -s nullglob
+
+          # Two bundle formats, because two different verifiers consume them.
+          #
+          # The mvmctl binary tarballs and the SBOM are verified by the cosign
+          # CLI (install.sh, and `mvmctl update`, which shells out to
+          # `cosign verify-blob`). That reads both shapes, so they stay on the
+          # legacy `--bundle` format they have always shipped.
+          #
+          # The image tarballs are verified IN-BINARY by the Rust sigstore
+          # stack (mvm_build::release_signature -> image_verify), which parses
+          # only the newer Sigstore bundle carrying verificationMaterial. A
+          # legacy bundle here would fail to parse on every download, so these
+          # must be signed with --new-bundle-format — same as every other
+          # artifact that stack verifies (image manifests, packs, revocations).
           for tarball in artifacts/*.tar.gz; do
+            case "$(basename "${tarball}")" in
+              runtime-overlay-*|sdk-sidecar-*) continue ;;
+            esac
             cosign sign-blob \
               --yes \
               --bundle "${tarball}.bundle" \
               "${tarball}"
-            echo "Signed: ${tarball}"
+            echo "Signed (legacy bundle, cosign-CLI consumers): ${tarball}"
+          done
+
+          for tarball in artifacts/runtime-overlay-*.tar.gz artifacts/sdk-sidecar-*.tar.gz; do
+            cosign sign-blob \
+              --yes \
+              --new-bundle-format \
+              --bundle "${tarball}.bundle" \
+              "${tarball}"
+            echo "Signed (new bundle format, in-binary verifier): ${tarball}"
           done
 
           # Sign the SBOM
@@ -807,6 +833,8 @@ jobs:
             artifacts/runtime-overlay-*.tar.gz.sha256
             artifacts/sdk-sidecar-*.tar.gz
             artifacts/sdk-sidecar-*.tar.gz.sha256
+            artifacts/runtime-overlay-*.tar.gz.bundle
+            artifacts/sdk-sidecar-*.tar.gz.bundle
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*

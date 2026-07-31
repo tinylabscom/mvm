@@ -213,6 +213,23 @@
       constructor that requests them. 10 downloader unit tests, 5 launch-path
       tests, 4 release-asset gates, and 2 BDD scenarios (acquire-and-boot,
       checksum-drift refusal), taking the BDD suite to 57 scenarios / 279 steps.
+- [x] Plan 277 — cosign-verify the downloaded runtime overlay and SDK sidecar.
+      Closes plan 273's one deferred gap. Both archives are now verified against
+      the release workflow's cosign-keyless signing identity before extraction,
+      through `mvm_core::crypto::image_verify` and the existing
+      `release_trust` root — no new dependency. Two findings shaped it: the
+      published `*.tar.gz.bundle` files are in the legacy cosign format the
+      in-binary Rust verifier *rejects*, so `release.yml`'s signing step is
+      split (binary tarballs keep legacy for the cosign-CLI consumers,
+      image tarballs move to `--new-bundle-format`); and no released version has
+      ever shipped a runtime-overlay tarball, so mandatory verification costs
+      zero compatibility. Fails closed: a build without `manifest-verify`
+      refuses the download rather than downgrading to digest-only, and
+      `MVM_SKIP_COSIGN_VERIFY` — documented but until now never read by any
+      code — is the emergency escape. Drive-by: made
+      `initramfs::resolve_returns_missing_when_cache_empty` hermetic; it read
+      the developer's real `$HOME` cache and failed on any machine that had
+      built an initramfs.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.

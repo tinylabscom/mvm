@@ -566,6 +566,9 @@ mod sdk_sidecar_host_resolution_tests {
             "MVM_OVERLAY_BASE_URL",
             format!("file://{}", release_root.path().display()),
         );
+        // See the overlay test above: the signature rung is witnessed in
+        // `mvm_build::release_signature`, not here.
+        env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
         let attached = resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")])
             .expect("a published sidecar must satisfy the binding")
@@ -1036,6 +1039,10 @@ mod runtime_overlay_attach_tests {
         env.set("HOME", home.path());
         env.set("MVM_HOME", cache.path());
         env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
+        // A valid Sigstore signature cannot be minted offline; this test is
+        // about the acquire ladder's cache/install rungs. The signature rung
+        // has its own witnesses in `mvm_build::release_signature`.
+        env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
 
         let release_root = tempfile::tempdir().unwrap();
         let version = env!("CARGO_PKG_VERSION");
