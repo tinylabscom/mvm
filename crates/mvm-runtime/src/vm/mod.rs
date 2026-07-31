@@ -17,7 +17,6 @@ pub mod name_registry;
 pub mod overlay;
 pub mod reconcile;
 pub mod template;
-pub mod vminitd_client;
 pub mod volume_registry;
 
 // Substrate re-exports — preserve the `mvm::vm::{cow,

@@ -105,6 +105,14 @@ virtio-queue = "0.18"
 # (host-side, std-only). Tracks the same 0.18 `virtio-queue`/`vm-memory` line
 # already vendored.
 virtio-vsock = "0.12"
+# vminitd's SandboxContext gRPC (Apple Container boot path): prost for the
+# protobuf wire types (hand-written derives — no protoc/prost-build in the
+# pipeline), h2 for the HTTP/2 transport over the vsock stream (h2/http were
+# already in the lockfile via the S3 client tree).
+prost = "0.13"
+prost-types = "0.13"
+h2 = "0.4"
+http = "1"
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
@@ -127,6 +135,11 @@ storage-s3 = ["dep:object_store", "dep:futures"]
 # The claim-free host-wasmtime portability tier (`WasmBackend`). Off by
 # default; pulls the wasmtime + wasmtime-wasi closure only when enabled.
 wasm-backend = ["dep:wasmtime", "dep:wasmtime-wasi"]
+# Apple Containerization-framework tier's live-boot smoke test. Off by
+# default; the guest artifacts (Apple kernel + initfs) are a separate
+# fetch, so this gates only the artifact-requiring e2e hook (itself
+# `#[ignore]`d behind `MVM_AC_E2E`).
+apple-container = []
 # The hermetic in-memory `MockBackend`/`MockGuestAgent` test double + the
 # `AnyBackend::Mock` variant that selects it. Off by default so the mock — a
 # Tier-3 backend satisfying none of the security claims (no guest, no

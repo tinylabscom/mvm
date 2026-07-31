@@ -110,7 +110,10 @@ pub fn build_container_activation_environment(
 /// share by tag instead.  The runtime overlay rides along only when the full
 /// overlay triple is present — it is always verity-sealed.  Custom volumes
 /// are translated to virtio-fs tags when the config carries directory shares.
-fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnvironment> {
+///
+/// `pub(crate)` so the Apple Container backend builds the identical message
+/// for its vminitd injection instead of re-rolling it.
+pub(crate) fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnvironment> {
     // Verity is keyed off the hash device: `verity_path` set means the
     // backend attached the Merkle sidecar at the hash slot, so the root mounts
     // as dm-verity and must carry a roothash. No sidecar device means a plain

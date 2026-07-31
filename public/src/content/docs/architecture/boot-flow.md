@@ -168,19 +168,18 @@ model in adapted form — or honestly not at all:
   [Matryoshka model](/security/matryoshka/)). A shared-kernel container is
   still not a microVM; this tier exists so KVM-less dev/CI hosts can
   exercise the real agent and RPC surface, never as an isolation story.
-- **Apple Container** — Apple's `container` framework boots lightweight Linux
-  VMs with its own init (`vminitd` as guest PID 1, gRPC on vsock port 1024)
-  and networking/vsock stack. An honest, fail-closed backend skeleton now
-  exists behind `--hypervisor apple-container` (opt-in only, never
-  auto-selected; every operation fails with a typed error naming the
-  milestone that provides it) — see
-  `specs/plans/271-apple-container-backend.md` for the staged design. Full
-  support means driving the same activation contract through `vminitd`'s
-  gRPC API rather than an mvm initramfs: the host writes the serialized
-  `ActivateEnvironment` into the container VM and starts `mvm-guest-agent`
-  as a root process, and the agent performs the same mounts (dm-verity
-  rootfs + runtime overlay, virtio-fs volumes) and the same uid-901 drop as
-  on every other backend.
+- **Apple Container** — Apple's container kernel and `initfs.ext4` (which
+  carries `vminitd`, guest PID 1, gRPC on vsock port 1024) boot on mvm's own
+  HVF supervisor behind `--hypervisor apple-container` (opt-in only, never
+  auto-selected). The backend resolves the two artifacts from the local
+  cache, boots the initfs as the root block device with
+  `init=/sbin/vminitd`, and drives the same activation contract through
+  `vminitd`'s gRPC API rather than an mvm initramfs: the host writes the
+  guest agent and the serialized `ActivateEnvironment` into the container VM
+  and starts the agent as a root process. The final agent bring-up step is
+  still fail-closed (the agent's non-PID-1 activation entry point lands
+  next), so `start` reports that milestone with a typed error — see
+  `specs/plans/271-apple-container-backend.md` for the staged design.
 - **WHP (Windows Hypervisor Platform)** — a future Windows-host backend. The
   guest side is unchanged: the same kernel + universal initramfs boot and the
   same `ActivateEnvironment`. The work is entirely host-side — a WHP

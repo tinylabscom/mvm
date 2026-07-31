@@ -92,10 +92,8 @@ pub const GUEST_CID: u32 = 3;
 /// keeps its disjoint-union shape. The "52" tail is a
 /// callback to the historical port for grep-ability.
 ///
-/// **Single source of truth.** `mvm_runtime::vm::vminitd_client` re-declares
-/// this value because it cannot depend on `mvm-agentd`. If you change
-/// this, update that duplicate in the same commit; the workspace tests
-/// catch drift.
+/// **Single source of truth.** All host-side code refers to this constant
+/// (`mvm-runtime` depends on `mvm-agentd`, so no duplicate is needed).
 pub const GUEST_AGENT_PORT: u32 = 5252;
 
 /// Control vsock port the guest's `/init` connects to (host side) to

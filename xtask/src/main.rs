@@ -40,6 +40,7 @@ mod check_no_network_literals;
 mod check_no_overclaim;
 mod check_no_spec_refs_in_comments;
 mod check_no_string_backend_dispatch;
+mod check_no_vz;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
 mod check_single_home;
@@ -89,6 +90,10 @@ fn main() -> Result<()> {
         Some("check-no-host-nix") => {
             let workspace = workspace_root();
             check_no_host_nix::run(&workspace)
+        }
+        Some("check-no-vz") => {
+            let workspace = workspace_root();
+            check_no_vz::run(&workspace)
         }
         Some("check-doc-claims") => {
             let workspace = workspace_root();

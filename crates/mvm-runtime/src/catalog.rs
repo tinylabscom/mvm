@@ -246,8 +246,10 @@ backend_catalog![
         aliases: ["container"],
         constructor: AnyBackend::AppleContainer(AppleContainerBackend::new()),
         tier: Tier2,
-        // No pid-file lifecycle — the skeleton boots nothing, and the real
-        // framework-driven path will track VM state out-of-band.
+        // No marker of its own: `start` tears down every VM it boots
+        // before returning (the agent bring-up is fail-closed), and a live
+        // one would surface under the HVF supervisor's `hvf.pid` marker,
+        // which the probe already maps to the HVF descriptor.
         marker_file: None,
         started_vm_probe_order: None,
         list_all: true,

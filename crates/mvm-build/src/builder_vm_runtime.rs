@@ -1160,6 +1160,7 @@ pub fn finalize_install_job(artifact_out: &Path) -> Result<BuilderArtifacts, Bui
 ///
 /// The lock lives on a **sidecar** `<image>.lock` file, NOT on the
 /// image fd itself. The macOS hypervisor (formerly Apple
+// allow(no-vz): historical design-note reference in a doc comment, not a dependency or API use
 /// `Virtualization.framework`'s `VZDiskImageStorageDeviceAttachment`, now
 /// HVF) takes its own exclusive lock on the disk image at `vm.start()`;
 /// if the host also held an `flock` on the image it would collide
