@@ -82,6 +82,34 @@ pub struct SurfaceFile {
     pub package: String,
     /// Claim numbers whose witnesses resolve here.
     pub claims: Vec<u32>,
+    /// Optionally restrict which mutants in this file are in claim scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<SurfaceScope>,
+}
+
+/// A narrowing of one file's mutation surface.
+///
+/// The surface is resolved by mapping each `fn:` witness to its declaring
+/// file, which assumes the file is the enforcement code the witness
+/// guards. That holds for a cohesive module and fails for a large
+/// multi-purpose binary, where the witness guards one function and the
+/// other few thousand lines answer to no claim at all.
+///
+/// Narrowing a claim's surface is a weakening move, and one that reads as
+/// routine in a diff — so it is deliberately expensive here. Resolution
+/// never produces a scope, so one can only arrive by hand, in the
+/// committed baseline, as a reviewable diff. It carries a mandatory `why`,
+/// enforced exactly as an accepted miss's reason is, and must name where
+/// the excluded code's coverage is tracked, so narrowing records a debt
+/// rather than discharging one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SurfaceScope {
+    /// Regex handed to `cargo mutants --re`, matched against mutant names.
+    pub examine_re: String,
+    /// Why the rest of the file is not this claim's surface.
+    pub why: String,
+    /// Where the excluded code's own coverage gap is tracked.
+    pub excluded_tracked_by: String,
 }
 
 /// A mutant that survived, with a stated reason for tolerating it.
@@ -152,15 +180,22 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
     if matches!(mode, Mode::RepinSurface | Mode::RewriteBaseline) {
         // Re-pinning keeps the stated reasons; a full rewrite discards
         // them on purpose, having just re-observed the ground truth.
+        let previous = read_baseline(&baseline_path).ok();
         let accepted_misses = if mode == Mode::RewriteBaseline {
-            seed_accepted(&run_mutants_over(workspace, &resolved)?)
+            let scoped = carry_scopes_forward(resolved.clone(), previous.as_ref());
+            seed_accepted(&run_mutants_over(workspace, &scoped)?)
         } else {
-            read_baseline(&baseline_path)
-                .map(|b| b.accepted_misses)
+            previous
+                .as_ref()
+                .map(|b| b.accepted_misses.clone())
                 .unwrap_or_default()
         };
+        // Re-pinning must never silently widen a scope back out: that
+        // would look like routine maintenance and quietly re-admit
+        // hundreds of out-of-claim mutants.
+        let surface = carry_scopes_forward(resolved, previous.as_ref());
         let baseline = Baseline {
-            surface: resolved,
+            surface,
             uncovered_claims: uncovered,
             accepted_misses,
         };
@@ -176,6 +211,7 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
 
     let baseline = read_baseline(&baseline_path)?;
     let mut errors = check_accepted_reasons(&baseline.accepted_misses);
+    errors.extend(check_scope_reasons(&baseline.surface));
     errors.extend(diff_surface(&baseline.surface, &resolved));
     errors.extend(diff_uncovered(&baseline.uncovered_claims, &uncovered));
 
@@ -187,7 +223,10 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
     }
 
     if mode == Mode::Run {
-        let observed = run_mutants_over(workspace, &resolved)?;
+        // The committed surface, not the freshly resolved one: resolution
+        // cannot know about scopes, and running the unscoped surface would
+        // report every out-of-claim mutant as a new miss.
+        let observed = run_mutants_over(workspace, &baseline.surface)?;
         let verdict = ratchet(&baseline.accepted_misses, &observed);
         for m in &verdict.new_misses {
             errors.push(format!(
@@ -273,6 +312,10 @@ pub fn resolve_surface(workspace: &Path) -> Result<Surface> {
                 path: path.clone(),
                 package: package_for(path)?,
                 claims: claims.iter().copied().collect(),
+                // Resolution never narrows. A scope can only be added by
+                // hand to the committed baseline, which is what makes it
+                // a reviewable act rather than a silent one.
+                scope: None,
             })
         })
         .collect();
@@ -380,6 +423,59 @@ pub fn diff_uncovered(committed: &[UncoveredClaim], resolved: &[UncoveredClaim])
         errors.push(format!(
             "claim {n} gained a mutation surface — re-pin so the baseline records it"
         ));
+    }
+    errors
+}
+
+/// Copy each committed file's `scope` onto the freshly resolved surface.
+///
+/// Resolution cannot derive a scope, so without this every re-pin would
+/// drop the narrowings and silently re-admit the code they exclude.
+pub fn carry_scopes_forward(
+    mut resolved: Vec<SurfaceFile>,
+    previous: Option<&Baseline>,
+) -> Vec<SurfaceFile> {
+    let Some(previous) = previous else {
+        return resolved;
+    };
+    let scopes: BTreeMap<&str, &SurfaceScope> = previous
+        .surface
+        .iter()
+        .filter_map(|s| s.scope.as_ref().map(|sc| (s.path.as_str(), sc)))
+        .collect();
+    for file in &mut resolved {
+        if let Some(scope) = scopes.get(file.path.as_str()) {
+            file.scope = Some((*scope).clone());
+        }
+    }
+    resolved
+}
+
+/// Every narrowed surface must say why, and where the excluded code's
+/// coverage is tracked. A scope without either is a claim quietly
+/// shrinking to fit its evidence.
+pub fn check_scope_reasons(surface: &[SurfaceFile]) -> Vec<String> {
+    let mut errors = Vec::new();
+    for file in surface {
+        let Some(scope) = &file.scope else { continue };
+        if scope.examine_re.trim().is_empty() {
+            errors.push(format!(
+                "surface {} has an empty scope regex — remove the scope rather than                  narrowing to nothing",
+                file.path
+            ));
+        }
+        if scope.why.trim().is_empty() {
+            errors.push(format!(
+                "surface {} is scoped with no stated reason — say why the rest of the                  file is not claim {:?}'s surface",
+                file.path, file.claims
+            ));
+        }
+        if scope.excluded_tracked_by.trim().is_empty() {
+            errors.push(format!(
+                "surface {} is scoped without naming where the excluded code's coverage                  is tracked — narrowing must record the debt, not discharge it",
+                file.path
+            ));
+        }
     }
     errors
 }
@@ -621,6 +717,13 @@ fn run_mutants_for_file(
         // mvm-cli's build.rs; a mutation run rebuilds per mutant and
         // does not boot a VM, so paying that cost every time is waste.
         .env("MVM_SKIP_EMBED_BINARIES", "1");
+    if let Some(scope) = &file.scope {
+        eprintln!(
+            "      scoped to /{}/ — {}",
+            scope.examine_re, scope.excluded_tracked_by
+        );
+        cmd.args(["--re", &scope.examine_re]);
+    }
     isolation.apply(&mut cmd);
     let status = cmd.status().context("spawning `cargo mutants`")?;
 
@@ -927,6 +1030,7 @@ a.rs:5:1: replace x with y
             path: path.into(),
             package: package_for(path).unwrap_or_else(|| "unknown".into()),
             claims,
+            scope: None,
         }
     }
 
@@ -960,6 +1064,84 @@ a.rs:5:1: replace x with y
         let errs = diff_surface(&old, &new);
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("changed claims"));
+    }
+
+    fn scoped(path: &str, examine_re: &str, why: &str, tracked: &str) -> SurfaceFile {
+        SurfaceFile {
+            path: path.into(),
+            package: package_for(path).unwrap_or_else(|| "unknown".into()),
+            claims: vec![2],
+            scope: Some(SurfaceScope {
+                examine_re: examine_re.into(),
+                why: why.into(),
+                excluded_tracked_by: tracked.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn an_unscoped_surface_file_needs_no_justification() {
+        assert!(check_scope_reasons(&[surface("crates/a/src/l.rs", vec![1])]).is_empty());
+    }
+
+    #[test]
+    fn a_scope_must_state_why_and_where_the_rest_is_tracked() {
+        let ok = scoped(
+            "crates/a/src/l.rs",
+            "virtiofs",
+            "one witness, big file",
+            "#123",
+        );
+        assert!(check_scope_reasons(&[ok]).is_empty());
+
+        let no_why = scoped("crates/a/src/l.rs", "virtiofs", "   ", "#123");
+        let errs = check_scope_reasons(&[no_why]);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("no stated reason"), "{}", errs[0]);
+
+        let no_tracking = scoped("crates/a/src/l.rs", "virtiofs", "because", "");
+        let errs = check_scope_reasons(&[no_tracking]);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("record the debt"), "{}", errs[0]);
+
+        let empty_re = scoped("crates/a/src/l.rs", "", "because", "#123");
+        let errs = check_scope_reasons(&[empty_re]);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("narrowing to nothing"), "{}", errs[0]);
+    }
+
+    /// A re-pin resolves the surface afresh, and resolution never yields a
+    /// scope. Without carrying them forward, routine maintenance would
+    /// silently widen every narrowed file back out.
+    #[test]
+    fn repinning_carries_a_scope_forward() {
+        let previous = Baseline {
+            surface: vec![scoped("crates/a/src/l.rs", "virtiofs", "why", "#123")],
+            uncovered_claims: vec![],
+            accepted_misses: vec![],
+        };
+        let resolved = vec![surface("crates/a/src/l.rs", vec![2])];
+        assert!(resolved[0].scope.is_none());
+
+        let carried = carry_scopes_forward(resolved, Some(&previous));
+        assert_eq!(
+            carried[0].scope.as_ref().map(|s| s.examine_re.as_str()),
+            Some("virtiofs")
+        );
+    }
+
+    #[test]
+    fn carrying_forward_leaves_unscoped_files_alone() {
+        let previous = Baseline {
+            surface: vec![scoped("crates/a/src/l.rs", "virtiofs", "why", "#123")],
+            uncovered_claims: vec![],
+            accepted_misses: vec![],
+        };
+        let carried = carry_scopes_forward(
+            vec![surface("crates/b/src/other.rs", vec![9])],
+            Some(&previous),
+        );
+        assert!(carried[0].scope.is_none());
     }
 
     #[test]
