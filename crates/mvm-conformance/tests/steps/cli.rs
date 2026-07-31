@@ -100,6 +100,31 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     world.last_run = Some(output);
 }
 
+/// Run against the home a prior `Given an isolated mvm home` created, so a later
+/// assertion about that home's contents inspects the directory the run actually
+/// used.
+///
+/// Distinct from `... and an isolated mvm home`, which makes its own throwaway
+/// home and drops it: pairing that step with a filesystem assertion checks an
+/// empty directory the command never touched, and passes for the wrong reason.
+#[when(expr = "I run mvmctl in the isolated mvm home with {string}")]
+fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("`Given an isolated mvm home` must run before this step");
+    #[allow(deprecated)] // matches the sibling steps' use of this API
+    let mut cmd = Command::cargo_bin("mvmctl").unwrap_or_else(|e| {
+        panic!("mvmctl binary not found ({e}) — run `cargo build --bin mvmctl` before `just bdd`")
+    });
+    let output = cmd
+        .args(args.split_whitespace())
+        .env("MVM_HOME", home.path())
+        .output()
+        .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
 #[given(expr = "an isolated mvm home")]
 fn isolated_mvm_home(world: &mut CliWorld) {
     world.isolated_home = Some(tempfile::tempdir().expect("create isolated MVM_HOME"));
