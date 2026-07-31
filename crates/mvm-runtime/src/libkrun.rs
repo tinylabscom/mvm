@@ -805,8 +805,9 @@ impl VmBackend for LibkrunBackend {
     fn capabilities(&self) -> VmCapabilities {
         // libkrun does not support memory snapshots (same trade as
         // Apple Container). The mvm libkrun launch path is intentionally
-        // vsock-only: the supervisor accepts only the disconnected sink
-        // configuration and serves egress through the host-bound vsock proxy.
+        // vsock-only: the supervisor accepts only `NetworkingMode::VsockDirect`,
+        // which configures a virtio-vsock device and no net device at all, and
+        // serves egress through the host-bound vsock proxy.
         // Pause/resume is theoretically possible but not exposed by libkrun's
         // public C API today.
         VmCapabilities {
@@ -816,8 +817,10 @@ impl VmBackend for LibkrunBackend {
             standby_pool: true,
             vsock: true,
             tap_networking: false,
-            // The virtio-net device is attached but drained into a disconnected
-            // sink with no upstream route, so the guest still has no routable NIC.
+            // Stronger than the field name asks for: the guest has no NIC at
+            // all, not a NIC without a route. `VsockDirect` configures a
+            // virtio-vsock device and never calls libkrun's net attach, so
+            // there is no net device in the guest's device tree to route.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
             // libkrun's C API doesn't expose virtio-balloon control
