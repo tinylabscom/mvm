@@ -1806,13 +1806,18 @@ mod tests {
             names: NameMode::Audit,
             ..Default::default()
         };
-        if let Some((out, hits)) = r.redact_bytes_for(named, &audit_names) {
-            assert!(hits.names > 0, "the audit arm must count name spans");
-            assert!(
-                String::from_utf8_lossy(&out).contains("Alice Johnson"),
-                "audit counts but must not mask"
-            );
-        }
+        // `expect`, not `if let`: a zeroed counter makes `hits` empty, which
+        // makes `redact_bytes_for` return None — so an `if let` skips the
+        // assertions entirely and the test passes for the very mutation it
+        // is meant to catch.
+        let (out, hits) = r
+            .redact_bytes_for(named, &audit_names)
+            .expect("an audited name span is still a hit");
+        assert!(hits.names > 0, "the audit arm must count name spans");
+        assert!(
+            String::from_utf8_lossy(&out).contains("Alice Johnson"),
+            "audit counts but must not mask"
+        );
     }
 
     /// `redact_bytes` reports both categories it fired. Dropping the `pii`
