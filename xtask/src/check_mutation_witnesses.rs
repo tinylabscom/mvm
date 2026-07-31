@@ -568,27 +568,45 @@ fn run_mutants_for_file(workspace: &Path, file: &SurfaceFile, out_dir: &Path) ->
 ///
 /// That is the failure this whole gate exists to prevent, one level up: a
 /// green result standing in for evidence that was never collected. So the
-/// counts in `outcomes.json` are the signal, not the presence of a file. A
-/// completed run carries `total_mutants`; a baseline failure carries only
-/// an `outcomes` array whose sole entry is the failed `Baseline` scenario.
+/// counts in `outcomes.json` are the signal, not the presence of a file.
+///
+/// There are two ways to arrive here having tested nothing, and both have
+/// been observed on this repo's own claim surface:
+///
+/// - The baseline fails to build or fails its tests, giving a `Baseline`
+///   outcome summarised `Failure`.
+/// - The baseline **times out**, giving one summarised `Timeout`. That is
+///   what a package whose own suite runs longer than the per-test budget
+///   produces, and it is indistinguishable from the above in every way
+///   that matters here.
+///
+/// So the check is that the summary *is* `Success`, rather than that it is
+/// one of a list of known failures. A summary this code has not seen
+/// before is not evidence that anything ran. `total_mutants` is checked
+/// for being **nonzero** for the same reason: cargo-mutants writes the key
+/// as `0` on an aborted run, so its mere presence proves nothing.
 fn ensure_mutants_actually_ran(outcomes_json: &str, path: &str) -> Result<u64> {
     let v: serde_json::Value = serde_json::from_str(outcomes_json)
         .with_context(|| format!("parsing cargo-mutants outcomes.json for {path}"))?;
 
-    let baseline_failed = v
+    let baseline_verdict = v
         .get("outcomes")
         .and_then(|o| o.as_array())
-        .is_some_and(|entries| {
-            entries.iter().any(|e| {
-                e.get("scenario").and_then(|s| s.as_str()) == Some("Baseline")
-                    && e.get("summary").and_then(|s| s.as_str()) == Some("Failure")
-            })
-        });
-    if baseline_failed {
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|e| e.get("scenario").and_then(|s| s.as_str()) == Some("Baseline"))
+        })
+        .and_then(|e| e.get("summary").and_then(|s| s.as_str()));
+    if let Some(verdict) = baseline_verdict
+        && verdict != "Success"
+    {
         bail!(
-            "{path}: the unmutated tree failed its own tests, so cargo-mutants tested \
-             no mutants. This file contributed no coverage — it is not clean, it is \
-             unmeasured. Fix the failing tests for its package and re-run."
+            "{path}: the unmutated tree did not pass its own tests (baseline \
+             {verdict}), so cargo-mutants tested no mutants. This file contributed \
+             no coverage — it is not clean, it is unmeasured. Fix its package's \
+             suite, or raise the per-test timeout if the suite is merely slow, then \
+             re-run."
         );
     }
 
@@ -599,6 +617,13 @@ fn ensure_mutants_actually_ran(outcomes_json: &str, path: &str) -> Result<u64> {
              measured."
         );
     };
+    if total == 0 {
+        bail!(
+            "{path}: cargo-mutants tested zero mutants. A claim-surface file with \
+             nothing to mutate is not covered, it is unmeasured — either the run \
+             aborted before mutating anything, or `--file` matched no code."
+        );
+    }
     Ok(total)
 }
 
@@ -1045,6 +1070,26 @@ mod baseline_guard_tests {
   "unviable": 0
 }"#;
 
+    /// Verbatim shape observed running this gate's own surface over
+    /// `crates/mvm-build/src/app_deps_gate.rs`: three of that package's
+    /// tests outran the per-test budget, so the *baseline* timed out.
+    /// cargo-mutants found 33 mutants, tested none of them, and still
+    /// wrote every count as zero.
+    const BASELINE_TIMED_OUT: &str = r#"{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Timeout",
+      "log_path": "log/baseline.log"
+    }
+  ],
+  "total_mutants": 0,
+  "missed": 0,
+  "caught": 0,
+  "timeout": 0,
+  "unviable": 0
+}"#;
+
     #[test]
     fn a_failed_baseline_is_an_error_not_a_clean_file() {
         let err = ensure_mutants_actually_ran(BASELINE_FAILED, "crates/x/src/y.rs")
@@ -1082,5 +1127,63 @@ mod baseline_guard_tests {
     fn a_clean_file_is_still_accepted() {
         assert_eq!(ensure_mutants_actually_ran(COMPLETED, "p").unwrap(), 17);
         assert!(parse_missed("").is_empty());
+    }
+
+    /// A timed-out baseline tested nothing, exactly like a failed one. It
+    /// was not caught while the check enumerated known failure summaries,
+    /// which is why the check now asks for `Success` instead.
+    #[test]
+    fn a_timed_out_baseline_is_an_error_not_a_clean_file() {
+        let err = ensure_mutants_actually_ran(BASELINE_TIMED_OUT, "crates/x/src/y.rs")
+            .expect_err("a baseline that timed out tested no mutants");
+        let msg = err.to_string();
+        assert!(msg.contains("Timeout"), "{msg}");
+        assert!(msg.contains("unmeasured"), "{msg}");
+    }
+
+    /// Any baseline verdict other than success is unmeasured, including
+    /// one this code has never seen. Enumerating known failures would let
+    /// a new cargo-mutants summary read as coverage.
+    #[test]
+    fn an_unrecognised_baseline_verdict_is_an_error() {
+        let json = r#"{
+  "outcomes": [{"scenario": "Baseline", "summary": "SomeFutureVerdict"}],
+  "total_mutants": 0
+}"#;
+        let err = ensure_mutants_actually_ran(json, "crates/x/src/y.rs")
+            .expect_err("an unknown baseline verdict is not evidence anything ran");
+        assert!(err.to_string().contains("SomeFutureVerdict"), "{err}");
+    }
+
+    /// A run that completed its baseline but mutated nothing is also
+    /// unmeasured: a claim-surface file with no mutants tells you nothing
+    /// about its witness.
+    #[test]
+    fn zero_mutants_tested_is_an_error_even_with_a_passing_baseline() {
+        let json = r#"{
+  "outcomes": [{"scenario": "Baseline", "summary": "Success"}],
+  "total_mutants": 0,
+  "missed": 0,
+  "caught": 0
+}"#;
+        let err = ensure_mutants_actually_ran(json, "crates/x/src/y.rs")
+            .expect_err("zero mutants is not coverage");
+        assert!(err.to_string().contains("zero mutants"), "{err}");
+    }
+
+    /// A successful baseline alongside a real total is still accepted —
+    /// the new checks must not reject the shape a healthy run writes.
+    #[test]
+    fn a_successful_baseline_with_mutants_is_accepted() {
+        let json = r#"{
+  "outcomes": [{"scenario": "Baseline", "summary": "Success"}],
+  "total_mutants": 33,
+  "missed": 2,
+  "caught": 31
+}"#;
+        assert_eq!(
+            ensure_mutants_actually_ran(json, "crates/x/src/y.rs").unwrap(),
+            33
+        );
     }
 }
