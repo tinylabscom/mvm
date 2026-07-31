@@ -152,7 +152,9 @@ test-crate CRATE:
 test-filter FILTER:
     cargo nextest run --workspace -E 'test({{FILTER}})'
 
-# Run tests with CI profile (retries, JUnit output)
+# Run tests under the `ci` profile: no retries, slow-test warnings, and a
+# JUnit report at target/nextest/ci/junit.xml carrying pass/fail structure
+# only (no captured test output — see .config/nextest.toml).
 test-ci:
     cargo nextest run --workspace --profile ci
 
@@ -231,6 +233,25 @@ clippy-bdd:
 
 # Format check + clippy + model gates (workspace + the feature-gated BDD target)
 lint: fmt-check clippy clippy-bdd model
+
+# ── Claim mutation testing ───────────────────────────────────────────────
+
+# Verify the committed mutation surface still matches the claims ledger.
+# Milliseconds, needs no cargo-mutants — this is the part CI runs per PR.
+mutation-surface:
+    cargo run -p xtask -- check-mutation-witnesses
+
+# Mutate the claim surface and ratchet survivors against the baseline.
+# HOURS: this is the nightly lane's command, not an inner-loop check.
+# Needs `cargo install cargo-mutants cargo-nextest`.
+mutation-witnesses:
+    cargo run -p xtask -- check-mutation-witnesses --run
+
+# Re-pin the surface after a witness legitimately moved. Cheap, and keeps
+# the stated reasons on existing accepted misses. Add --run to also
+# re-record the misses themselves (hours, and it discards those reasons).
+mutation-repin:
+    cargo run -p xtask -- check-mutation-witnesses --write-baseline
 
 # ── CI Gate ──────────────────────────────────────────────────────────────
 

@@ -160,14 +160,46 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
+/// Environment variable naming the host substitution endpoint's Unix
+/// socket on the shared-kernel container tier: the endpoint lives on a
+/// host-owned directory bind-mounted into the container, so the forward
+/// proxy relays to it over AF_UNIX instead of the vsock `EGRESS_PORT` (a
+/// container has no vsock). Unset on microVM backends, which keep the
+/// vsock path.
+pub const EGRESS_ENDPOINT_SOCK_ENV: &str = "MVM_AGENT_EGRESS_ENDPOINT_SOCK";
+
+/// The bind-mounted substitution-endpoint socket a shared-kernel container
+/// relays egress through, when the host backend configured one. `None` on
+/// microVM backends and on container boots with no endpoint (no bound
+/// secrets and a deny-egress policy), where every proxied request must
+/// fail closed rather than silently bypass the gate.
+pub fn egress_endpoint_socket() -> Option<std::path::PathBuf> {
+    let path = std::env::var(EGRESS_ENDPOINT_SOCK_ENV).ok()?;
+    (!path.is_empty()).then_some(std::path::PathBuf::from(path))
+}
+
 /// Start the guest-local forward proxy: bind loopback [`FORWARD_PROXY_PORT`] and
-/// serve, relaying each request to the host substitution endpoint over a
-/// guest→host AF_VSOCK connection. Blocks; the guest init runs it on its own
+/// serve, relaying each request to the host substitution endpoint — over a
+/// guest→host AF_VSOCK connection on microVM backends, or over the
+/// bind-mounted endpoint Unix socket on the shared-kernel container tier.
+/// Blocks; the guest init runs it on its own
 /// thread. This is the production entry point — `serve` +
 /// `substitution_client::substitute` are the unit-tested parts it composes.
 pub fn start_forward_proxy(relay_timeout_secs: u64) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", FORWARD_PROXY_PORT))
         .with_context(|| format!("binding forward proxy on 127.0.0.1:{FORWARD_PROXY_PORT}"))?;
+    if let Some(endpoint_sock) = egress_endpoint_socket() {
+        return serve(&listener, move |req| {
+            let mut stream =
+                std::os::unix::net::UnixStream::connect(&endpoint_sock).with_context(|| {
+                    format!(
+                        "connect to substitution endpoint {}",
+                        endpoint_sock.display()
+                    )
+                })?;
+            substitution_client::relay(&mut stream, req)
+        });
+    }
     serve(&listener, move |req| {
         substitution_client::substitute(req, relay_timeout_secs)
     })
@@ -276,6 +308,56 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn egress_endpoint_socket_reads_the_env_only_when_set_and_non_empty() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+
+        env.remove(EGRESS_ENDPOINT_SOCK_ENV);
+        assert_eq!(egress_endpoint_socket(), None);
+        env.set(EGRESS_ENDPOINT_SOCK_ENV, "");
+        assert_eq!(egress_endpoint_socket(), None);
+        env.set(
+            EGRESS_ENDPOINT_SOCK_ENV,
+            "/run/mvm/substitution-endpoint.sock",
+        );
+        assert_eq!(
+            egress_endpoint_socket(),
+            Some(std::path::PathBuf::from(
+                "/run/mvm/substitution-endpoint.sock"
+            ))
+        );
+    }
+
+    #[test]
+    fn relay_over_a_unix_stream_round_trips_like_the_vsock_path() {
+        // The container tier's upstream: `substitution_client::relay` speaks
+        // the identical framed wire protocol over a plain UnixStream, so a
+        // bind-mounted endpoint socket behaves exactly like the vsock leg.
+        use mvm_core::substitution_wire::WireResponse;
+
+        let (mut host_side, mut endpoint_side) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let req: WireRequest = crate::vsock::read_frame(&mut endpoint_side).unwrap();
+            let resp = WireResponse::Ok {
+                status: 200,
+                headers: vec![],
+                body_b64: String::new(),
+            };
+            crate::vsock::write_frame(&mut endpoint_side, &resp).unwrap();
+            req
+        });
+
+        let req = WireRequest {
+            method: "GET".into(),
+            url: "https://example.test/".into(),
+            headers: vec![],
+            body_b64: String::new(),
+        };
+        let resp = substitution_client::relay(&mut host_side, &req).unwrap();
+        assert!(matches!(resp, WireResponse::Ok { status: 200, .. }));
+        assert_eq!(server.join().unwrap(), req);
+    }
 
     #[test]
     fn parses_a_get_with_absolute_url_and_headers() {

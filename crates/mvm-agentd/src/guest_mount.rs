@@ -34,6 +34,9 @@ pub enum MountError {
     /// A required filesystem type is unavailable.
     #[error("unsupported filesystem: {0}")]
     UnsupportedFilesystem(String),
+    /// The activation message itself is contradictory or malformed.
+    #[error("invalid activation config: {0}")]
+    InvalidConfig(String),
 }
 
 impl MountError {
@@ -104,13 +107,33 @@ pub fn mount_early_filesystems() -> Result<()> {
 
 /// Mount the rootfs, returning the staging path (`/mnt/root`).
 ///
-/// Three shapes, selected by the config's optional fields: a dm-verity block
-/// root (`roothash` + `hash_dev` set — create the `root` target and mount it
-/// read-only), an unverified plain-block root (neither set — mount the data
-/// device read-only directly), or a virtio-fs root (`virtiofs_tag` set —
-/// mount the tag read-only).  On non-Linux platforms it is a no-op stub so
-/// the workspace compiles.
+/// Three mount shapes, selected by the config's optional fields: a
+/// dm-verity block root (`roothash` + `hash_dev` set — create the `root`
+/// target and mount it read-only), an unverified plain-block root
+/// (neither set — mount the data device read-only directly), or a
+/// virtio-fs root (`virtiofs_tag` set — mount the tag read-only). The
+/// fourth shape, `in_place`, mounts nothing and returns `/` directly: the
+/// runtime already owns the root (a shared-kernel container whose root is
+/// the image). On non-Linux platforms it is a no-op stub so the workspace
+/// compiles.
 pub fn mount_rootfs(rootfs: &RootfsConfig) -> Result<PathBuf> {
+    if rootfs.in_place {
+        // Mutually exclusive with every mount-carrying field: a host that
+        // sets both gets a loud validation error, never a silent choice
+        // between "mount this device" and "the root is already there".
+        if !rootfs.data_dev.is_empty()
+            || rootfs.hash_dev.is_some()
+            || rootfs.roothash.is_some()
+            || rootfs.virtiofs_tag.is_some()
+        {
+            return Err(MountError::InvalidConfig(
+                "rootfs.in_place is mutually exclusive with data_dev/hash_dev/roothash/virtiofs_tag"
+                    .to_string(),
+            ));
+        }
+        return Ok(PathBuf::from("/"));
+    }
+
     ensure_dir(ROOTFS_STAGING)?;
 
     #[cfg(not(target_os = "linux"))]
@@ -347,7 +370,30 @@ mod linux_impl {
         }
     }
 
-    const _: () = assert!(DM_IOCTL_STRUCT_SIZE as usize == std::mem::size_of::<DmIoctl>());
+    // Layout contract with linux/dm-ioctl.h. `DmIoctl` is the fixed header
+    // of every device-mapper ioctl and `DmTargetSpec` is the target record
+    // that follows it in the same buffer; the kernel reads both by offset.
+    // These are the structs the dm-verity table is built from, so drift
+    // here is a verified-boot setup failure reported as an unrelated errno.
+    //
+    // Derived on Linux 6.8 with cc sizeof/offsetof/_Alignof, not read off
+    // the Rust definitions. The size assertion is kept in its original form
+    // as well: DM_IOCTL_STRUCT_SIZE is encoded into the ioctl request
+    // number, so the constant and the struct must agree or the kernel
+    // rejects the command.
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(DM_IOCTL_STRUCT_SIZE as usize == size_of::<DmIoctl>());
+        assert!(size_of::<DmIoctl>() == 312);
+        assert!(align_of::<DmIoctl>() == 8);
+        assert!(offset_of!(DmIoctl, version) == 0);
+        assert!(offset_of!(DmIoctl, data_size) == 12);
+        assert!(offset_of!(DmIoctl, data_start) == 16);
+        assert!(offset_of!(DmIoctl, target_count) == 20);
+        assert!(offset_of!(DmIoctl, dev) == 40);
+        assert!(offset_of!(DmIoctl, name) == 48);
+    };
 
     #[repr(C)]
     pub struct DmTargetSpec {
@@ -357,6 +403,18 @@ mod linux_impl {
         pub next: u32,
         pub target_type: [u8; 16],
     }
+
+    const _: () = {
+        use std::mem::{align_of, offset_of, size_of};
+
+        assert!(size_of::<DmTargetSpec>() == 40);
+        assert!(align_of::<DmTargetSpec>() == 8);
+        assert!(offset_of!(DmTargetSpec, sector_start) == 0);
+        assert!(offset_of!(DmTargetSpec, length) == 8);
+        assert!(offset_of!(DmTargetSpec, status) == 16);
+        assert!(offset_of!(DmTargetSpec, next) == 20);
+        assert!(offset_of!(DmTargetSpec, target_type) == 24);
+    };
 }
 
 #[cfg(target_os = "linux")]
@@ -797,6 +855,58 @@ mod tests {
     #[test]
     fn validate_roothash_accepts_64_lowercase_hex() {
         assert!(validate_roothash(FAKE_HASH, "test").is_ok());
+    }
+
+    #[test]
+    fn in_place_rootfs_mounts_nothing_and_returns_root() {
+        let cfg = RootfsConfig {
+            data_dev: String::new(),
+            hash_dev: None,
+            roothash: None,
+            virtiofs_tag: None,
+            in_place: true,
+        };
+        assert_eq!(mount_rootfs(&cfg).unwrap(), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn in_place_rootfs_rejects_mount_carrying_fields() {
+        for cfg in [
+            RootfsConfig {
+                data_dev: "/dev/vda".to_string(),
+                hash_dev: None,
+                roothash: None,
+                virtiofs_tag: None,
+                in_place: true,
+            },
+            RootfsConfig {
+                data_dev: String::new(),
+                hash_dev: Some("/dev/vdb".to_string()),
+                roothash: None,
+                virtiofs_tag: None,
+                in_place: true,
+            },
+            RootfsConfig {
+                data_dev: String::new(),
+                hash_dev: None,
+                roothash: Some(FAKE_HASH.to_string()),
+                virtiofs_tag: None,
+                in_place: true,
+            },
+            RootfsConfig {
+                data_dev: String::new(),
+                hash_dev: None,
+                roothash: None,
+                virtiofs_tag: Some("mvmroot".to_string()),
+                in_place: true,
+            },
+        ] {
+            let err = mount_rootfs(&cfg).unwrap_err();
+            assert!(
+                matches!(err, MountError::InvalidConfig(_)),
+                "expected InvalidConfig, got: {err}"
+            );
+        }
     }
 
     #[test]

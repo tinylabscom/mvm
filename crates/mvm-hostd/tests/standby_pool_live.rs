@@ -45,6 +45,8 @@ fn spec(dir: &Path, nonce: &str) -> StandbySpec {
         vm_state_dir: dir.join("state").to_string_lossy().into_owned(),
         image_path: None,
         image_sha256: None,
+        // This scenario never claims, so the guest boots nothing: no egress client.
+        vsock_egress: false,
     }
 }
 

@@ -70,15 +70,40 @@ fn ensure_parent_can_reach_an_agent(
     Ok(())
 }
 
+/// The parent's stand-in for the launch's egress *enablement*, and nothing else.
+///
+/// The guest's `mvm.vsock_egress=1` token is derived from
+/// `network_policy.allows_egress()`, and a restored child inherits its cmdline
+/// out of the parent's saved memory rather than deriving its own — so whether a
+/// child's guest runs an egress client at all is settled at the parent's boot.
+/// The parent therefore has to boot the token the launch would, which means its
+/// config has to answer `allows_egress()` the way the launch's effective
+/// enablement does.
+///
+/// What it must *not* carry is any destination. There is no "egress on, no
+/// hosts" policy shape, so the enablement rides the only host-free one: it names
+/// nothing the launch asked for, and a parent has no NIC, no egress endpoint and
+/// no gateway to route a destination to in any case. The allow-list stays where
+/// it is enforced — host-side, on the claimed child's own endpoint, from that
+/// child's own launch policy — so a shared parent holds nothing per-launch to
+/// hand to the next claim, and the pool partitions on the boolean alone.
+fn parent_egress_enablement(enabled: bool) -> NetworkPolicy {
+    if enabled {
+        NetworkPolicy::unrestricted()
+    } else {
+        NetworkPolicy::deny_all()
+    }
+}
+
 /// Reduce `launch` to the launch config of the factory parent recorded as
 /// `spec`: the guest's boot shape carried verbatim, every field that carries
 /// workload authority or per-launch identity dropped.
 ///
-/// The parent's identity, resources, kernel and rootfs are taken from `spec`
-/// rather than from `launch`, because those four are the pool's own compat key
-/// — a claim matches a parent on them. Sourcing them from the record that will
-/// be matched is what stops the recorded key from describing something other
-/// than what actually booted.
+/// The parent's identity, resources, kernel, rootfs and guest egress enablement
+/// are taken from `spec` rather than from `launch`, because those are the pool's
+/// own compat key — a claim matches a parent on them. Sourcing them from the
+/// record that will be matched is what stops the recorded key from describing
+/// something other than what actually booted.
 pub fn factory_parent_config(
     launch: &VmStartConfig,
     spec: &StandbySpec,
@@ -90,10 +115,12 @@ pub fn factory_parent_config(
     let VmStartConfig {
         // ── Per-launch identity and workload authority. A factory parent runs
         // no workload: it holds no plan, no tenant, no secrets, no volumes and
-        // no ports; its egress is deny-all because it has no gated endpoint to
-        // route through; it pre-opens no console listeners; and it never
-        // replenishes a pool of its own. Each is dropped here, so a parent is
-        // incapable of carrying one rather than merely expected not to.
+        // no ports; it pre-opens no console listeners; and it never replenishes a
+        // pool of its own. Each is dropped here, so a parent is incapable of
+        // carrying one rather than merely expected not to. `network_policy` is
+        // dropped for the same reason and its enablement half re-derived from
+        // `spec` below — a parent boots whether the guest runs an egress client,
+        // never which destinations one may reach.
         name: _,
         template_id: _,
         rootfs_path: _,
@@ -157,7 +184,7 @@ pub fn factory_parent_config(
         plan_json: None,
         bundle_json: None,
         warm_pool_size: 0,
-        network_policy: NetworkPolicy::deny_all(),
+        network_policy: parent_egress_enablement(spec.vsock_egress),
         dev_console: false,
     };
 
@@ -190,6 +217,12 @@ pub fn factory_parent_config(
 /// restored memory rather than deriving its own, so that divergence would reach
 /// every child; resolving it is part of the work that must land before a warm
 /// pool is armed.
+///
+/// `state_dir` is also the second input to the guest's egress token, which is
+/// suppressed for a state dir holding a secret-bearing plan. A factory parent
+/// holds no plan, so nothing writes one beside it and that half is inert here:
+/// the parent's token follows [`StandbySpec::vsock_egress`] alone, which is
+/// exactly the value a claim matches on.
 pub fn factory_parent_spec(
     config: &VmStartConfig,
     state_dir: &Path,
@@ -268,6 +301,10 @@ mod tests {
         }
     }
 
+    /// The pool record a spawn for `launch` would write. `vsock_egress` comes
+    /// from the same shared derivation the CLI's compat-key builder uses, so
+    /// these fixtures exercise the value a real claim would match on rather than
+    /// one hand-set here.
     fn standby_spec_for(launch: &VmStartConfig, dir: &Path) -> StandbySpec {
         StandbySpec {
             id: "standby-abc".into(),
@@ -283,6 +320,7 @@ mod tests {
             vm_state_dir: dir.join("standby-abc").display().to_string(),
             image_path: Some(launch.rootfs_path.clone()),
             image_sha256: Some("e".repeat(64)),
+            vsock_egress: crate::egress_shared::effective_vsock_egress(launch),
         }
     }
 
@@ -338,31 +376,17 @@ mod tests {
         assert!(!parent.trusted_builder);
     }
 
-    /// The one boot-shape difference a factory parent cannot close, pinned so
-    /// the launch-path gate that exists for it is not dropped as redundant.
+    /// An egress-allowing launch: the parent must boot the *identical* cmdline
+    /// the workload does, egress token included.
     ///
-    /// `mvm.vsock_egress=1` starts the guest's in-guest egress client, and it is
-    /// emitted iff the launch's policy allows egress. A parent is deny-all by
-    /// construction: it has no gated endpoint to route through, and it is shared
-    /// across claims, so carrying one launch's policy would hand that launch's
-    /// shape to the next claim — the policy is not part of the compat key. Since
-    /// a child inherits its parent's cmdline out of restored memory rather than
-    /// deriving its own, an egress-allowing launch served warm would come up
-    /// with no network at all, silently. `warm_eligible_launch` on the CLI side
-    /// therefore refuses that shape outright and it cold-boots.
-    ///
-    /// What this asserts is narrower than it looks: for *this fixture*, which
-    /// carries no verb-grant sidecar on either side, the egress token is the
-    /// only difference. It is not a claim that the two cmdlines can differ by at
-    /// most one token in production — the per-VM grant tokens
-    /// (`mvm.verb_grant=`, `mvm.require_grant=`, `mvm.host_signer_pub=`) come
-    /// from a sidecar a factory parent never has, so a workload carrying one
-    /// diverges by those too, silently and without failing anything here. See
-    /// [`factory_parent_spec`]'s note. Within the covered surface, a second
-    /// token appearing here means something else has started depending on the
-    /// parent's stripped-down config.
+    /// `mvm.vsock_egress=1` starts the guest's in-guest egress client, and a
+    /// restored child inherits it from the parent's saved memory rather than
+    /// deriving its own — so a parent that dropped the token would hand every
+    /// child a guest with no network at all, silently. Equality is the assertion
+    /// (not "contains the token") because that is the property a child depends
+    /// on: whatever the workload path adds, the parent adds too.
     #[test]
-    fn an_egress_allowing_launch_diverges_by_one_token_which_is_why_the_pool_refuses_it() {
+    fn a_parent_warmed_for_an_egress_allowing_launch_boots_the_launchs_own_cmdline() {
         let _home = isolated_home();
         let tmp = tempfile::tempdir().unwrap();
         let mut launch = sealed_launch(tmp.path());
@@ -370,29 +394,23 @@ mod tests {
             mvm_core::network_policy::HostPort::new("api.example.com", 443),
         ]);
         let spec = standby_spec_for(&launch, tmp.path());
+        assert!(
+            spec.vsock_egress,
+            "fixture must warm an egress-enabled parent, or it proves nothing"
+        );
 
         let workload = workload_boot(&launch, &tmp.path().join("workload-a"));
         let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
 
         assert!(
-            !parent_cfg.network_policy.allows_egress(),
-            "a parent has no gated endpoint and is shared, so it stays deny-all"
-        );
-        assert!(
             workload.cmdline.contains("mvm.vsock_egress=1"),
             "fixture must exercise the egress token: {}",
             workload.cmdline
         );
-        assert!(
-            !parent.cmdline.contains("mvm.vsock_egress"),
-            "a deny-all parent must not carry the egress token: {}",
-            parent.cmdline
-        );
         assert_eq!(
-            workload.cmdline,
-            format!("{} mvm.vsock_egress=1", parent.cmdline),
-            "the egress token must be the only difference between the two cmdlines"
+            parent.cmdline, workload.cmdline,
+            "a parent warmed for an egress-allowing launch must boot that launch's cmdline"
         );
         assert_eq!(
             parent.blocks, workload.blocks,
@@ -400,9 +418,129 @@ mod tests {
         );
     }
 
+    /// The enablement the parent carries names no destination the launch asked
+    /// for. A parent is shared across claims, so anything per-launch on it would
+    /// reach the next claim; the allow-list is resolved host-side on the claimed
+    /// child's own endpoint instead, and never rides the parent.
+    #[test]
+    fn the_parent_carries_the_egress_enablement_but_none_of_the_launchs_destinations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut launch = sealed_launch(tmp.path());
+        launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("api.example.com", 443),
+            mvm_core::network_policy::HostPort::new("secret.internal", 8443),
+        ]);
+        let spec = standby_spec_for(&launch, tmp.path());
+
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+
+        assert!(
+            parent_cfg.network_policy.allows_egress(),
+            "the parent must boot the launch's egress enablement"
+        );
+        let label = parent_cfg.network_policy.posture_label();
+        for host in ["api.example.com", "secret.internal"] {
+            assert!(
+                !label.contains(host),
+                "a shared parent must carry no launch destination, got: {label}"
+            );
+        }
+        assert_ne!(
+            parent_cfg.network_policy, launch.network_policy,
+            "the parent must not be handed the launch's own policy"
+        );
+    }
+
+    /// A deny-all launch's parent stays deny-all, and its cmdline still matches
+    /// the workload's exactly — the enablement is a boolean, so flipping it must
+    /// not perturb anything else.
+    #[test]
+    fn a_parent_warmed_for_a_deny_all_launch_boots_no_egress_client() {
+        let _home = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let launch = sealed_launch(tmp.path());
+        let spec = standby_spec_for(&launch, tmp.path());
+        assert!(
+            !spec.vsock_egress,
+            "the default launch policy is deny-all, so no egress client is warmed"
+        );
+
+        let workload = workload_boot(&launch, &tmp.path().join("workload-a"));
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+
+        assert!(!parent_cfg.network_policy.allows_egress());
+        assert!(
+            !workload.cmdline.contains("mvm.vsock_egress"),
+            "a deny-all workload boots no egress client: {}",
+            workload.cmdline
+        );
+        assert_eq!(parent.cmdline, workload.cmdline);
+    }
+
+    /// The case that must never come out permissive. A secret-bearing workload's
+    /// outbound traffic belongs to the host-side substitution endpoint, so a cold
+    /// boot suppresses the guest's own egress client even though the policy allows
+    /// egress. The pool keys on that *effective* value, so the parent warmed for
+    /// such a launch suppresses it too — and the two cmdlines come out equal, not
+    /// merely both token-less.
+    #[test]
+    fn a_secret_bearing_launch_warms_a_parent_with_no_egress_client_either() {
+        let _home = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut launch = sealed_launch(tmp.path());
+        launch.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("api.example.com", 443),
+        ]);
+        launch.plan_json = Some(crate::egress_shared::plan_json_with_one_bound_secret());
+        let spec = standby_spec_for(&launch, tmp.path());
+        assert!(
+            launch.network_policy.allows_egress(),
+            "fixture must exercise the suppression, not a deny-all policy"
+        );
+        assert!(
+            !spec.vsock_egress,
+            "a secret-bearing launch must warm a parent with no egress client"
+        );
+
+        // The cold boot the parent is compared against: the admitted plan is
+        // persisted beside the VM before it starts, which is what makes the
+        // cold-boot token suppress itself.
+        let workload_dir = tmp.path().join("workload-a");
+        std::fs::create_dir_all(&workload_dir).unwrap();
+        std::fs::write(
+            workload_dir.join("plan.json"),
+            launch.plan_json.as_deref().unwrap(),
+        )
+        .unwrap();
+        let workload = workload_boot(&launch, &workload_dir);
+
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+
+        assert!(
+            !workload.cmdline.contains("mvm.vsock_egress"),
+            "a secret-bearing cold boot suppresses the guest egress client: {}",
+            workload.cmdline
+        );
+        assert!(
+            !parent.cmdline.contains("mvm.vsock_egress"),
+            "so must the parent warmed for it: {}",
+            parent.cmdline
+        );
+        assert_eq!(parent.cmdline, workload.cmdline);
+        assert!(!parent_cfg.network_policy.allows_egress());
+        assert_eq!(parent_cfg.plan_json, None, "a parent still holds no plan");
+    }
+
     /// The same guard, stated against the concrete symptoms the live run
     /// recorded, so a failure names what the guest will miss rather than only
     /// that two values differ.
+    ///
+    /// `sealed_launch` is the legacy sibling-initramfs shape, whose PID 1 reads
+    /// the roothashes and device paths off the kernel cmdline — it is never sent
+    /// `ActivateEnvironment`. A parent booted without those tokens aborts in PID
+    /// 1 and panics the kernel, so there is nothing left to capture.
     #[test]
     fn parent_carries_the_overlay_drives_and_runtime_tokens_the_guest_agent_needs() {
         let _home = isolated_home();
@@ -427,6 +565,40 @@ mod tests {
             "parent cmdline missing runtime-source policy: {}",
             parent.cmdline
         );
+        for token in [
+            "mvm.roothash=",
+            "mvm.data=/dev/vda",
+            "mvm.hash=/dev/vdb",
+            "mvm.runtime_roothash=",
+            "mvm.runtime_data=/dev/vdc",
+            "mvm.runtime_hash=/dev/vdd",
+        ] {
+            assert!(
+                parent.cmdline.contains(token),
+                "parent cmdline missing {token} its legacy PID 1 needs: {}",
+                parent.cmdline
+            );
+        }
+    }
+
+    /// The universal-initramfs counterpart: that PID 1 is handed the same
+    /// roothashes and device paths over vsock, so carrying them on the cmdline
+    /// would leak the boot secrets of a sealed image into a kernel argument the
+    /// guest can read from `/proc/cmdline`.
+    #[test]
+    fn parent_on_the_universal_initramfs_carries_no_roothash_tokens() {
+        let (_env, home, _lock) = isolated_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut launch = sealed_launch(tmp.path());
+        launch.initrd_path = Some(cmdline::seed_universal_initramfs(home.path()));
+        let spec = standby_spec_for(&launch, tmp.path());
+        let parent_cfg = factory_parent_config(&launch, &spec).unwrap();
+        let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+
+        assert!(
+            crate::microvm::booted_with_universal_initramfs(&parent_cfg),
+            "fixture must resolve as a universal-initramfs boot"
+        );
         for legacy in [
             "mvm.roothash=",
             "mvm.data=/dev/vda",
@@ -441,6 +613,13 @@ mod tests {
                 parent.cmdline
             );
         }
+        assert!(
+            parent
+                .cmdline
+                .contains("mvm.runtime_source_policy=required_overlay"),
+            "parent cmdline missing runtime-source policy: {}",
+            parent.cmdline
+        );
     }
 
     #[test]
@@ -473,15 +652,14 @@ mod tests {
         assert!(parent_cfg.volumes.is_empty());
         assert!(parent_cfg.secret_files.is_empty());
         assert!(parent_cfg.config_files.is_empty());
-        assert!(
-            !parent_cfg.network_policy.allows_egress(),
-            "a parent has no gated endpoint, so it must not be allowed off the box"
-        );
 
         let parent = factory_parent_spec(&parent_cfg, Path::new(&spec.vm_state_dir), fc_base);
+        // The enablement the guest boots with is all the parent takes from the
+        // launch's policy, and it buys the parent no reach: a parent wires no
+        // egress channel at all, so the guest's client has nothing to dial.
         assert!(
             parent.vsock.is_empty(),
-            "a factory parent wires no host channels: no endpoint, no broker"
+            "a factory parent wires no host channels: no egress, no broker"
         );
         assert_eq!(
             parent.blocks.len(),

@@ -46,6 +46,29 @@
       #1876 and #1878; tracked in
       `specs/plans/266-vsock-overload-hardening.md`.
 
+- [x] Claim witnesses are now mutation-tested, not merely present.
+      `check-claim-catalog` proves a witness exists; nothing proved it can
+      fail. Added `xtask check-mutation-witnesses`, which derives the
+      mutation surface *from the claims ledger* (each `fn:` witness resolves
+      to its declaring file — this repo keeps `#[cfg(test)] mod tests`
+      beside the implementation, so a witness lands on the code it guards)
+      and pins it to `xtask/mutation-witness-baseline.json`: 26 files across
+      8 packages. The cheap default mode runs on every PR and fails when the
+      surface moves, so a claim quietly leaving mutation coverage is a
+      reviewable diff; `--run` mutates the surface nightly in `security.yml`
+      and ratchets survivors, failing only on a *new* hole. Claims that reach
+      no mutable file are reported and pinned rather than silently absent:
+      4, 5 and 7 are witnessed only by CI lanes, and claim 16's three
+      witnesses all live in an integration test, which cargo-mutants does not
+      mutate. The first real run (claim-10 anchor, 52 mutants) found **4
+      survivors** — including `NetworkPreset::is_deny_all` surviving
+      replacement by both `true` and `false`, because it has no production
+      caller anywhere in the tree and its only assertion lives in another
+      crate's tests. Seeded as triaged baseline entries; the nightly lane
+      ships `continue-on-error` until the baseline covers the whole surface.
+      Also extracted the shared ledger parser into `xtask/src/claims_ledger.rs`
+      so both gates read one table. `specs/plans/272-mutation-tested-claim-witnesses.md`.
+      307/307 xtask nextest.
 - [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
       only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
       builder image / runtime overlay from the host's shared cache), so a test
@@ -58,11 +81,77 @@
       Reachability was measured empirically by running the suite against an
       empty vs. a populated fixture `$HOME` rather than inferred from the call
       graph. 8021/8021 nextest on a host with a populated `~/.mvm`.
-      **Deferred:** `mvmctl::audit_emissions_live
-      update_check_does_not_emit_audit_entry` fails intermittently under full
-      workspace concurrency and is *not* in this class — its `AuditSandbox`
-      already isolates both roots, and the test binary passed 47/47 across four
-      consecutive runs. Needs separate triage as a concurrency flake.
+      **Deferred → closed.** `mvmctl::audit_emissions_live
+      update_check_does_not_emit_audit_entry` failed intermittently under full
+      workspace concurrency and was correctly ruled out of the `$HOME` class.
+      Triaged in the nextest-profile work: not a concurrency flake but a bug in
+      the shared `serve_release_latest_fixture` helper it and its sibling use.
+      The fixture's listener is non-blocking, and on macOS the accepted socket
+      inherits `O_NONBLOCK` (proven against both platforms — Linux does not
+      inherit), so its read returned `WouldBlock` before the request landed and
+      the loop treated that as "request complete". The fixture then answered an
+      empty request with a 404 and half-closed, which the client saw as that
+      404 or as a reset mid-send. macOS-only, which is why CI never saw it.
+
+- [x] Cross-root cache-seed hardening (#1925, #1926, #1927, #1928). The three
+      opportunistic seeds that populate an isolated cache root from the host's
+      shared one now share `mvm_build::cache_install`, which owns the single
+      derivation of the default cache root — so the set of places that can read
+      `$HOME` while `MVM_HOME` is set is exactly one, and the
+      `check-test-home-isolation` allowlist shrank from four entries to two.
+      `install_initramfs_into_cache` now verifies the staged image against its
+      `initramfs.hash` sidecar before the rename, closing the one real
+      integrity asymmetry: the hash is SHA-256 of the *uncompressed* cpio (the
+      size sidecar is the compressed length), so this gunzips rather than
+      hashing the file, and it runs at cache-root admission rather than on
+      every resolve to keep a decompress off the boot path. Abandoned
+      `<arch>.tmp.<pid>` staging dirs are now reaped by age (a real 6-day-old
+      orphan was found on a dev host), and the initramfs seed asks the resolver
+      for its artifact dir instead of recovering it from a file path. Three
+      test fixtures had to become realistic — they wrote `b"image"` with a
+      `b"hash"` sidecar, which is why the gap survived review.
+
+- [x] Builder-image seed verified at admission (#1932). The cross-root seed
+      copied four artifacts and left the integrity sidecars behind, so the
+      seeded cache could not be verified afterwards *and* read as
+      `MissingArtifactDigestManifest` to a later bootstrap — which then
+      rebuilt the ~775 MB it had just copied. The seed now carries the
+      sidecars and checks `.mvm-artifacts.sha256` before admitting bytes,
+      declining (not erroring) on drift so a damaged shared cache falls
+      through to a fresh local build. Measured cost of digesting the image is
+      ~2.1s, which is why the check sits at admission and not in
+      `validate_builder_vm_image_cache`, which runs on every builder VM
+      start. The digest logic moved into `mvm_build::cache_install` and is
+      now shared with the bootstrap readiness check — that also fixed two
+      latent defects in it: the old version read each artifact wholly into
+      memory (775 MB) instead of streaming, and compared whole manifest
+      strings, so a reordered manifest read as tampering.
+
+- [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
+      (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
+      contract and the other four asserted size only, so nothing was protected
+      against a same-size field reorder. Deriving the values from the headers
+      rather than the Rust structs found that all seven hand-declared
+      `sockaddr_vm` copies mirror the pre-Linux-6.0 layout (`svm_flags` landed
+      at offset 12 in 6.0, shrinking `svm_zero`; the total stayed 16, which is
+      why a size-only assertion could never have caught it). Also answered the
+      question the contracts raised: device-mapper layout drift **fails
+      closed** — `DM_TABLE_LOAD` returns `EINVAL` for a displaced
+      `target_type`, measured against Linux 6.8 — so MVM-SEC-03 was never at
+      risk. **WS2 shipped (#1943):** `just test-ci` named a nextest `ci`
+      profile that did not exist and had therefore never run. Adding it, with
+      no captured test output in the uploaded JUnit, surfaced that the
+      `update_check_does_not_emit_audit_entry` flake deferred above was not a
+      concurrency flake at all but a macOS-only fixture bug — an accepted
+      socket inherits `O_NONBLOCK` there but not on Linux, so the fixture read
+      an empty request and answered 404. Fixed; that deferral is closed.
+      **WS3 re-scoped:** `check-mutation-witnesses` (#1934) shipped the
+      mutation-testing idea mid-flight and does it better than this plan's
+      WS4, which is struck. WS3 is now the three claims whose only witness is
+      a CI lane (MVM-SEC-04/05/07), which mutation testing structurally cannot
+      reach, plus triaging #1934's first full run — blocked on #1946, since
+      `--run` currently executes mutated security code against the real
+      `~/.mvm`.
 
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
@@ -470,7 +559,30 @@ Then unify + retire the old paths:
       Phase 2 slice one — the runner-side warm-pool claim substrate
       (`specs/plans/255-phase2-warm-pool-substrate.md`) — landed on branch
       `feat/plan-255-phase2-warm-pool`, with the live FC warm pool + capability
-      flip a follow-up slice.
+      flip a follow-up slice. That follow-up
+      (`specs/plans/255-live-fc-warm-claim.md`) built spawn/capture/fork/reseed
+      and then **failed its live KVM validation**
+      (`specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`): the
+      standby parent booted a bare rootfs and panicked for want of the runtime
+      overlay that carries the guest agent. The parent's boot inputs now come
+      from the launch's own `VmStartConfig` through the same mappers a workload
+      boot uses, guarded by shape-equality tests, and a later live run on the
+      same host confirms that half — the parent boots, reaches its guest agent,
+      and the capture writes a `vm_full` checkpoint carrying a 512 MiB
+      `memory.bin`, then releases the parent.
+      Since then the recorded reductions have closed: a claimed child is wired
+      the host channels a cold boot gets (#1917); an egress-allowing launch is
+      **keyed** into the pool rather than excluded from it —
+      `StandbyCompat::vsock_egress` (the launch's *effective* enablement: the
+      policy allows egress **and** the admitted plan binds no secret) partitions
+      the warm set, the parent boots that boolean and no destination, and the
+      allow-list stays host-side on the claimed child's own egress endpoint; and
+      the CLI no longer reserves a parent the runner is about to reserve (#1922),
+      which had made every warm claim refuse with "parent is not in a claimable
+      state" so the pool filled and never drained.
+      `standby_pool` stays **`false`**: the **claim** half has still never
+      executed live, so the post-restore handshake and the child's egress/broker/
+      exit channels remain unproven. The flip is gated on that run.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.
@@ -575,7 +687,39 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    change. Updated `workload_runner::cmdline` and runner tests to assert
    the new token-free cmdline shape. `cargo nextest run -p mvm-runtime`
    (1091 passed) and `cargo nextest run -p mvm-agentd` (498 passed).
-7. [x] Initramfs cache resolver/builder and CLI attachment. Added
+   **Corrected — the shrink was unconditional and broke every host that
+   cannot resolve the universal artifact.**
+   `attach_universal_initramfs_if_cached` is non-fatal by design, and on
+   macOS it always fails (no `nix build` for a Linux initramfs, and the
+   published `initramfs-<arch>.tar.gz` 404s), so the boot falls back to the
+   legacy per-rootfs `rootfs.initrd` whose PID 1 is `mvm-verity-init` — which
+   reads those exact tokens off the cmdline and is never sent
+   `ActivateEnvironment`. Result on every macOS `machine run --image`:
+   `mvm-verity-init: FATAL: no mvm.roothash= on kernel cmdline` → `Kernel
+   panic - Attempted to kill init!` before userspace, no guest agent, and a
+   host-side `Failed to read frame length` out of the first RPC.
+   `workload_cmdline` now emits the tokens whenever
+   `microvm::booted_with_universal_initramfs(config)` is false, so each boot
+   protocol gets the channel its PID 1 actually reads. The unit tests and the
+   `s4_verified_boot` feature that asserted the tokens were absent were
+   themselves keyed to a legacy `rootfs.initrd` fixture, so they encoded the
+   panic; each now carries a universal-flavour case (tokens absent) and a
+   legacy-flavour case (tokens present).
+8. [x] Guest-agent readiness proven on the wire. `wait_for_agent` /
+   `wait_for_guest_agent` both documented "reachable means it speaks the
+   protocol, not just that the socket is open", but reached that verdict
+   through `negotiate_protocol`, which in a non-test build takes the
+   `negotiate_protocol_authenticated` arm and never touches the stream — so
+   in every shipped binary the probe degenerated to "did `connect()` succeed".
+   The VMM binds the agent port before the guest kernel starts, so that
+   succeeds throughout the guest's boot and equally for a guest that panicked
+   before userspace; both callers then issued their real RPC into a dead
+   socket and surfaced `Failed to read frame length` from the framing layer.
+   Added `mvm_agentd::vsock::probe_agent_ready` — authenticated handshake plus
+   one `Ping`, real I/O with no cfg-gated shortcut, any answer (including a
+   refusal) counting as ready and only a transport failure as not-yet — and
+   routed both waiters through it.
+9. [x] Initramfs cache resolver/builder and CLI attachment. Added
    `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs` Nix
    builder + cache installer, and `attach_universal_initramfs_if_cached` in
    `mvm-cli/src/commands/vm/up/runtime_source.rs`, wired from `exec.rs` and
@@ -599,7 +743,30 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    fallback can warm the cache automatically.  Added a BDD scenario for the
    cold-cache non-fatal fallback under `features/suites/s14_universal_initramfs`,
    and updated the verified-boot cmdline feature to assert that the legacy
-   `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots.
+   `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots
+   — narrowed by item 6's correction to *universal*-initramfs boots only.
+
+Live witness for items 6 and 8 on macOS 26.5.2 / arm64, HVF backend, after the
+corrections: `machine run --image alpine -- /bin/sh -c "echo TRANSIENT-OK; cat
+/etc/alpine-release"` prints `TRANSIENT-OK` + `3.24.1` in 5.8s, and
+`machine run --image alpine -it --allow-host google.com -- /bin/sh -c "ping -c 3
+google.com"` attaches its PTY, resolves `google.com` to a real address, and runs
+the command inside the guest. `ping` then fails with `can't create raw socket:
+Address family not supported by protocol` — the vsock-only data plane offers no
+raw IP by design, so ICMP is unreachable and a TCP client is the right probe.
+
+TCP egress over vsock is live on the same path: `--allow-host example.com:80`
+with `wget http://example.com`, and bare `--allow-host example.com` with
+`wget https://example.com`, both return the real page body from inside the
+guest.
+
+One diagnosability note worth a follow-up. A bare `--allow-host <host>` means
+`<host>:443` (`parse_allow_host` defaults to the https port), so pairing it with
+an `http://` URL is a port mismatch and the gate denies — correctly. What the
+guest sees is `HTTP/1.1 403 Forbidden` with `Content-Length: 0` from
+`http_forward::write_proxy_error_*`, carrying no reason, which reads as "egress
+is broken" rather than "port 80 was not admitted". The host knows exactly which
+`EgressVerdict::Deny` it took; none of it reaches the caller.
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 

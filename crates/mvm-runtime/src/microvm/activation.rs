@@ -50,9 +50,22 @@ pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<(
     let mut stream = vm
         .vsock_connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .context("connect to guest agent for activation")?;
+    activate_over_stream(&mut stream, &env)
+}
+
+/// Send a pre-built [`ActivateEnvironment`] over an already-connected
+/// stream and require the ACK. Shared by [`activate_workload`] (whose
+/// stream comes from a `RunningVm` vsock connection) and by backends whose
+/// agent channel is not a vsock at all — the shared-kernel container tier
+/// reaches the agent over a host bind-mounted Unix socket, through the
+/// identical authenticated framing.
+pub fn activate_over_stream<S>(stream: &mut S, env: &ActivateEnvironment) -> Result<()>
+where
+    S: std::io::Read + std::io::Write + Send,
+{
     let response = mvm_agentd::vsock::send_request_stream(
-        &mut stream,
-        &GuestRequest::ActivateEnvironment(env),
+        stream,
+        &GuestRequest::ActivateEnvironment(env.clone()),
     )
     .context("send ActivateEnvironment to guest")?;
     match response {
@@ -62,6 +75,32 @@ pub fn activate_workload(vm: &dyn RunningVm, config: &VmStartConfig) -> Result<(
         }
         other => bail!("unexpected response to ActivateEnvironment: {other:?}"),
     }
+}
+
+/// Build the activation message for a shared-kernel container boot
+/// (the Docker dev tier). The container runtime already owns `/`, the
+/// runtime overlay, and the volume mountpoints — the host bind-mounted all
+/// three at container-create time — so the message carries none of them:
+/// the root is `in_place` (no mount, no pivot), and only the verb-grant
+/// envelope travels. What remains load-bearing is the agent's uid-901
+/// privilege drop and the `NotActivated` gate flip, identical to every
+/// other backend.
+pub fn build_container_activation_environment(
+    config: &VmStartConfig,
+) -> Result<ActivateEnvironment> {
+    let verb_grant_envelope = read_verb_grant_envelope(&config.name)?;
+    Ok(ActivateEnvironment {
+        rootfs: RootfsConfig {
+            data_dev: String::new(),
+            hash_dev: None,
+            roothash: None,
+            virtiofs_tag: None,
+            in_place: true,
+        },
+        runtime: None,
+        volumes: Vec::new(),
+        verb_grant_envelope,
+    })
 }
 
 /// Build an [`ActivateEnvironment`] from the admitted launch config.
@@ -82,6 +121,7 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
             hash_dev: None,
             roothash: None,
             virtiofs_tag: Some(VIRTIOFS_ROOT_TAG.to_string()),
+            in_place: false,
         }
     } else if config.verity_path.is_some() {
         let roothash = resolve_rootfs_roothash(config)
@@ -91,6 +131,7 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
             hash_dev: Some(ROOTFS_HASH_DEV.to_string()),
             roothash: Some(roothash),
             virtiofs_tag: None,
+            in_place: false,
         }
     } else {
         RootfsConfig {
@@ -98,6 +139,7 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
             hash_dev: None,
             roothash: None,
             virtiofs_tag: None,
+            in_place: false,
         }
     };
 
@@ -377,6 +419,58 @@ mod tests {
 
         let env = build_activation_environment(&config).unwrap();
         assert!(env.verb_grant_envelope.is_some());
+    }
+
+    #[test]
+    fn container_activation_environment_is_in_place_and_carries_only_the_grant() {
+        let (_env, _dir) = test_env();
+        let env = build_container_activation_environment(&base_config()).unwrap();
+        assert!(env.rootfs.in_place);
+        assert!(env.rootfs.data_dev.is_empty());
+        assert_eq!(env.rootfs.hash_dev, None);
+        assert_eq!(env.rootfs.roothash, None);
+        assert_eq!(env.rootfs.virtiofs_tag, None);
+        assert!(env.runtime.is_none());
+        assert!(env.volumes.is_empty());
+        assert!(env.verb_grant_envelope.is_none());
+    }
+
+    #[test]
+    fn activate_over_stream_requires_the_ack_and_fails_closed_otherwise() {
+        // Error response ⇒ the boot fails closed with the guest's message.
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let guest_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+            let host_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+            let mut session =
+                mvm_agentd::vsock::AuthenticatedSession::guest(&mut guest, guest_key, &host_key)
+                    .unwrap();
+            let req: GuestRequest = session.read(&mut guest).unwrap();
+            assert!(matches!(req, GuestRequest::ActivateEnvironment(_)));
+            session
+                .write(
+                    &mut guest,
+                    &GuestResponse::ActivateEnvironmentError {
+                        message: "mount failed".into(),
+                    },
+                )
+                .unwrap();
+        });
+
+        let (_env, dir) = test_env();
+        // The host side of the handshake reads its signer from the keys dir.
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
+        let _ = dir;
+
+        let env = build_container_activation_environment(&base_config()).unwrap();
+        let err = activate_over_stream(&mut host, &env).unwrap_err();
+        assert!(
+            err.to_string().contains("mount failed"),
+            "expected the guest's error to fail the boot: {err}"
+        );
+        server.join().unwrap();
     }
 
     trait VolumeExt {

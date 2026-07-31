@@ -133,6 +133,9 @@ jobs:
       - name: No forbidden dependency families
         run: cargo run -p xtask -- check-forbidden-deps
 
+      - name: repr(C) types carry a layout contract
+        run: cargo run -p xtask -- check-abi-layout
+
       - name: SDK crate split guard
         run: cargo run -p xtask -- check-sdk-split
 
@@ -210,7 +213,19 @@ jobs:
         run: cargo build --all-targets
 
       - name: Run tests
-        run: cargo nextest run --workspace --all-targets
+        run: cargo nextest run --workspace --all-targets --profile ci
+
+      # Structure only — the `ci` profile stores no captured test output, so
+      # this artifact carries pass/fail per test and nothing a failing test
+      # happened to print. Read failures in the job log.
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: nextest-junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: xtask man-page tests
         # gen-man lives behind xtask's off-by-default `man` feature (it pulls

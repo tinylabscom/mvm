@@ -42,7 +42,16 @@ pub(crate) fn early_setup() {
 
     #[cfg(target_os = "linux")]
     {
-        if let Err(e) = guest_mount::mount_early_filesystems() {
+        if crate::transport::unix_transport_selected() {
+            // A shared-kernel container runtime has already mounted /proc,
+            // /sys, and /dev for the namespace and drops CAP_SYS_ADMIN, so
+            // the initramfs early mounts would fail with EPERM. The agent
+            // is still PID 1 of the container's PID namespace, so the
+            // SIGCHLD reaper is still required.
+            eprintln!(
+                "mvm-guest-agent: unix transport — container runtime provides early filesystems"
+            );
+        } else if let Err(e) = guest_mount::mount_early_filesystems() {
             fatal(&format!("early filesystem mount failed: {e}"));
         }
         install_sigchld_handler();
@@ -71,7 +80,14 @@ pub(crate) fn apply_activation(
     let new_root = guest_mount::mount_rootfs(&env.rootfs)?;
     guest_mount::mount_runtime_overlay(env.runtime.as_ref(), &new_root)?;
     guest_mount::mount_volumes(&env.volumes, &new_root)?;
-    guest_mount::pivot_to_root(&new_root)?;
+    if env.rootfs.in_place {
+        // Shared-kernel container: the runtime already owns `/`, so there is
+        // no staged root to pivot into — activation is the privilege drop
+        // and the gate flip only.
+        eprintln!("mvm-guest-agent: in-place root, skipping pivot");
+    } else {
+        guest_mount::pivot_to_root(&new_root)?;
+    }
     guest_mount::drop_privilege(WORKLOAD_UID, WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);

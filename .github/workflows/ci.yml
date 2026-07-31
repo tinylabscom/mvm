@@ -132,8 +132,18 @@ jobs:
       - name: mvm-cli drives machines through the mvm-client facade
         run: cargo run -p xtask -- check-cli-runtime-surface
 
+      - name: repr(C) types carry a layout contract
+        run: cargo run -p xtask -- check-abi-layout
+
       - name: Conformance claim catalog
         run: cargo run -p xtask -- check-claim-catalog
+
+      # Surface pin only — milliseconds, no cargo-mutants needed. Fails when a
+      # claim's witnesses stop resolving to a mutable file, i.e. when a claim
+      # drops out of the nightly mutation lane's scope. The mutation run itself
+      # lives in security.yml because it costs hours.
+      - name: Claim mutation surface is pinned
+        run: cargo run -p xtask -- check-mutation-witnesses
 
       - name: Conformance model is the single source (R1)
         run: cargo run -p xtask -- check-conformance

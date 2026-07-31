@@ -30,6 +30,10 @@ pub mod builderd_client;
 /// controlled-shell-job channel in `builder_protocol`).
 pub mod builderd_protocol;
 pub mod cache;
+/// Shared conventions for admitting an artifact into a cache root: the
+/// cross-root seed from the host's shared cache, the staging-directory dance
+/// every install uses, and the digest-manifest check that gates admission.
+pub mod cache_install;
 /// Builder-VM egress allowlist proxy — the lib half of the
 /// `mvm-egress-proxy` bin. Kept as a lib module (not bin-inlined) so
 /// its pub API is dead-code-clean on non-Linux and its tests run

@@ -161,14 +161,20 @@ model in adapted form — or honestly not at all:
   verified-boot, block-volume, and console requests still fail closed. Per
   ADR-024 it stays opt-in, claim-free, and — if it ever executes real
   workloads — the engine runs in-guest, never as a host process dependency.
-- **Docker / shared-kernel containers** — there is no container fallback and
-  none is planned: a shared-kernel container is not a microVM (see
-  [Matryoshka model](/security/matryoshka/)). Its init is not
-  `mvm-guest-agent` and its mounts are host-kernel namespaces, not dm-verity
-  block devices, so this boot contract cannot apply without becoming a
-  microVM. A container tier, if one is ever admitted, would be dev-tier only,
-  refused by prod admission, and would carry its own explicitly weaker boot
-  contract rather than sharing this one.
+- **Docker / shared-kernel containers** — an opt-in dev tier now exists
+  (ADR-034, `specs/adrs/034-docker-dev-tier-backend.md`): `--hypervisor
+  docker` runs the identical `mvm-guest-agent` as the container's PID 1 and
+  delivers the identical `ActivateEnvironment` — over a host bind-mounted
+  Unix socket instead of vsock — with the runtime overlay and volumes as
+  host bind mounts, `--network none`, and egress through the same
+  substitution endpoint. It carries the activation contract in adapted
+  form: the container already owns its root, so activation is the uid-901
+  drop and the gate flip (an in-place root), with no dm-verity and no
+  hardware boundary. It is never auto-selected, is refused by production
+  admission, and reports the hardware-isolation claims as not holding (see
+  [Matryoshka model](/security/matryoshka/)). A shared-kernel container is
+  still not a microVM; this tier exists so KVM-less dev/CI hosts can
+  exercise the real agent and RPC surface, never as an isolation story.
 - **Apple Container** — Apple's `container` framework boots lightweight Linux
   VMs with its own init (`vminitd` as guest PID 1, gRPC on vsock port 1024)
   and networking/vsock stack. An honest, fail-closed backend skeleton now

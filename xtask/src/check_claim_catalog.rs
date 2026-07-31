@@ -4,19 +4,16 @@
 //! by named tests and CI lanes. Prose drifts: a witness gets renamed,
 //! the claim paragraph still names the old one, and nothing notices.
 //! This lint makes the claims ledger table embedded in
-//! `specs/adrs/001-microvm-security-posture.md` (between the
-//! `<!-- claims-catalog:begin -->` / `<!-- claims-catalog:end -->`
-//! markers) the machine-checked map from each claim to its witnesses
-//! and fails when a named witness no longer exists in the tree — the
-//! same "catalog can't outrun reality" discipline an arc42 Ch.10
-//! architecture doc enforces, scoped to what's mechanically checkable.
+//! `specs/adrs/001-microvm-security-posture.md` the machine-checked map
+//! from each claim to its witnesses and fails when a named witness no
+//! longer exists in the tree — the same "catalog can't outrun reality"
+//! discipline an arc42 Ch.10 architecture doc enforces, scoped to what
+//! is mechanically checkable.
 //!
-//! Catalog row shape (a 5-column markdown table):
-//!   | # | Claim | Witnesses | Authority | Status |
-//! `Witnesses` is a comma-separated list of typed tokens:
-//!   - `fn:NAME` — must appear as `fn NAME(` somewhere under `crates/`
-//!     (a test fn or the impl symbol the claim exercises).
-//!   - `ci:NAME` — must appear literally in some `.github/workflows/*`.
+//! The table parser lives in `claims_ledger`, shared with
+//! `check-mutation-witnesses`, which derives its mutation surface from
+//! the same rows. This gate asserts a witness *exists*; that one asks
+//! whether the witness can actually detect the property breaking.
 //!
 //! The ledger also carries degenerate claim frontmatter (status
 //! `Shipped`, no gated phrases) so `check-no-overclaim` — which scans
@@ -24,32 +21,22 @@
 //! it as an inert, already-shipped claim rather than choking on missing
 //! frontmatter.
 
+use crate::claims_ledger::{self, Row, Witness};
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 const KNOWN_STATUSES: [&str; 4] = ["Shipped", "Preview", "Planned", "Not-claimed"];
-const BEGIN_MARKER: &str = "<!-- claims-catalog:begin -->";
-const END_MARKER: &str = "<!-- claims-catalog:end -->";
 
 pub fn run(workspace: &Path) -> Result<()> {
-    let adr_path = workspace
-        .join("specs")
-        .join("adrs")
-        .join("001-microvm-security-posture.md");
-    let source = std::fs::read_to_string(&adr_path)
-        .with_context(|| format!("reading {}", adr_path.display()))?;
-    let ledger = extract_ledger_section(&source).with_context(|| {
-        format!(
-            "locating the claims ledger between `{BEGIN_MARKER}` and `{END_MARKER}` in {}",
-            adr_path.display()
-        )
-    })?;
+    let rows = claims_ledger::load(workspace)?;
 
-    let rows = parse_rows(ledger)
-        .with_context(|| format!("parsing the claims ledger table in {}", adr_path.display()))?;
+    let model_path = workspace.join("model").join("claims.toml");
+    let model_toml = std::fs::read_to_string(&model_path)
+        .with_context(|| format!("reading {}", model_path.display()))?;
 
     let mut errors: Vec<String> = Vec::new();
     structural_checks(&rows, &mut errors);
+    ledger_witnesses_are_known_to_the_model(&rows, &model_toml, &mut errors);
 
     let mut needles: Vec<Needle> = Vec::new();
     for row in &rows {
@@ -88,47 +75,6 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Slice out the text strictly between `BEGIN_MARKER` and `END_MARKER`.
-/// The ADR carries several other markdown tables (STRIDE threat-model
-/// rows, compliance mappings) with their own pipe-delimited rows;
-/// scoping to the marker-delimited region keeps those from ever being
-/// mistaken for claim-catalog rows.
-fn extract_ledger_section(source: &str) -> Result<&str> {
-    let start = source
-        .find(BEGIN_MARKER)
-        .ok_or_else(|| anyhow::anyhow!("begin marker not found"))?
-        + BEGIN_MARKER.len();
-    let end = source[start..]
-        .find(END_MARKER)
-        .ok_or_else(|| anyhow::anyhow!("end marker not found"))?;
-    Ok(&source[start..start + end])
-}
-
-struct Row {
-    number: u32,
-    claim: String,
-    witnesses: Vec<Witness>,
-    authority: String,
-    status: String,
-}
-
-#[derive(Clone)]
-enum Witness {
-    /// `fn:NAME` — resolves to `fn NAME(` anywhere under `crates/`.
-    Fn(String),
-    /// `ci:NAME` — resolves to the literal NAME in any workflow file.
-    Ci(String),
-}
-
-impl Witness {
-    fn token(&self) -> String {
-        match self {
-            Self::Fn(n) => format!("fn:{n}"),
-            Self::Ci(n) => format!("ci:{n}"),
-        }
-    }
-}
-
 struct Needle {
     claim: u32,
     token: String,
@@ -157,6 +103,70 @@ impl Needle {
             found: false,
         }
     }
+}
+
+/// Every witness the ADR ledger names must also appear in
+/// `model/claims.toml` for the same claim.
+///
+/// R1 makes the model the single source, so the ledger table is allowed to
+/// be a representative anchor — a subset — but never to name a witness the
+/// model has never heard of. Nothing else compares the two: this gate
+/// resolves the ledger's witnesses against the tree, `check-conformance`
+/// compares the model against `CONFORMANCE.md`, and
+/// `check-mutation-witnesses` derives its surface from the ledger. A
+/// witness added to the ADR table but not to the model was invisible to
+/// all three, which is how two claims had already drifted.
+fn ledger_witnesses_are_known_to_the_model(
+    rows: &[Row],
+    model_toml: &str,
+    errors: &mut Vec<String>,
+) {
+    for row in rows {
+        let id = format!("MVM-SEC-{:02}", row.number);
+        let Some(model) = model_claim_witnesses(model_toml, &id) else {
+            errors.push(format!(
+                "claim {}: ledger row has no `[[claim]]` with id = \"{id}\" in model/claims.toml",
+                row.number
+            ));
+            continue;
+        };
+        for w in &row.witnesses {
+            let token = w.token();
+            if !model.contains(&token) {
+                errors.push(format!(
+                    "claim {}: ledger names witness `{token}` that model/claims.toml does not \
+                     list for {id}. The model is the single source — add it there first.",
+                    row.number
+                ));
+            }
+        }
+    }
+}
+
+/// The `witnesses = [...]` tokens recorded for `id` in `model/claims.toml`.
+///
+/// Deliberately a small hand parser rather than a serde model: this gate
+/// must keep working when the claim schema grows a field, and it only ever
+/// needs one of them.
+fn model_claim_witnesses(model_toml: &str, id: &str) -> Option<Vec<String>> {
+    let needle = format!("id = \"{id}\"");
+    let start = model_toml.find(&needle)?;
+    let rest = &model_toml[start..];
+    // Stop at the next claim so a missing `witnesses` key cannot silently
+    // borrow the following claim's list.
+    let scope_end = rest[needle.len()..]
+        .find("[[claim]]")
+        .map_or(rest.len(), |i| i + needle.len());
+    let scope = &rest[..scope_end];
+    let list_start = scope.find("witnesses = [")? + "witnesses = [".len();
+    let list_end = list_start + scope[list_start..].find(']')?;
+    Some(
+        scope[list_start..list_end]
+            .split(',')
+            .map(|t| t.trim().trim_matches('"').to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+    )
 }
 
 fn structural_checks(rows: &[Row], errors: &mut Vec<String>) {
@@ -198,84 +208,12 @@ fn structural_checks(rows: &[Row], errors: &mut Vec<String>) {
     }
 }
 
-fn parse_rows(source: &str) -> Result<Vec<Row>> {
-    let mut rows = Vec::new();
-    for line in source.lines() {
-        let line = line.trim();
-        if !line.starts_with('|') {
-            continue;
-        }
-        let cells = split_row(line);
-        if cells.len() != 5 {
-            continue; // prose pipe or malformed line — not a catalog row
-        }
-        if is_separator(&cells) || cells[0].eq_ignore_ascii_case("#") {
-            continue;
-        }
-        let Ok(number) = cells[0].parse::<u32>() else {
-            continue; // header variants / non-numeric first cell
-        };
-        let witnesses = parse_witnesses(&cells[2])
-            .with_context(|| format!("claim {number}: bad witnesses cell"))?;
-        rows.push(Row {
-            number,
-            claim: cells[1].clone(),
-            witnesses,
-            authority: cells[3].clone(),
-            status: cells[4].clone(),
-        });
-    }
-    if rows.is_empty() {
-        bail!("no data rows found (expected a 5-column markdown table)");
-    }
-    Ok(rows)
-}
-
-/// Split a `| a | b |` line into trimmed inner cells.
-fn split_row(line: &str) -> Vec<String> {
-    let t = line.strip_prefix('|').unwrap_or(line);
-    let t = t.strip_suffix('|').unwrap_or(t);
-    t.split('|').map(|c| c.trim().to_string()).collect()
-}
-
-/// True for a `|---|---|` markdown separator row.
-fn is_separator(cells: &[String]) -> bool {
-    cells.iter().all(|c| {
-        !c.is_empty()
-            && c.chars()
-                .all(|ch| ch == '-' || ch == ':' || ch.is_whitespace())
-    })
-}
-
-fn parse_witnesses(cell: &str) -> Result<Vec<Witness>> {
-    let mut out = Vec::new();
-    for tok in cell.split(',') {
-        let tok = tok.trim().trim_matches('`').trim();
-        if tok.is_empty() {
-            continue;
-        }
-        let (kind, name) = tok.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!("witness {tok:?} missing a `kind:` prefix (want fn:NAME or ci:NAME)")
-        })?;
-        let name = name.trim();
-        if name.is_empty() {
-            bail!("witness {tok:?} has an empty name");
-        }
-        match kind.trim() {
-            "fn" => out.push(Witness::Fn(name.to_string())),
-            "ci" => out.push(Witness::Ci(name.to_string())),
-            other => bail!("witness {tok:?}: unknown kind {other:?} (expected fn or ci)"),
-        }
-    }
-    Ok(out)
-}
-
 fn resolve_fn_needles(workspace: &Path, needles: &mut [Needle]) -> Result<()> {
     if !needles.iter().any(|n| matches!(n.kind, Kind::Fn)) {
         return Ok(());
     }
     let crates = workspace.join("crates");
-    for_each_file(&crates, Some("rs"), &mut |content| {
+    claims_ledger::for_each_file(&crates, Some("rs"), &mut |_, content| {
         mark(needles, Kind::Fn, content);
     })?;
     Ok(())
@@ -286,7 +224,7 @@ fn resolve_ci_needles(workspace: &Path, needles: &mut [Needle]) -> Result<()> {
         return Ok(());
     }
     let workflows = workspace.join(".github").join("workflows");
-    for_each_file(&workflows, None, &mut |content| {
+    claims_ledger::for_each_file(&workflows, None, &mut |_, content| {
         mark(needles, Kind::Ci, content);
     })?;
     Ok(())
@@ -301,77 +239,95 @@ fn mark(needles: &mut [Needle], kind: Kind, content: &str) {
     }
 }
 
-/// Walk `dir` recursively, calling `cb` with the text of every file
-/// whose extension matches `ext` (or every file when `ext` is `None`).
-/// Skips heavy build/VCS dirs. Missing dirs are not an error.
-fn for_each_file(dir: &Path, ext: Option<&str>, cb: &mut dyn FnMut(&str)) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            if matches!(name, "target" | ".git" | "node_modules") {
-                continue;
-            }
-            for_each_file(&path, ext, cb)?;
-        } else {
-            let matches_ext = match ext {
-                Some(want) => path.extension().and_then(|e| e.to_str()) == Some(want),
-                None => true,
-            };
-            if matches_ext && let Ok(content) = std::fs::read_to_string(&path) {
-                cb(&content);
-            }
+#[cfg(test)]
+mod model_sync_tests {
+    use super::*;
+
+    const MODEL: &str = r#"
+spec = "mvm/1"
+
+[[claim]]
+id = "MVM-SEC-01"
+level = "build"
+suite = "s"
+statement = "st"
+witnesses = [
+    "fn:known_one",
+    "ci:known-lane",
+]
+
+[[claim]]
+id = "MVM-SEC-02"
+level = "build"
+suite = "s"
+statement = "st"
+witnesses = ["fn:other"]
+"#;
+
+    fn row(number: u32, witnesses: Vec<Witness>) -> Row {
+        Row {
+            number,
+            claim: "c".into(),
+            witnesses,
+            authority: "a".into(),
+            status: "Shipped".into(),
         }
     }
-    Ok(())
+
+    #[test]
+    fn ledger_witness_absent_from_the_model_is_rejected() {
+        let rows = vec![row(1, vec![Witness::Fn("ghost".into())])];
+        let mut errors = Vec::new();
+        ledger_witnesses_are_known_to_the_model(&rows, MODEL, &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("fn:ghost"), "{}", errors[0]);
+        assert!(errors[0].contains("MVM-SEC-01"), "{}", errors[0]);
+    }
+
+    #[test]
+    fn ledger_subset_of_the_model_is_accepted() {
+        // The ledger is documented as a representative anchor, so naming
+        // fewer witnesses than the model is legal.
+        let rows = vec![row(1, vec![Witness::Ci("known-lane".into())])];
+        let mut errors = Vec::new();
+        ledger_witnesses_are_known_to_the_model(&rows, MODEL, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn ledger_row_with_no_model_claim_is_rejected() {
+        let rows = vec![row(9, vec![Witness::Fn("known_one".into())])];
+        let mut errors = Vec::new();
+        ledger_witnesses_are_known_to_the_model(&rows, MODEL, &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("MVM-SEC-09"), "{}", errors[0]);
+    }
+
+    #[test]
+    fn witness_lookup_does_not_borrow_the_next_claims_list() {
+        // A claim whose own `witnesses` key is missing must not silently
+        // pick up the following claim's list.
+        let model = r#"
+[[claim]]
+id = "MVM-SEC-01"
+level = "build"
+
+[[claim]]
+id = "MVM-SEC-02"
+witnesses = ["fn:belongs_to_two"]
+"#;
+        assert_eq!(model_claim_witnesses(model, "MVM-SEC-01"), None);
+        assert_eq!(
+            model_claim_witnesses(model, "MVM-SEC-02"),
+            Some(vec!["fn:belongs_to_two".to_string()])
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const TABLE: &str = "\
-| # | Claim | Witnesses | Authority | Status |
-|---|-------|-----------|-----------|--------|
-| 1 | First claim | fn:foo_one, ci:lane-a | seccomp | Shipped |
-| 2 | Second claim | fn:bar_two | Ed25519 | Shipped |
-";
-
-    fn rows() -> Vec<Row> {
-        parse_rows(TABLE).unwrap()
-    }
-
-    #[test]
-    fn parses_data_rows_and_skips_header_and_separator() {
-        let rows = rows();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].number, 1);
-        assert_eq!(rows[0].claim, "First claim");
-        assert_eq!(rows[0].witnesses.len(), 2);
-        assert_eq!(rows[1].status, "Shipped");
-    }
-
-    #[test]
-    fn witness_kinds_route_by_prefix() {
-        let ws = parse_witnesses("fn:foo, ci:my-lane, `fn:baz`").unwrap();
-        assert!(matches!(ws[0], Witness::Fn(ref n) if n == "foo"));
-        assert!(matches!(ws[1], Witness::Ci(ref n) if n == "my-lane"));
-        assert!(matches!(ws[2], Witness::Fn(ref n) if n == "baz"));
-    }
-
-    #[test]
-    fn witness_rejects_unknown_kind_and_missing_prefix() {
-        assert!(parse_witnesses("wat:foo").is_err());
-        assert!(parse_witnesses("nokind").is_err());
-        assert!(parse_witnesses("fn:").is_err());
-    }
+    use crate::claims_ledger::{extract_ledger_section, parse_rows};
 
     #[test]
     fn structural_flags_noncontiguous_and_bad_status() {
@@ -440,11 +396,6 @@ mod tests {
         resolve_ci_needles(tmp.path(), &mut needles).unwrap();
         assert!(needles[0].found);
         assert!(!needles[1].found);
-    }
-
-    #[test]
-    fn split_row_drops_outer_pipes() {
-        assert_eq!(split_row("| a | b |"), vec!["a", "b"]);
     }
 
     #[test]

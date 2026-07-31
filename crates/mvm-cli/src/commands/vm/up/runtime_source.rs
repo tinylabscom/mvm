@@ -968,9 +968,23 @@ mod universal_initramfs_attach_tests {
         let arch = GuestArch::host();
         let source = dir.path().join("source");
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::write(source.join("initramfs.cpio.gz"), b"image").unwrap();
-        std::fs::write(source.join("initramfs.hash"), b"hash").unwrap();
-        std::fs::write(source.join("initramfs.size"), "5").unwrap();
+        // The installer verifies the image against its hash sidecar, so the
+        // fixture has to match what the build emits: a real gzip stream, the
+        // SHA-256 of the uncompressed payload, and the compressed length.
+        let payload = b"cpio-payload";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, payload).unwrap();
+        let image = encoder.finish().unwrap();
+        std::fs::write(source.join("initramfs.cpio.gz"), &image).unwrap();
+        std::fs::write(
+            source.join("initramfs.hash"),
+            format!(
+                "{}\n",
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(payload))
+            ),
+        )
+        .unwrap();
+        std::fs::write(source.join("initramfs.size"), format!("{}\n", image.len())).unwrap();
         std::fs::write(source.join("VERSION"), version).unwrap();
 
         let cache_root = dir.path().join("cache").join("initramfs");

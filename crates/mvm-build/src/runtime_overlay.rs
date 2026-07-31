@@ -145,20 +145,20 @@ fn seed_from_default_cache(
     resolver: &RuntimeOverlayResolver,
     arch_dir: &str,
 ) -> Result<bool, RuntimeOverlayError> {
-    let default_cache_root = PathBuf::from(mvm_core::config::default_mvm_cache_dir());
-    if resolver.cache_root() == default_cache_root {
-        return Ok(false);
-    }
-
-    let source =
-        RuntimeOverlayResolver::new(default_cache_root, resolver.expected_version().to_string())
-            .resolve(arch_dir);
-    let Ok(source) = source else {
-        return Ok(false);
-    };
-
-    install_overlay_into_cache(&source, resolver.cache_root(), &InstallOptions::default())?;
-    Ok(true)
+    let version = resolver.expected_version().to_string();
+    crate::cache_install::seed_on_miss(
+        resolver.cache_root(),
+        &crate::cache_install::default_cache_root(),
+        |root| {
+            RuntimeOverlayResolver::new(root.to_path_buf(), version.clone())
+                .resolve(arch_dir)
+                .ok()
+        },
+        |source| {
+            install_overlay_into_cache(&source, resolver.cache_root(), &InstallOptions::default())
+                .map(|_| ())
+        },
+    )
 }
 
 #[cfg(feature = "pure-mkfs")]
@@ -727,12 +727,15 @@ pub fn install_overlay_into_cache(
     // PID + a small random suffix. Multiple concurrent installs
     // for the same (version, arch) get distinct staging dirs and
     // the last rename wins atomically.
-    let staging = parent.join(staging_dir_name(&source.arch));
+    let staging = parent.join(crate::cache_install::staging_dir_name(&source.arch));
     // Belt-and-braces: if a previous interrupted install left a
     // staging dir at the same name, blow it away.
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }
+    // A run killed between here and the rename below orphans its staging dir
+    // under another pid, which nothing else would ever clean up.
+    crate::cache_install::reap_stale_staging(parent, &source.arch);
     std::fs::create_dir(&staging)?;
 
     install_file_with_perms(&source.overlay_ext4, &staging.join("overlay.ext4"))?;
@@ -772,14 +775,6 @@ fn all_required_files_present(layout: &RuntimeOverlayLayout) -> bool {
         && layout.roothash_file.is_file()
         && layout.version_file.is_file()
         && layout.checksum_manifest_file.is_file()
-}
-
-fn staging_dir_name(arch: &str) -> String {
-    // PID alone is enough to disambiguate per-process; if two
-    // installs in the same process race, the second one wins on
-    // the post-staging rename, which is the same semantics as
-    // calling install_overlay_into_cache(overwrite=true) twice.
-    format!("{}.tmp.{}", arch, std::process::id())
 }
 
 fn install_file_with_perms(src: &Path, dst: &Path) -> Result<(), RuntimeOverlayError> {
@@ -1582,8 +1577,7 @@ mod tests {
         env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
-        let default_cache_root =
-            std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir());
+        let default_cache_root = crate::cache_install::default_cache_root();
         install_overlay_into_cache(&source, &default_cache_root, &InstallOptions::default())
             .expect("install source into default cache");
 
@@ -1650,7 +1644,7 @@ mod tests {
         let cache = TempDir::new().unwrap();
         let parent = cache.path().join("runtime-overlay/0.14.0");
         std::fs::create_dir_all(&parent).unwrap();
-        let staging = parent.join(staging_dir_name("aarch64"));
+        let staging = parent.join(crate::cache_install::staging_dir_name("aarch64"));
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("garbage"), b"left over from a crash").unwrap();
 

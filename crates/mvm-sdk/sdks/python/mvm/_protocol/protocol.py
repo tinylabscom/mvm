@@ -1164,6 +1164,7 @@ class ReadinessReport:
 class RootfsConfig:
     data_dev: str
     hash_dev: Optional[str] = None
+    in_place: Optional[bool] = False
     roothash: Optional[str] = None
     virtiofs_tag: Optional[str] = None
 

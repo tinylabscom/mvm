@@ -1,8 +1,5 @@
 use super::*;
 
-const BUILDER_VM_CACHE_REQUIRED_ARTIFACTS: &[&str] =
-    &["vmlinux", "rootfs.ext4", "cmdline.txt", "manifest.json"];
-
 /// Which phase of Stage 0 failed. Each variant maps to a
 /// `stage=...` value in the `Stage0Failed` audit detail so a dashboard
 /// can break down "Stage 0 reliability" by failure phase. String
@@ -617,12 +614,16 @@ pub(super) fn builder_vm_source_cache_status(
         return BuilderVmSourceCacheStatus::FingerprintMismatch;
     }
 
-    let digest_path = dir.join(BUILDER_VM_ARTIFACT_DIGEST_FILE);
-    if !digest_path.exists() {
-        return BuilderVmSourceCacheStatus::MissingArtifactDigestManifest;
-    }
-    if !builder_vm_artifact_digest_manifest_matches(dir) {
-        return BuilderVmSourceCacheStatus::ArtifactDigestMismatch;
+    match mvm_build::cache_install::verify_digest_manifest(
+        dir,
+        BUILDER_VM_ARTIFACT_DIGEST_FILE,
+        mvm_build::cache_install::BUILDER_VM_CACHE_ARTIFACTS,
+    ) {
+        mvm_build::cache_install::DigestManifestCheck::Match => {}
+        mvm_build::cache_install::DigestManifestCheck::ManifestAbsent => {
+            return BuilderVmSourceCacheStatus::MissingArtifactDigestManifest;
+        }
+        _ => return BuilderVmSourceCacheStatus::ArtifactDigestMismatch,
     }
 
     let provenance_path = dir.join(BUILDER_VM_PROVENANCE_FILE);
@@ -666,28 +667,29 @@ pub(super) fn write_builder_vm_source_fingerprint(
     .with_context(|| format!("writing builder VM source fingerprint in {}", dir.display()))
 }
 
+// Both helpers below are reached only from the builder-VM bootstrap paths;
+// the readiness check consults the shared verifier directly.
+#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_artifact_digest_manifest(dir: &std::path::Path) -> Result<String> {
-    let mut lines = Vec::new();
-    for name in BUILDER_VM_CACHE_REQUIRED_ARTIFACTS {
-        let path = dir.join(name);
-        if !path.exists() {
-            anyhow::bail!("builder VM artifact digest missing {}", path.display());
-        }
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("reading builder VM artifact {}", path.display()))?;
-        lines.push(format!("{}  {name}", hex::encode(Sha256::digest(&bytes))));
-    }
-    Ok(format!("{}\n", lines.join("\n")))
+    mvm_build::cache_install::digest_manifest(
+        dir,
+        mvm_build::cache_install::BUILDER_VM_CACHE_ARTIFACTS,
+    )
+    .with_context(|| format!("hashing builder VM artifacts in {}", dir.display()))
 }
 
+/// Whole-directory verdict collapsed to a bool, for the callers that only need
+/// "is this dir self-consistent" and have their own error to raise.
+#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_artifact_digest_manifest_matches(dir: &std::path::Path) -> bool {
-    let expected = match builder_vm_artifact_digest_manifest(dir) {
-        Ok(expected) => expected,
-        Err(_) => return false,
-    };
-    std::fs::read_to_string(dir.join(BUILDER_VM_ARTIFACT_DIGEST_FILE))
-        .map(|actual| actual == expected)
-        .unwrap_or(false)
+    matches!(
+        mvm_build::cache_install::verify_digest_manifest(
+            dir,
+            BUILDER_VM_ARTIFACT_DIGEST_FILE,
+            mvm_build::cache_install::BUILDER_VM_CACHE_ARTIFACTS,
+        ),
+        mvm_build::cache_install::DigestManifestCheck::Match
+    )
 }
 
 #[cfg(any(feature = "builder-vm", test))]
@@ -720,7 +722,7 @@ fn builder_vm_source_cache_provenance(
 
 fn builder_vm_artifact_names_present(dir: &std::path::Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
-    for name in BUILDER_VM_CACHE_REQUIRED_ARTIFACTS {
+    for name in mvm_build::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
         let path = dir.join(name);
         if !path.exists() {
             anyhow::bail!("builder VM provenance missing artifact {}", path.display());

@@ -247,10 +247,12 @@ match the surrounding naming, idiom, and module layout. Consistency is a feature
 
 ## Rust Best Practices
 
-Standing guidelines for every Rust change in this repo — write new code toward
-them and pull existing code their way as you touch it. Where a dedicated section
-already states a stricter rule (Clippy suppressions, `unwrap()`, reuse-first),
-that section governs; the points below extend it, never relax it.
+Use the [Rust Engineering Best Practices](https://gist.github.com/auser/c3161f55a8393faa8af5ddda68c6befa)
+as the development reference for every Rust change in this repo: write new code
+toward those practices and pull existing code their way as you touch it. Where a
+dedicated section in this file states a stricter or repository-specific rule
+(Clippy suppressions, `unwrap()`, reuse-first), this file governs; the points
+below extend the external guide, never relax it.
 
 ### API & type design
 

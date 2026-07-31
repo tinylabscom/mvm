@@ -1984,30 +1984,26 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         // Re-pick the transport on each iteration: a Firecracker VM
         // that's still booting may not show up in
         // resolve_running_vm_dir until the daemon registers it.
-        // "agent reachable" means it speaks the protocol, not just that
-        // the socket is open. We require a
-        // successful hello (with at least the `Ping` capability) before
-        // reporting ready, since under hard cutover a pre-hello agent
-        // would only answer `ProtocolMismatch` to the next request and
-        // that is *not* "reachable" from the caller's perspective.
+        // "agent reachable" means it answered on the wire, not just that the
+        // socket is open — the VMM binds the agent port before the guest kernel
+        // starts, so a connect alone also succeeds against a guest that is still
+        // booting or that panicked before userspace. `probe_agent_ready`
+        // handshakes and pings, so returning true here means the caller's next
+        // RPC reaches a live agent instead of reading EOF.
         if let Ok(transport) = vsock_transport::for_vm(vm_name)
             && let Ok(mut stream) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             && {
                 // Bound each probe: a transport whose socket is bound but whose
                 // guest agent hasn't replied yet (e.g. still booting, or an
                 // hvf VMM whose relay isn't answering) must not block the
-                // whole hello read forever — otherwise this loop never gets back
-                // to the deadline check and hangs instead of timing out. A short
-                // per-attempt read timeout lets `negotiate_protocol` fail fast so
+                // whole handshake read forever — otherwise this loop never gets
+                // back to the deadline check and hangs instead of timing out. A
+                // short per-attempt read timeout lets the probe fail fast so
                 // the outer loop retries and ultimately honours `timeout_secs`.
                 // The stream is a throwaway probe (dropped below), so the timeout
                 // never touches a real agent-RPC data stream.
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
-                mvm_agentd::vsock::negotiate_protocol(
-                    &mut stream,
-                    vec![mvm_agentd::vsock::GuestCapability::Ping],
-                )
-                .is_ok()
+                mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok()
             }
         {
             return true;

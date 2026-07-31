@@ -317,6 +317,7 @@ mod tests {
             state,
             image_sha256: None,
             parent_checkpoint: None,
+            vsock_egress: false,
         }
     }
 
@@ -336,6 +337,7 @@ mod tests {
             state: StandbyState::Idle,
             image_sha256: None,
             parent_checkpoint: None,
+            vsock_egress: false,
         }
     }
 
@@ -346,6 +348,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: None,
+            vsock_egress: false,
         }
     }
 
@@ -395,6 +398,49 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// A restored child inherits its guest's egress enablement from the parent's
+    /// saved memory, so the pool partitions on it: neither enablement may be
+    /// served by a parent of the other, and the replenish counts them separately
+    /// so each half fills its own set.
+    #[test]
+    fn egress_enablement_partitions_the_pool_in_both_directions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let deny_key = compat("aa");
+        let egress_key = StandbyCompat {
+            vsock_egress: true,
+            ..deny_key.clone()
+        };
+
+        pool.record(&handle("no-egress-parent", "aa", StandbyState::Idle))
+            .unwrap();
+        assert!(
+            pool.select_idle_compatible(&egress_key).unwrap().is_none(),
+            "a parent that booted no egress client must not serve a launch needing one"
+        );
+        assert_eq!(pool.idle_count_compatible(&egress_key).unwrap(), 0);
+        assert_eq!(pool.idle_count_compatible(&deny_key).unwrap(), 1);
+
+        let mut egress_parent = handle("egress-parent", "aa", StandbyState::Idle);
+        egress_parent.vsock_egress = true;
+        pool.record(&egress_parent).unwrap();
+        assert_eq!(
+            pool.select_idle_compatible(&egress_key)
+                .unwrap()
+                .map(|h| h.id),
+            Some("egress-parent".to_string())
+        );
+        assert_eq!(
+            pool.select_idle_compatible(&deny_key)
+                .unwrap()
+                .map(|h| h.id),
+            Some("no-egress-parent".to_string()),
+            "and the egress parent must not be handed to the deny-all launch either"
+        );
+        assert_eq!(pool.idle_count_compatible(&egress_key).unwrap(), 1);
+        assert_eq!(pool.idle_count_compatible(&deny_key).unwrap(), 1);
     }
 
     #[test]
@@ -580,6 +626,7 @@ mod tests {
             state,
             image_sha256: Some(image.into()),
             parent_checkpoint: None,
+            vsock_egress: false,
         }
     }
 
@@ -590,6 +637,7 @@ mod tests {
             vcpus: 2,
             mem_mib: 1024,
             image_sha256: Some(image.into()),
+            vsock_egress: false,
         }
     }
 

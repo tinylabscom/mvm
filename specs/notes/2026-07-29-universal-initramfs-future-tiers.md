@@ -35,15 +35,35 @@ backends").
 
 ## Docker / shared-kernel containers
 
-- Constraint source: `public/src/content/docs/security/matryoshka.md` ("No
-  container fallback") — mvm has no Tier 3; a host with no microVM backend
-  fails closed rather than dropping to a weaker boundary.
-- Boot contract: cannot apply without becoming a microVM. Container init is
-  not `mvm-guest-agent`; mounts are host-kernel namespaces, not dm-verity
-  block devices. A future container tier would be dev-tier only, refused by
-  prod admission (same discipline as the Lima test-tier exception in
-  `AGENTS.md`), and would carry its own explicitly weaker boot contract
-  rather than sharing the universal initramfs.
+- Constraint source: ADR-034 (`specs/adrs/034-docker-dev-tier-backend.md`) —
+  an opt-in, never-auto-selected, prod-refused shared-kernel container dev
+  tier, applying the ADR-024 discipline (honest capabilities, fail closed,
+  none of the hardware-isolation claims) to a Docker substrate. The default
+  and production rules are unchanged: a host with no microVM backend still
+  fails closed on every path it did not explicitly opt out of.
+- Implemented design: `DockerBackend` (`crates/mvm-runtime/src/docker_backend.rs`)
+  runs the container with the identical static `mvm-guest-agent` bind-mounted
+  read-only as `/init` (PID 1 of the container's PID namespace),
+  `--network none`, `--security-opt no-new-privileges`, the runtime-overlay
+  guest binaries bind-mounted read-only at `/mvm/runtime`, and DirShare
+  volumes as read-only-honored bind mounts. The agent listens on AF_UNIX
+  (`MVM_AGENT_TRANSPORT=unix`) instead of vsock — the only guest-side
+  transport change; the socket lives on a host-owned 0700 directory
+  bind-mounted into the container, and that directory's permissions are the
+  peer boundary (deliberately weaker than the vsock host-CID gate). After
+  start the host delivers `ActivateEnvironment` over that socket: the root
+  is `in_place` (the container already owns `/` — no mount, no pivot), so
+  activation is the uid-901 drop and the `NotActivated` gate flip. Egress,
+  when the policy allows it, rides the same per-VM substitution endpoint
+  over a bind-mounted socket the in-container forward proxy relays to.
+  Kernel/initrd boot, dm-verity, block volumes, snapshots, pause/resume,
+  warm start, and the standby pool all fail closed with typed errors.
+- Boot contract: adapted, not shared literally. Container init IS
+  `mvm-guest-agent` (unlike the arbitrary container this note originally
+  considered), but mounts are host bind mounts, not dm-verity block
+  devices, and claims 1/2/3/6 report `DoesNotHold`. Prod admission refuses
+  the tier structurally (`as_workload_backend` → `None`, Tier 3,
+  `is_workload: false`).
 
 ## Apple Container
 
