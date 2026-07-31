@@ -28,6 +28,133 @@ pub enum NetworkMode {
     None,
     /// No guest NIC; egress and ingress are mediated by host brokers over vsock.
     HostVsockProxy,
+    /// No guest NIC; the guest gets a point-to-point `mvm0` **TUN** interface
+    /// and raw IP packets are framed over dedicated vsock connections to the
+    /// host gateway, which applies policy before anything reaches host
+    /// networking.
+    ///
+    /// A compatibility mode for workloads that need a real IP stack. It is
+    /// never selected implicitly — the presence of an egress rule does not
+    /// imply it — and there is no fallback between it and the other modes.
+    /// It trades the socket-aware path's connection intent and owned-cleartext
+    /// substitution for IP-stack fidelity; see
+    /// `specs/adrs/035-l3-tun-over-vsock.md` §"Capability difference".
+    L3Vsock,
+}
+
+impl NetworkMode {
+    /// Stable wire/CLI spelling. Matches the serde representation, so the
+    /// CLI parser and the plan cannot drift apart.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::HostVsockProxy => "host_vsock_proxy",
+            Self::L3Vsock => "l3_vsock",
+        }
+    }
+
+    /// Whether this mode carries the L3 tunnel.
+    pub fn is_l3_vsock(&self) -> bool {
+        matches!(self, Self::L3Vsock)
+    }
+}
+
+/// How much ICMP an L3 workload may exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum L3IcmpPolicy {
+    /// No ICMP at all.
+    Deny,
+    /// Error and control messages only — enough for path-MTU discovery.
+    ErrorsOnly,
+    /// Errors plus echo to admitted destinations.
+    #[default]
+    EchoAndErrors,
+}
+
+/// One declared ingress mapping: a host listener forwarding into the guest.
+///
+/// Version 1 implements TCP. A `udp` protocol is refused at admission rather
+/// than accepted and ignored, so a workload never believes it is reachable
+/// on a port nothing is listening for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct L3IngressMapping {
+    /// `"tcp"`. Any other value is refused at admission.
+    pub proto: String,
+    /// Host address the listener binds. `0.0.0.0` is a wildcard exposure.
+    pub host_addr: String,
+    pub host_port: u16,
+    /// Guest port packets are delivered to.
+    pub guest_port: u16,
+}
+
+/// The L3-tunnel half of a workload's admitted networking contract.
+///
+/// Present only when [`NetworkMode::L3Vsock`] is selected; admission refuses
+/// an `l3_vsock` plan that carries no spec, and refuses a spec on a plan whose
+/// mode is something else. Every field is part of the signed contract, so the
+/// transport's shape is admitted rather than host-chosen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct L3NetworkSpec {
+    /// Wire-protocol major version the plan admits. Version 1 today.
+    pub protocol_version: u8,
+    /// Negotiated feature bits. Version 1 grants none.
+    #[serde(default)]
+    pub features: u32,
+    /// MTU assigned to the guest interface.
+    pub mtu: u16,
+    /// Data queues to open. Version 1 admits exactly one.
+    pub queue_count: u16,
+    /// CIDR the host allocates the machine's point-to-point /30 from. `None`
+    /// means the host default pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_pool: Option<String>,
+    /// Private ranges this workload may reach. Empty — the default — denies
+    /// every RFC1918 destination. `MANDATORY_DENY_RANGES` is unconditional
+    /// and cannot be opened here.
+    #[serde(default)]
+    pub admitted_private_cidrs: Vec<String>,
+    #[serde(default)]
+    pub icmp: L3IcmpPolicy,
+    /// Whether IP fragments are carried. Version 1 admits `false` only;
+    /// reassembly is an unbounded-state sink.
+    #[serde(default)]
+    pub allow_fragments: bool,
+    /// Declared ingress mappings. Anything not listed here is never
+    /// reachable from outside.
+    #[serde(default)]
+    pub ingress: Vec<L3IngressMapping>,
+    /// Cap on concurrent flows for this machine.
+    pub max_flows: u32,
+    /// Cap on live DNS bindings for this machine.
+    pub max_dns_bindings: u32,
+    /// Revision counter for the networking rules. Flows and DNS bindings
+    /// from a superseded epoch never apply.
+    #[serde(default)]
+    pub policy_epoch: u64,
+}
+
+impl L3NetworkSpec {
+    /// The version-1 shape with conservative defaults: one queue, MTU 1500,
+    /// no fragments, no private ranges, no ingress.
+    pub fn v1() -> Self {
+        Self {
+            protocol_version: 1,
+            features: 0,
+            mtu: 1500,
+            queue_count: 1,
+            address_pool: None,
+            admitted_private_cidrs: Vec::new(),
+            icmp: L3IcmpPolicy::default(),
+            allow_fragments: false,
+            ingress: Vec::new(),
+            max_flows: 4096,
+            max_dns_bindings: 1024,
+            policy_epoch: 0,
+        }
+    }
 }
 
 /// How the workload image was specified — the source the deterministic build

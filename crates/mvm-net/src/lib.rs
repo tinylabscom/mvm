@@ -20,6 +20,11 @@
 //! the egress-proxy substitution/scan seams.
 
 pub mod enforcement;
+/// Policy core for the opt-in L3 TUN-over-vsock network mode: session
+/// identity, address allocation, bounded flow state, per-packet admission,
+/// DNS bindings, and declared ingress. Pure — the host gateway supplies
+/// the I/O and the platform datapath.
+pub mod l3;
 pub mod provider;
 pub mod registry;
 

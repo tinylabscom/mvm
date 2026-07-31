@@ -247,6 +247,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: Default::default(),
+        l3_network: None,
         schema_version: SCHEMA_VERSION,
         // Placeholder — overwritten below with the content-address once every
         // load-bearing field is set. The derivation excludes `plan_id`, so this

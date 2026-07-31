@@ -2965,9 +2965,11 @@ dependencies = [
 name = "mvm-net"
 version = "0.18.0"
 dependencies = [
+ "ipnet",
  "mvm-core",
  "mvm-protocol",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
