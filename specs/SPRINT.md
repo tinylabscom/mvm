@@ -87,6 +87,17 @@
       tamper-refusal scenarios; 8,403 workspace tests, doctests, clippy/model
       gates, and all 76 BDD scenarios pass. Tracked in
       `specs/plans/280-transcript-root-audit-binding.md`.
+- [x] L3 TUN-over-vsock network mode (plan 279 / ADR-035): opt-in
+      `--network-mode l3-vsock` giving a workload a real IP stack with no
+      guest NIC. Shared no_std wire protocol, pure policy core (anti-spoof,
+      canonical-egress admission, bounded flows, controlled DNS, declared
+      ingress), guest `mvm-net-agent`, machine-scoped host gateway, Linux
+      host-TUN/nftables datapath, `CONFIG_TUN` in the workload kernel, and
+      the amendment's backend-neutral guest channel, per-boot VM identity,
+      signed network lease, and capability-gated forwarding. Privileged
+      Linux lane run on a KVM host (6/6, live forwarding witness, clean
+      teardown); 23 hermetic BDD scenarios in `s25_l3_vsock`. macOS is
+      capability-declared and refuses; native Windows is not claimed.
 
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added
