@@ -18,6 +18,21 @@ const HOST_AGENT_BIN: &str = env!("CARGO_BIN_EXE_mvm-host-agent");
 const SIGNER_HELPER_BIN: &str = env!("CARGO_BIN_EXE_mvm-signer-helper");
 const BROKER_RECOVERY_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Hang guard — deliberately **not** a budget.
+///
+/// These tests spawn real processes and wait for them to reach a state. What
+/// they assert is that the state is reached at all; how fast is a property of
+/// the host scheduler, not of the code under test. A deadline picked from
+/// "this should take ~1.5s, so 6s is ample headroom" encodes a 4x guess about
+/// machine load, and at full workspace parallelism that guess is wrong — the
+/// test goes red while the same code passes in about a second alone.
+///
+/// So this value is chosen to be unreachable by a merely-slow machine, and it
+/// must never be tuned toward "what seems fast enough". If a wait reaches it,
+/// something is stuck, and the panic says what was observed rather than only
+/// that a clock ran out.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 struct HostAgentFixture {
     _env: TestEnv,
     _data_dir: TempDir,
@@ -117,21 +132,40 @@ impl HostAgentFixture {
     }
 
     async fn wait_for_emit_until(&self, event: &str, deadline: Instant) -> ServiceResponse {
+        let started = Instant::now();
         let mut last_error = None;
+        let mut attempts = 0usize;
         while Instant::now() < deadline {
             match self.try_emit(event).await {
                 Ok(resp) => return resp,
                 Err(e) => last_error = Some(e),
             }
+            attempts += 1;
+            // A dead daemon will never bring the broker back, so waiting out
+            // the guard would only turn a decidable failure into a slow one.
+            // Fail on the state change instead of on elapsed time.
+            if let Some(pid) = self.daemon_pid()
+                && !pid_alive(pid)
+            {
+                panic!(
+                    "host-agent daemon (pid {pid}) exited after {attempts} recovery \
+                     attempt(s) in {:.1}s; the broker cannot recover. Last error: {:#}",
+                    started.elapsed().as_secs_f64(),
+                    last_error.expect("at least one recovery attempt")
+                );
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!(
-            "host-agent broker did not recover before timeout: {:#}",
+            "host-agent broker did not recover after {attempts} attempt(s) in {:.1}s \
+             (hang guard, not a budget). Last error: {:#}",
+            started.elapsed().as_secs_f64(),
             last_error.expect("at least one recovery attempt")
         );
     }
 
     async fn wait_for_worker_replacement(&self, previous_pid: libc::pid_t, deadline: Instant) {
+        let started = Instant::now();
         while Instant::now() < deadline {
             if let Some(pid) = self.worker_pid()
                 && pid != previous_pid
@@ -141,7 +175,12 @@ impl HostAgentFixture {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        panic!("host-agent worker did not restart before timeout; previous pid was {previous_pid}");
+        panic!(
+            "host-agent worker did not restart in {:.1}s (hang guard, not a budget); \
+             previous pid was {previous_pid}, current pid file reads {:?}",
+            started.elapsed().as_secs_f64(),
+            self.worker_pid()
+        );
     }
 
     fn chain_entries(&self) -> usize {
@@ -193,13 +232,21 @@ fn pid_alive(pid: libc::pid_t) -> bool {
 }
 
 async fn wait_until_pid_dead(pid: libc::pid_t, deadline: Instant) {
+    let started = Instant::now();
     while Instant::now() < deadline {
         if !pid_alive(pid) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("pid {pid} was still alive at deadline");
+    // Say what was observed, not just that a clock ran out: a bare "still
+    // alive at deadline" cannot distinguish a stuck process from a loaded one,
+    // which is what made this family unactionable when it went red in CI.
+    panic!(
+        "pid {pid} was still alive after {:.1}s (hang guard, not a budget) — \
+         the process never exited",
+        started.elapsed().as_secs_f64()
+    );
 }
 
 async fn write_frame(stream: &mut UnixStream, value: &impl serde::Serialize) -> Result<()> {
@@ -363,11 +410,12 @@ async fn idle_daemon_self_terminates_when_last_vm_deregisters() {
     // Deregister the only VM → registration count drops to 0.
     fixture.deregister();
 
-    // Poll until both the worker and the wrapper (daemon) are gone.
-    // The idle watcher polls every 500ms and the timeout is 1s, so the worker
-    // exits after ~1.5s at most. The wrapper observes the idle exit code and
-    // returns Ok() without restarting. 6s is ample headroom.
-    let deadline = Instant::now() + Duration::from_secs(6);
+    // Poll until both the worker and the wrapper (daemon) are gone. The idle
+    // watcher polls every 500ms against a 1s timeout, so an unloaded machine
+    // sees the worker exit in ~1.5s and the wrapper follow it. The assertion
+    // is that they exit — not that they exit quickly — so the wait is bounded
+    // by the hang guard rather than by a multiple of the expected duration.
+    let deadline = Instant::now() + HANG_GUARD;
     wait_until_pid_dead(worker_pid, deadline).await;
     wait_until_pid_dead(daemon_pid, deadline).await;
 }

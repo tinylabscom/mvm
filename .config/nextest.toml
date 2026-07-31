@@ -36,8 +36,19 @@ final-status-level = "flaky"
 # same tests pass in about a second alone. Capping how many race a clock
 # at once helps, but does not cure it: the group caps concurrency among
 # its own members, while the starvation comes from the other ~8,200 tests
-# in the run. Treat this as a mitigation; the durable fix is for these
-# tests not to assert a wall-clock budget for a spawned process at all.
+# in the run. Treat this as a mitigation, not a cure.
+#
+# The durable fix — a test not racing a clock for a spawned process — has
+# landed for the two `mvm-hostd` binaries: their give-up conditions are now
+# hang guards sized to be unreachable by a merely-slow machine, plus a
+# liveness short-circuit so a dead daemon fails immediately with a reason
+# instead of waiting one out. They stay in the group as belt-and-braces.
+#
+# It does NOT apply to the `mvm-runtime` members, and that is the point of
+# keeping the group: their budget is `SUBST_HANDSHAKE_TIMEOUT`, a production
+# constant. The wait those tests race is the one the product itself enforces,
+# so raising it to suit the test suite would change shipped behaviour. For
+# them the concurrency cap is the fix available.
 #
 # This is deliberately narrow. A test that merely needs a unique tempdir
 # and does not have one is a bug in the test, and a group here would hide
