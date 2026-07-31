@@ -183,14 +183,24 @@ fn apply_outcome_prod(o: Outcome) -> Result<(), GateError> {
     }
 }
 
-fn warn_outcome_dev(o: Outcome, kind: &str) {
+/// Warn that the dev gate is admitting something the prod gate would
+/// reject. Returns whether it warned.
+///
+/// The return value exists so "dev admits, but says so" is assertable.
+/// Its only other observable is a `tracing` event, and capturing one needs
+/// a subscriber harness this crate does not otherwise want — which is how
+/// replacing this whole function with a no-op survived: the dev gate went
+/// silent and nothing could tell.
+fn warn_outcome_dev(o: Outcome, kind: &str) -> bool {
     if let Outcome::Fail(e) = o {
         tracing::warn!(
             kind = kind,
             error = %e,
             "app-deps gate (dev): rejection condition observed; admitting anyway"
         );
+        return true;
     }
+    false
 }
 
 /// Read + classify the SBOM sidecar.
@@ -598,5 +608,104 @@ mod tests {
         write_artifact(&r.volume_dir, FILE_SBOM, REAL_SBOM.as_bytes());
         write_artifact(&r.volume_dir, FILE_CVE, REAL_CVE_NO_FINDINGS.as_bytes());
         apply_install_gate(&r, GateLevel::Prod).expect("real clean scan passes prod");
+    }
+
+    /// The dev gate admits a rejection condition, but it must not do so
+    /// silently. Replacing the whole warning path with a no-op survived,
+    /// because the only observable was a tracing event.
+    #[test]
+    fn the_dev_gate_warns_exactly_when_it_admits_a_rejection() {
+        assert!(
+            warn_outcome_dev(
+                Outcome::Fail(GateError::SbomMissingFile {
+                    path: "/nonexistent/sbom.cdx.json".to_string(),
+                }),
+                "SBOM"
+            ),
+            "a failing outcome admitted in dev mode must warn"
+        );
+        assert!(
+            !warn_outcome_dev(Outcome::Ok, "SBOM"),
+            "a passing outcome has nothing to warn about"
+        );
+    }
+
+    /// A sidecar that exists but cannot be read is not a sidecar that is
+    /// absent. `read_artifact` forks the caller's typed error on exactly
+    /// that distinction, and collapsing its guard to `true` reported every
+    /// unreadable artifact as simply missing.
+    ///
+    /// A directory where a file belongs gives a deterministic non-NotFound
+    /// errno on every platform, and does not depend on the test process
+    /// being unprivileged — a permission-based fixture would pass
+    /// vacuously in the root container the mutation lane runs in.
+    #[test]
+    fn read_artifact_separates_absent_from_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let absent = tmp.path().join("not-there.json");
+        assert!(
+            matches!(read_artifact(&absent), Ok(None)),
+            "an absent sidecar reads as absent"
+        );
+
+        let unreadable = tmp.path().join("cve.json");
+        std::fs::create_dir_all(&unreadable).unwrap();
+        assert!(
+            read_artifact(&unreadable).is_err(),
+            "an unreadable sidecar must not read as absent"
+        );
+
+        let present = tmp.path().join("sbom.json");
+        std::fs::write(&present, b"{}").unwrap();
+        assert!(matches!(read_artifact(&present), Ok(Some(b)) if b == b"{}"));
+    }
+
+    /// `pnpm audit` keys its findings by advisory ID under an
+    /// `advisories` / `vulnerabilities` container, so the container key is
+    /// never the package name. Three mutants survived on that test alone,
+    /// and each makes the gate blame the container instead of the package
+    /// — the refusal still fires, but it names the wrong thing.
+    #[test]
+    fn a_pnpm_shaped_finding_is_attributed_to_the_advisory_not_its_container() {
+        for container in ["advisories", "vulnerabilities"] {
+            let report = serde_json::json!({
+                container: {
+                    "GHSA-xxxx-yyyy": { "severity": "high" }
+                }
+            });
+            let (package, severity) =
+                first_high_or_critical_finding(&report).expect("a high finding is found");
+            assert_eq!(severity, "high");
+            assert_eq!(
+                package, "GHSA-xxxx-yyyy",
+                "the {container} container key is not a package name"
+            );
+        }
+
+        // A nameless finding sitting directly under the container is what
+        // separates the two halves of the check. With a nested advisory
+        // key the inner level supplies a name either way, so only this
+        // shape can tell whether the container key was wrongly adopted.
+        for container in ["advisories", "vulnerabilities"] {
+            let report = serde_json::json!({ container: { "severity": "high" } });
+            let (package, _) =
+                first_high_or_critical_finding(&report).expect("a high finding is found");
+            assert_eq!(
+                package, "unknown",
+                "a finding with no name must be `unknown`, never the {container} container key"
+            );
+        }
+
+        // A container key that is not one of the two known wrappers is a
+        // perfectly good name, so the exclusion must be exactly those two
+        // and not "any key".
+        let report = serde_json::json!({
+            "left-pad": { "severity": "critical" }
+        });
+        let (package, severity) =
+            first_high_or_critical_finding(&report).expect("a critical finding is found");
+        assert_eq!(severity, "critical");
+        assert_eq!(package, "left-pad");
     }
 }
