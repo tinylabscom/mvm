@@ -12,7 +12,7 @@
 //! reads green in CI while the same test is red for everyone else — and a
 //! genuine regression in the code under test is masked either way.
 //!
-//! Three rules keep that class closed:
+//! Four rules keep that class closed:
 //!
 //! 1. `default-cache-caller` — `default_mvm_cache_dir` is the only resolver
 //!    that reads `$HOME` while `MVM_HOME` is set, so it is the only door the
@@ -24,6 +24,11 @@
 //!    `TestEnv::isolate_mvm_home` does both; an explicit `HOME` set counts.
 //! 3. `subprocess-home-isolation` — in an integration test, a `Command`
 //!    handed `MVM_HOME` must be handed `HOME` too.
+//! 4. `seed-caller-isolation` — a test that *calls* a seeding resolver must
+//!    isolate `HOME` even when it never moves `MVM_HOME`. Rule 2 misses that
+//!    shape entirely, and it is the shape the initramfs cold-cache assertion
+//!    had: it passed a tempdir as the cache root, looked isolated, and seeded
+//!    from the real `$HOME` behind its own assertion.
 //!
 //! Rule 3 deliberately does no reachability analysis, and that is the point:
 //! the child is a whole `mvmctl`, so it reaches *every* seed regardless of
@@ -31,6 +36,13 @@
 //! a fixture names none of the seed symbols, and it builds its `Command` in a
 //! shared helper rather than inside a `#[test]` body, which is the second
 //! thing rule 2 keys on.
+//!
+//! Rules 2 and 4 read test-function bodies, so between them they cover the
+//! in-process `TestEnv` patterns the known failures came from — rule 2 the
+//! tests that relocate `MVM_HOME`, rule 4 the ones that never touch it and
+//! reach a seed anyway. Rule 4 skips `#[ignore]`d live tests, which assert
+//! against real host state by construction, and skips seed sites, which drive
+//! the seam with roots they pass explicitly.
 
 use anyhow::{Result, bail};
 use std::path::Path;
@@ -40,6 +52,7 @@ enum Rule {
     DefaultCacheCaller,
     TestHomeIsolation,
     SubprocessHomeIsolation,
+    SeedCallerIsolation,
 }
 
 impl Rule {
@@ -48,6 +61,7 @@ impl Rule {
             Rule::DefaultCacheCaller => "default-cache-caller",
             Rule::TestHomeIsolation => "test-home-isolation",
             Rule::SubprocessHomeIsolation => "subprocess-home-isolation",
+            Rule::SeedCallerIsolation => "seed-caller-isolation",
         }
     }
 }
@@ -189,6 +203,10 @@ fn scan_source(rel: &str, src: &str) -> Vec<String> {
         return hits;
     }
 
+    // A seed site owns the cross-root seam and drives it with roots it passes
+    // explicitly, so rule 3 there would only ever flag its own fixtures.
+    let is_seed_site = SEED_SITES.iter().any(|(path, _)| *path == rel);
+
     for block in test_blocks(src) {
         if sets_mvm_home(block.body) && !isolates_home(block.body) {
             push(
@@ -200,9 +218,55 @@ fn scan_source(rel: &str, src: &str) -> Vec<String> {
                     block.name
                 ),
             );
+            continue;
+        }
+        if is_seed_site {
+            continue;
+        }
+        // An `#[ignore]`d live test is outside the hermetic suite by
+        // construction: it asserts against real host state — a bootstrapped
+        // builder image, a running VMM — and isolating HOME would defeat the
+        // thing it exists to prove. The rule protects the suite that actually
+        // runs on a contributor's machine.
+        if block.body.contains("#[ignore") {
+            continue;
+        }
+        if let Some(anchor) = called_seed_anchor(block.body)
+            && !isolates_home(block.body)
+        {
+            push(
+                &mut hits,
+                block.line,
+                Rule::SeedCallerIsolation,
+                format!(
+                    "test `{}` calls `{anchor}`, which seeds from the real $HOME, without isolating HOME",
+                    block.name
+                ),
+            );
         }
     }
     hits
+}
+
+/// The seed anchor a test body names, if any.
+///
+/// Rule 2 only fires on a test that *moves* `MVM_HOME`. A test that never
+/// touches it but calls a seeding resolver directly reads the developer's real
+/// `$HOME` just the same — that is the shape the initramfs cold-cache assertion
+/// had: green in CI's empty `$HOME`, red on every machine that had ever built
+/// the artifact, and blind to the regression it was written to catch.
+fn called_seed_anchor(body: &str) -> Option<&'static str> {
+    SEED_ANCHORS
+        .iter()
+        .copied()
+        .find(|anchor| body_calls(body, anchor))
+}
+
+/// A call, not a mention: skip comment lines so the rule reads code only.
+fn body_calls(body: &str, anchor: &str) -> bool {
+    body.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .any(|line| line.contains(anchor))
 }
 
 struct TestBlock<'a> {
@@ -211,23 +275,88 @@ struct TestBlock<'a> {
     body: &'a str,
 }
 
-/// Split `src` into one block per `#[test]`, each running to the next
-/// `#[test]` or end of file. Coarse, but a test's env setup always sits
-/// between its own attribute and the next one.
+/// Split `src` into one block per test, each bounded by that test function's
+/// own body.
+///
+/// Bounding a block at the *next* test attribute is wrong in a way that is easy
+/// to miss: the last test in a `#[cfg(test)]` module then runs on through the
+/// production code that follows it and into the next test module. In
+/// `mvm-cli/src/exec.rs`, which has two test modules, that made one block 1770
+/// lines long and let it "call" any symbol in the file. A two-condition rule
+/// rarely trips over that; a single-condition rule reads it as a false positive
+/// every time. Brace-matching the function body is the boundary that actually
+/// matches what the rules mean by "this test does X".
 fn test_blocks(src: &str) -> Vec<TestBlock<'_>> {
-    let starts: Vec<usize> = src.match_indices("#[test]").map(|(at, _)| at).collect();
-    starts
-        .iter()
-        .enumerate()
-        .map(|(n, &start)| {
-            let end = starts.get(n + 1).copied().unwrap_or(src.len());
-            TestBlock {
+    test_attribute_offsets(src)
+        .into_iter()
+        .filter_map(|start| {
+            let body = function_body_from(src, start)?;
+            Some(TestBlock {
                 line: src[..start].lines().count() + 1,
-                name: test_fn_name(&src[start..end]).unwrap_or("<unnamed>"),
-                body: &src[start..end],
-            }
+                name: test_fn_name(&src[start..]).unwrap_or("<unnamed>"),
+                body,
+            })
         })
         .collect()
+}
+
+/// The `fn ... { ... }` that follows the attribute at `start`, as a slice of
+/// `src`. Returns `None` when no balanced body follows (a malformed or
+/// truncated file), which drops the block rather than over-reading.
+fn function_body_from(src: &str, start: usize) -> Option<&str> {
+    let open = src[start..].find('{')? + start;
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    let mut idx = open;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'/' if bytes.get(idx + 1) == Some(&b'/') => {
+                idx = src[idx..].find('\n').map_or(bytes.len(), |n| idx + n);
+                continue;
+            }
+            b'/' if bytes.get(idx + 1) == Some(&b'*') => {
+                idx = src[idx + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |n| idx + 2 + n + 2);
+                continue;
+            }
+            b'"' => {
+                idx += 1;
+                while idx < bytes.len() && bytes[idx] != b'"' {
+                    idx += if bytes[idx] == b'\\' { 2 } else { 1 };
+                }
+            }
+            // A char literal, not a lifetime: `'{'` would otherwise unbalance
+            // the count. Lifetimes have no closing quote and fall through.
+            b'\'' if bytes.get(idx + 2) == Some(&b'\'') => idx += 2,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[start..=idx]);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn test_attribute_offsets(src: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut at = 0usize;
+    for line in src.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[")
+            && trimmed.contains("test")
+            && !trimmed.starts_with("#[cfg(test)")
+        {
+            offsets.push(at + (line.len() - trimmed.len()));
+        }
+        at += line.len();
+    }
+    offsets
 }
 
 fn test_fn_name(body: &str) -> Option<&str> {
@@ -310,6 +439,60 @@ fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rule 3's motivating shape: a test that never touches `MVM_HOME` but
+    /// calls a seeding resolver still reads the real `$HOME`.
+    #[test]
+    fn flags_a_seed_caller_that_never_moves_mvm_home() {
+        let src = format!(
+            "{ANCHORED}\
+             #[cfg(test)]\nmod t {{\n    #[test]\n    fn cold() {{\n\
+             let dir = tempdir();\n        resolve_or_seed_from_default_cache(&dir);\n    }}\n}}\n"
+        );
+        let hits = scan_source("crates/mvm-build/src/thing.rs", &src);
+        assert!(
+            hits.iter().any(|h| h.contains("seed-caller-isolation")),
+            "expected a seed-caller hit, got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_seed_caller_that_isolates_home() {
+        let src = format!(
+            "{ANCHORED}\
+             #[cfg(test)]\nmod t {{\n    #[test]\n    fn cold() {{\n\
+             env.isolate_mvm_home(dir.path());\n        resolve_or_seed_from_default_cache(&dir);\n    }}\n}}\n"
+        );
+        assert!(scan_source("crates/mvm-build/src/thing.rs", &src).is_empty());
+    }
+
+    /// An `#[ignore]`d live test asserts against real host state on purpose.
+    #[test]
+    fn skips_an_ignored_live_seed_caller() {
+        let src = format!(
+            "{ANCHORED}\
+             #[cfg(test)]\nmod t {{\n    #[test]\n    #[ignore = \"live\"]\n    fn live() {{\n\
+             ensure_builder_vm_image();\n    }}\n}}\n"
+        );
+        assert!(scan_source("crates/mvm-build/src/thing.rs", &src).is_empty());
+    }
+
+    /// A test block stops at its own closing brace. Without that, the last
+    /// test in a `#[cfg(test)]` module runs on through the production code
+    /// after it and "calls" every symbol there.
+    #[test]
+    fn a_test_block_does_not_leak_into_the_code_after_its_module() {
+        let src = format!(
+            "{ANCHORED}\
+             #[cfg(test)]\nmod t {{\n    #[test]\n    fn harmless() {{\n        let x = 1;\n    }}\n}}\n\
+             fn production() {{\n    ensure_builder_vm_image();\n}}\n"
+        );
+        let hits = scan_source("crates/mvm-cli/src/thing.rs", &src);
+        assert!(
+            hits.is_empty(),
+            "a test must not be blamed for production code after its module: {hits:?}"
+        );
+    }
 
     const ANCHORED: &str = "fn helper() { ensure_builder_vm_image() }\n";
 
