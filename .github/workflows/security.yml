@@ -319,7 +319,7 @@ jobs:
             echo "secs=300" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fuzz GuestRequest
+      - name: Fuzz GuestRequest (fuzz_guest_request)
         working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
@@ -330,14 +330,14 @@ jobs:
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_guest_request -- -max_total_time="$DURATION"
 
-      - name: Fuzz AuthenticatedFrame
+      - name: Fuzz AuthenticatedFrame (fuzz_authenticated_frame)
         working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_authenticated_frame -- -max_total_time="$DURATION"
 
-      - name: Fuzz bounded DNS codec (fuzz-dns-codec)
+      - name: Fuzz bounded DNS codec (fuzz_dns_codec)
         working-directory: crates/mvm-agentd
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
@@ -355,7 +355,7 @@ jobs:
         # steps in vsock.rs.
         run: cargo fuzz run fuzz_authed_path -- -max_total_time="$DURATION"
 
-      - name: Fuzz SupervisorConfig (host-side)
+      - name: Fuzz SupervisorConfig (fuzz_supervisor_config)
         working-directory: crates/deps/libkrun-sys
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
