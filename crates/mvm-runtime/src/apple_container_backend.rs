@@ -82,8 +82,11 @@ impl Default for AppleContainerBackend {
 
 /// The pure config mapping behind [`AppleContainerBackend::start`]: clone
 /// the config and substitute the kernel image. Split out so the mapping is
-/// unit-testable without a runner.
-fn kernel_override_config(config: &VmStartConfig, kernel: &Path) -> VmStartConfig {
+/// unit-testable without a runner. `pub` as the backend's kernel-
+/// substitution contract surface: callers (and the conformance suite) can
+/// verify exactly what the backend changes about a launch config — the
+/// kernel path and nothing else.
+pub fn kernel_override_config(config: &VmStartConfig, kernel: &Path) -> VmStartConfig {
     let mut cfg = config.clone();
     cfg.kernel_path = Some(kernel.display().to_string());
     cfg

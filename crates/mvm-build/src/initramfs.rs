@@ -265,12 +265,13 @@ fn build_initramfs_with_cargo(
 }
 
 /// Write the four artifact files (image + sidecars) for `agent_bytes` into
+/// Write the four artifact files (image + sidecars) for `agent_bytes` into
 /// `out_dir`: the deterministic image, `initramfs.hash` = SHA-256 of the
 /// UNCOMPRESSED cpio, `initramfs.size` = the compressed byte length, and
-/// `VERSION` — the same contract the publish-path build emits. Ungated so
-/// the assembly is unit-testable on every host.
-#[cfg(any(target_os = "linux", test))]
-fn assemble_initramfs_artifact(
+/// `VERSION` — the same contract the publish-path build emits. `pub` as
+/// the deterministic-assembly contract surface (the conformance suite
+/// drives it hermetically).
+pub fn assemble_initramfs_artifact(
     agent_bytes: &[u8],
     version: &str,
     out_dir: &Path,
@@ -301,9 +302,10 @@ fn assemble_initramfs_artifact(
 /// agent, mode 0755), epoch-zero metadata in a stable order — the Rust
 /// equivalent of `find . | sort | cpio -o -H newc --owner=0:0` with all
 /// timestamps touched to the epoch. No `/dev` nodes: PID 1 mounts
-/// devtmpfs itself, so the kernel creates the device nodes.
-#[cfg(any(target_os = "linux", test))]
-fn initramfs_cpio(agent_bytes: &[u8]) -> Vec<u8> {
+/// devtmpfs itself, so the kernel creates the device nodes. `pub` as the
+/// determinism contract surface (the conformance suite builds it twice
+/// and compares bytes).
+pub fn initramfs_cpio(agent_bytes: &[u8]) -> Vec<u8> {
     crate::rootfs_inject::build_newc_cpio(&[
         crate::rootfs_inject::CpioEntry::dir("."),
         crate::rootfs_inject::CpioEntry::file("./init", 0o755, agent_bytes.to_vec()),
@@ -313,7 +315,6 @@ fn initramfs_cpio(agent_bytes: &[u8]) -> Vec<u8> {
 /// Gzip at the maximum level with no name/timestamp header — the
 /// deterministic counterpart of `gzip -n -9` (the flate2 encoder writes a
 /// zero mtime and no original filename by default).
-#[cfg(any(target_os = "linux", test))]
 fn gzip_deterministic(data: &[u8]) -> Result<Vec<u8>, InitramfsBuildError> {
     use std::io::Write as _;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
@@ -322,7 +323,6 @@ fn gzip_deterministic(data: &[u8]) -> Result<Vec<u8>, InitramfsBuildError> {
 }
 
 /// Lowercase-hex SHA-256 of `data`.
-#[cfg(any(target_os = "linux", test))]
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(data))

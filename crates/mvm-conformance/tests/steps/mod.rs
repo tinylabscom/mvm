@@ -1,6 +1,8 @@
 //! Step definitions, one module per scenario surface.
 
+mod apple_container;
 mod cli;
+mod initramfs;
 mod kernel_pin;
 mod oci_unpack;
 mod readme_contract;
