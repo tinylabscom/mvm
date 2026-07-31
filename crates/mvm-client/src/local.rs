@@ -431,8 +431,8 @@ fn materialize_from_dir(
 ) -> Result<PathBuf> {
     let output = run_rootfs_output(name);
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
-    // `None`: this library carries no embedded guest binaries (only the mvmctl
-    // binary does), so it resolves them from the cache or a source checkout.
+    // The library carries no guest binaries; remaining legacy injection needs
+    // a source checkout or a complete compatibility cache.
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
             .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)

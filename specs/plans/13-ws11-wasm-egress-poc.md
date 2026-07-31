@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Everything runs in the worktree `/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-simplification-plan`, branch `plan/mvm-simplification`. Never touch the main checkout.
-- Run gates with `MVM_SKIP_EMBED_BINARIES=1`; prefix wasm builds with `PATH="$HOME/.cargo/bin:$PATH"`.
+- Run the ordinary cargo gates; prefix wasm builds with `PATH="$HOME/.cargo/bin:$PATH"`.
 - REUSE, never re-implement: `mvm_agentd::substitution_client`, `mvm_core::substitution_wire`, `substitution_spawn::{spawn_substitution_endpoint, SubstitutionSpawnParams, EndpointTransport}`, `egress_shared::decode_plan_secrets_from_state`, the P3a host-import, the P3b.1 spawn wiring.
 - `wasmtime` stays behind the `wasm-backend` feature; the default workspace build carries no `wasmtime` (`cargo tree -p mvm-runtime -e no-dev | rg -c wasmtime` == 0).
 - `WasmBackend` stays the **claim-free** portability tier: `security_profile()` keeps every numbered claim `DoesNotHold`; the egress seam adds NO claim-catalog witness (the data-governance witness is a *governance* witness, not an isolation claim).
@@ -78,7 +78,7 @@ fn start_config_still_rejects_kernel_and_console() {
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-runtime --features wasm-backend start_config_with_egress -- --nocapture`
+Run: `cargo test -p mvm-runtime --features wasm-backend start_config_with_egress -- --nocapture`
 Expected: FAIL — the egress-allowed config currently returns `Err(NetworkingNotSupported)`.
 
 - [ ] **Step 3: Remove the egress rejection**
@@ -87,7 +87,7 @@ Delete the `if config.network_policy.allows_egress() { return Err(WasmBackendErr
 
 - [ ] **Step 4: Run to verify both tests pass**
 
-Run: `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-runtime --features wasm-backend start_config -- --nocapture`
+Run: `cargo test -p mvm-runtime --features wasm-backend start_config -- --nocapture`
 Expected: PASS (both).
 
 - [ ] **Step 5: Commit**
@@ -178,14 +178,14 @@ fn governed_egress_substitutes_secret_and_audits_on_bound_destination() {
 
 - [ ] **Step 3: Run to verify it fails** (endpoint/audit not yet wired in the harness helpers, or the fixture/plan seeding incomplete).
 
-Run: `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-runtime --features wasm-backend governed_egress -- --nocapture`
+Run: `cargo test -p mvm-runtime --features wasm-backend governed_egress -- --nocapture`
 Expected: FAIL (a specific unwired step, not a panic-in-host).
 
 - [ ] **Step 4: Implement the harness helpers** (`write_admitted_plan_with_bound_secret`, `spawn_endpoint_for_test` reusing `spawn_substitution_endpoint` with the P3b.1 params, `run_egress_fixture` instantiating the `.wat` via `WasmBackend` and returning the decoded `WireResponse`, `audit_chain_has_substitution_entry`, `verify_audit_chain_ok`). Reuse the real libraries — do not re-implement substitution/audit. If the endpoint bin must be present, gate the test to build/locate it, or mark it `#[ignore]` with a clear message + a CI job that runs `--ignored` (report which you chose).
 
 - [ ] **Step 5: Run to verify the witness passes.**
 
-Run: `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-runtime --features wasm-backend governed_egress -- --nocapture`
+Run: `cargo test -p mvm-runtime --features wasm-backend governed_egress -- --nocapture`
 Expected: PASS — all four governance assertions hold.
 
 - [ ] **Step 6: Commit**
@@ -214,7 +214,7 @@ fn governed_egress_denies_unbound_destination() {
 ```
 
 - [ ] **Step 2: Run — fails** (helper `audit_chain_has_fail_closed_entry` unwritten).
-Run: `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-runtime --features wasm-backend governed_egress_denies -- --nocapture` → FAIL.
+Run: `cargo test -p mvm-runtime --features wasm-backend governed_egress_denies -- --nocapture` → FAIL.
 - [ ] **Step 3: Implement `audit_chain_has_fail_closed_entry`** (reads the per-tenant audit log for the endpoint's fail-closed kind — see recon step 3).
 - [ ] **Step 4: Run — passes.** Same command → PASS.
 - [ ] **Step 5: Commit**
@@ -231,11 +231,11 @@ git commit -m "test(wasm): data-governance witness — default-deny on unbound d
 - [ ] **Step 1: Run the full gate.**
 
 ```
-MVM_SKIP_EMBED_BINARIES=1 cargo check --workspace --all-targets
-MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D warnings
-MVM_SKIP_EMBED_BINARIES=1 cargo clippy -p mvm-runtime --features wasm-backend -- -D warnings
-MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-runtime --features wasm-backend wasm_backend
-MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-runtime --features wasm-backend --test wasm_egress_witness
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p mvm-runtime --features wasm-backend -- -D warnings
+cargo test -p mvm-runtime --features wasm-backend wasm_backend
+cargo test -p mvm-runtime --features wasm-backend --test wasm_egress_witness
 cargo tree -p mvm-runtime -e no-dev | rg -c wasmtime   # expect 0
 cargo run -q -p xtask -- check-no-spec-refs-in-comments
 cargo run -q -p xtask -- check-no-string-backend-dispatch

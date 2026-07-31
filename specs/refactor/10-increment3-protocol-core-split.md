@@ -285,9 +285,9 @@ downstream `crate::{plan,policy,protocol}::X` paths never churn.
 Per step and at close:
 
 1. `PATH="$HOME/.cargo/bin:$PATH" cargo build -p mvm-protocol --target wasm32-unknown-unknown` → 0 (the no_std proof).
-2. `MVM_SKIP_EMBED_BINARIES=1 cargo check --workspace --all-targets` → 0.
-3. `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D warnings` → 0, **no new `#[allow]`**.
-4. `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace --no-fail-fast -E 'not package(mvm-runtime) and not package(mvm-conformance)'` + `-p mvm-runtime` separately (codesign SIGKILL) → 0 failed. The signed-plan / bundle / audit / substitution rejection ladders must stay green — they *are* the byte-identity regression net.
+2. `cargo check --workspace --all-targets` → 0.
+3. `cargo clippy --workspace --all-targets -- -D warnings` → 0, **no new `#[allow]`**.
+4. `cargo nextest run --workspace --no-fail-fast -E 'not package(mvm-runtime) and not package(mvm-conformance)'` + `-p mvm-runtime` separately (codesign SIGKILL) → 0 failed. The signed-plan / bundle / audit / substitution rejection ladders must stay green — they *are* the byte-identity regression net.
 5. `cargo run -q -p xtask -- check-claim-catalog` + `check-core-runtime-free` → clean. `mvm-core` must stay tokio-free (the no_std pressure only tightens this).
 6. Byte fixtures: freeze a signed `ExecutionPlan` and a `SignedControl.ControlRequest` before Tier 1; assert identical bytes after each tier.
 

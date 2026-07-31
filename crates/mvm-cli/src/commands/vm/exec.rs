@@ -790,8 +790,8 @@ fn build_exec_request(
                 // support would panic the guest in early init opening
                 // /dev/mapper/control, with no host signal. Fail fast instead.
                 assert_workload_kernel_supports_verity(&kernel_path)?;
-                // A source-checkout run with no embedded guest runtime cross-compiles
-                // the mvm guest binaries inside materialization — a slow,
+                // A source-checkout run that needs the legacy rootfs guest runtime
+                // cross-compiles it inside materialization — a slow,
                 // output-silent host `cargo zigbuild`. Announce it so the run does
                 // not look wedged after the OCI pull logs.
                 if super::super::image::oci_guest_runtime_compile_pending(&oci_cache_root) {

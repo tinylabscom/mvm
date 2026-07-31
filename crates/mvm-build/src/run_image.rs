@@ -11,24 +11,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::guest_agent_build::GuestRuntimeBinaryBytes;
 use crate::oci_runtime_inject::{MvmRuntimeBinaries, OciEntrypointConfig};
 use crate::rootfs::MaterializeExt4Input;
 use mvm_fs::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
 };
-
-/// Guest runtime binaries embedded in the host binary at build time — the
-/// end-user fallback for a shipped mvmctl with no source checkout to
-/// cross-compile from.
-pub struct PrebuiltGuestBinaries<'a> {
-    pub oci_init: &'a [u8],
-    pub agent: &'a [u8],
-    pub netinit: &'a [u8],
-    pub egress_client: &'a [u8],
-    pub entrypoint_runner: &'a [u8],
-    pub verity_init: &'a [u8],
-}
 
 pub struct InjectAndMaterializeRequest<'a> {
     cache_root: &'a Path,
@@ -37,7 +24,6 @@ pub struct InjectAndMaterializeRequest<'a> {
     label: &'a str,
     profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
     entrypoint: Option<&'a OciEntrypointConfig>,
-    prebuilt: Option<PrebuiltGuestBinaries<'a>>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
@@ -56,7 +42,6 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             label,
             profile: crate::oci_runtime_inject::RuntimeInjectionProfile::RootfsOnly,
             entrypoint: None,
-            prebuilt: None,
             sealed: false,
             deferred_nodes: Vec::new(),
         }
@@ -70,7 +55,6 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     label: &'a str,
     profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
     entrypoint: Option<&'a OciEntrypointConfig>,
-    prebuilt: Option<PrebuiltGuestBinaries<'a>>,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
@@ -83,11 +67,6 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
 
     pub fn entrypoint(mut self, entrypoint: Option<&'a OciEntrypointConfig>) -> Self {
         self.entrypoint = entrypoint;
-        self
-    }
-
-    pub fn prebuilt(mut self, prebuilt: Option<PrebuiltGuestBinaries<'a>>) -> Self {
-        self.prebuilt = prebuilt;
         self
     }
 
@@ -111,7 +90,6 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             label: self.label,
             profile: self.profile,
             entrypoint: self.entrypoint,
-            prebuilt: self.prebuilt,
             sealed: self.sealed,
             deferred_nodes: self.deferred_nodes,
         }
@@ -128,10 +106,9 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
 /// (see [`seal_and_assemble_verity`]) — and the sidecar is written `sealed`, so
 /// the runtime routes the block+ext4 verity boot and refuses interactive access.
 ///
-/// Guest binaries resolve by build mode: shipped binaries with non-empty
-/// `prebuilt` bytes install those exact embedded helpers first, while source
-/// builds with embedded stubs compile the invoking checkout through the
-/// content-keyed guest cache. A caller with no embedded binaries passes `None`.
+/// Guest binaries for the remaining legacy/rootfs-only injection shapes resolve
+/// from the invoking source checkout's content-keyed cache or an existing
+/// compatibility cache. The host executable does not carry workload binaries.
 pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
     let InjectAndMaterializeRequest {
         cache_root,
@@ -140,11 +117,10 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         label,
         profile,
         entrypoint,
-        prebuilt,
         sealed,
         deferred_nodes,
     } = request;
-    let bins = resolve_guest_binaries(cache_root, prebuilt)?;
+    let bins = resolve_guest_binaries(cache_root)?;
     crate::oci_runtime_inject::inject_mvm_runtime(
         unpacked_root,
         &bins,
@@ -361,35 +337,13 @@ fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) 
 
 /// Resolve the guest-agent binaries.
 ///
-/// A shipped mvmctl with embedded bytes installs those exact helpers first, so
-/// stale same-version cache entries cannot override the released runtime. A
-/// source build has embedded stubs (`prebuilt = None`) and resolves the
-/// *invoking* checkout's guest sources through a content-keyed cache, so local
-/// edits rebuild instead of serving a stale version+arch entry. A no-checkout
-/// caller without embedded helpers can still use a complete version+arch cache.
-pub fn resolve_guest_binaries(
-    cache_root: &Path,
-    prebuilt: Option<PrebuiltGuestBinaries<'_>>,
-) -> Result<MvmRuntimeBinaries> {
+/// A source checkout resolves the invoking checkout's guest sources through a
+/// content-keyed cache, so local edits rebuild instead of serving a stale
+/// version+arch entry. An installed caller may reuse a complete compatibility
+/// cache, but the released workload path obtains guest code from the universal
+/// initramfs and runtime overlay.
+pub fn resolve_guest_binaries(cache_root: &Path) -> Result<MvmRuntimeBinaries> {
     let arch = mvm_core::arch::GuestArch::host();
-
-    if let Some(p) = prebuilt {
-        let version = env!("CARGO_PKG_VERSION");
-        return crate::guest_agent_build::install_prebuilt_guest_binaries(
-            GuestRuntimeBinaryBytes {
-                oci_init: p.oci_init,
-                agent: p.agent,
-                netinit: p.netinit,
-                egress_client: p.egress_client,
-                entrypoint_runner: p.entrypoint_runner,
-                verity_init: p.verity_init,
-            },
-            cache_root,
-            version,
-            arch,
-        )
-        .context("install the embedded guest agent binaries");
-    }
 
     match crate::guest_agent_build::guest_binary_source()
         .context("resolve the guest-binary cache key for this host")?
@@ -416,8 +370,9 @@ pub fn resolve_guest_binaries(
     }
 
     anyhow::bail!(
-        "no guest agent binaries available: this build embeds none and there is no source \
-         checkout to cross-compile from"
+        "legacy rootfs guest-runtime injection is unavailable for mvmctl {} on {arch}; \
+         run from a source checkout or use the universal initramfs/runtime-overlay path",
+        env!("CARGO_PKG_VERSION")
     )
 }
 
@@ -565,54 +520,6 @@ pub fn select_root_strategy(s: RootStrategySelection) -> RootStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::arch::GuestArch;
-
-    #[test]
-    fn embedded_guest_binaries_overwrite_stale_cache() {
-        let cache = tempfile::tempdir().unwrap();
-        let arch = GuestArch::host();
-        let version = env!("CARGO_PKG_VERSION");
-        crate::guest_agent_build::install_prebuilt_guest_binaries(
-            GuestRuntimeBinaryBytes {
-                oci_init: b"stale-init",
-                agent: b"stale-agent",
-                netinit: b"stale-netinit",
-                egress_client: b"stale-egress",
-                entrypoint_runner: b"stale-entrypoint",
-                verity_init: b"stale-verity-init",
-            },
-            cache.path(),
-            version,
-            arch,
-        )
-        .unwrap();
-
-        let bins = resolve_guest_binaries(
-            cache.path(),
-            Some(PrebuiltGuestBinaries {
-                oci_init: b"fresh-init",
-                agent: b"fresh-agent",
-                netinit: b"fresh-netinit",
-                egress_client: b"fresh-egress",
-                entrypoint_runner: b"fresh-entrypoint",
-                verity_init: b"fresh-verity-init",
-            }),
-        )
-        .unwrap();
-
-        assert_eq!(std::fs::read(bins.oci_init).unwrap(), b"fresh-init");
-        assert_eq!(std::fs::read(bins.agent).unwrap(), b"fresh-agent");
-        assert_eq!(std::fs::read(bins.netinit).unwrap(), b"fresh-netinit");
-        assert_eq!(std::fs::read(bins.egress_client).unwrap(), b"fresh-egress");
-        assert_eq!(
-            std::fs::read(bins.entrypoint_runner).unwrap(),
-            b"fresh-entrypoint"
-        );
-        assert_eq!(
-            std::fs::read(bins.verity_init).unwrap(),
-            b"fresh-verity-init"
-        );
-    }
 
     #[cfg(not(target_os = "linux"))]
     #[test]

@@ -1,22 +1,20 @@
 //! `xtask check-guest-binary-lists`
 //!
 //! CI lint — the guest runtime binaries baked into an OCI `run --image` rootfs
-//! are named in four hand-maintained lists that must stay in lockstep:
+//! are named in two hand-maintained lists that must stay in lockstep:
 //!
 //! - `crates/mvm-build/src/guest_agent_build.rs` — the `cargo zigbuild --bin`
 //!   invocation that actually builds them (the authoritative list).
-//! - `crates/mvm-cli/build.rs` — the same `--bin` invocation that cross-compiles
-//!   + embeds them into a shipped mvmctl.
 //! - `crates/mvm-build/src/oci_runtime_inject.rs` — the `MvmRuntimeBinaries`
 //!   struct whose field docs name each bin.
-//! - `crates/mvm-cli/src/commands/image/materialize.rs` — the `find("…")`
-//!   lookups that pull the embedded bytes.
 //!
-//! The check asserts those four sets are identical to each other AND that every
+//! The check asserts those two sets are identical to each other AND that every
 //! name is a real `[[bin]]` of `mvm-agentd`. A drift — a
 //! renamed bin, a list left behind, or a name that no longer maps to a bin —
 //! fails here instead of silently shipping a rootfs missing (or misnaming) a
-//! guest binary.
+//! guest binary. It separately asserts that `mvm-cli/build.rs` has no guest
+//! `--bin` list: workload binaries belong to the initramfs/runtime artifacts,
+//! never the host CLI executable.
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -26,7 +24,6 @@ use std::path::Path;
 const GUEST_AGENT_BUILD: &str = "crates/mvm-build/src/guest_agent_build.rs";
 const CLI_BUILD_RS: &str = "crates/mvm-cli/build.rs";
 const OCI_INJECT: &str = "crates/mvm-build/src/oci_runtime_inject.rs";
-const IMAGE_MOD: &str = "crates/mvm-cli/src/commands/image/materialize.rs";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let universe = guest_bin_universe(workspace)?;
@@ -37,16 +34,8 @@ pub fn run(workspace: &Path) -> Result<()> {
             extract_guest_agent_build_argv(workspace, GUEST_AGENT_BUILD)?,
         ),
         (
-            "mvm-cli/build.rs argv",
-            extract_bin_flags_from_file(workspace, CLI_BUILD_RS)?,
-        ),
-        (
             "oci_runtime_inject.rs MvmRuntimeBinaries",
             extract_runtime_struct(workspace, OCI_INJECT)?,
-        ),
-        (
-            "image/materialize.rs find() lookups",
-            extract_find_calls(workspace, IMAGE_MOD)?,
         ),
     ];
 
@@ -60,23 +49,29 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
     }
 
-    // All four lists identical.
+    // Both lists identical.
     let canonical = &lists[0].1;
     for (label, set) in &lists[1..] {
         if set != canonical {
             bail!(
                 "guest-binary name lists drift:\n  {} = {:?}\n  {} = {:?}\n\n\
-                 Fix: keep the guest runtime binary lists identical across {}, {}, {}, {}.",
+                 Fix: keep the guest runtime binary lists identical across {} and {}.",
                 lists[0].0,
                 canonical,
                 label,
                 set,
                 GUEST_AGENT_BUILD,
-                CLI_BUILD_RS,
                 OCI_INJECT,
-                IMAGE_MOD,
             );
         }
+    }
+
+    let cli_guest_bins = extract_bin_flags_from_file(workspace, CLI_BUILD_RS)?;
+    if !cli_guest_bins.is_empty() {
+        bail!(
+            "mvm-cli/build.rs embeds workload guest binaries {:?}; build them through the initramfs/runtime artifacts instead",
+            cli_guest_bins,
+        );
     }
 
     // Every listed name is a real guest `[[bin]]` — catches an invalid drift.
@@ -91,7 +86,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     }
 
     eprintln!(
-        "check-guest-binary-lists: 4 lists agree on {} guest binaries, all real [[bin]]s",
+        "check-guest-binary-lists: 2 artifact lists agree on {} guest binaries; mvm-cli embeds none",
         canonical.len()
     );
     Ok(())
@@ -170,14 +165,6 @@ fn extract_runtime_struct(workspace: &Path, rel: &str) -> Result<BTreeSet<String
     Ok(re.captures_iter(block).map(|c| c[1].to_string()).collect())
 }
 
-/// Guest binary names looked up via `find("…")` (the `embedded_guest_binaries`
-/// resolver).
-fn extract_find_calls(workspace: &Path, rel: &str) -> Result<BTreeSet<String>> {
-    let src = read(workspace, rel)?;
-    let re = Regex::new(r#"find\("(mvm-[a-z0-9-]+)"\)"#).unwrap();
-    Ok(re.captures_iter(&src).map(|c| c[1].to_string()).collect())
-}
-
 fn read(workspace: &Path, rel: &str) -> Result<String> {
     let path = workspace.join(rel);
     std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
@@ -239,13 +226,13 @@ name = "mvm-oci-init"
     }
 
     #[test]
-    fn the_four_lists_agree_and_are_real_bins() {
+    fn the_artifact_lists_agree_and_cli_embeds_no_guest_bins() {
         // The real gate over the current tree.
         run(&workspace_root()).expect("guest-binary lists must be in sync");
     }
 
     #[test]
-    fn extractors_each_find_the_six_runtime_bins() {
+    fn artifact_extractors_each_find_the_six_runtime_bins() {
         let root = workspace_root();
         let expected = BTreeSet::from([
             "mvm-oci-init".to_string(),
@@ -259,12 +246,13 @@ name = "mvm-oci-init"
             extract_guest_agent_build_argv(&root, GUEST_AGENT_BUILD).unwrap(),
             expected
         );
-        assert_eq!(
-            extract_bin_flags_from_file(&root, CLI_BUILD_RS).unwrap(),
-            expected
-        );
         assert_eq!(extract_runtime_struct(&root, OCI_INJECT).unwrap(), expected);
-        assert_eq!(extract_find_calls(&root, IMAGE_MOD).unwrap(), expected);
+        assert!(
+            extract_bin_flags_from_file(&root, CLI_BUILD_RS)
+                .unwrap()
+                .is_empty(),
+            "mvm-cli must not cross-compile workload guest binaries"
+        );
     }
 
     #[test]

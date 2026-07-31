@@ -382,7 +382,32 @@ fn spawn_docker_egress_endpoint_if_needed(
 /// when the set can't be resolved (no source checkout and a cold cache) —
 /// booting without it would silently hand the workload a lesser
 /// environment than the launch contract promises.
-fn resolve_overlay_bins_dir(cache_root: &Path) -> std::result::Result<PathBuf, DockerBackendError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerRuntimeArtifacts {
+    agent_binary: PathBuf,
+    overlay_bins_dir: PathBuf,
+}
+
+fn docker_runtime_artifacts(
+    binaries: mvm_build::guest_agent_build::RuntimeOverlayGuestBinaries,
+) -> std::result::Result<DockerRuntimeArtifacts, DockerBackendError> {
+    // Every binary in the set lives in the layout's own cache dir.
+    let overlay_bins_dir = binaries
+        .agent
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| DockerBackendError::RuntimeOverlayUnavailable {
+            reason: "resolved agent path has no parent directory".to_string(),
+        })?;
+    Ok(DockerRuntimeArtifacts {
+        agent_binary: binaries.agent_interactive,
+        overlay_bins_dir,
+    })
+}
+
+fn resolve_docker_runtime(
+    cache_root: &Path,
+) -> std::result::Result<DockerRuntimeArtifacts, DockerBackendError> {
     let arch = mvm_core::arch::GuestArch::host();
     let Some(workspace) = mvm_build::guest_agent_build::detect_source_workspace() else {
         return Err(DockerBackendError::RuntimeOverlayUnavailable {
@@ -398,15 +423,7 @@ fn resolve_overlay_bins_dir(cache_root: &Path) -> std::result::Result<PathBuf, D
     .map_err(|e| DockerBackendError::RuntimeOverlayUnavailable {
         reason: e.to_string(),
     })?;
-    // Every binary in the set lives in the layout's own cache dir.
-    let dir = binaries
-        .agent
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| DockerBackendError::RuntimeOverlayUnavailable {
-            reason: "resolved agent path has no parent directory".to_string(),
-        })?;
-    Ok(dir)
+    docker_runtime_artifacts(binaries)
 }
 
 /// Create the per-VM run directory with owner-only permissions: it holds
@@ -520,18 +537,16 @@ impl VmBackend for DockerBackend {
             .map_err(|e| anyhow!("write agent config in {}: {e}", run_dir.display()))?;
 
         let cache_root = PathBuf::from(mvm_cache_dir());
-        let binaries = mvm_build::run_image::resolve_guest_binaries(&cache_root, None)
-            .context("resolve the mvm-guest-agent binary for the container")?;
-        let overlay_bins_dir = resolve_overlay_bins_dir(&cache_root)?;
+        let runtime = resolve_docker_runtime(&cache_root)?;
         let egress_endpoint_sock =
             spawn_docker_egress_endpoint_if_needed(config, &state_dir, &run_dir)?;
 
         let plan = DockerRunPlan {
             name: config.name.clone(),
             image: config.rootfs_path.trim().to_string(),
-            agent_binary: binaries.agent,
+            agent_binary: runtime.agent_binary,
             run_dir: run_dir.clone(),
-            overlay_bins_dir: Some(overlay_bins_dir),
+            overlay_bins_dir: Some(runtime.overlay_bins_dir),
             egress_endpoint_sock,
             dir_shares: config.volumes.clone(),
             cpus: config.cpus,
@@ -1009,6 +1024,27 @@ mod tests {
         assert!(joined.ends_with("alpine:3.20 --config /run/mvm/agent.json"));
         assert!(!joined.contains("--privileged"));
         assert!(!joined.contains("--net="));
+    }
+
+    #[test]
+    fn docker_runtime_uses_the_interactive_agent_from_the_overlay_artifact() {
+        let root = PathBuf::from("/cache/runtime-overlay-bins");
+        let artifacts =
+            docker_runtime_artifacts(mvm_build::guest_agent_build::RuntimeOverlayGuestBinaries {
+                agent: root.join("agent"),
+                agent_interactive: root.join("agent-interactive"),
+                netinit: root.join("netinit"),
+                seccomp_apply: root.join("seccomp-apply"),
+                verity_init: root.join("verity-init"),
+                runner: root.join("runner"),
+                egress_client: root.join("egress-client"),
+                addon_dns: root.join("addon-dns"),
+                exit_report: root.join("exit-report"),
+            })
+            .expect("map runtime overlay binaries");
+
+        assert_eq!(artifacts.agent_binary, root.join("agent-interactive"));
+        assert_eq!(artifacts.overlay_bins_dir, root);
     }
 
     #[test]
