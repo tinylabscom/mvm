@@ -303,6 +303,21 @@ fn output_contains(world: &mut CliWorld, needle: String) {
     );
 }
 
+/// The negative of `the output contains`, for asserting a record is gone rather
+/// than merely that some other line is present.
+#[then(expr = "the output does not contain {string}")]
+fn output_does_not_contain(world: &mut CliWorld, needle: String) {
+    let output = world
+        .last_run
+        .as_ref()
+        .expect("a prior step must run mvmctl");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(needle.as_str()),
+        "expected stdout not to contain {needle:?}, but it did:\n{stdout}"
+    );
+}
+
 #[then(expr = "the file {string} exists")]
 fn file_exists(world: &mut CliWorld, path: String) {
     let _ = world.last_output();

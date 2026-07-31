@@ -70,3 +70,19 @@ Feature: machine run request contract
     When I run mvmctl with "machine run --image alpine --dry-run -- /bin/true" and an isolated mvm home
     Then the command exits with code 0
     And the output contains "network: deny-all"
+
+  # `--net` is the broad opt-in and `--allow-host` the narrow one; a dry run is
+  # where the difference is visible before it is committed to.
+  Scenario: machine run --net resolves to the dev preset rather than an allow-list
+    When I run mvmctl with "machine run --image alpine --dry-run --net -- /bin/true" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "network: preset:dev"
+
+  # The security profile and the resources are what the operator asked for, not
+  # a default silently substituted for them.
+  Scenario: machine run dry-run echoes the requested profile and resources
+    When I run mvmctl with "machine run --image alpine --dry-run --profile restrictive --cpus 4 --memory 1G -- /bin/true" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "profile: restrictive"
+    And the output contains "cpus=4"
+    And the output contains "memory=1G (1024 MiB)"
