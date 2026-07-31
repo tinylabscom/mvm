@@ -770,6 +770,24 @@ is broken" rather than "port 80 was not admitted". The host knows exactly which
 
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
+### Deferred: a dry run should not require a bootable backend
+
+`machine run --dry-run` with egress enabled (`--allow-host` / `--net`) resolves an
+*available* egress-capable backend before printing the plan, so it exits 1 on a
+host with no usable VMM. That makes the command's outcome a fact about the host
+rather than about the request, and it is why two otherwise-valuable hermetic
+scenarios — that a bare `--allow-host <host>` resolves to `<host>:443`, and that
+`--net` resolves to the dev preset — could not be gated: they pass on a developer
+machine and fail on a CI runner, and the reverse assertion has the same problem
+inverted.
+
+Whether that check belongs in a dry run is a real question. A dry run exists to
+show the resolved plan without booting, and needing a bootable backend defeats it
+exactly where it is most useful — CI, a laptop without a VMM, planning a run
+before provisioning. Against that, a plan you could never execute is arguably
+worth refusing. Not decided here, and deliberately not changed inside a test
+change.
+
 ## 5. Definition of done
 
 - Both surfaces build; `cargo nextest run --workspace` + `cargo test --workspace --doc` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all --check` green.
