@@ -224,15 +224,29 @@ mod tests {
         }
     }
 
+    /// The apple-container backend is not opt-in any more: on the hvf default
+    /// tier `auto_select` prefers it when Apple's container kernel is already
+    /// cached, so a plain `machine run` reaches it without `--hypervisor`.
+    ///
+    /// This asserts the *exact* condition rather than a one-directional
+    /// "never", because both directions are regressions: reaching
+    /// apple-container off the hvf tier, and failing to reach it when its
+    /// artifact is present. The predecessor asserted "never" and went stale
+    /// the moment the ladder gained the arm — invisibly, because that branch
+    /// is unreachable on the Linux CI runners, so it broke only the macOS
+    /// contributors it was meant to protect.
     #[test]
-    fn auto_select_never_returns_apple_container() {
-        // Opt-in only: `auto_select`'s ladder constructs Firecracker/Hvf/
-        // Libkrun and nothing else, so this holds on every platform the
-        // ladder can resolve to.
-        assert_ne!(
-            AnyBackend::auto_select().kind(),
-            BackendKind::AppleContainer,
-            "auto_select must never fall through to the apple-container backend"
+    fn auto_select_picks_apple_container_exactly_when_its_kernel_is_cached() {
+        let hvf_tier = mvm_core::platform::current().is_hvf_default_tier();
+        let kernel_cached = AppleContainerBackend::new().is_available().unwrap_or(false);
+        let selected = AnyBackend::auto_select().kind();
+
+        assert_eq!(
+            selected == BackendKind::AppleContainer,
+            hvf_tier && kernel_cached,
+            "auto_select reached {selected:?}; the apple-container arm is taken \
+             exactly when the hvf tier is default and its container kernel is \
+             cached (hvf_tier={hvf_tier}, kernel_cached={kernel_cached})"
         );
     }
 

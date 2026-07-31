@@ -1211,8 +1211,13 @@ mod tests {
             // The full set of legitimate auto_select returns is:
             //   firecracker (KVM), hvf (macOS 26+ hvf VMM, via the HVF workload
             //   runner whose name() delegates to the hvf driver), libkrun
-            //   (macOS 13-25 / Linux non-KVM fallback).
-            matches!(name, "firecracker" | "hvf" | "libkrun"),
+            //   (macOS 13-25 / Linux non-KVM fallback), and apple-container
+            //   (the hvf tier's preferred arm when Apple's container kernel is
+            //   already cached). Which of the last two the hvf tier resolves to
+            //   is pinned by `auto_select_picks_apple_container_exactly_when_
+            //   its_kernel_is_cached` in `apple_container_backend`; this test
+            //   only asserts the ladder never leaves that set.
+            matches!(name, "firecracker" | "hvf" | "libkrun" | "apple-container"),
             "auto_select returned unexpected backend: {name}"
         );
     }
