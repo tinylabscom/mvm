@@ -404,10 +404,11 @@ of the address ≠ authorization question (§7.4). The answer differs by what "i
 means, so split it.
 
 **Three things, three different answers.** *Identity of the data* (what the bytes are): a
-content-address supplies it for free; mvm does this everywhere. *Identity of the principal* (who
-authored it): a hash **cannot** — an address says what the bytes are, never who signed them; that
-needs Ed25519 `key_id` (authenticity), which mvm has. *Permissions* (what may this do, where may
-it go): this is the trap.
+content-address supplies it for free; mvm does this everywhere. *Authenticity of the principal*
+(which trusted authority issued it): a hash **cannot** — an address says what the bytes are,
+never who signed them. That needs a signature verified against an already-trusted public key;
+`key_id` / `signer_id` only selects or fingerprints that key and is not proof by itself.
+*Permissions* (what may this do, where may it go): this is the trap.
 
 **The trap — content-addressing a capability is not authority.** Put `permissions: [...]` in a
 packet and content-address it, and κ certifies only "this packet *contains* this permission
@@ -415,47 +416,56 @@ string," never that the permission was *granted*. Anyone can craft a packet asse
 permission and it gets a perfectly valid address; the hash authenticates the bytes, not the
 authority behind them. So this merely turns "trust the claim" into "trust the bytes of the claim"
 — zero elevation of trust. This is exactly the structural weakness of UOR/Hologram's
-capability-only, unsigned control plane (cf. the "restored child is unauthorizable" finding,
-§7.4), and why the standing rule is: κ layers *under* signed authority, never *as* it.
+capability-only, unsigned control plane, and why the standing rule is: κ layers *under* signed
+authority, never *as* it.
 
 **The form that works — a signed capability, which mvm already ships.** Carry the permission with
-the data, but signed rather than merely hashed: (1) **signed** by an authority the verifier
-trusts (authenticity); (2) **bound** to principal (`key_id`) + destination/scope + validity
-window + nonce (freshness, anti-replay); (3) **content-addressed underneath** (integrity), so κ
-is the tamper-check and reference handle while the *signature* is what makes it a permission.
-That is precisely what the `ExecutionPlan` is (signed, content-addressed, validity/nonce-bound —
-claim 8), what the broker enforces per-service from `ExecutionPlan.services` before dispatch
-(claim 12), and what the secrets path returns as destination- and time-bound *signed* credentials
-(claim 13). "Identity + permissions in the packet" is already the design — κ is the integrity
-layer under it, never the permission itself.
+the data, but signed rather than merely hashed: (1) **signed** by an authority whose public key
+the verifier already trusts (authenticity); (2) **bound** to session/principal +
+destination/scope + validity window + nonce (freshness, anti-replay); and (3) optionally
+**content-addressed underneath** when a stable integrity/reference handle is useful. The
+signature makes it authority; κ never does. That is precisely what the content-addressed,
+signed, validity/nonce-bound `ExecutionPlan` supplies (claim 8), what the broker enforces
+per-service from `ExecutionPlan.services` before dispatch (claim 12), and what the secrets path
+returns as destination- and time-bound signed credentials (claim 13). The guest-side `VerbGrant`
+is the narrower form: host-signed and bound to a session, plan nonce, expiry, and verb set.
 
-**Where κ genuinely adds something in-packet** (additive, tenant-scoped): *content-address the
-capability object itself* → tamper-evident, referenceable-by-κ, cacheable/dedup within the tenant
-boundary (its identity is a κ, its authority is the signature over it); *bind data → authority in
-the transcript* (extends §7.6) → stamp each admitted flow with the κ of the signed capability
-that authorized it, so the chain records "this packet crossed under capability κ_X" — provable
-data→authority binding rather than just "a flow happened"; and, for delegation, *macaroons* — a
-signed root capability attenuated by appending hash-chained caveats (narrow the scope, add an
-expiry) without re-contacting the issuer. The macaroon root stays signed; κ/hash-chaining is the
-attenuation mechanism, not the trust root.
+**What is already bound.** `ExecutionPlan.plan_id` is the SHA-256 content-address of the plan's
+load-bearing body, and every chain-signed `AuditEntry` — including flow open/close — records that
+`plan_id`. The existing data-plane *metadata* therefore already answers "which admitted signed
+authority governed this flow." A second capability κ on every flow would duplicate that binding.
+The genuinely missing link is the one identified in §7.6: the encrypted byte-transcript's sealed
+manifest has no aggregate root in the signed chain. Emit that root through the existing
+plan-bound audit entry and it automatically binds the exact capture to the same `plan_id`. A
+separate digest for a narrower capability becomes useful only if a future action is authorized
+by a capability independently of the plan; otherwise its signature already supplies integrity
+and its nonce/session binding makes cache deduplication nearly valueless.
 
-**Caveats.** Per-packet signing on the hot vsock path is too expensive — bind the capability at
-*session/connection* admission and reference it by κ in per-frame metadata (the §7.6 perf point).
-A capability κ in a packet is a fingerprint; keep it within the tenant/trust boundary (the §7.4
+**Caveats.** Do not sign every packet on the hot vsock path. Authenticate and bind authority at
+session/connection admission, then carry only the already-bound flow/session identity. Any
+capability digest is a content fingerprint; keep it within the tenant/trust boundary (the §7.4
 cross-tenant leak rule).
 
-**Concrete payoff — the restored-fork-child blocker (Plan 255).** This maps onto a live
-structural blocker in the warm-pool work: a restored fork child is currently unauthorizable
-because its verb-grant is bound to the *original* admission, not carried in a re-presentable form.
-A signed, attenuatable in-packet capability (macaroon-style, derived from the parent's grant) is
-exactly the shape that could let a restored child carry its own narrowed authority — the one
-place this is not theory but a candidate answer to an existing blocker.
+**Restored children need the existing grant path completed, not a new capability system.** The
+factory-parent boot now receives the host-signer public key as host identity without receiving a
+workload grant (#1959 fixed the boot half). The production post-restore path still sends
+`grant_envelope: None`; it should instead deliver a freshly host-signed `VerbGrantEnvelope` bound
+to the child's newly admitted plan/session and verify it against that boot-pinned key. The
+separate current hard blocker is the unaudited factory parent (#1962). Neither problem requires
+offline delegation or a new wire format.
 
-**Net.** Right read as "a *signed* capability travels with the data" (mvm already does this); a
-trap read as "content-addressing *is* the permission" (UOR/Hologram's gap). The genuinely new,
-in-house work it points at is (a) binding data→capability-κ into the transcript (rides with §7.6,
-Phase 1) and (b) a macaroon-style attenuatable capability to unblock the restored-child case
-(fleet, Phase 3).
+**Delegation is trigger-gated.** If a future fleet use case genuinely needs a holder to attenuate
+authority without re-contacting the issuer — especially multi-hop or offline delegation — then
+evaluate an established attenuatable-capability format (for example Macaroons or Biscuit) against
+a written bearer/replay/revocation threat model. Do not invent a custom Ed25519 + hash-chain
+scheme, and do not add this machinery merely to rotate a child grant while the host issuer is
+already online.
+
+**Net.** Right read as "a *signed* capability travels with the session/data" (mvm already does
+this); a trap read as "content-addressing *is* the permission" (UOR/Hologram's gap). The bounded
+new work is the §7.6 sealed-transcript-root audit binding plus completion of Plan 255's existing
+post-restore grant delivery. A general attenuatable capability remains deferred until an actual
+delegation requirement appears.
 
 ## 8. Interop hazards and alignment points
 
@@ -562,7 +572,7 @@ should we consider this" is: Phase 1 now, the rest when its trigger fires.
 | **0 — Decide & scope** | Now (days) | Adopt "conform, don't consume" as explicit policy; pin SHA-256 as the canonical axis; turn §6 U1–U5 + §7.5 defensive coverage into a `specs/plans/` doc. | None. |
 | **1 — Methodology + defensive coverage** | Next 1–2 sprints | U1 tiers · U4 replay-vector lane · U2 prose over-claim gate · U3 falsifiability table · U5 ≥2-verifier oracle bar; content-address kernel + build cache with verify-on-read; anchor the sealed data-plane transcript root into the audit chain (§7.6). All in-house, no dependency. | Phase 0 plan approved. |
 | **2 — Interop alignment** | Mid-term, triggered | Agree axis + wire-form + in-toto/SLSA canonicalization with the sibling projects; read `uor-foundation` (the real κ engine); evaluate `uor-addr-1` (lighter crate). | A real second consumer of the addresses **and** a UOR/Hologram-side conversation. |
-| **3 — Runtime / fleet / AI** | Long-term, opportunistic | holospace object model (migrate-by-κ-closure) into mvmd; content-addressed inter-VM routing (mvmd only — no east-west path in mvm, §7.6); a signed, attenuatable in-packet capability (macaroon-style) to unblock the restored-fork-child authorization gap (§7.7); `hologram-ai` interop for the deferred `ai` command; distributed transport (RBSR / iroh-blobs). | A concrete mvmd migration/scale requirement, or the `ai` command leaving deferred status. |
+| **3 — Runtime / fleet / AI** | Long-term, opportunistic | holospace object model (migrate-by-κ-closure) into mvmd; content-addressed inter-VM routing (mvmd only — no east-west path in mvm, §7.6); evaluate an established attenuatable-capability format only if offline/multi-hop delegation becomes a concrete requirement (§7.7); `hologram-ai` interop for the deferred `ai` command; distributed transport (RBSR / iroh-blobs). | A concrete mvmd migration/scale requirement, a concrete offline/multi-hop delegation requirement, or the `ai` command leaving deferred status. |
 
 **Bottom line:** consider **Phase 1 now** — it is the highest-ROI, lowest-risk, fully
 in-house work, and it doubles as security hardening (the two defensive pursuits). Hold
