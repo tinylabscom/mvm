@@ -1047,6 +1047,16 @@ mod tests {
         // full `PER_IP_CONNECT_TIMEOUT` budget before falling over. The overall
         // timeout here must exceed that per-IP budget, leaving room for the
         // fallover attempt against the reachable loopback address.
+        //
+        // This one keeps the public address on purpose: the branch under test
+        // is fallover after a *timeout*, which needs an address that blackholes
+        // rather than refuses, and nothing loopback-local can produce that
+        // portably. The cost is a real dependency on the ambient network
+        // dropping TEST-NET-1 — behind a captive portal or an intercepting
+        // resolver the first connect succeeds and this passes without
+        // exercising fallover at all. The refused-fallover branch is covered
+        // deterministically by `..._falls_over_from_unreachable_ipv6_to_ipv4`,
+        // so a silent pass here does not leave fallover wholly unwitnessed.
         let unreachable: IpAddr = "192.0.2.1".parse().unwrap();
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
 
@@ -1067,10 +1077,15 @@ mod tests {
             let _ = listener.accept().await;
         });
 
-        // 2001:db8::/32 (RFC 3849) is the documentation range — never routed,
-        // so the connect consumes its per-IP budget (or errors immediately)
-        // before the IPv4 fallover, mirroring an admitted-but-unreachable AAAA.
-        let unreachable_v6: IpAddr = "2001:db8::1".parse().unwrap();
+        // `::1` on the same port, where only the IPv4 socket is listening, so
+        // the v6 attempt is refused immediately and the fallover is genuinely
+        // exercised. The previous fixture used 2001:db8::1 (RFC 3849
+        // documentation range) and relied on the ambient network never routing
+        // it. That is fragile in both directions: on a network that answers,
+        // the v6 connect succeeds, `stream.is_some()` still holds, and the test
+        // passes without ever testing fallover; on one that blackholes it, the
+        // attempt burns its share of the 5s budget.
+        let unreachable_v6: IpAddr = "::1".parse().unwrap();
         let loopback_v4: IpAddr = "127.0.0.1".parse().unwrap();
 
         let stream =
@@ -1088,13 +1103,27 @@ mod tests {
     #[tokio::test]
     async fn splice_sends_fail_ack_when_no_admitted_ip_is_reachable() {
         let (mut client, guest) = tokio::io::duplex(1024);
-        let ips = vec!["192.0.2.1".parse::<IpAddr>().unwrap()];
+
+        // A closed loopback port, not a blackholed public address. The
+        // previous fixture used 192.0.2.1 (RFC 5737 TEST-NET-1) and relied on
+        // the ambient network dropping it so the connect would time out. That
+        // is an assumption about whoever's network the suite happens to run
+        // on: behind a captive portal or an intercepting resolver something
+        // answers, the connect succeeds, and the test fails claiming the host
+        // reached an unreachable address. Binding a port and dropping the
+        // listener gives ECONNREFUSED on every platform and every network,
+        // and returns immediately instead of burning the timeout.
+        let closed_port = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+            probe.local_addr().expect("probe addr").port()
+        };
+        let ips = vec!["127.0.0.1".parse::<IpAddr>().unwrap()];
         let splicer = tokio::spawn(async move {
             splice(
                 guest,
                 "unreachable",
                 &ips,
-                443,
+                closed_port,
                 Vec::new(),
                 Duration::from_secs(1),
             )
