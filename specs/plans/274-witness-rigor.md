@@ -4,7 +4,7 @@
 
 **Goal:** Close three gaps in how this repo proves things about itself: (1) 13 of 17 `#[repr(C)]` types cross a foreign ABI boundary with no compile-time layout contract at all, and the other four assert size only, (2) the `ci` nextest profile every `just test-ci` invocation names does not exist, and (3) nothing establishes that a claim's named witness would actually go red if the code it ratifies were wrong.
 
-**Architecture:** Three workstreams. WS1 adds `const _: () = assert!(...)` layout contracts to every `repr(C)` type plus an `xtask check-abi-layout` gate (shipped, #1940). WS2 adds `.config/nextest.toml`, fixing a Justfile recipe that had never run (shipped, #1943). WS3 was a by-hand planted-defect sweep across every code-level witness; `check-mutation-witnesses` (#1934) shipped that mechanically while this plan was in flight, so WS3 is cut down to the three claims whose witnesses are CI lanes that mutation testing structurally cannot reach, plus triaging that gate's first full run. The originally-planned WS4 is struck — see "Superseded by #1934".
+**Architecture:** Three workstreams. WS1 adds `const _: () = assert!(...)` layout contracts to every `repr(C)` type plus an `xtask check-abi-layout` gate (shipped, #1940). WS2 adds `.config/nextest.toml`, fixing a Justfile recipe that had never run (shipped, #1943). WS3 was a by-hand planted-defect sweep across every code-level witness; `check-mutation-witnesses` (#1934) shipped that mechanically while this plan was in flight. **WS3 and WS4 are both struck in favour of plan 272**, which now carries the corrected sweep — four claims, not the three WS3 had hand-copied. With WS1 and WS2 shipped, this plan is closed.
 
 **Tech Stack:** Rust 1.96 (`offset_of!` stable since 1.77), `xtask`, `cargo-nextest` 0.9.122, `cargo-mutants`, GitHub Actions (`ci.yml` Lint job, `security.yml` nightly).
 
@@ -18,7 +18,7 @@ the sweep would have been duplicated effort against a better mechanism.
 What no mechanism covers is a claim whose only witness is a CI lane, and
 that is what WS3 is now.
 
-## Numbering and overlap with plan 272
+## Numbering and overlap with plan 272 — RESOLVED
 
 This plan was authored as 272 and renumbered to 274: another session
 independently claimed 272 for `specs/plans/272-mutation-tested-claim-witnesses.md`
@@ -26,13 +26,20 @@ and published it first (PR #1934), so that one keeps the number. The worktree
 and branch slugs below still read `plan272`; they are sandbox identifiers, not
 the plan number, and are left alone.
 
-**Read plan 272 before starting WS3/WS4.** The two plans were written without
-knowledge of each other and their scopes overlap: plan 272 covers
-mutation-tested claim witnesses, which is this plan's WS4 and much of its WS3.
-WS1 (ABI layout contracts) and WS2 (the missing nextest profile) are unique to
-this plan and unaffected. Whether WS3/WS4 should be descoped in favour of plan
-272, or plan 272 folded in here, is an owner decision that has not been made —
-do not start either workstream assuming it is unclaimed.
+**Owner decision made: WS3 and WS4 are both struck in favour of plan 272.**
+WS1 (ABI layout contracts, #1940) and WS2 (the missing nextest profile,
+#1943) are unique to this plan, shipped, and unaffected. With WS3 and WS4
+struck, **this plan is closed** — all remaining witness-bite work lives in
+plan 272 §WS-3.
+
+The deciding argument is not tidiness. WS3 hand-copied the list of claims
+that mutation testing cannot reach into prose and recorded **three**
+(MVM-SEC-04/05/07). `check-mutation-witnesses` *derives* that list from the
+ledger and reports **four** — it also names **MVM-SEC-16**, whose three
+witnesses are real Rust functions that cargo-mutants skips only because they
+live in `crates/mvm-hostd/tests/`. A hand-maintained copy of a computed list
+had already drifted before either workstream started. Plan 272 §WS-3 now
+carries the corrected four-claim sweep, next to the gate that computes it.
 
 ## Provenance
 
@@ -1173,14 +1180,25 @@ process-external, since per-test process isolation does not help it.
 
 ---
 
-# WS3 — the witnesses mutation testing cannot reach  ✅ re-scoped
+# WS3 — the witnesses mutation testing cannot reach  ❌ STRUCK → plan 272 §WS-3
 
-**This workstream was cut down after WS1/WS2 shipped.** It originally
-planned a by-hand planted-defect sweep across all 34 `fn:` witnesses.
-`check-mutation-witnesses` (#1934, merged 2026-07-30) now does that job
-mechanically and exhaustively, so the sweep would be duplicated effort
-against a better mechanism — see "Superseded by #1934" below. What
-survives is the part #1934 structurally cannot do.
+**Struck. Do not execute this workstream — it lives in plan 272 §WS-3.**
+
+It was first cut down after WS1/WS2 shipped: it originally planned a
+by-hand planted-defect sweep across all 34 `fn:` witnesses, and
+`check-mutation-witnesses` (#1934, merged 2026-07-30) does that job
+mechanically and exhaustively. What appeared to survive was the part
+#1934 structurally cannot reach — the text below.
+
+That text is **wrong in one respect**, which is why the whole workstream
+moved rather than staying here: it says three claims are unreachable. The
+gate reports **four**. It also names MVM-SEC-16, whose witnesses are real
+Rust functions that cargo-mutants skips only because they sit in
+`crates/mvm-hostd/tests/` — so claim 16 needs a planted defect in the
+enforcement code, not a CI-lane falsification. A hand-kept copy of a
+computed list drifted from it immediately; the corrected sweep therefore
+lives beside the gate that computes the list. Retained below for the
+reasoning behind each falsification, which plan 272 §WS-3 cites.
 
 ## What #1934 cannot reach
 

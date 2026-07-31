@@ -2,8 +2,10 @@
 use anyhow::Context;
 use anyhow::{Result, anyhow, bail};
 
+// `put`/`get` moved onto the extension trait; the concrete `AmazonS3`
+// receiver means the base trait no longer needs to be named here.
 #[cfg(feature = "template-registry-s3")]
-use object_store::ObjectStore;
+use object_store::ObjectStoreExt;
 #[cfg(feature = "template-registry-s3")]
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 #[cfg(feature = "template-registry-s3")]

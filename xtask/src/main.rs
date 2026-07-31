@@ -49,6 +49,7 @@ mod check_trust_gradient;
 mod check_two_surfaces;
 mod check_uniform_vsock_egress;
 mod check_vsock_only_egress;
+mod check_workflow_paths;
 mod claims_ledger;
 mod fs_walk;
 mod gen_stubs;
@@ -231,6 +232,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_mvm_host_binaries_sync::run(&workspace)
         }
+        Some("check-workflow-paths") => {
+            let workspace = workspace_root();
+            check_workflow_paths::run(&workspace)
+        }
         Some("check-runtime-overlay-version") => {
             let workspace = workspace_root();
             check_runtime_overlay_version::run(&workspace)
@@ -267,7 +272,7 @@ fn main() -> Result<()> {
             ir_parity::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-content-address-determinism, check-deferrals, check-honesty, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-claim-catalog, check-abi-layout, check-mutation-witnesses, check-conformance, check-trust-gradient, check-vsock-only-egress, check-uniform-vsock-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-workflow-paths, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -374,6 +379,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-mvm-host-binaries-sync            Plan 115 / ADR-004: assert Rust manifest and Nix attrset agree"
+            );
+            eprintln!(
+                "  check-workflow-paths                    assert every workflow working-directory and cargo-fuzz target still exists"
             );
             eprintln!(
                 "  perf <subcommand>                       Plan 60 Phase 9 perf gates (rootfs-size, boot)"

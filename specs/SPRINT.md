@@ -69,6 +69,19 @@
       Also extracted the shared ledger parser into `xtask/src/claims_ledger.rs`
       so both gates read one table. `specs/plans/272-mutation-tested-claim-witnesses.md`.
       307/307 xtask nextest.
+
+      **Now also owns the witnesses this gate cannot reach,** folded in from
+      plan 274 whose WS3/WS4 are struck. That plan's prose named three such
+      claims; the gate derives four. The fourth, MVM-SEC-16, is qualitatively
+      different — its witnesses are ordinary Rust functions skipped only for
+      living in `crates/mvm-hostd/tests/`, so it needs a planted defect in the
+      enforcement code rather than a CI-lane falsification. Keeping the sweep
+      beside the gate that computes the list is what stops the two diverging
+      again. #1946 was closed by #1958, which exports `HOME`/`MVM_HOME` to a
+      runner temp dir in the nightly job and carries `CARGO_HOME`/
+      `RUSTUP_HOME` across. That covers the CI lane; `just
+      mutation-witnesses` still runs against a developer's real `~/.mvm`,
+      which is the entry point #1946 called the sharper of the two.
 - [x] Non-hermetic `$HOME` test class closed. `default_mvm_cache_dir` is the
       only resolver that reads `$HOME` while `MVM_HOME` is set (it seeds the
       builder image / runtime overlay from the host's shared cache), so a test
@@ -127,6 +140,59 @@
       memory (775 MB) instead of streaming, and compared whole manifest
       strings, so a reordered manifest read as tampering.
 
+- [x] Restore the claim witnesses that had gone red in the nightly. The
+      `security.yml` cron had failed **ten consecutive nights** (2026-07-21
+      through 07-30), starting the night after the crate consolidation
+      (`d115fcebe`) merged. Two of the five red jobs were the named witness
+      for a numbered claim, so those claims had been unwitnessed the whole
+      time, not merely noisy.
+
+      **MVM-SEC-05's only witness ran nothing at all.** The fuzz lane's
+      first step still declared `working-directory: crates/mvm-guest`, a
+      crate the consolidation deleted; the step failed to *start*, and
+      because the fourteen targets were sequential steps in one job, every
+      later target was skipped too. Four of the nine directories were stale
+      (`mvm-guest`, `mvm-oci`, `mvm-vm-host`, `mvm-ext4`); the corpus-upload
+      block had been updated to the new paths, so the rename was done
+      halfway. Fixed independently and first in #1958, which corrected the
+      fourteen `working-directory` values in place; this branch's matrix
+      rebuild was dropped in favour of it.
+      **Residual:** the targets remain sequential steps in one job at the
+      nightly `secs=1800` budget, and the job sets no `timeout-minutes`, so
+      14 x 1800s is 7 hours of fuzzing against GitHub's 6-hour default
+      ceiling — before per-target sanitizer builds. The lane should be
+      expected to time out rather than pass, and a matrix (one cell per
+      target, `fail-fast: false`) is the shape that both fits the ceiling
+      and stops one stale entry skipping every target after it.
+
+      **MVM-SEC-07's two witnesses failed for unrelated reasons.**
+      `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
+      7.5) via `object_store 0.11`; bumped to `object_store 0.14`, the first
+      release requiring `quick-xml >= 0.41`. Fixed, not ignored — and the
+      step's ten `--ignore` flags, whose comment claimed to mirror
+      `deny.toml`'s `ignore = []`, were removed after confirming none still
+      matched anything in the graph. `cargo-deny`'s duplicate-dalek failure
+      was diagnosed independently and fixed first in #1952; `deny.toml` had
+      never carried those entries while `check-duplicate-majors` had — the
+      two-gate drift that let the PR-visible gate stay green while the
+      nightly stayed red.
+
+      Also restored: the flake-lock gate (two probe examples pinning
+      `inputs.mvm` to this repo were missing from a hardcoded exclusion list
+      — replaced with a check for the property itself, anchored so
+      `nix/flake.nix`'s documentation comment does not match) and
+      builder-VM reproducibility (`mvm-builderd` joined the host-binary
+      manifest but not the cross-compile step).
+
+      Two new gates make both rot classes PR-visible, each with a planted
+      defect recorded in `specs/VERIFICATION.md`:
+      `check-workflow-paths` resolves every workflow `working-directory`
+      and `cargo fuzz run` target against the tree, and
+      `check-mvm-host-binaries-sync` now treats the cross-compile step as a
+      third mirror of the binary manifest. Claim 5's witness was retyped
+      from `ci:fuzz` — which matched the job key and stayed green through
+      all ten dead nightlies — to the three fuzz targets it actually names.
+
 - [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
       (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
       contract and the other four asserted size only, so nothing was protected
@@ -145,13 +211,23 @@
       concurrency flake at all but a macOS-only fixture bug — an accepted
       socket inherits `O_NONBLOCK` there but not on Linux, so the fixture read
       an empty request and answered 404. Fixed; that deferral is closed.
-      **WS3 re-scoped:** `check-mutation-witnesses` (#1934) shipped the
-      mutation-testing idea mid-flight and does it better than this plan's
-      WS4, which is struck. WS3 is now the three claims whose only witness is
-      a CI lane (MVM-SEC-04/05/07), which mutation testing structurally cannot
-      reach, plus triaging #1934's first full run — blocked on #1946, since
-      `--run` currently executes mutated security code against the real
-      `~/.mvm`.
+      **WS3 and WS4 struck; plan closed.** `check-mutation-witnesses`
+      (#1934) shipped the mutation-testing idea mid-flight and does it
+      better, so both workstreams fold into
+      `specs/plans/272-mutation-tested-claim-witnesses.md` §WS-3. The
+      deciding argument was a live drift: WS3 hand-copied the list of
+      claims mutation testing cannot reach and recorded **three**
+      (MVM-SEC-04/05/07), while the gate *derives* that list from the
+      ledger and reports **four** — it also names MVM-SEC-16, whose three
+      witnesses are ordinary Rust functions cargo-mutants skips only
+      because they live in `crates/mvm-hostd/tests/`. Claim 16 therefore
+      needs a planted defect in the enforcement code rather than a CI-lane
+      falsification, which is a different task from the other three. The
+      corrected four-claim sweep now sits next to the gate that computes
+      the list, so the two cannot drift again. #1946 is fixed: `--run`
+      confines `HOME` and `MVM_HOME` to a temp root, applied where
+      cargo-mutants is spawned so the nightly job and the local recipe
+      share one implementation.
 
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through

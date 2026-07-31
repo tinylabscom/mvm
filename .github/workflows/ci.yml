@@ -184,6 +184,12 @@ jobs:
       - name: no new duplicate-major dependencies
         run: cargo run -p xtask -- check-duplicate-majors
 
+      # security.yml runs on tags + cron, so a step pointing at a renamed
+      # crate is invisible on a PR and dead until someone reads a nightly.
+      # This resolves those paths here, where the rename happens.
+      - name: workflow paths and fuzz targets still exist
+        run: cargo run -p xtask -- check-workflow-paths
+
       - name: mvm-guest agent closure is runtime-free
         run: cargo run -p xtask -- check-guest-agent-runtime-free
 
