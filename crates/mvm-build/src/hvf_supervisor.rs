@@ -33,11 +33,8 @@ pub struct HvfDisk {
 }
 
 /// A host UDS that the supervisor binds on behalf of one guest vsock data port,
-/// allowing a host client (the console driver for PTY data, or the vminitd
-/// gRPC client on the Apple Container boot) to connect and exchange data with
-/// the in-guest listener.
-/// Populated only when `dev_console` is true or on the opt-in container boot;
-/// a sealed prod config carries none.
+/// allowing the console driver to connect and exchange PTY data with the guest.
+/// Populated only when `dev_console` is true; a sealed prod config carries none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsoleDataSocket {
@@ -117,12 +114,9 @@ pub struct HvfSupervisorConfig {
     /// other backends. `None` ⇒ `BROKER_PORT` fails closed (no broker reachable).
     #[serde(default)]
     pub broker_socket: Option<PathBuf>,
-    /// Dev-only data sockets: one entry per guest vsock data port the host
-    /// may connect to — console data ports for the interactive console, and
-    /// vminitd's control channel on the Apple Container boot. Empty for
-    /// sealed prod configs (claim 15).
-    /// Populated by the driver when `VmStartConfig.dev_console` is true, or
-    /// by the Apple Container backend for its vminitd port.
+    /// Dev-only console data sockets: one entry per guest vsock data port the
+    /// console driver may connect to. Empty for sealed prod configs (claim 15).
+    /// Populated by the driver when `VmStartConfig.dev_console` is true.
     #[serde(default)]
     pub console_data_sockets: Vec<ConsoleDataSocket>,
 }

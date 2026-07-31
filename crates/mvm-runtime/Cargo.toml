@@ -105,14 +105,6 @@ virtio-queue = "0.18"
 # (host-side, std-only). Tracks the same 0.18 `virtio-queue`/`vm-memory` line
 # already vendored.
 virtio-vsock = "0.12"
-# vminitd's SandboxContext gRPC (Apple Container boot path): prost for the
-# protobuf wire types (hand-written derives — no protoc/prost-build in the
-# pipeline), h2 for the HTTP/2 transport over the vsock stream (h2/http were
-# already in the lockfile via the S3 client tree).
-prost = "0.13"
-prost-types = "0.13"
-h2 = "0.4"
-http = "1"
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
