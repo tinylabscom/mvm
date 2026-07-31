@@ -54,8 +54,13 @@ secrecy.workspace = true
 # closure the dep budget rejects). `aws` gives the S3 builder + its
 # reqwest/rustls path; `template-registry-s3` pulls it for the template
 # registry, `storage-s3` pulls it for the S3 `MountProvider`.
-object_store = { version = "0.11", optional = true, default-features = false, features = [
+# `fs` supplies `LocalFileSystem`, which the sync test drives instead of a
+# hand-rolled double so list/get run against a real filesystem. It adds only
+# walkdir/tokio/nix, all already in this crate's tree, and `storage-s3` is
+# off by default so the measured default closure is unchanged.
+object_store = { version = "0.14", optional = true, default-features = false, features = [
     "aws",
+    "fs",
 ] }
 # Stream adapter for object_store's list(), used by the S3 `MountProvider`.
 # Already in the `storage-s3` dep tree via object_store/reqwest, so gating

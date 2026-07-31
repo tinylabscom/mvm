@@ -43,8 +43,23 @@ const ALLOWLIST: &[&str] = &[
     // pins 0.12.1; the two rust-vmm families track different vmm-sys-util
     // majors until they converge.
     "vmm-sys-util",
+    // Windows host-target shim family. object_store 0.14 (taken for the
+    // quick-xml >= 0.41 fix) resolves errno -> windows-sys 0.60 ->
+    // windows-targets 0.53 alongside the 0.52 line ring/sysinfo already
+    // pull. Host/build-only: none of these reach the Linux guest path or a
+    // shipped mvmctl on macOS/Linux. deny.toml skips the same family for
+    // the same reason — both gates must agree.
     "windows-core",
     "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

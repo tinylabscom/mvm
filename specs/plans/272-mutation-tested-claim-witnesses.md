@@ -175,3 +175,20 @@ within a day", not "within a PR".
 - [ ] `substitute` resolves to four files (an overloaded name across the
       agent, keyholder, and supervisor network stages). All four land in the
       surface today. A more specific witness token would narrow it.
+- [ ] Three cargo-fuzz harnesses exist and no workflow runs them:
+      `fuzz_builder_request` and `fuzz_entrypoint_event` (mvm-agentd) and
+      `fuzz_snapshot_frame` (mvm-core). They were left out of the matrix
+      rebuild deliberately — the lane had run nothing for ten nightlies, so
+      adding never-executed targets to the change that restores it would
+      have made a first-run failure indistinguishable from the restoration
+      being wrong. Add them once the matrix is observed green.
+- [ ] `check-duplicate-majors` is wired into `ci.yml`'s Lint job but not
+      `ci-full.yml`'s, against the standing rule that a gate lives in both
+      lists. It happens to be the gate that would have caught the dalek
+      duplication early.
+- [ ] `ci:NAME` witnesses resolve by literal string match anywhere in
+      `.github/workflows/*`, so `ci:fuzz` matched a job key while the job
+      ran nothing, and `ci:fuzz-dns-codec` matched a step's display text.
+      Claims 5 and 10 now name fuzz targets, which `check-workflow-paths`
+      resolves to a file — but the token kind still cannot express "this
+      lane passed". That is the gap the claim-witness health check is for.

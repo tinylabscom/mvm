@@ -127,6 +127,54 @@
       memory (775 MB) instead of streaming, and compared whole manifest
       strings, so a reordered manifest read as tampering.
 
+- [x] Restore the claim witnesses that had gone red in the nightly. The
+      `security.yml` cron had failed **ten consecutive nights** (2026-07-21
+      through 07-30), starting the night after the crate consolidation
+      (`d115fcebe`) merged. Two of the five red jobs were the named witness
+      for a numbered claim, so those claims had been unwitnessed the whole
+      time, not merely noisy.
+
+      **MVM-SEC-05's only witness ran nothing at all.** The fuzz lane's
+      first step still declared `working-directory: crates/mvm-guest`, a
+      crate the consolidation deleted; the step failed to *start*, and
+      because the fourteen targets were sequential steps in one job, every
+      later target was skipped too. Four of the nine directories were stale
+      (`mvm-guest`, `mvm-oci`, `mvm-vm-host`, `mvm-ext4`); the corpus-upload
+      block had been updated to the new paths, so the rename was done
+      halfway. Rebuilt as a `fail-fast: false` matrix, one cell per target:
+      a stale entry now breaks only itself, and the fourteen targets no
+      longer serialize into 7 hours against a 6-hour job ceiling — which is
+      why simply correcting the paths would not have produced a green lane.
+
+      **MVM-SEC-07's two witnesses failed for unrelated reasons.**
+      `cargo-audit`: `quick-xml 0.37.5` carried RUSTSEC-2026-0194/0195 (both
+      7.5) via `object_store 0.11`; bumped to `object_store 0.14`, the first
+      release requiring `quick-xml >= 0.41`. Fixed, not ignored — and the
+      step's ten `--ignore` flags, whose comment claimed to mirror
+      `deny.toml`'s `ignore = []`, were removed after confirming none still
+      matched anything in the graph. `cargo-deny`: `x25519-dalek 2` held
+      `curve25519-dalek` at 4 against the workspace's 5, duplicating
+      `cpufeatures` and `fiat-crypto` too; `x25519-dalek 3` collapses all
+      three. `deny.toml` had never carried these while
+      `check-duplicate-majors` had — the two-gate drift that let the
+      PR-visible gate stay green while the nightly stayed red.
+
+      Also restored: the flake-lock gate (two probe examples pinning
+      `inputs.mvm` to this repo were missing from a hardcoded exclusion list
+      — replaced with a check for the property itself, anchored so
+      `nix/flake.nix`'s documentation comment does not match) and
+      builder-VM reproducibility (`mvm-builderd` joined the host-binary
+      manifest but not the cross-compile step).
+
+      Two new gates make both rot classes PR-visible, each with a planted
+      defect recorded in `specs/VERIFICATION.md`:
+      `check-workflow-paths` resolves every workflow `working-directory`
+      and `cargo fuzz run` target against the tree, and
+      `check-mvm-host-binaries-sync` now treats the cross-compile step as a
+      third mirror of the binary manifest. Claim 5's witness was retyped
+      from `ci:fuzz` — which matched the job key and stayed green through
+      all ten dead nightlies — to the three fuzz targets it actually names.
+
 - [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
       (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
       contract and the other four asserted size only, so nothing was protected
