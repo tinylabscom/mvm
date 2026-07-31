@@ -874,6 +874,8 @@ mod tests {
         use mvm_core::policy::RedactionPolicy;
 
         let input = SynthesisInput {
+            network_mode: Default::default(),
+            l3_network: None,
             vm_name: "hvf-secret-vm",
             tenant: None,
             backend_name: "hvf",

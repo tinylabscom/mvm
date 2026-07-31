@@ -265,6 +265,12 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
         None
     };
 
+    // Refuse an unserveable mode and state the capability trade before any
+    // build or boot work happens.
+    if let Some(warning) = super::preflight_network_mode(args.network_mode)? {
+        eprintln!("{warning}");
+    }
+
     if args.entrypoint {
         return run_entrypoint_action(args, resolved_flake_slot);
     }
@@ -312,6 +318,7 @@ pub(in crate::commands) fn boot_persistent_by_name(
     run_dispatch(
         cli,
         MachineRunArgs {
+            network_mode: CliNetworkMode::HostVsockProxy,
             name: Some(name),
             flake,
             kernel_pin,

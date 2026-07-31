@@ -376,6 +376,60 @@ pub enum LocalAuditKind {
     /// denials. Detail format:
     ///   `proto=<tcp|udp>,dst=<ip:port>,category=<cloud-metadata|link-local|cgnat|loopback>`
     NetworkMandatoryDeny,
+    // --- L3 TUN-over-vsock tunnel ---
+    // Machine-scoped tunnel lifecycle and policy decisions. Every entry
+    // carries the machine id, session id, plan digest, and policy epoch;
+    // none of them ever carries packet payload, DNS payload beyond the
+    // normalized question name, or application content. Per-packet drops
+    // move a counter — these kinds record decision *classes* and their
+    // totals, never a line per packet.
+    /// A guest asked for the L3 tunnel. Detail carries the requested
+    /// protocol version and feature bits.
+    L3TunnelRequested,
+    /// The tunnel's control connection was accepted and bound to a
+    /// host-owned session.
+    L3TunnelConnected,
+    /// The host assigned the guest its address, peer, MTU, resolver, and
+    /// policy epoch. Detail carries the assignment, which is host-chosen.
+    L3ConfigAssigned,
+    /// The guest reported its interface up; packets may flow.
+    L3TunnelReady,
+    /// The tunnel ended. Detail carries the reason and the session's
+    /// packet/byte totals in each direction.
+    L3TunnelDisconnected,
+    /// A DNS question was answered under domain policy. Detail carries the
+    /// normalized name and the number of addresses bound — never the
+    /// wire-format payload.
+    L3DnsAdmitted,
+    /// A DNS question was refused. Detail carries the normalized name and
+    /// the reason code.
+    L3DnsDenied,
+    /// A new flow was admitted to the host network. Detail carries the
+    /// destination tuple, protocol, and matching rule.
+    L3FlowAdmitted,
+    /// A packet was refused. Detail carries the reason code and the
+    /// destination tuple; refusals are aggregated per class per interval
+    /// rather than emitted per packet.
+    L3FlowDenied,
+    /// A flow closed. Detail carries its final packet and byte counts.
+    L3FlowClosed,
+    /// A declared ingress mapping opened a host listener.
+    L3IngressOpened,
+    /// An ingress mapping's listener closed.
+    L3IngressClosed,
+    /// A frame failed validation and its connection was dropped.
+    L3MalformedFrame,
+    /// A packet's source was not the address the host assigned this
+    /// machine.
+    L3SpoofedPacketDropped,
+    /// A bounded queue was full and packets were tail-dropped. Detail
+    /// carries the direction and the count since the last entry.
+    L3QueueOverflow,
+    /// A rate limiter refused work. Detail carries which limiter.
+    L3RateLimited,
+    /// The tunnel's host resources — datapath, device, routes, rules,
+    /// listeners, address lease — were released.
+    L3ResourcesCleanedUp,
     /// Supervisor admission resolved a destination host to one or
     /// more IPs and pinned them for the lifetime of the workload.
     /// Fires once per `(workload, destination)`
@@ -765,6 +819,44 @@ mod tests {
             let json = serde_json::to_string(&event).unwrap();
             let parsed: LocalAuditEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.kind, kind, "kind round-trip diverged: {kind:?}");
+        }
+    }
+
+    /// Wire-format pin for the tunnel variants. The strings are what an
+    /// operator greps for and what a downstream aggregator matches on, so a
+    /// rename is a breaking change, not a refactor.
+    #[test]
+    fn l3_audit_kinds_use_snake_case_on_the_wire() {
+        for (kind, expected) in [
+            (LocalAuditKind::L3TunnelRequested, "l3_tunnel_requested"),
+            (LocalAuditKind::L3TunnelConnected, "l3_tunnel_connected"),
+            (LocalAuditKind::L3ConfigAssigned, "l3_config_assigned"),
+            (LocalAuditKind::L3TunnelReady, "l3_tunnel_ready"),
+            (
+                LocalAuditKind::L3TunnelDisconnected,
+                "l3_tunnel_disconnected",
+            ),
+            (LocalAuditKind::L3DnsAdmitted, "l3_dns_admitted"),
+            (LocalAuditKind::L3DnsDenied, "l3_dns_denied"),
+            (LocalAuditKind::L3FlowAdmitted, "l3_flow_admitted"),
+            (LocalAuditKind::L3FlowDenied, "l3_flow_denied"),
+            (LocalAuditKind::L3FlowClosed, "l3_flow_closed"),
+            (LocalAuditKind::L3IngressOpened, "l3_ingress_opened"),
+            (LocalAuditKind::L3IngressClosed, "l3_ingress_closed"),
+            (LocalAuditKind::L3MalformedFrame, "l3_malformed_frame"),
+            (
+                LocalAuditKind::L3SpoofedPacketDropped,
+                "l3_spoofed_packet_dropped",
+            ),
+            (LocalAuditKind::L3QueueOverflow, "l3_queue_overflow"),
+            (LocalAuditKind::L3RateLimited, "l3_rate_limited"),
+            (
+                LocalAuditKind::L3ResourcesCleanedUp,
+                "l3_resources_cleaned_up",
+            ),
+        ] {
+            let encoded = serde_json::to_string(&kind).unwrap();
+            assert_eq!(encoded, format!("\"{expected}\""), "{kind:?}");
         }
     }
 

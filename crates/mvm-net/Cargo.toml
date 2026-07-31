@@ -19,6 +19,10 @@ mvm-protocol.workspace = true
 # claim-10 projection already uses, so the two cannot disagree.
 ipnet.workspace = true
 thiserror.workspace = true
+# Lease serialization + the keyed MAC over its canonical bytes. Both are
+# already workspace deps; the lease adds no new crate.
+serde.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

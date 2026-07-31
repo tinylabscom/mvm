@@ -2968,7 +2968,9 @@ dependencies = [
  "ipnet",
  "mvm-core",
  "mvm-protocol",
+ "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
 ]
 

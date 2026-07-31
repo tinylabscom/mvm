@@ -2370,3 +2370,90 @@ fn advance_does_not_collide_with_the_port_forward_verb() {
     let forward = parse(&["forward", "myvm", "8080:80"]).expect("parse forward");
     assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
 }
+
+// ---- network mode -------------------------------------------------
+
+/// The default is the socket-aware mode. `l3-vsock` is a deliberate
+/// selection, never something a workload lands in by accident.
+#[test]
+fn machine_run_defaults_to_the_socket_aware_network_mode() {
+    let args = parse_run(&["run", "--image", "alpine"]).unwrap();
+    assert_eq!(args.network_mode, CliNetworkMode::HostVsockProxy);
+    assert!(!args.network_mode.forfeits_payload_visibility());
+}
+
+#[test]
+fn machine_run_accepts_every_network_mode_spelling() {
+    for (flag, expected) in [
+        ("none", CliNetworkMode::None),
+        ("host-vsock-proxy", CliNetworkMode::HostVsockProxy),
+        ("l3-vsock", CliNetworkMode::L3Vsock),
+    ] {
+        let args = parse_run(&["run", "--image", "alpine", "--network-mode", flag]).unwrap();
+        assert_eq!(args.network_mode, expected, "--network-mode {flag}");
+    }
+}
+
+/// An egress rule says *where* traffic may go, not *how* it travels. A
+/// workload that declares one must not be silently moved onto the L3
+/// tunnel and lose the substitution path with it.
+#[test]
+fn an_allow_host_rule_does_not_imply_the_l3_mode() {
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine",
+        "--allow-host",
+        "api.example.com:443",
+    ])
+    .unwrap();
+    assert_eq!(args.allow_host, vec!["api.example.com:443"]);
+    assert_eq!(args.network_mode, CliNetworkMode::HostVsockProxy);
+}
+
+#[test]
+fn an_unknown_network_mode_is_rejected_rather_than_defaulted() {
+    let parsed = parse_run(&["run", "--image", "alpine", "--network-mode", "bridge"]);
+    assert!(parsed.is_err(), "a mode mvm does not have must not parse");
+}
+
+#[test]
+fn each_cli_mode_maps_to_its_signed_plan_value() {
+    use mvm_protocol::plan::NetworkMode;
+    assert_eq!(CliNetworkMode::None.to_plan_mode(), NetworkMode::None);
+    assert_eq!(
+        CliNetworkMode::HostVsockProxy.to_plan_mode(),
+        NetworkMode::HostVsockProxy
+    );
+    assert_eq!(CliNetworkMode::L3Vsock.to_plan_mode(), NetworkMode::L3Vsock);
+    assert!(CliNetworkMode::L3Vsock.to_plan_mode().is_l3_vsock());
+}
+
+/// Only the L3 mode gives up payload visibility, and the preflight says so
+/// exactly once — or refuses outright where no datapath exists.
+#[test]
+fn the_preflight_states_the_capability_trade_or_refuses() {
+    assert_eq!(
+        super::preflight_network_mode(CliNetworkMode::HostVsockProxy).unwrap(),
+        None
+    );
+    assert_eq!(
+        super::preflight_network_mode(CliNetworkMode::None).unwrap(),
+        None
+    );
+
+    match super::preflight_network_mode(CliNetworkMode::L3Vsock) {
+        Ok(Some(warning)) => {
+            assert!(warning.contains("opaque"), "{warning}");
+            assert!(warning.contains("substitution"), "{warning}");
+        }
+        Ok(None) => panic!("selecting l3-vsock must always state the trade"),
+        Err(err) => {
+            // No datapath on this host: the refusal must name the mode and
+            // point at the alternative rather than failing obscurely.
+            let msg = err.to_string();
+            assert!(msg.contains("l3-vsock"), "{msg}");
+            assert!(msg.contains("host-vsock-proxy"), "{msg}");
+        }
+    }
+}

@@ -186,6 +186,73 @@ impl MachineAction {
     }
 }
 
+/// How a machine reaches the network, as the CLI spells it.
+///
+/// Mirrors `mvm_protocol::plan::NetworkMode` one-for-one; the plan's value is
+/// what gets signed, and this is only the surface that selects it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum CliNetworkMode {
+    /// No network at all.
+    None,
+    /// Host-brokered egress and ingress over vsock. The default: it keeps
+    /// connection intent and the owned-cleartext substitution path.
+    HostVsockProxy,
+    /// L3 TUN-over-vsock. A compatibility mode for workloads that need a real
+    /// IP stack. The guest still has no NIC and every packet still crosses the
+    /// vsock boundary, but encrypted application payloads are opaque to it:
+    /// secret substitution and cleartext redaction do not apply.
+    L3Vsock,
+}
+
+impl CliNetworkMode {
+    /// The signed-plan value this selection means.
+    pub fn to_plan_mode(self) -> mvm_protocol::plan::NetworkMode {
+        match self {
+            Self::None => mvm_protocol::plan::NetworkMode::None,
+            Self::HostVsockProxy => mvm_protocol::plan::NetworkMode::HostVsockProxy,
+            Self::L3Vsock => mvm_protocol::plan::NetworkMode::L3Vsock,
+        }
+    }
+
+    /// Whether choosing this mode gives up the socket-aware path's
+    /// application-layer capabilities. The run path warns on it once.
+    pub fn forfeits_payload_visibility(self) -> bool {
+        matches!(self, Self::L3Vsock)
+    }
+}
+
+/// Refuse or warn about a selected network mode before anything boots.
+///
+/// Two jobs, both fail-loud rather than fail-quiet:
+///
+/// - `l3-vsock` on a host with no L3 datapath is refused here, with the
+///   platform's own reason, instead of coming up and dropping every packet.
+/// - Choosing `l3-vsock` gives up the socket-aware path's application-layer
+///   capabilities. That is a real reduction in what mvm can enforce, so it is
+///   stated once at selection time rather than buried in a document.
+pub(in crate::commands) fn preflight_network_mode(
+    mode: CliNetworkMode,
+) -> anyhow::Result<Option<String>> {
+    if !mode.forfeits_payload_visibility() {
+        return Ok(None);
+    }
+    if let Err(err) = mvm_hostd::netd::host_datapath().is_available() {
+        anyhow::bail!(
+            "--network-mode l3-vsock is not available on this host: {err}\n\
+             The socket-aware mode (--network-mode host-vsock-proxy) is the default \
+             and does not need a host tunnel device."
+        );
+    }
+    Ok(Some(
+        "warning: --network-mode l3-vsock gives the workload a real IP stack, so mvm sees \
+         packets rather than connections. Destination, port, DNS, flow, and ingress policy \
+         are still enforced and every packet still crosses the vsock boundary, but encrypted \
+         application payloads are opaque: secret substitution and cleartext redaction do not \
+         apply in this mode."
+            .to_string(),
+    ))
+}
+
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
 /// flags and translates into the same admitted execution path.
 #[derive(ClapArgs, Debug, Clone)]
@@ -211,6 +278,11 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    // Never inferred: an `--allow-host` rule says *where* traffic may go,
+    // not *how* it travels, so adding one does not switch modes.
+    /// Select how the workload reaches the network.
+    #[arg(long = "network-mode", value_enum, default_value = "host-vsock-proxy")]
+    pub network_mode: CliNetworkMode,
     /// Set the vCPU count.
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -334,6 +406,7 @@ impl MachineRunArgs {
 
     fn into_run_args(self) -> RunArgs {
         RunArgs {
+            network_mode: self.network_mode.to_plan_mode(),
             manifest: self.manifest,
             // Default off; `run_dispatch` sets it for the warm-claim-eligible
             // transient mode.
@@ -1365,6 +1438,7 @@ fn run_args_for_image_revert(
     };
     (
         MachineRunArgs {
+            network_mode: CliNetworkMode::HostVsockProxy,
             image,
             flake: None,
             hypervisor: run.hypervisor,

@@ -294,37 +294,189 @@ Teardown is deterministic and idempotent: namespace, TUN, routes,
 nftables table, and listeners are removed on stop and on failed startup
 alike.
 
-### macOS
+### macOS (Apple Silicon)
 
-The platform-neutral core — protocol, session, policy, DNS, flow state,
-ingress, audit — is shared. The macOS datapath is **not** shipped in
-this change. The `darwin` backend is present and fails closed with a
-named error; `l3-vsock` is refused at admission on macOS rather than
-silently degraded, and it is never selected by auto-detection.
+The platform-neutral core — protocol, session, identity, lease, policy,
+DNS, flow state, ingress, audit — is shared unchanged. The Linux
+TUN/netns/nftables mechanics are **not** portable to macOS and are not
+pretended to be.
 
-The exact missing privileged operations are:
+The intended first macOS backend is a **userspace socket gateway**: admitted
+guest flows are translated into host sockets. That needs no privileges at
+all — no `utun`, no routes, no PF anchor, no helper — and covers ordinary
+application TCP, UDP, and host-terminated DNS. It does not cover raw
+sockets, arbitrary IP protocols, arbitrary ICMP, or multicast, and it does
+not claim to.
 
-1. `utun` interface creation — `socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` +
-   `connect()` with `ctl_info` for `com.apple.net.utun_control`. Requires
-   root; there is no entitlement that grants it to an unprivileged process.
-2. Interface address/MTU configuration — `SIOCAIFADDR` / `SIOCSIFMTU` on
-   the utun. Requires root.
-3. Route installation/removal scoped to the utun — `PF_ROUTE` socket
-   writes. Requires root.
-4. PF anchor management — loading and flushing rules in an mvm-owned
-   anchor (`pfctl -a mvm/<machine>`), plus enabling PF if disabled.
-   Requires root.
+**Status: not implemented.** What ships is `MacosUserspaceGateway`: the
+capability declaration (`tcp`, `udp`, `controlled_dns`, `declared_ingress`,
+`userspace_socket_translation`; **not** `full_packet_forwarding`, `icmp`,
+`arbitrary_ipv4`, or `raw_ip_protocols`) plus a refusal at
+`is_available()`. So on macOS today `l3-vsock` is refused at admission with
+a stated reason. It is never degraded, and it is never routed through
+`gvproxy` or any other proxy runtime as an interim.
 
-mvm has no privileged host helper today. Adding one is a separate,
-narrowly-scoped change: a helper whose API is exactly the four
-operations above plus status and deterministic cleanup, with **no**
-arbitrary command execution, **no** arbitrary PF rule insertion, and
-**no** file access. It must be authenticated to the calling supervisor
-and must refuse operations for machines that supervisor does not own.
-That helper is out of scope here and is tracked in plan 279 §macOS.
+The later full-packet backend needs privileged operations mvm has no helper
+for:
 
-We do not route macOS through `gvproxy` or any other proxy runtime as an
-interim measure.
+1. `utun` creation — `socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` +
+   `connect()` with `ctl_info` for `com.apple.net.utun_control`. Root; no
+   entitlement grants it unprivileged.
+2. Address/MTU configuration — `SIOCAIFADDR` / `SIOCSIFMTU`. Root.
+3. Route installation/removal scoped to the utun — `PF_ROUTE` writes. Root.
+4. PF anchor management — loading and flushing an mvm-owned anchor
+   (`pfctl -a mvm/<machine>`), and enabling PF if disabled. Root.
+
+A helper for those must expose exactly those four operations plus status
+and deterministic cleanup: no arbitrary command execution, no arbitrary PF
+rules, no arbitrary routes, no arbitrary files, no arbitrary interfaces. It
+must authenticate to the calling supervisor and refuse machines that
+supervisor does not own.
+
+The HVF backend continues to expose no guest NIC either way, and its
+virtio-vsock terminates into an mvm-owned host stream.
+
+### WSL2
+
+WSL2 is a **Linux execution node**, not a native Windows backend. When mvm
+runs inside WSL2 with nested KVM, the guest's vsock terminates inside the
+WSL Linux environment, `mvm-netd` runs there, and the Linux forwarding
+backend is used. Windows sits entirely outside the guest/vsock boundary and
+needs no protocol change.
+
+**Status: architecturally supported, not validated.** Nothing in the
+protocol or the backend abstraction is Windows-aware, which is what makes
+this work; but no WSL2 runner has executed the suite, so it is not claimed
+as tested.
+
+### Native Windows
+
+**Not supported.** mvm has no native Windows VMM backend, so there is
+nothing for a Windows forwarding adapter to attach to. The portable types
+are kept free of Linux assumptions so a future adapter is possible, and the
+likely mapping is:
+
+```text
+Linux guest AF_VSOCK
+  → Hyper-V socket transport
+  → Windows host AF_HYPERV
+  → Windows mvm-netd transport adapter
+  → userspace socket gateway or WFP/packet backend
+```
+
+Native Windows would require a Windows-capable hypervisor backend, Hyper-V
+socket service registration and machine identity, a Windows forwarding
+implementation, Windows lifecycle and cleanup, and native live tests. None
+exist. "Works on Windows" in this document always means WSL2.
+
+## The guest channel, and why the endpoint is not the identity
+
+A guest always speaks AF_VSOCK. What the host holds varies by VMM:
+
+| VMM | Host-facing endpoint |
+|---|---|
+| Firecracker | per-port Unix socket (the VMM's termination of the guest's virtio-vsock connection) |
+| libkrun | per-port Unix socket |
+| in-house HVF | an mvm-owned stream |
+| QEMU | a real AF_VSOCK socket |
+| future Windows | AF_HYPERV service |
+
+All five are the same fact — the host end of a guest vsock connection — and
+`mvm_net::channel::GuestChannelProvider` normalizes them behind typed
+`GuestService` values (`MachineControl`, `NetworkControl`,
+`NetworkData { queue }`, `WorkloadExit`, `Broker`, `Substitution`). Nothing
+above that abstraction sees a path, a CID, or a port.
+
+**"Complete host control over vsock" does not mean reimplementing
+virtio-vsock.** The VMM implements the transport; mvm owns the host-facing
+service endpoint and every application-level byte — whether the VM gets a
+vsock device at all, the service-to-endpoint mapping, listener creation,
+connection acceptance, per-boot authentication, limits, policy, audit
+attribution, shutdown, revocation, and cleanup. That is the whole
+authorization surface, and it is entirely ours.
+
+**Why a CID is not enough.** CIDs, UDS paths, and service ports are all
+reusable across boots. Authorizing on one would let a restarted machine —
+or a later machine that inherited the number — present as its predecessor.
+So authorization binds to `VmInstanceIdentity { node_id, vm_id, boot_id,
+plan_digest }`, minted by the host per boot, and every networking
+connection is bound to that plus a per-boot session nonce, the admitted
+plan digest, the policy epoch, and the active lease. A guest can select
+none of them: `HELLO` carries a version, feature bits, and a queue count,
+and nothing else.
+
+## The network lease
+
+`mvm_net::lease::NetworkLease` is one signed grant of network identity for
+one VM boot. A standalone `mvmctl` mints one through
+`LocalLeaseAuthority`; a control plane will later issue one centrally. The
+node-local data plane verifies the same object either way, so there is one
+networking model rather than a local one and a cluster one.
+
+A lease is bound to one boot (`boot_id`), one node, one plan digest, and
+one policy epoch, inside a validity window. Verification order is version,
+signature, identity binding, then validity — nothing about the grant is
+read before the signature is confirmed. Every failure denies the whole
+lease.
+
+**Control-plane loss** never opens anything up. `ControlPlaneLossPolicy`
+chooses only how fast an already-admitted workload loses what it had:
+hold-existing-deny-new (the default), hold-until-expiry, or
+deny-immediately. After expiry, all three deny.
+
+## Local versus central responsibility
+
+A control plane authorizes and programs; it does not carry packets.
+
+| Central (future `mvmd`) | Node-local (`mvm-hostd` / `mvm-netd`) |
+|---|---|
+| VM network identity, address allocation, DNS naming | the backend vsock/UDS/HVF listener |
+| placement, allowed routes, ingress declarations | binding a channel to the local boot |
+| egress policy, policy epochs | packet validation, anti-spoofing |
+| lease issuance and expiry | local flow state, DNS termination |
+| service discovery, inter-node routing metadata | local ingress listeners, host forwarding |
+| audit aggregation | backpressure, fail-closed, immediate teardown |
+
+## Cross-node traffic
+
+AF_VSOCK is never stretched between machines. Each node terminates its own
+guests' vsock locally, and node-to-node traffic rides a separate,
+authenticated transport:
+
+```text
+VM A → local vsock → Node A mvm-netd
+     → authenticated node-to-node transport
+     → Node B mvm-netd → local vsock → VM B
+```
+
+The guest cannot tell whether a destination VM is local or remote. Source
+and destination VM identity, tenant isolation, lease and route
+authorization, hop identity, and flow audit correlation all survive the
+hop. The node-to-node transport is a separate abstraction and is **not
+implemented**; the local implementation does not depend on it.
+
+## Launch-path convergence
+
+Audited paths and their status:
+
+| Path | Guest NIC | Status |
+|---|---|---|
+| `machine run` transient | none | converged |
+| `machine run`/`start` persistent | none | converged |
+| Firecracker workload driver (`driver/fc.rs`) | none — no `/network-interfaces` PUT at all | converged |
+| `mvm-hostd` supervisor launch | none | converged (same `VmStartConfig`) |
+| warm restore / fork (`vm/instance_snapshot.rs`) | refused — a non-empty `network-interfaces` list on restore is a hard failure | converged |
+| libkrun | attaches a drained virtio-net | **advertises `l3_vsock: false`**, so `l3-vsock` cannot select it |
+| QEMU dev/test | n/a | does not advertise `l3_vsock` |
+| builder VM (`mvm-build/src/firecracker.rs`) | TAP NIC | **not a workload path** — the Nix build engine, carries no untrusted workload |
+
+The invariant is structural rather than conventional in two places: the
+backend-neutral `VmStartConfig` has **no** guest network-device field at all
+(regression-gated by
+`machine::nic_guard::tests::the_launch_specification_has_no_guest_network_device_field`),
+and `machine::nic_guard::enforce_no_guest_nic` refuses an `l3-vsock` launch
+on any backend that does not advertise both `l3_vsock` and
+`no_routable_guest_nic`.
 
 ## Policy
 

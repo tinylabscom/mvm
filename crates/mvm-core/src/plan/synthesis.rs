@@ -43,10 +43,10 @@
 
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec, Nonce, PlanId,
-    PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION,
-    SecretBinding, SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
-    WorkloadIntent,
+    AuditTaxonomy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec, L3NetworkSpec,
+    NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
+    RuntimeProfileRef, SCHEMA_VERSION, SecretBinding, SecretReleasePolicy, SignedImageRef,
+    TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -117,6 +117,13 @@ pub struct SynthesisInput<'a> {
     /// Optional audit event prefix override. `None` derives from the
     /// intent.
     pub audit_event_prefix: Option<&'a str>,
+    /// How this workload reaches the network. Part of the signed contract:
+    /// the transport is admitted, never a host-side default the guest
+    /// discovers at boot. `Default` is the closed mode.
+    pub network_mode: NetworkMode,
+    /// The L3-tunnel contract, when `network_mode` selects it. Admission
+    /// refuses the pair being inconsistent in either direction.
+    pub l3_network: Option<L3NetworkSpec>,
     /// vCPU count.
     pub cpus: u32,
     /// Memory budget in MiB.
@@ -246,8 +253,8 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     let mut plan = ExecutionPlan {
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
-        network_mode: Default::default(),
-        l3_network: None,
+        network_mode: input.network_mode,
+        l3_network: input.l3_network.clone(),
         schema_version: SCHEMA_VERSION,
         // Placeholder — overwritten below with the content-address once every
         // load-bearing field is set. The derivation excludes `plan_id`, so this
@@ -376,6 +383,8 @@ mod tests {
 
     fn input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            network_mode: NetworkMode::default(),
+            l3_network: None,
             vm_name,
             tenant: None,
             backend_name: "firecracker",

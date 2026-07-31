@@ -65,6 +65,10 @@ pub mod host_cost;
 pub mod host_time;
 pub mod icmp_client;
 pub mod integrations;
+/// The in-guest half of the L3 TUN-over-vsock tunnel: the `mvm0` device,
+/// its host-assigned configuration, the privilege drop, and the packet
+/// pump. `mvm0` terminates only in this agent.
+pub mod l3;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole

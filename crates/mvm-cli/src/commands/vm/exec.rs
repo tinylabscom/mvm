@@ -111,6 +111,12 @@ pub(in crate::commands) enum RunProfile {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct RunArgs {
+    /// The admitted networking transport. Carried here rather than
+    /// re-derived downstream so exactly one value reaches the signed plan.
+    /// Not a flag of its own — `machine run --network-mode` selects it and
+    /// the machine surface translates it.
+    #[arg(skip)]
+    pub network_mode: mvm_protocol::plan::NetworkMode,
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
     /// legacy slot name). If omitted, the bundled default microVM image is used.
     #[arg(short = 'm', long, conflicts_with = "image")]
@@ -923,6 +929,11 @@ fn emit_oci_run_admission(
         })?;
     let exec_timeout_secs = u32::try_from(timeout_secs).unwrap_or(u32::MAX);
     let input = SynthesisInput {
+        // `mvmctl run --image` has no mode selector of its own; the
+        // machine surface is where a mode is chosen, and it threads the
+        // choice through `RunArgs`.
+        network_mode: Default::default(),
+        l3_network: None,
         vm_name: "run-oci",
         tenant: None,
         backend_name: "transient-run",
@@ -1796,6 +1807,7 @@ mod tests {
 
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
+            network_mode: Default::default(),
             warm_pool_size: 0,
             pty: false,
             vm_name: None,
