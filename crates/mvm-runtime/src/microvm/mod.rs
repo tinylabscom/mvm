@@ -18,6 +18,7 @@ mod observe;
 mod run_info;
 mod snapshot;
 
+pub(crate) use activation::read_verb_grant_envelope;
 pub use activation::*;
 pub use boot_config::*;
 pub use control::*;

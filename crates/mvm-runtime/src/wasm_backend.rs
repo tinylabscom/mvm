@@ -30,6 +30,20 @@
 //! secret. A launch config that instead asks for a kernel/verified boot, a
 //! snapshot, or an interactive console still fails closed with a typed
 //! error naming the supported alternative.
+//!
+//! The capability handshake: every run also receives the same environment
+//! description the microVM/container tiers deliver as
+//! `ActivateEnvironment`, adapted to WASI — preopened directories instead
+//! of block mounts (the runtime overlay read-only at `/mvm/runtime`,
+//! directory-share volumes at their guest mountpoints), and policy/grant
+//! delivery as an `activation.json` plus `MVM_ACTIVATION_FILE` env instead
+//! of a vsock verb. WASI has no mountable root: the module's filesystem
+//! view IS its root, the in-place analog of the container tier's
+//! already-owned `/`. The WASI capability model is the gate — the module
+//! receives exactly the preopens, env, and host imports the plan admits
+//! and nothing else; no signature verification happens in-guest because
+//! the WASI host itself is the trust boundary (which is precisely why
+//! this tier stays claim-free and dev/demo-only).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -95,6 +109,22 @@ pub enum WasmBackendError {
 
     #[error("wasm module {path:?} trapped: {reason}")]
     ModuleTrapped { path: String, reason: String },
+
+    #[error(
+        "wasm backend cannot attach block volume '{host}' — a WASI instance has no block \
+         devices; use a directory-share volume instead"
+    )]
+    DiskVolumeNotSupported { host: String },
+
+    #[error(
+        "wasm backend cannot resolve the runtime-overlay guest binaries: {reason}. They \
+         cross-compile from a source checkout (or a warm cache) — populate the cache with a \
+         build first, or drop the runtime-overlay requirement"
+    )]
+    RuntimeOverlayUnavailable { reason: String },
+
+    #[error("wasm backend volume mountpoint {guest_path:?} is denied: {reason}")]
+    VolumePathDenied { guest_path: String, reason: String },
 }
 
 /// Reject every launch request this tier cannot honestly satisfy before
@@ -110,6 +140,20 @@ fn reject_unsupported_start_config(
     }
     if config.dev_console {
         return Err(WasmBackendError::ConsoleNotSupported);
+    }
+    if let Some(volume) = config
+        .volumes
+        .iter()
+        .find(|v| matches!(v.kind, mvm_core::vm_backend::VmVolumeKind::Disk))
+    {
+        return Err(WasmBackendError::DiskVolumeNotSupported {
+            host: volume.host.clone(),
+        });
+    }
+    // Every directory share becomes a WASI preopen verbatim, so its guest
+    // mountpoint must pass the mount-path policy before any of it starts.
+    for volume in &config.volumes {
+        crate::wasm_activation::validate_wasm_volume_guest_path(&volume.guest)?;
     }
     if config.rootfs_path.trim().is_empty() {
         return Err(WasmBackendError::ModulePathMissing);
@@ -284,12 +328,33 @@ impl VmBackend for WasmBackend {
     fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
         reject_unsupported_start_config(config)?;
         let state_dir = mvm_core::config::vm_state_dir(&config.name);
+
+        // Resolve the environment-activation inputs BEFORE spawning
+        // anything: a launch whose declared overlay can't resolve fails
+        // closed here, leaving no side effects behind.
+        let overlay_bins_dir = crate::wasm_activation::resolve_wasm_overlay_bins_dir(config)?;
+        let grant_present = crate::microvm::read_verb_grant_envelope(&config.name)?.is_some();
+
         let spawned_endpoint = spawn_wasm_egress_endpoint_if_needed(config, &state_dir)?;
         let egress_endpoint = spawned_endpoint
             .clone()
             .or_else(|| self.egress_endpoint.clone());
 
-        let result = engine::run_module_to_completion(&config.rootfs_path, egress_endpoint);
+        // The capability handshake: activation file + preopen plan the
+        // engine translates into WASI preopens and env (see
+        // `crate::wasm_activation`).
+        let activation = crate::wasm_activation::prepare_wasm_activation(
+            config,
+            &state_dir,
+            overlay_bins_dir.as_deref(),
+            grant_present,
+        )?;
+
+        let result = engine::run_module_to_completion(
+            &config.rootfs_path,
+            egress_endpoint,
+            Some(&activation),
+        );
         if spawned_endpoint.is_some() {
             // A wasm run is synchronous end-to-end inside `start` — there is
             // no later `stop()` boundary to reap the endpoint at, so its
@@ -427,11 +492,12 @@ mod engine {
     use std::path::{Path, PathBuf};
 
     use super::WasmBackendError;
+    use crate::wasm_activation::WasmPreopenPlan;
     use mvm_core::substitution_wire::{WireRequest, WireResponse};
     use mvm_core::vm_backend::VmExitStatus;
     use wasmtime::{Caller, Engine, Extern, Linker, Memory, Module, Store};
-    use wasmtime_wasi::WasiCtxBuilder;
     use wasmtime_wasi::p1::{self, WasiP1Ctx};
+    use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
     pub fn is_compiled_in() -> bool {
         true
@@ -619,12 +685,16 @@ mod engine {
 
     /// Build a fresh engine + linker wired with WASI Preview 1 and the
     /// `mvm:egress` host-import, and a `Store` carrying `egress_endpoint`
-    /// as host state. The one wiring path both [`run_module_to_completion`]
+    /// as host state. The instance's filesystem and environment come
+    /// exclusively from `activation`: every preopen is applied with its
+    /// read-only marking and every env entry is set, and nothing beyond
+    /// them is reachable. The one wiring path both [`run_module_to_completion`]
     /// and the test-only [`instantiate_for_test`] go through, so the
     /// import can't drift between the production and test instantiation
     /// paths.
     fn new_engine_linker_store(
         egress_endpoint: Option<PathBuf>,
+        activation: Option<&WasmPreopenPlan>,
     ) -> std::result::Result<(Engine, Linker<WasmHostState>, Store<WasmHostState>), WasmBackendError>
     {
         let engine = Engine::default();
@@ -642,7 +712,39 @@ mod engine {
                 reason: format!("failed to wire the mvm:egress host-import: {e}"),
             })?;
 
-        let wasi_ctx = WasiCtxBuilder::new().inherit_stdio().build_p1();
+        let mut wasi_builder = WasiCtxBuilder::new();
+        wasi_builder.inherit_stdio();
+        if let Some(plan) = activation {
+            for preopen in &plan.preopens {
+                let (dir_perms, file_perms) = if preopen.read_only {
+                    (DirPerms::READ, FilePerms::READ)
+                } else {
+                    (
+                        DirPerms::READ | DirPerms::MUTATE,
+                        FilePerms::READ | FilePerms::WRITE,
+                    )
+                };
+                wasi_builder
+                    .preopened_dir(
+                        &preopen.host_dir,
+                        &preopen.guest_path,
+                        dir_perms,
+                        file_perms,
+                    )
+                    .map_err(|e| WasmBackendError::ModuleLoadFailed {
+                        path: String::new(),
+                        reason: format!(
+                            "preopen {} at {}: {e}",
+                            preopen.host_dir.display(),
+                            preopen.guest_path
+                        ),
+                    })?;
+            }
+            for (key, value) in &plan.env {
+                wasi_builder.env(key, value);
+            }
+        }
+        let wasi_ctx = wasi_builder.build_p1();
         let store = Store::new(
             &engine,
             WasmHostState {
@@ -654,17 +756,20 @@ mod engine {
     }
 
     /// Instantiate the WASI module at `path` and run its `_start` export to
-    /// completion. No filesystem preopens and no socket capability are ever
-    /// granted, so the instance is network- and host-fs-isolated by
-    /// construction beyond the explicit `mvm:egress` import — the honest
-    /// zero-capability default for everything else; a module with no
-    /// `egress_endpoint` configured gets `NoEndpointConfigured` on every
-    /// `mvm:egress` call.
+    /// completion. The instance receives exactly the capabilities
+    /// `activation` admits: its preopens are the only directories the
+    /// module can see (read-only where marked), its env entries the only
+    /// ones set — no filesystem preopens and no socket capability are ever
+    /// granted beyond that, so the instance is network- and
+    /// host-fs-isolated by construction beyond the explicit `mvm:egress`
+    /// import; a module with no `egress_endpoint` configured gets
+    /// `NoEndpointConfigured` on every `mvm:egress` call.
     pub fn run_module_to_completion(
         path: &str,
         egress_endpoint: Option<PathBuf>,
+        activation: Option<&WasmPreopenPlan>,
     ) -> std::result::Result<VmExitStatus, WasmBackendError> {
-        let (engine, linker, mut store) = new_engine_linker_store(egress_endpoint)?;
+        let (engine, linker, mut store) = new_engine_linker_store(egress_endpoint, activation)?;
         let module =
             Module::from_file(&engine, path).map_err(|e| WasmBackendError::ModuleLoadFailed {
                 path: path.to_string(),
@@ -711,8 +816,9 @@ mod engine {
     pub(super) fn instantiate_for_test(
         path: &str,
         egress_endpoint: Option<PathBuf>,
+        activation: Option<&WasmPreopenPlan>,
     ) -> std::result::Result<(Store<WasmHostState>, wasmtime::Instance), WasmBackendError> {
-        let (engine, linker, mut store) = new_engine_linker_store(egress_endpoint)?;
+        let (engine, linker, mut store) = new_engine_linker_store(egress_endpoint, activation)?;
         let module =
             Module::from_file(&engine, path).map_err(|e| WasmBackendError::ModuleLoadFailed {
                 path: path.to_string(),
@@ -733,6 +839,7 @@ mod engine {
     use std::path::PathBuf;
 
     use super::WasmBackendError;
+    use crate::wasm_activation::WasmPreopenPlan;
     use mvm_core::vm_backend::VmExitStatus;
 
     pub fn is_compiled_in() -> bool {
@@ -742,6 +849,7 @@ mod engine {
     pub fn run_module_to_completion(
         _path: &str,
         _egress_endpoint: Option<PathBuf>,
+        _activation: Option<&WasmPreopenPlan>,
     ) -> std::result::Result<VmExitStatus, WasmBackendError> {
         Err(WasmBackendError::NotCompiledIn)
     }
@@ -885,6 +993,50 @@ mod tests {
         assert_eq!(err, WasmBackendError::ModulePathMissing);
     }
 
+    #[test]
+    fn disk_volume_fails_closed_dir_share_passes() {
+        let mut config = cfg("x", "/tmp/mod.wasm");
+        config.volumes = vec![mvm_core::vm_backend::VmVolume {
+            host: "/host/disk.img".into(),
+            guest: "/mnt/disk".into(),
+            size: "1G".into(),
+            read_only: false,
+            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
+            encrypted: false,
+        }];
+        assert_eq!(
+            reject_unsupported_start_config(&config),
+            Err(WasmBackendError::DiskVolumeNotSupported {
+                host: "/host/disk.img".into()
+            })
+        );
+
+        config.volumes[0].kind = mvm_core::vm_backend::VmVolumeKind::DirShare;
+        assert!(reject_unsupported_start_config(&config).is_ok());
+    }
+
+    #[test]
+    fn volume_mountpoint_shadowing_the_handshake_fails_closed() {
+        for bad in ["mnt/relative", "/run/mvm", "/mvm/runtime"] {
+            let mut config = cfg("x", "/tmp/mod.wasm");
+            config.volumes = vec![mvm_core::vm_backend::VmVolume {
+                host: "/host/share".into(),
+                guest: bad.into(),
+                size: String::new(),
+                read_only: true,
+                kind: mvm_core::vm_backend::VmVolumeKind::DirShare,
+                encrypted: false,
+            }];
+            assert!(
+                matches!(
+                    reject_unsupported_start_config(&config),
+                    Err(WasmBackendError::VolumePathDenied { .. })
+                ),
+                "guest path {bad:?} must be refused"
+            );
+        }
+    }
+
     // ── P3b.1: wasm_endpoint_plan / wasm_substitution_spawn_params ──
     // Decision + params only — no subprocess is ever spawned in this module.
 
@@ -1022,6 +1174,16 @@ mod tests {
     #[cfg(not(feature = "wasm-backend"))]
     #[test]
     fn start_without_feature_fails_closed_not_panics() {
+        // Isolate MVM_HOME: `start` materializes the activation run dir
+        // before the engine's fail-closed error, and must not write into
+        // the developer's real `~/.mvm`.
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+
         let b = WasmBackend::new();
         let config = cfg("x", "/tmp/does-not-matter.wasm");
         let err = b.start(&config).unwrap_err();
@@ -1039,6 +1201,23 @@ mod tests {
         use super::*;
         use std::io::Write;
 
+        /// Isolate MVM_HOME: every `start` materializes the activation run
+        /// dir under the per-VM state dir, and these tests must not write
+        // into the developer's real `~/.mvm`.
+        fn isolated_home() -> (
+            mvm_core::util::test_env::TestEnv,
+            tempfile::TempDir,
+            std::sync::MutexGuard<'static, ()>,
+        ) {
+            let guard = crate::base::runtime_meta::HOME_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.set("MVM_HOME", dir.path());
+            (env, dir, guard)
+        }
+
         /// Write `wat` to a temp `.wat` file `wasmtime::Module::from_file`
         /// can parse (it text-parses `.wat` and auto-detects binary wasm).
         fn wat_module(wat: &str) -> tempfile::NamedTempFile {
@@ -1052,6 +1231,7 @@ mod tests {
         fn runs_a_trivial_module_to_completion_with_exit_zero() {
             // No imports beyond the linked WASI basics; `_start` just
             // returns, which this backend treats as a clean exit(0).
+            let (_env, _home, _guard) = isolated_home();
             let module = wat_module("(module (func) (export \"_start\" (func 0)))");
             let b = WasmBackend::new();
             let config = cfg("trivial", module.path().to_str().unwrap());
@@ -1066,10 +1246,91 @@ mod tests {
                 .expect("wait must return the captured exit status");
             assert_eq!(status.code, Some(0));
             assert!(status.success);
+
+            // The capability handshake was materialized: the activation run
+            // dir + file exist under this VM's isolated state dir.
+            let run_dir = mvm_core::config::vm_state_dir("trivial").join("wasm-activation");
+            assert!(run_dir.join("activation.json").is_file());
+            let written: crate::wasm_activation::WasmActivation =
+                serde_json::from_slice(&std::fs::read(run_dir.join("activation.json")).unwrap())
+                    .unwrap();
+            assert_eq!(written.runtime_overlay, None);
+            assert!(!written.grant_present);
+        }
+
+        #[test]
+        fn module_sees_the_activation_env_and_the_runtime_preopen() {
+            let (_env, home, _guard) = isolated_home();
+            // Seed an overlay-bins dir so the activation carries a runtime
+            // preopen the module can enumerate.
+            let overlay = home.path().join("runtime-overlay-bins");
+            std::fs::create_dir_all(&overlay).unwrap();
+            let config = cfg("activated", "/tmp/does-not-matter.wasm");
+            let run_dir = mvm_core::config::vm_state_dir("activated").join("wasm-activation");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            std::fs::write(run_dir.join("activation.json"), "{}").unwrap();
+            let plan = crate::wasm_activation::build_wasm_preopen_plan(
+                &config,
+                &run_dir,
+                Some(overlay.as_path()),
+            );
+
+            // A fixture that reads MVM_ACTIVATION_FILE via WASI environ and
+            // exits 0 only when it matches, and lists the overlay preopen.
+            let wat = r#"
+                (module
+                  (import "wasi_snapshot_preview1" "environ_sizes_get" (func $esizes (param i32 i32) (result i32)))
+                  (import "wasi_snapshot_preview1" "environ_get" (func $eget (param i32 i32) (result i32)))
+                  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+                  (memory (export "memory") 1)
+                  (data (i32.const 512) "MVM_ACTIVATION_FILE=/run/mvm/activation.json")
+                  (func $memcmp (param $a i32) (param $b i32) (param $len i32) (result i32)
+                    (local $i i32)
+                    (block $done
+                      (loop $loop
+                        (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+                        (if (i32.ne (i32.load8_u (i32.add (local.get $a) (local.get $i)))
+                                    (i32.load8_u (i32.add (local.get $b) (local.get $i))))
+                          (then (return (i32.const 0))))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br $loop)))
+                    (i32.const 1))
+                  (func (export "_start")
+                    (local $count i32) (local $i i32) (local $ptr i32)
+                    (if (i32.ne (call $esizes (i32.const 0) (i32.const 4)) (i32.const 0))
+                      (then (call $proc_exit (i32.const 2))))
+                    (local.set $count (i32.load (i32.const 0)))
+                    (if (i32.ne (call $eget (i32.const 16) (i32.const 1024)) (i32.const 0))
+                      (then (call $proc_exit (i32.const 3))))
+                    (block $done
+                      (loop $scan
+                        (br_if $done (i32.ge_u (local.get $i) (local.get $count)))
+                        (local.set $ptr (i32.load (i32.add (i32.const 16) (i32.mul (local.get $i) (i32.const 4)))))
+                        (if (call $memcmp (local.get $ptr) (i32.const 512) (i32.const 44))
+                          (then (call $proc_exit (i32.const 0))))
+                        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                        (br $scan)))
+                    (call $proc_exit (i32.const 7))))
+            "#;
+            let module = wat_module(wat);
+            let exit = engine::run_module_to_completion(
+                module.path().to_str().unwrap(),
+                None,
+                Some(&plan),
+            )
+            .expect("module with the activation env must run to completion");
+            assert_eq!(exit.code, Some(0), "activation env must be visible");
+
+            // Without the activation plan the same module must NOT see the env.
+            let exit =
+                engine::run_module_to_completion(module.path().to_str().unwrap(), None, None)
+                    .expect("module without the activation plan must still run");
+            assert_eq!(exit.code, Some(7), "no env without the handshake");
         }
 
         #[test]
         fn runs_a_module_that_calls_proc_exit_with_a_nonzero_code() {
+            let (_env, _home, _guard) = isolated_home();
             let wat = r#"
                 (module
                   (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
@@ -1102,10 +1363,93 @@ mod tests {
 
         #[test]
         fn missing_module_file_fails_closed_with_typed_error() {
+            let (_env, _home, _guard) = isolated_home();
             let b = WasmBackend::new();
             let config = cfg("missing", "/nonexistent/path/does-not-exist.wasm");
             let err = b.start(&config).unwrap_err();
             assert!(err.to_string().contains("failed to load wasm module"));
+        }
+
+        /// The capability handshake end to end: a module built from a
+        /// `WasmPreopenPlan` sees exactly the admitted preopens (the run dir
+        /// at /run/mvm with the activation file, an overlay dir at
+        /// /mvm/runtime read-only) and the `MVM_ACTIVATION_FILE` env — and
+        /// nothing beyond them (a path outside the preopens is not openable,
+        /// and a read-only preopen refuses writes).
+        #[test]
+        fn activation_preopens_and_env_are_exactly_what_the_module_sees() {
+            use crate::wasm_activation::{WasmPreopen, WasmPreopenPlan};
+
+            let run_dir = tempfile::tempdir().unwrap();
+            std::fs::write(run_dir.path().join("activation.json"), b"{}").unwrap();
+            let overlay_dir = tempfile::tempdir().unwrap();
+            std::fs::write(overlay_dir.path().join("agent"), b"bin").unwrap();
+
+            let plan = WasmPreopenPlan {
+                preopens: vec![
+                    WasmPreopen {
+                        host_dir: run_dir.path().to_path_buf(),
+                        guest_path: "/run/mvm".into(),
+                        read_only: true,
+                    },
+                    WasmPreopen {
+                        host_dir: overlay_dir.path().to_path_buf(),
+                        guest_path: "/mvm/runtime".into(),
+                        read_only: true,
+                    },
+                ],
+                env: vec![(
+                    "MVM_ACTIVATION_FILE".to_string(),
+                    "/run/mvm/activation.json".to_string(),
+                )],
+            };
+
+            // dirfd 3 = first preopen (/run/mvm), dirfd 4 = second
+            // (/mvm/runtime). path_open returns a WASI errno (0 = success);
+            // environ_sizes_get writes the env count at addr 0.
+            let wat = r#"(module
+  (import "wasi_snapshot_preview1" "path_open" (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "environ_sizes_get" (func $esg (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 100) "activation.json")
+  (data (i32.const 200) "agent")
+  (func (export "open_activation") (result i32)
+    (call $path_open (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 15) (i32.const 0) (i64.const 0) (i64.const 0) (i32.const 0) (i32.const 500)))
+  (func (export "open_overlay_bin") (result i32)
+    (call $path_open (i32.const 4) (i32.const 0) (i32.const 200) (i32.const 5) (i32.const 0) (i64.const 0) (i64.const 0) (i32.const 0) (i32.const 500)))
+  (func (export "open_shadow_escape") (result i32)
+    (call $path_open (i32.const 3) (i32.const 0) (i32.const 200) (i32.const 5) (i32.const 0) (i64.const 0) (i64.const 0) (i32.const 0) (i32.const 500)))
+  (func (export "env_count") (result i32)
+    (drop (call $esg (i32.const 0) (i32.const 4)))
+    (i32.load (i32.const 0)))
+  (func (export "_start")))
+"#;
+            let module = wat_module(wat);
+            let (mut store, instance) =
+                engine::instantiate_for_test(module.path().to_str().unwrap(), None, Some(&plan))
+                    .expect("module with WASI imports must instantiate");
+
+            let errno = |name: &str, store: &mut wasmtime::Store<engine::WasmHostState>| {
+                instance
+                    .get_typed_func::<(), i32>(&mut *store, name)
+                    .unwrap_or_else(|_| panic!("fixture must export {name}"))
+                    .call(store, ())
+                    .unwrap_or_else(|_| panic!("{name} must not trap"))
+            };
+
+            // The admitted files open.
+            assert_eq!(errno("open_activation", &mut store), 0);
+            assert_eq!(errno("open_overlay_bin", &mut store), 0);
+            // `agent` does not exist under /run/mvm — the preopen boundary
+            // is real (nothing outside the admitted dirs is reachable).
+            assert_ne!(errno("open_shadow_escape", &mut store), 0);
+            // The one admitted env entry is present.
+            let env_count = instance
+                .get_typed_func::<(), i32>(&mut store, "env_count")
+                .unwrap()
+                .call(&mut store, ())
+                .unwrap();
+            assert_eq!(env_count, 1);
         }
 
         mod mvm_egress_import_tests {
@@ -1198,6 +1542,7 @@ mod tests {
                 let (mut store, instance) = engine::instantiate_for_test(
                     module.path().to_str().unwrap(),
                     backend.egress_endpoint.clone(),
+                    None,
                 )
                 .expect("module with the mvm:egress import must instantiate");
 
@@ -1240,7 +1585,7 @@ mod tests {
                 // configured, so the import must fail closed rather than
                 // panic or trap the host.
                 let (mut store, instance) =
-                    engine::instantiate_for_test(module.path().to_str().unwrap(), None)
+                    engine::instantiate_for_test(module.path().to_str().unwrap(), None, None)
                         .expect("module with the mvm:egress import must instantiate");
 
                 let run_egress = instance
@@ -1273,6 +1618,7 @@ mod tests {
                 let (mut store, instance) = engine::instantiate_for_test(
                     module.path().to_str().unwrap(),
                     Some(socket_path),
+                    None,
                 )
                 .expect("module with the mvm:egress import must instantiate");
 

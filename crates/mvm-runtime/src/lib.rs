@@ -119,6 +119,11 @@ pub mod vsock_egress_bridge;
 /// then clone them only after the checkpoint's fail-closed lineage
 /// verification (`verify_content` + `verify_lineage`) passes.
 pub mod warm_snapshot;
+/// The Wasm tier's activation analog: the capability handshake (preopens,
+/// env, activation file) delivered to a WASI run, adapted from the
+/// microVM/container tiers' environment activation. Pure data + mapping,
+/// independent of the `wasm-backend` engine feature.
+pub mod wasm_activation;
 /// `WasmBackend` — host-`wasmtime` claim-free portability tier running a
 /// user-supplied WASI module. Always constructible; the real engine only
 /// compiles in behind the opt-in `wasm-backend` feature.
