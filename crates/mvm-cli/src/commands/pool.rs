@@ -35,7 +35,10 @@ use super::Cli;
 use super::env::builder_vm::ensure_default_microvm_image;
 use super::vm::checkpoint::SignedChainAnchor;
 use super::vm::host_signer;
-use mvm_hostd::plan_admission::stash_plan_for_bridge;
+use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
+use mvm_hostd::plan_admission::{
+    AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_for_bridge,
+};
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
 pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
@@ -172,6 +175,127 @@ pub struct WarmResult {
 /// Spawn failures are logged and counted; the caller decides whether to
 /// surface them as an error.  Returns a [`WarmResult`] with success and
 /// failure counts.
+/// Tenant a factory parent's plan is admitted under when the launch it mirrors
+/// carries none. A parent is host-side capacity, not a tenant's workload, so it
+/// gets its own identity rather than borrowing an arbitrary one.
+const STANDBY_PARENT_TENANT: &str = "standby";
+
+/// The captured parent's own rootfs digest — the bytes it actually booted, so
+/// the plan admitted for it describes what it is rather than what asked for it.
+fn captured_rootfs_digest(meta: &mvm_core::checkpoint::CheckpointMeta) -> Result<String> {
+    mvm_runtime::workload_runner::claim::parent_rootfs_digest(meta)
+        .map(str::to_string)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Admit a signed `ExecutionPlan` for a captured factory parent.
+///
+/// Mirrors the workload admission path (synthesize → sign → verify → window →
+/// nonce) with every workload authority left out: no secrets, no services, no
+/// bundle, no deps volume, no shares. The parent runs nothing on a tenant's
+/// behalf; the plan exists so its checkpoint has a signed creation entry to
+/// anchor against.
+fn admit_standby_parent_plan(
+    handle: &StandbyHandle,
+    backend_name: &str,
+    tenant: &str,
+    rootfs_sha256: &str,
+    vcpus: u8,
+    mem_mib: u32,
+) -> Result<AdmittedPlan> {
+    let input = SynthesisInput {
+        vm_name: &handle.id,
+        tenant: Some(tenant),
+        backend_name,
+        image_name: &handle.id,
+        image_sha256: rootfs_sha256,
+        image_cosign_bundle: None,
+        intent: None,
+        seccomp_tier: PlanSeccompTier::Standard,
+        network_policy_ref: None,
+        fs_policy_ref: None,
+        egress_policy_ref: None,
+        tool_policy_ref: None,
+        secret_release: SecretReleasePolicy::default(),
+        secrets: Vec::new(),
+        audit_event_prefix: None,
+        cpus: u32::from(vcpus),
+        mem_mib: u64::from(mem_mib),
+        disk_mib: 0,
+        boot_timeout_secs: 60,
+        exec_timeout_secs: 0,
+        destroy_on_exit: true,
+        bundle_pin: None,
+        deps_volume: None,
+        shares: Vec::new(),
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        audit_labels: Default::default(),
+        agent_verbs: None,
+        services: Vec::new(),
+    };
+    let ledger = InMemoryNonceLedger::new();
+    admit_for_run(&input, &SystemClock, &ledger, None, None)
+        .context("admitting a plan for the captured standby parent")
+}
+
+/// Bind a freshly captured parent's checkpoint into the signed audit chain.
+///
+/// The claim path refuses to fork a parent whose checkpoint carries no
+/// `checkpoint.created` entry — the claim-8 lineage gate. A factory parent is
+/// never launched from a workload plan, so nothing else admits one for it, and
+/// without this every parent the pool captures is unclaimable by construction.
+fn audit_captured_parent(
+    checkpoints: &CheckpointStore,
+    handle: &StandbyHandle,
+    backend_name: &str,
+    tenant: &str,
+) -> Result<()> {
+    let checkpoint_id = handle.parent_checkpoint.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "standby '{}' was recorded without a parent checkpoint to anchor",
+            handle.id
+        )
+    })?;
+    let meta = checkpoints
+        .read_meta(&CheckpointId::new(checkpoint_id.to_string()))
+        .with_context(|| format!("reading captured checkpoint '{checkpoint_id}'"))?;
+    let rootfs_sha256 = captured_rootfs_digest(&meta)?;
+    let admitted = admit_standby_parent_plan(
+        handle,
+        backend_name,
+        tenant,
+        &rootfs_sha256,
+        handle.vcpus,
+        handle.mem_mib,
+    )?;
+    let signer = host_signer::load_or_init()
+        .context("loading the host signer to sign the parent's creation entry")?;
+    let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
+        .context("opening the audit chain to record the parent's creation")?;
+    mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &admitted.plan, &meta)
+        .context("emitting checkpoint.created for the captured standby parent")
+}
+
+/// Drop a parent that could not be audited, checkpoint and all.
+///
+/// An unauditable parent is worse than no parent: every claim would refuse it,
+/// quarantine it, and replenish would spawn another — a wasted boot and capture
+/// per launch, forever. Its guest is already stopped by the capture, so this
+/// only has to reclaim the disk.
+fn discard_unauditable_parent(checkpoints: &CheckpointStore, handle: &StandbyHandle) {
+    let Some(id) = handle.parent_checkpoint.as_deref() else {
+        return;
+    };
+    if let Err(e) = checkpoints.remove(&CheckpointId::new(id.to_string())) {
+        tracing::warn!(
+            checkpoint = id,
+            error = %e,
+            "could not remove the unauditable parent's checkpoint; it will occupy disk until pruned"
+        );
+    }
+}
+
 pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
     if p.target == 0 {
         return Ok(WarmResult {
@@ -240,8 +364,29 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
         })?;
         match p.backend.spawn_standby_via_runner(&spawn_ctx, &spec) {
             Ok(handle) => {
-                pool.record(&handle)?;
-                spawned += 1;
+                // Audit before recording: the claim refuses a parent with no
+                // signed creation entry, so pooling an unauditable one only
+                // buys a refusal, a quarantine and another spawn next launch.
+                let tenant = p
+                    .launch
+                    .and_then(|c| c.tenant_id.as_deref())
+                    .unwrap_or(STANDBY_PARENT_TENANT);
+                match audit_captured_parent(&checkpoints, &handle, p.backend.name(), tenant) {
+                    Ok(()) => {
+                        pool.record(&handle)?;
+                        spawned += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            standby = %handle.id,
+                            error = %e,
+                            "could not audit the captured standby parent; discarding it rather \
+                             than pooling one no claim could ever verify"
+                        );
+                        discard_unauditable_parent(&checkpoints, &handle);
+                        failed += 1;
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "spawn standby failed; pool stays under target");
@@ -656,6 +801,156 @@ mod tests {
         let mut c = eligible_cfg();
         c.warm_pool_size = 0;
         assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+    }
+
+    // ── Auditing a captured factory parent ───────────────────────────────
+    //
+    // The claim refuses a parent whose checkpoint has no signed creation
+    // entry. Nothing admits a plan for a factory parent, so before this the
+    // pool filled with parents no claim could ever verify.
+
+    /// A captured parent's checkpoint, written the way `capture_vm_full` leaves
+    /// it: a `vm_full` record carrying the rootfs blob a claim binds against.
+    fn write_captured_parent(store: &CheckpointStore, id: &str, rootfs_sha: &str) -> CheckpointId {
+        use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ContentBlob};
+        let ckpt = CheckpointId::new(id.to_string());
+        let meta = CheckpointMeta::builder(ckpt.clone(), CheckpointClass::VmFull, "standby-vm")
+            .content(vec![ContentBlob {
+                name: "rootfs.ext4".into(),
+                sha256: rootfs_sha.into(),
+            }])
+            .supervisor_config_digest("")
+            .created_unix(1)
+            .build();
+        store.write_meta(&meta).unwrap();
+        ckpt
+    }
+
+    fn captured_handle(id: &str, ckpt: &CheckpointId) -> StandbyHandle {
+        StandbyHandle {
+            id: id.to_string(),
+            template_id: None,
+            control_socket: String::new(),
+            // Zero is the released-after-capture sentinel a real captured
+            // parent carries: its state lives in the checkpoint, not a process.
+            pid: 0,
+            vcpus: 2,
+            mem_mib: 512,
+            binding_nonce: "nonce".into(),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            parent_checkpoint: Some(ckpt.as_str().to_string()),
+            kernel_sha256: "a".repeat(64),
+            image_sha256: Some("b".repeat(64)),
+            vsock_egress: false,
+        }
+    }
+
+    /// The whole point: after auditing, the anchor the claim uses resolves the
+    /// parent's creation digest. This is the exact lookup that returned `None`
+    /// and produced `ParentUnaudited` on every live claim.
+    #[test]
+    fn auditing_a_captured_parent_makes_the_claim_anchor_resolve_it() {
+        use mvm_runtime::checkpoint::CheckpointChainAnchor;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = CheckpointStore::open();
+        let ckpt = write_captured_parent(&store, "standby-standby-abc", &"ab".repeat(32));
+        let handle = captured_handle("standby-abc", &ckpt);
+        let meta = store.read_meta(&ckpt).unwrap();
+
+        // Before: the claim's gate finds nothing and refuses.
+        assert_eq!(
+            SignedChainAnchor::load()
+                .unwrap()
+                .recorded_creation_digest(&meta)
+                .unwrap(),
+            None,
+            "an un-audited parent must not resolve — that is the fail-closed gate"
+        );
+
+        audit_captured_parent(&store, &handle, "firecracker", "tenant-a").unwrap();
+
+        assert_eq!(
+            SignedChainAnchor::load()
+                .unwrap()
+                .recorded_creation_digest(&meta)
+                .unwrap(),
+            Some(meta.meta_digest.clone()),
+            "after auditing, the claim's anchor must recover the parent's content-address"
+        );
+    }
+
+    /// The parent's plan is admitted for capacity, not for work: it must carry
+    /// none of the authority a workload plan does, or a claimed child could
+    /// inherit reach the parent was never entitled to.
+    #[test]
+    fn the_parent_plan_carries_no_workload_authority() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let ckpt = CheckpointId::new("standby-standby-xyz".to_string());
+        let handle = captured_handle("standby-xyz", &ckpt);
+        let admitted =
+            admit_standby_parent_plan(&handle, "firecracker", "tenant-a", &"cd".repeat(32), 2, 512)
+                .unwrap();
+
+        assert!(admitted.plan.secrets.is_empty(), "no secret bindings");
+        assert!(
+            admitted.plan.services.is_empty(),
+            "no host-service bindings"
+        );
+        assert_eq!(admitted.plan.workload.0, handle.id, "named for the parent");
+        assert_eq!(
+            admitted.plan.image.sha256,
+            "cd".repeat(32),
+            "the plan describes the rootfs the parent actually booted"
+        );
+    }
+
+    /// An unauditable parent must be dropped, not pooled. Pooling one buys a
+    /// refusal and a quarantine on the next launch, then another spawn — a
+    /// wasted boot and capture per launch, forever.
+    #[test]
+    fn an_unauditable_parent_is_discarded_with_its_checkpoint() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = CheckpointStore::open();
+        let ckpt = write_captured_parent(&store, "standby-standby-doomed", &"ef".repeat(32));
+        let handle = captured_handle("standby-doomed", &ckpt);
+        assert!(store.read_meta(&ckpt).is_ok());
+
+        discard_unauditable_parent(&store, &handle);
+
+        assert!(
+            store.read_meta(&ckpt).is_err(),
+            "the discarded parent's checkpoint must not survive to occupy disk"
+        );
+    }
+
+    /// A handle with no captured checkpoint has nothing to anchor; say so
+    /// rather than emitting an entry that points at nothing.
+    #[test]
+    fn auditing_refuses_a_handle_with_no_captured_checkpoint() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+
+        let store = CheckpointStore::open();
+        let mut handle = captured_handle("standby-nockpt", &CheckpointId::new("x".to_string()));
+        handle.parent_checkpoint = None;
+
+        let err = audit_captured_parent(&store, &handle, "firecracker", "tenant-a").unwrap_err();
+        assert!(
+            err.to_string().contains("without a parent checkpoint"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
