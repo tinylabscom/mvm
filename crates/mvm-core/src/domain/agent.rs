@@ -87,6 +87,17 @@ pub struct DesiredPool {
     /// a local Nix build. Falls back to local build if the pull fails.
     #[serde(default)]
     pub registry_artifact: Option<RegistryArtifact>,
+    /// Distributed-volume mounts attached to every instance of this pool
+    /// (Plan 59 Stage 0).
+    ///
+    /// Schema evolution: `#[serde(default)]` keeps the old-coordinator →
+    /// new-agent direction parsing (missing field ⇒ no mounts). The
+    /// reverse direction (new coordinator sending `mounts` to an old
+    /// agent) fails closed on `deny_unknown_fields`; rolling that out is
+    /// governed by `DesiredState::schema_version`, matching how prior
+    /// `DesiredPool` field additions were sequenced.
+    #[serde(default)]
+    pub mounts: Vec<DesiredMount>,
 }
 
 fn default_seccomp() -> String {
@@ -95,6 +106,81 @@ fn default_seccomp() -> String {
 
 fn default_compression() -> String {
     "none".to_string()
+}
+
+/// A distributed-volume mount (S3/NFS/FUSE-backed bucket) attached to
+/// every instance of a pool.
+///
+/// Part of the signed desired state (Plan 59 Stage 0 contract freeze).
+/// The coordinator resolves a tenant bucket into this shape; agents
+/// reconcile it via the hostd `MountVolume` / `UnmountVolume` verbs.
+///
+/// This is deliberately a separate type from the IR `Mount`
+/// (`mvm-protocol::ir::workload`) — the IR describes a single workload's
+/// authored intent, while this describes coordinator-resolved fleet
+/// state pushed to agents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesiredMount {
+    /// Coordinator-scoped bucket identifier this mount materializes.
+    pub bucket_id: String,
+    /// Backing provider (e.g. "s3", "nfs", "local-virtiofs").
+    ///
+    /// Deliberately an open string rather than an enum, mirroring the
+    /// `MountSource::External { provider, .. }` precedent in the IR:
+    /// new providers plug in without a core-schema edit. An unknown
+    /// provider is rejected at mount time, never silently defaulted.
+    pub provider: String,
+    /// Provider-schema-owned configuration. The desired-state layer
+    /// does not interpret it; the provider validates it at mount time.
+    pub config: serde_json::Value,
+    /// Absolute guest path the volume is mounted at.
+    pub target: String,
+    /// Read-only vs read-write attachment for each instance.
+    pub mode: DesiredMountMode,
+    /// Monotonic mount-config generation. The coordinator bumps it on
+    /// any change to this mount (config, mode, access_mode, …); agents
+    /// remount when their applied generation is behind.
+    pub generation: u64,
+    /// Concurrency contract across instances (see [`MountAccessMode`]).
+    ///
+    /// Defaults to [`MountAccessMode::Rox`]: read-only-many is the only
+    /// mode that is safe on every provider without write coordination,
+    /// so writers must opt in explicitly.
+    #[serde(default)]
+    pub access_mode: MountAccessMode,
+}
+
+/// Read-only vs read-write for a [`DesiredMount`].
+///
+/// Mirrors (rather than reuses) the IR `MountMode`
+/// (`mvm-protocol::ir::workload`) so the signed desired-state schema
+/// stays self-contained; the wire values (`"ro"` / `"rw"`) are
+/// identical by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesiredMountMode {
+    /// Read-only attachment.
+    Ro,
+    /// Read-write attachment.
+    Rw,
+}
+
+/// Concurrency/access contract for a [`DesiredMount`] across the
+/// instances of a pool (Kubernetes PV-style semantics).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MountAccessMode {
+    /// Read-write by at most one instance at a time.
+    Rwo,
+    /// Read-only by many instances. The default: the only mode that is
+    /// safe on every provider without write coordination — writers must
+    /// opt in explicitly via `Rwo`/`Rwx`.
+    #[default]
+    Rox,
+    /// Read-write by many instances (requires a provider that
+    /// coordinates concurrent writers, e.g. NFS).
+    Rwx,
 }
 
 // ============================================================================
@@ -1087,6 +1173,7 @@ mod tests {
                 health_check_timeout_secs: 90,
             })),
             registry_artifact: None,
+            mounts: vec![],
         };
         let json = serde_json::to_string(&pool).unwrap();
         let parsed: DesiredPool = serde_json::from_str(&json).unwrap();
@@ -1227,12 +1314,164 @@ mod tests {
                 template_id: "hello".to_string(),
                 revision: Some("rev-abc123".to_string()),
             }),
+            mounts: vec![],
         };
         let json = serde_json::to_string(&pool).unwrap();
         let parsed: DesiredPool = serde_json::from_str(&json).unwrap();
         let ra = parsed.registry_artifact.unwrap();
         assert_eq!(ra.template_id, "hello");
         assert_eq!(ra.revision.as_deref(), Some("rev-abc123"));
+    }
+
+    // ========================================================================
+    // Tests for distributed-volume mounts (Plan 59 Stage 0)
+    // ========================================================================
+
+    /// Old coordinator → new agent: a `DesiredPool` payload that predates
+    /// the `mounts` field must still parse (`#[serde(default)]` ⇒ empty).
+    ///
+    /// The reverse direction (new coordinator sending `mounts` to an old
+    /// agent) fails closed on that agent's `deny_unknown_fields` — that
+    /// rollout is governed by `DesiredState::schema_version`, matching how
+    /// prior `DesiredPool` field additions were sequenced.
+    #[test]
+    fn test_desired_pool_backward_compat_no_mounts() {
+        let json = r#"{
+            "pool_id": "gateways",
+            "flake_ref": "github:org/repo",
+            "profile": "minimal",
+            "instance_resources": {"vcpus": 2, "mem_mib": 1024},
+            "desired_counts": {"running": 3, "warm": 1, "sleeping": 0}
+        }"#;
+        let parsed: DesiredPool = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.pool_id, "gateways");
+        assert!(parsed.mounts.is_empty());
+    }
+
+    #[test]
+    fn test_desired_pool_mounts_roundtrip() {
+        let mount = DesiredMount {
+            bucket_id: "bkt-artifacts".to_string(),
+            provider: "s3".to_string(),
+            config: serde_json::json!({
+                "endpoint": "https://s3.example.com",
+                "bucket": "acme-artifacts",
+                "region": "us-east-1"
+            }),
+            target: "/mnt/artifacts".to_string(),
+            mode: DesiredMountMode::Rw,
+            generation: 7,
+            access_mode: MountAccessMode::Rwx,
+        };
+        let pool = DesiredPool {
+            pool_id: "workers".to_string(),
+            flake_ref: ".".to_string(),
+            profile: "minimal".to_string(),
+            role: Role::Worker,
+            instance_resources: InstanceResources {
+                vcpus: 1,
+                mem_mib: 512,
+                data_disk_mib: 0,
+            },
+            desired_counts: DesiredCounts {
+                running: 1,
+                warm: 0,
+                sleeping: 0,
+            },
+            runtime_policy: RuntimePolicy::default(),
+            seccomp_policy: "baseline".to_string(),
+            snapshot_compression: "none".to_string(),
+            routing_table: None,
+            secret_scopes: vec![],
+            sleep_policy: None,
+            default_update_strategy: None,
+            registry_artifact: None,
+            mounts: vec![mount.clone()],
+        };
+        let json = serde_json::to_string(&pool).unwrap();
+        let parsed: DesiredPool = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.mounts.len(), 1);
+        assert_eq!(parsed.mounts[0], mount);
+    }
+
+    #[test]
+    fn test_desired_mount_parses_from_json() {
+        let json = r#"{
+            "bucket_id": "bkt-shared",
+            "provider": "nfs",
+            "config": {"server": "10.240.0.9", "export": "/exports/shared"},
+            "target": "/mnt/shared",
+            "mode": "ro",
+            "generation": 1
+        }"#;
+        let parsed: DesiredMount = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.bucket_id, "bkt-shared");
+        assert_eq!(parsed.provider, "nfs");
+        assert_eq!(parsed.target, "/mnt/shared");
+        assert_eq!(parsed.mode, DesiredMountMode::Ro);
+        assert_eq!(parsed.generation, 1);
+        // access_mode omitted ⇒ defaults to read-only-many.
+        assert_eq!(parsed.access_mode, MountAccessMode::Rox);
+    }
+
+    #[test]
+    fn test_desired_mount_rejects_unknown_fields() {
+        let bad = serde_json::json!({
+            "bucket_id": "bkt-shared",
+            "provider": "s3",
+            "config": {},
+            "target": "/mnt/shared",
+            "mode": "ro",
+            "generation": 1,
+            "unexpected": true
+        });
+        let err = serde_json::from_value::<DesiredMount>(bad).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_mount_access_mode_default_is_rox() {
+        assert_eq!(MountAccessMode::default(), MountAccessMode::Rox);
+    }
+
+    #[test]
+    fn test_mount_enums_wire_values() {
+        // Pin the wire values: mode mirrors the IR MountMode ("ro"/"rw");
+        // access_mode is snake_case of the K8s-style variants.
+        assert_eq!(
+            serde_json::to_string(&DesiredMountMode::Ro).unwrap(),
+            "\"ro\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DesiredMountMode::Rw).unwrap(),
+            "\"rw\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MountAccessMode::Rwo).unwrap(),
+            "\"rwo\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MountAccessMode::Rox).unwrap(),
+            "\"rox\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MountAccessMode::Rwx).unwrap(),
+            "\"rwx\""
+        );
+        for mode in [DesiredMountMode::Ro, DesiredMountMode::Rw] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let parsed: DesiredMountMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, mode);
+        }
+        for access in [
+            MountAccessMode::Rwo,
+            MountAccessMode::Rox,
+            MountAccessMode::Rwx,
+        ] {
+            let json = serde_json::to_string(&access).unwrap();
+            let parsed: MountAccessMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, access);
+        }
     }
 
     // ========================================================================
