@@ -12,6 +12,8 @@
 //! `body_b64` is base64 so the JSON stays compact and binary-safe; callers
 //! encode/decode at the edges.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// A request the guest routed to the substitution endpoint. A header value may
@@ -65,11 +67,30 @@ pub struct ResolveWireRequest {
 
 /// The resolver's reply: the resolved value (base64) or a refusal. A
 /// refusal never carries a secret.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written (not derived): the `Ok` variant's `value_b64` is
+/// the raw credential, base64-encoded but otherwise unprotected, so a
+/// derived `Debug` would print it verbatim into any log or panic message
+/// that formats this type. See [`fmt::Debug for ResolveWireResponse`].
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum ResolveWireResponse {
     Ok { value_b64: String },
     Refused { message: String },
+}
+
+impl fmt::Debug for ResolveWireResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResolveWireResponse::Ok { .. } => f
+                .debug_struct("Ok")
+                .field("value_b64", &"<redacted>")
+                .finish(),
+            ResolveWireResponse::Refused { message } => {
+                f.debug_struct("Refused").field("message", message).finish()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -172,5 +193,24 @@ mod tests {
         })
         .unwrap();
         assert!(json.contains(r#""result":"refused""#), "got: {json}");
+    }
+
+    #[test]
+    fn resolve_wire_response_ok_debug_redacts_the_value() {
+        let resp = ResolveWireResponse::Ok {
+            value_b64: "c2stbGl2ZS14eHg=".into(),
+        };
+        let debug = format!("{resp:?}");
+        assert!(!debug.contains("c2stbGl2ZS14eHg="), "leaked value: {debug}");
+        assert!(debug.contains("<redacted>"), "got: {debug}");
+    }
+
+    #[test]
+    fn resolve_wire_response_refused_debug_shows_the_message() {
+        let resp = ResolveWireResponse::Refused {
+            message: "secret not bound".into(),
+        };
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("secret not bound"), "got: {debug}");
     }
 }

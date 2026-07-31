@@ -194,6 +194,19 @@ mod tests {
     }
 
     #[test]
+    fn remote_resolver_maps_invalid_base64_to_resolve_error_without_panicking() {
+        let path = spawn_server(ResolveWireResponse::Ok {
+            value_b64: "!!not-valid-base64!!".into(),
+        });
+
+        let resolver = RemoteResolver::new(path, Duration::from_secs(5));
+        let err = resolver
+            .resolve(&secret_ref_with_hosts(&["api.stripe.com"]))
+            .unwrap_err();
+        assert!(matches!(err, ResolveError::Backend { .. }));
+    }
+
+    #[test]
     fn remote_resolver_maps_refusal_to_resolve_error() {
         let path = spawn_server(ResolveWireResponse::Refused {
             message: "secret not bound".into(),
