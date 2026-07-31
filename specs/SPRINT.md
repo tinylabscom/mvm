@@ -840,6 +840,46 @@ status line and discards the body, so a wget user still needs the host log
 (`/tmp/mvm-substitution-endpoint-<vm>.log`). Surfacing a failed run's egress
 denials through `mvmctl` itself is the follow-up.
 
+### The universal-initramfs cache could not see source fixes
+
+A boot that attached the universal initramfs died at its first RPC with
+`send ActivateEnvironment to guest: Failed to read frame length`, and the guest
+console said `rejecting control connection without a pinned host key` — the
+symptom #1959 had already fixed.
+
+It kept happening because the cache could not see that fix.
+`<cache>/initramfs/<version>/<arch>/` is keyed on a version that only moves at
+release, so an artifact built from older guest sources outlives every change to
+them: the fix lands, the cache still serves the binary from before it, and the
+fix looks inert. The runtime overlay and the verity initramfs both record a
+`SOURCE_FINGERPRINT` for this reason; this one did not. It does now — a mismatch
+**evicts** rather than ignores, so the next resolve rebuilds instead of
+re-finding the same bytes, and an artifact with no fingerprint is treated as
+unknown provenance rather than assumed fresh. Trusting those is what let the
+stale one survive.
+
+The activation race underneath — `activate_workload` sending before the agent
+had bound its port — was fixed independently on main by #1985 while this was in
+review, so only the cache work remains here.
+
+Live on macOS: the stale artifact is discarded, the host falls back to the legacy
+initramfs (macOS cannot build the universal one), and the workload runs. A
+working universal-initramfs boot is **not** verified here — this host cannot
+produce the artifact, so what is proven is the eviction and the fallback.
+
+`initramfs::tests::resolve_returns_missing_when_cache_empty` is also fixed. Its
+`HOME` isolation had made it genuinely hermetic, which exposed what that was
+hiding: on Linux the empty-cache path falls through to a real `nix build`, and
+with a shell double that reports success without producing an artifact the call
+never returns. It ran for 20,000+ seconds and took a CI job to its six-hour
+limit. It had been passing on Linux only by finding an artifact it was supposed
+to prove absent. It now exercises `resolve_or_seed_from_default_cache`, whose
+contract is the one the name claims, and completes in milliseconds.
+
+That a shell double reporting success can make the nix path hang rather than
+error is worth closing separately: a build producing no artifact should fail,
+not wait.
+
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
 ### Deferred: a dry run should not require a bootable backend

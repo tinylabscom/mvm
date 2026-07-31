@@ -296,8 +296,41 @@ pub(crate) fn attach_universal_initramfs_if_cached(
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     let arch = mvm_core::arch::GuestArch::host();
     let env = HostShellEnvironment;
+    // A source checkout rebuilds its guest binaries when they change, but the
+    // initramfs cache is keyed only on `(version, arch)` — so without this it
+    // keeps serving the artifact built before the change, and a guest-side fix
+    // appears not to have worked. Evicting on a fingerprint mismatch is what
+    // makes the next resolve rebuild rather than re-find the stale bytes.
+    if let Some(workspace_root) =
+        crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+        && let Ok(fingerprint) =
+            mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
+                &workspace_root,
+            )
+        && let Ok(true) =
+            mvm_build::initramfs::evict_if_source_changed(&cache_root, version, arch, &fingerprint)
+    {
+        tracing::info!(
+            initramfs_version = version,
+            "guest sources changed since the cached universal initramfs was built; discarded it"
+        );
+    }
     match mvm_build::initramfs::resolve_or_build_local_initramfs(&env, &cache_root, version, arch) {
         Ok(artifact) => {
+            if let Some(workspace_root) =
+                crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+                && let Ok(fingerprint) =
+                    mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
+                        &workspace_root,
+                    )
+            {
+                let _ = mvm_build::initramfs::record_source_fingerprint(
+                    &cache_root,
+                    version,
+                    arch,
+                    &fingerprint,
+                );
+            }
             start_config.initrd_path = Some(artifact.image_path.display().to_string());
             tracing::info!(
                 initramfs_version = version,
@@ -1355,6 +1388,25 @@ mod universal_initramfs_attach_tests {
         let cache_root = dir.path().join("cache").join("initramfs");
         mvm_build::initramfs::install_initramfs_into_cache(&source, &cache_root, version, arch)
             .unwrap();
+        // A warm cache in a source checkout has to say what built it. Without a
+        // fingerprint the artifact is of unknown provenance and is discarded —
+        // which is the whole point of the eviction, and would make this fixture
+        // describe a cache the attach path is right to refuse.
+        if let Some(workspace_root) =
+            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+            && let Ok(fingerprint) =
+                mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
+                    &workspace_root,
+                )
+        {
+            mvm_build::initramfs::record_source_fingerprint(
+                &cache_root,
+                version,
+                arch,
+                &fingerprint,
+            )
+            .unwrap();
+        }
 
         let mut sc = VmStartConfig::default();
         attach_universal_initramfs_if_cached(&mut sc).unwrap();

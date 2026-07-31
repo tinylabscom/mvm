@@ -64,6 +64,69 @@ pub enum InitramfsBuildError {
 /// the default cache's artifact and retry once. A default-cache miss surfaces
 /// the original resolve error unchanged. This is still a pure cache operation —
 /// no build, no download.
+/// Name of the source-fingerprint file recorded beside a cached initramfs.
+///
+/// The cache key is otherwise `(version, arch)`, and the version only moves on a
+/// release. That makes a locally built artifact outlive every change to the guest
+/// sources it was built from: a fix lands, the cache still serves the binary from
+/// before it, and the fix looks like it did not work. The runtime overlay and the
+/// verity initramfs both record a fingerprint for exactly this reason; this one
+/// did not, which is how an agent built before its own trust-anchor fix kept
+/// being booted afterwards.
+pub const LOCAL_SOURCE_FINGERPRINT_FILE: &str = "SOURCE_FINGERPRINT";
+
+/// Whether a cached artifact was built from `fingerprint`.
+///
+/// A cache with no fingerprint recorded is *not* fresh for a source checkout:
+/// it predates this check and there is no way to tell what built it.
+fn cached_artifact_matches_source(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    fingerprint: &str,
+) -> bool {
+    let recorded = cache_root
+        .join(version)
+        .join(arch.to_string())
+        .join(LOCAL_SOURCE_FINGERPRINT_FILE);
+    std::fs::read_to_string(recorded)
+        .map(|found| found.trim() == fingerprint.trim())
+        .unwrap_or(false)
+}
+
+/// Record the fingerprint an artifact was built from.
+pub fn record_source_fingerprint(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    fingerprint: &str,
+) -> std::io::Result<()> {
+    let dir = cache_root.join(version).join(arch.to_string());
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(LOCAL_SOURCE_FINGERPRINT_FILE), fingerprint)
+}
+
+/// Discard a cached artifact that a source checkout did not build.
+///
+/// Removing rather than ignoring it, so the next resolve takes the build or
+/// download path instead of finding the same stale bytes again.
+pub fn evict_if_source_changed(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    fingerprint: &str,
+) -> std::io::Result<bool> {
+    if cached_artifact_matches_source(cache_root, version, arch, fingerprint) {
+        return Ok(false);
+    }
+    let dir = cache_root.join(version).join(arch.to_string());
+    if !dir.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(&dir)?;
+    Ok(true)
+}
+
 pub fn resolve_or_seed_from_default_cache(
     cache_root: &Path,
     version: &str,
@@ -566,6 +629,80 @@ mod tests {
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// The defect this closes: the cache key is `(version, arch)` and the
+    /// version only moves on a release, so an artifact built from older guest
+    /// sources outlives every change to them. A guest-side fix lands, the cache
+    /// still serves the binary from before it, and the fix looks inert — which
+    /// is exactly how an agent built before its own trust-anchor fix kept being
+    /// booted afterwards.
+    #[test]
+    fn a_cached_artifact_from_other_sources_is_evicted() {
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join("0.18.0").join("aarch64");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("initramfs.cpio.gz"), b"stale").unwrap();
+        record_source_fingerprint(cache.path(), "0.18.0", GuestArch::Aarch64, "old-sources")
+            .unwrap();
+
+        let evicted =
+            evict_if_source_changed(cache.path(), "0.18.0", GuestArch::Aarch64, "new-sources")
+                .unwrap();
+        assert!(
+            evicted,
+            "a mismatched fingerprint must discard the artifact"
+        );
+        assert!(
+            !dir.exists(),
+            "the stale artifact must be gone, not merely ignored"
+        );
+    }
+
+    /// The matching case must not churn: rebuilding a correct artifact on every
+    /// boot would be its own bug.
+    #[test]
+    fn a_cached_artifact_from_the_same_sources_is_kept() {
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join("0.18.0").join("aarch64");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("initramfs.cpio.gz"), b"fresh").unwrap();
+        record_source_fingerprint(cache.path(), "0.18.0", GuestArch::Aarch64, "same").unwrap();
+
+        let evicted =
+            evict_if_source_changed(cache.path(), "0.18.0", GuestArch::Aarch64, "same").unwrap();
+        assert!(!evicted);
+        assert!(dir.join("initramfs.cpio.gz").is_file());
+    }
+
+    /// An artifact with no fingerprint recorded predates this check, so nothing
+    /// can vouch for what built it. Treating it as fresh is what let the stale
+    /// one survive in the first place.
+    #[test]
+    fn an_unfingerprinted_artifact_is_not_trusted() {
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join("0.18.0").join("aarch64");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("initramfs.cpio.gz"), b"unknown provenance").unwrap();
+
+        let evicted =
+            evict_if_source_changed(cache.path(), "0.18.0", GuestArch::Aarch64, "any").unwrap();
+        assert!(
+            evicted,
+            "an artifact of unknown provenance must not be reused"
+        );
+    }
+
+    /// Resolution reports "missing" when the cache is genuinely empty.
+    ///
+    /// Two isolations are load-bearing. `HOME` moves because the resolver falls
+    /// back to `default_mvm_cache_dir`, the one resolver that reads `$HOME` even
+    /// when `MVM_HOME` is set, and would otherwise seed this tempdir from the
+    /// developer's real cache — asserting "empty" against a machine-dependent
+    /// fact. And this exercises the *resolver*, not
+    /// `resolve_or_build_local_initramfs`, whose empty-cache path on Linux falls
+    /// through to a real `nix build`: with a no-op shell that build reports
+    /// success without producing anything and the call never returns. Left that
+    /// way the test passed on Linux only by finding an artifact it was supposed
+    /// to prove absent, and hung for hours once it genuinely could not.
     #[test]
     fn resolve_returns_missing_when_cache_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -573,34 +710,27 @@ mod tests {
         // `$HOME/.mvm/cache`, so without this the assertion holds only on a
         // machine that has never built an initramfs — which CI is and a
         // contributor's laptop is not.
+        //
+        // And this exercises the *resolver* rather than
+        // `resolve_or_build_local_initramfs`, whose empty-cache path on Linux
+        // falls through to a real `nix build`. With a shell double that reports
+        // success without producing an artifact, that call never returns: the
+        // test ran for 20,000+ seconds in CI and took the job to its six-hour
+        // limit. Isolating HOME is what made it reachable — before that the test
+        // passed on Linux by finding an artifact it was supposed to prove absent.
         let _lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         env.isolate_mvm_home(dir.path());
         let cache = dir.path().join("cache");
-        let err =
-            resolve_or_build_local_initramfs(&NoopShell, &cache, "0.18.0", GuestArch::Aarch64)
-                .unwrap_err();
-        assert!(!format!("{err}").is_empty());
-    }
-
-    struct NoopShell;
-
-    impl ShellEnvironment for NoopShell {
-        fn shell_exec(&self, _script: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn shell_exec_stdout(&self, _script: &str) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-
-        fn shell_exec_visible(&self, _script: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        fn log_info(&self, _msg: &str) {}
-
-        fn log_success(&self, _msg: &str) {}
+        let err = resolve_or_seed_from_default_cache(&cache, "0.18.0", GuestArch::Aarch64)
+            .expect_err("an empty cache with nothing to seed from must resolve as missing");
+        assert!(
+            matches!(
+                err,
+                InitramfsBuildError::Resolve(mvm_fs::initramfs::InitramfsError::Missing(_))
+            ),
+            "expected a Missing resolution, got: {err}"
+        );
     }
 
     #[test]
