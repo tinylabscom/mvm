@@ -96,6 +96,11 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "tilde-expansion of user volume specs + non-mvm credential-store deny roots (~/.ssh, ~/.gnupg, ~/.aws)",
     ),
     (
+        "xtask/src/check_mutation_witnesses.rs",
+        &[Rule::HomeRead],
+        "the mutation sandbox moves HOME off the real root, so it reads the outgoing $HOME once to keep CARGO_HOME/RUSTUP_HOME on the real ~/.cargo and ~/.rustup; it derives no mvm path",
+    ),
+    (
         "crates/deps/libkrun-sys/examples/libkrun-smoke.rs",
         &[Rule::HomeRead, Rule::HomeLiteral],
         "manual smoke example in the FFI crate, which sits below mvm-core and cannot call the resolver",

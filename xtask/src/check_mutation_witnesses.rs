@@ -1047,12 +1047,12 @@ a.rs:5:1: replace x with y
 
         assert_eq!(env["HOME"], sb.home.to_str().unwrap());
         assert_eq!(env["MVM_HOME"], sb.mvm_home.to_str().unwrap());
-        // The point of the sandbox: neither root may be the caller's.
-        if let Some(real) = std::env::var_os("HOME") {
-            let real = PathBuf::from(real);
-            assert_ne!(sb.home, real);
-            assert_ne!(sb.mvm_home, real.join(".mvm"));
-        }
+        // The point of the sandbox: both roots sit under the temp root, so
+        // neither can be the caller's. Containment is the property that
+        // actually matters — stronger than inequality against one known
+        // path, and it asserts without reading the real HOME at all.
+        assert!(sb.home.starts_with(&sb.root));
+        assert!(sb.mvm_home.starts_with(&sb.root));
     }
 
     #[test]
