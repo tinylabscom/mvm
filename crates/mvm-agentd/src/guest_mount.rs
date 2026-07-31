@@ -250,29 +250,95 @@ pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
 /// canonical switch_root sequence (chdir + MS_MOVE + chroot).  The agent
 /// process keeps running; it does not exec a new init.
 pub fn pivot_to_root(new_root: &Path) -> Result<()> {
+    pivot_common(new_root, false)
+}
+
+/// Container-mode pivot: like [`pivot_to_root`], but a pseudo-filesystem
+/// that is not its own mount in the container root (commonly `/dev`) is
+/// mounted fresh inside the new root instead of moved.  MS_MOVE only works
+/// on real mountpoints; the fresh mount has the same effect inside the
+/// caller's private mount namespace and never touches the init system's.
+pub fn pivot_to_root_container(new_root: &Path) -> Result<()> {
+    pivot_common(new_root, true)
+}
+
+/// Enter a private mount namespace (`CLONE_NEWNS`) and make mount
+/// propagation private, so every subsequent mount/move stays local to this
+/// process.  The container-mode activation path runs the agent as an
+/// ordinary child of the guest's init system, which keeps its own mount
+/// namespace untouched.  On non-Linux platforms this is a no-op so the
+/// workspace compiles.
+pub fn unshare_mount_namespace() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // Ensure the target directories exist in the new root.
-        for sub in ["proc", "sys", "dev"] {
-            let dst = new_root.join(sub);
-            ensure_dir(&dst.to_string_lossy())?;
+        // SAFETY: unshare(CLONE_NEWNS) takes no pointers; it detaches this
+        // process's mount namespace from the parent's.
+        if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+            return Err(MountError::syscall(
+                "unshare(CLONE_NEWNS)",
+                std::io::Error::last_os_error(),
+            ));
         }
-
-        // Move the initramfs pseudo-filesystems into the new root so the
-        // workload (and the agent itself) keeps seeing them.
-        for sub in ["/proc", "/sys", "/dev"] {
-            let dst = new_root.join(&sub[1..]).to_string_lossy().to_string();
-            let _ = ensure_dir(&dst);
-            move_mount(sub, &dst)
-                .map_err(|e| MountError::syscall(format!("move-mount {sub} -> {dst}"), e))?;
-        }
-
-        // switch_root: chdir to new_root, move it onto /, chroot into it.
-        chdir(new_root)?;
-        mount(".", "/", "", libc::MS_MOVE, "")?;
-        chroot(".")?;
-        chdir("/")?;
+        // Propagation is inherited from the parent subtree; without this,
+        // later mounts and moves would propagate back into the init
+        // system's namespace whenever the inherited root is shared.
+        mount("none", "/", "none", libc::MS_REC | libc::MS_PRIVATE, "")?;
     }
+    Ok(())
+}
+
+/// The shared switch_root sequence behind [`pivot_to_root`] and
+/// [`pivot_to_root_container`].  `fresh_pseudo_fallback` mounts a fresh
+/// pseudo-filesystem inside the new root when the source is not a
+/// mountpoint of its own (EINVAL) — the container-mode case.
+#[cfg(target_os = "linux")]
+fn pivot_common(new_root: &Path, fresh_pseudo_fallback: bool) -> Result<()> {
+    // Ensure the target directories exist in the new root.
+    for sub in ["proc", "sys", "dev"] {
+        let dst = new_root.join(sub);
+        ensure_dir(&dst.to_string_lossy())?;
+    }
+
+    // Move the pseudo-filesystems into the new root so the workload (and
+    // the agent itself) keeps seeing them.
+    let pseudo: [(&str, &str, libc::c_ulong); 3] = [
+        (
+            "/proc",
+            "proc",
+            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+        ),
+        (
+            "/sys",
+            "sysfs",
+            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+        ),
+        ("/dev", "devtmpfs", libc::MS_NOSUID),
+    ];
+    for (src, fstype, flags) in pseudo {
+        let dst = new_root.join(&src[1..]).to_string_lossy().to_string();
+        let _ = ensure_dir(&dst);
+        match move_mount(src, &dst) {
+            Ok(()) => {}
+            Err(e) if fresh_pseudo_fallback && e.raw_os_error() == Some(libc::EINVAL) => {
+                mount(fstype, &dst, fstype, flags, "")?;
+            }
+            Err(e) => {
+                return Err(MountError::syscall(format!("move-mount {src} -> {dst}"), e));
+            }
+        }
+    }
+
+    // switch_root: chdir to new_root, move it onto /, chroot into it.
+    chdir(new_root)?;
+    mount(".", "/", "", libc::MS_MOVE, "")?;
+    chroot(".")?;
+    chdir("/")?;
+    Ok(())
+}
+
+/// Non-Linux stub so the workspace compiles on macOS.
+#[cfg(not(target_os = "linux"))]
+fn pivot_common(new_root: &Path, _fresh_pseudo_fallback: bool) -> Result<()> {
     let _ = new_root;
     Ok(())
 }

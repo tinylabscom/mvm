@@ -174,11 +174,16 @@ model in adapted form — or honestly not at all:
   auto-selected). The backend resolves the two artifacts from the local
   cache, boots the initfs as the root block device with
   `init=/sbin/vminitd`, and drives the same activation contract through
-  `vminitd`'s gRPC API rather than an mvm initramfs: the host writes the
-  guest agent and the serialized `ActivateEnvironment` into the container VM
-  and starts the agent as a root process. The final agent bring-up step is
-  still fail-closed (the agent's non-PID-1 activation entry point lands
-  next), so `start` reports that milestone with a typed error — see
+  `vminitd`'s gRPC API rather than an mvm initramfs: the host injects the
+  guest agent, the serialized `ActivateEnvironment`, and the host-signer
+  trust anchor, and starts the agent as a root process. The agent
+  self-applies the activation file in container mode — its own mount
+  namespace, the same dm-verity/overlay/volume mounts and uid-901 drop as
+  every other backend, a chroot into the verified root — and serves the
+  standard operational RPC surface on vsock port 5252 once `start`
+  confirms it with an authenticated Ping. The security profile still
+  reports every claim as not holding until the bring-up is validated
+  end-to-end with the real artifacts — see
   `specs/plans/271-apple-container-backend.md` for the staged design.
 - **WHP (Windows Hypervisor Platform)** — a future Windows-host backend. The
   guest side is unchanged: the same kernel + universal initramfs boot and the

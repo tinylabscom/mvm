@@ -1,6 +1,6 @@
 # Plan 271: Apple Container backend — same boot contract through vminitd
 
-**Status:** Stage 1 (backend skeleton) merged; stage 2 (HVF boot + vminitd transport + injection) implemented; stages 3–4 designed below.
+**Status:** Stages 1–3 implemented (backend skeleton; HVF boot + vminitd transport + injection; agent container-mode activation + real bring-up). Stage 4 (runner/driver parity + e2e validation) designed below.
 **Owner:** mvm core.
 **Depends on:** universal initramfs + `ActivateEnvironment` (PR #1914).
 
@@ -124,31 +124,57 @@ What is honestly different, and must be documented as such:
   (sealed/plain/partial/refusals); artifact resolution tests; pid-guard
   test; pid-file stop/status tests. E2E: `MVM_AC_E2E=1`, `#[ignore]`d.
 
-### Stage 3 — Agent non-PID-1 activation entry
+### Stage 3 — Agent non-PID-1 activation entry + real bring-up (this change)
 
-- Agent flag: `--activation-file <path>` (or the `MVM_ACTIVATION_FILE` env
-  the injection already sets) added to `mvm-guest-agent`: read the env,
-  apply it, then serve; fail closed on malformed JSON.
-- Mount-without-pivot: when not PID 1, the agent enters its own mount
-  namespace (`unshare(CLONE_NEWNS)`) and `chroot`s workload children into
-  the verified root instead of `pivot_root` — vminitd keeps `/`. The
-  `RootfsConfig.in_place` wire field (Docker tier) is the existing seam for
-  "skip the pivot".
-- At that point `start` stops tearing down: the VM stays up, `wait` reads
-  the supervisor's workload-exit file, `logs` reads the console capture.
+- Agent entry: `MVM_ACTIVATION_FILE=<path>` selects the activation entry
+  mode at startup (`select_activation_entry`): PID 1 always keeps the
+  RPC-driven path (a stray file is ignored so it can never self-activate
+  an initramfs boot); not-PID-1 with the file self-activates in
+  **container mode** before the first accept; not-PID-1 without it keeps
+  the legacy no-op behavior.
+- Container mode: `unshare(CLONE_NEWNS)` + recursive-private propagation
+  FIRST (no mount can perturb vminitd's namespace), then the identical
+  mount sequence as the PID-1 path — `mount_rootfs` (verity/plain/
+  virtio-fs), `mount_runtime_overlay`, `mount_volumes` — then
+  `pivot_to_root_container` (MS_MOVE for real mounts, a fresh
+  proc/sysfs/devtmpfs mount when the source is not a mountpoint of its
+  own), then `drop_privilege(901, 901)`. The ordered steps are built by
+  `container_activation_plan` (pure, unit-tested per rootfs shape incl.
+  `in_place`) and executed step-for-step. The SIGCHLD reaper stays
+  PID-1-only; the `ActivationState` transitions (`Activating` →
+  `Activated`/`Failed`) match the PID-1 path exactly. A missing/malformed
+  file is a typed error and a non-zero exit, never a panic.
+- Bring-up: the injection additionally writes the host-signer trust
+  anchor (`/run/mvm/host-signer.pub`, without which the agent rejects all
+  control connections), and `start` then waits for the agent to answer an
+  authenticated Ping on vsock:5252 (the standard session handshake every
+  backend uses) instead of tearing down. `wait` rides vminitd
+  `WaitProcess` on the agent process; `logs` reads the console capture;
+  `stop` SIGTERMs the agent via vminitd before terminating the
+  supervisor; `list`/`stop_all` key on an `apple-container.marker` state
+  file (the pid-file convention is shared with the HVF driver). Rollback
+  on any failure is unchanged.
+- `device_only` sidecars: verified — the boot spec attaches verity
+  sidecars as plain read-only virtio-blk devices in the activation
+  environment's fixed slot order (rootfs/verity/overlay/overlay-verity,
+  initfs last); a test pins the order, the read-only flag, and
+  file-backed (non-ephemeral) attachment for every disk.
 
-### Stage 4 — Runner/driver parity
+### Stage 4 — Runner/driver parity + e2e validation
 
+- Live validation with the real artifacts (the only remaining functional
+  gate): `MVM_AC_E2E=1 MVM_AC_E2E_ROOTFS=<plain ext4>` macOS smoke booting
+  to an authenticated `Ping`, then `stop`; dm-verity sealed smoke reusing
+  the existing `mvm-ext4 output mounts on the real kernel` lane's
+  artifacts where possible; claim-by-claim review of `security_profile()`
+  afterwards.
 - `AppleContainerDriver: VmmDriver` or equivalent wiring so admitted plans
   reach the backend with the same egress/broker relay sockets the HVF
-  driver assembles (the stage-2 boot path leaves them unwired).
+  driver assembles (the bring-up leaves them unwired).
 - virtio-fs shares for `DirShare` volumes through the supervisor's
   virtiofs device (only the root share exists today).
-- Verification: `MVM_AC_E2E=1` macOS smoke booting the dev image to
-  `Ping`; dm-verity sealed smoke reusing the existing
-  `mvm-ext4 output mounts on the real kernel` lane's artifacts where
-  possible; BDD scenario under `features/suites/` mirroring the
-  initramfs-cache feature; claim-by-claim review of `security_profile()`.
+- BDD scenario under `features/suites/` mirroring the initramfs-cache
+  feature.
 
 ## Constraints that do not change
 

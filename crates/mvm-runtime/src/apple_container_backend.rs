@@ -18,22 +18,23 @@
 //! the `NotActivated` RPC gate, and the operational RPC surface stay shared
 //! verbatim with every other backend.
 //!
-//! What is wired today, and what is fail-closed: the full path through
-//! injection is real — resolve artifacts, assemble the supervisor config,
-//! boot the HVF supervisor, connect to vminitd, inject the agent and the
-//! activation environment, and `CreateProcess`/`StartProcess` the agent.
-//! The final step — the agent picking up its activation environment when it
-//! is *not* PID 1 of the workload root — has no implementation yet, so a
-//! successful `start` tears the VM back down and returns a typed
-//! [`AppleContainerError::NotImplemented`] naming that milestone. `stop`
-//! and `status` are real (pid-file based, same convention as the HVF
-//! driver); `wait`, `logs`, `pause`, and `resume` stay fail-closed.
+//! What is wired today, and what is fail-closed: the full bring-up is real
+//! — resolve artifacts, assemble the supervisor config, boot the HVF
+//! supervisor, connect to vminitd, inject the agent + activation
+//! environment + host-signer trust anchor, `CreateProcess`/`StartProcess`
+//! the agent, and wait for it to self-apply the activation file in
+//! container mode (private mount namespace + chroot, uid-901 drop) and
+//! answer an authenticated control Ping. `start` returns with the VM
+//! running; `stop` (agent SIGTERM via vminitd, then supervisor), `status`,
+//! `list` (marker-file inventory), `wait` (vminitd `WaitProcess` on the
+//! agent), and `logs` (console capture) are real; `pause` and `resume`
+//! stay fail-closed. Every failure rolls the VM back.
 //!
 //! Honest reporting, not silent degradation: `capabilities()` advertises no
 //! snapshot, no standby pool, and no warm start; `security_profile()`
-//! reports every numbered claim as `DoesNotHold` until the backend can
-//! admit and activate a real workload; and the backend is opt-in only —
-//! `AnyBackend::auto_select` never returns this kind.
+//! reports every numbered claim as `DoesNotHold` until the bring-up has
+//! been validated end-to-end with the real artifacts; and the backend is
+//! opt-in only — `AnyBackend::auto_select` never returns this kind.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -59,8 +60,18 @@ use crate::hvf_backend::{
 /// supervisor's own pid-file confirmation.
 const VMINITD_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long `start` waits for the injected agent to self-apply the
+/// activation file (mounts, chroot, privilege drop) and answer an
+/// authenticated control Ping.
+const AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// vminitd process id for the guest agent (vminitd-scoped, not a PID).
 const AGENT_PROCESS_ID: &str = "mvm-guest-agent";
+
+/// Marker file dropped into the VM state dir on a successful bring-up, so
+/// `list`/`stop_all` can tell this backend's VMs apart from the HVF
+/// driver's (which shares the state-dir and pid-file convention).
+const STATE_MARKER_FILE: &str = "apple-container.marker";
 
 /// Typed, fail-closed errors for requests this backend cannot satisfy.
 /// Every error names what was refused and why, rather than silently falling
@@ -104,9 +115,9 @@ impl AppleContainerBackend {
     }
 
     /// Boot the supervisor for an already-assembled config, connect to
-    /// vminitd, and run the injection sequence. On success the guest agent
-    /// process exists inside the VM; the caller owns the teardown and the
-    /// final fail-closed answer.
+    /// vminitd, run the injection sequence, and wait for the agent to
+    /// finish its container-mode activation and answer Ping. On success
+    /// the VM stays running; the caller owns the VmId answer.
     fn boot_and_activate(
         &self,
         config: &VmStartConfig,
@@ -133,9 +144,23 @@ impl AppleContainerBackend {
             .context("build the activation environment for the container VM")?;
         let activation_json =
             serde_json::to_vec(&environment).context("serialize the activation environment")?;
+        // The agent pins the host-signer trust anchor from
+        // `/run/mvm/host-signer.pub` and rejects control connections
+        // without it — inject the host's pubkey when one exists. (When
+        // none does, the wait below times out and the boot rolls back,
+        // which is the same fail-closed posture as every other backend.)
+        let host_signer_pub = mvm_core::config::mvm_keys_dir().join("host-signer.pub");
+        let host_signer_bytes = std::fs::read(&host_signer_pub).ok();
 
-        inject_agent(&mut client, &agent_bytes, &activation_json)
-            .context("vminitd injection sequence")?;
+        inject_agent(
+            &mut client,
+            &agent_bytes,
+            &activation_json,
+            host_signer_bytes.as_deref(),
+        )
+        .context("vminitd injection sequence")?;
+
+        wait_for_agent(state_dir).context("guest agent did not come up")?;
         Ok(())
     }
 }
@@ -213,17 +238,22 @@ fn connect_vminitd(state_dir: &Path) -> Result<VminitdClient> {
     }
 }
 
-/// The injection sequence against a live vminitd: stage the agent binary
-/// and the activation environment under `/run/mvm`, then register and start
-/// the agent process.
+/// The injection sequence against a live vminitd: stage the agent binary,
+/// the activation environment, and (when the host has one) the host-signer
+/// trust anchor under `/run/mvm`, then register and start the agent
+/// process.
 fn inject_agent(
     client: &mut VminitdClient,
     agent_bytes: &[u8],
     activation_json: &[u8],
+    host_signer_pub: Option<&[u8]>,
 ) -> Result<(), crate::apple_container::vminitd::VminitdError> {
     client.mkdir(boot_spec::INJECTION_GUEST_DIR, true, 0o700)?;
     client.write_file(boot_spec::AGENT_GUEST_PATH, agent_bytes, 0o755)?;
     client.write_file(boot_spec::ACTIVATION_GUEST_PATH, activation_json, 0o644)?;
+    if let Some(pubkey) = host_signer_pub {
+        client.write_file(boot_spec::HOST_SIGNER_PUB_GUEST_PATH, pubkey, 0o644)?;
+    }
     client.create_process(AGENT_PROCESS_ID, boot_spec::agent_process_config())?;
     let pid = client.start_process(AGENT_PROCESS_ID)?;
     if pid <= 0 {
@@ -232,6 +262,36 @@ fn inject_agent(
         ));
     }
     Ok(())
+}
+
+/// Poll the agent's host-bridged vsock socket until it answers an
+/// authenticated Ping — proof the agent self-applied the activation file
+/// (mounts, chroot, uid-901 drop) and is serving operational RPCs. The
+/// Ping rides the standard authenticated session handshake every backend's
+/// host side uses.
+fn wait_for_agent(state_dir: &Path) -> Result<()> {
+    let sock = mvm_core::config::vm_hvf_agent_socket_at(state_dir);
+    let sock = sock.to_string_lossy().into_owned();
+    let deadline = Instant::now() + AGENT_CONNECT_TIMEOUT;
+    loop {
+        let attempt = mvm_agentd::vsock::ping_at(&sock);
+        if matches!(attempt, Ok(true)) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let detail = match attempt {
+                Ok(true) => return Ok(()),
+                Ok(false) => "agent answered Ping with a non-Pong response".to_string(),
+                Err(e) => e.to_string(),
+            };
+            bail!(
+                "guest agent did not answer an authenticated Ping within {AGENT_CONNECT_TIMEOUT:?} \
+                 (last error: {detail}); see {}",
+                state_dir.join("console.log").display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 /// Stop the VM owned by `state_dir`, if its supervisor is running. Errors
@@ -277,27 +337,32 @@ impl VmBackend for AppleContainerBackend {
             .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
         let _ = crate::libkrun::open_console_capture(&state_dir.join("console.log"));
 
-        let result = self.boot_and_activate(config, &artifacts, &state_dir);
-        // Whatever happened — boot failure, injection failure, or a fully
-        // successful agent launch — this branch keeps nothing running: the
-        // agent cannot finish activation on its own yet, so a booted VM
-        // would be an unreachable, unaudited guest.
-        teardown(&state_dir);
-        result?;
-
-        Err(AppleContainerError::NotImplemented {
-            operation: "finish guest-agent bring-up inside the container VM",
-            milestone: "the guest agent's non-PID-1 activation-file entry point",
+        // Rollback on any failure: a half-brought-up VM is torn down before
+        // the error propagates, so nothing unreachable is left running.
+        if let Err(e) = self.boot_and_activate(config, &artifacts, &state_dir) {
+            teardown(&state_dir);
+            return Err(e);
         }
-        .into())
+        // Mark the state dir as this backend's so `list`/`stop_all` can
+        // distinguish it from the HVF driver's VMs (shared convention).
+        std::fs::write(state_dir.join(STATE_MARKER_FILE), b"")
+            .map_err(|e| anyhow!("write state marker in {}: {e}", state_dir.display()))?;
+        Ok(VmId(config.name.clone()))
     }
 
-    fn wait(&self, _id: &VmId) -> Result<VmExitStatus> {
-        Err(AppleContainerError::NotImplemented {
-            operation: "wait on a container VM",
-            milestone: "a workload-exit reporter on the vminitd boot path",
+    fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
+        let state_dir = mvm_core::config::vm_state_dir(&id.0);
+        if read_pid(&state_dir.join(PID_FILE_NAME)).is_none() {
+            bail!("container VM {} is not running", id.0);
         }
-        .into())
+        let mut client = connect_vminitd(&state_dir).context("connect to vminitd for wait")?;
+        let code = client
+            .wait_process(AGENT_PROCESS_ID)
+            .context("vminitd WaitProcess for the guest agent")?;
+        Ok(VmExitStatus {
+            code: Some(code),
+            success: code == 0,
+        })
     }
 
     fn pause(&self, _id: &VmId) -> Result<()> {
@@ -317,17 +382,28 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        let pid_file = mvm_core::config::vm_state_dir(&id.0).join(PID_FILE_NAME);
-        if let Some(pid) = read_pid(&pid_file) {
+        let state_dir = mvm_core::config::vm_state_dir(&id.0);
+        // Graceful first: signal the agent through vminitd so it can drain,
+        // then terminate the supervisor (which ends the VM and every guest
+        // process with it). The signal is best-effort — a single-shot
+        // connect fails fast when the VM is already gone.
+        if let Ok(mut client) = VminitdClient::connect(&boot_spec::vminitd_host_socket(&state_dir))
+        {
+            let _ = client.signal_process(AGENT_PROCESS_ID, libc::SIGTERM);
+        }
+        if let Some(pid) = read_pid(&state_dir.join(PID_FILE_NAME)) {
             terminate_pid(pid);
         }
+        let _ = std::fs::remove_file(state_dir.join(STATE_MARKER_FILE));
         Ok(())
     }
 
     fn stop_all(&self) -> Result<()> {
-        // `start` tears down every VM it boots before returning, so no VM
-        // this backend owns can still be running; individual leftovers from
-        // a crashed run are stopped by name via `stop`.
+        for info in self.list()? {
+            if matches!(info.status, VmStatus::Running) {
+                self.stop(&info.id)?;
+            }
+        }
         Ok(())
     }
 
@@ -342,18 +418,56 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        // `start` never returns a VmId on this branch (every launch ends in
-        // teardown plus a typed error), so there is no running inventory to
-        // report.
-        Ok(Vec::new())
+        // The state-dir convention is shared with the HVF driver, so the
+        // marker file written at bring-up is the only honest discriminator.
+        let root = mvm_core::config::vms_dir();
+        let entries = match std::fs::read_dir(&root) {
+            Ok(it) => it,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(anyhow!("read {}: {e}", root.display())),
+        };
+        let mut vms = Vec::new();
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.join(STATE_MARKER_FILE).exists() {
+                continue;
+            }
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let alive =
+                read_pid(&dir.join(PID_FILE_NAME)).is_some_and(crate::hvf_backend::pid_alive);
+            vms.push(VmInfo {
+                id: VmId(name.clone()),
+                name,
+                status: if alive {
+                    VmStatus::Running
+                } else {
+                    VmStatus::Stopped
+                },
+                guest_ip: None,
+                cpus: 0,
+                memory_mib: 0,
+                profile: None,
+                revision: None,
+                flake_ref: None,
+                ports: Vec::new(),
+            });
+        }
+        Ok(vms)
     }
 
-    fn logs(&self, _id: &VmId, _lines: u32, _hypervisor: bool) -> Result<String> {
-        Err(AppleContainerError::NotImplemented {
-            operation: "read container VM logs",
-            milestone: "console-log surfacing for the vminitd boot path",
-        }
-        .into())
+    fn logs(&self, id: &VmId, lines: u32, _hypervisor: bool) -> Result<String> {
+        let console = mvm_core::config::vm_state_dir(&id.0).join("console.log");
+        let text = std::fs::read_to_string(&console).with_context(|| {
+            format!(
+                "read the container VM console log at {} (has the VM been started?)",
+                console.display()
+            )
+        })?;
+        let all: Vec<&str> = text.lines().collect();
+        let start = all.len().saturating_sub(lines as usize);
+        Ok(all[start..].join("\n"))
     }
 
     fn is_available(&self) -> Result<bool> {
@@ -373,25 +487,27 @@ impl VmBackend for AppleContainerBackend {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // Every numbered claim reports `DoesNotHold`: the boot path exists,
-        // but the agent cannot finish activation yet, so no untrusted
-        // workload may run here. Apple's container VMs are
+        // Every numbered claim reports `DoesNotHold` until the bring-up has
+        // been validated end-to-end with the real artifacts: the path is
+        // fully wired, but nothing here may carry an untrusted workload on
+        // the strength of unit tests alone. Apple's container VMs are
         // hardware-isolated lightweight Linux VMs, which is the Tier 2
         // shape this backend is being built toward; the tier string says so
         // honestly rather than rounding the posture up.
         BackendSecurityProfile {
             claims: [ClaimStatus::DoesNotHold; 7],
             layer_coverage: LayerCoverage::default(),
-            tier: "Tier 2 (Apple Container guest stack on the in-house HVF VMM; agent bring-up not yet wired)",
+            tier: "Tier 2 (Apple Container guest stack on the in-house HVF VMM; pending e2e validation)",
             notes: &[
                 "Apple Container VMs are hardware-isolated lightweight Linux VMs; the guest \
                  kernel and `vminitd` (PID 1, gRPC on vsock port 1024) come from Apple's \
                  containerization package, booted unmodified by mvm's own HVF supervisor.",
                 "Activation rides vminitd's gRPC API (vsock port 1024) instead of an mvm \
-                 initramfs; the guest agent, mount logic, uid-901 drop, and RPC gate stay \
-                 shared with every other backend.",
-                "Every claim reports DoesNotHold until the agent finishes activation on this \
-                 boot path — nothing here may carry an untrusted workload yet.",
+                 initramfs; the agent self-applies the injected activation file in container \
+                 mode (private mount namespace + chroot, uid-901 drop) and then serves the \
+                 same operational RPC surface on vsock port 5252 as every other backend.",
+                "Every claim reports DoesNotHold until the bring-up is validated end-to-end \
+                 with the real artifacts — nothing here may carry an untrusted workload yet.",
                 "Opt-in only; never selected by auto-detect.",
             ],
         }
@@ -548,20 +664,75 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_wait_logs_fail_closed_with_typed_errors() {
+    fn pause_resume_fail_closed_with_typed_errors() {
         let b = AppleContainerBackend::new();
         let id = VmId("x".to_string());
-        for err in [
-            b.pause(&id).unwrap_err(),
-            b.resume(&id).unwrap_err(),
-            b.wait(&id).unwrap_err(),
-            b.logs(&id, 10, false).unwrap_err(),
-        ] {
+        for err in [b.pause(&id).unwrap_err(), b.resume(&id).unwrap_err()] {
             assert!(
                 matches!(typed(&err), AppleContainerError::NotImplemented { .. }),
                 "expected a typed NotImplemented, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn wait_errors_honestly_when_the_vm_is_not_running() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let b = AppleContainerBackend::new();
+        let err = b.wait(&VmId("ac-wait-test".to_string())).unwrap_err();
+        assert!(
+            err.to_string().contains("is not running"),
+            "wait on a stopped VM must say so, got: {err}"
+        );
+    }
+
+    #[test]
+    fn logs_reads_the_console_tail_and_errors_without_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let b = AppleContainerBackend::new();
+        let id = VmId("ac-logs-test".to_string());
+        assert!(b.logs(&id, 10, false).is_err(), "no console log yet");
+
+        let state_dir = mvm_core::config::vm_state_dir(&id.0);
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        std::fs::write(state_dir.join("console.log"), "one\ntwo\nthree\n").expect("console");
+        assert_eq!(b.logs(&id, 2, false).unwrap(), "two\nthree");
+        assert_eq!(b.logs(&id, 10, false).unwrap(), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn list_and_stop_all_key_on_the_marker_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let b = AppleContainerBackend::new();
+        assert!(b.list().unwrap().is_empty());
+
+        // A marker without a live pid lists as Stopped; stop_all ignores it
+        // (nothing to terminate) and stop clears the marker.
+        let id = VmId("ac-marker-test".to_string());
+        let state_dir = mvm_core::config::vm_state_dir(&id.0);
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        std::fs::write(state_dir.join(STATE_MARKER_FILE), b"").expect("marker");
+        let listed = b.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, id.0);
+        assert_eq!(listed[0].status, VmStatus::Stopped);
+        assert!(b.stop_all().is_ok());
+        assert!(
+            state_dir.join(STATE_MARKER_FILE).exists(),
+            "stop_all skips stopped VMs, so the marker stays"
+        );
+        assert!(b.stop(&id).is_ok());
+        assert!(
+            !state_dir.join(STATE_MARKER_FILE).exists(),
+            "stop clears the marker"
+        );
+        assert!(b.list().unwrap().is_empty());
     }
 
     #[test]
@@ -617,25 +788,34 @@ mod tests {
 
     #[test]
     #[ignore = "requires the apple-container artifacts in the cache and HVF (MVM_AC_E2E=1)"]
-    fn start_boots_injects_then_fails_closed_at_agent_bringup() {
+    fn start_brings_the_agent_up_and_stop_tears_the_vm_down() {
         // End-to-end: boots the real container VM on the in-house HVF VMM,
-        // runs the full vminitd injection sequence, and asserts the final
-        // answer is the typed agent-bring-up milestone (the VM is torn down
-        // either way). Gated: needs both artifacts in the cache, macOS HVF,
-        // and a codesigned mvm-hvf-supervisor.
+        // runs the full vminitd injection sequence, waits for the agent to
+        // self-apply the activation file and answer Ping, then stops the VM
+        // cleanly. Gated: needs both artifacts in the cache, macOS HVF, a
+        // codesigned mvm-hvf-supervisor, and a plain ext4 workload rootfs
+        // named by MVM_AC_E2E_ROOTFS.
         if std::env::var("MVM_AC_E2E").ok().as_deref() != Some("1") {
             return;
         }
+        let rootfs = std::env::var("MVM_AC_E2E_ROOTFS")
+            .expect("MVM_AC_E2E_ROOTFS must name a plain ext4 workload rootfs");
         let b = AppleContainerBackend::new();
-        let err = b.start(&cfg("ac-e2e")).unwrap_err();
+        let config = VmStartConfig {
+            name: format!("ac-e2e-{}", std::process::id()),
+            rootfs_path: rootfs,
+            memory_mib: 1024,
+            ..Default::default()
+        };
+        let id = b.start(&config).expect("bring-up must succeed");
+        assert_eq!(b.status(&id).unwrap(), VmStatus::Running);
         assert!(
-            matches!(
-                typed(&err),
-                AppleContainerError::NotImplemented { operation, .. }
-                    if operation.contains("bring-up")
-            ),
-            "expected the final fail-closed bring-up error, got: {err}"
+            b.list().unwrap().iter().any(|v| v.name == id.0),
+            "the running VM must appear in the inventory"
         );
+        assert!(b.logs(&id, 5, false).is_ok());
+        b.stop(&id).expect("stop");
+        assert_eq!(b.status(&id).unwrap(), VmStatus::Stopped);
     }
 
     #[test]
@@ -680,7 +860,7 @@ mod tests {
             let _ = connection.await;
         });
         let mut client = VminitdClient::new_for_test(runtime, send_request);
-        let err = inject_agent(&mut client, b"agent", b"{}").unwrap_err();
+        let err = inject_agent(&mut client, b"agent", b"{}", None).unwrap_err();
         assert!(
             err.to_string().contains("non-positive pid"),
             "expected the pid guard to fire, got: {err}"

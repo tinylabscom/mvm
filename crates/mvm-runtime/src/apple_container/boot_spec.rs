@@ -39,6 +39,9 @@ pub const VMINITD_HOST_SOCKET_NAME: &str = "vminitd.sock";
 pub const AGENT_GUEST_PATH: &str = "/run/mvm/mvm-guest-agent";
 /// Guest path the activation environment JSON is written to.
 pub const ACTIVATION_GUEST_PATH: &str = "/run/mvm/activation.json";
+/// Guest path the host-signer trust anchor is written to — the same path
+/// the agent pins on every backend.
+pub const HOST_SIGNER_PUB_GUEST_PATH: &str = "/run/mvm/host-signer.pub";
 /// Guest directory holding both injected files.
 pub const INJECTION_GUEST_DIR: &str = "/run/mvm";
 
@@ -354,7 +357,21 @@ mod tests {
                 Path::new("/cache/apple-container/initfs.ext4"),
             ]
         );
-        assert!(cfg.disks.iter().all(|d| d.read_only));
+        // Every sealed-boot disk is attached read-only (hypervisor-enforced)
+        // and file-backed: the verity sidecars are hash trees opened by
+        // device path for dm-verity, never skipped or served from RAM.
+        for (i, disk) in cfg.disks.iter().enumerate() {
+            assert!(
+                disk.read_only,
+                "disk {i} ({:?}) must be read-only",
+                disk.path
+            );
+            assert!(
+                !disk.ephemeral,
+                "disk {i} ({:?}) must be file-backed",
+                disk.path
+            );
+        }
         // The activation env names vda..vdd for the workload disks, so the
         // initfs (root) lands at vde.
         let cmdline = cfg.cmdline.expect("cmdline");

@@ -67,20 +67,23 @@ backends").
   disks keep the activation environment's fixed device names) with
   `init=/sbin/vminitd`; and the host drives `vminitd`'s SandboxContext gRPC
   (h2 transport over the supervisor's vsock port bridge, hand-written prost
-  wire types) to inject the guest agent and the serialized
-  `ActivateEnvironment` and start the agent as a root process. The final
-  agent bring-up step stays fail-closed — the agent has no non-PID-1
-  activation entry point yet — so `start` tears the VM down and returns a
-  typed error naming that milestone; `stop`/`status` are real (pid-file),
-  `wait`/`logs`/`pause`/`resume` fail closed, and the security profile still
-  reports all seven claims `DoesNotHold`. The staged design lives in
+  wire types) to inject the guest agent, the serialized
+  `ActivateEnvironment`, and the host-signer trust anchor, then starts the
+  agent as a root process. The agent self-applies the activation file in
+  container mode — `unshare(CLONE_NEWNS)`, the same verity/overlay/volume
+  mounts as every backend, a chroot into the verified root, the uid-901
+  drop — and `start` waits for it to answer an authenticated Ping on
+  vsock:5252 before returning with the VM running. `wait` rides vminitd
+  `WaitProcess`, `logs` reads the console capture, `stop` signals the
+  agent via vminitd and terminates the supervisor, and rollback on any
+  failure is unchanged. The security profile still reports all seven
+  claims `DoesNotHold` until the bring-up is validated end-to-end with the
+  real artifacts. The staged design lives in
   `specs/plans/271-apple-container-backend.md`.
-- Remaining shape: the agent's non-PID-1 activation entry (mount namespace
-  + `chroot` instead of `pivot_root`, reading the injected activation file),
-  then runner/driver parity (egress/broker relay sockets, virtio-fs shares
-  for `DirShare` volumes). The agent performs the same mounts and the
-  uid-901 drop unchanged. Capability and security-profile honesty rules from
-  ADR-024 apply verbatim.
+- Remaining shape: live e2e validation with the real artifacts (the gated
+  `MVM_AC_E2E` smoke), then runner/driver parity (egress/broker relay
+  sockets, virtio-fs shares for `DirShare` volumes). Capability and
+  security-profile honesty rules from ADR-024 apply verbatim.
 
 ## QEMU (converged onto the unified runner)
 

@@ -712,6 +712,19 @@ fn main() {
         ),
     }
 
+    // Container-mode activation: not PID 1, launched with an activation
+    // file. Apply it now — after the boot-time reads above (config, trust
+    // anchor, verb grant all resolve against the boot root) and before the
+    // first accept — mirroring the PID-1 ordering where activation lands
+    // after those same loads. Any failure is terminal: exit non-zero and
+    // let the host observe the dead process rather than serve unactivated.
+    if let init::ActivationEntry::ContainerFile(path) = init::activation_entry()
+        && let Err(e) = init::apply_container_activation(&path, &boot_state)
+    {
+        eprintln!("mvm-guest-agent: container activation failed: {e}");
+        std::process::exit(1);
+    }
+
     // Every accepted connection gets its own bounded worker so a long-running
     // data stream cannot prevent Ping, readiness, sleep, or shutdown requests
     // from being accepted. Data dispatch has a lower cap than total dispatch,
