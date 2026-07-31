@@ -530,18 +530,6 @@ jobs:
     # not-yet-triaged files. Flip this off once the baseline covers the
     # whole surface — tracked in specs/plans/272.
     continue-on-error: true
-    # `--run` mutates the claim-enforcement surface and then runs the suite
-    # against each mutant — plan verification that no longer verifies, a
-    # seccomp filter that no longer filters, the host signer. That is
-    # security code with the check removed, so it must not reach a real
-    # mvm state root: it could mint a key at the wrong path or mode (the
-    # mutation may be *in* the path/mode logic) or leave firewall rules
-    # behind. MVM_HOME alone is not enough — `default_mvm_cache_dir`
-    # deliberately reads $HOME to seed from the shared cache, which is the
-    # leak `check-test-home-isolation` exists to catch.
-    env:
-      MVM_HOME: ${{ runner.temp }}/mutants-mvm-home
-      HOME: ${{ runner.temp }}/mutants-mvm-home
     steps:
       - uses: actions/checkout@v6
 
@@ -558,19 +546,38 @@ jobs:
           key: cargo-mutation-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-mutation-
 
-      - name: Fail closed if a real mvm state root is reachable
-        run: |
-          mkdir -p "$MVM_HOME"
-          if [ -e "$HOME/.mvm/keys" ]; then
-            echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
-            exit 1
-          fi
-
       - name: Install cargo-mutants and nextest
         run: cargo install --locked cargo-mutants cargo-nextest
 
       - name: Mutate the claim surface and ratchet survivors
-        run: cargo run -p xtask -- check-mutation-witnesses --run
+        # `--run` mutates the claim-enforcement surface and runs the suite
+        # against each mutant — plan verification that no longer verifies, a
+        # seccomp filter that no longer filters, the host signer. That is
+        # security code with its check removed, so it must not reach a real
+        # mvm state root: it could mint a key at the wrong path or mode (the
+        # mutation may be *in* the path/mode logic) or leave firewall rules
+        # behind.
+        #
+        # MVM_HOME alone is not enough — `default_mvm_cache_dir` deliberately
+        # reads the home directory to seed from the shared cache, which is the
+        # leak `check-test-home-isolation` exists to catch. So both roots move.
+        #
+        # CARGO_HOME/RUSTUP_HOME are pinned to the real home *before* the
+        # redirect: `~` follows HOME, so without this the toolchain the earlier
+        # steps installed would vanish mid-job and the cache step above would
+        # be keyed on a path that only exists here.
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export MVM_HOME="$RUNNER_TEMP/mutants-mvm-home"
+          export HOME="$MVM_HOME"
+          mkdir -p "$HOME"
+          if [ -e "$HOME/.mvm/keys" ]; then
+            echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
+            exit 1
+          fi
+          cargo run -p xtask -- check-mutation-witnesses --run
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-001 §W5.1 — the unit tests that exercise the
