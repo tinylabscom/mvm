@@ -63,10 +63,11 @@ pub use rpc::{
     send_run_code_streaming, send_run_detached, send_run_entrypoint,
 };
 pub use verb_grant::{
-    HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant,
-    is_verb_trust_baseline, launch_requires_grant, load_host_signer_verifying_key,
-    load_pinned_verb_grant, load_verb_trust_policy, parse_require_grant_cmdline, pin_verb_grant,
-    re_pin_verb_grant, trust_decision, verifying_key_from_hex,
+    HOST_SIGNER_PUB_CMDLINE_KEY, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,
+    enforce_verb_grant, host_signer_pub_token, is_verb_trust_baseline, launch_requires_grant,
+    load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy,
+    parse_require_grant_cmdline, pin_verb_grant, provision_host_signer_anchor_from_cmdline,
+    re_pin_verb_grant, trust_decision, verifying_key_from_hex, write_host_signer_anchor,
 };
 
 /// Default vsock guest CID (Firecracker convention).

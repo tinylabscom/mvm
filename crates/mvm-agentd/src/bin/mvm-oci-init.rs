@@ -199,28 +199,13 @@ mod linux {
     /// guest has no config drive, so the launcher rides the 32-byte public key on
     /// `mvm.host_signer_pub=<hex>` and the agent verifies the grant against it.
     fn provision_host_signer_pub() {
-        let Some(hex) = cmdline_value("mvm.host_signer_pub") else {
+        let cmdline = cmdline();
+        let Some(hex) = mvm_agentd::vsock::host_signer_pub_token(&cmdline) else {
             return;
         };
-        if let Err(e) = write_host_signer_pub(Path::new("/"), &hex) {
-            eprintln!("mvm-oci-init: {e}");
+        if let Err(e) = mvm_agentd::vsock::write_host_signer_anchor(Path::new("/"), hex) {
+            eprintln!("mvm-oci-init: host-signer anchor not provisioned: {e}");
         }
-    }
-
-    /// Decode the hex host-signer pubkey token and write the raw key bytes to
-    /// `<root>/run/mvm/host-signer.pub` with mode 0644. `root` is a seam for
-    /// tests; production passes `/`.
-    fn write_host_signer_pub(root: &Path, hex: &str) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-        let bytes =
-            hex_decode(hex).map_err(|()| "malformed host-signer pubkey token".to_string())?;
-        let dir = root.join("run/mvm");
-        fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-        let path = dir.join("host-signer.pub");
-        fs::write(&path, &bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
-            .map_err(|e| format!("chmod {}: {e}", path.display()))?;
-        Ok(())
     }
 
     fn mount_fs(
