@@ -199,28 +199,13 @@ mod linux {
     /// guest has no config drive, so the launcher rides the 32-byte public key on
     /// `mvm.host_signer_pub=<hex>` and the agent verifies the grant against it.
     fn provision_host_signer_pub() {
-        let Some(hex) = cmdline_value("mvm.host_signer_pub") else {
+        let cmdline = cmdline();
+        let Some(hex) = mvm_agentd::vsock::host_signer_pub_token(&cmdline) else {
             return;
         };
-        if let Err(e) = write_host_signer_pub(Path::new("/"), &hex) {
-            eprintln!("mvm-oci-init: {e}");
+        if let Err(e) = mvm_agentd::vsock::write_host_signer_anchor(Path::new("/"), hex) {
+            eprintln!("mvm-oci-init: host-signer anchor not provisioned: {e}");
         }
-    }
-
-    /// Decode the hex host-signer pubkey token and write the raw key bytes to
-    /// `<root>/run/mvm/host-signer.pub` with mode 0644. `root` is a seam for
-    /// tests; production passes `/`.
-    fn write_host_signer_pub(root: &Path, hex: &str) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-        let bytes =
-            hex_decode(hex).map_err(|()| "malformed host-signer pubkey token".to_string())?;
-        let dir = root.join("run/mvm");
-        fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-        let path = dir.join("host-signer.pub");
-        fs::write(&path, &bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
-            .map_err(|e| format!("chmod {}: {e}", path.display()))?;
-        Ok(())
     }
 
     fn mount_fs(
@@ -600,31 +585,9 @@ mod linux {
             assert!(!loopback_flags_indicate_up("garbage"));
         }
 
-        #[test]
-        fn write_host_signer_pub_writes_bytes_mode_0644() {
-            use std::os::unix::fs::PermissionsExt;
-            let dir = tempfile::tempdir().unwrap();
-            let pubkey = [0xABu8; 32];
-            let hex: String = pubkey.iter().map(|b| format!("{b:02x}")).collect();
-
-            write_host_signer_pub(dir.path(), &hex).unwrap();
-
-            let path = dir.path().join("run/mvm/host-signer.pub");
-            let written = fs::read(&path).unwrap();
-            assert_eq!(written, pubkey.to_vec(), "raw key bytes must round-trip");
-            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o644, "host-signer.pub must be mode 0644");
-        }
-
-        #[test]
-        fn write_host_signer_pub_rejects_malformed_hex() {
-            let dir = tempfile::tempdir().unwrap();
-            assert!(write_host_signer_pub(dir.path(), "zz").is_err());
-            assert!(
-                !dir.path().join("run/mvm/host-signer.pub").exists(),
-                "no file written on malformed input"
-            );
-        }
+        // The anchor writer moved to `mvm_agentd::vsock::write_host_signer_anchor`
+        // so both inits share one implementation; its byte layout, 0644 mode and
+        // malformed-token refusal are covered there rather than duplicated here.
 
         #[test]
         fn resolve_guest_agent_for_dev_required_overlay_prefers_interactive_overlay() {

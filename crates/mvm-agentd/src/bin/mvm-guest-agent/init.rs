@@ -54,6 +54,7 @@ pub(crate) fn early_setup() {
         } else if let Err(e) = guest_mount::mount_early_filesystems() {
             fatal(&format!("early filesystem mount failed: {e}"));
         }
+        provision_host_signer_anchor();
         install_sigchld_handler();
     }
 
@@ -61,6 +62,29 @@ pub(crate) fn early_setup() {
     {
         // Should never be PID 1 on non-Linux, but keep the compile path
         // quiet.
+    }
+}
+
+/// Copy the host-signer anchor off the kernel cmdline into the filesystem the
+/// control listener reads it from.
+///
+/// A block-backed guest gets this from `mvm-oci-init`, which copies the key off
+/// the config drive. The universal initramfs has no config drive and no second
+/// init — the agent itself is `/init` — so without this the anchor never lands,
+/// every control connection is refused for want of a pinned key, and the run
+/// dies at `ActivateEnvironment`, its very first RPC.
+///
+/// Absent or malformed tokens are logged, not fatal: the guest simply stays
+/// anchorless and keeps refusing control connections, which is the same
+/// fail-closed posture as before.
+#[cfg(target_os = "linux")]
+fn provision_host_signer_anchor() {
+    match mvm_agentd::vsock::provision_host_signer_anchor_from_cmdline() {
+        Ok(true) => eprintln!("mvm-guest-agent: host-signer anchor provisioned from cmdline"),
+        Ok(false) => {
+            eprintln!("mvm-guest-agent: no host-signer anchor on cmdline; control stays closed")
+        }
+        Err(e) => eprintln!("mvm-guest-agent: host-signer anchor not provisioned: {e}"),
     }
 }
 

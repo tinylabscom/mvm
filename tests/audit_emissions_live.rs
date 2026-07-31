@@ -309,12 +309,17 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
                     let mut req_bytes = Vec::with_capacity(2048);
                     let mut buf = [0u8; 512];
+                    // Did the client's headers actually arrive? The read below
+                    // is bounded by a timeout, so "no bytes" and "unknown path"
+                    // are different failures that must not look alike.
+                    let mut headers_complete = false;
                     loop {
                         match stream.read(&mut buf) {
                             Ok(0) => break,
                             Ok(n) => {
                                 req_bytes.extend_from_slice(&buf[..n]);
                                 if req_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    headers_complete = true;
                                     break;
                                 }
                             }
@@ -335,6 +340,28 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
                         .next()
                         .and_then(|line| line.split_whitespace().nth(1))
                         .unwrap_or("/");
+                    // A truncated request is a fixture-side timeout, not a
+                    // routing decision. Answering the 404 below would make a
+                    // slow client indistinguishable from a request for an
+                    // unknown path — which is exactly what made an earlier
+                    // flake in this file unreadable after the fact.
+                    if !headers_complete {
+                        let detail = format!(
+                            "loopback fixture read {} byte(s) before the 1s timeout and never saw \
+                             end-of-headers; the client was too slow or the socket was truncated",
+                            req_bytes.len()
+                        );
+                        let _ = stream.write_all(
+                            format!(
+                                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{detail}",
+                                detail.len()
+                            )
+                            .as_bytes(),
+                        );
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                        continue;
+                    }
                     let body = if path.contains("/releases/latest") {
                         Some(response_body.as_bytes())
                     } else {
@@ -367,6 +394,46 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
         }
     });
     (format!("http://{addr}"), tx)
+}
+
+/// The loopback fixture must not answer a slow client with a 404.
+///
+/// An earlier intermittent failure in this file was unreadable precisely
+/// because a truncated read produced the same 404 as a genuinely unknown
+/// path, so the recorded symptom said nothing about the cause. This pins the
+/// two apart.
+#[test]
+fn loopback_fixture_reports_a_truncated_request_rather_than_a_404() {
+    use std::io::Write as _;
+
+    let (base_url, _stop) = serve_release_latest_fixture(r#"{"tag_name":"v0.0.0"}"#.to_string());
+    let addr = base_url
+        .strip_prefix("http://")
+        .expect("fixture url is http")
+        .to_string();
+
+    let mut stream = std::net::TcpStream::connect(&addr).expect("connect to loopback fixture");
+    // A path the fixture *does* serve, but no end-of-headers — so if the
+    // fixture answered anything routing-shaped it would be a 200, and a 404
+    // would mean it fell back to the unknown-path arm on an empty request.
+    stream
+        .write_all(b"GET /repos/tinylabscom/mvm/releases/latest HTTP/1.1\r\nHost: localhost\r\n")
+        .expect("send truncated request");
+    stream.flush().expect("flush truncated request");
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read fixture response");
+
+    assert!(
+        response.starts_with("HTTP/1.1 503"),
+        "a truncated request must be reported, not routed; got:\n{response}"
+    );
+    assert!(
+        response.contains("never saw end-of-headers"),
+        "the 503 must say why, so a future failure needs no archaeology; got:\n{response}"
+    );
 }
 
 #[test]
@@ -1586,9 +1653,16 @@ fn update_check_does_not_emit_audit_entry() {
         .args(["env", "update", "--check"])
         .output()
         .expect("spawn mvmctl update --check");
+    // This assertion is a precondition, not the property under test. Carry
+    // enough to tell a fixture problem (503 from the loopback server, a
+    // truncated read) apart from a real regression in `update --check`,
+    // without needing to reproduce an intermittent failure to find out.
     assert!(
         output.status.success(),
-        "mvmctl update --check failed: stderr={}",
+        "mvmctl update --check failed before the audit assertion could run.\n\
+         exit={:?}\nstdout={}\nstderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 

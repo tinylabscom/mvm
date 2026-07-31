@@ -119,9 +119,24 @@ sdk-build-typescript:
 
 # ── Testing (nextest) ────────────────────────────────────────────────────
 
-# Run all tests
+# Run all tests, keeping the full output at target/nextest/last-run.log.
+#
+# An intermittent failure in a suite this size is only diagnosable from the
+# panic and captured streams nextest prints beside it, and those survive
+# nowhere by default — a dev who hits one has terminal scrollback at best,
+# and anyone piping this through `grep` has already discarded the part that
+# mattered. `tee` costs nothing and leaves the evidence under target/, which
+# is gitignored and never uploaded, so this says nothing about the CI-artifact
+# question that .config/nextest.toml settles deliberately.
+#
+# `pipefail` is load-bearing: without it the recipe reports `tee`'s status and
+# a failing suite exits 0, which is the exact silent-green this whole change
+# is trying to remove.
 test:
-    cargo nextest run --workspace
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/nextest
+    cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
 
 # Non-release builds now skip the embedded host-vm binary cross-compile by
 # default. Keep this explicit recipe as the "always stub" path when a caller

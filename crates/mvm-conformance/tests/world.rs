@@ -85,6 +85,9 @@ pub struct CliWorld {
     /// Per-scenario SDK-sidecar cache root, so a developer's populated cache
     /// can never satisfy a scenario for the wrong reason.
     pub sdk_sidecar_cache: Option<tempfile::TempDir>,
+    /// Per-scenario staged release directory the acquire scenarios fetch from,
+    /// so the download path runs against local bytes and never the network.
+    pub sdk_sidecar_release: Option<tempfile::TempDir>,
     /// Host-service bindings the scenario's plan carries.
     pub sdk_sidecar_services: Vec<mvm_protocol::protocol::broker::ServiceId>,
     /// The signed-plan fixture the sidecar scenarios gate against.

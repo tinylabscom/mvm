@@ -1,0 +1,98 @@
+name: Security lane watch
+
+# The Security workflow runs on release tags, a nightly cron, and manual
+# dispatch — never on a pull request. Nothing surfaces a failure, so a red
+# lane is invisible until somebody thinks to read run history. That is not
+# hypothetical: cargo-deny, cargo-audit, the fuzz lane, the flake-lock check
+# and builder-VM reproducibility were all red for six consecutive nights
+# before anyone noticed, and three of those five back numbered security
+# claims (ADR-001). A claim keeps a green ledger entry while its only
+# evidence is failing.
+#
+# This watches Security instead of living inside it. Two reasons:
+#
+#   1. `workflow_run` fires after the whole run completes, so there is no
+#      20-entry `needs:` list to keep in sync with the job graph.
+#   2. It reads each job's real conclusion from the API rather than the
+#      workflow's aggregate status. A job marked `continue-on-error: true`
+#      — the mutation-witness lane is one — never fails the workflow, so an
+#      `if: failure()` guard would not fire for it. The API still reports
+#      that job as failed, and this reports it too.
+#
+# Failure opens or updates one tracking issue; a clean run closes it. The
+# issue is the enforcement surface, not a merge block: these lanes do not
+# run on PRs, so there is nothing to block.
+
+on:
+  workflow_run:
+    workflows: ["Security"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write # opens/updates/closes the tracking issue
+  actions: read # reads the watched run's per-job conclusions
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Report failing security lanes
+    # Manual dispatch has an operator watching the run; the cron and the
+    # release-tag gate do not.
+    if: >-
+      github.event.workflow_run.event == 'schedule' ||
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect failing jobs and open, update, or close the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TITLE: "Security lane is red"
+        run: |
+          set -euo pipefail
+
+          # Per-job conclusions, not the run's aggregate: a
+          # continue-on-error job leaves the run green while reporting its
+          # own failure here.
+          gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out")
+                  | "- \(.name) — [log](\(.html_url))"' > failing.md
+
+          EXISTING=$(gh issue list --repo "$REPO" --state open \
+            --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')
+
+          if [ ! -s failing.md ]; then
+            if [ -n "$EXISTING" ]; then
+              printf 'Security run [%s](%s) on `%s` is green again — closing.\n' \
+                "$RUN_ID" "$RUN_URL" "$HEAD_SHA" > body.md
+              gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
+              gh issue close "$EXISTING" --repo "$REPO"
+            fi
+            echo "Security run $RUN_ID: all jobs green."
+            exit 0
+          fi
+
+          {
+            printf 'The `Security` workflow (%s) failed on `%s`.\n\n' "$RUN_EVENT" "$HEAD_SHA"
+            printf 'Run: %s\n\n' "$RUN_URL"
+            printf 'Failing jobs:\n\n'
+            cat failing.md
+            printf '\nThese lanes do not run on pull requests, so a failure here is\n'
+            printf 'invisible until someone reads run history. Several of them are the\n'
+            printf 'only witness for a numbered claim in `specs/adrs/001-microvm-security-posture.md`\n'
+            printf '— while a lane is red, that claim has no live evidence behind it.\n'
+          } > body.md
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file body.md
+          fi

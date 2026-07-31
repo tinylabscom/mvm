@@ -887,3 +887,140 @@ Run 1 wall clock 173 s, dominated by a runtime-overlay rebuild from source
 with the overlay cached, was 10.0 s for cold boot + capture + replenish. The earlier
 cold-boot-to-agent-ready baseline of 2096 ms median (n=7) still stands as the number
 to beat; a warm figure needs the claim to succeed.
+
+---
+
+## Fifth live run (2026-07-31) — the claim finally executes, and fails closed on an un-audited parent
+
+Host: Linux 6.8.0-124, `/dev/kvm`, release build at `main` (`d0ccada18`) plus
+the two open boot fixes (#1959, #1961). Capability flipped to `true` **on the
+test host only**; the committed default stays `false`. Fully unshared
+`MVM_HOME=/root/mvm-live3-home` — **no cache symlink**, workload kernel built
+into it directly.
+
+### Three boot blockers had to be cleared first
+
+No Firecracker workload could boot at all, and the failures were serial: each
+one only became visible once the previous was fixed.
+
+1. **#1945 / #1948 (merged).** `mount_early_filesystems` mounted `/proc`,
+   `/sys`, `/dev` without creating them; the universal initramfs ships only
+   `init`. PID 1 died on ENOENT and the kernel panicked.
+2. **#1957 / #1959.** The host-signer anchor rides the kernel cmdline as
+   `mvm.host_signer_pub=<hex>`, but the only code writing it to
+   `/run/mvm/host-signer.pub` lived in `mvm-oci-init` — which never runs under
+   the universal initramfs, where the agent itself is `/init`. The agent parsed
+   no cmdline tokens at all, so it had no pinned key, refused every control
+   connection, and the run died at `ActivateEnvironment`, its first RPC.
+   *This is BLOCKER-3 in the gate list below, on the boot path.*
+3. **#1961.** devtmpfs was mounted only `if !Path::new("/dev/console").exists()`.
+   The kernel creates a bare `/dev/console` in the initramfs rootfs so init has
+   stdio — which is exactly why agent output reaches the serial console — so the
+   guard always skipped the mount. `/dev` then held that one node and dm-verity
+   found no `/dev/mapper/control`, failing activation.
+
+With all three, a guest boots and fully activates:
+
+```
+mvm-guest-agent: host-signer anchor provisioned from cmdline
+mvm-guest-agent: control plane ready (0ms)
+mvm-guest-agent: activation complete, serving operational RPCs
+```
+
+**A methodology trap worth recording.** The first attempt reproduced the #1945
+panic *byte-for-byte against a build that already contained the fix*.
+`resolve_or_build_local_initramfs` tries the isolated cache, then
+`seed_from_default_cache` — which reads `~/.mvm/cache/initramfs`, a path that
+deliberately ignores `MVM_HOME` — and only then runs `nix build`. The initramfs
+cache is keyed on `(version, arch)` **only**, never on guest-agent source, so an
+unshared `MVM_HOME` silently re-imported a pre-fix initramfs (both `init`
+binaries hashed `e500f3cf…`). Clearing *both* caches forced a real build
+(`7c5f4152…`). Same family as the workload-kernel staleness, but by design, so
+`MVM_HOME` discipline alone does not avoid it. Filed as a secondary finding on
+issue #1957.
+
+### The claim executes for the first time — and is refused
+
+With an idle, compat-matching parent in the pool:
+
+```
+DEBUG machine run warm-pool eligibility mode=Transient warm_pool_size=1
+WARN  standby claim failed; cold-booting
+      standby=standby-6702024cb03918fe
+      error=claim standby: parent has no signed audit entry;
+            refusing to fork an un-audited parent
+```
+
+This clears BUG-2 and the double-reserve as claim blockers: eligibility opens,
+`select_idle_compatible` **finds** the parent (so the compat key matches), and
+the refusal now comes from parent verification — strictly further than any
+previous run reached.
+
+**Root cause (issue #1962): no parent is ever audited at spawn.**
+`reserve_and_verify_parent` verifies the parent's checkpoint against the signed
+audit chain; the anchor looks for a `checkpoint.created` entry. Nothing on the
+spawn path emits one — `bind_checkpoint_created` has exactly one production
+caller, the user-facing checkpoint command, and `SpawnContext`
+(`workload_runner/runner.rs:283`) carries only `checkpoints` and `launch`, with
+no `AuditEmitter` and no `ExecutionPlan` to emit *with*. Confirmed against the
+live chain: 78 entries across three cycles, zero `checkpoint.created`.
+
+So **every** captured parent is unclaimable by construction. Both sides are
+individually correct — refusing to fork an un-audited parent is exactly right
+for claim 8 — and nothing carries the anchor across the seam.
+
+**Secondary effect: the pool churns.** On verification failure the parent is
+quarantined by removal, then replenish spawns a fresh one, so every launch pays
+a wasted boot + capture and the pool never converges. The standby id rotates
+each run while `idle` stays pinned at 1:
+`7e386f9d…` → `6702024c…` → `8ae4af1f…`.
+
+**Observability gap.** `try_warm_claim` returns `Ok(None)` from four gates with
+no log, and `claim_or_cold` cold-boots silently when selection finds nothing.
+The one informative path is a `tracing::warn!` that default CLI verbosity does
+not surface — so at default settings a claim that never happens is
+indistinguishable from one never attempted. This is why the previous runs could
+not tell the two apart. Worth logging the claim decision where operators see it.
+
+### Cold boot to activation — measured, 10 reps
+
+`machine start` returns once the guest reports activation complete, so this
+brackets kernel boot + PID-1 early setup + anchor provisioning + dm-verity
+rootfs + activation. 10/10 reached `activation complete`, `rc=0`.
+
+```
+1766 1775 1775 1808 1817 1858 1859 1877 2027 2119   (ms, sorted)
+min 1766 · median 1837.5 · p90 2027 · max 2119 · mean 1868.1 · spread 353
+```
+
+Median 1837.5 ms against the 2096 ms baseline recorded earlier — same order,
+~12% faster, on a now-correct boot path.
+
+**Warm is not measurable through the claim path** while #1962 stands: no claim
+can complete, so there is no warm-to-agent-ready number to report. The ~60 ms
+figure quoted elsewhere is the *driver-seam* restore
+(`fc_warm_pool_live.rs`, which calls `fork_standby_child` directly with
+`channels: &[]` and asserts the capability stays disarmed) — it measures the
+restore mechanism, deliberately not the claim wiring, and should not be quoted
+as a claim latency.
+
+### Gate list — updated
+
+1. **BUG-1** — fixed, live-proven (unchanged).
+2. **BUG-2** — no longer blocks the claim. The transient `machine run` path
+   reaches the claim decision and completes guest RPC setup.
+3. **BLOCKER-3** — **boot half fixed** by #1959: the child now gets a
+   boot-pinned host-signer anchor from the cmdline. The post-restore re-pin half
+   is still unexercised, because no claim completes.
+4. **BLOCKER-4** — still open and still unexercised.
+5. **NEW / BLOCKER-5 — issue #1962, now the hard blocker.** Standby parents are
+   never audited at spawn, so every claim fails closed with `ParentUnaudited`.
+   Fix options in the issue; option 1 (admit a plan for the factory parent and
+   emit `checkpoint.created` under it) is the one consistent with claim 8.
+   Relaxing the claim-side check is not an option.
+6. **Deferred, known-sharp** — failed-stop leaves an invisible live VM
+   (unchanged).
+7. Only then: re-run the Task 7 priorities and flip the capability if green.
+
+`standby_pool` stays `false`. The flip was not proposed: the claim is refused,
+not green.
