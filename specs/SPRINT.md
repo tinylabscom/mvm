@@ -306,6 +306,22 @@
       `initramfs::resolve_returns_missing_when_cache_empty` hermetic; it read
       the developer's real `$HOME` cache and failed on any machine that had
       built an initramfs.
+- [ ] Plan 278 — transparent connect interception for non-cooperative
+      workloads. Proposed, nothing implemented. Closes the app-compat gap left
+      by cooperative interception (proxy env + loopback SOCKS5h): a workload
+      that ignores proxy env fails closed today, which is correct security and a
+      real compatibility wall. Design is seccomp user-notify on `connect(2)`,
+      redirected into the existing loopback proxy via `ADDFD_FLAG_SETFD`, adding
+      no NIC and no second egress gate. Two findings shaped it: `seccompiler`
+      0.5 can express no notify action and its install helper discards the
+      listener fd, so the notify filter stacks as a second hand-written BPF
+      program alongside the tier filter; and the notify TOCTOU is harmless here
+      because the authorization decision is made at the host endpoint from the
+      SOCKS request, not from the address read out of guest memory. **W0 is
+      blocking**: reading the destination needs `ptrace_may_access` to pass
+      against a workload the guest currently sets `PR_SET_DUMPABLE = 0` on, and
+      the choice between a co-uid supervisor and relaxing `DUMPABLE` is an
+      explicit hardening decision that must be settled before any code lands.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.
