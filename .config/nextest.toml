@@ -1,0 +1,73 @@
+# cargo-nextest configuration.
+#
+# `just test-ci` has always passed `--profile ci`; without this file that
+# recipe fails before running a single test with
+# `error: profile 'ci' not found`.
+
+[profile.default]
+# No retries, ever. A test that passes on the second attempt is a test
+# whose result carries no information, and a retry budget turns a real
+# race into a green run nobody investigates.
+retries = 0
+# Warn on tests creeping toward the wall-clock budget of the VM-boot
+# paths without killing them; the warning is the signal.
+slow-timeout = { period = "60s" }
+fail-fast = false
+
+[profile.ci]
+retries = 0
+# Warn only, deliberately. The slowest test in the suite runs ~170s, so a
+# `terminate-after` set by feel rather than by measurement would sooner or
+# later kill a legitimately slow test and turn a passing lane red. Adding
+# a kill threshold is a separate change that should come with a number
+# behind it.
+slow-timeout = { period = "120s" }
+# Report every failure in one run. `fail-fast = true` costs a round trip
+# per failure on a suite this size.
+fail-fast = false
+status-level = "fail"
+final-status-level = "flaky"
+
+[test-groups]
+# Tests that spawn a real helper process and then wait on a fixed
+# wall-clock budget for it to hand shake, bind, or exit. Process
+# isolation does not help: the contended resource is the host scheduler,
+# and at full workspace parallelism these budgets are missed while the
+# same tests pass in about a second alone. Capping how many race a clock
+# at once helps, but does not cure it: the group caps concurrency among
+# its own members, while the starvation comes from the other ~8,200 tests
+# in the run. Treat this as a mitigation; the durable fix is for these
+# tests not to assert a wall-clock budget for a spawned process at all.
+#
+# This is deliberately narrow. A test that merely needs a unique tempdir
+# and does not have one is a bug in the test, and a group here would hide
+# it — see the fixture fix in tests/audit_emissions_live.rs, which was a
+# real defect that looked like contention.
+process-handshake = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'package(mvm-runtime) and (test(/substitution_spawn::/) or test(/broker_services_spawn::/))'
+test-group = "process-handshake"
+
+[[profile.default.overrides]]
+filter = 'package(mvm-hostd) and (binary(host_agent_restart) or binary(per_tenant_isolation))'
+test-group = "process-handshake"
+
+[[profile.ci.overrides]]
+filter = 'package(mvm-runtime) and (test(/substitution_spawn::/) or test(/broker_services_spawn::/))'
+test-group = "process-handshake"
+
+[[profile.ci.overrides]]
+filter = 'package(mvm-hostd) and (binary(host_agent_restart) or binary(per_tenant_isolation))'
+test-group = "process-handshake"
+
+[profile.ci.junit]
+path = "junit.xml"
+# Structure only, never payloads. Captured stdout/stderr from a failing
+# test in this suite can carry key paths, grant tokens, or raw buffers,
+# and the JUnit file is uploaded as a downloadable CI artifact with its
+# own retention. `check-no-display-on-secret-types` protects types *named*
+# like secrets; it says nothing about a byte buffer a debug assertion
+# happened to print. The job log remains the place to read a failure.
+store-success-output = false
+store-failure-output = false
