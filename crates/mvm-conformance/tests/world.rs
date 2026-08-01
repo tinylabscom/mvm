@@ -123,6 +123,10 @@ pub struct CliWorld {
     /// The typed artifact-missing triple (`what`, `path`, `hint`) captured
     /// from the apple-container backend's start failure.
     pub apple_container_error: Option<(String, String, String)>,
+    /// The typed untrusted-artifact triple (`reason`, `path`, `hint`)
+    /// captured from the apple-container backend's start failure when the
+    /// cached kernel fails its digest attestation.
+    pub apple_container_untrusted: Option<(String, String, String)>,
     /// The backend kind auto-select resolved to, as its `Debug` token.
     pub auto_selected_kind: Option<String>,
     /// The kernel path after the apple-container backend's substitution.

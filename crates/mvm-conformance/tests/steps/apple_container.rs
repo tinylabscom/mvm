@@ -1,5 +1,6 @@
 //! Steps for the Apple Container backend's hermetic contracts: artifact
-//! resolution fails closed with a typed, hint-carrying error; auto-select
+//! resolution fails closed with a typed, hint-carrying error; a cached
+//! kernel is trusted only with a matching digest sidecar; auto-select
 //! never lands on the backend; and the launch-config kernel substitution
 //! replaces exactly the kernel path. These drive the real backend code and
 //! never start a VM, so they run in the normal hermetic BDD gate.
@@ -27,7 +28,10 @@ fn start_minimal(world: &mut CliWorld) {
         .expect_err("start must fail with no kernel in the isolated cache");
     let AppleContainerError::ArtifactMissing { what, path, hint } = err
         .downcast_ref::<AppleContainerError>()
-        .expect("the failure must be the typed artifact error");
+        .expect("the failure must be the typed artifact error")
+    else {
+        panic!("the failure must be the artifact-missing variant");
+    };
     world.apple_container_error = Some((what.to_string(), path.clone(), hint.to_string()));
 }
 
@@ -85,8 +89,9 @@ fn not_apple_container(world: &mut CliWorld) {
     );
 }
 
-#[given("an apple-container kernel is cached in the isolated home")]
-fn cache_kernel(world: &mut CliWorld) {
+/// Write `bytes` as the cached kernel, plus `sidecar` as its
+/// `vmlinux.sha256` pin when given, into the isolated home's artifact dir.
+fn stage_kernel(world: &CliWorld, bytes: &[u8], sidecar: Option<&str>) {
     let home = world
         .isolated_home
         .as_ref()
@@ -98,9 +103,92 @@ fn cache_kernel(world: &mut CliWorld) {
     std::fs::create_dir_all(&dir).expect("create artifact dir");
     std::fs::write(
         dir.join(mvm_runtime::apple_container::artifacts::KERNEL_FILE_NAME),
-        b"fake-kernel-bytes",
+        bytes,
     )
     .expect("write kernel");
+    if let Some(sidecar) = sidecar {
+        std::fs::write(
+            dir.join(mvm_runtime::apple_container::artifacts::KERNEL_DIGEST_FILE_NAME),
+            sidecar,
+        )
+        .expect("write digest sidecar");
+    }
+}
+
+/// Lowercase-hex SHA-256 of `bytes`, for a sidecar that honestly pins the
+/// fake kernel it sits beside.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+#[given("an apple-container kernel is cached in the isolated home")]
+fn cache_kernel(world: &mut CliWorld) {
+    // The fake kernel is staged with the digest sidecar a real operator
+    // would record: without the matching pin the artifact is untrusted.
+    let bytes = b"fake-kernel-bytes";
+    let sidecar = sha256_hex(bytes);
+    stage_kernel(world, bytes, Some(&sidecar));
+}
+
+#[given("an apple-container kernel is cached with a sidecar that does not match its bytes")]
+fn cache_kernel_tampered(world: &mut CliWorld) {
+    // A well-formed pin for different bytes — the attestation must reject
+    // the kernel even though the sidecar parses.
+    let wrong = sha256_hex(b"different-kernel-bytes");
+    stage_kernel(world, b"fake-kernel-bytes", Some(&wrong));
+}
+
+#[when("I start the apple-container backend and capture the attestation failure")]
+fn start_capture_attestation_failure(world: &mut CliWorld) {
+    let err = AppleContainerBackend::new()
+        .start(&VmStartConfig::default())
+        .expect_err("start must fail closed on a kernel that fails attestation");
+    let AppleContainerError::ArtifactUntrusted { path, reason, hint } = err
+        .downcast_ref::<AppleContainerError>()
+        .expect("the failure must be the typed untrusted-artifact error")
+    else {
+        panic!("the failure must be the untrusted-artifact variant");
+    };
+    world.apple_container_untrusted = Some((reason.clone(), path.clone(), (*hint).to_string()));
+}
+
+#[then("the failure is the untrusted-artifact digest error")]
+fn failure_is_untrusted(world: &mut CliWorld) {
+    let (reason, path, hint) = world
+        .apple_container_untrusted
+        .as_ref()
+        .expect("a prior step must capture the attestation failure");
+    assert!(
+        reason.contains("do not match the pinned digest"),
+        "the error must say the bytes failed attestation: {reason}"
+    );
+    assert!(
+        path.contains("apple-container"),
+        "the error must name the cached kernel path: {path}"
+    );
+    assert!(
+        hint.contains("sha256sum"),
+        "the hint must say how to record the digest: {hint}"
+    );
+}
+
+#[then("the failure names the pinned and actual digests")]
+fn failure_names_digests(world: &mut CliWorld) {
+    let (reason, _, _) = world
+        .apple_container_untrusted
+        .as_ref()
+        .expect("a prior step must capture the attestation failure");
+    let pinned = sha256_hex(b"different-kernel-bytes");
+    let actual = sha256_hex(b"fake-kernel-bytes");
+    assert!(
+        reason.contains(&pinned),
+        "the error must name the pinned digest {pinned}: {reason}"
+    );
+    assert!(
+        reason.contains(&actual),
+        "the error must name the actual digest {actual}: {reason}"
+    );
 }
 
 #[when("I apply the backend's kernel substitution to a caller config")]
