@@ -11,7 +11,7 @@ fn compile_hello_app_lowers_decorator_to_flake() {
     let out = tempfile::tempdir().expect("tmp out");
     let app = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/python/hello-app/app.py"
+        "/examples/python/hello-app/app.py"
     );
 
     #[allow(deprecated)]

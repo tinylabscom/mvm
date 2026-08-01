@@ -869,4 +869,43 @@ mod tests {
         );
         assert!(parsed_al.egress_mode().is_none());
     }
+
+    /// The SSH ban has production callers in the L4 projection and the CLI
+    /// resolver, but this crate only ever asserted the negative direction
+    /// — so pinning the predicate to `false` disarmed the ban here without
+    /// failing anything.
+    #[test]
+    fn ssh_port_is_banned_and_its_neighbours_are_not() {
+        assert!(is_banned_ssh_port(BANNED_SSH_PORT));
+        assert!(is_banned_ssh_port(22));
+        assert!(!is_banned_ssh_port(21));
+        assert!(!is_banned_ssh_port(23));
+        assert!(!is_banned_ssh_port(2222));
+        assert!(!is_banned_ssh_port(0));
+    }
+
+    /// Both directions of both preset predicates. Asserting only that a
+    /// preset *is* deny-all leaves a constant-`true` predicate — one that
+    /// calls every preset deny-all, including `Unrestricted` — passing.
+    #[test]
+    fn preset_predicates_hold_only_for_their_own_preset() {
+        assert!(NetworkPreset::None.is_deny_all());
+        assert!(!NetworkPreset::Unrestricted.is_deny_all());
+        assert!(!NetworkPreset::Dev.is_deny_all());
+
+        assert!(NetworkPreset::Unrestricted.is_unrestricted());
+        assert!(!NetworkPreset::None.is_unrestricted());
+        assert!(!NetworkPreset::Dev.is_unrestricted());
+    }
+
+    /// The one named broad-egress grant. The builder VM and dev shells
+    /// depend on it actually being unrestricted; substituting the deny-all
+    /// default breaks every Nix fetch, and nothing here noticed.
+    #[test]
+    fn trusted_build_egress_is_unrestricted_not_the_deny_all_default() {
+        let policy = NetworkPolicy::trusted_build_egress();
+        assert_eq!(policy, NetworkPolicy::unrestricted());
+        assert_ne!(policy, NetworkPolicy::deny_all());
+        assert_ne!(policy, NetworkPolicy::default());
+    }
 }

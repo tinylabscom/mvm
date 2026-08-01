@@ -26,7 +26,12 @@
       "package": "mvm-build",
       "claims": [
         2
-      ]
+      ],
+      "scope": {
+        "examine_re": "virtiofs_mount_flags",
+        "why": "This file is on claim 2's surface only because the claim's witness test `virtiofs_mount_flags_keep_workspace_read_only` is declared in it. The witness guards one function, `virtiofs_mount_flags`, and the surrounding 4476 lines are the builder VM's init - vsock framing, nix-store seeding, ext4 probing - which assert nothing about a guest elevating to uid 0. Measured 2026-07-31: 164 of 291 mutants survive, none of them in the witnessed function, which is fully caught. Scoped to the code the witness actually guards so the claim's result means what it says.",
+        "excluded_tracked_by": "#2006"
+      }
     },
     {
       "path": "crates/mvm-build/src/runtime_overlay.rs",
@@ -61,7 +66,12 @@
       "package": "mvm-cli",
       "claims": [
         15
-      ]
+      ],
+      "scope": {
+        "examine_re": "enforce_accessible_gate",
+        "why": "This file is on claim 15's surface only because the claim's witness `enforce_accessible_gate` - the host gate that refuses `mvmctl console` on a sealed image - is declared in it. The witness is fully caught. The surrounding 789 lines are the dev-mode interactive console client: sizing a terminal, building an argv, pumping a PTY. None of it asserts anything about a sealed VM's reachability. Measured 2026-08-01: 78 of 92 mutants survive, none in the witnessed function. Scoped to the code the witness guards so the claim's result means what it says.",
+        "excluded_tracked_by": "#2021"
+      }
     },
     {
       "path": "crates/mvm-core/src/plan/bundle.rs",
@@ -189,15 +199,15 @@
   "uncovered_claims": [
     {
       "number": 4,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 5,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -223,7 +233,7 @@
     {
       "file": "crates/mvm-protocol/src/policy/network_policy.rs",
       "mutant": "replace NetworkPolicy::trusted_build_egress -> Self with Default::default()",
-      "reason": "Observed 2026-07-29. No mvm-protocol test asserts the shape of the trusted-build egress policy. The mutant substitutes the deny-all default, so it makes the policy stricter, not weaker — a functional coverage gap rather than a security hole. Untriaged."
+      "reason": "Observed 2026-07-29. No mvm-protocol test asserts the shape of the trusted-build egress policy. The mutant substitutes the deny-all default, so it makes the policy stricter, not weaker \u2014 a functional coverage gap rather than a security hole. Untriaged."
     }
   ]
 }

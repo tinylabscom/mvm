@@ -340,6 +340,59 @@ pub fn source_cache_key(workspace_root: &Path) -> Result<String, GuestAgentBuild
     Ok(format!("src-{}", guest_source_fingerprint(workspace_root)?))
 }
 
+/// Where the guest binaries come from on this host, and the cache key that
+/// goes with it.
+///
+/// The two arms key differently — a source checkout on a fingerprint of the
+/// guest sources, a shipped binary on the crate version — and which arm
+/// applies is a property of the host, not of the caller. Returning both
+/// together is what stops a caller from pairing one arm's key with the
+/// other's assumption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuestBinarySource {
+    /// An mvm source checkout: cross-compile from `workspace_root` on a miss.
+    SourceCheckout {
+        workspace_root: PathBuf,
+        cache_key: String,
+    },
+    /// No checkout — the shipped binary's embedded bytes, keyed by version.
+    EmbeddedVersion { cache_key: String },
+}
+
+impl GuestBinarySource {
+    /// The cache-key segment [`GuestAgentLayout::under`] is addressed with.
+    pub fn cache_key(&self) -> &str {
+        match self {
+            Self::SourceCheckout { cache_key, .. } | Self::EmbeddedVersion { cache_key } => {
+                cache_key
+            }
+        }
+    }
+}
+
+/// Resolve [`GuestBinarySource`] for this host.
+///
+/// Public because seeding the guest-binary cache and reading it must agree
+/// on the key, and the only way to guarantee that is for both to derive it
+/// here. A test that seeds the version key while the resolver reads the
+/// source-fingerprint key does not fail — it silently misses and performs
+/// a real cross-compile, which is how three `pull_core` unit tests came to
+/// spend fifty-five seconds each building the guest agent.
+pub fn guest_binary_source() -> Result<GuestBinarySource, GuestAgentBuildError> {
+    match detect_source_workspace() {
+        Some(workspace_root) => {
+            let cache_key = source_cache_key(&workspace_root)?;
+            Ok(GuestBinarySource::SourceCheckout {
+                workspace_root,
+                cache_key,
+            })
+        }
+        None => Ok(GuestBinarySource::EmbeddedVersion {
+            cache_key: env!("CARGO_PKG_VERSION").to_string(),
+        }),
+    }
+}
+
 /// A stable content fingerprint over the guest crate sources compiled into the
 /// runtime binaries (`mvm-agentd`): each crate's
 /// `Cargo.toml` plus every file under its `src/`. Hashes workspace-relative

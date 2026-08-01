@@ -631,4 +631,27 @@ mod tests {
             other => panic!("expected unchanged Forward, got {other:?}"),
         }
     }
+
+    /// A panicking observer's message is the only account of why it
+    /// failed. Pinning this to a constant survived, which turns every such
+    /// panic into the same uninformative string — and `panic!("literal")`
+    /// and `panic!("{}", formatted)` land in different downcast arms, so
+    /// one case does not cover the other.
+    #[test]
+    fn a_panic_payload_is_recovered_from_either_string_form() {
+        let from_str = std::panic::catch_unwind(|| panic!("observer exploded"))
+            .expect_err("the closure panics");
+        assert_eq!(downcast_panic(&from_str), "observer exploded");
+
+        let owned = format!("observer {} exploded", 7);
+        let from_string =
+            std::panic::catch_unwind(move || panic!("{}", owned)).expect_err("the closure panics");
+        assert_eq!(downcast_panic(&from_string), "observer 7 exploded");
+
+        // A payload that is neither string form still says so rather than
+        // returning something that reads like a message.
+        let non_string =
+            std::panic::catch_unwind(|| std::panic::panic_any(42u32)).expect_err("panics");
+        assert_eq!(downcast_panic(&non_string), "<non-string panic>");
+    }
 }

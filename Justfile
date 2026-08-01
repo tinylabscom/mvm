@@ -259,6 +259,12 @@ mutation-surface:
 # Mutate the claim surface and ratchet survivors against the baseline.
 # HOURS: this is the nightly lane's command, not an inner-loop check.
 # Needs `cargo install cargo-mutants cargo-nextest`.
+#
+# No isolation wrapper here on purpose. `--run` executes security code with
+# its check removed, so it must not reach a real mvm state root — and that
+# confinement lives where cargo-mutants is actually spawned, so every
+# caller gets it rather than each one carrying its own copy. This recipe
+# had no wrapper at all until that landed, which is the failure mode.
 mutation-witnesses:
     cargo run -p xtask -- check-mutation-witnesses --run
 

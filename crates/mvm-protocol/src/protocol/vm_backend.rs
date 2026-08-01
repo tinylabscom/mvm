@@ -1754,4 +1754,100 @@ mod tests {
         assert!(profile.dropped_claims().is_empty());
         assert!(profile.na_claims().is_empty());
     }
+
+    /// The audit label is what the chain-signed log records for the boot's
+    /// runtime source. A blank or wrong label is a corrupt audit record,
+    /// and every variant must be distinguishable from every other.
+    #[test]
+    fn runtime_source_audit_labels_are_exact_and_distinct() {
+        assert_eq!(
+            RuntimeSourcePolicy::RequiredOverlay.audit_label(),
+            "required-overlay"
+        );
+        assert_eq!(
+            RuntimeSourcePolicy::PreferOverlay.audit_label(),
+            "prefer-overlay"
+        );
+        assert_eq!(RuntimeSourcePolicy::RootfsOnly.audit_label(), "rootfs-only");
+
+        let labels = [
+            RuntimeSourcePolicy::RequiredOverlay.audit_label(),
+            RuntimeSourcePolicy::PreferOverlay.audit_label(),
+            RuntimeSourcePolicy::RootfsOnly.audit_label(),
+        ];
+        for label in labels {
+            assert!(!label.is_empty());
+        }
+        assert_ne!(labels[0], labels[1]);
+        assert_ne!(labels[1], labels[2]);
+        assert_ne!(labels[0], labels[2]);
+    }
+
+    /// Every cmdline spelling round-trips to its own variant. Dropping an
+    /// arm makes that value unparseable, so the boot silently falls back to
+    /// a runtime source the cmdline did not ask for.
+    #[test]
+    fn every_runtime_source_cmdline_value_round_trips() {
+        for policy in [
+            RuntimeSourcePolicy::RequiredOverlay,
+            RuntimeSourcePolicy::PreferOverlay,
+            RuntimeSourcePolicy::RootfsOnly,
+        ] {
+            assert_eq!(
+                RuntimeSourcePolicy::from_cmdline_value(policy.cmdline_value()),
+                Some(policy),
+                "{} must parse back to itself",
+                policy.cmdline_value()
+            );
+        }
+        assert_eq!(RuntimeSourcePolicy::from_cmdline_value("nonsense"), None);
+        assert_eq!(RuntimeSourcePolicy::from_cmdline_value(""), None);
+        // The audit spelling is not the cmdline spelling; neither is accepted
+        // in the other's place.
+        assert_eq!(
+            RuntimeSourcePolicy::from_cmdline_value("prefer-overlay"),
+            None
+        );
+    }
+
+    /// `is_microvm` gates the Tier 3 shared-kernel banner, so it must be a
+    /// conjunction: any missing isolation layer means not a microVM. With
+    /// a disjunction, a container that only clears the host-hypervisor
+    /// layer reports as hardware-isolated and the banner never fires.
+    #[test]
+    fn is_microvm_requires_every_isolation_layer() {
+        assert!(LayerCoverage::all_layers().is_microvm());
+
+        let base = LayerCoverage::all_layers();
+        for drop_one in [
+            LayerCoverage {
+                l1_host_hypervisor: false,
+                ..base
+            },
+            LayerCoverage {
+                l2_vmm: false,
+                ..base
+            },
+            LayerCoverage {
+                l3_guest_kernel: false,
+                ..base
+            },
+        ] {
+            assert!(
+                !drop_one.is_microvm(),
+                "a backend missing an isolation layer must not report as a microVM: {drop_one:?}"
+            );
+        }
+
+        // The Tier 3 shape: only the host hypervisor, no VMM, no guest
+        // kernel of its own.
+        let shared_kernel = LayerCoverage {
+            l1_host_hypervisor: true,
+            l2_vmm: false,
+            l3_guest_kernel: false,
+            l4_guest_agent: true,
+            l5_workload: true,
+        };
+        assert!(!shared_kernel.is_microvm());
+    }
 }

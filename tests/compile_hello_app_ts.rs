@@ -14,7 +14,7 @@ fn compile_hello_app_ts_lowers_and_strips_framework() {
     let out = tempfile::tempdir().expect("tmp out");
     let app = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/typescript/hello-app/app.ts"
+        "/examples/typescript/hello-app/app.ts"
     );
 
     #[allow(deprecated)]
@@ -68,7 +68,7 @@ fn compile_hello_app_ts_with_deps_bakes_node_modules_at_build_time() {
     let out = tempfile::tempdir().expect("tmp out");
     let app = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/typescript/hello-app-with-deps/app.ts"
+        "/examples/typescript/hello-app-with-deps/app.ts"
     );
 
     #[allow(deprecated)]
