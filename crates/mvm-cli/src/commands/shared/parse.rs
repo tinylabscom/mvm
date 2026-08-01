@@ -764,4 +764,59 @@ mod volume_spec_tests {
             &tmp.path().join(".ssh")
         ));
     }
+
+    /// The MiB→bytes conversion is two multiplications, and both survived
+    /// every arithmetic mutation: nothing observed the size of the image
+    /// that gets created. `*` becoming `+` or `/` turns a 10 MiB request
+    /// into a few kilobytes, so the guest gets a disk orders of magnitude
+    /// smaller than it asked for and fails on first write.
+    ///
+    /// Asserting the created file's length is what makes this
+    /// discriminate; asserting the call returns `Ok` is what the
+    /// whole-function `-> Ok(())` mutant passes.
+    #[test]
+    fn a_disk_volume_is_materialised_at_the_requested_size() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let host = tmp.path().join("data.img");
+        let volume = VmVolume {
+            host: host.to_string_lossy().into_owned(),
+            guest: "/data".to_string(),
+            size: "10M".to_string(),
+            read_only: false,
+            kind: VmVolumeKind::Disk,
+            encrypted: false,
+        };
+
+        materialize_disk_volume(&volume).expect("materialising a disk volume");
+
+        let len = std::fs::metadata(&host).expect("the image exists").len();
+        // The writer rounds down to a block boundary (observed: 64 KiB
+        // short of the request), so this asserts the band rather than an
+        // exact count — an exact count would encode the rounding as if it
+        // were the contract. The band is still far tighter than any of the
+        // arithmetic mutants: `10 + 1024 * 1024` is ~1 MiB, `10 * 1024 +
+        // 1024` is ~11 KiB, and the two `/` forms collapse to 10 and 0.
+        let requested = 10 * 1024 * 1024u64;
+        assert!(
+            len > requested - (1024 * 1024) && len <= requested,
+            "a 10M request must produce very nearly 10 MiB, got {len} bytes"
+        );
+
+        // A directory share is not a disk and must not have an image
+        // written for it — the early return is its own mutant.
+        let share_host = tmp.path().join("share");
+        let share = VmVolume {
+            host: share_host.to_string_lossy().into_owned(),
+            guest: "/share".to_string(),
+            size: "10M".to_string(),
+            read_only: false,
+            kind: VmVolumeKind::DirShare,
+            encrypted: false,
+        };
+        materialize_disk_volume(&share).expect("a dir share is a no-op");
+        assert!(
+            !share_host.exists(),
+            "a directory share must not materialise a disk image"
+        );
+    }
 }
