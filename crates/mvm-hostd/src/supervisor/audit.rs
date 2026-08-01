@@ -154,6 +154,33 @@ impl AuditEntry {
             ],
         )
     }
+
+    /// Construct the chain entry that authenticates a sealed transcript's
+    /// ciphertext-manifest root without exposing payload bytes or plaintext
+    /// digests to the audit stream.
+    pub fn transcript_sealed(
+        plan: &ExecutionPlan,
+        bundle: Option<&PolicyBundle>,
+        capture_id: &str,
+        vm_name: &str,
+        sealed_root_hex: &str,
+        chunk_count: usize,
+    ) -> Self {
+        Self::for_plan(
+            plan,
+            bundle,
+            TRANSCRIPT_SEALED_EVENT,
+            [
+                (LABEL_CAPTURE_ID.to_string(), capture_id.to_string()),
+                (LABEL_VM_NAME.to_string(), vm_name.to_string()),
+                (
+                    LABEL_TRANSCRIPT_ROOT.to_string(),
+                    sealed_root_hex.to_string(),
+                ),
+                (LABEL_CHUNK_COUNT.to_string(), chunk_count.to_string()),
+            ],
+        )
+    }
 }
 
 /// Canonical `event` string for a `FlowOpened` chain entry. Pinned
@@ -168,6 +195,17 @@ pub const FLOW_CLOSED_EVENT: &str = "gateway.flow_closed";
 /// emitted when a host-allowlisted observer's `Modify`/`Drop` forced a
 /// fail-closed flow kill.
 pub const FLOW_OBSERVER_FAULT_EVENT: &str = "gateway.flow_observer_fault";
+
+/// Canonical chain event and labels for a sealed transcript content address.
+pub const TRANSCRIPT_SEALED_EVENT: &str = "gateway.transcript_sealed";
+/// Label containing the transcript capture identifier.
+pub const LABEL_CAPTURE_ID: &str = "capture_id";
+/// Label containing the VM identity bound into the transcript root.
+pub const LABEL_VM_NAME: &str = "vm_name";
+/// Label containing the authenticated ciphertext-manifest root.
+pub const LABEL_TRANSCRIPT_ROOT: &str = "transcript_root";
+/// Label containing the number of ordered ciphertext chunks.
+pub const LABEL_CHUNK_COUNT: &str = "chunk_count";
 
 /// Per-direction flow label for [`AuditEntry::flow_opened`] /
 /// [`AuditEntry::flow_closed`]. Egress = guest → internet,
@@ -526,6 +564,24 @@ mod tests {
         assert_eq!(entry.labels.get("flow_id"), Some(&"f00ba4".to_string()));
         assert_eq!(entry.labels.get("direction"), Some(&"egress".to_string()));
         // Plan binding still in place — same shape as for_plan().
+        assert_eq!(entry.plan_id, plan.plan_id);
+        assert_eq!(entry.tenant, plan.tenant);
+    }
+
+    #[test]
+    fn transcript_sealed_helper_carries_only_ciphertext_root_metadata() {
+        let plan = sample_plan();
+        let root = "ab".repeat(32);
+        let entry = AuditEntry::transcript_sealed(&plan, None, "capture-1", "vm-1", &root, 7);
+
+        assert_eq!(entry.event, TRANSCRIPT_SEALED_EVENT);
+        assert_eq!(
+            entry.labels.get(LABEL_CAPTURE_ID),
+            Some(&"capture-1".to_string())
+        );
+        assert_eq!(entry.labels.get(LABEL_VM_NAME), Some(&"vm-1".to_string()));
+        assert_eq!(entry.labels.get(LABEL_TRANSCRIPT_ROOT), Some(&root));
+        assert_eq!(entry.labels.get(LABEL_CHUNK_COUNT), Some(&"7".to_string()));
         assert_eq!(entry.plan_id, plan.plan_id);
         assert_eq!(entry.tenant, plan.tenant);
     }

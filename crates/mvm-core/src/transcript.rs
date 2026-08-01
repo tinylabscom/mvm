@@ -21,7 +21,7 @@ use crate::crypto::aead;
 pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 
 /// Current sealed-transcript manifest format. Unknown versions fail closed.
-pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 1;
+pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 2;
 
 /// Direction of a captured chunk relative to the workload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +84,11 @@ pub struct TranscriptManifest {
     /// Recipient binding allowed to decrypt later (e.g. a host key id).
     pub recipient: String,
     pub chunks: Vec<ChunkRecord>,
+    /// RFC-6962 Merkle root over the capture binding, sealed-key metadata,
+    /// bounds, and ordered chunk records. The chunk records contain ciphertext
+    /// digests, never plaintext digests.
+    #[serde(default)]
+    pub sealed_root_hex: String,
 }
 
 /// Why a transcript operation refused. Fail-closed: any variant means the
@@ -113,6 +118,98 @@ pub enum TranscriptError {
     Decrypt { seq: u64, file: String },
     #[error("wrapped transcript key is malformed or cannot be unwrapped")]
     WrappedKeyInvalid,
+    #[error("sealed transcript root is missing")]
+    SealedRootMissing,
+    #[error("sealed transcript root must be 64 lowercase hex characters")]
+    SealedRootMalformed,
+    #[error("sealed transcript root does not match the manifest")]
+    SealedRootMismatch,
+    #[error("sealed transcript root metadata could not be serialized: {0}")]
+    SealedRootSerialization(String),
+}
+
+#[derive(Serialize)]
+struct RootMetadata<'a> {
+    domain: &'static str,
+    format_version: u32,
+    capture_id: &'a str,
+    binding: &'a CaptureBinding,
+    bounds: &'a CaptureBounds,
+    created_unix_secs: u64,
+    wrapped_data_key_b64: &'a str,
+    recipient: &'a str,
+    chunk_count: usize,
+}
+
+#[derive(Serialize)]
+struct RootChunk<'a> {
+    domain: &'static str,
+    chunk: &'a ChunkRecord,
+}
+
+/// Recompute the manifest's content address. Leaves use fixed-field-order JSON
+/// and the shared RFC-6962 tree implementation; the domain strings keep this
+/// tree distinct from audit-log trees and distinguish metadata from chunks.
+pub fn sealed_root_hex(manifest: &TranscriptManifest) -> Result<String, TranscriptError> {
+    validate_format(manifest)?;
+    let metadata = RootMetadata {
+        domain: "mvm.transcript.metadata.v1",
+        format_version: manifest.format_version,
+        capture_id: &manifest.capture_id,
+        binding: &manifest.binding,
+        bounds: &manifest.bounds,
+        created_unix_secs: manifest.created_unix_secs,
+        wrapped_data_key_b64: &manifest.wrapped_data_key_b64,
+        recipient: &manifest.recipient,
+        chunk_count: manifest.chunks.len(),
+    };
+    let mut leaves = Vec::with_capacity(manifest.chunks.len() + 1);
+    leaves.push(
+        serde_json::to_vec(&metadata)
+            .map_err(|e| TranscriptError::SealedRootSerialization(e.to_string()))?,
+    );
+    for chunk in &manifest.chunks {
+        leaves.push(
+            serde_json::to_vec(&RootChunk {
+                domain: "mvm.transcript.chunk.v1",
+                chunk,
+            })
+            .map_err(|e| TranscriptError::SealedRootSerialization(e.to_string()))?,
+        );
+    }
+    Ok(hex::encode(mvm_protocol::merkle::merkle_root(&leaves)))
+}
+
+/// Verify the manifest-stored root against a fresh recomputation. This checks
+/// manifest integrity; callers that need authenticated provenance must also
+/// compare the recomputed root with the host-signed audit-chain label.
+pub fn verify_sealed_root(manifest: &TranscriptManifest) -> Result<(), TranscriptError> {
+    validate_format(manifest)?;
+    if manifest.sealed_root_hex.is_empty() {
+        return Err(TranscriptError::SealedRootMissing);
+    }
+    if manifest.sealed_root_hex.len() != 64
+        || !manifest
+            .sealed_root_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(TranscriptError::SealedRootMalformed);
+    }
+    if sealed_root_hex(manifest)? != manifest.sealed_root_hex {
+        return Err(TranscriptError::SealedRootMismatch);
+    }
+    Ok(())
+}
+
+fn validate_format(manifest: &TranscriptManifest) -> Result<(), TranscriptError> {
+    if manifest.format_version != TRANSCRIPT_MANIFEST_FORMAT_VERSION {
+        return Err(TranscriptError::UnknownFormatVersion {
+            got: manifest.format_version,
+            expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
+        });
+    }
+    Ok(())
 }
 
 /// Accumulates a live capture and fails closed the moment a bound is hit.
@@ -164,12 +261,7 @@ impl CaptureBudget {
 /// closed on an unknown format version, an unsafe filename, or a missing,
 /// oversized, or tampered chunk. Integrity only — does not decrypt.
 pub fn verify_chunks(manifest: &TranscriptManifest, dir: &Path) -> Result<(), TranscriptError> {
-    if manifest.format_version != TRANSCRIPT_MANIFEST_FORMAT_VERSION {
-        return Err(TranscriptError::UnknownFormatVersion {
-            got: manifest.format_version,
-            expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
-        });
-    }
+    validate_format(manifest)?;
     for c in &manifest.chunks {
         if c.file.is_empty()
             || c.file.contains('/')
@@ -306,7 +398,7 @@ impl TranscriptWriter {
 
     /// Finalize the manifest for the chunks written so far.
     pub fn seal(self) -> TranscriptManifest {
-        TranscriptManifest {
+        let mut manifest = TranscriptManifest {
             format_version: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
             capture_id: self.capture_id,
             binding: self.binding,
@@ -315,7 +407,11 @@ impl TranscriptWriter {
             wrapped_data_key_b64: self.wrapped_data_key_b64,
             recipient: self.recipient,
             chunks: self.chunks,
-        }
+            sealed_root_hex: String::new(),
+        };
+        manifest.sealed_root_hex =
+            sealed_root_hex(&manifest).expect("fixed transcript root metadata serializes");
+        manifest
     }
 }
 
@@ -327,6 +423,7 @@ pub fn export(
     dir: &Path,
     key: &aead::Key,
 ) -> Result<Vec<u8>, TranscriptError> {
+    verify_sealed_root(manifest)?;
     verify_chunks(manifest, dir)?;
     let mut out = Vec::new();
     for c in &manifest.chunks {
@@ -385,7 +482,7 @@ mod tests {
     }
 
     fn manifest(chunks: Vec<ChunkRecord>) -> TranscriptManifest {
-        TranscriptManifest {
+        let mut manifest = TranscriptManifest {
             format_version: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
             capture_id: "cap-1".to_string(),
             binding: CaptureBinding {
@@ -398,7 +495,10 @@ mod tests {
             wrapped_data_key_b64: String::new(),
             recipient: "host-key-1".to_string(),
             chunks,
-        }
+            sealed_root_hex: String::new(),
+        };
+        manifest.sealed_root_hex = sealed_root_hex(&manifest).unwrap();
+        manifest
     }
 
     fn write_chunk(dir: &Path, name: &str, body: &[u8]) -> ChunkRecord {
@@ -427,6 +527,32 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: TranscriptManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn sealed_root_vector_is_pinned() {
+        let m = manifest(vec![
+            ChunkRecord {
+                seq: 0,
+                file: "0.chunk".to_string(),
+                sha256_hex: "11".repeat(32),
+                size_bytes: 48,
+                direction: Direction::Egress,
+                dropped: false,
+            },
+            ChunkRecord {
+                seq: 1,
+                file: "1.chunk".to_string(),
+                sha256_hex: "22".repeat(32),
+                size_bytes: 64,
+                direction: Direction::Ingress,
+                dropped: true,
+            },
+        ]);
+        assert_eq!(
+            m.sealed_root_hex,
+            "81cf47b6993c2752d0a50ed0051151d6354986863f5b6265ae723e664c4f6dda"
+        );
     }
 
     #[test]
@@ -535,6 +661,70 @@ mod tests {
             recipient: "host-key-1".to_string(),
             wrapped_data_key_b64: "wrapped".to_string(),
         }
+    }
+
+    #[test]
+    fn sealed_root_binds_capture_metadata_and_ordered_ciphertext_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = aead::Key::from_bytes([6u8; 32]);
+        let mut writer = TranscriptWriter::new(dir.path(), key, writer_config());
+        writer.push(Direction::Egress, b"request").unwrap();
+        writer
+            .push_dropped(Direction::Ingress, b"response")
+            .unwrap();
+        let manifest = writer.seal();
+
+        assert_eq!(manifest.sealed_root_hex.len(), 64);
+        assert_eq!(
+            sealed_root_hex(&manifest).unwrap(),
+            manifest.sealed_root_hex
+        );
+        verify_sealed_root(&manifest).expect("freshly sealed manifest root verifies");
+
+        let mut changed_binding = manifest.clone();
+        changed_binding.binding.vm_name = "different-vm".into();
+        assert!(matches!(
+            verify_sealed_root(&changed_binding),
+            Err(TranscriptError::SealedRootMismatch)
+        ));
+
+        let mut reordered = manifest.clone();
+        reordered.chunks.reverse();
+        assert!(matches!(
+            verify_sealed_root(&reordered),
+            Err(TranscriptError::SealedRootMismatch)
+        ));
+
+        let mut changed_digest = manifest.clone();
+        changed_digest.chunks[0].sha256_hex = "00".repeat(32);
+        assert!(matches!(
+            verify_sealed_root(&changed_digest),
+            Err(TranscriptError::SealedRootMismatch)
+        ));
+    }
+
+    #[test]
+    fn sealed_root_verification_rejects_an_absent_or_malformed_root() {
+        let mut legacy = manifest(Vec::new());
+        legacy.format_version = 1;
+        legacy.sealed_root_hex.clear();
+        assert!(matches!(
+            verify_sealed_root(&legacy),
+            Err(TranscriptError::UnknownFormatVersion { got: 1, .. })
+        ));
+
+        let mut manifest = manifest(Vec::new());
+        manifest.sealed_root_hex.clear();
+        assert!(matches!(
+            verify_sealed_root(&manifest),
+            Err(TranscriptError::SealedRootMissing)
+        ));
+
+        manifest.sealed_root_hex = "not-a-sha256".into();
+        assert!(matches!(
+            verify_sealed_root(&manifest),
+            Err(TranscriptError::SealedRootMalformed)
+        ));
     }
 
     // `aead::Key` is deliberately not `Clone`; build identical keys from bytes

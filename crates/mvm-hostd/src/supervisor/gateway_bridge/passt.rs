@@ -6,13 +6,14 @@
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-
 use crate::supervisor::audit::{FlowCloseReason, FlowDirection};
 use crate::supervisor::network::PacketCtx;
 use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
 
-use super::events::{FlowEvent, FlowEventKind, ObserverWiring, TranscriptCaptureRoots};
+use super::events::{
+    FlowEvent, FlowEventKind, GatewayAuditEventSender, ObserverWiring, TranscriptCaptureRoots,
+    TranscriptSealedEvent,
+};
 use super::flow_policy::{FlowAction, FlowDecisionCtx, FlowPolicy};
 use super::native_gateway::flow_is_killed;
 
@@ -22,7 +23,7 @@ pub(super) async fn run_passt_bridge(
     vm_name: String,
     tenant: String,
     policy: Arc<dyn FlowPolicy>,
-    event_tx: mpsc::Sender<FlowEvent>,
+    event_tx: GatewayAuditEventSender,
     wiring: ObserverWiring,
 ) {
     let gateway_std = std::os::unix::net::UnixStream::from(gateway_fd);
@@ -124,7 +125,7 @@ async fn bridge_copy_bidirectional(
     vm_name: String,
     tenant: String,
     policy: Arc<dyn FlowPolicy>,
-    event_tx: mpsc::Sender<FlowEvent>,
+    event_tx: GatewayAuditEventSender,
     wiring: ObserverWiring,
 ) -> std::io::Result<()> {
     let (mut a_rd, mut a_wr) = a.into_split();
@@ -369,13 +370,31 @@ async fn bridge_copy_bidirectional(
         && let Some(sink) = cap.lock().await.take()
     {
         match sink.seal() {
-            Ok(manifest) => mvm_core::audit_emit!(
-                TranscriptSealed,
-                vm: &vm_name,
-                "tenant={tenant} vm={vm_name} capture={} chunks={}",
-                manifest.capture_id,
-                manifest.chunks.len()
-            ),
+            Ok(manifest) => {
+                if let Err(error) = event_tx
+                    .send_transcript_sealed(TranscriptSealedEvent {
+                        capture_id: manifest.capture_id.clone(),
+                        vm_name: vm_name.clone(),
+                        sealed_root_hex: manifest.sealed_root_hex.clone(),
+                        chunk_count: manifest.chunks.len(),
+                    })
+                    .await
+                {
+                    tracing::warn!(
+                        capture_id = %manifest.capture_id,
+                        %error,
+                        "transcript seal could not reach the audit signer"
+                    );
+                }
+                mvm_core::audit_emit!(
+                    TranscriptSealed,
+                    vm: &vm_name,
+                    "tenant={tenant} vm={vm_name} capture={} chunks={} root={}",
+                    manifest.capture_id,
+                    manifest.chunks.len(),
+                    manifest.sealed_root_hex
+                );
+            }
             Err(e) => {
                 tracing::warn!(vm = %vm_name, error = %e, "transcript capture seal failed")
             }
@@ -415,6 +434,7 @@ async fn bridge_copy_bidirectional(
 
 #[cfg(test)]
 mod tests {
+    use super::super::events::{GatewayAuditEvent, audit_event_channel};
     use super::super::test_support::*;
     use super::*;
 
@@ -450,7 +470,7 @@ mod tests {
         let mut passt = tokio::net::UnixStream::from_std(gateway_b).unwrap();
         let mut libkrun = tokio::net::UnixStream::from_std(guest_b).unwrap();
 
-        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, mut rx) = audit_event_channel(64);
         let policy = unrestricted_flow_policy();
         let bridge_task = tokio::spawn(bridge_copy_bidirectional(
             supervisor_gateway,
@@ -470,7 +490,9 @@ mod tests {
         let ev1 = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .expect("open in time")
-            .expect("event");
+            .expect("event")
+            .into_flow()
+            .expect("bridge emits a flow event");
         assert!(matches!(ev1.kind, FlowEventKind::Opened));
         assert_eq!(ev1.direction, FlowDirection::Ingress);
 
@@ -482,7 +504,9 @@ mod tests {
         let ev2 = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .expect("second open in time")
-            .expect("event");
+            .expect("event")
+            .into_flow()
+            .expect("bridge emits a flow event");
         assert!(matches!(ev2.kind, FlowEventKind::Opened));
         assert_ne!(ev1.direction, ev2.direction);
 
@@ -491,11 +515,15 @@ mod tests {
         let c1 = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .expect("close")
-            .expect("event");
+            .expect("event")
+            .into_flow()
+            .expect("bridge emits a flow event");
         let c2 = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .expect("second close")
-            .expect("event");
+            .expect("event")
+            .into_flow()
+            .expect("bridge emits a flow event");
         assert!(matches!(c1.kind, FlowEventKind::Closed { .. }));
         assert!(matches!(c2.kind, FlowEventKind::Closed { .. }));
         bridge_task
@@ -554,7 +582,7 @@ mod tests {
         let mut passt = tokio::net::UnixStream::from_std(gateway_b).unwrap();
         let mut libkrun = tokio::net::UnixStream::from_std(guest_b).unwrap();
 
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, mut rx) = audit_event_channel(64);
         let bridge_task = tokio::spawn(bridge_copy_bidirectional(
             supervisor_gateway,
             supervisor_guest,
@@ -593,6 +621,16 @@ mod tests {
             mvm_core::transcript::unwrap_data_key(&kek, &manifest.wrapped_data_key_b64).unwrap();
         let out = mvm_core::transcript::export(&manifest, &cap_dir, &data_key).unwrap();
         assert_eq!(out, frame, "export round-trips the captured frame bytes");
+
+        let sealed = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| match event {
+            GatewayAuditEvent::TranscriptSealed(sealed) => Some(sealed),
+            GatewayAuditEvent::Flow(_) => None,
+        });
+        let sealed = sealed.expect("bridge queues the transcript seal for chain signing");
+        assert_eq!(sealed.capture_id, manifest.capture_id);
+        assert_eq!(sealed.vm_name, manifest.binding.vm_name);
+        assert_eq!(sealed.sealed_root_hex, manifest.sealed_root_hex);
+        assert_eq!(sealed.chunk_count, manifest.chunks.len());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -609,7 +647,7 @@ mod tests {
         let mut passt = tokio::net::UnixStream::from_std(gateway_b).unwrap();
         let mut libkrun = tokio::net::UnixStream::from_std(guest_b).unwrap();
 
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let policy = unrestricted_flow_policy();
         let bridge_task = tokio::spawn(bridge_copy_bidirectional(
             supervisor_gateway,

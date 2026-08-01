@@ -58,6 +58,7 @@ impl TranscriptCaptureSink {
             if manifest.binding.vm_name != vm || !manifest.chunks.is_empty() {
                 continue; // wrong VM, or already captured (not armed)
             }
+            transcript::verify_sealed_root(&manifest)?;
             // Armed match — unwrap the per-capture data key under the host KEK.
             let kek = transcript::load_or_init_kek(keys_dir).map_err(|e| io_err("kek", &e))?;
             let data_key = transcript::unwrap_data_key(&kek, &manifest.wrapped_data_key_b64)?;
@@ -108,7 +109,7 @@ impl TranscriptCaptureSink {
         let manifest = self.writer.seal();
         let json =
             serde_json::to_vec_pretty(&manifest).map_err(|e| io_err("serialize manifest", &e))?;
-        std::fs::write(self.dir.join(MANIFEST_FILE), &json)
+        mvm_core::atomic_io::atomic_write(&self.dir.join(MANIFEST_FILE), &json)
             .map_err(|e| io_err(MANIFEST_FILE, &e))?;
         Ok(manifest)
     }
@@ -235,5 +236,24 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn open_for_vm_refuses_a_tampered_armed_manifest() {
+        let t = tempfile::tempdir().unwrap();
+        let transcripts = t.path().join("transcripts");
+        let keys = t.path().join("keys");
+        arm(&transcripts, &keys, "t1", "vm1", "cap-1");
+
+        let path = transcripts.join("t1/cap-1").join(MANIFEST_FILE);
+        let mut manifest: TranscriptManifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest.bounds.max_bytes += 1;
+        std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+        let err = TranscriptCaptureSink::open_for_vm(&transcripts, &keys, "t1", "vm1")
+            .err()
+            .expect("tampered armed manifest is refused");
+        assert_eq!(err, TranscriptError::SealedRootMismatch);
     }
 }
