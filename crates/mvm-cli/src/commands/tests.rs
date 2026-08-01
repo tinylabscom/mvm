@@ -321,11 +321,13 @@ fn volume_create_parses_default_root() {
                     volume,
                     root,
                     host_backed,
+                    size,
                 },
         })) => {
             assert_eq!(volume, "work");
             assert_eq!(root, None);
             assert!(!host_backed);
+            assert_eq!(size, "1G");
         }
         _ => panic!("Expected volume create command"),
     }
@@ -352,11 +354,13 @@ fn volume_create_host_backed_parses() {
                     volume,
                     root,
                     host_backed,
+                    size,
                 },
         })) => {
             assert_eq!(volume, "work");
             assert_eq!(root, None);
             assert!(host_backed);
+            assert_eq!(size, "1G");
         }
         _ => panic!("Expected volume create command"),
     }

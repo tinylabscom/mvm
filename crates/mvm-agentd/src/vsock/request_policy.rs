@@ -639,6 +639,8 @@ mod tests {
                 tag: "vol".to_string(),
                 mountpoint: "/mnt/vol".to_string(),
                 read_only: false,
+                kind: crate::vsock::VolumeConfigKind::VirtioFs,
+                device: None,
             }],
             verb_grant_envelope: None,
         });

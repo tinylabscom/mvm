@@ -26,7 +26,9 @@ mod rpc;
 pub mod sys;
 mod verb_grant;
 
-pub use activation::{ActivateEnvironment, RootfsConfig, RuntimeOverlayConfig, VolumeConfig};
+pub use activation::{
+    ActivateEnvironment, RootfsConfig, RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
+};
 pub use api::{
     PRIMED_MARKER_PATH, PostRestoreReply, checkpoint_integrations, interpret_primed_status,
     mount_volume_on, ping, ping_at, post_restore_at, post_restore_with_grant_and_clock_at,

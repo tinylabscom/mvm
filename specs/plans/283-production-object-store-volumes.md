@@ -104,23 +104,23 @@ to the PR CI matrix and the WS2/WS6 builder-VM lanes.
 
 ## WS2 — Live mvm local/block attachment
 
-- [ ] Add behavior-first tests that register a managed volume, launch a VM, and
+- [x] Add behavior-first tests that register a managed volume, launch a VM, and
       prove the launch configuration consumes the registration rather than
       leaving it as inert JSON.
-- [ ] Replace stringly host-path registry handoff with a validated attachment
+- [x] Replace stringly host-path registry handoff with a validated attachment
       type carrying volume identity, local source kind, guest path, and access
       mode; retain backward-compatible persisted-state decoding where required.
-- [ ] Resolve local encrypted volume state before launch and refuse locked,
+- [x] Resolve local encrypted volume state before launch and refuse locked,
       missing, unencrypted, out-of-policy, or changed paths before starting a
       VMM.
-- [ ] Thread resolved attachments through the single admitted launch funnel and
+- [x] Thread resolved attachments through the single admitted launch funnel and
       every supported backend without backend-name string dispatch.
-- [ ] Ensure Firecracker/QEMU/HVF/libkrun/Apple Container/Docker capability
+- [x] Ensure Firecracker/QEMU/HVF/libkrun/Apple Container/Docker capability
       reporting is honest: attach with the correct primitive or refuse with a
       typed unsupported-capability error before boot.
-- [ ] Thread the same admitted attachment set into universal-initramfs activation
+- [x] Thread the same admitted attachment set into universal-initramfs activation
       metadata and enforce rootfs → runtime overlay → user-volume ordering.
-- [ ] Make detach and failed-start cleanup RAII/idempotent so no mapper, mount,
+- [x] Make detach and failed-start cleanup RAII/idempotent so no mapper, mount,
       virtiofs process, device, or registry state leaks after failure.
 - [ ] Implement mvmctl local create/list/mount/unmount/snapshot/restore behavior
       against the live lifecycle and delete the “follow-up” warning once true.
@@ -129,6 +129,20 @@ to the PR CI matrix and the WS2/WS6 builder-VM lanes.
       unsupported backend, and cleanup after failed start.
 - [ ] Run host gates plus builder-VM Linux and KVM E2E tests before marking WS2
       complete.
+
+WS2 implementation evidence (2026-08-01): new managed volumes are encrypted
+ext4 block images with capacity recorded in the backward-compatible catalog;
+legacy records remain directory-shaped. Launch-time resolution consumes the
+per-VM registry, revalidates catalog identity/state/path/ext4, constructs the
+same admitted `Disk` set for backend and activation metadata, and refuses
+unsupported directory/disk shapes before boot. Transitional unlock/seal state
+is crash-recovered under an RAII catalog lock. Durable attachment leases roll
+back on failed launch, persist after detached start, block concurrent attach or
+lock, and release idempotently on stop. Focused evidence: 21 runtime registry
+tests, 14 CLI lifecycle tests, four persistent-image tests, activation/guest
+mount/QEMU tests, touched-crate check, all-target Clippy, formatting, and the
+production file-size gate are green. Local snapshot/restore commands, BDD, and
+builder-VM/KVM proof remain open, so WS2 is not complete.
 
 ## WS3 — mvmd migration from OpenDAL to `object_store`
 

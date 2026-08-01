@@ -12,7 +12,7 @@
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
-use crate::vsock::{RootfsConfig, RuntimeOverlayConfig, VolumeConfig};
+use crate::vsock::{RootfsConfig, RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind};
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.
@@ -251,16 +251,57 @@ pub fn validate_volume_mountpoint(mountpoint: &str) -> Result<()> {
     Ok(())
 }
 
-/// Mount any custom virtio-fs volumes inside the new root tree.
+fn resolve_volume_mount_source(volume: &VolumeConfig) -> Result<(&str, &'static str)> {
+    if volume.tag.is_empty() {
+        return Err(MountError::InvalidConfig(
+            "volume tag must not be empty".to_string(),
+        ));
+    }
+    match volume.kind {
+        VolumeConfigKind::VirtioFs => {
+            if volume.device.is_some() {
+                return Err(MountError::InvalidConfig(format!(
+                    "virtio-fs volume {:?} must not carry a block device",
+                    volume.tag
+                )));
+            }
+            Ok((&volume.tag, "virtiofs"))
+        }
+        VolumeConfigKind::Block => {
+            let device = volume.device.as_deref().ok_or_else(|| {
+                MountError::InvalidConfig(format!(
+                    "block volume {:?} is missing its guest device",
+                    volume.tag
+                ))
+            })?;
+            let suffix = device.strip_prefix("/dev/vd").ok_or_else(|| {
+                MountError::PathPolicyDenied(format!(
+                    "block volume device {device:?} is outside /dev/vd[a-z]"
+                ))
+            })?;
+            if suffix.len() != 1 || !suffix.bytes().all(|byte| byte.is_ascii_lowercase()) {
+                return Err(MountError::PathPolicyDenied(format!(
+                    "block volume device {device:?} is outside /dev/vd[a-z]"
+                )));
+            }
+            Ok((device, "ext4"))
+        }
+    }
+}
+
+/// Mount custom virtio-fs and ext4 block volumes inside the new root tree.
 pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
     for vol in volumes {
         validate_volume_mountpoint(&vol.mountpoint)?;
+        let (source, filesystem) = resolve_volume_mount_source(vol)?;
+        #[cfg(not(target_os = "linux"))]
+        let _ = (source, filesystem);
         let target = root.join(&vol.mountpoint);
         ensure_dir(&target.to_string_lossy())?;
         #[cfg(target_os = "linux")]
         {
             let flags = if vol.read_only { libc::MS_RDONLY } else { 0 };
-            mount(&vol.tag, &target.to_string_lossy(), "virtiofs", flags, "")?;
+            mount(source, &target.to_string_lossy(), filesystem, flags, "")?;
         }
     }
     Ok(())
@@ -1053,6 +1094,54 @@ mod tests {
     fn validate_volume_mountpoint_rejects_relative_and_empty() {
         assert!(validate_volume_mountpoint("data").is_err());
         assert!(validate_volume_mountpoint("").is_err());
+    }
+
+    #[test]
+    fn volume_mount_source_distinguishes_virtiofs_and_block() {
+        let share = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/data/share".to_string(),
+            read_only: true,
+            kind: crate::vsock::VolumeConfigKind::VirtioFs,
+            device: None,
+        };
+        assert_eq!(
+            resolve_volume_mount_source(&share).unwrap(),
+            ("uvol0", "virtiofs")
+        );
+
+        let block = VolumeConfig {
+            tag: "uvol1".to_string(),
+            mountpoint: "/data/disk".to_string(),
+            read_only: false,
+            kind: crate::vsock::VolumeConfigKind::Block,
+            device: Some("/dev/vdb".to_string()),
+        };
+        assert_eq!(
+            resolve_volume_mount_source(&block).unwrap(),
+            ("/dev/vdb", "ext4")
+        );
+    }
+
+    #[test]
+    fn volume_mount_source_rejects_invalid_kind_device_combinations() {
+        let share_with_device = VolumeConfig {
+            tag: "uvol0".to_string(),
+            mountpoint: "/data/share".to_string(),
+            read_only: false,
+            kind: crate::vsock::VolumeConfigKind::VirtioFs,
+            device: Some("/dev/vdb".to_string()),
+        };
+        assert!(resolve_volume_mount_source(&share_with_device).is_err());
+
+        let invalid_block = VolumeConfig {
+            tag: "uvol1".to_string(),
+            mountpoint: "/data/disk".to_string(),
+            read_only: false,
+            kind: crate::vsock::VolumeConfigKind::Block,
+            device: Some("/dev/sda".to_string()),
+        };
+        assert!(resolve_volume_mount_source(&invalid_block).is_err());
     }
 
     #[test]
