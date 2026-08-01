@@ -21,7 +21,16 @@ use crate::crypto::aead;
 pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 
 /// Current sealed-transcript manifest format. Unknown versions fail closed.
-pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 2;
+///
+/// Bumped 2 -> 3 when `ChunkRecord` grew `prev_hash`: that field is part of
+/// every chunk leaf the sealed root commits to, so a manifest sealed under
+/// the old layout now recomputes to a different root. Without the bump that
+/// manifest would fail `verify_sealed_root` with `SealedRootMismatch` —
+/// indistinguishable from actual tampering. Bumping the version makes
+/// `validate_format` (which every verifier calls before touching the root)
+/// reject it first, with an honest "old format" error instead of a false
+/// tamper signal.
+pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 3;
 
 /// Direction of a captured chunk relative to the workload: network egress/
 /// ingress, or one of the workload's own output streams (stdout/stderr) plus
@@ -599,7 +608,7 @@ mod tests {
         let m = two_chunk_manifest();
         assert_eq!(
             m.sealed_root_hex,
-            "d77845a3522f96e9d44d7e8664804b92f5f9990ace10d1cf74be4bc8f9bad2e1"
+            "73b077cace4f804b2d2d83d293d12a0d63a398423bad12c611eb633b15c90206"
         );
     }
 
@@ -621,11 +630,64 @@ mod tests {
     fn the_pre_linkage_root_vector_no_longer_verifies() {
         // Guards the re-pin itself: if this ever passes again, the chunk-record
         // layout silently reverted and the new vector is meaningless.
+        //
+        // `two_chunk_manifest` stamps the *current* format_version (via the
+        // `manifest` helper), so this exercises the root comparison, not the
+        // version check: the manifest passes `validate_format` and only then
+        // fails on the stale root.
         let m = manifest_with_root(PRE_LINKAGE_ROOT_HEX);
-        assert!(matches!(
+        assert_eq!(m.format_version, TRANSCRIPT_MANIFEST_FORMAT_VERSION);
+        assert_eq!(
             verify_sealed_root(&m),
             Err(TranscriptError::SealedRootMismatch)
-        ));
+        );
+    }
+
+    #[test]
+    fn stale_format_version_manifest_fails_on_version_not_root_mismatch() {
+        // A manifest sealed by pre-linkage code: format_version 2, and a
+        // chunk with no `prev_hash` key at all — not a defaulted empty
+        // string, the key is simply absent, exactly like a real capture
+        // written before the field existed. `sealed_root_hex` is some value
+        // that pre-linkage code could plausibly have produced; its exact
+        // content never matters, since the version check must refuse the
+        // manifest before the root is ever compared.
+        let json = format!(
+            r#"{{"format_version":2,"capture_id":"cap-1","binding":{{"tenant_id":"t","vm_name":"vm","session_id":null}},"bounds":{{"max_duration_secs":60,"max_bytes":1000,"max_chunks":3}},"created_unix_secs":1,"wrapped_data_key_b64":"","recipient":"host-key-1","chunks":[{{"seq":0,"file":"0.chunk","sha256_hex":"{}","size_bytes":48,"direction":"egress","dropped":false}}],"sealed_root_hex":"{}"}}"#,
+            "11".repeat(32),
+            "33".repeat(32),
+        );
+        let m: TranscriptManifest =
+            serde_json::from_str(&json).expect("a pre-linkage manifest still parses");
+        assert_eq!(
+            m.chunks[0].prev_hash, "",
+            "no prev_hash key in the source JSON"
+        );
+        // An old-but-honest manifest and an attacker-tampered one must never
+        // produce the same error: this is the version-refusal error, never
+        // `SealedRootMismatch`.
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::UnknownFormatVersion {
+                got: 2,
+                expected: 3
+            })
+        );
+    }
+
+    #[test]
+    fn current_format_version_manifest_round_trips_through_verify_and_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(4), writer_config());
+        w.push(Direction::Stdout, b"hello ").unwrap();
+        w.push(Direction::Stderr, b"world").unwrap();
+        let manifest = w.seal();
+        assert_eq!(manifest.format_version, TRANSCRIPT_MANIFEST_FORMAT_VERSION);
+        verify_sealed_root(&manifest).expect("current-version manifest verifies");
+        assert_eq!(
+            export(&manifest, dir.path(), &fixed_key(4)).unwrap(),
+            b"hello world"
+        );
     }
 
     #[test]
