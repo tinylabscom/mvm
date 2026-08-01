@@ -516,8 +516,9 @@ fn dev_build_via_builder_vm(
 /// `rootfs.ext4` is the one universal artifact; every other candidate
 /// (`vmlinux`, `initrd`, `bin/microvm-run`, `image.tar.gz`) is recorded only
 /// when it actually exists in the revision dir. When `rootfs.ext4` is
-/// absent, no record is written at all — an absent record reads back as a
-/// cold miss, never as a false hit (S3).
+/// absent, no record is written at all: an absent record reads back as a
+/// cold miss, so we never serve a cache hit we cannot re-verify (fail
+/// closed: never trust the path over a verified digest).
 #[cfg(feature = "builder-vm")]
 fn write_cache_record_for_result(fingerprint: &str, result: &DevBuildResult) -> Result<()> {
     let build_dir = Path::new(&result.build_dir);
@@ -582,10 +583,11 @@ fn build_cache_fingerprint(
 /// record, it fails to parse, or verification against the artifacts
 /// actually on disk fails.
 ///
-/// A verification failure **evicts** the stale record (deletes it) before
+/// Verification runs unconditionally on every hit; a missing/unparseable
+/// record or any mismatch is a miss+evict, never a path-trust fallback. A
+/// verification failure **evicts** the stale record (deletes it) before
 /// returning `None`, so a tampered or partially-collected cache entry is
-/// never served twice and a fresh build runs unconditionally (S3: fail
-/// closed, never trust the path).
+/// never served twice and a fresh build runs unconditionally.
 #[cfg(feature = "builder-vm")]
 fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
     let record = crate::pipeline::build_cache::read_cache_record(fingerprint)?;
@@ -1928,9 +1930,19 @@ mod tests {
         bytes[0] ^= 0xFF;
         std::fs::write(build_dir_path.join("rootfs.ext4"), bytes).expect("rewrite rootfs");
 
+        let cache_dir = crate::pipeline::build_cache::build_cache_dir();
+        assert!(
+            cache_dir.join(&fingerprint).exists(),
+            "sanity: the record file must exist before eviction"
+        );
+
         assert!(
             cached_build_result(&fingerprint).is_none(),
             "a tampered artifact must never be served"
+        );
+        assert!(
+            !cache_dir.join(&fingerprint).exists(),
+            "a failed verification must delete the stale record file, not merely refuse it"
         );
         assert!(
             crate::pipeline::build_cache::read_cache_record(&fingerprint).is_none(),
@@ -1969,9 +1981,7 @@ mod tests {
         std::fs::write(build_dir_path.join("rootfs.ext4"), b"bytes").expect("write rootfs.ext4");
 
         // Pre-typed-record cache entries were a bare `<revision>\n` marker.
-        let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
-            .join("dev")
-            .join("build-cache");
+        let cache_dir = crate::pipeline::build_cache::build_cache_dir();
         std::fs::create_dir_all(&cache_dir).expect("create build-cache dir");
         std::fs::write(cache_dir.join(&fingerprint), format!("{revision}\n"))
             .expect("write legacy record");
