@@ -189,49 +189,52 @@ impl MachineAction {
 /// How a machine reaches the network.
 ///
 /// **Not an operator choice.** There is one networking configuration and
-/// mvm always uses it — the guest gets a real IP stack *and* the
-/// host-owned proxy, and the host decides per destination which path a flow
-/// takes. Exposing a transport selector would only let someone pick a
-/// weaker posture than the one they could have had, and the strongest
-/// choice is the same every time.
+/// mvm always uses the strongest one available — exposing a transport
+/// selector could only let someone pick a weaker posture than the one they
+/// would otherwise have had.
 ///
-/// The mode still exists in the *signed plan*: it is the admitted contract
-/// a control plane sets and the node enforces. This is only the derivation
-/// used by local `machine run`.
+/// The derivation has two inputs, and neither is a preference:
+///
+/// 1. **What the plan requires.** A workload that depends on the host
+///    seeing its outbound cleartext — one that binds secrets, or enables
+///    reversible replacement or redaction — must have the socket-aware
+///    transport, because the tunnel cannot provide it.
+/// 2. **What the host can serve.** The tunnel needs an L3 datapath. Where
+///    there is none, the socket-aware transport is what this host has.
+///
+/// Note the direction of the second clause: it can only ever move a
+/// workload to *more* host visibility, never less. Moving the other way is
+/// what must never happen silently, and the compatibility gate refuses it
+/// outright.
+///
+/// The mode still lives in the *signed plan*: it is the admitted contract a
+/// control plane sets and the node enforces. This is only the derivation
+/// local `machine run` uses.
 pub(in crate::commands) fn derive_network_mode(
     requirements: &mvm_net::l3::SubstitutionRequirements,
+    host_serves_l3: bool,
 ) -> mvm_protocol::plan::NetworkMode {
-    // A workload that depends on the host seeing its outbound cleartext
-    // gets the socket-aware transport, because the tunnel cannot provide
-    // it — see the mode-compatibility gate. Everything else gets the
-    // tunnel, which is universally compatible.
-    if requirements.needs_owned_cleartext() {
+    if requirements.needs_owned_cleartext() || !host_serves_l3 {
         mvm_protocol::plan::NetworkMode::HostVsockProxy
     } else {
         mvm_protocol::plan::NetworkMode::L3Vsock
     }
 }
 
-/// Check the derived networking configuration before anything boots.
+/// Whether this host can serve the L3 tunnel.
+pub(in crate::commands) fn host_serves_l3() -> bool {
+    mvm_hostd::netd::host_datapath().is_available().is_ok()
+}
+
+/// Settle the networking configuration before anything boots.
 ///
-/// There is no mode to warn about any more — the derivation always picks
-/// the strongest transport the workload can actually use. What remains is
-/// the platform check: a host with no L3 datapath cannot serve a workload
-/// that needs the tunnel, and that must be a refusal rather than a silent
-/// downgrade to a weaker posture.
+/// Returns the derived mode rather than a warning: there is nothing for an
+/// operator to decide, so there is nothing to caution them about. Both
+/// outcomes are serviceable, which is why this cannot fail.
 pub(in crate::commands) fn preflight_network(
     requirements: &mvm_net::l3::SubstitutionRequirements,
-) -> anyhow::Result<mvm_protocol::plan::NetworkMode> {
-    let mode = derive_network_mode(requirements);
-    if mode.is_l3_vsock()
-        && let Err(err) = mvm_hostd::netd::host_datapath().is_available()
-    {
-        anyhow::bail!(
-            "this host cannot serve mvm networking: {err}\n\
-             The workload needs a real IP stack and no L3 datapath is available here."
-        );
-    }
-    Ok(mode)
+) -> mvm_protocol::plan::NetworkMode {
+    derive_network_mode(requirements, host_serves_l3())
 }
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
@@ -383,7 +386,7 @@ impl MachineRunArgs {
     fn into_run_args(self) -> RunArgs {
         RunArgs {
             // Derived, never selected: see `derive_network_mode`.
-            network_mode: derive_network_mode(&mvm_net::l3::SubstitutionRequirements::default()),
+            network_mode: preflight_network(&mvm_net::l3::SubstitutionRequirements::default()),
             manifest: self.manifest,
             // Default off; `run_dispatch` sets it for the warm-claim-eligible
             // transient mode.

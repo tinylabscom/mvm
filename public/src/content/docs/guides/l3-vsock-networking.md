@@ -36,9 +36,15 @@ they would otherwise have had, and the right answer is the same every time:
 - a workload whose plan needs the host to see its outbound cleartext — one
   that binds secrets, or enables reversible replacement or redaction — gets
   the socket-aware transport, because the tunnel cannot provide that;
+- on a host with no L3 datapath (macOS today), every workload gets the
+  socket-aware transport, because that is what the host can serve;
 - every other workload gets the tunnel, which is universally compatible.
 
-That is derived from the plan, so it cannot be got wrong. The mode is still
+Note the direction of the middle clause: it can only ever give the host
+*more* visibility, never less. Moving the other way is what must never
+happen quietly, and the compatibility gate refuses it outright.
+
+All of that is derived, so it cannot be got wrong. The mode is still
 recorded in the *signed plan* — it is the admitted contract, and a control
 plane sets it — but it is not an operator knob.
 
@@ -106,7 +112,7 @@ Choosing L3 mode does not weaken the boundary. It still guarantees:
 |---|---|
 | **Linux** (Firecracker) | Supported and tested, including a privileged lane with a real host TUN and nftables, and a live boot witness (below). |
 | **Linux** (libkrun) | Not selectable. libkrun attaches a drained virtio-net device; L3 mode requires the guest to have no network device at all, so libkrun does not advertise the capability and selection fails closed. |
-| **macOS** (Apple Silicon) | **Not available.** The intended backend is a userspace socket gateway (TCP, UDP, controlled DNS). It is not implemented, so `l3-vsock` is refused at admission with a stated reason. It is never degraded and never routed through a proxy runtime. |
+| **macOS** (Apple Silicon) | No L3 datapath, so workloads run on the socket-aware transport — which is the stronger posture, and everything still works. The intended backend is a userspace socket gateway (TCP, UDP, controlled DNS); it is not implemented, and is never faked or routed through a proxy runtime. |
 | **Windows via WSL2** | Architecturally supported — WSL2 is a Linux node, the guest's vsock terminates inside it, and the Linux backend is used. Not yet validated on a WSL2 runner. |
 | **Native Windows** | **Not supported.** mvm has no native Windows VMM backend. "Works on Windows" here always means WSL2. |
 

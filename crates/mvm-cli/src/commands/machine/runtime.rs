@@ -265,11 +265,11 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
         None
     };
 
-    // Refuse a host that cannot serve this workload's networking before any
-    // build or boot work happens. There is no mode to choose and nothing to
-    // warn about — the derivation always picks the strongest transport the
-    // workload can use.
-    super::preflight_network(&mvm_net::l3::SubstitutionRequirements::default())?;
+    // Settle the networking configuration before any build or boot work.
+    // There is no mode to choose: the derivation picks the strongest
+    // transport this workload and this host can actually support.
+    let network_mode = super::preflight_network(&mvm_net::l3::SubstitutionRequirements::default());
+    tracing::debug!(?network_mode, "derived machine networking");
 
     if args.entrypoint {
         return run_entrypoint_action(args, resolved_flake_slot);
