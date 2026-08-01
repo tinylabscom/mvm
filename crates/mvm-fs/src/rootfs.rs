@@ -241,6 +241,12 @@ pub struct MaterializeOptions {
     pub walk: WalkOptions,
     /// Superblock metadata (UUID, volume label) stamped on the image.
     pub build: BuildOptions,
+    /// Nodes to place in the image that the walk cannot find on the host
+    /// tree. This is how an OCI unpack carries the entries a case-folding
+    /// host filesystem refused to hold — see
+    /// [`crate::oci::unpack::UnpackReport::deferred_nodes`]. A node here
+    /// wins over a walked node at the same path.
+    pub extra_nodes: Vec<Node>,
 }
 
 impl MaterializeOptions {
@@ -269,6 +275,31 @@ impl MaterializeOptions {
         self.build = build;
         self
     }
+
+    /// Add nodes the host tree cannot supply, merged over the walk.
+    pub fn with_extra_nodes(mut self, extra_nodes: Vec<Node>) -> Self {
+        self.extra_nodes = extra_nodes;
+        self
+    }
+}
+
+/// Merge `extra` over `walked`, last-wins by path.
+///
+/// The two lists are disjoint in practice — an unpack defers a node
+/// precisely because the host tree could not hold it, so the walk cannot
+/// have found it. The dedup is a guard against emitting two directory
+/// entries with the same name if a caller ever passes an overlapping
+/// node, which would produce a structurally invalid image rather than a
+/// loud error.
+fn merge_extra_nodes(mut walked: Vec<Node>, extra: Vec<Node>) -> Vec<Node> {
+    if extra.is_empty() {
+        return walked;
+    }
+    let overridden: std::collections::HashSet<&str> =
+        extra.iter().map(|node| node.path()).collect();
+    walked.retain(|node| !overridden.contains(node.path()));
+    walked.extend(extra);
+    walked
 }
 
 /// Materialize the directory tree at `root` into an ext4 image at `output`,
@@ -285,7 +316,10 @@ pub fn materialize_ext4_pure(
     output: &Path,
     options: &MaterializeOptions,
 ) -> Result<MaterializedImage, MaterializeError> {
-    let nodes = collect_nodes(root, options.walk)?;
+    let nodes = merge_extra_nodes(
+        collect_nodes(root, options.walk)?,
+        options.extra_nodes.clone(),
+    );
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).map_err(|source| MaterializeError::Write {
             path: parent.to_path_buf(),
@@ -728,5 +762,70 @@ mod tests {
             ..SizeHeuristic::default()
         };
         assert_eq!(heuristic.estimate(1), Err(InvalidSizeMultiplier));
+    }
+
+    #[test]
+    fn extra_nodes_reach_the_image_alongside_the_walked_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("tree");
+        std::fs::create_dir_all(root.join("usr/share/man/man7")).unwrap();
+        std::fs::write(root.join("usr/share/man/man7/PAM.7.gz"), b"page").unwrap();
+
+        let deferred = Node::Symlink {
+            path: "/usr/share/man/man7/pam.7.gz".to_string(),
+            target: "PAM.7.gz".to_string(),
+        };
+        let options = MaterializeOptions::default().with_extra_nodes(vec![deferred.clone()]);
+
+        let walked = collect_nodes(&root, options.walk).unwrap();
+        assert!(
+            !walked.iter().any(|n| n.path() == deferred.path()),
+            "the walk cannot see a path the host tree does not hold"
+        );
+
+        let merged = merge_extra_nodes(walked, options.extra_nodes.clone());
+        assert!(merged.contains(&deferred));
+        assert!(
+            merged
+                .iter()
+                .any(|n| n.path() == "/usr/share/man/man7/PAM.7.gz"),
+            "merging must not displace the walked occupant"
+        );
+
+        // And the whole thing emits a real image.
+        let image = tmp.path().join("rootfs.ext4");
+        let out = materialize_ext4_pure(&root, &image, &options).expect("materialize");
+        assert!(out.size_bytes > 0);
+    }
+
+    #[test]
+    fn an_extra_node_overrides_a_walked_node_at_the_same_path() {
+        let walked = vec![Node::File {
+            path: "/etc/motd".to_string(),
+            mode: 0o644,
+            data: b"walked".to_vec(),
+            xattrs: Vec::new(),
+        }];
+        let extra = vec![Node::File {
+            path: "/etc/motd".to_string(),
+            mode: 0o600,
+            data: b"extra".to_vec(),
+            xattrs: Vec::new(),
+        }];
+
+        let merged = merge_extra_nodes(walked, extra.clone());
+        assert_eq!(
+            merged, extra,
+            "a duplicate path must resolve to one node, not two directory entries"
+        );
+    }
+
+    #[test]
+    fn empty_extra_nodes_leave_the_walk_untouched() {
+        let walked = vec![Node::Symlink {
+            path: "/bin/sh".to_string(),
+            target: "bash".to_string(),
+        }];
+        assert_eq!(merge_extra_nodes(walked.clone(), Vec::new()), walked);
     }
 }

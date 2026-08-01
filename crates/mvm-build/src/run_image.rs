@@ -39,6 +39,7 @@ pub struct InjectAndMaterializeRequest<'a> {
     entrypoint: Option<&'a OciEntrypointConfig>,
     prebuilt: Option<PrebuiltGuestBinaries<'a>>,
     sealed: bool,
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
 
 impl<'a> InjectAndMaterializeRequest<'a> {
@@ -57,6 +58,7 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             entrypoint: None,
             prebuilt: None,
             sealed: false,
+            deferred_nodes: Vec::new(),
         }
     }
 }
@@ -70,6 +72,7 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     entrypoint: Option<&'a OciEntrypointConfig>,
     prebuilt: Option<PrebuiltGuestBinaries<'a>>,
     sealed: bool,
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
 }
 
 impl<'a> InjectAndMaterializeRequestBuilder<'a> {
@@ -93,6 +96,13 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
         self
     }
 
+    /// Carry the OCI unpacker's deferred nodes — entries a case-folding
+    /// host filesystem could not hold — into the materialized image.
+    pub fn deferred_nodes(mut self, deferred_nodes: Vec<mvm_fs::ext4::Node>) -> Self {
+        self.deferred_nodes = deferred_nodes;
+        self
+    }
+
     pub fn build(self) -> InjectAndMaterializeRequest<'a> {
         InjectAndMaterializeRequest {
             cache_root: self.cache_root,
@@ -103,6 +113,7 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             entrypoint: self.entrypoint,
             prebuilt: self.prebuilt,
             sealed: self.sealed,
+            deferred_nodes: self.deferred_nodes,
         }
     }
 }
@@ -131,6 +142,7 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         entrypoint,
         prebuilt,
         sealed,
+        deferred_nodes,
     } = request;
     let bins = resolve_guest_binaries(cache_root, prebuilt)?;
     crate::oci_runtime_inject::inject_mvm_runtime(
@@ -145,11 +157,10 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
     // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
     let tree_size = unpacked_tree_size(unpacked_root)
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
-    materialize_run_rootfs(&MaterializeExt4Input::new(
-        unpacked_root.to_path_buf(),
-        output.to_path_buf(),
-        tree_size,
-    ))?;
+    materialize_run_rootfs(
+        &MaterializeExt4Input::new(unpacked_root.to_path_buf(), output.to_path_buf(), tree_size)
+            .with_deferred_nodes(deferred_nodes),
+    )?;
 
     // `--prod`: seal the rootfs and stand up its verity initramfs together,
     // before the sidecar is written. If this fails we surface it and never
