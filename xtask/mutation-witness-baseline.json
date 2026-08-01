@@ -38,6 +38,9 @@
       "package": "mvm-build",
       "claims": [
         6
+      ],
+      "features": [
+        "pure-mkfs"
       ]
     },
     {
@@ -232,21 +235,6 @@
     },
     {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "delete ! in stage_runtime_overlay_binary",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace & with ^ in overlay_mode_of",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace & with | in overlay_mode_of",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "replace && with || in extract_release_archive",
       "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
     },
@@ -254,21 +242,6 @@
       "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "replace && with || in local_source_cache_is_fresh",
       "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace build_runtime_overlay_from_guest_binaries -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> with Ok(Default::default())",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace collect_overlay_nodes -> Result<Vec<mvm_fs::ext4::Node>, RuntimeOverlayError> with Ok(vec![Default::default()])",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace collect_overlay_nodes -> Result<Vec<mvm_fs::ext4::Node>, RuntimeOverlayError> with Ok(vec![])",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
     },
     {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
@@ -287,26 +260,6 @@
     },
     {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace overlay_guest_path -> String with \"xyzzy\".into()",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace overlay_guest_path -> String with String::new()",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace overlay_mode_of -> u16 with 0",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace overlay_mode_of -> u16 with 1",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "replace run_nix_build -> Result<(), RuntimeOverlayError> with Ok(())",
       "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
     },
@@ -319,11 +272,6 @@
       "file": "crates/mvm-build/src/runtime_overlay.rs",
       "mutant": "replace runtime_overlay_source_checkout_root -> Option<PathBuf> with Some(Default::default())",
       "reason": "the only witness is runtime_overlay_build.rs, which shells out to a real nix build and skips when nix is absent. The mutation lane installs no nix, so these paths never execute there. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace stage_runtime_overlay_binary -> Result<(), RuntimeOverlayError> with Ok(())",
-      "reason": "not compiled by the mutation build: these live behind the pure-mkfs feature, which is not a default. cargo-mutants generates mutants by parsing source -- syn does not evaluate cfg -- so the code is mutated, never built, and no test can kill it. Falsifiable: the tests added for overlay_mode_of and all_required_files_present do catch these under --features pure-mkfs."
     },
     {
       "file": "crates/mvm-build/src/runtime_overlay.rs",
