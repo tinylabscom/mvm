@@ -1,8 +1,8 @@
 //! Internal admission and boot helpers consumed by `machine/mod.rs`:
 //! `start_persistent_oci_machine`, `admit_plan_for_boot`, `AdmitPlanForBootParams`,
 //! `AdmissionContext`, `emit_launched_if`, `emit_failed_if`,
-//! `persists_plan_before_start`, `resolve_workload_kernel`, `untrusted_transient_admit`,
-//! and `load_workload_ir`.
+//! `persists_plan_before_start`, `resolve_workload_kernel`, and
+//! `load_workload_ir`.
 
 use clap::Args as ClapArgs;
 
@@ -27,8 +27,6 @@ pub(super) use admission::{
 // doesn't carry an unused re-export.
 #[cfg(test)]
 pub(super) use admission::SECURITY_POLICY_FILENAME;
-#[cfg(feature = "mcp")]
-pub(in crate::commands) use admission::untrusted_transient_admit;
 
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;

@@ -19,18 +19,16 @@
 //!    fail the tool call.
 //! 3. **Uniform error rendering** — tool-side errors return
 //!    [`ToolInvokeError`] so callers can surface a structured
-//!    failure to the LLM client (MCP semantics: errors must reach
-//!    the model, not the JSON-RPC error channel).
+//!    failure to the LLM client — errors must reach the model, not
+//!    the transport's error channel.
 //!
 //! ## What this module is NOT
 //!
 //! - Not a tool gate. [`crate::supervisor::tool_gate::ToolGate`] +
 //!   [`crate::supervisor::policy_tool_gate::PolicyToolGate`] decide
 //!   allow/deny; this module decides "given allow, what happens".
-//! - Not a transport. The MCP server (`mvm-cli::mcp::server`) and
-//!   the future agent vsock RPC are the
-//!   two consumers; both call [`ToolRegistry::invoke`] after the
-//!   gate clears.
+//! - Not a transport. The agent vsock RPC is the consumer; it calls
+//!   [`ToolRegistry::invoke`] after the gate clears.
 //! - Not a place for per-tenant state. Tools are stateless from the
 //!   registry's perspective; any per-tenant data (cached
 //!   credentials, rate-limit buckets) lives inside each tool's own
@@ -65,7 +63,7 @@ use crate::supervisor::audit_recorder::{EventCategory, Recorder};
 
 /// One tool the agent invokes through the supervisor. The trait is
 /// JSON-shaped on both sides so any tool's signature flows through
-/// the MCP wire format and the vsock RPC without bespoke encoding.
+/// the vsock RPC without bespoke encoding.
 ///
 /// Implementors carry their own per-tool state (credentials,
 /// upstream HTTP clients, rate-limit buckets) so the registry stays
@@ -80,16 +78,15 @@ pub trait HostMediatedTool: Send + Sync {
 
     /// Invoke the tool. `params` is the raw JSON the agent sent;
     /// the impl deserializes into its own typed shape. Returns a
-    /// JSON `Value` (the MCP wire result) or a structured
+    /// JSON `Value` (the wire result) or a structured
     /// [`ToolInvokeError`].
     async fn invoke(&self, params: serde_json::Value)
     -> Result<serde_json::Value, ToolInvokeError>;
 }
 
-/// Errors a tool surface can emit. Rendered to the MCP
-/// `ToolResult { is_error: true, content: [Text { text: ... }] }`
-/// shape by the dispatcher — they do NOT propagate as JSON-RPC
-/// errors (clients tend to retry those instead of surfacing).
+/// Errors a tool surface can emit. Rendered by the dispatcher into
+/// an in-band error result — they do NOT propagate as transport-level
+/// errors (clients tend to retry those instead of surfacing them).
 #[derive(Debug, Error)]
 pub enum ToolInvokeError {
     /// The params didn't deserialize, or a required field is missing.
@@ -115,7 +112,7 @@ pub enum ToolInvokeError {
 
 /// A bundle of available [`HostMediatedTool`] impls keyed by their
 /// canonical name. Build once at supervisor start; share across
-/// every dispatcher (MCP, agent vsock RPC).
+/// every dispatcher (agent vsock RPC).
 ///
 /// The registry holds an optional [`Recorder`] for chain-signed
 /// audit emission. When wired, every invoke fires
@@ -189,9 +186,8 @@ impl ToolRegistry {
         self.tools.keys().copied().collect()
     }
 
-    /// True if the named tool is registered. Used by the future
-    /// MCP dispatcher to short-circuit before constructing the
-    /// JSON-RPC response.
+    /// True if the named tool is registered. Lets a dispatcher
+    /// short-circuit before constructing the response.
     pub fn is_registered(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
@@ -202,8 +198,8 @@ impl ToolRegistry {
     /// Recorder.
     ///
     /// **Allowlist note**: This method does NOT consult any
-    /// `ToolPolicy`. The caller (MCP dispatcher / agent vsock
-    /// handler) MUST have already called
+    /// `ToolPolicy`. The caller (the agent vsock handler) MUST have
+    /// already called
     /// [`crate::supervisor::tool_gate::ToolGate::check`] and seen
     /// `ToolDecision::Allow`. Skipping that step is a security bug
     /// — the registry trusts its caller to gate access.

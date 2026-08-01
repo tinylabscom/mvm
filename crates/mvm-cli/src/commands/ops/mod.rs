@@ -7,8 +7,6 @@ pub(super) mod audit_posture;
 pub(super) mod cache;
 pub(super) mod config;
 pub(super) mod group;
-#[cfg(feature = "mcp")]
-pub(super) mod mcp;
 pub(super) mod metrics;
 pub(super) mod network;
 pub(super) mod reconcile;

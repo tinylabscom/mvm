@@ -484,15 +484,12 @@ host = [
 ]
 
 # `user` — everything a user runs to create/drive sandboxes: cosign manifest
-# verification for `--prod`, `build --watch`, and the MCP server that drives
-# sandboxes over the Model Context Protocol (a zero-extra-dep capability that was
-# implemented but composed by no surface, so it shipped in no build).
+# verification for `--prod` and `build --watch`.
 user = [
     "mvm-runtime/manifest-verify",
     "mvm-cli/manifest-verify",
     "mvm-core/manifest-verify",
     "mvm-cli/dev-watch",
-    "mvm-cli/mcp",
 ]
 
 # `dev` — the local-development union. A contributor laptop is BOTH host and

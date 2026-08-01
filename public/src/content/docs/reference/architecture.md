@@ -100,7 +100,7 @@ The workspace is organized by responsibility rather than by platform:
 | Host policy / supervision | `mvm-hostd` | Admission, audit, policy enforcement, launch preparation, per-VM host processes |
 | Guest / protocol surfaces | `mvm-agentd` | Guest agent and in-guest protocol tooling |
 | Domain-specific subsystems | `mvm-fs`, `mvm-net`, `mvm-protocol` | OCI/filesystem handling, networking, audit-log verification |
-| CLI / SDK surface | `mvm-cli`, `mvm-sdk` | User interface and workload authoring APIs (the `mcp` feature folds the former MCP-server crate into `mvm-cli`) |
+| CLI / SDK surface | `mvm-cli`, `mvm-sdk` | User interface and workload authoring APIs |
 
 The root crate (`mvmctl`) is the facade/runtime integration crate. `mvm-cli` is the binary-facing
 command surface.

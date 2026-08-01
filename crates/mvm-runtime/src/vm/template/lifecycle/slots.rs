@@ -13,7 +13,7 @@ use mvm_core::manifest::{
 use tracing::instrument;
 
 /// One row produced by [`template_list_slots`]. Contains just the
-/// fields a UI/MCP caller needs without re-loading every slot's
+/// fields a UI caller needs without re-loading every slot's
 /// `manifest.json` per query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotEntry {

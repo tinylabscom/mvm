@@ -98,7 +98,7 @@ impl Resolve for SsrfFilteringResolver {
         Box::pin(async move {
             // ⚠️ reqwest connects on the **resolver's** SocketAddr port, NOT
             // the URL's — so this 443 forces every request through HTTPS:443.
-            // Fine for the HTTPS-only callers (web_fetch, MCP tools), but it
+            // Fine for the HTTPS-only callers (web_fetch, host tools), but it
             // breaks plain `http` (the request hits :443 → "plain HTTP request
             // was sent to HTTPS port"). HTTP/arbitrary-port callers must use
             // `resolve_ssrf_safe_ips` + `hardened_client_builder_no_dns` +

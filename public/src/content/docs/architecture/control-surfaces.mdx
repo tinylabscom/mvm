@@ -19,7 +19,6 @@ entry point is shipped everywhere.
 | `mvmctl` CLI | Local operation, scripting, CI, debugging, build/run lifecycle. | Shipped and broadest surface. |
 | Runtime SDK | Application-owned sandbox lifecycle from Python or TypeScript. | Partial; see lifecycle matrix. |
 | Declaration SDK | Code-first workload declarations compiled into Workload IR. | Shipped for supported literal declarations. |
-| MCP stdio | Local model-tool integration over the Model Context Protocol. | Shipped for local stdio tool calls. |
 | Console | Human debugging in development images. | Shipped where backend/image policy permits it. |
 | Guest RPC | Process, filesystem, readiness, and telemetry operations. | Backend/image dependent. |
 | REST API | HTTP management surface. | Not claimed in these local docs. |
@@ -128,24 +127,6 @@ export const run = mvm.app({
 The declaration workflow is the safer authoring path for deployable workloads
 because supported declarations are extracted without importing the module.
 
-## MCP stdio
-
-Use the local MCP surface when a model client needs a tool server that routes
-execution into mvm instead of the host process. The server speaks stdio and is
-intended for local tool integration.
-
-Relevant limits are controlled by:
-
-| Variable | Purpose |
-| --- | --- |
-| `MVM_MCP_SESSION_IDLE` | Idle timeout for a tool session. |
-| `MVM_MCP_SESSION_MAX` | Maximum lifetime for a tool session. |
-| `MVM_MCP_MAX_INFLIGHT` | Maximum concurrent tool calls. |
-| `MVM_MCP_MEM_CEILING_MIB` | Per-call memory ceiling before dispatch. |
-
-MCP is not a general remote management API. Keep it local, bounded, and tied to
-policy profiles.
-
 ## Console
 
 Use console access for human debugging:
@@ -184,7 +165,6 @@ calls to `mvmctl` with JSON output and explicit state directories.
 - Use static declarations for reviewable deployable workloads.
 - Use runtime SDK live mode only for trusted SDK scripts.
 - Keep console access out of production-style paths.
-- Keep MCP local and bounded by concurrency, memory, and session limits.
 - Treat stdout, stderr, logs, console bytes, and screenshots as sensitive.
 - Store receipts or audit identifiers with higher-level automation traces.
 

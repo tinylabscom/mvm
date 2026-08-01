@@ -46,7 +46,7 @@
 //! ## What this module is NOT
 //!
 //! - Not a persistent overlay — that comes later. Files
-//!   written here survive across MCP server restarts (the host
+//!   written here survive across supervisor restarts (the host
 //!   directory is durable) but they aren't atomic / aren't
 //!   encrypted / aren't volume-mounted into the workload.
 //! - Not a sandboxing layer — `O_NOFOLLOW` + the path validator

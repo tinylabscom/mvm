@@ -317,8 +317,8 @@ verbs people already expect — and a few they don't.
   you're on. Metering and traces are emitted as standard, open instrumentation,
   so they plug straight into the observability tools teams already run, such as
   Prometheus.
-- **AI-agent integration.** The project speaks MCP, so an AI agent can drive
-  sandboxes as tools — which is exactly the untrusted-code-execution problem the
+- **AI-agent integration.** An AI agent drives sandboxes through the CLI's JSON
+  output and the SDKs — which is exactly the untrusted-code-execution problem the
   whole system is built to make safe. The agent story carries all the way to the
   prompt-injection and egress guardrails covered in the security model: adversarial
   inputs are tracked by provenance, and tainted content can't escalate into a

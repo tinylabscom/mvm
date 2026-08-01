@@ -21,29 +21,29 @@ day-to-day development for no proportional benefit.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | two jobs on PR (`lint` + `test`); all four jobs in merge queue / manual dispatch |
+| `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | two jobs on PR (`lint` + `test`); all three jobs in merge queue / manual dispatch |
 | `architecture.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | structural/architectural invariants; skips the actual work on docs-only PRs, always runs in merge queue |
 | `ci-full.yml` | `workflow_dispatch` only | the full platform + live-VM + OCI-ratification matrix; operator-triggered, never automatic |
 | `security.yml` | `push: tags: v*` + nightly cron + `workflow_dispatch` | dependency audit / advisory scan; release-time backstop plus nightly catch for new advisories |
 | `windows.yml` | `push: tags: v*` + `workflow_dispatch` | non-blocking informational Windows build check; never a required check |
 | `release.yml` | `push: tags: v*` | builds and publishes release artifacts |
 
-### `ci.yml` is capped at four jobs in the merge queue, two on pull requests
+### `ci.yml` is capped at three jobs in the merge queue, two on pull requests
 
 `lint` (fmt, clippy, and the full battery of `xtask` architectural
 checks — see ADR-010) and `test` (the workspace nextest run, doctests,
 hermetic BDD, no-std target checks, and real-kernel ext4 checks) run on
-every pull request. `mcp-server-smoke` and `nix-flake-check` run only in
-the merge queue and on manual `workflow_dispatch`, so ordinary PR updates
-pay for the lighter compile/test signal and the heavier smoke/eval lanes
-run once before merge. The SDK publication dry-run is part of the manual
-full matrix rather than the development lane. Nothing platform-specific
-(macOS, live KVM, Windows) or slow (OCI ratification, dependency audit,
-the full builder-VM image build) runs on every pull request — those live
-in `ci-full.yml`, run only by explicit `workflow_dispatch`.
+every pull request. `nix-flake-check` runs only in the merge queue and
+on manual `workflow_dispatch`, so ordinary PR updates pay for the
+lighter compile/test signal and the heavier eval lane runs once before
+merge. The SDK publication dry-run is part of the manual full matrix
+rather than the development lane. Nothing platform-specific (macOS,
+live KVM, Windows) or slow (OCI ratification, dependency audit, the
+full builder-VM image build) runs on every pull request — those live in
+`ci-full.yml`, run only by explicit `workflow_dispatch`.
 
 Checks that need the same Linux and Rust environment are steps in one of
-these four jobs, not standalone jobs. This shares checkout, toolchain,
+these three jobs, not standalone jobs. This shares checkout, toolchain,
 dependency installation, and cache overhead while retaining the same
 behavioral coverage.
 
@@ -71,16 +71,16 @@ slow to run on every commit.
 `just ci` (`lint`, `test`, `test-doc`, `bdd`) reproduces the core Rust
 checks from `ci.yml`, so a contributor can sanity-check locally before
 pushing. The workflow additionally exercises Linux-only real-kernel
-filesystem behavior, no-std cross-target boundaries, MCP stdio, and Nix
+filesystem behavior, no-std cross-target boundaries, and Nix
 evaluation on the hosted Linux runner.
 
 ## Consequences
 
 A pull-request update gets fast, complete feedback from the checks that
 matter for almost every change — two Linux-only jobs (`lint` and `test`)
-plus the architecture-invariant lane, with the heavier `mcp-server-smoke`
-and `nix-flake-check` lanes deferred to the merge queue. The merge queue
-runs the full set of five required checks against the final merge group.
+plus the architecture-invariant lane, with the heavier `nix-flake-check`
+lane deferred to the merge queue. The merge queue runs the full set of
+required checks against the final merge group.
 Development branches without a pull request consume no hosted runners
 unless an operator dispatches CI manually. Landing that already-checked
 commit on `main` does not run them a third time. An operator opts into the expensive platform, live-VM,
