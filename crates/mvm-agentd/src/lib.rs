@@ -19,6 +19,10 @@ pub mod builder_build;
 pub mod builder_session;
 /// Builder-VM file transfer over vsock (the hvf VMM has no virtio-fs).
 pub mod builder_transfer;
+/// The single waiter for child processes: an orphan reaper that publishes
+/// what it collects, so PID-1 reaping cannot destroy an owned child's exit
+/// status.
+pub mod child_wait;
 /// PTY-over-vsock interactive console — the single dev-only interactive path
 /// into a guest. Gated behind `interactive` so the relay symbols are absent from
 /// a sealed production agent (claim 15: no interactive access to a sealed prod

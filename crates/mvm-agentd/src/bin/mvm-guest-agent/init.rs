@@ -4,8 +4,11 @@
 //! this harness before entering the normal vsock control plane:
 //!
 //!   1. Mount `/proc`, `/sys`, and `/dev`.
-//!   2. Install a SIGCHLD handler so orphaned descendants become zombies
-//!      that PID 1 reaps immediately.
+//!   2. Start the orphan reaper so descendants re-parented to PID 1 are
+//!      collected instead of accumulating as zombies. It is a thread, not
+//!      a SIGCHLD handler, so it can publish the statuses of children the
+//!      agent owns rather than destroying them — see
+//!      [`mvm_agentd::child_wait`].
 //!   3. Hand control back to `main`; the normal vsock accept loop serves
 //!      `ActivateEnvironment` as the only allowed verb.
 //!   4. `apply_activation` mounts the rootfs, runtime overlay, and volumes,
@@ -13,9 +16,6 @@
 //!
 //! Linux-only.  On non-Linux targets the functions are no-ops so the
 //! workspace still compiles on macOS.
-
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use mvm_agentd::guest_mount;
 use mvm_agentd::vsock::ActivateEnvironment;
@@ -47,7 +47,7 @@ pub(crate) fn early_setup() {
             // /sys, and /dev for the namespace and drops CAP_SYS_ADMIN, so
             // the initramfs early mounts would fail with EPERM. The agent
             // is still PID 1 of the container's PID namespace, so the
-            // SIGCHLD reaper is still required.
+            // orphan reaper is still required.
             eprintln!(
                 "mvm-guest-agent: unix transport — container runtime provides early filesystems"
             );
@@ -55,7 +55,7 @@ pub(crate) fn early_setup() {
             fatal(&format!("early filesystem mount failed: {e}"));
         }
         provision_host_signer_anchor();
-        install_sigchld_handler();
+        mvm_agentd::child_wait::install_orphan_reaper();
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -130,54 +130,4 @@ fn fatal(message: &str) -> ! {
     );
     std::thread::sleep(std::time::Duration::from_millis(200));
     std::process::exit(1);
-}
-
-// ============================================================================
-// SIGCHLD handling (Linux only)
-// ============================================================================
-
-#[cfg(target_os = "linux")]
-static SIGCHLD_INSTALLED: AtomicBool = AtomicBool::new(false);
-
-#[cfg(target_os = "linux")]
-fn install_sigchld_handler() {
-    if SIGCHLD_INSTALLED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-
-    // SAFETY: `on_sigchld` is async-signal-safe: it only calls `waitpid`
-    // in a loop with `WNOHANG` and writes to `STDERR_FILENO` on failure.
-    // The handler is installed once from the main thread before any child
-    // processes exist.
-    unsafe {
-        let mut action: libc::sigaction = std::mem::zeroed();
-        action.sa_sigaction = on_sigchld as *const () as usize;
-        action.sa_flags = libc::SA_NOCLDSTOP | libc::SA_RESTART;
-        let rc = libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut());
-        if rc != 0 {
-            fatal(&format!(
-                "sigaction(SIGCHLD) failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-    }
-}
-
-/// SIGCHLD handler.  Reap any zombie children without blocking.  The
-/// loop is required because multiple children may exit while the signal
-/// is masked and Linux collapses concurrent SIGCHLD deliveries.
-#[cfg(target_os = "linux")]
-unsafe extern "C" fn on_sigchld(_sig: libc::c_int) {
-    loop {
-        let mut status = 0;
-        // SAFETY: `waitpid(-1, WNOHANG)` is async-signal-safe and does not
-        // block.  The status pointer is owned on this signal-handler stack.
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if pid <= 0 {
-            break;
-        }
-    }
 }
