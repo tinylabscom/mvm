@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use anyhow::{Result, bail};
+use mvm_core::checkpoint::CheckpointId;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
     SnapshotCapability, StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState,
@@ -32,6 +33,7 @@ use mvm_core::vm_backend::{
     VmStatus,
 };
 
+use crate::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
 use crate::mock_guest_agent::MockGuestAgent;
 
 /// Per-VM state held by [`MockBackend`].
@@ -97,6 +99,42 @@ impl MockBackend {
     pub fn with_failing_spawn_standby(mut self) -> Self {
         self.fail_spawn_standby = true;
         self
+    }
+
+    /// Test-only counterpart of the runner-backed spawn-and-capture path.
+    ///
+    /// The mock has no VMM process, but pool bookkeeping still needs the same
+    /// captured checkpoint that a real runner returns so audit and claim tests
+    /// exercise the production contract rather than a bare, unclaimable handle.
+    pub(crate) fn spawn_standby_captured(
+        &self,
+        ctx: &crate::workload_runner::SpawnContext<'_>,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let mut handle = self.spawn_standby(spec)?;
+        let rootfs = spec.image_path.as_deref().ok_or_else(|| {
+            StandbyError::SpawnFailed(
+                "mock standby capture requires a launch rootfs image".to_string(),
+            )
+        })?;
+        let checkpoint_id = CheckpointId::new(format!("standby-parent-{}", spec.id));
+        capture_fs_quick(
+            ctx.checkpoints,
+            CaptureFsQuickParams {
+                id: checkpoint_id.clone(),
+                vm_name: spec.id.clone(),
+                rootfs: rootfs.into(),
+                supervisor_config_digest: String::new(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
+                tag: None,
+                created_unix: crate::standby_pool::now_unix_secs(),
+                quiesced: true,
+            },
+        )
+        .map_err(|e| StandbyError::SpawnFailed(format!("capture mock standby parent: {e}")))?;
+        handle.parent_checkpoint = Some(checkpoint_id.to_string());
+        Ok(handle)
     }
 
     /// Test helper: count VMs currently recorded.
