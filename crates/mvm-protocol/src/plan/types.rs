@@ -38,7 +38,7 @@ pub enum NetworkMode {
     /// imply it — and there is no fallback between it and the other modes.
     /// It trades the socket-aware path's connection intent and owned-cleartext
     /// substitution for IP-stack fidelity; see
-    /// `specs/adrs/035-l3-tun-over-vsock.md` §"Capability difference".
+    /// `specs/adrs/036-l3-tun-over-vsock.md` §"Capability difference".
     L3Vsock,
 }
 

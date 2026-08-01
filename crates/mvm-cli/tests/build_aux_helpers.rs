@@ -9,10 +9,33 @@ fn bins(specs: &[AuxHelperSpec]) -> Vec<&str> {
     specs.iter().map(|s| s.bin).collect()
 }
 
+/// Every host/arch combination mvmctl builds for.
+const HOSTS: &[(&str, &str)] = &[
+    ("linux", "x86_64"),
+    ("linux", "aarch64"),
+    ("macos", "x86_64"),
+    ("macos", "aarch64"),
+];
+
 #[test]
-fn substitution_endpoint_builds_on_every_host() {
-    let specs = aux_helper_specs("linux", "x86_64", false);
-    assert_eq!(bins(&specs), vec!["mvm-substitution-endpoint"]);
+fn the_host_independent_helpers_build_on_every_host() {
+    // Neither of these is gated on host capability, and the reason is the
+    // same for both: whether a launch uses the egress endpoint or the L3
+    // gateway is decided at admission from the signed plan. A binary that
+    // existed on some hosts and not others would turn that into a
+    // host-dependent decision.
+    for (os, arch) in HOSTS {
+        for libkrun in [false, true] {
+            let specs = aux_helper_specs(os, arch, libkrun);
+            let bins = bins(&specs);
+            for required in ["mvm-substitution-endpoint", "mvm-netd"] {
+                assert!(
+                    bins.contains(&required),
+                    "{required} must build on {os}/{arch} (libkrun={libkrun}), got {bins:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

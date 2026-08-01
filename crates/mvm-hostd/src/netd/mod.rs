@@ -11,10 +11,24 @@
 //! strictly *after* that boundary. None of them is ever attached to a guest
 //! or exposed as a hypervisor network device.
 //!
-//! See `specs/adrs/035-l3-tun-over-vsock.md`.
+//! See `specs/adrs/036-l3-tun-over-vsock.md`.
 
 /// The already-admitted configuration the launch path hands `mvm-netd`.
-pub mod config;
+/// Defined in `mvm-net` so the launch path can build one without depending
+/// on this crate; re-exported here because this is where it is consumed.
+pub mod config {
+    pub use mvm_net::l3::config::*;
+
+    /// Map the wire layout onto this crate's provider layout. The
+    /// conversion lives here, not in the policy core, so the core does not
+    /// have to know the daemon's types.
+    pub fn uds_layout(value: NetdUdsLayout) -> super::UdsLayout {
+        match value {
+            NetdUdsLayout::PerVmDir => super::UdsLayout::PerVmDir,
+            NetdUdsLayout::HvfVsockDir => super::UdsLayout::HvfVsockDir,
+        }
+    }
+}
 pub mod datapath;
 pub mod gateway;
 pub mod metrics;

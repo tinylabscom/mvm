@@ -890,6 +890,10 @@ impl VmBackend for LibkrunBackend {
 
         let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
         let cfg = build_supervisor_config(config, &state_dir)?;
+        // The L3 gateway is orthogonal to the substitution endpoint: a
+        // launch may need one, the other, or neither. It goes first because
+        // it must be listening before the guest boots and dials it.
+        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir)?;
         let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(
             &config.name,
             &state_dir,
@@ -1058,6 +1062,7 @@ impl VmBackend for LibkrunBackend {
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        crate::netd_spawn::reap_netd(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer too (no-op when none spawned),
         // so they can't outlive the guest.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));

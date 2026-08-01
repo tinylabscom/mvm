@@ -22,11 +22,21 @@ pub(crate) fn aux_helper_specs(
     target_arch: &str,
     libkrun_present: bool,
 ) -> Vec<AuxHelperSpec> {
-    let mut specs = vec![AuxHelperSpec {
-        package: "mvm-hostd",
-        bin: "mvm-substitution-endpoint",
-        features: &[],
-    }];
+    let mut specs = vec![
+        AuxHelperSpec {
+            package: "mvm-hostd",
+            bin: "mvm-substitution-endpoint",
+            features: &[],
+        },
+        // The per-VM L3 gateway. Built everywhere mvmctl is: whether a host
+        // can serve the tunnel is decided at admission, not by whether the
+        // binary happens to exist.
+        AuxHelperSpec {
+            package: "mvm-hostd",
+            bin: "mvm-netd",
+            features: &[],
+        },
+    ];
     if target_os == "macos" && target_arch == "aarch64" {
         specs.push(AuxHelperSpec {
             package: "mvm-hostd",

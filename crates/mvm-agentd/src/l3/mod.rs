@@ -6,7 +6,7 @@
 //! reach the host network, because nothing else exists to reach it with —
 //! this mode runs on backends that present no network device at all.
 //!
-//! See `specs/adrs/035-l3-tun-over-vsock.md`.
+//! See `specs/adrs/036-l3-tun-over-vsock.md`.
 
 pub mod agent;
 pub mod netcfg;

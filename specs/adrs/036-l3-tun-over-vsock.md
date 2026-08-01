@@ -1,4 +1,4 @@
-# ADR-035 — L3 TUN-over-vsock, an opt-in compatibility network mode
+# ADR-036 — L3 TUN-over-vsock, an opt-in compatibility network mode
 
 **Status: Accepted**
 **Date: 2026-07-31**
@@ -574,7 +574,7 @@ being retried. Inbound connections are routed only to the session that
 declared them, are byte- and connection-accounted, and every listener is
 closed on machine stop, so a restart cannot inherit a stale mapping.
 TCP is implemented in this change. **UDP ingress is not** — it is an
-explicit follow-up in plan 279, not a claimed feature.
+explicit follow-up in plan 285, not a claimed feature.
 
 ## Resource bounds
 
@@ -667,8 +667,11 @@ Three ways one could try, and why only one is taken:
 3. **Refuse the combination.** Taken. A plan that binds secrets, enables
    reversible replacement, or enables per-destination redaction cannot
    select `l3-vsock`; `mvm_net::l3::check_mode_compatibility` refuses it at
-   admission, before any build or boot, and the error names
-   `--network-mode host-vsock-proxy` as the fix.
+   admission, before any build or boot, and the error names dropping
+   `raw_ip_stack` from the workload's network declaration as the fix.
+   In practice derivation already keeps such a plan on the socket-aware
+   transport, so the gate is the backstop against a plan constructed
+   directly rather than the ordinary path.
 
 Option 3 is the important one. A workload whose substitution silently
 stopped applying looks exactly like one that never needed it, which is how a

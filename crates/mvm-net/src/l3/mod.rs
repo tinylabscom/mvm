@@ -12,12 +12,16 @@
 //! projection that nftables and the socket-aware gate consume, so
 //! `--allow-host api.example.com:443` means one thing everywhere.
 //!
-//! See `specs/adrs/035-l3-tun-over-vsock.md`.
+//! See `specs/adrs/036-l3-tun-over-vsock.md`.
 
 pub mod admit;
 pub mod alloc;
 /// Whether a plan's networking mode can serve what the plan asks for.
 pub mod compat;
+/// The already-admitted configuration the launch path hands the host
+/// gateway. Lives here rather than in the daemon crate so the launch path
+/// can build one without depending upward.
+pub mod config;
 pub mod dns;
 pub mod flow;
 pub mod ingress;
@@ -29,6 +33,7 @@ pub use admit::{
 };
 pub use alloc::{AddressAllocator, AddressLease, AllocError, DEFAULT_POOL};
 pub use compat::{ModeCompatError, SubstitutionRequirements, check_mode_compatibility};
+pub use config::{NETD_READY_MARKER, NetdConfig, NetdEgress, NetdRule, NetdUdsLayout};
 pub use dns::{DnsBinding, DnsBindingStore, DnsDeny, DnsLimits};
 pub use flow::{FlowAdmission, FlowCounters, FlowKey, FlowLimits, FlowState, FlowTable};
 pub use ingress::{IngressError, IngressMapping, IngressTable};

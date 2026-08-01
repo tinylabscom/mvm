@@ -74,9 +74,10 @@ pub enum ModeCompatError {
     #[error(
         "l3-vsock is incompatible with this plan: {}. \
          In l3-vsock mode the guest originates its own connections, so the host sees \
-         ciphertext and cannot substitute or redact inside them. Use \
-         --network-mode host-vsock-proxy for this workload, or remove the \
-         requirement from the plan.",
+         ciphertext and cannot substitute or redact inside them. Drop \
+         raw_ip_stack from this workload's network declaration so it runs \
+         on the socket-aware transport, or remove the requirement from the \
+         plan.",
         .reasons.join("; ")
     )]
     NeedsOwnedCleartext { reasons: Vec<&'static str> },
@@ -147,7 +148,7 @@ mod tests {
         assert!(matches!(err, ModeCompatError::NeedsOwnedCleartext { .. }));
         // The message must tell the operator what to do, not just refuse.
         let msg = err.to_string();
-        assert!(msg.contains("host-vsock-proxy"), "{msg}");
+        assert!(msg.contains("raw_ip_stack"), "{msg}");
         assert!(msg.contains("binds secrets"), "{msg}");
     }
 

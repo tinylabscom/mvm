@@ -1,7 +1,7 @@
-# Plan 279 — L3 TUN-over-vsock network mode
+# Plan 285 — L3 TUN-over-vsock network mode
 
 **Status: In progress**
-**ADR: [035](../adrs/035-l3-tun-over-vsock.md)**
+**ADR: [036](../adrs/036-l3-tun-over-vsock.md)**
 
 Opt-in `l3-vsock` network mode: the guest gets a point-to-point `mvm0`
 TUN interface, the guest agent frames raw IP packets over dedicated
@@ -9,7 +9,7 @@ vsock connections, and a machine-scoped host gateway applies policy
 before anything reaches host networking. No guest NIC, no TAP, no
 bridge, no L2.
 
-Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
+Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
 
 ## W1 — Canonical mode + plan representation
 
@@ -27,6 +27,9 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       in the signed plan as the admitted contract
 - [x] `--allow-host` compiles into the same `CanonicalEgress` the
       gateway consumes — no second policy representation
+- [x] plan synthesis derives `L3NetworkSpec` from the admitted
+      `NetworkMode`, so the mode and the spec cannot disagree and the
+      compatibility gate never sees a half-formed L3 plan
 - [x] machine inspect / receipt output names the admitted mode
 
 ## W2 — Shared protocol (`mvm-protocol::l3`)
@@ -88,11 +91,16 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
 - [x] macOS datapath: fails closed with a named error; admission
       refuses `l3-vsock` on macOS
 - [x] deterministic cleanup on stop and on failed startup
+- [x] launch-path wiring: the workload runner starts the gateway and
+      waits for it to report both channels bound **before** the VM boots
+      (a guest that dials an unbound channel fails closed for no
+      reason), and every stop path — clean stop, crashed-guest stop —
+      reaps it, so a host TUN and an nft table never outlive the guest
 
 ## W6 — Audit + metrics
 
 - [x] `LocalAuditKind` variants for the tunnel/flow/DNS/ingress events
-      in ADR-035 §Audit
+      in ADR-036 §Audit
 - [x] bounded metrics: packets/bytes by direction, active flows, denied
       flows, malformed frames, queue drops, DNS decisions, reconnects
 - [x] no payloads, no DNS payloads beyond normalized metadata, no
@@ -128,7 +136,7 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       transport behind the backend-neutral abstraction, covering
       Firecracker, libkrun, and HVF; identity comes from the listener, not
       the reusable socket path
-- [x] measured overhead on two hosts, recorded in ADR-035 §"Measured
+- [x] measured overhead on two hosts, recorded in ADR-036 §"Measured
       overhead"
 - [x] `mvm-netd` as a real per-VM process: config on stdin, channels bound
       before the ready marker so the guest cannot race it, deterministic
@@ -139,7 +147,7 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       not come up; `mvm-net-agent` staged into the runtime overlay
 - [x] live boot witness on real Firecracker: `CONFIG_TUN` kernel built,
       guest has only loopback before the agent runs, `mvm0` created with
-      `ARPHRD_NONE` and no MAC — recorded in ADR-035 §"Live boot witness"
+      `ARPHRD_NONE` and no MAC — recorded in ADR-036 §"Live boot witness"
 - [x] `network.raw_ip_stack` end to end: declared in the workload's
       decorator, parsed into the IR, read by the run path, and derived into
       the signed plan's `network_mode`
@@ -151,7 +159,7 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
 
 ## W8 — Documentation
 
-- [x] ADR-035
+- [x] ADR-036
 - [x] user-facing guide with an example and an explicit warning that
       L3 mode cannot inspect or substitute inside encrypted traffic
 - [x] claim catalog: the mode's guarantees and its named limits
@@ -175,7 +183,7 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       network-device field, regression-gated, and `l3-vsock` is refused on
       any backend that does not advertise both `l3_vsock` and
       `no_routable_guest_nic`
-- [x] launch-path audit recorded in ADR-035 §"Launch-path convergence"
+- [x] launch-path audit recorded in ADR-036 §"Launch-path convergence"
 - [x] macOS: `MacosUserspaceGateway` declares its intended capabilities and
       refuses until implemented
 - [x] platform matrix (Linux / macOS / WSL2 / native Windows) documented
@@ -197,7 +205,7 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       needing no privileges at all. Capability declaration and refusal
       ship; the flow translator does not.
 - [ ] **macOS `utun` + PF datapath.** The later full-packet backend.
-      Requires a privileged host helper mvm does not have. ADR-035 §macOS
+      Requires a privileged host helper mvm does not have. ADR-036 §macOS
       names the exact four privileged operations. Follow-up must add a
       helper whose API is only those operations plus status and cleanup —
       no arbitrary exec, no arbitrary PF rules, no file access.

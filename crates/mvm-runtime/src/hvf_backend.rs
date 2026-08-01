@@ -608,6 +608,7 @@ impl VmBackend for HvfBackend {
         // check), so a crashed VM's decrypted-secret process can't outlive the
         // guest. Idempotent + no-op when the VM spawned none (no secrets).
         crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &id.0);
+        crate::netd_spawn::reap_netd(&state_dir);
         // Deregister from the per-tenant host-agent daemon (no-op if this VM
         // never registered — an unadmitted dev VM, or a failed registration
         // that was already logged). The daemon itself stays warm.

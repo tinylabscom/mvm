@@ -10,7 +10,7 @@
 //! virtio-net header, no offload metadata, and no Ethernet frame. A
 //! `PACKET` message carries one complete IP packet and nothing else.
 //!
-//! See `specs/adrs/035-l3-tun-over-vsock.md`.
+//! See `specs/adrs/036-l3-tun-over-vsock.md`.
 
 pub mod frame;
 pub mod ip;

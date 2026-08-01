@@ -3015,6 +3015,7 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-fs",
+ "mvm-net",
  "mvm-protocol",
  "nix 0.29.0",
  "object_store",

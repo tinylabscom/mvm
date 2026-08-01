@@ -65,7 +65,7 @@ Two consequences worth knowing:
   need it.** On macOS today there is no L3 datapath, so a `raw_ip_stack`
   workload is refused with a stated reason. Everything else runs normally.
 
-## What you give up## What you give up
+## What you give up
 
 :::caution[L3 mode cannot inspect or substitute inside encrypted traffic]
 In L3 mode mvm sees **packets**, not connections. Once your application

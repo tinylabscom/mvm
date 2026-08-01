@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 /// a guest that dials immediately cannot lose the race.
 pub const NETD_READY_MARKER: &str = "MVM_NETD_READY";
 
+/// Default bound on frames queued toward the guest.
+pub const DEFAULT_QUEUE_DEPTH: usize = 256;
+
+/// Default ceiling on DNS queries per second for one machine.
+pub const DEFAULT_DNS_QPS: u32 = 50;
+
 /// Filename of the per-VM pid file, under the VM state directory.
 pub const NETD_PID_FILE: &str = "netd.pid";
 
@@ -62,15 +68,15 @@ pub struct NetdConfig {
 }
 
 fn default_max_flows() -> usize {
-    mvm_net::l3::flow::DEFAULT_MAX_FLOWS
+    crate::l3::flow::DEFAULT_MAX_FLOWS
 }
 
 fn default_queue_depth() -> usize {
-    super::gateway::DEFAULT_QUEUE_DEPTH
+    DEFAULT_QUEUE_DEPTH
 }
 
 fn default_dns_qps() -> u32 {
-    super::gateway::DEFAULT_DNS_QPS
+    DEFAULT_DNS_QPS
 }
 
 /// Socket-directory convention, mirrored on the wire so the subprocess does
@@ -82,15 +88,6 @@ pub enum NetdUdsLayout {
     PerVmDir,
     /// The HVF supervisor's vsock listener directory.
     HvfVsockDir,
-}
-
-impl From<NetdUdsLayout> for super::UdsLayout {
-    fn from(value: NetdUdsLayout) -> Self {
-        match value {
-            NetdUdsLayout::PerVmDir => Self::PerVmDir,
-            NetdUdsLayout::HvfVsockDir => Self::HvfVsockDir,
-        }
-    }
 }
 
 /// The resolved egress grant.
@@ -146,13 +143,13 @@ pub enum NetdConfigError {
     #[error("UDP ingress is not implemented in protocol version 1")]
     UdpIngressUnsupported,
     #[error("{0}")]
-    Ingress(#[from] mvm_net::l3::IngressError),
+    Ingress(#[from] crate::l3::IngressError),
 }
 
 impl NetdConfig {
     /// The host-owned instance identity this configuration is bound to.
-    pub fn instance(&self) -> mvm_net::channel::VmInstanceIdentity {
-        mvm_net::channel::VmInstanceIdentity::new(
+    pub fn instance(&self) -> crate::channel::VmInstanceIdentity {
+        crate::channel::VmInstanceIdentity::new(
             self.node_id.clone(),
             self.vm_id.clone(),
             self.boot_id.clone(),
@@ -163,7 +160,7 @@ impl NetdConfig {
     /// Lower into the policy core's types, refusing anything unparseable
     /// rather than dropping it. A rule that silently vanished would widen
     /// the grant, so every failure here is fatal to the whole config.
-    pub fn to_policy(&self) -> Result<mvm_net::l3::L3PolicyConfig, NetdConfigError> {
+    pub fn to_policy(&self) -> Result<crate::l3::L3PolicyConfig, NetdConfigError> {
         use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
 
         let egress = match &self.egress {
@@ -204,13 +201,13 @@ impl NetdConfig {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(mvm_net::l3::L3PolicyConfig {
+        Ok(crate::l3::L3PolicyConfig {
             egress,
             admitted_private,
             icmp: match self.icmp {
-                NetdIcmpPolicy::Deny => mvm_net::l3::IcmpPolicy::Deny,
-                NetdIcmpPolicy::ErrorsOnly => mvm_net::l3::IcmpPolicy::ErrorsOnly,
-                NetdIcmpPolicy::EchoAndErrors => mvm_net::l3::IcmpPolicy::EchoAndErrors,
+                NetdIcmpPolicy::Deny => crate::l3::IcmpPolicy::Deny,
+                NetdIcmpPolicy::ErrorsOnly => crate::l3::IcmpPolicy::ErrorsOnly,
+                NetdIcmpPolicy::EchoAndErrors => crate::l3::IcmpPolicy::EchoAndErrors,
             },
             // Version 1 never carries fragments.
             allow_fragments: false,
@@ -221,8 +218,8 @@ impl NetdConfig {
 
     /// Lower the declared ingress mappings, refusing UDP rather than
     /// silently ignoring it.
-    pub fn to_ingress_table(&self) -> Result<mvm_net::l3::IngressTable, NetdConfigError> {
-        let mut table = mvm_net::l3::IngressTable::with_defaults();
+    pub fn to_ingress_table(&self) -> Result<crate::l3::IngressTable, NetdConfigError> {
+        let mut table = crate::l3::IngressTable::with_defaults();
         for mapping in &self.ingress {
             if mapping.proto != "tcp" {
                 return Err(NetdConfigError::UdpIngressUnsupported);
@@ -235,7 +232,7 @@ impl NetdConfig {
                         field: "ingress host address",
                         value: mapping.host_addr.clone(),
                     })?;
-            table.declare(mvm_net::l3::IngressMapping::tcp(
+            table.declare(crate::l3::IngressMapping::tcp(
                 host_addr,
                 mapping.host_port,
                 mapping.guest_port,
@@ -245,8 +242,8 @@ impl NetdConfig {
     }
 
     /// The address lease this configuration assigns.
-    pub fn lease(&self) -> mvm_net::l3::AddressLease {
-        mvm_net::l3::AddressLease::for_test(self.gateway_ipv4, self.guest_ipv4)
+    pub fn lease(&self) -> crate::l3::AddressLease {
+        crate::l3::AddressLease::for_test(self.gateway_ipv4, self.guest_ipv4)
     }
 }
 

@@ -118,8 +118,8 @@ pub(in crate::commands) enum RunProfile {
 pub(in crate::commands) struct RunArgs {
     /// The admitted networking transport. Carried here rather than
     /// re-derived downstream so exactly one value reaches the signed plan.
-    /// Not a flag of its own — `machine run --network-mode` selects it and
-    /// the machine surface translates it.
+    /// Not a flag of its own and not operator-selectable: the machine
+    /// surface derives it from what the workload declares it needs.
     #[arg(skip)]
     pub network_mode: mvm_protocol::plan::NetworkMode,
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a

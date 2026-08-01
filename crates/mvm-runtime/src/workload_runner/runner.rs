@@ -967,6 +967,12 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
             config,
         )?;
 
+        // The L3 gateway must be listening before the guest boots and dials
+        // it: there is no retry and no fallback, so a guest that finds no
+        // listener has no network at all. A no-op for every plan that did
+        // not select the tunnel.
+        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir)?;
+
         // Owned decode + defaults must outlive the `WorkloadLaunchInputs` borrows
         // below, so bind them here rather than inline.
         let default_redaction = RedactionPolicy::default();
@@ -999,8 +1005,17 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         };
         // The supervisor + endpoint are detached/disk-backed; the live handle is
         // reconstructed by id via `attach`, so the boot handle is dropped here.
-        let _vm = self.start_workload(&inputs)?;
-        Ok(VmId(config.name.clone()))
+        //
+        // A failure past this point leaves no VM, so the gateway spawned
+        // above would hold a host TUN and an nft table for a guest that
+        // never existed. Reap before propagating.
+        match self.start_workload(&inputs) {
+            Ok(_vm) => Ok(VmId(config.name.clone())),
+            Err(e) => {
+                crate::netd_spawn::reap_netd(&state_dir);
+                Err(e)
+            }
+        }
     }
 
     fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
@@ -1017,6 +1032,9 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // decrypted-secret process can't outlive the guest. Idempotent + a no-op
         // when the VM spawned none.
         reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        // The gateway holds the host TUN and this VM's nft table; both must
+        // die with the guest rather than outlive it.
+        crate::netd_spawn::reap_netd(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer (fork path) and deregister from
         // the per-tenant host-agent daemon (daemon path), so neither can outlive
         // the guest. Each is an idempotent no-op for the other path and for a VM
