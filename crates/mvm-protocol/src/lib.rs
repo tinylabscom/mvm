@@ -28,4 +28,5 @@ pub mod merkle;
 pub mod plan;
 pub mod policy;
 pub mod protocol;
+pub mod stream;
 pub mod verify;
