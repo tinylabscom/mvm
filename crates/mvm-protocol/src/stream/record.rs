@@ -46,9 +46,11 @@ pub enum StreamKind {
 /// `prev_hash` links each record to [`StreamRecord::hash`] of its
 /// predecessor — the same chaining shape [`crate::verify`] gives the audit
 /// log, applied per output stream rather than per tenant. The first record
-/// in a chain carries an all-zero `prev_hash`; `stream::verify_chain`
-/// enforces both that genesis marker and the unbroken link for every
-/// record after it.
+/// of a whole stream carries an all-zero `prev_hash`; `stream::verify_chain`
+/// enforces that genesis marker plus the unbroken link for every record
+/// after it, while `stream::verify_chain_from` accepts any caller-supplied
+/// anchor in place of the zero marker, for verifying a partial window of a
+/// longer chain instead of the whole thing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamRecord {
