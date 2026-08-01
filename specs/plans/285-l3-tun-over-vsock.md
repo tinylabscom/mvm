@@ -96,6 +96,13 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       (a guest that dials an unbound channel fails closed for no
       reason), and every stop path — clean stop, crashed-guest stop —
       reaps it, so a host TUN and an nft table never outlive the guest
+- [x] the boot path reads the declaration. `machine run` passed a
+      hardcoded `false` to `preflight_network`, so only the admission-only
+      `--mode plan` route honoured `raw_ip_stack` and no *booting* workload
+      could reach the tunnel. `runtime.rs` now reads the same workload-IR
+      field the admission path reads, so a workload cannot be admitted for
+      one transport and booted on another; unreadable IR fails closed
+      rather than guessing
 
 ## W6 — Audit + metrics
 

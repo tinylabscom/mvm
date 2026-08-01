@@ -31,7 +31,7 @@ pub(super) use admission::SECURITY_POLICY_FILENAME;
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;
 
-pub(super) use oci_persist::load_workload_ir;
+pub(in crate::commands) use oci_persist::load_workload_ir;
 pub(in crate::commands) use oci_persist::{
     PersistentImageStartParams, start_persistent_oci_machine,
 };
