@@ -6,14 +6,12 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-
 use crate::supervisor::audit::{FlowCloseReason, FlowDirection};
 use crate::supervisor::network::PacketCtx;
 use crate::supervisor::network::packet::{self, FlowKey};
 use crate::supervisor::network::pipeline::{PacketDecision, run_packet_pipeline};
 
-use super::events::{FlowEvent, FlowEventKind, ObserverWiring};
+use super::events::{FlowEvent, FlowEventKind, GatewayAuditEventSender, ObserverWiring};
 use super::flow_policy::{FlowAction, FlowDecisionCtx, FlowPolicy};
 
 /// True if `raw` parses to a flow already in `killed`. Cheap:
@@ -42,7 +40,7 @@ pub(super) async fn run_libkrun_native_gateway_bridge(
     vm_name: String,
     tenant: String,
     policy: Arc<dyn FlowPolicy>,
-    event_tx: mpsc::Sender<FlowEvent>,
+    event_tx: GatewayAuditEventSender,
     wiring: ObserverWiring,
 ) {
     use tokio::net::UnixDatagram;
@@ -348,7 +346,7 @@ pub(super) fn libkrun_reply_path(supervisor_listen_path: &std::path::Path) -> Pa
 
 #[cfg(test)]
 mod tests {
-    use super::super::events::BRIDGE_MTU;
+    use super::super::events::{BRIDGE_MTU, audit_event_channel};
     use super::super::flow_policy::{PlanFlowPolicy, bare_network_policy_egress};
     use super::super::test_support::*;
     use super::*;
@@ -433,7 +431,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
 
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let policy = unrestricted_flow_policy();
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gateway_path.clone(),
@@ -476,7 +474,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
 
-        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, mut rx) = audit_event_channel(64);
         let policy = unrestricted_flow_policy();
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gateway_path.clone(),
@@ -505,6 +503,7 @@ mod tests {
         for _ in 0..4 {
             match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
                 Ok(Some(ev)) => {
+                    let ev = ev.into_flow().expect("bridge emits a flow event");
                     if let FlowEventKind::ObserverFault { observer, reason } = ev.kind {
                         assert_eq!(observer, "test-drop");
                         assert_eq!(reason, "drop");
@@ -588,7 +587,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
 
-        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, mut rx) = audit_event_channel(64);
         let policy = unrestricted_flow_policy();
         // deny_all egress → the egress frame to 93.184.216.34:443 has no
         // matching rule → L4PolicyScan drops it at the chokepoint.
@@ -622,6 +621,7 @@ mod tests {
         for _ in 0..4 {
             match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
                 Ok(Some(ev)) => {
+                    let ev = ev.into_flow().expect("bridge emits a flow event");
                     if let FlowEventKind::ObserverFault { observer, reason } = ev.kind {
                         assert_eq!(observer, "l4-policy");
                         assert_eq!(reason, "drop");
@@ -646,7 +646,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let policy = unrestricted_flow_policy();
         // Allow tcp to exactly 93.184.216.34:443 — the frame's destination.
         let allow = canonicalize_l4(&[L4RuleSpec {
@@ -688,7 +688,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
-        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, mut rx) = audit_event_channel(64);
         let policy = unrestricted_flow_policy();
         // Egress allow-list = {example.com} → a UDP/53 query for a host outside
         // it is sink-holed at the chokepoint.
@@ -724,6 +724,7 @@ mod tests {
         for _ in 0..4 {
             match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
                 Ok(Some(ev)) => {
+                    let ev = ev.into_flow().expect("bridge emits a flow event");
                     if let FlowEventKind::ObserverFault { observer, reason } = ev.kind {
                         assert_eq!(observer, "dns-sinkhole");
                         assert_eq!(reason, "drop");
@@ -748,7 +749,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let policy = unrestricted_flow_policy();
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
@@ -793,7 +794,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
-        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, mut rx) = audit_event_channel(64);
         // Deny-all resolved policy → PlanFlowPolicy drops the egress flow at
         // open, before any packet scan runs. NoopScan wiring proves the drop is
         // the FlowPolicy's, not the packet layer's.
@@ -830,6 +831,7 @@ mod tests {
         for _ in 0..4 {
             match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
                 Ok(Some(ev)) => {
+                    let ev = ev.into_flow().expect("bridge emits a flow event");
                     if let FlowEventKind::Closed { reason } = ev.kind {
                         assert!(matches!(reason, FlowCloseReason::PolicyDropped));
                         assert_eq!(ev.direction, FlowDirection::Egress);
@@ -854,7 +856,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
 
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         // `open` egress mode → the flow opens; with NoopScan the frame is
         // forwarded to the gateway.
         let eff = mvm_core::policy::EffectivePolicy {
@@ -910,7 +912,7 @@ mod tests {
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
-        let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, mut rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -937,6 +939,7 @@ mod tests {
         for _ in 0..4 {
             match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
                 Ok(Some(ev)) => {
+                    let ev = ev.into_flow().expect("bridge emits a flow event");
                     if matches!(
                         ev.kind,
                         FlowEventKind::Closed {
@@ -975,7 +978,7 @@ mod tests {
         let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gateway_path.clone(),
             sup_listen.clone(),
@@ -1022,7 +1025,7 @@ mod tests {
         let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gateway_path.clone(),
             sup_listen.clone(),
@@ -1100,7 +1103,7 @@ mod tests {
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -1141,7 +1144,7 @@ mod tests {
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -1179,7 +1182,7 @@ mod tests {
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -1225,7 +1228,7 @@ mod tests {
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -1265,7 +1268,7 @@ mod tests {
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
@@ -1309,7 +1312,7 @@ mod tests {
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
-        let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
+        let (tx, _rx) = audit_event_channel(64);
         let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),

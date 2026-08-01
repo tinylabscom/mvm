@@ -38,6 +38,19 @@
       missing is a typed action identity and a tree manifest that can see a
       permission bit.
 
+- [x] Transcript evidence is now authenticated as one ordered ciphertext
+      evidence set before decryption. Version-2 manifests carry an RFC-6962
+      Merkle root over capture bindings, bounds, wrapped-key metadata, and
+      ordered ciphertext chunk records; the gateway persists the sealed
+      manifest atomically before emitting a chain-signed
+      `gateway.transcript_sealed` entry. Export requires exactly one matching
+      tenant audit-chain anchor before KEK unwrap and fails closed for legacy
+      version-1 manifests or any root, binding, chunk, or chain drift. The real
+      `mvmctl trust audit transcript export` path is covered by success and
+      tamper-refusal scenarios; 8,403 workspace tests, doctests, clippy/model
+      gates, and all 76 BDD scenarios pass. Tracked in
+      `specs/plans/280-transcript-root-audit-binding.md`.
+
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added
       `xtask` gates for R1 (`check-conformance`), R2 (`check-honesty`), and R4

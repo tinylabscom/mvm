@@ -6,6 +6,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+
 use crate::supervisor::audit::{FlowCloseReason, FlowDirection};
 use crate::supervisor::network::Observer;
 use crate::supervisor::network::latency::ObserverLatency;
@@ -39,6 +41,71 @@ pub enum FlowEventKind {
         observer: String,
         reason: String,
     },
+}
+
+/// A sealed transcript's authenticated content address, sent through the same
+/// ordered signer queue as flow lifecycle entries.
+#[derive(Debug, Clone)]
+pub(crate) struct TranscriptSealedEvent {
+    pub capture_id: String,
+    pub vm_name: String,
+    pub sealed_root_hex: String,
+    pub chunk_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum GatewayAuditEvent {
+    Flow(FlowEvent),
+    TranscriptSealed(TranscriptSealedEvent),
+}
+
+impl GatewayAuditEvent {
+    #[cfg(test)]
+    pub(crate) fn into_flow(self) -> Option<FlowEvent> {
+        match self {
+            Self::Flow(event) => Some(event),
+            Self::TranscriptSealed(_) => None,
+        }
+    }
+}
+
+/// Typed sender that keeps existing flow producers narrow while allowing the
+/// bridge teardown to enqueue a transcript seal on the same ordered channel.
+#[derive(Clone)]
+pub(crate) struct GatewayAuditEventSender {
+    inner: mpsc::Sender<GatewayAuditEvent>,
+}
+
+impl GatewayAuditEventSender {
+    pub async fn send(
+        &self,
+        event: FlowEvent,
+    ) -> Result<(), mpsc::error::SendError<GatewayAuditEvent>> {
+        self.inner.send(GatewayAuditEvent::Flow(event)).await
+    }
+
+    pub fn blocking_send(
+        &self,
+        event: FlowEvent,
+    ) -> Result<(), mpsc::error::SendError<GatewayAuditEvent>> {
+        self.inner.blocking_send(GatewayAuditEvent::Flow(event))
+    }
+
+    pub async fn send_transcript_sealed(
+        &self,
+        event: TranscriptSealedEvent,
+    ) -> Result<(), mpsc::error::SendError<GatewayAuditEvent>> {
+        self.inner
+            .send(GatewayAuditEvent::TranscriptSealed(event))
+            .await
+    }
+}
+
+pub(crate) fn audit_event_channel(
+    capacity: usize,
+) -> (GatewayAuditEventSender, mpsc::Receiver<GatewayAuditEvent>) {
+    let (tx, rx) = mpsc::channel(capacity);
+    (GatewayAuditEventSender { inner: tx }, rx)
 }
 
 /// Bounded mpsc capacity. The bridge `send().await`s — overflow

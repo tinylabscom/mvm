@@ -1,4 +1,4 @@
-//! `mvmctl audit transcript` — operator surface for opt-in forensic network
+//! `mvmctl trust audit transcript` — operator surface for opt-in forensic network
 //! transcript captures.
 //!
 //! `arm` provisions a capture (per-capture data key wrapped under the host KEK
@@ -22,6 +22,13 @@ use mvm_core::transcript::{
     self, CaptureBinding, CaptureBounds, TranscriptManifest, TranscriptWriter,
     TranscriptWriterConfig,
 };
+use mvm_hostd::supervisor::audit::{
+    LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
+    TRANSCRIPT_SEALED_EVENT,
+};
+use mvm_hostd::supervisor::verify_audit_chain_entries;
+
+use super::super::vm::host_signer::PUBLIC_FILENAME;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const KEK_RECIPIENT: &str = "transcript-kek";
@@ -157,15 +164,20 @@ struct CaptureSummary {
 struct TranscriptCtx {
     transcripts_dir: PathBuf,
     keys_dir: PathBuf,
+    audit_dir: PathBuf,
+    verifying_key_path: PathBuf,
     /// Audit-log path override (tests). `None` → the default local audit log.
     audit_path: Option<PathBuf>,
 }
 
 impl TranscriptCtx {
     fn from_config() -> Self {
+        let keys_dir = config::mvm_keys_dir();
         Self {
             transcripts_dir: config::mvm_transcripts_dir(),
-            keys_dir: config::mvm_keys_dir(),
+            verifying_key_path: keys_dir.join(PUBLIC_FILENAME),
+            keys_dir,
+            audit_dir: config::mvm_audit_dir(),
             audit_path: None,
         }
     }
@@ -276,6 +288,7 @@ impl TranscriptCtx {
         let vm = manifest.binding.vm_name.clone();
 
         let recover = || -> Result<Vec<u8>> {
+            self.verify_chain_anchor(tenant, capture_id, &manifest)?;
             let kek = transcript::load_or_init_kek(&self.keys_dir)
                 .context("loading the host transcript KEK")?;
             let data_key = transcript::unwrap_data_key(&kek, &manifest.wrapped_data_key_b64)
@@ -304,6 +317,54 @@ impl TranscriptCtx {
         }
     }
 
+    fn verify_chain_anchor(
+        &self,
+        tenant: &str,
+        capture_id: &str,
+        manifest: &TranscriptManifest,
+    ) -> Result<()> {
+        transcript::verify_sealed_root(manifest).context("verifying transcript manifest root")?;
+        if manifest.capture_id != capture_id || manifest.binding.tenant_id != tenant {
+            anyhow::bail!(
+                "transcript binding does not match requested tenant/capture ({tenant}/{capture_id})"
+            );
+        }
+
+        let verifying_key = super::audit::load_verifying_key(&self.verifying_key_path)
+            .context("loading trusted host audit verifying key")?;
+        let chain_path = self.audit_dir.join(format!("{tenant}.jsonl"));
+        let entries = verify_audit_chain_entries(&chain_path, &verifying_key)
+            .with_context(|| format!("verifying audit chain {}", chain_path.display()))?;
+        let matching: Vec<_> = entries
+            .iter()
+            .filter(|entry| {
+                entry.tenant.0 == tenant
+                    && entry.event == TRANSCRIPT_SEALED_EVENT
+                    && entry
+                        .labels
+                        .get(LABEL_CAPTURE_ID)
+                        .is_some_and(|value| value == capture_id)
+            })
+            .collect();
+        if matching.len() != 1 {
+            anyhow::bail!(
+                "expected exactly one host-signed transcript seal for capture {capture_id}, found {}",
+                matching.len()
+            );
+        }
+        let entry = matching[0];
+        let expected_chunks = manifest.chunks.len().to_string();
+        if entry.labels.get(LABEL_VM_NAME) != Some(&manifest.binding.vm_name)
+            || entry.labels.get(LABEL_TRANSCRIPT_ROOT) != Some(&manifest.sealed_root_hex)
+            || entry.labels.get(LABEL_CHUNK_COUNT) != Some(&expected_chunks)
+        {
+            anyhow::bail!(
+                "host-signed transcript seal does not match capture {capture_id} binding, root, or chunk count"
+            );
+        }
+        Ok(())
+    }
+
     fn audit(&self, kind: LocalAuditKind, vm: &str) -> LocalAuditBuilder {
         let b = event(kind).vm_name(vm);
         match &self.audit_path {
@@ -316,7 +377,8 @@ impl TranscriptCtx {
 fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
     let path = dir.join(MANIFEST_FILE);
     let json = serde_json::to_string_pretty(manifest)?;
-    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+    mvm_core::atomic_io::atomic_write(&path, json.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Immediate subdirectory names of `dir` (empty if `dir` is missing).
@@ -346,8 +408,43 @@ mod tests {
         TranscriptCtx {
             transcripts_dir: root.join("transcripts"),
             keys_dir: root.join("keys"),
+            audit_dir: root.join("chain-audit"),
+            verifying_key_path: root.join("keys/host-signer.pub"),
             audit_path: Some(root.join("audit.jsonl")),
         }
+    }
+
+    fn trusted_host_key(c: &TranscriptCtx) -> ed25519_dalek::SigningKey {
+        use ed25519_dalek::SigningKey;
+
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        std::fs::create_dir_all(c.verifying_key_path.parent().unwrap()).unwrap();
+        std::fs::write(&c.verifying_key_path, key.verifying_key().to_bytes()).unwrap();
+        key
+    }
+
+    fn anchor(c: &TranscriptCtx, manifest: &TranscriptManifest, root: &str) {
+        use mvm_hostd::audit::emitter::AuditEmitter;
+
+        let key = trusted_host_key(c);
+        let emitter = AuditEmitter::with_dir(key, &c.audit_dir).unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant(&manifest.binding.tenant_id)
+            .plan_id("transcript-test-plan")
+            .build();
+        emitter
+            .emit_transcript_sealed(
+                &plan,
+                &manifest.capture_id,
+                &manifest.binding.vm_name,
+                root,
+                manifest.chunks.len(),
+            )
+            .unwrap();
+    }
+
+    fn anchor_manifest(c: &TranscriptCtx, manifest: &TranscriptManifest) {
+        anchor(c, manifest, &manifest.sealed_root_hex);
     }
 
     fn bounds() -> CaptureBounds {
@@ -425,7 +522,9 @@ mod tests {
         );
         w.push(Direction::Egress, b"GET / HTTP/1.1\r\n").unwrap();
         w.push(Direction::Ingress, b"HTTP/1.1 200 OK\r\n").unwrap();
-        write_manifest(&dir, &w.seal()).unwrap();
+        let sealed = w.seal();
+        write_manifest(&dir, &sealed).unwrap();
+        anchor_manifest(&c, &sealed);
 
         let out = c.export("t1", &id).unwrap();
         assert_eq!(out, b"GET / HTTP/1.1\r\nHTTP/1.1 200 OK\r\n");
@@ -453,13 +552,65 @@ mod tests {
             },
         );
         w.push(Direction::Egress, b"secret").unwrap();
-        write_manifest(&dir, &w.seal()).unwrap();
+        let sealed = w.seal();
+        write_manifest(&dir, &sealed).unwrap();
+        anchor_manifest(&c, &sealed);
         // Same-length byte flip → hash mismatch on export.
         let mut ct = std::fs::read(dir.join("0.chunk")).unwrap();
         ct[0] ^= 0xff;
         std::fs::write(dir.join("0.chunk"), &ct).unwrap();
 
         assert!(c.export("t1", &id).is_err());
+        assert!(audit_contains(&c, "transcript_refused"));
+    }
+
+    #[test]
+    fn export_refuses_when_the_host_signed_anchor_is_missing() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path());
+        let id = c.arm("t1", "vm1", None, bounds()).unwrap();
+        trusted_host_key(&c);
+
+        let err = c
+            .export("t1", &id)
+            .expect_err("unanchored evidence is refused");
+        assert!(err.to_string().contains("audit chain"));
+        assert!(audit_contains(&c, "transcript_refused"));
+    }
+
+    #[test]
+    fn export_refuses_when_the_host_signed_root_does_not_match() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path());
+        let id = c.arm("t1", "vm1", None, bounds()).unwrap();
+        let (_dir, manifest) = c.load_manifest("t1", &id).unwrap();
+        anchor(&c, &manifest, &"00".repeat(32));
+
+        let err = c
+            .export("t1", &id)
+            .expect_err("mismatched signed root is refused");
+        assert!(err.to_string().contains("does not match"));
+        assert!(audit_contains(&c, "transcript_refused"));
+    }
+
+    #[test]
+    fn export_refuses_a_tampered_host_audit_chain() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path());
+        let id = c.arm("t1", "vm1", None, bounds()).unwrap();
+        let (_dir, manifest) = c.load_manifest("t1", &id).unwrap();
+        anchor_manifest(&c, &manifest);
+
+        let path = c.audit_dir.join("t1.jsonl");
+        let chain = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            chain.replace("gateway.transcript_sealed", "gateway.forged"),
+        )
+        .unwrap();
+
+        let err = c.export("t1", &id).expect_err("tampered chain is refused");
+        assert!(err.to_string().contains("verifying audit chain"));
         assert!(audit_contains(&c, "transcript_refused"));
     }
 

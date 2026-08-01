@@ -538,6 +538,29 @@ impl AuditEmitter {
         )
     }
 
+    /// Record the authenticated ciphertext-manifest root of a completed
+    /// forensic transcript capture. Payload bytes and plaintext digests stay
+    /// outside the chain; the labels are sufficient to authenticate the
+    /// encrypted evidence before decryption.
+    pub fn emit_transcript_sealed(
+        &self,
+        plan: &ExecutionPlan,
+        capture_id: &str,
+        vm_name: &str,
+        sealed_root_hex: &str,
+        chunk_count: usize,
+    ) -> Result<()> {
+        let entry = AuditEntry::transcript_sealed(
+            plan,
+            None,
+            capture_id,
+            vm_name,
+            sealed_root_hex,
+            chunk_count,
+        );
+        self.emit_entry(&entry)
+    }
+
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
     /// carrying its captured exit code.
     pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
@@ -635,13 +658,17 @@ impl AuditEmitter {
         E: IntoIterator<Item = (String, String)>,
     {
         let entry = AuditEntry::for_plan(plan, None, event, extras);
+        self.emit_entry(&entry)
+    }
+
+    fn emit_entry(&self, entry: &AuditEntry) -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("building tokio runtime for audit emit")?;
         for signer in &self.signers {
-            rt.block_on(signer.sign_and_emit(&entry))
-                .with_context(|| format!("signing-and-emitting audit event {event}"))?;
+            rt.block_on(signer.sign_and_emit(entry))
+                .with_context(|| format!("signing-and-emitting audit event {}", entry.event))?;
         }
         Ok(())
     }
@@ -872,6 +899,44 @@ mod tests {
             verify_audit_chain(&path, &vk).unwrap(),
             1,
             "single-entry chain must verify clean"
+        );
+    }
+
+    #[test]
+    fn transcript_sealed_event_is_chain_signed_with_root_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            SigningKey::from_bytes(&seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-transcript");
+        let root = "cd".repeat(32);
+
+        emitter
+            .emit_transcript_sealed(&plan, "capture-1", "vm-1", &root, 3)
+            .unwrap();
+
+        let path = dir.path().join("local.jsonl");
+        let entries = crate::supervisor::verify_audit_chain_entries(&path, &vk).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].event,
+            crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT
+        );
+        assert_eq!(
+            entries[0]
+                .labels
+                .get(crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT),
+            Some(&root)
+        );
+        assert_eq!(
+            entries[0]
+                .labels
+                .get(crate::supervisor::audit::LABEL_CHUNK_COUNT),
+            Some(&"3".to_string())
         );
     }
 

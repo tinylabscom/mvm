@@ -1,6 +1,7 @@
 //! Signer task — the sole per-VM caller of `AuditSigner::sign_and_emit`.
-//! Drains the bridge's event mpsc, fans each event out to host-allowlisted
-//! observers, then chain-signs it.
+//! Drains the bridge's ordered event queue. Flow events fan out to
+//! host-allowlisted observers before chain signing; transcript seals go
+//! directly to the same chain signer without entering the flow interface.
 
 use std::sync::Arc;
 
@@ -10,21 +11,21 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::supervisor::audit::{AuditEntry, AuditSigner};
 
-use super::events::{FlowEvent, FlowEventKind, FlowEventWire};
+#[cfg(test)]
+use super::events::audit_event_channel;
+use super::events::{FlowEventKind, FlowEventWire, GatewayAuditEvent};
 
-/// Drains the per-VM event channel, fans each `FlowEvent` out to the
-/// host-allowlisted observers, then converts it
-/// to a chained `AuditEntry` and signs it. Sole caller of
-/// `signer.sign_and_emit` per VM.
+/// Drains the per-VM event channel, converts each item to a chained
+/// `AuditEntry`, and signs it. Flow events first fan out to host-allowlisted
+/// observers; transcript seals share ordering but remain outside that
+/// flow-specific interface. Sole caller of `signer.sign_and_emit` per VM.
 ///
-/// **Ordering invariant:** observer fan-out runs **before** chain
-/// signing, so observers see every event the chain will record. Chain
-/// signing is structural — it always runs after the fan-out loop and
-/// cannot be displaced by tenant policy. A panicking observer is
-/// caught via `catch_unwind` and logged via `tracing::warn`; sibling
-/// observers and the chain-signing call continue.
+/// **Ordering invariant:** flow-observer fan-out runs **before** that flow's
+/// chain signing. Chain signing is structural and cannot be displaced by
+/// tenant policy. A panicking observer is caught via `catch_unwind` and logged
+/// via `tracing::warn`; sibling observers and the chain-signing call continue.
 pub(crate) async fn signer_task(
-    mut rx: mpsc::Receiver<FlowEvent>,
+    mut rx: mpsc::Receiver<GatewayAuditEvent>,
     plan: Arc<ExecutionPlan>,
     bundle: Option<Arc<PolicyBundle>>,
     signer: Arc<dyn AuditSigner>,
@@ -32,6 +33,27 @@ pub(crate) async fn signer_task(
     observers: Vec<Arc<dyn crate::supervisor::network::Observer>>,
 ) {
     while let Some(event) = rx.recv().await {
+        let event = match event {
+            GatewayAuditEvent::Flow(event) => event,
+            GatewayAuditEvent::TranscriptSealed(sealed) => {
+                let entry = AuditEntry::transcript_sealed(
+                    plan.as_ref(),
+                    bundle.as_deref(),
+                    &sealed.capture_id,
+                    &sealed.vm_name,
+                    &sealed.sealed_root_hex,
+                    sealed.chunk_count,
+                );
+                if let Err(e) = signer.sign_and_emit(&entry).await {
+                    tracing::warn!(
+                        error = ?e,
+                        capture_id = sealed.capture_id,
+                        "transcript seal signer emit failed"
+                    );
+                }
+                continue;
+            }
+        };
         // Publish on the live-tail broadcast first (informational,
         // never blocks the signer; failure here is "no subscribers"
         // which is fine).
@@ -104,6 +126,7 @@ pub(crate) async fn signer_task(
 mod tests {
     use super::*;
     use crate::supervisor::audit::{FlowCloseReason, FlowDirection};
+    use crate::supervisor::gateway_bridge::events::{FlowEvent, TranscriptSealedEvent};
 
     /// Proves the structural ordering invariant: observers run BEFORE
     /// chain signing under `catch_unwind`. A
@@ -155,7 +178,7 @@ mod tests {
         let local = LocalSet::new();
         local
             .run_until(async {
-                let (tx, rx) = mpsc::channel::<FlowEvent>(8);
+                let (tx, rx) = audit_event_channel(8);
                 let (broadcast_tx, _broadcast_rx) = broadcast::channel::<String>(8);
 
                 let count_before = Arc::new(CountObs(AtomicU32::new(0)));
@@ -200,6 +223,14 @@ mod tests {
                 })
                 .await
                 .unwrap();
+                tx.send_transcript_sealed(TranscriptSealedEvent {
+                    capture_id: "capture-1".to_string(),
+                    vm_name: "vm-1".to_string(),
+                    sealed_root_hex: "ef".repeat(32),
+                    chunk_count: 2,
+                })
+                .await
+                .unwrap();
                 drop(tx);
                 task.await.unwrap();
 
@@ -223,13 +254,24 @@ mod tests {
                     "after-panic observer must see both events \
                      (proves panic isolation across siblings)"
                 );
-                // CapturingAuditSigner also recorded both entries —
-                // chain integrity preserved across observer panics.
+                // CapturingAuditSigner recorded both flow entries plus the
+                // ordered transcript seal; transcript metadata is not fanned
+                // out through the flow-observer interface.
                 let entries = signer.entries();
                 assert_eq!(
                     entries.len(),
-                    2,
+                    3,
                     "chain signing fires AFTER fan-out regardless of observer panics"
+                );
+                assert_eq!(
+                    entries[2].event,
+                    crate::supervisor::audit::TRANSCRIPT_SEALED_EVENT
+                );
+                assert_eq!(
+                    entries[2]
+                        .labels
+                        .get(crate::supervisor::audit::LABEL_TRANSCRIPT_ROOT),
+                    Some(&"ef".repeat(32))
                 );
             })
             .await;

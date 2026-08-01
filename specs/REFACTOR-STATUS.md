@@ -58,6 +58,15 @@ for detailed scope and acceptance criteria.
         the unified footprint ledger against the literal 50,000,000-byte contract
         with the optional SDK sidecar reported separately
 
+- [x] Plan 280 — transcript root audit binding
+  (`specs/plans/280-transcript-root-audit-binding.md`)
+  - [x] Version-2 manifest root over fixed metadata and ordered ciphertext
+        chunk records, with deterministic and mutation coverage
+  - [x] Ordered `gateway.transcript_sealed` emission after atomic manifest
+        persistence, chain-signed through the existing per-VM signer
+  - [x] Exact tenant audit-chain anchor required before transcript key unwrap
+        and decryption, with hermetic operator-path BDD coverage
+
 - [~] Plan 255 — vsock-first snapshot, egress, and warm-start adoption
   (`specs/plans/255-vsock-first-snapshot-egress-adoption.md`)
   - [x] Snapshot storage and lineage-protected clone primitives

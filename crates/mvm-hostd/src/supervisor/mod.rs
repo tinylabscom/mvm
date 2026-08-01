@@ -125,7 +125,9 @@ pub use artifact::{
 };
 pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
 pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
-pub use audit_file::{FileAuditSigner, SignedEnvelope, VerifyError, verify_audit_chain};
+pub use audit_file::{
+    FileAuditSigner, SignedEnvelope, VerifyError, verify_audit_chain, verify_audit_chain_entries,
+};
 pub use audit_recorder::{
     EventCategory, Recorder, RecorderError, UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256,
     UNBOUND_PLAN_ID,

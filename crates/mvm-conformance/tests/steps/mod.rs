@@ -6,6 +6,7 @@ mod oci_unpack;
 mod readme_contract;
 mod sdk_sidecar;
 mod snapshot;
+mod transcript;
 mod verified_boot;
 mod warm_claim;
 mod warm_restore;
