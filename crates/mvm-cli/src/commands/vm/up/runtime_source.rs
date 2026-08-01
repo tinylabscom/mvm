@@ -329,6 +329,15 @@ pub(crate) fn universal_initramfs_available() -> bool {
     mvm_build::initramfs::resolve_or_seed_from_default_cache(&cache_root, version, arch).is_ok()
 }
 
+/// How the universal initramfs is obtained for a boot.
+///
+/// Injected so the cold-cache contract is testable. In production this is
+/// always [`mvm_build::initramfs::resolve_or_build_local_initramfs`],
+/// which *builds* on a miss — the right thing on a first boot, and two
+/// minutes of cargo cross-compile on any host that can do it. A test of
+/// "a miss is non-fatal" has no business paying for that, and paying for
+/// it is also what made the miss path indistinguishable from the build
+/// path in the assertion.
 pub(crate) fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
 ) -> Result<()> {
@@ -1460,8 +1469,16 @@ mod universal_initramfs_attach_tests {
         }
     }
 
+    /// A cold cache must be non-fatal *and* must attach nothing.
+    ///
+    /// The resolver is injected rather than left to the real one. With the
+    /// real one this test took 128 seconds on Linux: a cold cache is
+    /// "warmed automatically on hosts that can build", so asserting that a
+    /// miss returns `Ok` was paying for a full initramfs cross-compile —
+    /// and then asserting `Ok` on the *build* path, never the miss path it
+    /// was written for.
     #[test]
-    fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal() {
+    fn attach_universal_initramfs_cold_cache_is_non_fatal_and_attaches_nothing() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         // HOME moves with MVM_HOME or the cache under test is not cold: the
