@@ -10,6 +10,34 @@
 
 ## Current issue delivery
 
+- [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
+      basename deny-list over the whole workspace root to an allow-list of the
+      top-level entries cargo can actually read. The filtered tree is `mvmSrc`,
+      so every surviving file was a cache key for every guest binary — a
+      Markdown edit, which the contribution rules require on essentially every
+      change, forced a full guest-agent rebuild. 416 of 1872 files (22%) stop
+      being cache keys, including all 111 spec files and 167 doc-site pages.
+      The soundness binding inverts with the list (the fingerprint's walked
+      entries must now be a *superset* of the filter's, not a subset), so both
+      directions are enforced by tests that parse the specific named nix list;
+      both were planted against and recorded in `specs/VERIFICATION.md`.
+
+- [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
+      <rev>/` is served on a hit if `rootfs.ext4` merely exists as a file: no
+      digest, no signature, so content substitution is undetected, and the
+      provenance recorder then signs whatever bytes are on disk. The audit log
+      faithfully records a substituted image as legitimate. Plan 276 is written
+      and Proposed; this moves WS6 into the sprint. Prerequisite for plan 279
+      WS1 so the new cache key and the new verification do not land together.
+
+- [ ] Build action identity + artifact manifest — **plan 279**
+      (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).
+      Sourced from `specs/research/deterministic-attestable-builds-and-lean4.md`.
+      Wrap Nix rather than replace it: the CAS, the SLSA-shaped pack manifest,
+      the deterministic ext4 writer and the signing chain already exist; what is
+      missing is a typed action identity and a tree manifest that can see a
+      permission bit.
+
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added
       `xtask` gates for R1 (`check-conformance`), R2 (`check-honesty`), and R4
@@ -192,6 +220,34 @@
       third mirror of the binary manifest. Claim 5's witness was retyped
       from `ci:fuzz` — which matched the job key and stayed green through
       all ten dead nightlies — to the three fuzz targets it actually names.
+
+- [x] A claim-bearing CI lane can stop backing its claim two ways, and only
+      one was watched. #1970 reports a *red* Security lane, but it triggers on
+      `workflow_run: completed`, so it fires only when Security finishes —
+      when the schedule itself stops firing, nothing completes, nothing
+      reports, and silence reads as health. That is not hypothetical: Security
+      ran nightly to 2026-06-16 and not again until 2026-07-21. Five weeks in
+      which sixteen claims kept green ledger entries with no evidence behind
+      them, and no watcher could have said so.
+
+      `xtask check-claim-witness-freshness` covers absence, on its own
+      schedule rather than on `workflow_run`, because the whole point is to
+      notice a lane that never ran. It maps each `ci:` witness onto the
+      workflow anchoring it (reusing #1980's resolver, lifted into
+      `claims_ledger` so one implementation serves both gates), derives the
+      allowance from the cron, and fails when the newest run is older than
+      three missed firings. It deliberately does *not* re-check conclusions —
+      that is #1970's job, and two gates on one property would eventually
+      disagree. Lanes with no daily-or-better cron are reported as notes, not
+      judged: a pull-request lane is legitimately idle. Falsified by making
+      Security's cron hourly, which reported it 14h stale and named all eight
+      claims it backs.
+
+      Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
+      are workspace-excluded, so no lane compiled them and the nightly aborts
+      on its first failure — which is how a syntactically invalid harness
+      survived eleven days. Run against main the step rediscovered both real
+      defects in seconds.
 
 - [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
       (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout

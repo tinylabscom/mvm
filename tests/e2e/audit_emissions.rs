@@ -29,7 +29,7 @@ impl IsolatedEnv {
 
     fn cmd(&self) -> Command {
         let mut cmd = mvmctl();
-        cmd.env("MVM_HOME", &self.root);
+        cmd.env("HOME", &self.root).env("MVM_HOME", &self.root);
         cmd
     }
 

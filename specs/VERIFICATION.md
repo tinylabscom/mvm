@@ -30,6 +30,8 @@ row below records a defect that was planted to prove the gate fires.
 | `check-claim-catalog` | Name a witness in the ADR-001 ledger that `model/claims.toml` does not list | yes |
 | `check-workflow-paths` | Point a fuzz step's `working-directory` at `crates/mvm-oci` (the pre-consolidation path that made the fuzz lane dead for ten nightlies) | yes |
 | `check-mvm-host-binaries-sync` | Drop `--bin mvm-builderd` from the builder-VM cross-compile step, reproducing the "path does not exist" image-build failure | yes |
+| `check-claim-witness-freshness` | Change `security.yml`'s cron to hourly so its real last-run age exceeds the allowance; reported `security.yml last ran 14h ago (schedule allows 3h)` naming all 8 claims it backs | yes |
+| `cargo-fuzz crates still compile` | None planted — run against main it independently rediscovered both real defects (`fuzz_authed_path` E0308, `fuzz_build_image` unclosed delimiter) that the nightly took eleven days to surface | yes |
 | `included_top_level_is_a_superset_of_the_nix_filter_allowlist` | Remove `"nix"` from `INCLUDED_TOP_LEVEL` while `workspace-filter.nix` still admits it, so a `nix/` change would go unhashed and boot a stale image | yes |
 | `excluded_basenames_are_a_subset_of_the_nix_workspace_filter` | Add `"crates"` to `EXCLUDED_BASENAMES`, pruning a tree the nix filter keeps | yes |
 
