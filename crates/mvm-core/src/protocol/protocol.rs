@@ -52,6 +52,13 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 ///   `#[serde(default)]` so old payloads still deserialize; the bump
 ///   forces mvmd-side fixture refresh because byte output changes
 ///   when defaults are present (JSON keys appear with default values).
+/// - `2` (unchanged): `MountVolume` / `UnmountVolume` added
+///   variant-additively for the distributed-volume mount contract. No
+///   existing-variant bytes change, so mvmd's frozen
+///   fixtures stay valid. An older hostd refuses the new frames at
+///   deserialization (unknown variant), which the agent surfaces as a
+///   clean error; the coordinator gates sending these verbs on node
+///   capability, so no bump was taken.
 pub const PROTOCOL_VERSION: u32 = 2;
 
 // ============================================================================
@@ -124,6 +131,44 @@ pub enum HostdRequest {
     SetupNetwork { tenant_id: String, net: TenantNet },
     /// Tear down per-tenant bridge and NAT rules.
     TeardownNetwork { tenant_id: String, net: TenantNet },
+    /// Mount a distributed volume (S3/NFS/FUSE-backed bucket) at a
+    /// host-side mountpoint (**contract only**).
+    ///
+    /// On success hostd replies `HostdResponse::Ok`. Until the mount
+    /// executor lands, hostd implementations MUST refuse this verb
+    /// with `HostdResponse::Error` (fail-closed stub) — no mount(2)
+    /// logic is implied by the variant's existence.
+    MountVolume {
+        tenant_id: String,
+        /// Coordinator-scoped bucket identifier (matches the desired
+        /// state's `DesiredMount::bucket_id`).
+        bucket_id: String,
+        /// Backing source kind (e.g. "s3", "nfs", "local-virtiofs").
+        /// Open string, matching `DesiredMount::provider` — unknown
+        /// kinds are refused at mount time, never silently defaulted.
+        source_kind: String,
+        /// Source-schema-owned configuration; hostd passes it to the
+        /// mount executor uninterpreted.
+        source_config: serde_json::Value,
+        /// Host-side path the volume is materialized at before being
+        /// exposed to guests.
+        host_mountpoint: String,
+    },
+    /// Unmount a previously mounted distributed volume (**contract
+    /// only**; refused with
+    /// `HostdResponse::Error` until the mount executor lands).
+    ///
+    /// Carries the same source identity as `MountVolume` so
+    /// provider-specific teardown (e.g. FUSE unmount options) needs no
+    /// host-side state lookup. On success hostd replies
+    /// `HostdResponse::Ok`.
+    UnmountVolume {
+        tenant_id: String,
+        bucket_id: String,
+        source_kind: String,
+        source_config: serde_json::Value,
+        host_mountpoint: String,
+    },
     /// Health check.
     Ping,
 }
@@ -524,6 +569,86 @@ mod tests {
     }
 
     #[test]
+    fn test_hostd_request_mount_volume_roundtrip() {
+        let req = HostdRequest::MountVolume {
+            tenant_id: "acme".to_string(),
+            bucket_id: "bkt-artifacts".to_string(),
+            source_kind: "s3".to_string(),
+            source_config: serde_json::json!({
+                "endpoint": "https://s3.example.com",
+                "bucket": "acme-artifacts"
+            }),
+            host_mountpoint: "/var/lib/mvm/mounts/acme/bkt-artifacts".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostdRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            HostdRequest::MountVolume {
+                tenant_id,
+                bucket_id,
+                source_kind,
+                source_config,
+                host_mountpoint,
+            } => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(bucket_id, "bkt-artifacts");
+                assert_eq!(source_kind, "s3");
+                assert_eq!(
+                    source_config.get("bucket").and_then(|b| b.as_str()),
+                    Some("acme-artifacts")
+                );
+                assert_eq!(host_mountpoint, "/var/lib/mvm/mounts/acme/bkt-artifacts");
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_hostd_request_unmount_volume_roundtrip() {
+        let req = HostdRequest::UnmountVolume {
+            tenant_id: "acme".to_string(),
+            bucket_id: "bkt-artifacts".to_string(),
+            source_kind: "nfs".to_string(),
+            source_config: serde_json::json!({"server": "10.240.0.9"}),
+            host_mountpoint: "/var/lib/mvm/mounts/acme/bkt-artifacts".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HostdRequest = serde_json::from_str(&json).unwrap();
+        match parsed {
+            HostdRequest::UnmountVolume {
+                tenant_id,
+                bucket_id,
+                source_kind,
+                source_config,
+                host_mountpoint,
+            } => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(bucket_id, "bkt-artifacts");
+                assert_eq!(source_kind, "nfs");
+                assert_eq!(
+                    source_config.get("server").and_then(|s| s.as_str()),
+                    Some("10.240.0.9")
+                );
+                assert_eq!(host_mountpoint, "/var/lib/mvm/mounts/acme/bkt-artifacts");
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    /// An mvm-hostd at PROTOCOL_VERSION 2 built before the mount verbs
+    /// were added refuses them at deserialization (serde unknown-variant),
+    /// which `recv_request` surfaces as a clean error — the fail-closed
+    /// behavior the variant-additive (no-bump) rollout relies on. This
+    /// test pins that an unknown verb is indeed a refusal, not a silent
+    /// fallback.
+    #[test]
+    fn test_hostd_request_unknown_variant_refused() {
+        let future_json = r#"{"FrobnicateVolume":{"tenant_id":"acme"}}"#;
+        let err = serde_json::from_str::<HostdRequest>(future_json).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
     fn test_hostd_request_ping_roundtrip() {
         let req = HostdRequest::Ping;
         let json = serde_json::to_string(&req).unwrap();
@@ -605,6 +730,20 @@ mod tests {
             HostdRequest::TeardownNetwork {
                 tenant_id: "t".to_string(),
                 net,
+            },
+            HostdRequest::MountVolume {
+                tenant_id: "t".to_string(),
+                bucket_id: "b".to_string(),
+                source_kind: "s3".to_string(),
+                source_config: serde_json::json!({}),
+                host_mountpoint: "/mnt/b".to_string(),
+            },
+            HostdRequest::UnmountVolume {
+                tenant_id: "t".to_string(),
+                bucket_id: "b".to_string(),
+                source_kind: "s3".to_string(),
+                source_config: serde_json::json!({}),
+                host_mountpoint: "/mnt/b".to_string(),
             },
             HostdRequest::Ping,
         ];
