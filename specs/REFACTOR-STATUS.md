@@ -99,13 +99,21 @@ for detailed scope and acceptance criteria.
         `level` vs ADR claim-frontmatter `status`) so a mistier cannot
         silently disengage `check-no-overclaim`
   - [x] WS2 — prose over-claim meta-gate, shipped as `xtask check-no-overclaim`
-  - [ ] WS3 — replay golden-vector corpus across every content-address surface
-        (no corpus in tree; `check-content-address-determinism` pins the
-        `serde_json preserve_order` drift mechanism, not an address)
+  - [ ] WS3 — replay golden-vector corpus across every content-address surface,
+        recording σ and κ where a transform is in play (no corpus in tree;
+        `check-content-address-determinism` pins the `serde_json preserve_order`
+        drift mechanism, not an address)
   - [ ] WS4 — ≥2 independent verifiers over the WS3 corpus
   - [ ] WS5 — bind each witness to its recorded red-proof
-  - [ ] WS6 — content-address the kernel + build cache, verify-on-read
-        (**blocks plan 279 WS1**; scheduled in `specs/SPRINT.md`)
+  - [ ] WS6 — **lead item**: content-address the kernel + build cache, verify on
+        read as well as on write (**blocks plan 279 WS1**; scheduled in
+        `specs/SPRINT.md`). The 2026-08-01 recon revision reverses finding 2 —
+        integrity-on-read is the one attestation property no surveyed system
+        enforces, mvm included — which promotes this from tail to lead
+  - [ ] WS7 — σ/κ separation and the transform descriptor: the protocol digest
+        over plaintext and the storage address over bytes at rest as disjoint
+        types, σ as a set, descriptor as an open enumeration. Free while every
+        surface is `Identity`; a format migration per transform family later
   - [x] Discharged elsewhere: sealed transcript root anchored into the audit
         chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
         (recon §7.7 → #2019)
