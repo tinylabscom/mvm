@@ -1008,6 +1008,11 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
+        // Capture the VMM's disk-backed process identity before reaping any
+        // sidecars. A teardown helper may remove marker files as part of its own
+        // cleanup; the live handle must already own everything needed to stop
+        // and verify the VMM independently of those mutable markers.
+        let vm = self.driver.attach(id)?;
         // Reap the per-VM secrets endpoint first, so a crashed VM's
         // decrypted-secret process can't outlive the guest. Idempotent + a no-op
         // when the VM spawned none.
@@ -1018,7 +1023,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // that registered none.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
         crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
-        self.driver.attach(id)?.kill()
+        vm.kill()
     }
 
     fn stop_all(&self) -> Result<()> {

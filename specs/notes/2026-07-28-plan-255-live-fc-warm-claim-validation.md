@@ -429,6 +429,19 @@ timing reps (`pgrep -af firecracker` showed seven live
 `--api-sock /root/mvm-t7-home/vms/t7cold/fc.socket` processes at the end).
 The next launch's orphan reaper collects them one at a time.
 
+**Follow-up (2026-07-31, #2007): fixed and live-proven for the ordinary
+persistent-machine path.** The immediate failure was reconcile-on-entry
+omitting `fc.pid` from its live-owner table, which let every state-touching CLI
+command recursively remove a live Firecracker's state before stop attached.
+Reconciliation and orphan-helper cleanup now recognize the marker.
+Confirmation refusal exits non-zero, teardown captures and verifies the exact
+Firecracker PID before state is removed, and start refuses to replace a PID
+marker that still names a live process. Hermetic regressions cover these
+boundaries. On the KVM host, non-TTY refusal retained PID 4124113, its marker,
+and the matching Firecracker command line; the following `machine stop
+stop2007 --yes` removed the marker and the exact process. The warm-pool
+claim-refusal cleanup described in the gate list below remains separate.
+
 ## Gate list as written after run 1
 
 *(Superseded by "What must happen before `standby_pool` can flip to `true`" at
@@ -1018,8 +1031,10 @@ as a claim latency.
    Fix options in the issue; option 1 (admit a plan for the factory parent and
    emit `checkpoint.created` under it) is the one consistent with claim 8.
    Relaxing the claim-side check is not an option.
-6. **Deferred, known-sharp** — failed-stop leaves an invisible live VM
-   (unchanged).
+6. **Deferred, known-sharp** — failed-stop leaves an invisible live VM on the
+   warm-pool claim-refusal cleanup path. The ordinary `machine stop`
+   manifestation is fixed and live-proven by #2007, but `force_stop` plus
+   `ClaimCleanup` remains a separate owner and is unchanged.
 7. Only then: re-run the Task 7 priorities and flip the capability if green.
 
 `standby_pool` stays `false`. The flip was not proposed: the claim is refused,

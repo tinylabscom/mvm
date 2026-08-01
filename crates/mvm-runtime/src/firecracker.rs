@@ -283,6 +283,19 @@ pub fn is_vm_running(pid_file: &str) -> Result<bool> {
     Ok(result.trim() == "yes")
 }
 
+/// Check whether one already-captured PID still names a Firecracker process.
+///
+/// Unlike [`is_vm_running`], this probe does not depend on the PID marker still
+/// existing. Teardown captures the marker once, then uses this identity until
+/// the process is proven gone so a concurrently removed marker cannot turn a
+/// live process into a false "stopped" result.
+pub fn is_firecracker_pid_running(pid: u32) -> Result<bool> {
+    let result = run_in_vm_stdout(&format!(
+        r#"[ -f "/proc/{pid}/comm" ] && [ "$(cat /proc/{pid}/comm)" = "firecracker" ] && echo yes || echo no"#,
+    ))?;
+    Ok(result.trim() == "yes")
+}
+
 /// Name of the Firecracker VM-state file produced by `PUT /snapshot/create`.
 pub const FC_VMSTATE_FILENAME: &str = "vmstate.bin";
 

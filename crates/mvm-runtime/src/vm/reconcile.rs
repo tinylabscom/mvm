@@ -211,11 +211,12 @@ pub fn sweep(
 }
 
 /// Supervisor pid-file names a per-VM state dir may carry. `pid` is the
-/// Apple-Container dev-VM owner file; `libkrun.pid` / `vz.pid` / `hvf.pid` are
-/// the workload-supervisor files (one per backend). The first one that exists
-/// and points at a live process marks the dir as having a live owner. HVF must
-/// be listed here or convergence reaps every running HVF machine's state dir.
-const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid", "pid"];
+/// Apple-Container dev-VM owner file; `libkrun.pid` / `vz.pid` / `hvf.pid` /
+/// `fc.pid` are the workload-supervisor files (one per backend). The first one
+/// that exists and points at a live process marks the dir as having a live
+/// owner. Every pid-file backend must be listed here or convergence can reap a
+/// running machine's state dir before its lifecycle command attaches.
+const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid", "fc.pid", "pid"];
 
 /// `kill(pid, 0)` existence probe — delivers no signal, just checks the
 /// process is alive. The cheap half of the live-vs-orphan discrimination
@@ -806,6 +807,29 @@ mod tests {
         assert!(
             view.orphan_dirs(&BTreeSet::new()).is_empty(),
             "a dir owned by a live hvf supervisor must not be reaped as an orphan"
+        );
+    }
+
+    #[test]
+    fn fs_view_recognizes_live_firecracker_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("firecracker-vm");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fc.pid"), std::process::id().to_string()).unwrap();
+
+        let view = FsRuntimeView::new(root);
+        let dir_str = dir.to_string_lossy().into_owned();
+        let reg = RegisterParams::minimal("firecracker-vm", &dir_str, "default");
+        let mut registry = VmNameRegistry::default();
+        registry.register_with_metadata(reg).unwrap();
+        assert!(
+            view.process_alive(registry.lookup("firecracker-vm").unwrap()),
+            "a live fc.pid must count as a live Firecracker owner"
+        );
+        assert!(
+            view.orphan_dirs(&BTreeSet::new()).is_empty(),
+            "a dir owned by live Firecracker must not be reaped as an orphan"
         );
     }
 

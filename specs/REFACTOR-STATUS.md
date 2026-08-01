@@ -81,6 +81,8 @@ for detailed scope and acceptance criteria.
   - [x] Linux regression coverage for concurrent raw-egress handlers
   - [x] Final-child verb grant issuance, validation, persistence, and
         PostRestore delivery without granting authority to the parent
+  - [x] Persistent-machine Firecracker stop fails closed and preserves state
+        until process exit is verified (#2007; live KVM recheck passed)
   - [~] Live warm-launch, fork-isolation, and restore-clock verification
   - [ ] Typed-connector egress-policy enrichment
   - [ ] OCI-image template build path and CLI facade completion
