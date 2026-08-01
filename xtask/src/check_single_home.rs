@@ -66,6 +66,13 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
         "the single legitimate resolver: owns the MVM_HOME | $HOME/.mvm derivation and the child layout",
     ),
     (
+        "xtask/src/check_mutation_witnesses.rs",
+        &[Rule::HomeRead, Rule::HomeLiteral],
+        "confines a mutation run away from the real state root, so it must read the real $HOME \
+         before redirecting it (to keep CARGO_HOME/RUSTUP_HOME pointing at the toolchain) and \
+         name .mvm/keys to refuse running if the redirect did not take",
+    ),
+    (
         "xtask/src/check_single_home.rs",
         ALL_RULES,
         "defines the very patterns it scans for",
