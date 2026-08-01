@@ -221,7 +221,6 @@ fn an_admitted_packet_reaches_the_host_stack_and_a_denied_one_does_not() {
         return;
     }
     use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
-    use mvm_hostd::netd::DatapathHandle;
     use mvm_net::l3::{
         AddressLease, DnsBindingStore, FlowTable, IngressTable, L3Admitter, L3PolicyConfig,
         OutboundVerdict,
@@ -323,7 +322,7 @@ fn an_idle_host_tun_does_not_block_the_gateway() {
         eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
         return;
     }
-    use mvm_hostd::netd::{DatapathError, DatapathHandle};
+    use mvm_hostd::netd::DatapathError;
 
     let dp = LinuxDatapath::new();
     let req = request("privtest-nonblock", 60);

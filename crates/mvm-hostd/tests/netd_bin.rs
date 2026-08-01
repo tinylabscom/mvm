@@ -70,6 +70,7 @@ fn config(vm_id: &str) -> NetdConfig {
 fn start_netd(home: &HomeGuard, cfg: &NetdConfig) -> Option<(Child, String)> {
     let mut child = Command::new(BIN)
         .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -216,6 +217,7 @@ fn the_netd_process_refuses_an_unparseable_configuration() {
     let home = HomeGuard::new();
     let mut child = Command::new(BIN)
         .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -248,6 +250,7 @@ fn the_netd_process_refuses_a_config_whose_rules_do_not_parse() {
     }]);
     let mut child = Command::new(BIN)
         .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

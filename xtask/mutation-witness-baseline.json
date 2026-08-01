@@ -617,6 +617,11 @@
       "file": "crates/mvm-sdk/src/compile/deps_audit.rs",
       "mutant": "replace * with + in hash_file_raw",
       "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
+    },
+    {
+      "file": "crates/mvm-protocol/src/policy/network_policy.rs",
+      "mutant": "replace NetworkPolicy::trusted_build_egress -> Self with Default::default()",
+      "reason": "Observed 2026-07-29. No mvm-protocol test asserts the shape of the trusted-build egress policy. The mutant substitutes the deny-all default, so it makes the policy stricter, not weaker — a functional coverage gap rather than a security hole. Untriaged."
     }
   ]
 }

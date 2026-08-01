@@ -116,7 +116,7 @@ pub enum FrameError {
     #[error("payload length {len} exceeds maximum {max}")]
     PayloadTooLong { len: usize, max: usize },
     /// A field reserved in this version carried a non-zero value. Rejected
-    /// so a later version can define it without ambiguity.
+    /// so the field can be given a meaning later without ambiguity.
     #[error("reserved field {field} must be zero in version {PROTOCOL_VERSION}")]
     ReservedNonZero { field: &'static str },
     /// Encoding was asked to emit a payload larger than the protocol

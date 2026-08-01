@@ -22,8 +22,8 @@ pub mod features {
     /// Peer can handle an assigned IPv6 configuration.
     pub const IPV6: u32 = 1 << 1;
     /// Every bit this build understands. Anything outside the mask is
-    /// rejected rather than ignored, so a later version cannot be
-    /// smuggled past an older peer.
+    /// rejected rather than ignored, so a feature bit a newer peer
+    /// understands cannot be smuggled past an older one.
     pub const KNOWN: u32 = MULTI_QUEUE | IPV6;
     /// What version 1 actually grants: nothing.
     pub const GRANTED_V1: u32 = 0;

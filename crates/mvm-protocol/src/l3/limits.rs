@@ -38,7 +38,7 @@ pub const MIN_IPV4_HEADER: usize = 20;
 pub const IPV6_HEADER_LEN: usize = 40;
 
 /// Number of data queues version 1 runs. The wire format carries a
-/// `queue_id` so a later version can raise this without a rewrite.
+/// `queue_id`, so raising this needs no change to the wire format.
 pub const QUEUE_COUNT_V1: u16 = 1;
 
 /// Upper bound on queues any version may negotiate.

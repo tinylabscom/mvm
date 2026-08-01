@@ -139,12 +139,24 @@ mod linux {
     // constant compiles for one and not the other.
     const TUNSETIFF: libc::Ioctl = crate::guest_net::target_ioctl_request(0x4004_54ca);
 
-    #[repr(C)]
+    #[repr(C, align(8))]
     struct IfReqFlags {
         name: [libc::c_char; libc::IFNAMSIZ],
         flags: libc::c_short,
         _pad: [u8; 22],
     }
+    // Layout contract for `struct ifreq` <linux/if.h>, read out of the header
+    // with cc `sizeof`/`_Alignof`/`offsetof` on LP64 Linux, not off this
+    // definition. `align(8)` is explicit because the C union's widest member
+    // is a pointer while this mirror's is a `c_short`; without it the Rust
+    // type under-aligns and the assert below is what catches that.
+    const _: () = {
+        use core::mem::{align_of, offset_of, size_of};
+        assert!(size_of::<IfReqFlags>() == 40);
+        assert!(align_of::<IfReqFlags>() == 8);
+        assert!(offset_of!(IfReqFlags, name) == 0);
+        assert!(offset_of!(IfReqFlags, flags) == 16);
+    };
 
     /// A real `/dev/net/tun` device.
     pub struct LinuxTun {

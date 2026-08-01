@@ -51,12 +51,25 @@ const fn ioctl_request_max() -> u64 {
 /// find them all and nothing unrelated is ever touched.
 const RESOURCE_PREFIX: &str = "mvmn";
 
-#[repr(C)]
+#[repr(C, align(8))]
 struct IfReqFlags {
     name: [libc::c_char; libc::IFNAMSIZ],
     flags: libc::c_short,
     _pad: [u8; 22],
 }
+
+// Layout contract for `struct ifreq` <linux/if.h>, read out of the header
+// with cc `sizeof`/`_Alignof`/`offsetof` on LP64 Linux, not off this
+// definition. `align(8)` is explicit because the C union's widest member
+// is a pointer while this mirror's is a `c_short`; without it the Rust
+// type under-aligns and the assert below is what catches that.
+const _: () = {
+    use core::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<IfReqFlags>() == 40);
+    assert!(align_of::<IfReqFlags>() == 8);
+    assert!(offset_of!(IfReqFlags, name) == 0);
+    assert!(offset_of!(IfReqFlags, flags) == 16);
+};
 
 /// Opens Linux datapaths.
 #[derive(Debug, Default)]
@@ -517,6 +530,21 @@ fn has_net_admin() -> bool {
         permitted: u32,
         inheritable: u32,
     }
+
+    // Layout contracts for `cap_user_header_t` / `cap_user_data_t`
+    // <linux/capability.h>, read out of the header with cc.
+    const _: () = {
+        use core::mem::{align_of, offset_of, size_of};
+        assert!(size_of::<CapHeader>() == 8);
+        assert!(align_of::<CapHeader>() == 4);
+        assert!(offset_of!(CapHeader, version) == 0);
+        assert!(offset_of!(CapHeader, pid) == 4);
+        assert!(size_of::<CapData>() == 12);
+        assert!(align_of::<CapData>() == 4);
+        assert!(offset_of!(CapData, effective) == 0);
+        assert!(offset_of!(CapData, permitted) == 4);
+        assert!(offset_of!(CapData, inheritable) == 8);
+    };
 
     let mut header = CapHeader {
         version: LINUX_CAPABILITY_VERSION_3,

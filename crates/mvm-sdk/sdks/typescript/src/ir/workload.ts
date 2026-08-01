@@ -7,7 +7,7 @@
 
 /**
  * One command in a hook phase.
- * 
+ *
  * Two variants, internally tagged on `kind` — matches the rest of the IR's enum conventions (`Source`, `Image`, `MountSource`, …) so the JSON Schema and SDK generators handle the discriminant uniformly.
  */
 export type HookCmd = ({
@@ -30,7 +30,7 @@ path: string
 })
 /**
  * Addon composition tier.
- * 
+ *
  * `Separate` is the v1 shape — the addon runs as its own microVM and the consumer reaches it over the mesh. `InVm` is reserved for the future in-VM addon tier where small Nix fragments compose directly into the consumer's `mkGuest` flake; it is rejected by the validator with `E_ADDON_TIER_NOT_IMPLEMENTED` until that lands.
  */
 export type AddonTier = ("separate" | "in_vm")
@@ -415,6 +415,14 @@ mode: NetworkMode
  */
 peers?: string[]
 ports?: PortForward[]
+/**
+ * The workload needs a real in-guest IP stack: raw sockets, ICMP, non-TCP/UDP protocols, or its own resolver.
+ *
+ * A statement about the *workload*, not about a transport. It is what selects the L3 tunnel, and it is declared here rather than chosen at run time so the same workload resolves the same way on every host.
+ *
+ * Leave it off unless the workload genuinely needs it: the tunnel cannot carry host-side secret substitution or cleartext redaction, because the guest originates its own connections.
+ */
+raw_ip_stack?: boolean
 }
 export interface NetworkEgress {
 /**

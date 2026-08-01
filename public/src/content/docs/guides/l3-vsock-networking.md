@@ -84,12 +84,13 @@ per-destination redaction is *derived* onto the socket-aware transport, and
 the compatibility gate refuses the combination outright if anything ever
 tried to construct it directly.
 
-Worth being precise about what is and is not lost. The guarantee that raw
-secrets never enter the guest is enforced at the host-services broker and is
-**unaffected** by the networking mode. What L3 gives up is the egress-time
-*backstop* that would catch a secret which reached the guest some other way
-— because in L3 mode the guest originates its own TLS, so the host sees
-ciphertext.
+Worth being precise about what is and is not lost. Host-side substitution
+works by having the broker release destination-bound, time-bound credentials
+rather than raw secret values, and that mechanism is **unaffected** by the
+networking mode. What L3 gives up is the egress-time *backstop* — the
+outbound scan that would catch a secret which reached the guest by some
+other route — because in L3 mode the guest originates its own TLS, so the
+host sees ciphertext.
 :::
 
 ## What still holds
