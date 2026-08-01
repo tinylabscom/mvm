@@ -6,6 +6,12 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [x] Plan 282 — Merge queue auto-requeue
+      (`specs/plans/282-merge-queue-auto-requeue.md`)
+  - [x] Refuse conflicts and bound retry attempts per PR
+  - [x] Keep privileged execution on the trusted base ref with no checkout
+  - [x] Complete repository validation and queue the PR
+
 - [ ] Plan 279 — Build action identity and a real artifact manifest
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`)
   - [ ] WS1 — `ActionDigest` into the identity taxonomy (land after plan 276 WS6)

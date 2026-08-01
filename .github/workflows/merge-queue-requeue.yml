@@ -1,0 +1,98 @@
+name: Merge queue auto-requeue
+
+# A PR ejected from the merge queue stops being worked on and stays that way
+# until a human notices. Live queue history shows that these unattended gaps
+# can exceed the validation cycle itself, so bounded automatic recovery is part
+# of keeping queue latency predictable.
+#
+# Most ejections are transient: a flaky test in the queue run, or the entry
+# being invalidated because something ahead of it merged. Those deserve an
+# automatic retry. A genuine merge conflict does not — it needs a human to
+# rebase — so this refuses to requeue one and says so on the PR instead.
+#
+# `pull_request_target` runs with a write token against the BASE ref. This
+# workflow never checks out the PR's code and only makes API calls, so nothing
+# from the head branch is executed with those permissions.
+
+on:
+  pull_request_target:
+    types: [dequeued]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# One requeue decision per PR at a time; a burst of dequeues shouldn't race.
+concurrency:
+  group: merge-queue-requeue-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  requeue:
+    name: Requeue if the ejection was transient
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide, and requeue when it is safe to
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          # How many times this workflow will retry one PR before leaving it
+          # alone. A PR that keeps being ejected is telling us something, and
+          # retrying it forever would burn a validation cycle each time while
+          # hiding the signal.
+          MAX_ATTEMPTS: "2"
+        run: |
+          set -euo pipefail
+
+          state=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.state')
+          merged=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.merged')
+          draft=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.draft')
+          if [ "${state}" != "open" ] || [ "${merged}" = "true" ] || [ "${draft}" = "true" ]; then
+            echo "PR #${PR} is state=${state} merged=${merged} draft=${draft} — nothing to requeue."
+            exit 0
+          fi
+
+          # `mergeable` is computed asynchronously; poll briefly rather than
+          # act on `null`, which would misread a conflict as a transient
+          # ejection and requeue something that cannot merge.
+          for _ in $(seq 1 10); do
+            mergeable=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.mergeable')
+            [ "${mergeable}" != "null" ] && break
+            sleep 6
+          done
+          mergeable_state=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.mergeable_state')
+          echo "PR #${PR}: mergeable=${mergeable} mergeable_state=${mergeable_state}"
+
+          if [ "${mergeable}" = "false" ] || [ "${mergeable_state}" = "dirty" ]; then
+            echo "::notice::PR #${PR} conflicts with the base — a human needs to rebase it."
+            gh pr comment "${PR}" --repo "${REPO}" --body \
+              "Ejected from the merge queue and **not** requeued: this PR conflicts with \`main\`. Rebase it and it will re-enter the queue on its own." \
+              || true
+            exit 0
+          fi
+
+          attempts=$(gh api "repos/${REPO}/issues/${PR}/timeline" --paginate \
+            --jq '[.[] | select(.event == "labeled") | select(.label.name == "auto-requeued")] | length')
+          if [ "${attempts}" -ge "${MAX_ATTEMPTS}" ]; then
+            echo "::warning::PR #${PR} has already been auto-requeued ${attempts} time(s); leaving it for a human."
+            gh pr comment "${PR}" --repo "${REPO}" --body \
+              "Ejected from the merge queue again after ${attempts} automatic retries. Not requeuing — this is repeating, so it is worth a look rather than consuming another validation cycle." \
+              || true
+            exit 0
+          fi
+
+          # The label is the attempt counter: `labeled` events persist in the
+          # timeline even after the label is removed, so the count survives
+          # someone tidying the PR.
+          gh label create auto-requeued --repo "${REPO}" \
+            --description "Automatically re-added to the merge queue after a transient ejection" \
+            --color ededed 2>/dev/null || true
+          # Toggle the label so every retry produces a distinct labeled event;
+          # leaving it attached would make the persistent attempt count stick
+          # at one forever.
+          gh pr edit "${PR}" --repo "${REPO}" --remove-label auto-requeued 2>/dev/null || true
+          gh pr edit "${PR}" --repo "${REPO}" --add-label auto-requeued
+
+          echo "Requeuing PR #${PR} (attempt $((attempts + 1)) of ${MAX_ATTEMPTS})."
+          gh pr merge "${PR}" --repo "${REPO}" --auto
