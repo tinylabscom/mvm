@@ -280,7 +280,6 @@
       concurrency flake at all but a macOS-only fixture bug — an accepted
       socket inherits `O_NONBLOCK` there but not on Linux, so the fixture read
       an empty request and answered 404. Fixed; that deferral is closed.
-<<<<<<< Updated upstream
       **WS3 and WS4 struck; plan closed.** `check-mutation-witnesses`
       (#1934) shipped the mutation-testing idea mid-flight and does it
       better, so both workstreams fold into
@@ -298,40 +297,58 @@
       confines `HOME` and `MVM_HOME` to a temp root, applied where
       cargo-mutants is spawned so the nightly job and the local recipe
       share one implementation.
-=======
-      **WS3 re-scoped:** `check-mutation-witnesses` (#1934) shipped the
-      mutation-testing idea mid-flight and does it better than this plan's
-      WS4, which is struck. WS3 is now the three claims whose only witness is
-      a CI lane (MVM-SEC-04/05/07), which mutation testing structurally cannot
-      reach, plus triaging #1934's first full run. **Task 8 done** — all
-      three CI-lane witnesses planted against, including the MVM-SEC-04
-      plant that correctly did *not* fire (an ungated `do_exec_streaming`
-      has no production caller, so it is dead-code-eliminated; the check
-      measures reachability, and the script's own positive control is what
-      makes it trustworthy). **Task 9 done, and the finding was not the
-      survivors.** Establishing the baseline showed that **eight of the
-      twenty-six surface files could not be measured at all**: the lane is
-      package-scoped, and `mvm-sdk` (never enabled `mvm-core/test-support`,
-      so its tests did not compile), `mvm-cli` (42 tests drive the root
-      package's `mvmctl`, so `CARGO_BIN_EXE_mvmctl` is unset) and
-      `mvm-runtime` (a test spawned an `mvm-hostd` binary) were each green
-      under `--workspace` and red alone — claims 1, 3, 10, 11, 14, 15. Two
-      of the eight reported `total=0 missed=0 caught=0`, byte-identical to
-      full coverage, because `ensure_mutants_actually_ran` enumerated the
-      one baseline verdict it had seen (`Failure`) and a timed-out baseline
-      reports `Timeout`; it now requires `Success` and a nonzero mutant
-      count. Every surviving mutant across the measurable files was a real
-      hole rather than an equivalent mutant, so `accepted_misses` did not
-      grow and the four pre-existing untriaged entries are closed. Two
-      affordability defects fixed alongside: the flat 300s per-mutant
-      timeout (too short for three packages, 5× too long for another — now
-      derived from each package's measured baseline) and
-      `seed_guest_runtime_cache` seeding the guest-binary cache under a key
-      the resolver never reads, which made three `pull_core` tests
-      cross-compile the guest agent for real at 55s each (mvm-cli's suite
-      86s → 2s). Nightly lane armed: `continue-on-error` removed. Detail in
-      `specs/VERIFICATION.md` §"Mutation-tested witnesses".
->>>>>>> Stashed changes
+
+- [ ] Plan 272 WS-2 — the full-surface mutation baseline, and what
+      establishing it found. The surface had never been measured end to
+      end, and the first complete run says 1221 mutants, 359 surviving.
+      Most of the finding is not the survivors.
+
+      **Eight of the twenty-six files could not be measured at all.** The
+      lane is package-scoped, and three packages were green under
+      `--workspace` and red alone: `mvm-sdk` never enabled
+      `mvm-core/test-support`, so its tests did not compile; `mvm-cli` has
+      42 tests driving the root package's `mvmctl`, so
+      `CARGO_BIN_EXE_mvmctl` is unset; `mvm-runtime` had a test spawning
+      an `mvm-hostd` binary. Claims 1, 3, 10, 11, 14 and 15 were affected.
+      Two of the eight reported `total=0 missed=0 caught=0` — what a
+      fully-covered file reports — because `ensure_mutants_actually_ran`
+      enumerated the one baseline verdict it had seen (`Failure`) and a
+      timed-out baseline reports `Timeout`. It now requires `Success` and
+      a nonzero count.
+
+      **Two files carry 242 of the 359 survivors**, both the same shape: a
+      witness resolving to a large multi-purpose file. `mvm-host-vm-init.rs`
+      (claim 2, 164) and `console.rs` (claim 15, 78) each have their own
+      witness fully caught while the rest of the file answers to no claim.
+      Both are scoped through the new `SurfaceScope`, which cannot be
+      produced by resolution, demands a written reason and a tracking
+      issue, and survives a re-pin — so narrowing a claim's surface costs
+      an argued diff. Filed as #2006 and #2021 with the measurements.
+
+      **The in-claim survivors were nearly all real holes**, closed with
+      tests and each verified by planting its mutant. The sharpest:
+      `validate_guest_mount` and `denied_host_roots` — claim 1's Tier-0
+      host-filesystem guard, which would have admitted any guest mount
+      path and made the host signer key, the audit chain and `~/.ssh`
+      shareable into a guest — and `set_no_new_privs`, claim 2's own named
+      `fn:` witness, which had no test at all. Also two fail-open egress
+      mutants in `stages.rs` (the L4 allow-list's DNS carve-out widened to
+      pass every UDP packet; the SSH banner detector silently ceasing to
+      detect) and two in `plan_admission.rs` (a size cap that admits
+      everything above it, and a stale verb-grant that survives into a
+      reused VM name).
+
+      Three affordability defects fixed alongside: the flat 300s
+      per-mutant timeout (too short for three packages, 5× too long for
+      another — now derived from each package's baseline);
+      `seed_guest_runtime_cache` seeding the guest-binary cache under a
+      key the resolver never reads, so three `pull_core` tests
+      cross-compiled the guest agent at 55s each (mvm-cli's suite 86s →
+      2s); and `just mutation-witnesses` running `--run` against the
+      developer's real `~/.mvm` — the isolation now lives at the single
+      cargo-mutants spawn site, which is what the entry above already
+      claimed. Detail in `specs/VERIFICATION.md` §"Mutation-tested
+      witnesses".
 
 - [ ] Tier-1 edge path: the build → sign → export → install-on-another-host →
       admit → boot chain now runs end to end on aarch64, delivered through
