@@ -289,6 +289,46 @@ impl mvm_core::build_env::ShellEnvironment for HostShellEnvironment {
 /// seeded on every supported host, workloads that have a rootfs continue to
 /// boot with their legacy `/init`. Once attached, `WorkloadRunner::start_workload`
 /// will send `ActivateEnvironment` over vsock after boot.
+/// Discard a cached universal initramfs whose recorded source fingerprint no
+/// longer matches the checkout it would be attached from. Returns true when a
+/// stale artifact was evicted.
+///
+/// A source checkout rebuilds its guest binaries when they change, but the
+/// initramfs cache is keyed only on `(version, arch)` — so without this it
+/// keeps serving the artifact built before the change, and a guest-side fix
+/// appears not to have worked. Evicting on a fingerprint mismatch is what
+/// makes the next resolve rebuild rather than re-find the stale bytes.
+fn evict_stale_universal_initramfs(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> bool {
+    let Some(workspace_root) = runtime_overlay_source_checkout_root() else {
+        return false;
+    };
+    let Ok(fingerprint) =
+        mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace_root)
+    else {
+        return false;
+    };
+    matches!(
+        mvm_build::initramfs::evict_if_source_changed(cache_root, version, arch, &fingerprint),
+        Ok(true)
+    )
+}
+
+/// Pure-read probe: would the universal initramfs attach from the cache
+/// without building or downloading anything? Applies the same
+/// source-fingerprint eviction as the attach path first, so a stale artifact
+/// never counts as available.
+pub(crate) fn universal_initramfs_available() -> bool {
+    let version = env!("CARGO_PKG_VERSION");
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
+    let arch = mvm_core::arch::GuestArch::host();
+    evict_stale_universal_initramfs(&cache_root, version, arch);
+    mvm_build::initramfs::resolve_or_seed_from_default_cache(&cache_root, version, arch).is_ok()
+}
+
 pub(crate) fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
 ) -> Result<()> {
@@ -296,20 +336,7 @@ pub(crate) fn attach_universal_initramfs_if_cached(
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     let arch = mvm_core::arch::GuestArch::host();
     let env = HostShellEnvironment;
-    // A source checkout rebuilds its guest binaries when they change, but the
-    // initramfs cache is keyed only on `(version, arch)` — so without this it
-    // keeps serving the artifact built before the change, and a guest-side fix
-    // appears not to have worked. Evicting on a fingerprint mismatch is what
-    // makes the next resolve rebuild rather than re-find the stale bytes.
-    if let Some(workspace_root) =
-        crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
-        && let Ok(fingerprint) =
-            mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
-                &workspace_root,
-            )
-        && let Ok(true) =
-            mvm_build::initramfs::evict_if_source_changed(&cache_root, version, arch, &fingerprint)
-    {
+    if evict_stale_universal_initramfs(&cache_root, version, arch) {
         tracing::info!(
             initramfs_version = version,
             "guest sources changed since the cached universal initramfs was built; discarded it"
@@ -1342,29 +1369,12 @@ mod universal_initramfs_attach_tests {
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::VmStartConfig;
 
-    #[test]
-    fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal() {
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        // HOME moves with MVM_HOME or the cache under test is not cold: the
-        // initramfs resolver seeds a miss from `$HOME/.mvm/cache`.
-        env.isolate_mvm_home(dir.path());
-
-        let mut sc = VmStartConfig::default();
-        // Must never return an error: a cold cache falls back to legacy boot
-        // (or is warmed automatically on hosts that can build/fetch it).
-        attach_universal_initramfs_if_cached(&mut sc).unwrap();
-    }
-
-    #[test]
-    fn attach_universal_initramfs_if_cached_attaches_from_cache() {
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(dir.path());
-
+    /// Install a fixture universal initramfs into `<mvm_home>/cache/initramfs`
+    /// exactly the way the real build/install path lays it out.
+    fn seed_warm_universal_initramfs(mvm_home: &std::path::Path) {
         let version = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
-        let source = dir.path().join("source");
+        let source = mvm_home.join("source");
         std::fs::create_dir_all(&source).unwrap();
         // The installer verifies the image against its hash sidecar, so the
         // fixture has to match what the build emits: a real gzip stream, the
@@ -1385,15 +1395,14 @@ mod universal_initramfs_attach_tests {
         std::fs::write(source.join("initramfs.size"), format!("{}\n", image.len())).unwrap();
         std::fs::write(source.join("VERSION"), version).unwrap();
 
-        let cache_root = dir.path().join("cache").join("initramfs");
+        let cache_root = mvm_home.join("cache").join("initramfs");
         mvm_build::initramfs::install_initramfs_into_cache(&source, &cache_root, version, arch)
             .unwrap();
         // A warm cache in a source checkout has to say what built it. Without a
         // fingerprint the artifact is of unknown provenance and is discarded —
         // which is the whole point of the eviction, and would make this fixture
         // describe a cache the attach path is right to refuse.
-        if let Some(workspace_root) =
-            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+        if let Some(workspace_root) = runtime_overlay_source_checkout_root()
             && let Ok(fingerprint) =
                 mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
                     &workspace_root,
@@ -1407,6 +1416,28 @@ mod universal_initramfs_attach_tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn attach_universal_initramfs_if_cached_cold_cache_is_non_fatal() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        // HOME moves with MVM_HOME or the cache under test is not cold: the
+        // initramfs resolver seeds a miss from `$HOME/.mvm/cache`.
+        env.isolate_mvm_home(dir.path());
+
+        let mut sc = VmStartConfig::default();
+        // Must never return an error: a cold cache falls back to legacy boot
+        // (or is warmed automatically on hosts that can build/fetch it).
+        attach_universal_initramfs_if_cached(&mut sc).unwrap();
+    }
+
+    #[test]
+    fn attach_universal_initramfs_if_cached_attaches_from_cache() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+        seed_warm_universal_initramfs(dir.path());
 
         let mut sc = VmStartConfig::default();
         attach_universal_initramfs_if_cached(&mut sc).unwrap();
@@ -1422,5 +1453,54 @@ mod universal_initramfs_attach_tests {
                 .contains("initramfs.cpio.gz"),
             "attached path should point at the cpio.gz image"
         );
+    }
+
+    #[test]
+    fn universal_initramfs_available_true_on_warm_cache() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+        seed_warm_universal_initramfs(dir.path());
+
+        assert!(universal_initramfs_available());
+    }
+
+    #[test]
+    fn universal_initramfs_available_false_on_cold_cache() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        // HOME moves with MVM_HOME or the cache under test is not cold: the
+        // initramfs resolver seeds a miss from `$HOME/.mvm/cache`.
+        env.isolate_mvm_home(dir.path());
+
+        assert!(!universal_initramfs_available());
+    }
+
+    #[test]
+    fn universal_initramfs_available_false_when_source_fingerprint_is_stale() {
+        let Some(_workspace_root) = runtime_overlay_source_checkout_root() else {
+            // Fingerprint eviction only applies to a source checkout.
+            return;
+        };
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+        seed_warm_universal_initramfs(dir.path());
+
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let cache_root = dir.path().join("cache").join("initramfs");
+        mvm_build::initramfs::record_source_fingerprint(
+            &cache_root,
+            version,
+            arch,
+            "stale-fingerprint",
+        )
+        .unwrap();
+
+        assert!(!universal_initramfs_available());
+        // The probe evicts the stale artifact rather than merely ignoring it,
+        // so the attach path never re-finds the same stale bytes.
+        assert!(!cache_root.join(version).join(arch.to_string()).exists());
     }
 }

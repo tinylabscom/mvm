@@ -51,6 +51,52 @@ impl Drop for MvmHomeGuard {
     }
 }
 
+/// Overrides a fixed set of process environment variables for the duration
+/// of one scenario and restores each previous value when the guard drops.
+///
+/// This is the process-wide counterpart of the per-command `.env(...)` the
+/// CLI steps use, for steps that drive in-process boot-policy code reading
+/// the environment (`MVM_HOME`, `HOME`, acquire-mode selectors). The BDD
+/// runner executes scenarios sequentially, so the process-global mutation is
+/// safe.
+pub struct ScenarioEnvGuard {
+    previous: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+}
+
+impl ScenarioEnvGuard {
+    pub fn new(overrides: &[(&str, &std::ffi::OsStr)]) -> Self {
+        let previous = overrides
+            .iter()
+            .map(|(key, value)| {
+                let previous = std::env::var_os(key);
+                // SAFETY: the BDD runner executes scenarios sequentially, so
+                // no other thread observes the process environment while this
+                // guard is alive.
+                unsafe { std::env::set_var(key, value) };
+                (std::ffi::OsString::from(key), previous)
+            })
+            .collect();
+        Self { previous }
+    }
+}
+
+impl Drop for ScenarioEnvGuard {
+    fn drop(&mut self) {
+        for (key, previous) in &self.previous {
+            match previous {
+                Some(prev) => {
+                    // SAFETY: serial scenario execution; see `ScenarioEnvGuard::new`.
+                    unsafe { std::env::set_var(key, prev) };
+                }
+                None => {
+                    // SAFETY: serial scenario execution; see `ScenarioEnvGuard::new`.
+                    unsafe { std::env::remove_var(key) };
+                }
+            }
+        }
+    }
+}
+
 /// Constructed fresh for every scenario. Holds the result of the most
 /// recent CLI invocation so later `Then` steps can assert on it, plus the
 /// workload identities parsed from successful `build address` runs, keyed by
@@ -92,6 +138,15 @@ pub struct CliWorld {
     pub initramfs_sidecars: Option<(String, String, String)>,
     /// The resolved image path after installing the assembled initramfs.
     pub initramfs_resolved_image: Option<PathBuf>,
+    /// Process-wide env overrides held across the steps of a sealed-OCI
+    /// initrd scenario (dropped — and the previous values restored — when
+    /// the world is dropped at scenario end).
+    pub initramfs_boot_env: Option<ScenarioEnvGuard>,
+    /// Outcome of the most recent persistent-OCI effective-initrd
+    /// resolution: `Ok(Some(path))` for a resolved initrd, `Ok(None)` for
+    /// "no initrd", `Err(rendered)` for the legacy ladder's terminal
+    /// failure.
+    pub initramfs_boot_initrd: Option<Result<Option<String>, String>>,
     /// Whether live CLI steps should keep one warm standby for the next run.
     pub warm_residency: bool,
     /// Content address of the bundle a `bundle install` step registered, so the

@@ -6,9 +6,12 @@
 
 use cucumber::{given, then, when};
 use mvm_core::arch::GuestArch;
+use mvm_core::vm_backend::RuntimeSourcePolicy;
 use mvm_fs::initramfs::InitramfsResolver;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
-use crate::world::CliWorld;
+use crate::world::{CliWorld, ScenarioEnvGuard};
 
 /// Parse the entry names of a newc archive, stopping at the trailer — the
 /// layout assertion needs the exact entry sequence.
@@ -36,6 +39,147 @@ fn newc_names(cpio: &[u8]) -> Vec<String> {
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(data))
+}
+
+/// Env selector pinning the overlay/initrd acquisition ladder to the
+/// published-artifact mode, so a scenario running inside a source checkout
+/// never takes the cross-compile branch. Kept in sync with the CLI's
+/// `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE`.
+const ACQUIRE_MODE_ENV: &str = "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE";
+
+/// Isolate the whole mvm world for an in-process boot-policy scenario:
+/// `MVM_HOME` *and* `HOME` move to `home` (a cold-cache scenario must not be
+/// warmed by the developer's real default cache), and the acquisition mode
+/// is pinned so no branch reaches for a toolchain.
+fn isolated_boot_env(home: &Path) -> ScenarioEnvGuard {
+    ScenarioEnvGuard::new(&[
+        ("MVM_HOME", home.as_os_str()),
+        ("HOME", home.as_os_str()),
+        (ACQUIRE_MODE_ENV, OsStr::new("download")),
+    ])
+}
+
+/// The workspace root the boot path's source-fingerprint freshness check
+/// sees from this checkout, keyed on the same marker file it uses.
+fn source_checkout_root() -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
+    root.join("nix")
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix")
+        .is_file()
+        .then(|| root.to_path_buf())
+}
+
+/// Install a universal initramfs into `<mvm_home>/cache/initramfs` exactly
+/// the way the real build/install path lays it out, including the source
+/// fingerprint a source checkout records — without it the freshness check
+/// would treat the artifact as stale and discard it.
+fn seed_warm_universal_initramfs(mvm_home: &Path) {
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = GuestArch::host();
+    let source = mvm_home.join("universal-initramfs-source");
+    let cache_root = mvm_home.join("cache").join("initramfs");
+    mvm_build::initramfs::assemble_initramfs_artifact(b"bdd-static-guest-agent", version, &source)
+        .expect("assemble the initramfs artifact");
+    mvm_build::initramfs::install_initramfs_into_cache(&source, &cache_root, version, arch)
+        .expect("install the initramfs into the cache");
+    if let Some(root) = source_checkout_root() {
+        let fingerprint =
+            mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&root)
+                .expect("fingerprint the source checkout");
+        mvm_build::initramfs::record_source_fingerprint(&cache_root, version, arch, &fingerprint)
+            .expect("record the initramfs source fingerprint");
+    }
+}
+
+/// The scenario's sealed rootfs lives at a fixed spot inside its isolated
+/// home so the Given that writes it and the When that boots it agree.
+fn scenario_rootfs(mvm_home: &Path) -> PathBuf {
+    mvm_home.join("vm").join("rootfs.ext4")
+}
+
+#[given("an isolated mvm home with a warm universal initramfs cache")]
+fn isolated_home_warm_universal_initramfs(world: &mut CliWorld) {
+    let tmp = tempfile::tempdir().expect("scenario mvm home");
+    world.initramfs_boot_env = Some(isolated_boot_env(tmp.path()));
+    seed_warm_universal_initramfs(tmp.path());
+    world.isolated_home = Some(tmp);
+}
+
+#[given("an isolated mvm home with a cold universal cache but a cached legacy verity initrd")]
+fn isolated_home_cold_universal_cached_verity_initrd(world: &mut CliWorld) {
+    let tmp = tempfile::tempdir().expect("scenario mvm home");
+    world.initramfs_boot_env = Some(isolated_boot_env(tmp.path()));
+    let layout = mvm_build::verity_initrd::VerityInitrdLayout::under(
+        &tmp.path().join("cache"),
+        env!("CARGO_PKG_VERSION"),
+        GuestArch::host(),
+    );
+    std::fs::create_dir_all(&layout.dir).expect("create the verity-initrd cache dir");
+    std::fs::write(&layout.initrd, b"legacy-verity-initrd").expect("seed the legacy verity initrd");
+    world.isolated_home = Some(tmp);
+}
+
+#[given("a sealed OCI rootfs with no sibling initrd")]
+fn sealed_oci_rootfs_without_sibling_initrd(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("a prior step must isolate the mvm home");
+    let rootfs = scenario_rootfs(home.path());
+    std::fs::create_dir_all(rootfs.parent().expect("the rootfs has a parent dir"))
+        .expect("create the rootfs dir");
+    std::fs::write(&rootfs, b"rootfs").expect("write the rootfs");
+}
+
+#[when("the persistent OCI effective initrd is resolved for a required-overlay boot")]
+fn resolve_persistent_oci_effective_initrd(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("a prior step must isolate the mvm home");
+    let outcome = mvm_cli::boot_policy::persistent_oci_effective_initrd(
+        &scenario_rootfs(home.path()),
+        RuntimeSourcePolicy::RequiredOverlay,
+    )
+    .map_err(|e| format!("{e:#}"));
+    world.initramfs_boot_initrd = Some(outcome);
+}
+
+#[then("the effective initrd is empty")]
+fn effective_initrd_is_empty(world: &mut CliWorld) {
+    let outcome = world
+        .initramfs_boot_initrd
+        .as_ref()
+        .expect("a prior step must resolve the effective initrd");
+    assert_eq!(
+        outcome.as_ref().map(Option::as_deref),
+        Ok(None),
+        "a warm universal initramfs must skip the legacy initrd entirely: {outcome:?}"
+    );
+}
+
+#[then("the effective initrd is the cached legacy verity initrd")]
+fn effective_initrd_is_cached_legacy_verity_initrd(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("a prior step must isolate the mvm home");
+    let layout = mvm_build::verity_initrd::VerityInitrdLayout::under(
+        &home.path().join("cache"),
+        env!("CARGO_PKG_VERSION"),
+        GuestArch::host(),
+    );
+    let outcome = world
+        .initramfs_boot_initrd
+        .as_ref()
+        .expect("a prior step must resolve the effective initrd");
+    assert_eq!(
+        outcome.as_ref().map(Option::as_deref),
+        Ok(Some(layout.initrd.to_str().expect("utf-8 initrd path"))),
+        "a cold universal cache must still run the legacy verity-initrd ladder: {outcome:?}"
+    );
 }
 
 #[given("fixed guest-agent bytes for the initramfs build")]

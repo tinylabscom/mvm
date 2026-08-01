@@ -11,7 +11,9 @@ use super::shared::{clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_sp
 mod admission;
 mod audit;
 mod kernel;
-mod oci_persist;
+// `pub(crate)` so the crate-root boot-policy facade can re-export the
+// effective-initrd decision; nothing else in the module is `pub`.
+pub(crate) mod oci_persist;
 mod policy;
 mod runtime_source;
 
