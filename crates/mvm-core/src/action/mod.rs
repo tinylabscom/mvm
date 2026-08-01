@@ -6,15 +6,12 @@
 //! recorded digest + size of every artifact it produced, so a cache hit can be
 //! verified against the actual bytes on disk before reuse rather than assumed.
 
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::packs::{Sha256Hex, is_sha256_hex};
+use crate::packs::{Sha256Hex, is_sha256_hex, stream_sha256};
 
 /// Identifies a build action by its fingerprint (sha256 over the action's
 /// inputs — flake ref, profile, role, and so on). Bare 64-hex, no prefix: the
@@ -75,12 +72,21 @@ pub struct ActionCacheRecord {
 /// Each file is streamed through a fixed buffer rather than read whole into
 /// memory — a cached `rootfs.ext4` runs to hundreds of megabytes. An empty
 /// `artifacts` list is refused rather than treated as vacuously verified: the
-/// absence of recorded digests must never read back as "verified."
+/// absence of recorded digests must never read back as "verified." Every
+/// `artifact.path` is checked for an escape (absolute, or carrying a `..`,
+/// root, or prefix component) before it is joined onto `dir`, so a record
+/// naming a path outside the revision directory is refused before any file
+/// is touched.
 pub fn verify_artifacts_on_disk(dir: &Path, record: &ActionCacheRecord) -> Result<(), VerifyError> {
     if record.artifacts.is_empty() {
         return Err(VerifyError::EmptyRecord);
     }
     for artifact in &record.artifacts {
+        if !artifact_path_is_safe(&artifact.path) {
+            return Err(VerifyError::UnsafePath {
+                path: artifact.path.clone(),
+            });
+        }
         let path = dir.join(&artifact.path);
         let (got_hash, got_size) = hash_file_streaming(&path, &artifact.path)?;
         if got_size != artifact.size_bytes {
@@ -101,12 +107,23 @@ pub fn verify_artifacts_on_disk(dir: &Path, record: &ActionCacheRecord) -> Resul
     Ok(())
 }
 
-/// Stream `path` through a `Sha256` hasher in fixed-size chunks, returning
-/// its hex digest and byte count. `record_path` is the artifact's recorded
-/// relative path, used for error reporting instead of the joined absolute
-/// path.
+/// True when `path` cannot escape the directory it will be joined onto:
+/// relative, and every component a plain path segment (no `..`, no root, no
+/// Windows-style prefix).
+fn artifact_path_is_safe(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+/// Hash `path` on disk via [`stream_sha256`], mapping the raw `io::Error`
+/// onto `VerifyError::Missing` or `VerifyError::Io`. `record_path` is the
+/// artifact's recorded relative path, used for error reporting instead of
+/// the joined absolute path.
 fn hash_file_streaming(path: &Path, record_path: &str) -> Result<(String, u64), VerifyError> {
-    let mut file = File::open(path).map_err(|source| {
+    stream_sha256(path).map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
             VerifyError::Missing {
                 path: record_path.to_string(),
@@ -117,22 +134,7 @@ fn hash_file_streaming(path: &Path, record_path: &str) -> Result<(String, u64), 
                 source,
             }
         }
-    })?;
-    let mut hasher = Sha256::new();
-    let mut total = 0u64;
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = file.read(&mut buffer).map_err(|source| VerifyError::Io {
-            path: record_path.to_string(),
-            source,
-        })?;
-        if read == 0 {
-            break;
-        }
-        total += read as u64;
-        hasher.update(&buffer[..read]);
-    }
-    Ok((hex::encode(hasher.finalize()), total))
+    })
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +159,8 @@ pub enum VerifyError {
     },
     #[error("artifact {path} is missing on disk")]
     Missing { path: String },
+    #[error("artifact path {path:?} is unsafe: must be relative with no parent-dir component")]
+    UnsafePath { path: String },
     #[error("artifact {path} could not be read: {source}")]
     Io {
         path: String,
@@ -320,6 +324,35 @@ mod tests {
         match error {
             VerifyError::SizeMismatch { path, .. } => assert_eq!(path, "vmlinux"),
             other => panic!("expected SizeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_fails_on_unsafe_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let unsafe_record = |path: &str| ActionCacheRecord {
+            action_digest: ActionDigest::from_fingerprint_hex(&valid_hex())
+                .expect("valid fingerprint"),
+            revision: "rev-1".to_string(),
+            artifacts: vec![ArtifactDigest {
+                path: path.to_string(),
+                sha256: Sha256Hex::from_bytes(b"irrelevant"),
+                size_bytes: 0,
+            }],
+        };
+
+        let absolute = unsafe_record("/etc/passwd");
+        let error = verify_artifacts_on_disk(dir.path(), &absolute).unwrap_err();
+        match error {
+            VerifyError::UnsafePath { path } => assert_eq!(path, "/etc/passwd"),
+            other => panic!("expected UnsafePath, got {other:?}"),
+        }
+
+        let escaping = unsafe_record("../escape");
+        let error = verify_artifacts_on_disk(dir.path(), &escaping).unwrap_err();
+        match error {
+            VerifyError::UnsafePath { path } => assert_eq!(path, "../escape"),
+            other => panic!("expected UnsafePath, got {other:?}"),
         }
     }
 
