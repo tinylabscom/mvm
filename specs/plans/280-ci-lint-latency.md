@@ -33,9 +33,9 @@ binaries for clippy, `test-support`, and example feature fingerprints.
 - [x] Move the `xtask` man-page feature tests from Lint to the required Test
       job, where the test-profile `mvm-cli` graph is already warm.
 - [x] Run the MCP stdio roundtrip inside the already-warm Test job for merge-
-      queue and manual runs. Retain the historical required-check name as a
-      skipped compatibility job so the branch rule does not need an unsafe
-      transition window.
+      queue and manual runs. Retain the historical required-check name as an
+      always-running aggregate gate that fails unless Test succeeds, so no
+      required result is ever satisfied by a skipped job.
 - [x] Measure the targeted feature lane locally: 2,718 tests plus the required
       example check completed in 7m27s, versus 13m38s and 8,610 tests for the
       sampled workspace-wide command.
@@ -55,8 +55,8 @@ binaries for clippy, `test-support`, and example feature fingerprints.
   nested target, so later feature variants reuse the embedded-binary graph.
 - Man-page feature coverage remains required but does not rebuild the
   test-profile CLI graph on Lint's critical path.
-- MCP still executes before a merge, but no separate runner is allocated for
-  its compatibility check.
+- MCP still executes before a merge. Its historical required check always
+  concludes and uses only a short aggregate runner after Test completes.
 - `cargo test --workspace`, `cargo check --workspace`, and Linux
   `cargo clippy --workspace --all-targets -- -D warnings` pass.
 

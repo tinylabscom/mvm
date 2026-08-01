@@ -463,15 +463,29 @@ jobs:
       - name: Hermetic BDD scenarios
         run: just bdd
 
-   mcp-server-smoke:
+  mcp-server-smoke:
     name: MCP server stdio roundtrip
-    # Branch protection still requires this historical check name. The real
-    # smoke now runs inside Test, whose compile graph is already warm; keeping a
-    # skipped compatibility job avoids allocating a fourth merge-queue runner.
-    if: github.event_name == 'mcp-check-compatibility-shim'
+    # The real smoke runs inside Test, whose compile graph is already warm.
+    # This always-running gate preserves the required check name and reports a
+    # failure instead of being skipped when Test fails or is cancelled.
+    needs: test
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - run: echo "MCP smoke runs in the required Test job"
+      - name: Report MCP smoke result
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          if [ "$TEST_RESULT" != "success" ]; then
+            echo "::error::Test did not succeed; inspect its MCP smoke step and remaining logs"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "MCP smoke is deferred to exact-commit merge-queue validation"
+          else
+            echo "MCP smoke completed successfully inside Test"
+          fi
   nix-flake-check:
     name: Nix flake check (Linux eval)
     # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,

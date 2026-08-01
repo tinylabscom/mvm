@@ -331,10 +331,14 @@ mod tests {
         assert!(test.contains("run: sudo apt-get install -y jq"));
         assert!(test.contains("run: ./scripts/test-mcp-roundtrip.sh"));
 
-        let compatibility = ci_job_block(&workflow, "mcp-server-smoke");
-        assert!(compatibility.contains("name: MCP server stdio roundtrip"));
-        assert!(compatibility.contains("if: github.event_name == 'mcp-check-compatibility-shim'"));
-        assert!(!compatibility.contains("./scripts/test-mcp-roundtrip.sh"));
+        let gate = ci_job_block(&workflow, "mcp-server-smoke");
+        assert!(gate.contains("name: MCP server stdio roundtrip"));
+        assert!(gate.contains("needs: test"));
+        assert!(gate.contains("if: ${{ always() }}"));
+        assert!(gate.contains("TEST_RESULT: ${{ needs.test.result }}"));
+        assert!(gate.contains("if [ \"$TEST_RESULT\" != \"success\" ]"));
+        assert!(!gate.contains("mcp-check-compatibility-shim"));
+        assert!(!gate.contains("./scripts/test-mcp-roundtrip.sh"));
     }
 
     #[test]

@@ -21,23 +21,22 @@ day-to-day development for no proportional benefit.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | two runner jobs on PR (`lint` + `test`); three in merge queue / manual dispatch (`lint`, `test` including MCP, and Nix) |
+| `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | three runner jobs on PR (`lint`, `test`, and the short MCP aggregate gate); four in merge queue / manual dispatch (the same jobs plus Nix, with MCP executed inside Test) |
 | `architecture.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | structural/architectural invariants; skips the actual work on docs-only PRs, always runs in merge queue |
 | `ci-full.yml` | `workflow_dispatch` only | the full platform + live-VM + OCI-ratification matrix; operator-triggered, never automatic |
 | `security.yml` | `push: tags: v*` + nightly cron + `workflow_dispatch` | dependency audit / advisory scan; release-time backstop plus nightly catch for new advisories |
 | `windows.yml` | `push: tags: v*` + `workflow_dispatch` | non-blocking informational Windows build check; never a required check |
 | `release.yml` | `push: tags: v*` | builds and publishes release artifacts |
 
-### `ci.yml` is capped at three runner jobs in the merge queue, two on pull requests
+### `ci.yml` shares expensive work and keeps required results conclusive
 
 `lint` (fmt, clippy, and the full battery of `xtask` architectural
 checks — see ADR-010) and `test` (the workspace nextest run, doctests,
 hermetic BDD, no-std target checks, man-page feature tests, and real-kernel
 ext4 checks) run on every pull request. The MCP stdio roundtrip runs inside
 the already-warm Test runner in the merge queue and on manual
-`workflow_dispatch`; its historical
-required-check job remains as a skipped compatibility shim until the branch
-rule is updated. `nix-flake-check` also runs only in the merge queue and on
+`workflow_dispatch`; its historical required-check job is an always-running
+aggregate gate that fails unless Test succeeds. `nix-flake-check` also runs only in the merge queue and on
 manual dispatch, so ordinary PR updates pay for the lighter compile/test signal
 and the heavier smoke/eval work runs once before merge. The SDK publication
 dry-run is part of the manual full matrix rather than the development lane.
@@ -46,8 +45,8 @@ Nothing platform-specific
 the full builder-VM image build) runs on every pull request — those live
 in `ci-full.yml`, run only by explicit `workflow_dispatch`.
 
-Checks that need the same Linux and Rust environment are steps in one of these
-three runner jobs, not standalone jobs. This shares checkout, toolchain, and
+Checks that need the same Linux and Rust environment are steps in the Lint,
+Test, or Nix jobs, not standalone build jobs. This shares checkout, toolchain, and
 dependency installation while retaining the same behavioral coverage. The PR
 workflow does not upload `target/`: GitHub scopes caches from pull-request and
 merge-queue refs so sibling runs cannot restore them, making the former 4+ GB
