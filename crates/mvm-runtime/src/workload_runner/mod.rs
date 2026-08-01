@@ -4,12 +4,14 @@
 //! audit. This module holds the pure, driver-independent pieces of that mapping
 //! so they are unit-testable without a hypervisor.
 
+mod child_grant;
 pub mod claim;
 pub(crate) mod cmdline;
 pub mod runner;
 pub mod spec_map;
 pub mod standby_boot;
 
+pub use child_grant::ChildGrantIssuer;
 pub use runner::{
     BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, ClaimContext, EndpointSpawnRequest,
     EndpointSpawner, RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs,

@@ -26,7 +26,8 @@ use mvm_runtime::driver::mock::MockDriver;
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 use mvm_runtime::workload_runner::claim::parent_rootfs_digest;
 use mvm_runtime::workload_runner::{
-    ClaimContext, EndpointSpawnRequest, EndpointSpawner, RealBrokerRegistrar, WorkloadRunner,
+    ChildGrantIssuer, ClaimContext, EndpointSpawnRequest, EndpointSpawner, RealBrokerRegistrar,
+    WorkloadRunner,
 };
 
 use crate::world::{CliWorld, WarmClaimOutcome, WarmClaimWitness};
@@ -156,6 +157,17 @@ impl EndpointSpawner for WarmClaimSpawner {
     }
 }
 
+struct WarmClaimGrantIssuer;
+
+impl ChildGrantIssuer for WarmClaimGrantIssuer {
+    fn issue(
+        &self,
+        config: &VmStartConfig,
+    ) -> anyhow::Result<Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>> {
+        mvm_hostd::plan_admission::stash_plan_and_mint_verb_grant(config)
+    }
+}
+
 #[when(expr = "the parent is claimed with an admitted child plan")]
 fn when_claim_parent(world: &mut CliWorld) {
     // `vm_state_dir` / `vm_substitution_endpoint_socket` are `MVM_HOME`-rooted.
@@ -217,6 +229,9 @@ fn when_claim_parent(world: &mut CliWorld) {
         .nonce([9u8; 16])
         .build();
     plan.image.sha256 = parent_digest.clone();
+    plan.agent_verbs = Some(vec![
+        mvm_core::plan::VerbId::new("run-entrypoint").expect("valid verb fixture"),
+    ]);
     let plan_json = serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test"))
         .expect("serialize the signed child plan");
 
@@ -245,6 +260,7 @@ fn when_claim_parent(world: &mut CliWorld) {
     let driver = MockDriver::default();
     let driver_probe = driver.clone();
     let runner = WorkloadRunner::new(driver, WarmClaimSpawner::default(), RealBrokerRegistrar);
+    let grant_issuer = WarmClaimGrantIssuer;
     let ctx = ClaimContext {
         pool,
         checkpoints,
@@ -252,6 +268,7 @@ fn when_claim_parent(world: &mut CliWorld) {
         anchor: &anchor,
         parent_checkpoint: parent_id,
         registry_path: &registry_path,
+        grant_issuer: Some(&grant_issuer),
     };
 
     world.warm_claim_outcome = Some(match runner.claim_standby(&ctx, &handle, &claim) {
@@ -262,6 +279,22 @@ fn when_claim_parent(world: &mut CliWorld) {
                 .iter()
                 .find(|f| f.child_vm_name == child.0)
                 .expect("a successful claim records exactly one fork for its child");
+            let delivered = driver_probe.delivered_child_identities();
+            let grant = delivered
+                .first()
+                .and_then(|identity| identity.grant_envelope.as_ref())
+                .expect("the successful claim delivers its child grant");
+            let host_key_bytes = std::fs::read(
+                mvm_core::config::mvm_keys_dir()
+                    .join(mvm_hostd::audit::host_keypair::PUBLIC_FILENAME),
+            )
+            .expect("read the host signer public key used for the child grant");
+            let host_key = ed25519_dalek::VerifyingKey::from_bytes(
+                &host_key_bytes
+                    .try_into()
+                    .expect("host signer public key is exactly 32 bytes"),
+            )
+            .expect("host signer public key is valid Ed25519");
             WarmClaimOutcome::Claimed(WarmClaimWitness {
                 child_id: child.0.clone(),
                 child_dir_has_sidecar: child_dir
@@ -270,6 +303,17 @@ fn when_claim_parent(world: &mut CliWorld) {
                 child_dir_has_rootfs: child_dir.join("rootfs.ext4").exists(),
                 fork_genid_nonzero: fork.genid.token != [0u8; GENID_BYTES],
                 fork_genid_content_hash_matches_parent: fork.genid.content_hash == parent_digest,
+                post_restore_grant_session_matches_child: grant.grant.session_id == child.0,
+                post_restore_grant_verbs: grant
+                    .grant
+                    .verbs
+                    .iter()
+                    .map(|verb| verb.as_str().to_string())
+                    .collect(),
+                post_restore_grant_verifies_under_host_key: grant
+                    .grant
+                    .verify(&host_key, &child.0, &plan.nonce, plan.valid_from)
+                    .is_ok(),
             })
         }
         Err(e) => WarmClaimOutcome::Refused {
@@ -326,6 +370,24 @@ fn then_fresh_genid(world: &mut CliWorld) {
     assert!(
         witness.fork_genid_content_hash_matches_parent,
         "the fresh token must be bound to the verified parent's content-address"
+    );
+}
+
+#[then(expr = "the child's signed verb grant is delivered with its final identity")]
+fn then_child_grant_matches_final_identity(world: &mut CliWorld) {
+    let witness = claimed_witness(world);
+    assert!(
+        witness.post_restore_grant_session_matches_child,
+        "the post-restore grant must bind the final runner-minted child identity"
+    );
+    assert_eq!(
+        witness.post_restore_grant_verbs,
+        ["run-entrypoint"],
+        "the post-restore grant must carry exactly the admitted verb set"
+    );
+    assert!(
+        witness.post_restore_grant_verifies_under_host_key,
+        "the post-restore grant must verify under the host's trusted signer key"
     );
 }
 

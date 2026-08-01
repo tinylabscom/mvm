@@ -723,9 +723,18 @@ Then unify + retire the old paths:
       the CLI no longer reserves a parent the runner is about to reserve (#1922),
       which had made every warm claim refuse with "parent is not in a claimable
       state" so the pool filled and never drained.
+      The post-restore authority gap is also closed in code: after the final
+      child identity is materialized, the host mints and validates the exact
+      admitted `VerbGrant`, persists it only for that child, and delivers it
+      with the generation token over PostRestore. The factory parent retains
+      the boot-pinned host identity but receives no workload grant. A real
+      host-key signature is verified in the hermetic warm-claim BDD, and a
+      missing issuer or mismatched envelope refuses before fork with no orphan.
       `standby_pool` stays **`false`**: the **claim** half has still never
-      executed live, so the post-restore handshake and the child's egress/broker/
-      exit channels remain unproven. The flip is gated on that run.
+      completed live. It now reaches the signed-parent check and refuses because
+      the capture path does not emit `checkpoint.created` (#1962), so the
+      post-restore grant delivery and the child's egress/broker/exit channels
+      remain live-unproven. The flip is gated on that run.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.

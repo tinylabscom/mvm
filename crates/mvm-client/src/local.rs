@@ -205,7 +205,10 @@ fn signal_guest_post_restore(name: &str) -> Result<()> {
     );
     signal_post_restore(
         name,
-        &VsockPostRestoreSignal { token },
+        &VsockPostRestoreSignal {
+            token,
+            grant_envelope: None,
+        },
         POST_RESTORE_READY_TIMEOUT,
     )
     .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))?;
