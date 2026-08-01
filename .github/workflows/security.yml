@@ -528,29 +528,40 @@ jobs:
   # checked on every PR by ci.yml; only the mutation run itself is
   # nightly, because it costs hours.
   mutation-witnesses:
-    name: Claim witnesses — mutation-tested (ADR-001 claims ledger)
+    name: Claim witnesses — mutation-tested (${{ matrix.package }})
     runs-on: ubuntu-latest
-    # STILL NON-BLOCKING, and now for a smaller and stated reason.
+    # BLOCKING, and sharded per package because it has to be.
     #
-    # It was non-blocking because accepted_misses had been seeded for one
-    # anchor file only. Establishing the rest found that eight of the 26
-    # files could not be measured at all — their packages' suites did not
-    # pass package-scoped, and this lane is always package-scoped — and
-    # that two of those reported themselves clean. All of that is fixed,
-    # and the whole surface now measures: 1221 mutants, 359 surviving.
+    # The whole surface takes ~6.9h end to end and a GitHub-hosted job is
+    # killed at 6, so one job could not reliably finish: it would go red
+    # nightly for a reason unrelated to any claim and be ignored — the
+    # failure this lane exists to prevent, reached from the other side.
+    # Split per package the slowest shard is ~2.5h.
     #
-    # What is left before this can block: the survivors in the
-    # driver-level files (Firecracker snapshot I/O, nix-gated overlay
-    # builds) still need their accepted_misses entries, and the ratchet
-    # compares exact mutant identities, so those entries have to come from
-    # a confirmation run over the changed files rather than be written
-    # from memory. Arming before that would fail the first nightly on
-    # entries that do not match — the same "green result standing in for
-    # evidence" this lane exists to prevent, one level up.
+    # Every survivor is either closed by a test or carried in
+    # xtask/mutation-witness-baseline.json with the mechanism that makes it
+    # uncatchable here (a live VMM, a nix build, a feature this run does not
+    # compile, or a provable equivalence). The ratchet tolerates only those
+    # exact identities, so a NEW hole still fails — including inside the
+    # files that carry accepted entries.
     #
-    # See specs/VERIFICATION.md §"Mutation-tested witnesses" and plan 272
-    # WS-2.
-    continue-on-error: true
+    # The matrix is pinned against the baseline by check-mutation-witnesses
+    # on every PR, so a package joining the surface cannot silently go
+    # unmeasured here.
+    #
+    # See specs/VERIFICATION.md §"Mutation-tested witnesses" and plan 272 WS-2.
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - mvm-agentd
+          - mvm-build
+          - mvm-cli
+          - mvm-core
+          - mvm-hostd
+          - mvm-protocol
+          - mvm-runtime
+          - mvm-sdk
     steps:
       - uses: actions/checkout@v6
 
@@ -564,13 +575,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-mutation-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-mutation-
+          key: cargo-mutation-${{ matrix.package }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-mutation-${{ matrix.package }}-
 
       - name: Install cargo-mutants and nextest
         run: cargo install --locked cargo-mutants cargo-nextest
 
-      - name: Mutate the claim surface and ratchet survivors
+      - name: Mutate this package's claim surface and ratchet survivors
         # `--run` mutates the claim-enforcement surface and runs the suite
         # against each mutant — plan verification that no longer verifies, a
         # seccomp filter that no longer filters, the host signer. That is
@@ -598,7 +609,7 @@ jobs:
             echo "::error::refusing to mutate against a reachable keystore at $HOME/.mvm/keys" >&2
             exit 1
           fi
-          cargo run -p xtask -- check-mutation-witnesses --run
+          cargo run -p xtask -- check-mutation-witnesses --run --package '${{ matrix.package }}'
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
   # ADR-001 §W5.1 — the unit tests that exercise the

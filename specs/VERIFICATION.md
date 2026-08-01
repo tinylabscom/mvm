@@ -30,6 +30,7 @@ row below records a defect that was planted to prove the gate fires.
 | `check-claim-catalog` | Name a witness in the ADR-001 ledger that `model/claims.toml` does not list | yes |
 | `check-workflow-paths` | Point a fuzz step's `working-directory` at `crates/mvm-oci` (the pre-consolidation path that made the fuzz lane dead for ten nightlies) | yes |
 | `check-mvm-host-binaries-sync` | Drop `--bin mvm-builderd` from the builder-VM cross-compile step, reproducing the "path does not exist" image-build failure | yes |
+| `check-mutation-witnesses` (shard matrix) | Remove the `mvm-cli` shard from `security.yml`'s mutation matrix, so that package would never be mutated while every shard stayed green | yes — `package mvm-cli is on the mutation surface but has no shard` |
 | `check-claim-witness-freshness` | Change `security.yml`'s cron to hourly so its real last-run age exceeds the allowance; reported `security.yml last ran 14h ago (schedule allows 3h)` naming all 8 claims it backs | yes |
 | `cargo-fuzz crates still compile` | None planted — run against main it independently rediscovered both real defects (`fuzz_authed_path` E0308, `fuzz_build_image` unclosed delimiter) that the nightly took eleven days to surface | yes |
 | `included_top_level_is_a_superset_of_the_nix_filter_allowlist` | Remove `"nix"` from `INCLUDED_TOP_LEVEL` while `workspace-filter.nix` still admits it, so a `nix/` change would go unhashed and boot a stale image | yes |
@@ -98,18 +99,51 @@ vacuously true. Both pass today.
 ### Mutation-tested witnesses: what the first full run found
 
 `check-mutation-witnesses --run` breaks each claim-surface file on purpose
-and asks whether any witness notices. Its nightly lane runs
-`continue-on-error` until a baseline covers the whole surface. Producing
+and asks whether any witness notices. Its nightly lane ran
+`continue-on-error` until a baseline covered the whole surface. Producing
 that baseline is recorded here, because most of what it found was not
 surviving mutants.
 
-The whole surface now measures — **1221 mutants, 359 surviving** — which
-it had never done before. The lane is not yet armed: the driver-level
-survivors still need `accepted_misses` entries, and since the ratchet
-compares exact mutant identities those entries must come from a
-confirmation run rather than be written from memory. Arming first would
-fail the first nightly on entries that do not match, which is the same
-unearned-green failure one level up.
+The whole surface now measures — **1221 mutants** — which it had never
+done before, and **the lane is armed**: `continue-on-error` is gone, so a
+witness that stops detecting its own property fails the nightly.
+
+Every survivor is either closed by a test or carried in
+`xtask/mutation-witness-baseline.json` with the mechanism that makes it
+uncatchable here. Ninety-one entries, and none of them says "not yet
+triaged": the generator that wrote them leaves anything without a stated
+mechanism *out*, so an untriaged survivor fails the gate rather than being
+suppressed by omission. Each entry comes from the newest **completed** run
+of that file — completion checked on `end_time`, because cargo-mutants
+writes `outcomes.json` incrementally and a run 39 of 50 through reports
+`missed: 0` and looks clean.
+
+| Mechanism | Entries |
+| --- | --- |
+| libkrun VM lifecycle over a live supervisor process | 31 |
+| Firecracker snapshot driver I/O + vsock readiness probes | 17 |
+| witnessed only by a nix-gated integration test the lane does not run | 12 |
+| not compiled by the lane's feature set (`pure-mkfs`) | 11 |
+| OCI registry / blob-cache I/O | 6 |
+| equivalent: the field's value equals the derived `Default` | 5 |
+| needs a live VM state dir plus a controlled pid | 3 |
+| singletons (binary entrypoint, fail-closed constant, two provable equivalences, two untestable inputs) | 6 |
+
+The lane is **sharded per package**, because it has to be: the whole
+surface takes ~6.9 hours end to end and a GitHub-hosted job is killed at
+six. One job could not reliably finish, so it would go red nightly for a
+reason unrelated to any claim and be ignored — the same failure this lane
+exists to prevent, arrived at from the other side. Split per package the
+slowest shard is ~2.5 hours. That makes the matrix a second place the
+surface is written down, so `check-mutation-witnesses` pins it against the
+baseline on every PR; the row above records the planted defect.
+
+These are **accepted rather than scoped out** on purpose. Scoping would
+stop the lane measuring those files at all; accepting keeps the ratchet
+live, so a *new* hole in any of them still fails the nightly. Scoping is
+reserved for the case where the non-claim noise would drown the ledger —
+164 and 78 entries would, 40 and 14 do not. The residual coverage debt is
+tracked in #2033.
 
 **Four of eight packages could not be measured at all.** The lane runs
 `cargo mutants -p <package> --file <path>` in a fresh copy of the tree, so
