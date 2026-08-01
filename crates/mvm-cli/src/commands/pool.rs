@@ -1687,8 +1687,13 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
         let kernel = tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"k").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"warm-rootfs").unwrap();
         let key = tmp.path().join("key");
         std::fs::write(&key, b"fake-key").unwrap();
+        let mut cfg = eligible_cfg();
+        cfg.kernel_path = Some(kernel.display().to_string());
+        cfg.rootfs_path = rootfs.display().to_string();
 
         let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
         fn warm_once(
@@ -1696,6 +1701,7 @@ mod tests {
             backend: &AnyBackend,
             kernel: &std::path::Path,
             key: &std::path::Path,
+            launch: &VmStartConfig,
         ) {
             warm_to_target(
                 pool,
@@ -1708,28 +1714,21 @@ mod tests {
                     signer_id: "host:test",
                     signing_key_path: key,
                     target: 2,
-                    launch: None,
+                    launch: Some(launch),
                 },
             )
             .unwrap();
         }
 
         std::thread::scope(|s| {
-            let a = s.spawn(|| warm_once(&pool, &backend, &kernel, &key));
-            let b = s.spawn(|| warm_once(&pool, &backend, &kernel, &key));
+            let a = s.spawn(|| warm_once(&pool, &backend, &kernel, &key, &cfg));
+            let b = s.spawn(|| warm_once(&pool, &backend, &kernel, &key, &cfg));
             a.join().unwrap();
             b.join().unwrap();
         });
 
         let want = StandbyCompat {
-            template_id: None,
-            kernel_sha256: kernel_sha256_hex(&kernel).unwrap(),
-            vcpus: 2,
-            mem_mib: 1024,
-            image_sha256: None,
-            // These warms carry no launch, so they mirror a launch-less spawn:
-            // no plan to read an egress decision off, hence no guest token.
-            vsock_egress: false,
+            ..compat_for_launch(backend.as_vm_backend(), &cfg).unwrap()
         };
         assert_eq!(
             pool.idle_count_compatible(&want).unwrap(),

@@ -773,10 +773,10 @@ impl AnyBackend {
             AnyBackend::Firecracker(runner) => runner.spawn_standby_captured(ctx, spec),
             AnyBackend::Libkrun(runner) => runner.spawn_standby_captured(ctx, spec),
             AnyBackend::Hvf(runner) => runner.spawn_standby_captured(ctx, spec),
-            // The hermetic lifecycle double has no runner and no checkpoint
-            // store; it services the spawn from its own in-memory state.
+            // The hermetic lifecycle double mirrors the runner's captured
+            // checkpoint contract while keeping the VM itself in memory.
             #[cfg(feature = "test-support")]
-            AnyBackend::Mock(backend) => backend.spawn_standby(spec),
+            AnyBackend::Mock(backend) => backend.spawn_standby_captured(ctx, spec),
             // Not workload-bearing backends — no warm pool, fail closed.
             AnyBackend::Qemu(_)
             | AnyBackend::Wasm(_)
