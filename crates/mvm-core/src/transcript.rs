@@ -23,12 +23,17 @@ pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 /// Current sealed-transcript manifest format. Unknown versions fail closed.
 pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 2;
 
-/// Direction of a captured chunk relative to the workload.
+/// Direction of a captured chunk relative to the workload: network egress/
+/// ingress, or one of the workload's own output streams (stdout/stderr) plus
+/// a trace channel for structured diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     Egress,
     Ingress,
+    Stdout,
+    Stderr,
+    Trace,
 }
 
 /// One sealed transcript chunk recorded in the manifest.
@@ -48,6 +53,14 @@ pub struct ChunkRecord {
     /// written before this field parse as `false` (forwarded).
     #[serde(default)]
     pub dropped: bool,
+    /// Sha256 (hex) of the previous chunk's on-disk ciphertext; all-zero
+    /// (64 `0` characters) for the first chunk. Chains chunks together so a
+    /// reordered or spliced-in record no longer matches its neighbor once the
+    /// sealed root is recomputed. `#[serde(default)]` so manifests written
+    /// before this field still parse — an empty string can never collide with
+    /// a real hash.
+    #[serde(default)]
+    pub prev_hash: String,
 }
 
 /// Which admitted workload/session a transcript belongs to. Capture is never
@@ -373,6 +386,10 @@ impl TranscriptWriter {
     ) -> Result<(), TranscriptError> {
         self.budget.try_add(plaintext.len() as u64)?;
         let seq = self.chunks.len() as u64;
+        let prev_hash = match self.chunks.last() {
+            Some(prev) => prev.sha256_hex.clone(),
+            None => "0".repeat(64),
+        };
         let file = format!("{seq}.chunk");
         let ciphertext = aead::seal(&self.key, plaintext);
         let path = self.dir.join(&file);
@@ -392,6 +409,7 @@ impl TranscriptWriter {
             size_bytes: ciphertext.len() as u64,
             direction,
             dropped,
+            prev_hash,
         });
         Ok(())
     }
@@ -511,6 +529,7 @@ mod tests {
             size_bytes: body.len() as u64,
             direction: Direction::Egress,
             dropped: false,
+            prev_hash: "0".repeat(64),
         }
     }
 
@@ -523,6 +542,7 @@ mod tests {
             size_bytes: 2,
             direction: Direction::Ingress,
             dropped: false,
+            prev_hash: "0".repeat(64),
         }]);
         let json = serde_json::to_string(&m).unwrap();
         let back: TranscriptManifest = serde_json::from_str(&json).unwrap();
@@ -530,8 +550,29 @@ mod tests {
     }
 
     #[test]
-    fn sealed_root_vector_is_pinned() {
-        let m = manifest(vec![
+    fn stream_directions_round_trip_through_serde() {
+        for d in [Direction::Stdout, Direction::Stderr, Direction::Trace] {
+            let s = serde_json::to_string(&d).expect("serialize direction");
+            let back: Direction = serde_json::from_str(&s).expect("deserialize direction");
+            assert_eq!(d, back);
+        }
+    }
+
+    #[test]
+    fn chunk_missing_prev_hash_field_parses_with_empty_default() {
+        // A manifest written before `prev_hash` existed has no such key; it
+        // must still load rather than fail closed on an old capture.
+        let json = r#"{"seq":0,"file":"0.chunk","sha256_hex":"ab","size_bytes":2,"direction":"egress","dropped":false}"#;
+        let c: ChunkRecord = serde_json::from_str(json).expect("legacy chunk record parses");
+        assert_eq!(c.prev_hash, "");
+    }
+
+    /// Shared by `sealed_root_vector_is_pinned` and
+    /// `the_pre_linkage_root_vector_no_longer_verifies` so both tests exercise
+    /// the exact same chunk records — the only thing that may differ between
+    /// them is which root is stamped on the result.
+    fn two_chunk_manifest() -> TranscriptManifest {
+        manifest(vec![
             ChunkRecord {
                 seq: 0,
                 file: "0.chunk".to_string(),
@@ -539,6 +580,7 @@ mod tests {
                 size_bytes: 48,
                 direction: Direction::Egress,
                 dropped: false,
+                prev_hash: "0".repeat(64),
             },
             ChunkRecord {
                 seq: 1,
@@ -547,12 +589,43 @@ mod tests {
                 size_bytes: 64,
                 direction: Direction::Ingress,
                 dropped: true,
+                prev_hash: "11".repeat(32),
             },
-        ]);
+        ])
+    }
+
+    #[test]
+    fn sealed_root_vector_is_pinned() {
+        let m = two_chunk_manifest();
         assert_eq!(
             m.sealed_root_hex,
-            "81cf47b6993c2752d0a50ed0051151d6354986863f5b6265ae723e664c4f6dda"
+            "d77845a3522f96e9d44d7e8664804b92f5f9990ace10d1cf74be4bc8f9bad2e1"
         );
+    }
+
+    /// The root `sealed_root_vector_is_pinned` pinned before `ChunkRecord`
+    /// grew `prev_hash`. Captured here, unchanged, only so the test below can
+    /// prove it no longer verifies.
+    const PRE_LINKAGE_ROOT_HEX: &str =
+        "81cf47b6993c2752d0a50ed0051151d6354986863f5b6265ae723e664c4f6dda";
+
+    /// Same chunk records as `two_chunk_manifest`, but stamped with a caller
+    /// supplied root instead of a freshly computed one.
+    fn manifest_with_root(root_hex: &str) -> TranscriptManifest {
+        let mut m = two_chunk_manifest();
+        m.sealed_root_hex = root_hex.to_string();
+        m
+    }
+
+    #[test]
+    fn the_pre_linkage_root_vector_no_longer_verifies() {
+        // Guards the re-pin itself: if this ever passes again, the chunk-record
+        // layout silently reverted and the new vector is meaningless.
+        let m = manifest_with_root(PRE_LINKAGE_ROOT_HEX);
+        assert!(matches!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::SealedRootMismatch)
+        ));
     }
 
     #[test]
@@ -613,6 +686,7 @@ mod tests {
             size_bytes: 1,
             direction: Direction::Egress,
             dropped: false,
+            prev_hash: "0".repeat(64),
         };
         assert!(matches!(
             verify_chunks(&manifest(vec![c]), dir.path()).unwrap_err(),
@@ -630,6 +704,7 @@ mod tests {
             size_bytes: 1,
             direction: Direction::Egress,
             dropped: false,
+            prev_hash: "0".repeat(64),
         };
         assert!(matches!(
             verify_chunks(&manifest(vec![c]), dir.path()).unwrap_err(),
@@ -661,6 +736,29 @@ mod tests {
             recipient: "host-key-1".to_string(),
             wrapped_data_key_b64: "wrapped".to_string(),
         }
+    }
+
+    /// A writer with room for a real stream capture — wider bounds than
+    /// [`bounds`], which is deliberately tight for budget-exhaustion tests.
+    fn writer_at(dir: &Path) -> TranscriptWriter {
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 1 << 20,
+            max_chunks: 64,
+        };
+        TranscriptWriter::new(dir, fixed_key(1), cfg)
+    }
+
+    #[test]
+    fn pushed_chunks_link_to_their_predecessor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = writer_at(dir.path());
+        w.push(Direction::Stdout, b"one").expect("push one");
+        w.push(Direction::Stdout, b"two").expect("push two");
+        let m = w.seal();
+        assert_eq!(m.chunks[0].prev_hash, "0".repeat(64));
+        assert_eq!(m.chunks[1].prev_hash, m.chunks[0].sha256_hex);
     }
 
     #[test]
