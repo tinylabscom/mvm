@@ -774,7 +774,7 @@ Then unify + retire the old paths:
 - [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
 - [ ] Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "abort"` for bins.
 - [ ] Dep cut: dedupe ext4 (writer+reader), TLS (`reqwest`/`rustls`/`rcgen`), compression (`flate2`/`lzma-rs`/`tar`), net (`etherparse`/`rtnetlink`/`mio`), syscall (`nix`/`rustix`/`libc`); **reimplement trivially-used deps** where it removes an attack surface for little code.
-- [ ] **Nix build speed:** local parallel/incremental build (nix-fast-build-style), no external cache providers (hermetic).
+- [ ] **Nix build speed:** local parallel/incremental build (nix-fast-build-style), no external cache providers (hermetic). **Narrowed (2026-07-31):** the initramfs left the Nix path entirely — it is now a deterministic cargo artifact (`build_initramfs_with_cargo`), so a cold cache costs one `cargo zigbuild` cross-compile, not a Nix evaluation. This item now covers only kernels, rootfs images, and overlays.
 - Gate: guest RSS ≤ ~8 MB, host RSS ≤ ~64 MB idle; an idle guest configured at 512 MB resident-costs ~its working set (demand-fault proven); lockfile materially smaller.
 
 **WS-DX — developer experience & performance** (the story #1637 promises)
@@ -876,9 +876,9 @@ Phase 4 (docs, close-out, wasm stretch, mvmd)     ─   last
 
 WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net` (1d). WS2 depends on the guest/host crate merges (1e/1h). WS10's de-tokio depends on WS2's single-binary shape.
 
-### Active workstream: universal initramfs + vsock-activated boot (Plan 270)
+### Workstream: universal initramfs + vsock-activated boot (Plan 270) — COMPLETE
 
-Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
+Shipped in #1914 (core), #1931 (QEMU unified runner), #1933 (Docker dev-tier), #1936 (Wasm activation), #1968 (Apple Container kernel on HVF), #1985 (activation agent-readiness retry), and #1996 (deterministic cargo initramfs, which replaced the Nix initramfs build described below). Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This workstream replaces the per-rootfs init paths (`mvm-verity-init`, `mvm-oci-init`, busybox `/init`) with one content-addressed initramfs in which `mvm-agentd` is PID 1 and receives a signed `ActivateEnvironment` command over vsock.
 
 **Prerequisites:** satisfied. `feat/vsock-control-conformance` and `feat/firecracker-vsock-only-final` are already merged to `main`; `feat/hvf-converge-vsock` cleanup is in PR #1905.
 
@@ -886,7 +886,12 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
 1. [x] Initramfs Nix derivation + content-addressed build. Created
    `nix/packages/mvm-guest-agent-static.nix`, `nix/images/initramfs/flake.nix`,
    and exposed `packages.<system>.initramfs` producing `initramfs.cpio.gz`,
-   `initramfs.hash`, `initramfs.size`, and `VERSION`.
+   `initramfs.hash`, `initramfs.size`, and `VERSION`. **Replaced (#1996):**
+   the Linux build path is now `build_initramfs_with_cargo` in
+   `mvm-build/src/initramfs.rs` — the pinned agent source is cross-compiled
+   via the shared `guest_agent_build::resolve_or_build_guest_binaries` cache
+   and packed as an epoch-zero, stably-ordered newc cpio (same sidecar
+   contract). The flake remains only as the optional publish-path build.
 2. [x] PID-1 signal handling and zombie reaping in `mvm-agentd`. Added
    `init.rs` with PID-1 detection, early filesystem mounts, and a SIGCHLD
    reaper. Wired into `mvm-guest-agent.rs` before the vsock bind.
@@ -927,8 +932,8 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    **Corrected — the shrink was unconditional and broke every host that
    cannot resolve the universal artifact.**
    `attach_universal_initramfs_if_cached` is non-fatal by design, and on
-   macOS it always fails (no `nix build` for a Linux initramfs, and the
-   published `initramfs-<arch>.tar.gz` 404s), so the boot falls back to the
+   macOS it always fails (no local build for a Linux initramfs on macOS, and
+   the published `initramfs-<arch>.tar.gz` 404s), so the boot falls back to the
    legacy per-rootfs `rootfs.initrd` whose PID 1 is `mvm-verity-init` — which
    reads those exact tokens off the cmdline and is never sent
    `ActivateEnvironment`. Result on every macOS `machine run --image`:
@@ -957,14 +962,16 @@ Tracked in `specs/plans/270-universal-initramfs-vsock-activated-boot.md`. This w
    refusal) counting as ready and only a transport failure as not-yet — and
    routed both waiters through it.
 9. [x] Initramfs cache resolver/builder and CLI attachment. Added
-   `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs` Nix
+   `mvm-fs/src/initramfs.rs` resolver, `mvm-build/src/initramfs.rs`
    builder + cache installer, and `attach_universal_initramfs_if_cached` in
    `mvm-cli/src/commands/vm/up/runtime_source.rs`, wired from `exec.rs` and
    `oci_persist.rs` and `checkpoint.rs` right after the runtime-overlay attachment. The resolver
    validates `initramfs.cpio.gz`, `initramfs.hash`, `initramfs.size`, and
    `VERSION`; the builder supports worktree-isolated caches by seeding from
    the default cache, falls back to a published-release download on non-Linux
-   hosts, produces the artifact on Linux via `nix build`, and installs
+   hosts, produces the artifact on Linux via the deterministic cargo build
+   (`build_initramfs_with_cargo` — previously `nix build`, replaced in
+   #1996), and installs
    atomically. `cargo fmt --all`, `cargo clippy --workspace --all-targets --
    -D warnings`, the spec-ref lint, targeted nextest for the modified crates
    (mvm-fs, mvm-build, mvm-runtime, mvm-agentd, mvm-cli initramfs tests),
@@ -1111,7 +1118,8 @@ produce the artifact, so what is proven is the eviction and the fallback.
 
 `initramfs::tests::resolve_returns_missing_when_cache_empty` is also fixed. Its
 `HOME` isolation had made it genuinely hermetic, which exposed what that was
-hiding: on Linux the empty-cache path falls through to a real `nix build`, and
+hiding: on Linux the empty-cache path falls through to a real build (then
+`nix build`; since #1996 the deterministic cargo build), and
 with a shell double that reports success without producing an artifact the call
 never returns. It ran for 20,000+ seconds and took a CI job to its six-hour
 limit. It had been passing on Linux only by finding an artifact it was supposed
@@ -1120,7 +1128,9 @@ contract is the one the name claims, and completes in milliseconds.
 
 That a shell double reporting success can make the nix path hang rather than
 error is worth closing separately: a build producing no artifact should fail,
-not wait.
+not wait. For the initramfs this is now moot because the Nix build path was
+removed entirely; the cargo build either produces the artifact or returns a
+typed error.
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
 ### Deferred: a dry run should not require a bootable backend
