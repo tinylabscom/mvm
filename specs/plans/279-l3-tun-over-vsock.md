@@ -140,6 +140,9 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
 - [x] live boot witness on real Firecracker: `CONFIG_TUN` kernel built,
       guest has only loopback before the agent runs, `mvm0` created with
       `ARPHRD_NONE` and no MAC — recorded in ADR-035 §"Live boot witness"
+- [x] `network.raw_ip_stack` end to end: declared in the workload's
+      decorator, parsed into the IR, read by the run path, and derived into
+      the signed plan's `network_mode`
 - [x] mode/plan compatibility gate — a plan that binds secrets, enables
       reversible replacement, or enables redaction cannot select
       `l3-vsock`, and the two plan fields cannot disagree in the hermetic lane: launch

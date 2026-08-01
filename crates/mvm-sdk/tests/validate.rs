@@ -824,3 +824,44 @@ fn rejects_concurrency_for_wasm_language() {
         .expect("expected E_UNSUPPORTED_CONCURRENCY_FOR_LANGUAGE");
     assert_eq!(err.path, ".apps[0].entrypoint.concurrency");
 }
+
+// ---- raw_ip_stack declaration ----------------------------------------
+
+/// `raw_ip_stack` is what selects the L3 tunnel, so it has to survive the
+/// parse. Absent means false — the socket-aware default.
+#[test]
+fn network_raw_ip_stack_defaults_off_and_round_trips() {
+    let off = mvm_sdk::ir::Network {
+        mode: mvm_sdk::ir::NetworkMode::None,
+        raw_ip_stack: false,
+        ports: Vec::new(),
+        egress: None,
+        peers: Vec::new(),
+        dns: None,
+    };
+    assert!(
+        !off.raw_ip_stack,
+        "a workload that says nothing must not land on the tunnel"
+    );
+
+    let json = serde_json::to_string(&off).expect("serialize");
+    assert!(
+        !json.contains("raw_ip_stack"),
+        "the default must not bloat every serialized workload: {json}"
+    );
+    let back: mvm_sdk::ir::Network = serde_json::from_str(&json).expect("deserialize");
+    assert!(!back.raw_ip_stack);
+
+    let on = mvm_sdk::ir::Network {
+        raw_ip_stack: true,
+        ..off.clone()
+    };
+    let json = serde_json::to_string(&on).expect("serialize");
+    assert!(json.contains("raw_ip_stack"), "{json}");
+    let back: mvm_sdk::ir::Network = serde_json::from_str(&json).expect("deserialize");
+    assert!(
+        back.raw_ip_stack,
+        "a declared need must survive the round trip, or the workload \
+         silently loses its transport"
+    );
+}

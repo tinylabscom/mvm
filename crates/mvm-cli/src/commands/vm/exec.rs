@@ -95,6 +95,11 @@ pub(in crate::commands) struct Args {
     /// `RunArgs::host_service` via `into_exec_args`.
     #[arg(skip)]
     pub host_service: Vec<String>,
+    /// The transport derived for this run, carried through so the admitted
+    /// plan records the mode the workload actually got. Not a flag: the
+    /// derivation is the only thing that sets it.
+    #[arg(skip)]
+    pub network_mode: mvm_protocol::plan::NetworkMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -314,6 +319,7 @@ impl RunArgs {
             healthcheck: self.healthcheck,
             hypervisor: self.hypervisor,
             host_service: self.host_service,
+            network_mode: self.network_mode,
         }
     }
 }
@@ -820,6 +826,7 @@ fn build_exec_request(
                     args.cpus,
                     u64::from(memory_mib),
                     args.timeout.unwrap_or(60),
+                    args.network_mode,
                 )
                 .context("admitting OCI image provenance for mvmctl run --image")?;
                 if cached.pulled {
@@ -919,6 +926,7 @@ fn emit_oci_run_admission(
     cpus: u32,
     mem_mib: u64,
     timeout_secs: u64,
+    network_mode: mvm_protocol::plan::NetworkMode,
 ) -> Result<()> {
     let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
         .with_context(|| {
@@ -929,10 +937,7 @@ fn emit_oci_run_admission(
         })?;
     let exec_timeout_secs = u32::try_from(timeout_secs).unwrap_or(u32::MAX);
     let input = SynthesisInput {
-        // `mvmctl run --image` has no mode selector of its own; the
-        // machine surface is where a mode is chosen, and it threads the
-        // choice through `RunArgs`.
-        network_mode: Default::default(),
+        network_mode,
         l3_network: None,
         vm_name: "run-oci",
         tenant: None,

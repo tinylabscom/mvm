@@ -40,11 +40,20 @@ The transport follows from one question about the *workload*:
 
 The need is declared by the workload, not chosen at run time:
 
-```toml
-# mvm.toml
-[network]
-raw_ip_stack = true   # needs ICMP / raw sockets / its own resolver
+```python
+import mvm
+
+@mvm.app(
+    image=mvm.python_image(python="3.12"),
+    network=mvm.network(mode="bridge", raw_ip_stack=True),
+)
+def probe(): ...
 ```
+
+Leaving it out is the default and means the socket-aware transport. A
+non-boolean value is a parse error rather than a silent default: the kwarg
+changes what the workload is admitted for, and quietly reading
+`raw_ip_stack="yes"` as false would strand it on a transport it cannot use.
 
 Two consequences worth knowing:
 
