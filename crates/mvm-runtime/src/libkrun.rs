@@ -413,6 +413,12 @@ fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    // The L3 tunnel and the socket-aware egress client are alternatives, not
+    // layers: the mode the plan admitted decides which one the guest starts.
+    if let Some(token) = crate::egress_shared::l3_cmdline_token(config) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     cmdline
 }
 

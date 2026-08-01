@@ -42,7 +42,7 @@ mod linux {
     use anyhow::{Context, Result};
     use mvm_agentd::l3::{KernelConfigurator, LinuxTun, NetAgent};
     use mvm_agentd::vsock::connect_host_vsock;
-    use mvm_protocol::l3::{GUEST_INTERFACE, L3_CONTROL_PORT, data_port, limits};
+    use mvm_protocol::l3::{GUEST_INTERFACE, GUEST_READY_FILE, L3_CONTROL_PORT, data_port, limits};
 
     /// How long to wait for the host gateway's listeners at boot. The
     /// supervisor binds them before it starts the VM, so this only absorbs
@@ -75,6 +75,11 @@ mod linux {
         agent.handshake(&mut control).context("tunnel handshake")?;
         set_nonblocking(data_fd).context("setting the data channel non-blocking")?;
         set_nonblocking(control_fd).context("setting the control channel non-blocking")?;
+
+        // Readiness is published only after the interface is configured and
+        // the host has acknowledged: the file's presence means the workload
+        // really can use the network, not merely that the agent started.
+        publish_ready().context("publishing tunnel readiness")?;
 
         // One reusable read buffer; the steady state allocates nothing.
         let mut rx = vec![0u8; limits::MAX_WIRE_LEN];
@@ -117,6 +122,7 @@ mod linux {
                 || fds[2].revents & (libc::POLLHUP | libc::POLLERR) != 0
             {
                 agent.fail_closed();
+                retract_ready();
                 return Ok(());
             }
 
@@ -130,6 +136,7 @@ mod linux {
                 match data.read(&mut rx) {
                     Ok(0) => {
                         agent.fail_closed();
+                        retract_ready();
                         return Ok(());
                     }
                     Ok(n) => {
@@ -150,6 +157,7 @@ mod linux {
                 match control.read(&mut control_rx) {
                     Ok(0) => {
                         agent.fail_closed();
+                        retract_ready();
                         return Ok(());
                     }
                     Ok(n) => {
@@ -157,6 +165,7 @@ mod linux {
                             .handle_control_frame(&control_rx[..n])
                             .context("handling a host control message")?;
                         if !agent.state().network_available() {
+                            retract_ready();
                             return Ok(());
                         }
                     }
@@ -176,11 +185,27 @@ mod linux {
                     if agent.send_heartbeat(&mut control).is_err() {
                         // A dead control channel is a dead session.
                         agent.fail_closed();
+                        retract_ready();
                         return Ok(());
                     }
                 }
             }
         }
+    }
+
+    /// Create the readiness file the guest init waits on.
+    ///
+    /// Removed again on the way out so a later boot cannot inherit a stale
+    /// "ready" from a session that is gone.
+    fn publish_ready() -> std::io::Result<()> {
+        if let Some(parent) = std::path::Path::new(GUEST_READY_FILE).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(GUEST_READY_FILE, b"ready\n")
+    }
+
+    fn retract_ready() {
+        let _ = std::fs::remove_file(GUEST_READY_FILE);
     }
 
     fn set_nonblocking(fd: libc::c_int) -> std::io::Result<()> {

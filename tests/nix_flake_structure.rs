@@ -868,6 +868,13 @@ fn runtime_overlay_flake_stages_egress_client_binary() {
          sealed boots can source the egress shim from the mounted \
          runtime filesystem."
     );
+    assert!(
+        content.contains("cp ${netAgent}/bin/mvm-net-agent \"$staging/net-agent\""),
+        "runtime-overlay flake must stage `mvm-net-agent` at `/net-agent` \
+         inside the overlay ext4. A guest booted for the l3-vsock mode that \
+         cannot resolve the agent refuses to start its workload, so a missing \
+         stage here is a failed boot rather than a degraded one."
+    );
 }
 
 #[test]

@@ -72,6 +72,22 @@ pub fn plan_json_has_bound_secrets(plan_json: &str) -> bool {
     mvm_core::plan::plan_from_admitted_json(plan_json).is_ok_and(|plan| !plan.secrets.is_empty())
 }
 
+/// The kernel-cmdline token that tells the guest init to bring the L3
+/// tunnel up, or `None` when this launch is not an L3 launch.
+///
+/// Derived from the admitted plan the launch config already carries, so the
+/// mode the host signals to the guest is the one that was signed — not a
+/// separate host-side switch that could drift from it. An undecodable plan
+/// answers `None`, which is the closed side: a guest that is not told to
+/// start the tunnel simply has no network.
+pub fn l3_cmdline_token(config: &VmStartConfig) -> Option<String> {
+    let plan_json = config.plan_json.as_deref()?;
+    let plan = mvm_core::plan::plan_from_admitted_json(plan_json).ok()?;
+    plan.network_mode
+        .is_l3_vsock()
+        .then(|| mvm_protocol::l3::GUEST_CMDLINE_FLAG.to_string())
+}
+
 /// True when the workload's persisted plan carries at least one bound secret
 /// (i.e. the credential-substitution endpoint will own `EGRESS_PORT`). The
 /// transparent-TCP vsock egress path (Phase A) is scoped to the `false` case so
@@ -264,5 +280,61 @@ mod phase_a_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod l3_token_tests {
+    use super::*;
+    use mvm_core::plan::NetworkMode;
+
+    fn plan_json(mode: NetworkMode) -> String {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.network_mode = mode;
+        if mode.is_l3_vsock() {
+            plan.l3_network = Some(mvm_core::plan::L3NetworkSpec::v1());
+        }
+        serde_json::to_string(&plan).expect("plan serializes")
+    }
+
+    fn config_with(plan_json: Option<String>) -> VmStartConfig {
+        VmStartConfig {
+            plan_json,
+            ..VmStartConfig::default()
+        }
+    }
+
+    #[test]
+    fn an_l3_plan_yields_the_guest_cmdline_flag() {
+        let config = config_with(Some(plan_json(NetworkMode::L3Vsock)));
+        assert_eq!(
+            l3_cmdline_token(&config).as_deref(),
+            Some(mvm_protocol::l3::GUEST_CMDLINE_FLAG)
+        );
+    }
+
+    #[test]
+    fn every_other_mode_yields_no_flag() {
+        for mode in [NetworkMode::None, NetworkMode::HostVsockProxy] {
+            let config = config_with(Some(plan_json(mode)));
+            assert_eq!(
+                l3_cmdline_token(&config),
+                None,
+                "{mode:?} must not start the tunnel"
+            );
+        }
+    }
+
+    #[test]
+    fn a_launch_with_no_plan_never_starts_the_tunnel() {
+        assert_eq!(l3_cmdline_token(&config_with(None)), None);
+    }
+
+    #[test]
+    fn an_undecodable_plan_fails_closed() {
+        // Not being told to start the tunnel means having no network, which
+        // is the safe side of an ambiguous plan.
+        let config = config_with(Some("{ not a plan".to_string()));
+        assert_eq!(l3_cmdline_token(&config), None);
     }
 }

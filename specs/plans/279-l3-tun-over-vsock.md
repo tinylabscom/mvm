@@ -132,6 +132,10 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
 - [x] `mvm-netd` as a real per-VM process: config on stdin, channels bound
       before the ready marker so the guest cannot race it, deterministic
       teardown; live-tested against the real guest agent on Linux
+- [x] guest-side spawn: the host emits `mvm.l3=1` from the admitted plan,
+      the guest init resolves and starts `mvm-net-agent`, waits for the
+      readiness file, and refuses to start the workload if the tunnel does
+      not come up; `mvm-net-agent` staged into the runtime overlay
 - [x] mode/plan compatibility gate — a plan that binds secrets, enables
       reversible replacement, or enables redaction cannot select
       `l3-vsock`, and the two plan fields cannot disagree in the hermetic lane: launch

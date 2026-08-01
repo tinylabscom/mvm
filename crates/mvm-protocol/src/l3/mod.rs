@@ -50,6 +50,23 @@ pub fn data_port(queue_id: u16) -> u32 {
     L3_DATA_PORT_BASE + u32::from(queue_id)
 }
 
+/// Kernel-cmdline flag the host sets when a boot is admitted for the L3
+/// tunnel. The guest init keys off this to start the agent — and to refuse
+/// to start the workload if the agent cannot come up.
+///
+/// A cmdline token rather than a file or an env var because it is the one
+/// channel that already exists before any guest userspace runs, and because
+/// the host writes it as part of the boot the plan admitted.
+pub const GUEST_CMDLINE_FLAG: &str = "mvm.l3=1";
+
+/// Path the guest agent creates once `mvm0` is configured and the tunnel is
+/// carrying packets.
+///
+/// This is the readiness signal the workload supervisor waits on. Its
+/// absence is meaningful: a workload admitted for networking must not start
+/// without it, or it runs believing it has a network it does not have.
+pub const GUEST_READY_FILE: &str = "/run/mvm/l3-ready";
+
 /// Interface name the guest agent creates. Fixed so host-side diagnostics
 /// and guest-side expectations cannot drift, and short enough for
 /// `IFNAMSIZ`.
