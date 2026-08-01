@@ -147,9 +147,15 @@ pub fn build_record(
 }
 
 /// True when `path` cannot escape the directory it will be joined onto:
-/// relative, and every component a plain path segment (no `..`, no root, no
-/// Windows-style prefix).
+/// non-empty, relative, and every component a plain path segment (no `..`,
+/// no root, no Windows-style prefix). An empty path's `Component` iterator
+/// is also empty, so the "every component is `Normal`" check holds
+/// vacuously for it; without an explicit check it would join onto `dir`
+/// itself instead of naming a real artifact, so it's rejected up front.
 fn artifact_path_is_safe(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
     let path = Path::new(path);
     !path.is_absolute()
         && path
@@ -391,6 +397,16 @@ mod tests {
         let error = verify_artifacts_on_disk(dir.path(), &escaping).unwrap_err();
         match error {
             VerifyError::UnsafePath { path } => assert_eq!(path, "../escape"),
+            other => panic!("expected UnsafePath, got {other:?}"),
+        }
+
+        // An empty path's `Component` iterator is itself empty, so without
+        // an explicit check it would vacuously pass the "every component is
+        // Normal" test and join onto `dir` itself instead of naming a file.
+        let empty = unsafe_record("");
+        let error = verify_artifacts_on_disk(dir.path(), &empty).unwrap_err();
+        match error {
+            VerifyError::UnsafePath { path } => assert_eq!(path, ""),
             other => panic!("expected UnsafePath, got {other:?}"),
         }
     }

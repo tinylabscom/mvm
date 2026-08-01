@@ -583,11 +583,11 @@ fn build_cache_fingerprint(
 /// record, it fails to parse, or verification against the artifacts
 /// actually on disk fails.
 ///
-/// Verification runs unconditionally on every hit; a missing/unparseable
-/// record or any mismatch is a miss+evict, never a path-trust fallback. A
-/// verification failure **evicts** the stale record (deletes it) before
-/// returning `None`, so a tampered or partially-collected cache entry is
-/// never served twice and a fresh build runs unconditionally.
+/// A missing or unparseable record is a plain miss: there is nothing to
+/// evict, since nothing was trusted. A record that parses but fails
+/// on-disk verification is a miss *and* evicts the stale entry (both the
+/// record and the build dir it named), so a tampered or partially-collected
+/// cache entry is never served twice and a fresh build runs unconditionally.
 #[cfg(feature = "builder-vm")]
 fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
     let record = crate::pipeline::build_cache::read_cache_record(fingerprint)?;
@@ -595,6 +595,17 @@ fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
     if let Err(e) = mvm_core::action::verify_artifacts_on_disk(Path::new(&build_dir), &record) {
         tracing::debug!(error = %e, "build-cache entry failed verification; evicting");
         crate::pipeline::build_cache::evict_cache_record(fingerprint);
+        // The build dir must go too, not just the record: the next build's
+        // `dev_build_with_builder_vm` promotes fresh artifacts into
+        // `dev_build_dir(revision)` only when that path is *absent* — it
+        // trusts an existing directory by revision name alone, with no hash
+        // check. Leaving the poisoned dir in place would make the next
+        // build discard its own freshly-built good output, re-adopt the
+        // poisoned bytes because the name matched, and let
+        // `write_cache_record_for_result` bless them again — one detected
+        // tamper would otherwise recur forever instead of self-healing on
+        // the very next build.
+        let _ = std::fs::remove_dir_all(&build_dir);
         return None;
     }
 
@@ -1935,6 +1946,10 @@ mod tests {
             cache_dir.join(&fingerprint).exists(),
             "sanity: the record file must exist before eviction"
         );
+        assert!(
+            build_dir_path.exists(),
+            "sanity: the poisoned build dir must exist before eviction"
+        );
 
         assert!(
             cached_build_result(&fingerprint).is_none(),
@@ -1947,6 +1962,17 @@ mod tests {
         assert!(
             crate::pipeline::build_cache::read_cache_record(&fingerprint).is_none(),
             "a failed verification must evict the stale record, not merely refuse it"
+        );
+        // The build dir must be gone too, not just the record: the next
+        // `dev_build_with_builder_vm` run promotes fresh artifacts into
+        // `dev_build_dir(revision)` only when that path doesn't already
+        // exist (it trusts an existing dir by revision name, no hash
+        // check). If eviction only deleted the record, the poisoned dir
+        // would survive and get silently re-adopted (and re-blessed with a
+        // fresh record) on the very next build.
+        assert!(
+            !build_dir_path.exists(),
+            "eviction must remove the poisoned build dir so a rebuild can't re-adopt it by name"
         );
     }
 
