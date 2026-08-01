@@ -98,10 +98,18 @@ vacuously true. Both pass today.
 ### Mutation-tested witnesses: what the first full run found
 
 `check-mutation-witnesses --run` breaks each claim-surface file on purpose
-and asks whether any witness notices. Its nightly lane ran
-`continue-on-error` until a baseline covered the whole surface. Producing
+and asks whether any witness notices. Its nightly lane runs
+`continue-on-error` until a baseline covers the whole surface. Producing
 that baseline is recorded here, because most of what it found was not
 surviving mutants.
+
+The whole surface now measures — **1221 mutants, 359 surviving** — which
+it had never done before. The lane is not yet armed: the driver-level
+survivors still need `accepted_misses` entries, and since the ratchet
+compares exact mutant identities those entries must come from a
+confirmation run rather than be written from memory. Arming first would
+fail the first nightly on entries that do not match, which is the same
+unearned-green failure one level up.
 
 **Four of eight packages could not be measured at all.** The lane runs
 `cargo mutants -p <package> --file <path>` in a fresh copy of the tree, so

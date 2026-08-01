@@ -530,17 +530,27 @@ jobs:
   mutation-witnesses:
     name: Claim witnesses — mutation-tested (ADR-001 claims ledger)
     runs-on: ubuntu-latest
-    # BLOCKING. The baseline now covers all 26 surface files: each has
-    # been observed to actually test mutants, and every survivor was
-    # triaged. A failure here means a claim witness has stopped detecting
-    # its own property being violated, which is what this lane is for.
+    # STILL NON-BLOCKING, and now for a smaller and stated reason.
     #
     # It was non-blocking because accepted_misses had been seeded for one
-    # anchor file only. Establishing the rest found that eight files could
-    # not be measured at all — their packages' suites did not pass
-    # package-scoped, and this lane is always package-scoped — and that
-    # two of those reported themselves clean. Both fixed; see
-    # specs/VERIFICATION.md §"Mutation-tested witnesses".
+    # anchor file only. Establishing the rest found that eight of the 26
+    # files could not be measured at all — their packages' suites did not
+    # pass package-scoped, and this lane is always package-scoped — and
+    # that two of those reported themselves clean. All of that is fixed,
+    # and the whole surface now measures: 1221 mutants, 359 surviving.
+    #
+    # What is left before this can block: the survivors in the
+    # driver-level files (Firecracker snapshot I/O, nix-gated overlay
+    # builds) still need their accepted_misses entries, and the ratchet
+    # compares exact mutant identities, so those entries have to come from
+    # a confirmation run over the changed files rather than be written
+    # from memory. Arming before that would fail the first nightly on
+    # entries that do not match — the same "green result standing in for
+    # evidence" this lane exists to prevent, one level up.
+    #
+    # See specs/VERIFICATION.md §"Mutation-tested witnesses" and plan 272
+    # WS-2.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
 
