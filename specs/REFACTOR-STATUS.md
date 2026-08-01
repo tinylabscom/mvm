@@ -19,6 +19,14 @@ for detailed scope and acceptance criteria.
   - [x] Revalidate and close newly filed #2054 on current main
   - [ ] Execute the refiled volume epic #2040
 
+- [ ] Plan 283 — Production object-store volumes
+      (`specs/plans/283-production-object-store-volumes.md`, issue #2040)
+  - [x] Canonical mvm contract and dead S3-path removal
+  - [ ] Live local/block attachment through the admitted VM launch path
+  - [ ] mvmd OpenDAL → `object_store` migration with mandatory encryption
+  - [ ] Durable encrypted checkpoints, cross-worker restore, and remote CLI
+  - [ ] MinIO integration plus Linux/KVM persistence and restore proof
+
 - [x] Plan 282 — Merge queue auto-requeue
       (`specs/plans/282-merge-queue-auto-requeue.md`)
   - [x] Refuse conflicts and bound retry attempts per PR

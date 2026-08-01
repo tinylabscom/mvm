@@ -37,10 +37,6 @@ pub mod encrypted;
 #[path = "encrypted_linux.rs"]
 pub mod encrypted;
 
-// S3 mount source — off by default; pulls object_store only under `storage-s3`.
-#[cfg(feature = "storage-s3")]
-pub mod s3;
-
 pub use backend::VolumeBackend;
 pub use content_addressed::{ContentAddressedStore, ContentDigest};
 pub use local::LocalBackend;
@@ -51,9 +47,6 @@ pub use provider::{AttachedVolume, LocalStorage, StorageProvider, VolumeHandle, 
 pub use snapshot::SnapshotUpper;
 
 pub use encrypted::EncryptedStorage;
-
-#[cfg(feature = "storage-s3")]
-pub use s3::S3MountProvider;
 
 use std::sync::Arc;
 

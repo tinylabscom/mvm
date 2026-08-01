@@ -18,7 +18,7 @@ use crate::storage::volume::backend::VolumeBackend;
 /// The fixture assumes `backend` is empty when called and does not
 /// clean up after itself — callers should construct a fresh backend
 /// per invocation.
-pub async fn assert_backend_contract<B: VolumeBackend>(backend: &B) {
+pub async fn assert_backend_contract<B: VolumeBackend + ?Sized>(backend: &B) {
     health_check_passes(backend).await;
     put_get_round_trip(backend).await;
     overwrite_replaces_content(backend).await;
@@ -35,13 +35,13 @@ fn key(s: &str) -> VolumePath {
     VolumePath::new(s).expect("valid test key")
 }
 
-async fn health_check_passes<B: VolumeBackend>(b: &B) {
+async fn health_check_passes<B: VolumeBackend + ?Sized>(b: &B) {
     b.health_check()
         .await
         .expect("contract: health_check must pass on a fresh backend");
 }
 
-async fn put_get_round_trip<B: VolumeBackend>(b: &B) {
+async fn put_get_round_trip<B: VolumeBackend + ?Sized>(b: &B) {
     let k = key("contract/put-get/file.txt");
     b.put(&k, Bytes::from_static(b"hello"))
         .await
@@ -58,7 +58,7 @@ async fn put_get_round_trip<B: VolumeBackend>(b: &B) {
     b.delete(&k).await.expect("contract: cleanup delete");
 }
 
-async fn overwrite_replaces_content<B: VolumeBackend>(b: &B) {
+async fn overwrite_replaces_content<B: VolumeBackend + ?Sized>(b: &B) {
     let k = key("contract/overwrite/file.txt");
     b.put(&k, Bytes::from_static(b"v1"))
         .await
@@ -75,7 +75,7 @@ async fn overwrite_replaces_content<B: VolumeBackend>(b: &B) {
     b.delete(&k).await.expect("contract: backend op");
 }
 
-async fn get_missing_returns_not_found<B: VolumeBackend>(b: &B) {
+async fn get_missing_returns_not_found<B: VolumeBackend + ?Sized>(b: &B) {
     let k = key("contract/missing/never-existed");
     match b.get(&k).await {
         Err(VolumeError::NotFound(_)) => {}
@@ -84,7 +84,7 @@ async fn get_missing_returns_not_found<B: VolumeBackend>(b: &B) {
     }
 }
 
-async fn delete_then_get_is_not_found<B: VolumeBackend>(b: &B) {
+async fn delete_then_get_is_not_found<B: VolumeBackend + ?Sized>(b: &B) {
     let k = key("contract/delete-get/doomed");
     b.put(&k, Bytes::from_static(b"x"))
         .await
@@ -97,7 +97,7 @@ async fn delete_then_get_is_not_found<B: VolumeBackend>(b: &B) {
     }
 }
 
-async fn delete_missing_is_not_found<B: VolumeBackend>(b: &B) {
+async fn delete_missing_is_not_found<B: VolumeBackend + ?Sized>(b: &B) {
     let k = key("contract/delete-missing/never-existed");
     match b.delete(&k).await {
         Err(VolumeError::NotFound(_)) => {}
@@ -106,7 +106,7 @@ async fn delete_missing_is_not_found<B: VolumeBackend>(b: &B) {
     }
 }
 
-async fn rename_round_trip<B: VolumeBackend>(b: &B) {
+async fn rename_round_trip<B: VolumeBackend + ?Sized>(b: &B) {
     let from = key("contract/rename/src");
     let to = key("contract/rename/dst");
     b.put(&from, Bytes::from_static(b"data"))
@@ -126,7 +126,7 @@ async fn rename_round_trip<B: VolumeBackend>(b: &B) {
     b.delete(&to).await.expect("contract: backend op");
 }
 
-async fn rename_to_existing_is_already_exists<B: VolumeBackend>(b: &B) {
+async fn rename_to_existing_is_already_exists<B: VolumeBackend + ?Sized>(b: &B) {
     let from = key("contract/rename-conflict/src");
     let to = key("contract/rename-conflict/dst");
     b.put(&from, Bytes::from_static(b"a"))
@@ -144,7 +144,7 @@ async fn rename_to_existing_is_already_exists<B: VolumeBackend>(b: &B) {
     b.delete(&to).await.expect("contract: backend op");
 }
 
-async fn stat_returns_metadata<B: VolumeBackend>(b: &B) {
+async fn stat_returns_metadata<B: VolumeBackend + ?Sized>(b: &B) {
     let k = key("contract/stat/file.txt");
     b.put(&k, Bytes::from_static(b"twelve bytes"))
         .await
@@ -155,7 +155,7 @@ async fn stat_returns_metadata<B: VolumeBackend>(b: &B) {
     b.delete(&k).await.expect("contract: backend op");
 }
 
-async fn list_returns_entries<B: VolumeBackend>(b: &B) {
+async fn list_returns_entries<B: VolumeBackend + ?Sized>(b: &B) {
     let a = key("contract/list/a.txt");
     let bb = key("contract/list/b.txt");
     let nested = key("contract/list/sub/c.txt");

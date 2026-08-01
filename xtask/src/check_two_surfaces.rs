@@ -107,11 +107,51 @@ pub fn run(workspace: &Path) -> Result<()> {
         );
     }
 
+    let runtime_manifest = std::fs::read_to_string(
+        workspace
+            .join("crates")
+            .join("mvm-runtime")
+            .join("Cargo.toml"),
+    )?;
+    validate_runtime_storage_features(&runtime_manifest)?;
+
     eprintln!(
         "check-two-surfaces: clean (exactly two product surfaces: host, user; \
          {} internal sub-features)",
         features.len() - SURFACES.len()
     );
+    Ok(())
+}
+
+/// The local runtime may use `object_store` for the fleet-operated template
+/// registry, but production tenant volume providers are constructed by the
+/// fleet orchestrator. A member-only volume feature would bypass the two
+/// shipped surfaces and put provider credentials on the local runtime.
+fn validate_runtime_storage_features(manifest: &str) -> Result<()> {
+    const TEMPLATE_REGISTRY_FEATURE: &str = "template-registry-s3";
+    const REMOVED_VOLUME_FEATURE: &str = "storage-s3";
+
+    let features = feature_names(manifest);
+    if features.contains(REMOVED_VOLUME_FEATURE) {
+        bail!(
+            "check-two-surfaces: mvm-runtime feature `{REMOVED_VOLUME_FEATURE}` bypasses the \
+             host/user product surfaces and crosses the fleet storage boundary; production \
+             object-store volume providers belong in the fleet orchestrator"
+        );
+    }
+
+    let object_store_features: Vec<&str> = features
+        .iter()
+        .map(String::as_str)
+        .filter(|feature| feature_deps(manifest, feature).contains("dep:object_store"))
+        .collect();
+    if object_store_features != [TEMPLATE_REGISTRY_FEATURE] {
+        bail!(
+            "check-two-surfaces: mvm-runtime may activate `object_store` only through \
+             `{TEMPLATE_REGISTRY_FEATURE}`, found {:?}",
+            object_store_features
+        );
+    }
     Ok(())
 }
 
@@ -261,5 +301,27 @@ dev = ["host", "user", "dev-watch"]
         ] {
             assert!(allowed.contains(f), "{f} must be classified");
         }
+    }
+
+    #[test]
+    fn runtime_rejects_a_member_only_object_store_volume_feature() {
+        let manifest = r#"
+[features]
+template-registry-s3 = ["dep:object_store"]
+storage-s3 = ["dep:object_store", "dep:futures"]
+"#;
+        let err = validate_runtime_storage_features(manifest).unwrap_err();
+        assert!(err.to_string().contains("storage-s3"));
+    }
+
+    #[test]
+    fn runtime_allows_object_store_only_for_the_template_registry() {
+        let manifest = r#"
+[features]
+default = []
+template-registry-s3 = ["dep:object_store"]
+wasm-backend = ["dep:wasmtime"]
+"#;
+        validate_runtime_storage_features(manifest).unwrap();
     }
 }

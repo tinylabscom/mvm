@@ -12,8 +12,8 @@
 //! ## Backends
 //!
 //! [`VolumeBackendConfig`] is the declarative shape of a backend. The
-//! runtime's volume-backend module ships `LocalBackend` only; mvmd ships
-//! `ObjectStoreBackend` (wrapping `opendal`) and `EncryptedBackend<B>`.
+//! runtime's volume-backend module ships `LocalBackend` only; the fleet
+//! orchestrator supplies remote object-store and encrypted implementations.
 
 use std::path::PathBuf;
 
@@ -277,8 +277,9 @@ pub enum VolumeBackendConfig {
         root: PathBuf,
     },
 
-    /// Object storage via opendal (S3, R2, GCS, Azure, Hetzner, …).
-    /// Implemented in mvmd, not the runtime's volume-backend module.
+    /// Remote object storage (S3, R2, GCS, Azure, Hetzner, …).
+    /// Implemented by the fleet orchestrator, not the runtime's
+    /// volume-backend module.
     /// Data-plane only — not virtio-fs-mountable in v1.
     #[serde(rename = "object-store")]
     ObjectStore(ObjectStoreSpec),
