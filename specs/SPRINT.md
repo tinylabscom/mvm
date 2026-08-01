@@ -30,6 +30,17 @@
       one. Workflow validation, focused tests, workspace check, clippy, and
       formatting pass. Tracked in plan 282.
 
+- [x] Merge-queue latency audit and workflow hardening: measured 50 recent
+      queued merges and 101 merge-group jobs, confirmed runner admission and
+      long required-job execution as the dominant critical path, and found
+      regenerated speculative groups adding up to 2h04m of rebuild delay. The
+      two required workflows now declare `checks_requested` explicitly, cancel
+      only superseded pull-request runs, never cancel merge-group validation,
+      and give manual runs unique concurrency keys. All five required check
+      names and exact-merge-commit validation remain intact. Plan 281 records
+      the measured 38m26s p50 / 2h14m03s p95 queue latency. The live ruleset is
+      now set to build concurrency 3, group wait 0, and timeout 90 minutes.
+
 - [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
       basename deny-list over the whole workspace root to an allow-list of the
       top-level entries cargo can actually read. The filtered tree is `mvmSrc`,

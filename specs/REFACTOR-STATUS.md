@@ -54,6 +54,13 @@ for detailed scope and acceptance criteria.
         `require_workload_backend` / `start_prepared` / the admitted
         persistent-OCI path accept `--hypervisor apple-container`
   - [ ] Container-mode closure (later stage)
+- [x] Plan 281 — Merge queue latency audit
+      (`specs/plans/281-merge-queue-latency.md`)
+  - [x] Measure queue, merge-group, runner, execution, rebuild, and post-check
+        latency from live GitHub metadata and logs
+  - [x] Preserve required exact-commit validation while making merge-group
+        triggering and cancellation behavior explicit
+  - [x] Apply capacity-backed merge-queue settings in the repository ruleset
 
 - [ ] Plan 279 — Build action identity and a real artifact manifest
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`)

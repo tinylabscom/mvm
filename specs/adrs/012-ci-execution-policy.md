@@ -62,6 +62,14 @@ feature tests, and examples therefore reuse the same embedded-binary graph.
 merges. `ci-full.yml`, `security.yml`, and `windows.yml` are not part of
 the merge-queue gate.
 
+Both required workflows listen explicitly for `checks_requested`. Their
+concurrency keys include the workflow, event type, and event ref, so unrelated
+pull requests and merge-group commits do not serialize. A new commit cancels a
+superseded `pull_request` run for the same PR; `merge_group` runs are never
+cancelled by workflow concurrency, because cancelling validation of the exact
+queue commit can eject the entry or leave its required checks unresolved.
+Manual dispatches use the run ID and therefore remain independent.
+
 ### Pre-commit hook (`.githooks/pre-commit`)
 
 Activated via `git config core.hooksPath .githooks`, it runs on every

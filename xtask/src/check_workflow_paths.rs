@@ -207,12 +207,17 @@ mod tests {
     use super::*;
 
     fn ci_workflow() -> String {
+        workflow("ci.yml")
+    }
+
+    fn workflow(name: &str) -> String {
         std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
-                .join(".github/workflows/ci.yml"),
+                .join(".github/workflows")
+                .join(name),
         )
-        .expect("CI workflow must be readable")
+        .unwrap_or_else(|error| panic!("{name} must be readable: {error}"))
     }
 
     fn ci_job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
@@ -339,6 +344,43 @@ mod tests {
         assert!(gate.contains("if [ \"$TEST_RESULT\" != \"success\" ]"));
         assert!(!gate.contains("mcp-check-compatibility-shim"));
         assert!(!gate.contains("./scripts/test-mcp-roundtrip.sh"));
+    }
+
+    #[test]
+    fn required_workflows_keep_merge_group_runs_independent_and_conclusive() {
+        let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}";
+        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}";
+
+        for name in ["ci.yml", "architecture.yml"] {
+            let source = workflow(name);
+            assert!(
+                source.contains("merge_group:\n    types: [checks_requested]"),
+                "{name} must handle merge-queue check requests explicitly"
+            );
+            assert!(
+                source.contains(expected_group),
+                "{name} concurrency key drifted"
+            );
+            assert!(
+                source.contains(expected_cancel),
+                "{name} must cancel only superseded pull-request runs"
+            );
+            assert!(!source.contains("cancel-in-progress: true"));
+        }
+
+        let ci = ci_workflow();
+        assert!(ci.contains("permissions:\n  contents: read"));
+        for required_name in [
+            "name: Lint (fmt + clippy + policy)",
+            "name: Test",
+            "name: MCP server stdio roundtrip",
+            "name: Nix flake check (Linux eval)",
+        ] {
+            assert!(ci.contains(required_name), "required check name drifted");
+        }
+
+        let architecture = workflow("architecture.yml");
+        assert!(architecture.contains("name: Invariant #1"));
     }
 
     #[test]
