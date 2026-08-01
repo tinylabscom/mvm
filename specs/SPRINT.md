@@ -10,6 +10,13 @@
 
 ## Current issue delivery
 
+- [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
+      requests, with conflict refusal, persistent attempt counting, no checkout
+      of untrusted code, and structural security tests. The label counter now
+      toggles on every retry so its persistent timeline count cannot stick at
+      one. Workflow validation, focused tests, workspace check, clippy, and
+      formatting pass. Tracked in plan 282.
+
 - [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
       basename deny-list over the whole workspace root to an allow-list of the
       top-level entries cargo can actually read. The filtered tree is `mvmSrc`,

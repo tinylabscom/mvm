@@ -1,11 +1,9 @@
 name: Merge queue auto-requeue
 
 # A PR ejected from the merge queue stops being worked on and stays that way
-# until a human notices. Measured on this repo: 4 of 8 recent PRs were ejected
-# at least once, and #1997 sat outside the queue for nearly three hours between
-# `removed_from_merge_queue` and someone re-adding it. That gap, not queue
-# throughput, is what "waiting hours to merge" actually is — the queue builds
-# five entries concurrently and a cycle is ~35 minutes.
+# until a human notices. Live queue history shows that these unattended gaps
+# can exceed the validation cycle itself, so bounded automatic recovery is part
+# of keeping queue latency predictable.
 #
 # Most ejections are transient: a flaky test in the queue run, or the entry
 # being invalidated because something ahead of it merged. Those deserve an
@@ -41,8 +39,8 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           # How many times this workflow will retry one PR before leaving it
           # alone. A PR that keeps being ejected is telling us something, and
-          # retrying it forever would burn a ~35-minute queue cycle each time
-          # while hiding the signal.
+          # retrying it forever would burn a validation cycle each time while
+          # hiding the signal.
           MAX_ATTEMPTS: "2"
         run: |
           set -euo pipefail
@@ -79,7 +77,7 @@ jobs:
           if [ "${attempts}" -ge "${MAX_ATTEMPTS}" ]; then
             echo "::warning::PR #${PR} has already been auto-requeued ${attempts} time(s); leaving it for a human."
             gh pr comment "${PR}" --repo "${REPO}" --body \
-              "Ejected from the merge queue again after ${attempts} automatic retries. Not requeuing — this is repeating, so it is worth a look rather than another ~35-minute cycle." \
+              "Ejected from the merge queue again after ${attempts} automatic retries. Not requeuing — this is repeating, so it is worth a look rather than consuming another validation cycle." \
               || true
             exit 0
           fi
@@ -90,7 +88,11 @@ jobs:
           gh label create auto-requeued --repo "${REPO}" \
             --description "Automatically re-added to the merge queue after a transient ejection" \
             --color ededed 2>/dev/null || true
-          gh pr edit "${PR}" --repo "${REPO}" --add-label auto-requeued || true
+          # Toggle the label so every retry produces a distinct labeled event;
+          # leaving it attached would make the persistent attempt count stick
+          # at one forever.
+          gh pr edit "${PR}" --repo "${REPO}" --remove-label auto-requeued 2>/dev/null || true
+          gh pr edit "${PR}" --repo "${REPO}" --add-label auto-requeued
 
           echo "Requeuing PR #${PR} (attempt $((attempts + 1)) of ${MAX_ATTEMPTS})."
           gh pr merge "${PR}" --repo "${REPO}" --auto
