@@ -880,6 +880,11 @@ mod runtime_overlay_attach_tests {
     #[test]
     fn firecracker_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
+        // `attach_runtime_overlay` seeds a miss from `$HOME/.mvm/cache`, so
+        // without this the assertion holds partly on the developer's own
+        // artifacts — and a broken `seed_cache` below would still pass.
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
         let ver = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
         seed_cache(dir.path(), ver, arch);
@@ -901,6 +906,11 @@ mod runtime_overlay_attach_tests {
     #[test]
     fn hvf_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
+        // `attach_runtime_overlay` seeds a miss from `$HOME/.mvm/cache`, so
+        // without this the assertion holds partly on the developer's own
+        // artifacts — and a broken `seed_cache` below would still pass.
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
         let ver = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
         seed_cache(dir.path(), ver, arch);
@@ -919,6 +929,11 @@ mod runtime_overlay_attach_tests {
     #[test]
     fn libkrun_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
+        // `attach_runtime_overlay` seeds a miss from `$HOME/.mvm/cache`, so
+        // without this the assertion holds partly on the developer's own
+        // artifacts — and a broken `seed_cache` below would still pass.
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
         let ver = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
         seed_cache(dir.path(), ver, arch);
@@ -937,6 +952,11 @@ mod runtime_overlay_attach_tests {
     #[test]
     fn unsupported_backend_never_attaches() {
         let dir = tempfile::tempdir().unwrap();
+        // `attach_runtime_overlay` seeds a miss from `$HOME/.mvm/cache`, so
+        // without this the assertion holds partly on the developer's own
+        // artifacts — and a broken `seed_cache` below would still pass.
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
         let ver = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
         seed_cache(dir.path(), ver, arch);
@@ -1030,6 +1050,11 @@ mod runtime_overlay_attach_tests {
     #[test]
     fn qemu_with_cached_overlay_populates_all_three_fields() {
         let dir = tempfile::tempdir().unwrap();
+        // `attach_runtime_overlay` seeds a miss from `$HOME/.mvm/cache`, so
+        // without this the assertion holds partly on the developer's own
+        // artifacts — and a broken `seed_cache` below would still pass.
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
         let ver = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
         seed_cache(dir.path(), ver, arch);
