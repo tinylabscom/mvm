@@ -17,6 +17,10 @@ pub mod datapath;
 pub mod gateway;
 pub mod metrics;
 pub mod packet;
+/// The per-port Unix-socket guest channel — the concrete transport behind
+/// the backend-neutral abstraction for every VMM whose host-facing endpoint
+/// is a per-VM socket.
+pub mod uds_channel;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -30,6 +34,7 @@ pub use gateway::{
     ResolveError, StaticResolver,
 };
 pub use metrics::GatewayMetrics;
+pub use uds_channel::{UdsGuestChannelProvider, UdsLayout};
 
 /// The datapath for the host this build runs on.
 ///

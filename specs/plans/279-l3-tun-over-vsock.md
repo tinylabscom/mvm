@@ -122,7 +122,13 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       `MVM_L3_PRIVILEGED_TESTS=1`; executed on a Linux/KVM host — 6/6 green,
       including a live forwarding witness that reads the kernel's own RX
       counter, and a verified-clean teardown
-- [x] BDD suite `s25_l3_vsock` (23 scenarios) in the hermetic lane: launch
+- [x] BDD suite `s25_l3_vsock` (23 scenarios)
+- [x] `UdsGuestChannelProvider` — the concrete per-port Unix-socket
+      transport behind the backend-neutral abstraction, covering
+      Firecracker, libkrun, and HVF; identity comes from the listener, not
+      the reusable socket path
+- [x] measured overhead on two hosts, recorded in ADR-035 §"Measured
+      overhead" in the hermetic lane: launch
       guard, admission, controlled DNS, session lifecycle, lease identity,
       capability gating, and control/data channel separation
 
