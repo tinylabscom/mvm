@@ -390,3 +390,66 @@ fn die(msg: &str) -> ! {
     eprintln!("mvm-seccomp-apply: {msg}");
     std::process::exit(2);
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// `set_no_new_privs` is a named `fn:` witness for the claim that no
+    /// guest binary can elevate to uid 0, and it had no test: the catalog
+    /// gate proves the symbol exists, not that anything asserts what it
+    /// does. Replacing the whole body with `Ok(())` therefore survived,
+    /// leaving `PR_SET_NO_NEW_PRIVS` unset while the claim read as
+    /// witnessed — and an unset bit is exactly how a setuid binary regains
+    /// privilege across `execve`.
+    ///
+    /// Reading the bit back with `PR_GET_NO_NEW_PRIVS` is what makes this
+    /// discriminate: asserting only that the call returns `Ok` is what a
+    /// constant `Ok(())` passes.
+    ///
+    /// The bit is one-way for the calling process, which is safe here
+    /// because nextest gives every test its own process, and it is
+    /// idempotent, so ordering against anything else does not matter.
+    #[test]
+    fn set_no_new_privs_actually_sets_the_kernel_bit() {
+        // SAFETY: prctl(PR_GET_NO_NEW_PRIVS, ...) takes only scalar args,
+        // reads process state and has no preconditions.
+        let before = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+        assert_eq!(
+            before, 0,
+            "a fresh test process must start without no_new_privs, or this test proves nothing"
+        );
+
+        set_no_new_privs().expect("prctl(PR_SET_NO_NEW_PRIVS) must succeed");
+
+        // SAFETY: as above.
+        let after = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
+        assert_eq!(after, 1, "no_new_privs must be set after the call returns");
+
+        // Idempotent, as the doc comment claims.
+        set_no_new_privs().expect("setting an already-set bit is a no-op");
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) },
+            1
+        );
+    }
+
+    /// `syscall_nr` returns -1 for a name this arch does not have, and the
+    /// caller skips those. Deleting the negation makes the sentinel `1`,
+    /// which is a real syscall number on both targets — the filter would
+    /// then be built against the wrong syscall rather than skipping.
+    #[test]
+    fn an_unknown_syscall_name_is_the_negative_sentinel() {
+        assert_eq!(syscall_nr("definitely_not_a_syscall"), -1);
+        assert!(
+            syscall_nr("read") >= 0,
+            "a real syscall must resolve to a non-negative number"
+        );
+        assert_ne!(
+            syscall_nr("definitely_not_a_syscall"),
+            syscall_nr("read"),
+            "the unknown sentinel must not collide with a real syscall number"
+        );
+    }
+}
