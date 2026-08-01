@@ -4,6 +4,10 @@
 // `deny` (not `forbid`) so `util::test_env` can carry the one narrow
 // unsafe carve-out for process-wide env mutation in tests.
 
+/// Content-addressed build-action cache records: a typed identity for one
+/// cached action's output artifacts, and a verify-on-read helper that
+/// recomputes each artifact's digest before a cache entry is trusted.
+pub mod action;
 pub mod arch;
 pub mod build_env;
 pub mod catalog;

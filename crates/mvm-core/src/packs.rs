@@ -802,7 +802,7 @@ fn hash_file(path: &Path) -> Result<(Sha256Hex, u64), String> {
     Ok((Sha256Hex(hex::encode(hasher.finalize())), total))
 }
 
-fn is_sha256_hex(value: &str) -> bool {
+pub(crate) fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
