@@ -98,18 +98,42 @@ vacuously true. Both pass today.
 ### Mutation-tested witnesses: what the first full run found
 
 `check-mutation-witnesses --run` breaks each claim-surface file on purpose
-and asks whether any witness notices. Its nightly lane runs
-`continue-on-error` until a baseline covers the whole surface. Producing
+and asks whether any witness notices. Its nightly lane ran
+`continue-on-error` until a baseline covered the whole surface. Producing
 that baseline is recorded here, because most of what it found was not
 surviving mutants.
 
-The whole surface now measures — **1221 mutants, 359 surviving** — which
-it had never done before. The lane is not yet armed: the driver-level
-survivors still need `accepted_misses` entries, and since the ratchet
-compares exact mutant identities those entries must come from a
-confirmation run rather than be written from memory. Arming first would
-fail the first nightly on entries that do not match, which is the same
-unearned-green failure one level up.
+The whole surface now measures — **1221 mutants** — which it had never
+done before, and **the lane is armed**: `continue-on-error` is gone, so a
+witness that stops detecting its own property fails the nightly.
+
+Every survivor is either closed by a test or carried in
+`xtask/mutation-witness-baseline.json` with the mechanism that makes it
+uncatchable here. Ninety-one entries, and none of them says "not yet
+triaged": the generator that wrote them leaves anything without a stated
+mechanism *out*, so an untriaged survivor fails the gate rather than being
+suppressed by omission. Each entry comes from the newest **completed** run
+of that file — completion checked on `end_time`, because cargo-mutants
+writes `outcomes.json` incrementally and a run 39 of 50 through reports
+`missed: 0` and looks clean.
+
+| Mechanism | Entries |
+| --- | --- |
+| libkrun VM lifecycle over a live supervisor process | 31 |
+| Firecracker snapshot driver I/O + vsock readiness probes | 17 |
+| witnessed only by a nix-gated integration test the lane does not run | 12 |
+| not compiled by the lane's feature set (`pure-mkfs`) | 11 |
+| OCI registry / blob-cache I/O | 6 |
+| equivalent: the field's value equals the derived `Default` | 5 |
+| needs a live VM state dir plus a controlled pid | 3 |
+| singletons (binary entrypoint, fail-closed constant, two provable equivalences, two untestable inputs) | 6 |
+
+These are **accepted rather than scoped out** on purpose. Scoping would
+stop the lane measuring those files at all; accepting keeps the ratchet
+live, so a *new* hole in any of them still fails the nightly. Scoping is
+reserved for the case where the non-claim noise would drown the ledger —
+164 and 78 entries would, 40 and 14 do not. The residual coverage debt is
+tracked in #2033.
 
 **Four of eight packages could not be measured at all.** The lane runs
 `cargo mutants -p <package> --file <path>` in a fresh copy of the tree, so

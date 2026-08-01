@@ -161,7 +161,9 @@ within a day", not "within a PR".
       left the local recipe — the sharper of the two, since a developer's
       real `~/.mvm` is not a discarded VM — running unprotected.
 - [x] Populate `accepted_misses` for the remaining 25 surface files, then
-      drop `continue-on-error` so a new hole fails the lane. **Triage
+      drop `continue-on-error` so a new hole fails the lane. **Done: 91
+      entries, every one naming the mechanism that makes its mutant
+      uncatchable, and the lane is armed.** **Triage
       rule:** a **real hole** gets the test that catches it; an
       **equivalent mutant** gets an `accepted_misses` entry with a stated
       reason. `check_accepted_reasons` already refuses an unexplained
