@@ -1,6 +1,6 @@
 # Plan 280 — CI lint and merge-queue latency
 
-**Status: In progress**
+**Status: Complete**
 
 ## Goal
 
@@ -39,10 +39,25 @@ binaries for clippy, `test-support`, and example feature fingerprints.
 - [x] Measure the targeted feature lane locally: 2,718 tests plus the required
       example check completed in 7m27s, versus 13m38s and 8,610 tests for the
       sampled workspace-wide command.
-- [ ] Validate workflow syntax, the full xtask suite, formatting, workspace
+- [x] Validate workflow syntax, the full xtask suite, formatting, workspace
       tests/check, and Linux all-target clippy.
-- [ ] Record the first post-change Actions timings and decide separately
+- [x] Record the first post-change Actions timings and decide separately
       whether cross-branch sccache storage or larger runners are justified.
+
+## First GitHub Actions result
+
+Pull-request run `30682895396` passed on the exact branch commit. Test waited
+19m07s for a runner and executed for 27m31s. Lint waited 21m10s and executed
+for 37m36s; its targeted `test-support` step took 23m23s. The reduced test set
+removed duplicate work, but the cold-run critical path did not improve over the
+36-minute baseline because a small number of `mvm-cli` and live audit tests
+still dominate that lane. The stable MCP aggregate appeared after Test and
+passed in two seconds.
+
+Do not add a cross-branch compiler cache without a trusted write boundary.
+Faster or additional hosted-runner capacity is justified by the observed
+19–21 minute runner waits; repository-scoped credentials cannot inspect or
+change that organization-level allocation.
 
 ## Acceptance gates
 
