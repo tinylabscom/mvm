@@ -40,9 +40,17 @@ That means these do **not** apply in L3 mode:
 - hostname attribution independent of the controlled resolver.
 
 If your workload depends on any of them, stay on the default
-`--network-mode host-vsock-proxy`. mvm prints this warning once when you
-select `l3-vsock`, and admission refuses a plan that both selects L3 mode
-and requires managed substitution.
+`--network-mode host-vsock-proxy`. You do not have to remember this:
+a plan that binds secrets, enables reversible replacement, or enables
+per-destination redaction **cannot** select `l3-vsock`. mvm refuses the
+combination before anything builds or boots, and names the fix.
+
+Worth being precise about what is and is not lost. The guarantee that raw
+secrets never enter the guest is enforced at the host-services broker and is
+**unaffected** by the networking mode. What L3 gives up is the egress-time
+*backstop* that would catch a secret which reached the guest some other way
+— because in L3 mode the guest originates its own TLS, so the host sees
+ciphertext.
 :::
 
 ## What still holds

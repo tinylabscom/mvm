@@ -110,6 +110,17 @@ impl L3Datapath for LinuxDatapath {
             });
         }
 
+        // Non-blocking is not an optimization here, it is required. The
+        // gateway drains this device until it reports `WouldBlock`; on a
+        // blocking fd an idle interface never returns, so the first inbound
+        // poll would hang the whole session — and with it the shutdown path
+        // that would otherwise have cleaned up.
+        set_nonblocking(file.as_raw_fd()).map_err(|source| DatapathError::SetupFailed {
+            what: "host tun device (non-blocking)",
+            machine_id: req.machine_id.clone(),
+            source,
+        })?;
+
         let mut handle = LinuxHandle {
             file: Some(file),
             iface: iface.clone(),
@@ -473,6 +484,20 @@ fn write_sockaddr(dst: *mut libc::sockaddr, addr: Ipv4Addr) {
             std::mem::size_of::<libc::sockaddr_in>(),
         );
     }
+}
+
+/// Put a file descriptor in non-blocking mode.
+fn set_nonblocking(fd: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: `fd` is owned by the caller's live `File`.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: same fd; F_SETFL takes an int.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Whether this process holds `CAP_NET_ADMIN` in its effective set.

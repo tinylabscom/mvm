@@ -233,6 +233,32 @@ impl CliNetworkMode {
 pub(in crate::commands) fn preflight_network_mode(
     mode: CliNetworkMode,
 ) -> anyhow::Result<Option<String>> {
+    preflight_network_mode_for(mode, &mvm_net::l3::SubstitutionRequirements::default())
+}
+
+/// The same preflight, against what a specific plan asks for.
+///
+/// Split out so the compatibility gate is testable against every
+/// requirement combination without constructing a whole plan, and so a
+/// caller that knows the plan passes what it knows rather than a default.
+pub(in crate::commands) fn preflight_network_mode_for(
+    mode: CliNetworkMode,
+    requirements: &mvm_net::l3::SubstitutionRequirements,
+) -> anyhow::Result<Option<String>> {
+    // A plan that needs the host to see outbound cleartext cannot run on
+    // the tunnel. Refusing here — before any build or boot — is the whole
+    // point: losing substitution silently is indistinguishable from never
+    // having needed it.
+    if let Err(err) = mvm_net::l3::check_mode_compatibility(
+        mode.to_plan_mode(),
+        requirements,
+        mode.forfeits_payload_visibility(),
+    ) && matches!(
+        err,
+        mvm_net::l3::ModeCompatError::NeedsOwnedCleartext { .. }
+    ) {
+        anyhow::bail!("{err}");
+    }
     if !mode.forfeits_payload_visibility() {
         return Ok(None);
     }

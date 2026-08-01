@@ -612,6 +612,55 @@ L3 mode **does not** claim:
 - Ethernet or raw Layer-2 compatibility;
 - parity with virtio-net offload performance.
 
+## Substitution and L3: what actually changes
+
+Secret substitution is central enough to the product that "L3 mode cannot do
+it" needs to be precise rather than a bullet in a table.
+
+**The primary control is unaffected.** mvm's guarantee is that raw secret
+bytes never enter the guest: `host.secrets.v1` mints destination-bound,
+time-bound credentials host-side, and the real values never leave the
+supervisor's address space. That is enforced at the broker, on a channel
+that has nothing to do with the packet path, so it holds identically in
+`l3-vsock` mode. A workload on the tunnel is no more likely to hold a
+secret than one on the brokered path.
+
+**What L3 gives up is the backstop.** The egress-time scan that catches a
+secret which reached the guest by some *other* route works because the
+socket-aware endpoint **originates** the outbound connection — it holds the
+cleartext, so it can see and rewrite it. Over the tunnel the guest
+originates the connection, so what crosses the vsock boundary for a TLS
+flow is ciphertext. No placement of a filter recovers that.
+
+Three ways one could try, and why only one is taken:
+
+1. **Terminate the guest's TLS with a host CA in its trust store.** This
+   would restore full substitution. It is deliberately out of scope: it is
+   a larger and worse security change than the one this ADR makes, and the
+   design explicitly rules out transparent interception.
+2. **Reassemble and rewrite cleartext TCP.** For flows the guest sends in
+   the clear, the gateway could reassemble the byte stream, apply the
+   scanner, and re-emit with adjusted sequence numbers and checksums. This
+   is genuinely possible and is not implemented — it means terminating TCP
+   in the gateway, and a subtly wrong implementation corrupts connections
+   rather than failing visibly. It would also only ever cover cleartext,
+   which is the minority of what matters.
+3. **Refuse the combination.** Taken. A plan that binds secrets, enables
+   reversible replacement, or enables per-destination redaction cannot
+   select `l3-vsock`; `mvm_net::l3::check_mode_compatibility` refuses it at
+   admission, before any build or boot, and the error names
+   `--network-mode host-vsock-proxy` as the fix.
+
+Option 3 is the important one. A workload whose substitution silently
+stopped applying looks exactly like one that never needed it, which is how a
+defence-in-depth layer becomes a defence in name only. Making the
+combination inadmissible means the trade is always a decision someone made,
+never one they inherited.
+
+The two fields must also agree: an `l3-vsock` plan with no L3 spec, or an L3
+spec on a plan that selected another mode, is refused for the same reason —
+the plan would be ambiguous about what was admitted.
+
 ## Capability difference between the modes
 
 | Capability | `host-vsock-proxy` (managed) | `l3-vsock` |

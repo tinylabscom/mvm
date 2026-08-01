@@ -13,6 +13,8 @@
 //!
 //! See `specs/adrs/035-l3-tun-over-vsock.md`.
 
+/// The already-admitted configuration the launch path hands `mvm-netd`.
+pub mod config;
 pub mod datapath;
 pub mod gateway;
 pub mod metrics;

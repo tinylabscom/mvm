@@ -128,7 +128,13 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       Firecracker, libkrun, and HVF; identity comes from the listener, not
       the reusable socket path
 - [x] measured overhead on two hosts, recorded in ADR-035 §"Measured
-      overhead" in the hermetic lane: launch
+      overhead"
+- [x] `mvm-netd` as a real per-VM process: config on stdin, channels bound
+      before the ready marker so the guest cannot race it, deterministic
+      teardown; live-tested against the real guest agent on Linux
+- [x] mode/plan compatibility gate — a plan that binds secrets, enables
+      reversible replacement, or enables redaction cannot select
+      `l3-vsock`, and the two plan fields cannot disagree in the hermetic lane: launch
       guard, admission, controlled DNS, session lifecycle, lease identity,
       capability gating, and control/data channel separation
 

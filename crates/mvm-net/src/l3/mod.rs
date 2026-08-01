@@ -16,6 +16,8 @@
 
 pub mod admit;
 pub mod alloc;
+/// Whether a plan's networking mode can serve what the plan asks for.
+pub mod compat;
 pub mod dns;
 pub mod flow;
 pub mod ingress;
@@ -26,6 +28,7 @@ pub use admit::{
     L3Admitter, L3PolicyConfig, OutboundVerdict, clamp_tcp_mss,
 };
 pub use alloc::{AddressAllocator, AddressLease, AllocError, DEFAULT_POOL};
+pub use compat::{ModeCompatError, SubstitutionRequirements, check_mode_compatibility};
 pub use dns::{DnsBinding, DnsBindingStore, DnsDeny, DnsLimits};
 pub use flow::{FlowAdmission, FlowCounters, FlowKey, FlowLimits, FlowState, FlowTable};
 pub use ingress::{IngressError, IngressMapping, IngressTable};

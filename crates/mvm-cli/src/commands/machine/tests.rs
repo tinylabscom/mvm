@@ -2457,3 +2457,54 @@ fn the_preflight_states_the_capability_trade_or_refuses() {
         }
     }
 }
+
+/// A plan that binds secrets depends on the host originating its outbound
+/// connections, which the L3 tunnel does not do. Selecting both is refused
+/// before any build or boot, with a message that names the fix.
+#[test]
+fn a_plan_needing_substitution_cannot_select_the_l3_mode() {
+    let needs_secrets = mvm_net::l3::SubstitutionRequirements {
+        binds_secrets: true,
+        ..Default::default()
+    };
+    let err = super::preflight_network_mode_for(CliNetworkMode::L3Vsock, &needs_secrets)
+        .expect_err("substitution and l3-vsock must not be admitted together");
+    let msg = err.to_string();
+    assert!(msg.contains("host-vsock-proxy"), "{msg}");
+    assert!(msg.contains("ciphertext"), "{msg}");
+}
+
+#[test]
+fn the_socket_aware_mode_still_serves_a_plan_that_needs_substitution() {
+    let needs_secrets = mvm_net::l3::SubstitutionRequirements {
+        binds_secrets: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        super::preflight_network_mode_for(CliNetworkMode::HostVsockProxy, &needs_secrets).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn every_substitution_requirement_blocks_the_l3_mode_on_its_own() {
+    for requirements in [
+        mvm_net::l3::SubstitutionRequirements {
+            binds_secrets: true,
+            ..Default::default()
+        },
+        mvm_net::l3::SubstitutionRequirements {
+            reversible_replacement_enabled: true,
+            ..Default::default()
+        },
+        mvm_net::l3::SubstitutionRequirements {
+            redaction_enabled: true,
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            super::preflight_network_mode_for(CliNetworkMode::L3Vsock, &requirements).is_err(),
+            "{requirements:?} must not be admitted on l3-vsock"
+        );
+    }
+}

@@ -309,3 +309,37 @@ fn an_admitted_packet_reaches_the_host_stack_and_a_denied_one_does_not() {
     handle.close().expect("close");
     assert!(!interface_exists(&iface));
 }
+
+/// An idle host TUN must report `WouldBlock` rather than blocking.
+///
+/// The gateway drains the device until it says there is nothing left; on a
+/// blocking descriptor an idle interface never returns, so the first
+/// inbound poll would hang the session and take the shutdown path with it.
+/// The in-memory datapath returns `WouldBlock` instantly, so only a real
+/// device can witness this.
+#[test]
+fn an_idle_host_tun_does_not_block_the_gateway() {
+    if !enabled() {
+        eprintln!("skipping: set MVM_L3_PRIVILEGED_TESTS=1");
+        return;
+    }
+    use mvm_hostd::netd::{DatapathError, DatapathHandle};
+
+    let dp = LinuxDatapath::new();
+    let req = request("privtest-nonblock", 60);
+    let mut handle = dp.open(&req).expect("open");
+
+    let mut buf = vec![0u8; 2048];
+    let start = std::time::Instant::now();
+    match handle.recv_from_network(&mut buf) {
+        Err(DatapathError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        Ok(n) => panic!("an idle device returned {n} bytes"),
+        Err(other) => panic!("expected WouldBlock on an idle device, got {other}"),
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "the read blocked instead of returning WouldBlock"
+    );
+
+    handle.close().expect("close");
+}
