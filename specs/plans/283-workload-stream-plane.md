@@ -404,8 +404,10 @@ Every task inherits these. They are repo-wide gates, not suggestions.
   check-no-spec-refs-in-comments`. Describe the behaviour, not the paperwork.
 - **No `#[allow(clippy::…)]`.** `clippy::too_many_arguments` is banned outright;
   introduce a params struct with a builder instead.
-- **No `.unwrap()` and no `panic!()`** in new code. Use `.expect("reason")` with
-  a reason that explains the invariant.
+- **No `.unwrap()` and no `panic!()` in production code.** Use `.expect("reason")`
+  with a reason that explains the invariant. One carve-out, tests only: the
+  else-arm of an exhaustive match in a test may `panic!` with the unexpected
+  value, because `assert!(matches!(..))` discards it from the failure message.
 - **Production files cap at 1500 lines** (`check-file-size`; trailing test
   modules are exempt). `crates/mvm-agentd/src/entrypoint.rs` is already 1276
   lines — new logic goes in new modules.
@@ -615,14 +617,32 @@ Add the three variants to `Direction`. Add `prev_hash: String` to `ChunkRecord`
 with `#[serde(default)]`. In `push_inner`, set `prev_hash` from the previous
 chunk's `sha256_hex` (all-zero for `seq == 0`) before pushing the record.
 
-- [ ] **Step 4: Run to verify it passes**
+- [ ] **Step 4: Re-pin the deterministic root vector, and witness the re-pin**
+
+`sealed_root_hex` covers the ordered chunk records, so adding `prev_hash`
+changes the root and the pinned deterministic vector must be updated. A silent
+re-pin is also how a genuine accidental root change would hide, so pin both
+directions in the same commit:
+
+```rust
+#[test]
+fn the_pre_linkage_root_vector_no_longer_verifies() {
+    // Guards the re-pin itself: if this ever passes again, the chunk-record
+    // layout silently reverted and the new vector is meaningless.
+    let m = manifest_with_root(PRE_LINKAGE_ROOT_HEX);
+    assert!(matches!(
+        verify_sealed_root(&m),
+        Err(TranscriptError::SealedRootMismatch)
+    ));
+}
+```
+
+- [ ] **Step 5: Run to verify it passes**
 
 Run: `cargo nextest run -p mvm-core transcript::`
-Expected: PASS. Existing sealed-root and `verify_chunks` tests must stay green —
-`sealed_root_hex` covers the ordered chunk records, so adding a field changes
-the root and any pinned deterministic vector must be re-pinned in this commit.
+Expected: PASS. Every existing sealed-root and `verify_chunks` test stays green.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```sh
 git add crates/mvm-core/src/transcript.rs
@@ -912,11 +932,18 @@ fn a_chunk_that_cannot_be_redacted_is_dropped_not_forwarded() {
 #[test]
 fn a_slow_reader_does_not_stall_ingest() {
     let mut b = broker_for("vm-a");
-    let _slow = b.subscribe(); // never drained
+    let slow = b.subscribe(); // deliberately never drained
+    let started = Instant::now();
     for i in 0..10_000u32 {
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, &i.to_le_bytes());
     }
-    // Completing at all is the assertion: ingest must never block on a reader.
+    // Fail loudly rather than hanging until the harness timeout kills us.
+    assert_eq!(b.ingested_count(), 10_000, "every ingest must be accepted");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "ingest must never wait on a reader"
+    );
+    assert!(slow.dropped_count() > 0, "the undrained reader must show its gap");
 }
 ```
 
