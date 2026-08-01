@@ -32,44 +32,21 @@ use super::oci_types::OciImageConfig;
 /// cached runtime-lean rootfs entries otherwise panic after the verity handoff.
 const OCI_RUNTIME_EPOCH: u32 = 6;
 
-/// Identity of the guest runtime the running mvmctl bakes into an OCI rootfs.
-/// Cheap and build-free (no agent cross-compile) so it can gate the cache-hit
-/// path without forcing a rebuild on hosts that only have a warm rootfs cache.
-///
-/// When this mvmctl ships no embedded guest binaries, the injected runtime is
-/// cross-compiled from `crates/mvm-agentd/src` instead — the embedded SHAs are
-/// then all-`missing` and can't track that source, so the guest source
-/// fingerprint is folded in. That makes a guest-source edit re-materialize the
-/// rootfs rather than reuse one carrying a stale injected `/init` / agent.
+/// Identity of the legacy guest runtime injected from the invoking source
+/// checkout. Cheap and build-free so it can gate the cache-hit path without
+/// forcing a guest build.
 pub(super) fn oci_runtime_tag() -> String {
     oci_runtime_tag_with(source_runtime_fingerprint().as_deref())
 }
 
-/// The guest source fingerprint to fold into the runtime tag, or `None` when it
-/// contributes nothing: this mvmctl ships embedded guest binaries (their SHAs
-/// already pin the injected identity) or no source checkout is in reach.
+/// The guest source fingerprint to fold into the runtime tag, or `None` when no
+/// source checkout is in reach.
 fn source_runtime_fingerprint() -> Option<String> {
-    runtime_source_fingerprint_for(embedded_guest_binaries().is_some())
-}
-
-/// The source fingerprint to fold in given whether embedded guest binaries are
-/// present. Split from [`source_runtime_fingerprint`] so the embedded-vs-source
-/// decision is unit-testable without build-time embedding state. Mirrors
-/// [`mvm_build::run_image::resolve_guest_binaries`], which cross-compiles the
-/// injected runtime from source only when no embedded binaries are present, and
-/// keys that build on the same [`guest_source_fingerprint`] used here — so the
-/// OCI cache tag and the guest-binary build cache miss and hit together.
-///
-/// [`guest_source_fingerprint`]: mvm_build::guest_agent_build::guest_source_fingerprint
-fn runtime_source_fingerprint_for(has_embedded_binaries: bool) -> Option<String> {
-    if has_embedded_binaries {
-        return None;
-    }
     let workspace = mvm_build::guest_agent_build::detect_source_workspace()?;
     match mvm_build::guest_agent_build::guest_source_fingerprint(&workspace) {
         Ok(fingerprint) => Some(fingerprint),
         Err(err) => {
-            // Degrade to the embedded-only tag rather than fail the run, but
+            // Degrade to the packaging-epoch tag rather than fail the run, but
             // leave a breadcrumb: a silent drop here can reuse a stale injected
             // rootfs for this one invocation with no trace for a contributor
             // debugging "my guest-source edit didn't take".
@@ -83,10 +60,9 @@ fn runtime_source_fingerprint_for(has_embedded_binaries: bool) -> Option<String>
     }
 }
 
-/// Pure runtime-tag computation over the embedded-binary SHAs plus an optional
-/// guest source fingerprint. Split out from [`oci_runtime_tag`] so the
-/// source-checkout invalidation is unit-testable without a real workspace or a
-/// particular embedded-binary set.
+/// Pure runtime-tag computation over the packaging epoch plus an optional guest
+/// source fingerprint. Split out from [`oci_runtime_tag`] so the
+/// source-checkout invalidation is unit-testable without a real workspace.
 fn oci_runtime_tag_with(source_fp: Option<&str>) -> String {
     use sha2::{Digest, Sha256};
 
@@ -94,24 +70,6 @@ fn oci_runtime_tag_with(source_fp: Option<&str>) -> String {
     hasher.update(b"epoch=");
     hasher.update(OCI_RUNTIME_EPOCH.to_string().as_bytes());
     hasher.update(b"\n");
-    for name in [
-        "mvm-oci-init",
-        "mvm-oci-entrypoint",
-        "mvm-guest-agent",
-        "mvm-guest-netinit",
-        "mvm-egress-client",
-        "mvm-verity-init",
-    ] {
-        hasher.update(name.as_bytes());
-        hasher.update(b"=");
-        let sha = crate::host_binaries::embedded::EMBEDDED
-            .iter()
-            .find(|bin| bin.name == name)
-            .map(|bin| bin.sha256_hex)
-            .unwrap_or("missing");
-        hasher.update(sha.as_bytes());
-        hasher.update(b"\n");
-    }
     if let Some(fp) = source_fp {
         hasher.update(b"guest-source=");
         hasher.update(fp.as_bytes());
@@ -303,7 +261,6 @@ pub(super) fn inject_runtime_and_materialize(
         )
         .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
         .entrypoint(entrypoint)
-        .prebuilt(embedded_guest_binaries())
         .sealed(sealed)
         .deferred_nodes(deferred_nodes)
         .build(),
@@ -329,7 +286,7 @@ pub(super) fn prepare_rootfs_only_tree(
             prepared_root.display()
         )
     })?;
-    let bins = mvm_build::run_image::resolve_guest_binaries(cache_root, embedded_guest_binaries())
+    let bins = mvm_build::run_image::resolve_guest_binaries(cache_root)
         .context("resolve guest binaries for rootfs-only OCI tree")?;
     mvm_build::oci_runtime_inject::inject_mvm_runtime(
         &prepared_root,
@@ -413,36 +370,13 @@ pub(super) fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// Whether booting an `--image` OCI run will cross-compile the mvm guest
-/// runtime from source first: this build carries no embedded guest binaries
-/// and the source-checkout guest cache is cold. Announcing this before the
-/// pull keeps the slow, output-silent `cargo zigbuild` from looking like a hang.
+/// runtime from source first. Announcing this before the pull keeps the slow,
+/// output-silent artifact build from looking like a hang.
 pub(in crate::commands) fn oci_guest_runtime_compile_pending(cache_root: &Path) -> bool {
-    embedded_guest_binaries().is_none()
-        && mvm_build::guest_agent_build::source_build_pending(
-            cache_root,
-            mvm_core::arch::GuestArch::host(),
-        )
-}
-
-/// The guest-agent binaries embedded in this mvmctl at build time (build.rs).
-/// `None` only if a required embedded binary is unexpectedly missing.
-pub(super) fn embedded_guest_binaries()
--> Option<mvm_build::run_image::PrebuiltGuestBinaries<'static>> {
-    let find = |name: &str| {
-        crate::host_binaries::embedded::EMBEDDED
-            .iter()
-            .find(|b| b.name == name)
-            .map(|b| b.bytes)
-            .filter(|b| !b.is_empty())
-    };
-    Some(mvm_build::run_image::PrebuiltGuestBinaries {
-        oci_init: find("mvm-oci-init")?,
-        agent: find("mvm-guest-agent")?,
-        netinit: find("mvm-guest-netinit")?,
-        egress_client: find("mvm-egress-client")?,
-        entrypoint_runner: find("mvm-oci-entrypoint")?,
-        verity_init: find("mvm-verity-init")?,
-    })
+    mvm_build::guest_agent_build::source_build_pending(
+        cache_root,
+        mvm_core::arch::GuestArch::host(),
+    )
 }
 
 #[cfg(test)]
@@ -505,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_tag_includes_guest_runtime_hash() {
+    fn runtime_tag_includes_packaging_digest() {
         let tag = oci_runtime_tag();
         assert!(
             tag.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-guest-")),
@@ -519,28 +453,17 @@ mod tests {
     }
 
     #[test]
-    fn source_fingerprint_folds_only_without_embedded_binaries() {
-        // Shipped mvmctl (embedded binaries present): never fold a source
-        // fingerprint, so the tag stays pinned to the embedded SHAs and warm
-        // end-user rootfs caches are byte-stable. Guards the is_some/is_none
-        // polarity that gates the whole source-checkout invalidation — an
-        // inversion here would silently disrupt end-user caches or reopen the
-        // stale-injected-runtime bug, and every other test would still pass.
-        assert!(runtime_source_fingerprint_for(true).is_none());
-        // In a source checkout (this test runs inside the mvm workspace) with
-        // no embedded binaries, the workspace is detected and its fingerprint
-        // folded in — the branch that closes the cache-invalidation bug.
+    fn source_checkout_runtime_tag_folds_the_guest_fingerprint() {
         assert!(
-            runtime_source_fingerprint_for(false).is_some(),
+            source_runtime_fingerprint().is_some(),
             "a detected source workspace must contribute a guest source fingerprint"
         );
     }
 
     #[test]
     fn guest_source_fingerprint_feeds_the_runtime_tag() {
-        // The source-checkout invalidation: when this mvmctl ships no embedded
-        // guest binaries and injects a runtime cross-compiled from
-        // `crates/mvm-agentd/src`, a guest-source edit (a changed source
+        // The source-checkout invalidation: when this mvmctl injects a runtime
+        // built from `crates/mvm-agentd/src`, a guest-source edit (a changed source
         // fingerprint) must change the runtime tag so the stale injected
         // rootfs/prepared-roots caches miss. A tag that ignored the fingerprint
         // (the old behaviour) is exactly the cache-correctness bug.
@@ -554,7 +477,7 @@ mod tests {
         );
         assert_ne!(
             no_source, fp_a,
-            "folding a source fingerprint in must diverge from the embedded-only tag"
+            "folding a source fingerprint in must diverge from the packaging-epoch tag"
         );
         // Still a well-formed tag regardless of the fingerprint input.
         for tag in [&no_source, &fp_a, &fp_b] {

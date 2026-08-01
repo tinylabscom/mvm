@@ -1052,6 +1052,16 @@ Shipped in #1914 (core), #1931 (QEMU unified runner), #1933 (Docker dev-tier), #
    and updated the verified-boot cmdline feature to assert that the legacy
    `mvm.roothash`/`mvm.data`/`mvm.hash` tokens are omitted from initramfs boots
    — narrowed by item 6's correction to *universal*-initramfs boots only.
+10. [x] Retired the obsolete CLI workload-guest payload. `mvm-cli/build.rs`
+    now embeds only the host and seed builder/bootstrap manifests; the six
+    workload helpers are supplied by the universal initramfs and runtime
+    overlay. Removed the dead skip-embedding environment switch and fast-test
+    recipe, deleted the embedded-byte OCI plumbing, retained a content-keyed
+    source fallback for legacy rootfs-only development, and added `xtask` plus
+    integration assertions that prevent workload binaries from returning to
+    the CLI payload. Focused tests, workspace clippy, formatting, and the full
+    workspace test suite pass; the latter was run serially because unrelated
+    tests mutate process-global environment variables under parallel execution.
 
 Live witness for items 6 and 8 on macOS 26.5.2 / arm64, HVF backend, after the
 corrections: `machine run --image alpine -- /bin/sh -c "echo TRANSIENT-OK; cat

@@ -49,6 +49,13 @@ for detailed scope and acceptance criteria.
         allow-list so a docs-only edit stops invalidating every guest binary
         (416 of 1872 files, 22%, stop being cache keys)
 
+- [~] Plan 270 — universal initramfs + vsock-activated boot
+  (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
+  - [x] Retire the obsolete CLI workload-guest payload and dead skip-embedding
+        switch; the universal initramfs/runtime overlay owns workload binaries
+  - [x] Pin `mvmctl` embedding to the builder/bootstrap host and seed manifests
+  - [~] Remaining rollout, snapshot, BDD, and live-smoke work stays in the plan
+
 - [~] Plan 265 — Fast-start SLO, backend sequencing & competitive positioning
   (`specs/plans/265-fast-start-slo-sequencing-positioning.md`)
   - [x] WS1 — Finish the FC warm-restore story (no-NIC guard, real

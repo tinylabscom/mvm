@@ -445,6 +445,27 @@ HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214. This
 
 ---
 
+## Task 7: Retire the pre-initramfs CLI guest payload
+
+The universal initramfs and runtime overlay are now the released workload
+artifact boundary. The older `mvmctl` build path still cross-compiled the six
+workload guest binaries and carried dead skip-embedding documentation even
+though that switch no longer controlled `build.rs`.
+
+- [x] Remove the workload guest cross-build from `mvm-cli/build.rs` and remove
+      the embedded-byte plumbing from OCI materialization.
+- [x] Keep source-checkout construction only as an explicit compatibility path
+      for legacy rootfs-only development, with content-keyed cache fixtures.
+- [x] Assert that `mvmctl` embeds exactly the host and seed builder/bootstrap
+      manifests, and reject any workload guest `--bin` entries in its build
+      script through `xtask`.
+- [x] Remove the dead environment switch, its fast-test recipe, mutation-runner
+      export, and historical setup instructions.
+- [x] Verify with formatting, workspace clippy, focused policy and embedding
+      tests, and the full workspace test suite.
+
+---
+
 ## Acceptance gate
 
 - `cargo nextest run --workspace` green.

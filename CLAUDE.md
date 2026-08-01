@@ -433,12 +433,9 @@ test gate — it's process-parallel and faster than `cargo test` on this
 folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 --workspace` still works as a fallback if nextest isn't installed.
 
-For fast inner-loop iteration or a freshly-created worktree, `just
-test-fast` (`MVM_SKIP_EMBED_BINARIES=1`) skips the embedded host-vm binary
-cross-compile in `crates/mvm-cli/build.rs` — safe for everything except a
-builder-VM boot (which fails closed with a clear message under a stub
-build). `just test-cached` wraps rustc in sccache to share compilation
-across worktrees/branches (needs `cargo install sccache`).
+For fast inner-loop iteration across worktrees, `just test-cached` wraps rustc
+in sccache to share compilation across branches (needs `cargo install
+sccache`).
 
 **Always pass `--all` to `cargo fmt`.** Without it, fmt only checks the
 manifest crate (whichever one the manifest points at), silently missing

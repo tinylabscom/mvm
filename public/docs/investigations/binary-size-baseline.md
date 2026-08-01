@@ -22,10 +22,10 @@ cargo run --package xtask -- check-binary-size \
   --budget-bytes <bytes>
 ```
 
-For local exploratory builds, `MVM_SKIP_EMBED_BINARIES=1` is acceptable only as
-an explicitly labeled provisional measurement. It replaces the embedded host
-helpers with zero-byte stubs, so it is **not** the shipped-artifact baseline and
-must not drive the release budget.
+Some July 2026 entries below were measured with a retired zero-byte helper-stub
+mode. They remain labeled as historical provisional measurements. Current
+builds always produce the builder/bootstrap helper payloads, so only a current
+release-path measurement may drive the release budget.
 
 ## Current measured baseline
 
@@ -103,7 +103,6 @@ Measured 2026-07-08 on this branch with:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/mvm-size-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo build --release --bin mvmctl --locked --offline
 
 ls -l /tmp/mvm-size-target/release/mvmctl
@@ -122,12 +121,11 @@ Section breakdown:
 |---:|---:|---:|---:|---:|
 | 20,201,472 | 32,768 | 0 | 4,295,901,184 | 4,316,135,424 |
 
-Important caveat: this host does not have the pinned zig `0.13.0` toolchain
-that `crates/mvm-cli/build.rs` requires for real embedded host binaries, so the
-local build used `MVM_SKIP_EMBED_BINARIES=1`. The resulting size is useful for
-relative branch-to-branch comparison of the Rust-side CLI payload, but it is
-not comparable to the shipped release artifact and does not update the release
-budget.
+Important caveat: this host did not have the pinned zig `0.13.0` toolchain that
+`crates/mvm-cli/build.rs` required for real builder/bootstrap helpers, so the
+historical build used the now-retired zero-byte stub mode. The recorded size is
+useful only for comparing the contemporaneous Rust-side CLI payload; the
+normalized command above now builds real helpers and will not reproduce it.
 
 ### Local provisional follow-up: Tokio feature-union trim
 
@@ -139,16 +137,13 @@ Validation/measurement commands:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/mvm-tokio-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo check --workspace --all-targets --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-tokio-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo clippy -p mvm-hostd -p mvm-storage -p mvm-guest-helpers \
     --all-targets --offline -- -D warnings
 
 CARGO_TARGET_DIR=/tmp/mvm-size-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo build --release --bin mvmctl --locked --offline
 
 stat -f '%N %z' /tmp/mvm-size-target/release/mvmctl
@@ -176,27 +171,21 @@ Validation commands:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/mvm-regex-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo check -p mvm-core -p mvm-hostd --all-targets --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-regex-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo clippy -p mvm-core -p mvm-hostd --all-targets --offline -- -D warnings
 
 CARGO_TARGET_DIR=/tmp/mvm-regex-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-hostd 'secrets_scanner::tests::' --lib --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-regex-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-hostd 'injection_guard::tests::' --lib --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-regex-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-hostd 'pii_redactor::tests::' --lib --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-size-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo build --release --bin mvmctl --locked --offline
 
 stat -f '%N %z' /tmp/mvm-size-target/release/mvmctl
@@ -229,27 +218,21 @@ Validation commands:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/mvm-clap-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo check -p mvm-cli --all-targets --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-clap-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-cli --lib commands::tests::top_level_help_hides_infra --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-clap-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-cli --lib commands::tests::machine_help_lists_run_first --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-clap-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-cli --lib commands::tests::builder_flag_appears_in_help --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-clap-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo clippy -p mvm-cli --all-targets --offline -- -D warnings
 
 CARGO_TARGET_DIR=/tmp/mvm-size-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo build --release --bin mvmctl --offline
 
 stat -f '%N %z' /tmp/mvm-size-target/release/mvmctl
@@ -281,27 +264,21 @@ Validation commands:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/mvm-serde-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo check --workspace --all-targets --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-serde-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-core protocol::protocol::tests:: --lib --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-serde-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-cli json_out::tests::to_json_string_is_pretty --lib --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-serde-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-hostd framing::tests:: --lib --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-serde-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo clippy --workspace --all-targets --offline -- -D warnings
 
 CARGO_TARGET_DIR=/tmp/mvm-size-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo build --release --bin mvmctl --offline
 
 stat -f '%N %z' /tmp/mvm-size-target/release/mvmctl
@@ -336,19 +313,15 @@ Validation commands:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/mvm-sdk-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo check -p mvm-sdk -p mvm-cli --all-targets --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-sdk-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo test -p mvm-sdk --lib --offline
 
 CARGO_TARGET_DIR=/tmp/mvm-sdk-audit-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo clippy -p mvm-sdk -p mvm-cli --all-targets --offline -- -D warnings
 
 CARGO_TARGET_DIR=/tmp/mvm-size-target \
-MVM_SKIP_EMBED_BINARIES=1 \
   cargo build --release --bin mvmctl --offline
 
 stat -f '%N %z' /tmp/mvm-size-target/release/mvmctl

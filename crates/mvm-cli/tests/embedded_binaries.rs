@@ -1,5 +1,21 @@
 use mvm_cli::host_binaries::embedded::EMBEDDED;
+use mvm_cli::host_binaries::manifest::{HOST_BINARIES, SEED_BINARIES};
 use sha2::{Digest, Sha256};
+
+#[test]
+fn embedded_set_is_only_builder_bootstrap_payloads() {
+    let mut expected: Vec<&str> = HOST_BINARIES.iter().map(|binary| binary.name).collect();
+    expected.extend(SEED_BINARIES.iter().copied());
+    expected.sort_unstable();
+
+    let mut actual: Vec<&str> = EMBEDDED.iter().map(|binary| binary.name).collect();
+    actual.sort_unstable();
+
+    assert_eq!(
+        actual, expected,
+        "workload guest binaries belong to the initramfs/runtime artifacts, not mvmctl"
+    );
+}
 
 #[test]
 fn each_embedded_binary_starts_with_elf_magic() {

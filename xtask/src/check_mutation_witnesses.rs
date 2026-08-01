@@ -845,11 +845,7 @@ fn run_mutants_for_file(
             &MUTANT_MINIMUM_TIMEOUT_SECS.to_string(),
         ])
         .arg("--output")
-        .arg(out_dir)
-        // The embedded host-vm binaries are cross-compiled by
-        // mvm-cli's build.rs; a mutation run rebuilds per mutant and
-        // does not boot a VM, so paying that cost every time is waste.
-        .env("MVM_SKIP_EMBED_BINARIES", "1");
+        .arg(out_dir);
     if let Some(scope) = &file.scope {
         eprintln!(
             "      scoped to /{}/ — {}",

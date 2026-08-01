@@ -138,12 +138,6 @@ test:
     mkdir -p target/nextest
     cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
 
-# Non-release builds now skip the embedded host-vm binary cross-compile by
-# default. Keep this explicit recipe as the "always stub" path when a caller
-# wants to force the fast mode even after opting into real embeds elsewhere.
-test-fast:
-    MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace
-
 # Doctests. nextest does NOT run doctests, so `just test` skips them;
 # this is the companion that keeps doc-fence coverage gated.
 test-doc:

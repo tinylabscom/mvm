@@ -100,5 +100,5 @@ harness.
   `MVM_LIVE_ROOTFS=/root/microvm/ubuntu-24.04.ext4`.
 - The musl target had to be installed (`rustup target add
   x86_64-unknown-linux-musl`) before `crates/mvm-cli/build.rs` would build the
-  embedded host-vm binaries. Note `MVM_SKIP_EMBED_BINARIES` does **not** exist in
+  embedded host-vm binaries. The former skip-embed switch did **not** exist in
   `build.rs`, despite being referenced in the contributor docs.

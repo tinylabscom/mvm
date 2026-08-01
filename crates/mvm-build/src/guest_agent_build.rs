@@ -4,20 +4,17 @@
 //! An mkGuest rootfs gets the agent from a nix build inside the builder
 //! VM. An arbitrary OCI image has no nix build of its own, so for the
 //! `run --image` path the host produces the binaries directly and bakes
-//! them in. This module mirrors the existing host cross-compile pattern
-//! (`crates/mvm-cli/build.rs` cross-compiles the host-vm bins with
-//! `cargo-zigbuild` to a static musl target) and caches the result under
+//! them in. This module builds the guest artifact with `cargo-zigbuild` to a
+//! static musl target and caches the result under
 //! `~/.mvm/cache/guest-agent/<version>/<arch>/interactive/`.
 //!
 //! `cargo-zigbuild` is the single portable cross path: the agent pulls
 //! `ring` (C), so a static musl build needs a musl C cross-compiler, and
 //! zig supplies it without a system `<arch>-linux-musl-gcc`. The
 //! source-checkout build ([`resolve_or_build_guest_binaries`]) is only
-//! reachable with the workspace + zig; a **shipped mvmctl** embeds these
-//! binaries at build time (`crates/mvm-cli/build.rs`) and installs the embedded
-//! bytes via [`install_prebuilt_guest_binaries`]. The resolution order lives in
-//! `run_image::inject_and_materialize`: embedded release bytes win for shipped
-//! binaries, while source builds use an invoking-checkout content-keyed cache.
+//! reachable with the workspace + zig. Installed binaries use the universal
+//! initramfs and runtime overlay; the host CLI never embeds these workload
+//! bytes.
 
 use mvm_core::arch::GuestArch;
 use sha2::{Digest, Sha256};
@@ -62,17 +59,6 @@ pub struct GuestRuntimeBinaryPaths<'a> {
     pub verity_init: &'a Path,
 }
 
-/// Embedded guest runtime binary bytes ready to install into the cache.
-#[derive(Debug, Clone, Copy)]
-pub struct GuestRuntimeBinaryBytes<'a> {
-    pub oci_init: &'a [u8],
-    pub agent: &'a [u8],
-    pub netinit: &'a [u8],
-    pub egress_client: &'a [u8],
-    pub entrypoint_runner: &'a [u8],
-    pub verity_init: &'a [u8],
-}
-
 /// Cache segment keying the agent build variant. The `run --image` path needs
 /// the interactive (exec-capable) agent, and this module always builds with it
 /// (see [`GuestAgentBuildSpec`]); keying the cache by the variant means a stale,
@@ -82,10 +68,10 @@ pub struct GuestRuntimeBinaryBytes<'a> {
 const AGENT_VARIANT: &str = "interactive";
 
 impl GuestAgentLayout {
-    /// `cache_key` names the cache generation: the mvmctl `version` for an
-    /// embedded/shipped build (content is fixed by the version), or a guest
-    /// source fingerprint (`source_cache_key`) for a contributor checkout so a
-    /// local edit lands in its own cache dir and never reuses a stale agent.
+    /// `cache_key` names the cache generation: an mvmctl `version` for a
+    /// compatibility cache, or a guest source fingerprint (`source_cache_key`)
+    /// for a contributor checkout so a local edit lands in its own cache dir
+    /// and never reuses a stale agent.
     pub fn under(cache_root: &Path, cache_key: &str, arch: GuestArch) -> Self {
         let dir = cache_root
             .join("guest-agent")
@@ -314,8 +300,8 @@ pub fn source_workspace_from(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// The mvm source workspace to cross-compile the guest binaries from, or `None`
-/// for a shipped binary with no checkout (→ the caller uses the embedded bytes).
+/// The mvm source workspace to build the legacy rootfs-injected guest runtime
+/// from, or `None` for an installed binary with no source fallback.
 ///
 /// Resolution: the invoking process's `current_dir` first (so a contributor
 /// running from any worktree/clone builds THAT tree's guest sources, not the
@@ -521,8 +507,7 @@ pub fn cached_guest_binaries(
 /// source-checkout cross-compile: a source workspace is detected and its
 /// content-keyed cache is cold. Mirrors [`resolve_or_build_guest_binaries`]'s
 /// build/no-build decision so a caller can announce the slow, output-silent
-/// `cargo zigbuild` before it runs. A caller holding embedded guest binaries
-/// installs those instead and must not consult this.
+/// `cargo zigbuild` before it runs.
 pub fn source_build_pending(cache_root: &Path, arch: GuestArch) -> bool {
     match detect_source_workspace() {
         Some(ws) => source_build_pending_for(cache_root, arch, &ws),
@@ -584,26 +569,6 @@ pub fn runtime_overlay_source_checkout_fingerprint(
         }
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-/// Install guest binaries from in-memory bytes (embedded in the host binary at
-/// build time) into the cache. The end-user path: a shipped mvmctl has no
-/// source checkout to cross-compile from, so it writes the embedded bytes here.
-pub fn install_prebuilt_guest_binaries(
-    bytes: GuestRuntimeBinaryBytes<'_>,
-    cache_root: &Path,
-    version: &str,
-    arch: GuestArch,
-) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
-    let layout = GuestAgentLayout::under(cache_root, version, arch);
-    std::fs::create_dir_all(&layout.dir)?;
-    write_exec(&layout.oci_init, bytes.oci_init)?;
-    write_exec(&layout.agent, bytes.agent)?;
-    write_exec(&layout.netinit, bytes.netinit)?;
-    write_exec(&layout.egress_client, bytes.egress_client)?;
-    write_exec(&layout.entrypoint_runner, bytes.entrypoint_runner)?;
-    write_exec(&layout.verity_init, bytes.verity_init)?;
-    Ok(layout.binaries())
 }
 
 fn build_runtime_overlay_guest_binaries_into_cache(
@@ -717,6 +682,7 @@ fn run_zigbuild(
     })
 }
 
+#[cfg(test)]
 fn write_exec(dst: &Path, bytes: &[u8]) -> Result<(), GuestAgentBuildError> {
     let _ = std::fs::remove_file(dst);
     std::fs::write(dst, bytes)?;
@@ -916,6 +882,26 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
+    fn seed_complete_guest_cache(
+        cache_root: &Path,
+        cache_key: &str,
+        arch: GuestArch,
+        bytes: &[u8],
+    ) {
+        let layout = GuestAgentLayout::under(cache_root, cache_key, arch);
+        std::fs::create_dir_all(&layout.dir).expect("create guest cache dir");
+        for path in [
+            &layout.oci_init,
+            &layout.agent,
+            &layout.netinit,
+            &layout.egress_client,
+            &layout.entrypoint_runner,
+            &layout.verity_init,
+        ] {
+            write_exec(path, bytes).expect("seed guest cache binary");
+        }
+    }
+
     #[test]
     fn source_build_pending_flips_when_the_source_keyed_cache_is_seeded() {
         // A deterministic workspace root: this crate's manifest dir has the
@@ -930,49 +916,54 @@ mod tests {
 
         // Seed the exact content-keyed slot the resolver would fill.
         let key = source_cache_key(&ws).expect("source cache key");
-        install_prebuilt_guest_binaries(
-            GuestRuntimeBinaryBytes {
-                oci_init: b"x",
-                agent: b"x",
-                netinit: b"x",
-                egress_client: b"x",
-                entrypoint_runner: b"x",
-                verity_init: b"x",
-            },
-            cache.path(),
-            &key,
-            arch,
-        )
-        .expect("seed the source-keyed guest cache");
+        seed_complete_guest_cache(cache.path(), &key, arch, b"x");
 
         // Warm cache: no cross-compile pending.
         assert!(!source_build_pending_for(cache.path(), arch, &ws));
     }
 
     #[test]
-    fn install_prebuilt_then_cached_round_trips() {
+    fn install_paths_then_cached_round_trips() {
         let cache = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
         let arch = GuestArch::Aarch64;
         let version = env!("CARGO_PKG_VERSION");
 
         // Nothing cached yet.
         assert!(cached_guest_binaries(cache.path(), version, arch).is_none());
 
-        // Install embedded-style bytes, then the cache lookup finds them.
-        let bins = install_prebuilt_guest_binaries(
-            GuestRuntimeBinaryBytes {
-                oci_init: b"fake-oci-init-elf",
-                agent: b"fake-agent-elf",
-                netinit: b"fake-netinit-elf",
-                egress_client: b"fake-egress-client-elf",
-                entrypoint_runner: b"fake-entrypoint-runner-elf",
-                verity_init: b"fake-verity-init-elf",
+        let oci_init = source.path().join("mvm-oci-init");
+        let agent = source.path().join("mvm-guest-agent");
+        let netinit = source.path().join("mvm-guest-netinit");
+        let egress_client = source.path().join("mvm-egress-client");
+        let entrypoint_runner = source.path().join("mvm-oci-entrypoint");
+        let verity_init = source.path().join("mvm-verity-init");
+        for (path, bytes) in [
+            (&oci_init, b"fake-oci-init-elf".as_slice()),
+            (&agent, b"fake-agent-elf".as_slice()),
+            (&netinit, b"fake-netinit-elf".as_slice()),
+            (&egress_client, b"fake-egress-client-elf".as_slice()),
+            (&entrypoint_runner, b"fake-entrypoint-runner-elf".as_slice()),
+            (&verity_init, b"fake-verity-init-elf".as_slice()),
+        ] {
+            std::fs::write(path, bytes).unwrap();
+        }
+
+        // Install artifact paths, then the cache lookup finds them.
+        let bins = install_into_cache(
+            GuestRuntimeBinaryPaths {
+                oci_init: &oci_init,
+                agent: &agent,
+                netinit: &netinit,
+                egress_client: &egress_client,
+                entrypoint_runner: &entrypoint_runner,
+                verity_init: &verity_init,
             },
             cache.path(),
             version,
             arch,
         )
-        .expect("install prebuilt");
+        .expect("install artifact paths");
         assert!(bins.agent.is_file());
         assert!(bins.netinit.is_file());
         assert!(bins.egress_client.is_file());
@@ -1302,21 +1293,8 @@ mod tests {
         let arch = GuestArch::Aarch64;
         let version = env!("CARGO_PKG_VERSION");
 
-        // Populate the version+arch cache (the embedded/shipped path).
-        install_prebuilt_guest_binaries(
-            GuestRuntimeBinaryBytes {
-                oci_init: b"STALE",
-                agent: b"STALE",
-                netinit: b"STALE",
-                egress_client: b"STALE",
-                entrypoint_runner: b"STALE",
-                verity_init: b"STALE",
-            },
-            cache.path(),
-            version,
-            arch,
-        )
-        .unwrap();
+        // Populate the version+arch compatibility cache.
+        seed_complete_guest_cache(cache.path(), version, arch, b"STALE");
         assert!(
             cached_guest_binaries(cache.path(), version, arch).is_some(),
             "version+arch cache is populated (stale)"
