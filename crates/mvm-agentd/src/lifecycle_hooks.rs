@@ -87,23 +87,34 @@ impl HookRunner for RealHookRunner {
     }
 
     fn spawn(&self, script_path: &Path) -> io::Result<Self::Child> {
-        Command::new(script_path).spawn().map(RealHookChild)
+        Command::new(script_path)
+            .spawn()
+            .map(|child| RealHookChild {
+                _owned: crate::child_wait::OwnedChild::new(child.id()),
+                child,
+            })
     }
 }
 
-struct RealHookChild(Child);
+/// The hook's child plus the token that keeps PID 1's orphan reaper
+/// publishing its exit status rather than discarding it. The token is
+/// never read — dropping it alongside the child is the whole contract.
+struct RealHookChild {
+    child: Child,
+    _owned: crate::child_wait::OwnedChild,
+}
 
 impl HookChild for RealHookChild {
     fn try_wait(&mut self) -> io::Result<Option<HookExit>> {
-        self.0.try_wait().map(|status| status.map(HookExit::from))
+        crate::child_wait::try_wait(&mut self.child).map(|status| status.map(HookExit::from))
     }
 
     fn kill(&mut self) -> io::Result<()> {
-        self.0.kill()
+        self.child.kill()
     }
 
     fn wait(&mut self) -> io::Result<HookExit> {
-        self.0.wait().map(HookExit::from)
+        crate::child_wait::wait(&mut self.child).map(HookExit::from)
     }
 }
 

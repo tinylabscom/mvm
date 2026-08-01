@@ -124,6 +124,10 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
         }
     };
 
+    // Claim the child before it can exit, so the orphan reaper records its
+    // status for us instead of discarding it.
+    let _owned = crate::child_wait::OwnedChild::new(child.id());
+
     if let Some(data) = stdin_data
         && let Some(ref mut pipe) = child.stdin
         && let Err(e) = pipe.write_all(data.as_bytes())
@@ -146,7 +150,7 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
             | drain_into(&err_buf, &mut sent_err, false, &mut emit);
         if capped {
             kill_pgroup(&child);
-            let _ = child.wait();
+            let _ = crate::child_wait::wait(&mut child);
             emit(ExecEvent::Stderr {
                 chunk: b"\n... (truncated)".to_vec(),
             });
@@ -154,7 +158,7 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             kill_pgroup(&child);
-            let _ = child.wait();
+            let _ = crate::child_wait::wait(&mut child);
             // Same no-tail-loss discipline as the normal exit path: join the
             // drain threads so all buffered bytes are appended, then flush.
             if let Some(h) = out_handle.take() {
@@ -167,7 +171,7 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
             let _ = drain_into(&err_buf, &mut sent_err, false, &mut emit);
             return ExecEvent::TimedOut;
         }
-        match child.try_wait() {
+        match crate::child_wait::try_wait(&mut child) {
             Ok(Some(status)) => {
                 // Child exited: join the drain threads so every buffered
                 // byte has been appended (a happens-before edge — the

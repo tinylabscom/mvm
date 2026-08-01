@@ -578,6 +578,11 @@ pub fn execute(
         }
     };
 
+    // Claim the child before it can exit, so PID 1's orphan reaper records
+    // its status for us rather than discarding it. Held until this call
+    // returns, by which point the child has been waited on.
+    let _owned = crate::child_wait::OwnedChild::new(child.id());
+
     // Drop the parent's copy of the write end so the child is the
     // only writer. Without this, reading the read end blocks
     // forever because the kernel sees a writer (us) still has it
@@ -831,7 +836,7 @@ fn poll_for_exit(
             kill_and_reap(child, caps.kill_grace_period);
             return ChildOutcome::PayloadCap;
         }
-        match child.try_wait() {
+        match crate::child_wait::try_wait(child) {
             Ok(Some(status)) => return ChildOutcome::Exited(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
@@ -862,7 +867,7 @@ pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
     }
     let escalate_at = Instant::now() + grace;
     while Instant::now() < escalate_at {
-        if let Ok(Some(_)) = child.try_wait() {
+        if let Ok(Some(_)) = crate::child_wait::try_wait(child) {
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -872,7 +877,7 @@ pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
     unsafe {
         libc::kill(-pgid, libc::SIGKILL);
     }
-    let _ = child.wait();
+    let _ = crate::child_wait::wait(child);
 }
 
 #[cfg(unix)]

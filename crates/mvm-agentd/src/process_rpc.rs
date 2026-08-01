@@ -156,6 +156,10 @@ struct ProcessRecord {
     started_at: String,
     /// Child handle, or `None` once we've called `wait()`.
     child: Mutex<Option<Child>>,
+    /// Keeps PID 1's orphan reaper publishing this child's exit status
+    /// instead of discarding it. Lives as long as the record. `None`
+    /// mirrors a record with no live child, the same way `child` does.
+    _owned: Option<crate::child_wait::OwnedChild>,
     /// Stdin pipe held by the agent until ProcSendInput drops it.
     stdin: Mutex<Option<ChildStdin>>,
     /// Captured stdout. Background drain thread (holding an `Arc`
@@ -447,6 +451,7 @@ pub fn handle_proc_start(
     let record = Arc::new(ProcessRecord {
         argv0,
         started_at,
+        _owned: Some(crate::child_wait::OwnedChild::new(child.id())),
         child: Mutex::new(Some(child)),
         stdin: Mutex::new(stdin),
         stdout_buf,
@@ -658,7 +663,7 @@ fn try_reap(record: &ProcessRecord, reap_grace: Duration) -> Option<TerminalStat
             .as_ref()
             .copied();
     };
-    match child.try_wait() {
+    match crate::child_wait::try_wait(child) {
         Ok(Some(status)) => {
             let terminal = if let Some(code) = status.code() {
                 TerminalState::Exited(code)
@@ -1058,6 +1063,7 @@ mod tests {
         ProcessRecord {
             argv0: "/bin/test".to_string(),
             started_at: "2025-01-01T00:00:00Z".to_string(),
+            _owned: None,
             child: Mutex::new(None),
             stdin: Mutex::new(None),
             stdout_buf: Arc::new(Mutex::new(vec![0u8; stdout_bytes])),
@@ -1116,6 +1122,7 @@ mod tests {
         let record = Arc::new(ProcessRecord {
             argv0: "/bin/echo".to_string(),
             started_at: "2025-01-01T00:00:00Z".to_string(),
+            _owned: None,
             child: Mutex::new(None),
             stdin: Mutex::new(None),
             stdout_buf,
