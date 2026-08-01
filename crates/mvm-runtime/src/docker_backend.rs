@@ -1034,6 +1034,7 @@ mod tests {
                 agent: root.join("agent"),
                 agent_interactive: root.join("agent-interactive"),
                 netinit: root.join("netinit"),
+                ping: root.join("ping"),
                 seccomp_apply: root.join("seccomp-apply"),
                 verity_init: root.join("verity-init"),
                 runner: root.join("runner"),
