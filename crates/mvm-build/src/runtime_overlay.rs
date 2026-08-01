@@ -200,6 +200,7 @@ pub fn build_runtime_overlay_from_guest_binaries(
     stage_runtime_overlay_binary(&bins.agent, &root.join("agent"))?;
     stage_runtime_overlay_binary(&bins.agent_interactive, &root.join("agent-interactive"))?;
     stage_runtime_overlay_binary(&bins.netinit, &root.join("netinit"))?;
+    stage_runtime_overlay_binary(&bins.ping, &root.join("ping"))?;
     stage_runtime_overlay_binary(&bins.seccomp_apply, &root.join("seccomp-apply"))?;
     stage_runtime_overlay_binary(&bins.runner, &root.join("runner"))?;
     stage_runtime_overlay_binary(&bins.egress_client, &root.join("egress-client"))?;
@@ -1164,6 +1165,7 @@ mod tests {
             "/agent",
             "/agent-interactive",
             "/netinit",
+            "/ping",
             "/seccomp-apply",
             "/runner",
             "/egress-client",
@@ -2033,6 +2035,7 @@ mod tests {
             agent: make_bin("agent"),
             agent_interactive: make_bin("agent-interactive"),
             netinit: make_bin("netinit"),
+            ping: make_bin("ping"),
             seccomp_apply: make_bin("seccomp-apply"),
             runner: make_bin("runner"),
             egress_client: make_bin("egress-client"),

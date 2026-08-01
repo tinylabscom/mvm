@@ -1947,6 +1947,7 @@ mod tests {
             audit_host_total: 0,
             audit_audit_total: 0,
             audit_dns_total: 0,
+            audit_icmp_total: 0,
             audit_workload_audit_total: 0,
         };
         let resp = AgentResponse::Metrics(snapshot);

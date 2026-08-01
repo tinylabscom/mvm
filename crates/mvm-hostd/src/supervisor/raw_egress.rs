@@ -30,7 +30,9 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::supervisor::audit_recorder::Recorder;
-use crate::supervisor::{dns_handler, http_forward, socks5_udp};
+use crate::supervisor::{
+    dns_handler, egress_rate, http_forward, icmp_echo, icmp_handler, socks5_udp,
+};
 use mvm_core::guest_netd::ConnectAck;
 use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 
@@ -54,7 +56,7 @@ pub async fn serve_raw_egress(
     recorder: Option<Arc<Recorder>>,
     timeout: Duration,
 ) {
-    let rate_guard = Arc::new(dns_handler::DnsRateGuard::default());
+    let rate_guard = Arc::new(egress_rate::EgressRateGuard::default());
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -84,7 +86,7 @@ async fn handle_raw_conn<S>(
     mut guest: S,
     gate: &EgressGate,
     recorder: Option<Arc<Recorder>>,
-    rate_guard: Arc<dns_handler::DnsRateGuard>,
+    rate_guard: Arc<egress_rate::EgressRateGuard>,
     timeout: Duration,
 ) -> std::io::Result<()>
 where
@@ -103,6 +105,16 @@ where
     }
     if target == socks5_udp::FRAME_LINE {
         return socks5_udp::serve(guest, gate, timeout).await;
+    }
+    if target == icmp_handler::FRAME_LINE {
+        return icmp_handler::serve_icmp(
+            guest,
+            gate,
+            recorder.as_deref(),
+            &rate_guard,
+            &icmp_echo::PingSocketEcho,
+        )
+        .await;
     }
     match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
         EgressVerdict::Allow { ips, port } => {
@@ -250,7 +262,7 @@ pub async fn serve_raw_egress_vsock(
     timeout: Duration,
 ) {
     use crate::supervisor::substitution_proxy::vsock;
-    let rate_guard = Arc::new(dns_handler::DnsRateGuard::default());
+    let rate_guard = Arc::new(egress_rate::EgressRateGuard::default());
     loop {
         let listen_fd = listener.raw_fd();
         let conn_fd = match vsock::accept(listen_fd) {
@@ -277,7 +289,7 @@ fn spawn_raw_egress_connection(
     conn_fd: std::os::fd::RawFd,
     gate: Arc<EgressGate>,
     recorder: Option<Arc<Recorder>>,
-    rate_guard: Arc<dns_handler::DnsRateGuard>,
+    rate_guard: Arc<egress_rate::EgressRateGuard>,
     timeout: Duration,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let spawn = std::thread::Builder::new()
@@ -306,7 +318,7 @@ fn handle_raw_conn_blocking(
     conn_fd: std::os::fd::RawFd,
     gate: &EgressGate,
     recorder: Option<Arc<Recorder>>,
-    rate_guard: Arc<dns_handler::DnsRateGuard>,
+    rate_guard: Arc<egress_rate::EgressRateGuard>,
     timeout: Duration,
 ) -> std::io::Result<()> {
     let owned = unsafe { OwnedFd::from_raw_fd(conn_fd) };
@@ -325,6 +337,15 @@ fn handle_raw_conn_blocking(
             recorder.as_deref(),
             &rate_guard,
             timeout,
+        );
+    }
+    if target == icmp_handler::FRAME_LINE {
+        return icmp_handler::serve_icmp_blocking(
+            guest,
+            gate,
+            recorder.as_deref(),
+            &rate_guard,
+            &icmp_echo::PingSocketEcho,
         );
     }
     if target == socks5_udp::FRAME_LINE {
@@ -814,7 +835,7 @@ mod tests {
                 server,
                 &gate,
                 None,
-                Arc::new(dns_handler::DnsRateGuard::default()),
+                Arc::new(egress_rate::EgressRateGuard::default()),
                 Duration::from_secs(1),
             )
             .await
@@ -848,7 +869,7 @@ mod tests {
                 server,
                 &gate,
                 None,
-                Arc::new(dns_handler::DnsRateGuard::default()),
+                Arc::new(egress_rate::EgressRateGuard::default()),
                 Duration::from_secs(1),
             )
             .await
@@ -874,7 +895,7 @@ mod tests {
                 server2,
                 &gate2,
                 None,
-                Arc::new(dns_handler::DnsRateGuard::default()),
+                Arc::new(egress_rate::EgressRateGuard::default()),
                 Duration::from_secs(1),
             )
             .await
@@ -898,7 +919,7 @@ mod tests {
                 server,
                 &gate,
                 None,
-                Arc::new(dns_handler::DnsRateGuard::default()),
+                Arc::new(egress_rate::EgressRateGuard::default()),
                 Duration::from_secs(1),
             )
             .await
@@ -1146,7 +1167,7 @@ mod tests {
         let (mut first_client, first_server) = UnixStream::pair().unwrap();
         let (mut second_client, second_server) = UnixStream::pair().unwrap();
         let gate = Arc::new(EgressGate::default_deny());
-        let rate_guard = Arc::new(dns_handler::DnsRateGuard::default());
+        let rate_guard = Arc::new(egress_rate::EgressRateGuard::default());
 
         let first = spawn_raw_egress_connection(
             first_server.into_raw_fd(),

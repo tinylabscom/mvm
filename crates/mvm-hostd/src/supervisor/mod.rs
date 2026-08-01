@@ -55,10 +55,14 @@ pub mod gateway_audit;
 // through a per-VM signer_task into the claim-8 chain, broadcasts
 // NDJSON to gateway_audit subscribers, and exposes a `FlowPolicy` hook
 // for SNI / L7 inspectors.
+pub mod egress_rate;
 pub mod gateway_bridge;
 #[cfg(feature = "custom-dns")]
 pub mod hickory_dns;
 pub mod http_forward;
+pub mod icmp_audit;
+pub mod icmp_echo;
+pub mod icmp_handler;
 pub mod injection_guard;
 pub mod inspector;
 pub mod instance_sampler;
