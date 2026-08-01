@@ -12,6 +12,32 @@ for detailed scope and acceptance criteria.
   - [x] Keep privileged execution on the trusted base ref with no checkout
   - [x] Complete repository validation and queue the PR
 
+- [x] Plan 270 — Universal initramfs + vsock-activated boot
+      (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
+  - [x] Core boot contract: `ActivateEnvironment` over the authenticated
+        vsock session, `ActivationState` gate, PID-1 agent with mount
+        library + uid-901 drop (#1914)
+  - [x] Runner/driver adoption: QEMU unified runner (#1931), Docker
+        dev-tier (#1933), Wasm activation (#1936), Apple Container kernel
+        on HVF (#1968)
+  - [x] Activation agent-readiness retry on the wire (#1985)
+  - [x] Deterministic cargo initramfs replaces the Nix initramfs build
+        (#1996); attestation stays the content hash + sidecar contract
+  - [~] Deviations recorded at the unticked steps in the plan: capability-bit
+        negotiation, chain-signed boot events, and vm_id/session binding were
+        superseded by the path discriminator + session-key pinning; the
+        guest-side activation idle timeout and focused zombie-reaping tests
+        remain open
+
+- [~] Plan 271 — Apple Container backend
+      (`specs/plans/271-apple-container-backend.md`)
+  - [x] Kernel artifact resolution + thin HVF-runner delegation shipped
+        (#1968): Apple's prebuilt container kernel boots the same universal
+        initramfs on the HVF runner; 100% Rust-native, `check-no-vz` guard
+  - [x] Hermetic BDD coverage for the backend contract (#1996)
+  - [ ] Live e2e validation with a real fetched kernel, then the
+        claim-by-claim security-profile review (plan's stage 2)
+
 - [ ] Plan 279 — Build action identity and a real artifact manifest
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`)
   - [ ] WS1 — `ActionDigest` into the identity taxonomy (land after plan 276 WS6)
