@@ -2299,4 +2299,79 @@ mod tests {
             "host_signer_pub trust anchor missing: {cmdline}"
         );
     }
+
+    /// `capabilities()` is a declaration table that callers route on, and
+    /// nothing asserted its contents: deleting any of seven fields from
+    /// the struct literal silently fell back to the `Default`, and every
+    /// one of those deletions survived.
+    ///
+    /// `tap_networking` and `no_routable_guest_nic` are the two that
+    /// matter beyond feature routing. A libkrun workload guest has no net
+    /// device at all — the supervisor accepts only `VsockDirect`, which
+    /// never calls libkrun's net attach — so the pair must read
+    /// "no TAP, no routable NIC". A caller that believed otherwise would
+    /// be reasoning about a network path that does not exist.
+    #[test]
+    fn libkrun_capabilities_declare_the_vsock_only_shape() {
+        let caps = LibkrunBackend.capabilities();
+
+        // The NIC-less posture, stated both ways.
+        assert!(!caps.tap_networking, "a libkrun workload guest has no TAP");
+        assert!(
+            caps.no_routable_guest_nic,
+            "a libkrun workload guest has no net device to route at all"
+        );
+        assert!(caps.vsock, "vsock is the only transport into the guest");
+        assert!(caps.host_vsock_proxy);
+
+        // The rest of the table, each pinned so its deletion is visible.
+        assert!(
+            !caps.pause_resume,
+            "libkrun's C API exposes no pause/resume"
+        );
+        assert!(!caps.snapshots, "libkrun has no memory snapshots");
+        assert_eq!(caps.snapshot_capability, SnapshotCapability::DiskOnly);
+        assert!(caps.standby_pool);
+        assert!(!caps.balloon, "libkrun's C API exposes no balloon control");
+        assert!(
+            !caps.fs_quick_checkpoint,
+            "the libkrun rootfs is a regular file, not an APFS clone source"
+        );
+    }
+
+    /// A backend's liveness probe decides whether a VM reports Running or
+    /// Stopped. Pinned to `true` a dead VM is Running forever, and the
+    /// reaper never collects it; pinned to `false` a live VM looks gone.
+    #[test]
+    fn pid_alive_distinguishes_a_live_process_from_a_dead_one() {
+        // This process is alive by construction.
+        assert!(pid_alive(std::process::id() as libc::pid_t));
+
+        // A child we reap ourselves is definitively gone afterwards.
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn a short-lived child");
+        let pid = child.id() as libc::pid_t;
+        child.wait().expect("reap the child");
+        assert!(!pid_alive(pid), "a reaped child must not report as alive");
+    }
+
+    /// The timestamp stamped onto libkrun VM state. A constant makes every
+    /// VM look like it started at the same moment, which defeats any
+    /// age-based reaping built on it.
+    #[test]
+    fn now_unix_secs_is_a_real_clock() {
+        let observed = now_unix_secs();
+        // 2020-01-01, comfortably in the past and comfortably after any
+        // constant a mutation would substitute.
+        assert!(
+            observed > 1_577_836_800,
+            "expected a current unix timestamp, got {observed}"
+        );
+        assert!(
+            observed < 4_102_444_800,
+            "expected a timestamp before 2100, got {observed}"
+        );
+    }
 }
