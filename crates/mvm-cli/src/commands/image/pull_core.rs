@@ -792,4 +792,29 @@ mod tests {
         assert_eq!(descriptor.digest, digest);
         assert_eq!(descriptor.size, 17);
     }
+
+    /// Which layers are gzip-compressed decides how each one is unpacked,
+    /// and nothing asserted it — a constant in either direction survived,
+    /// as did collapsing the three-way disjunction.
+    ///
+    /// Both directions matter: pinned to `true` every uncompressed layer
+    /// is fed through a gzip reader, pinned to `false` every compressed
+    /// one is unpacked as raw tar. Either way the rootfs the provenance
+    /// record describes is not the rootfs that boots.
+    #[test]
+    fn gzip_layers_are_recognised_by_media_type() {
+        // Each disjunct on its own, so none can be dropped unnoticed.
+        assert!(is_gzip_layer("application/vnd.oci.image.layer.v1.tar+gzip"));
+        assert!(is_gzip_layer("application/vnd.example.layer.gzip"));
+        assert!(is_gzip_layer("application/vnd.example.tar.gzip.v2"));
+
+        // Uncompressed and unrelated media types are not gzip.
+        assert!(!is_gzip_layer("application/vnd.oci.image.layer.v1.tar"));
+        assert!(!is_gzip_layer(
+            "application/vnd.docker.image.rootfs.diff.tar"
+        ));
+        assert!(!is_gzip_layer("application/vnd.oci.image.config.v1+json"));
+        assert!(!is_gzip_layer("application/vnd.example.layer+zstd"));
+        assert!(!is_gzip_layer(""));
+    }
 }
