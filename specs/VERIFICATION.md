@@ -32,6 +32,12 @@ row below records a defect that was planted to prove the gate fires.
 | `check-mvm-host-binaries-sync` | Drop `--bin mvm-builderd` from the builder-VM cross-compile step, reproducing the "path does not exist" image-build failure | yes |
 | `check-claim-witness-freshness` | Change `security.yml`'s cron to hourly so its real last-run age exceeds the allowance; reported `security.yml last ran 14h ago (schedule allows 3h)` naming all 8 claims it backs | yes |
 | `cargo-fuzz crates still compile` | None planted — run against main it independently rediscovered both real defects (`fuzz_authed_path` E0308, `fuzz_build_image` unclosed delimiter) that the nightly took eleven days to surface | yes |
+| `included_top_level_is_a_superset_of_the_nix_filter_allowlist` | Remove `"nix"` from `INCLUDED_TOP_LEVEL` while `workspace-filter.nix` still admits it, so a `nix/` change would go unhashed and boot a stale image | yes |
+| `excluded_basenames_are_a_subset_of_the_nix_workspace_filter` | Add `"crates"` to `EXCLUDED_BASENAMES`, pruning a tree the nix filter keeps | yes |
+
+The two build-fingerprint rows are a matched pair, and their bindings point in
+opposite directions because the nix filter admits by top-level entry and prunes
+by basename. Both were planted separately; each fired only its own gate.
 
 The `meta` gate also catches the reverse direction: a scenario tagged with an
 unregistered ID, or a scenario whose level tag disagrees with the register.
