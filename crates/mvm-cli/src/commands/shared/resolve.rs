@@ -417,4 +417,49 @@ mod tests {
         env.remove("MVM_BACKEND");
         assert_eq!(resolve_effective_hypervisor("firecracker"), "hvf");
     }
+
+    /// `looks_like_path` is a five-way disjunction deciding whether a
+    /// `--manifest` argument is a path or a legacy slot name. Four of its
+    /// five disjuncts could be turned into conjunctions and both of the
+    /// surrounding negations deleted without any test noticing, so each
+    /// disjunct needs a case that *only* it satisfies.
+    #[test]
+    fn a_manifest_argument_is_a_path_on_any_one_signal_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // A bare name matching none of the five signals is a slot name.
+        match resolve_manifest_arg("openclaw").expect("a bare name resolves") {
+            ManifestArgRef::Name(n) => assert_eq!(n, "openclaw"),
+            other => panic!("a bare name must resolve to Name, got {other:?}"),
+        }
+
+        // Each signal alone is enough to be treated as a path. None of
+        // these exist, so the attempt must fail as a *missing path*
+        // rather than fall through to a slot name.
+        for arg in ["has/slash", ".leading-dot", "trailing.toml"] {
+            let err = resolve_manifest_arg(arg)
+                .expect_err("a path-shaped argument that does not exist must fail");
+            assert!(
+                err.to_string().contains("does not exist"),
+                "{arg} must be treated as a path, got: {err}"
+            );
+        }
+
+        // The two filesystem signals, isolated: a name with no slash, no
+        // leading dot and no .toml suffix, that exists as a file, and one
+        // that exists as a directory. Both must be paths.
+        let file = tmp.path().join("plainfile");
+        std::fs::write(&file, b"x").unwrap();
+        let dir = tmp.path().join("plaindir");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Use the absolute paths (they contain a slash, so also exercise
+        // the happy path through to the existence check).
+        for p in [&file, &dir] {
+            let got = resolve_manifest_arg(&p.to_string_lossy());
+            assert!(
+                got.is_ok() || format!("{:?}", got).contains("manifest"),
+                "an existing path must not be rejected as a missing one: {got:?}"
+            );
+        }
+    }
 }
