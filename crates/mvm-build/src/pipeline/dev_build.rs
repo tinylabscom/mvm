@@ -1,3 +1,6 @@
+#[cfg(feature = "builder-vm")]
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use tracing::instrument;
 
@@ -494,13 +497,56 @@ fn dev_build_via_builder_vm(
 
     let result = dev_build_via_builder_vm_uncached(env, flake_ref, profile, mode)?;
 
-    // Record the fingerprint → revision mapping so the next identical
-    // build short-circuits. Best-effort: a read-only cache dir just means
-    // the next build re-evaluates.
-    if let Some(fp) = fingerprint.as_deref() {
-        let _ = crate::pipeline::build_cache::write_cached_revision(fp, &result.revision_hash);
+    // Record the fingerprint → typed cache record mapping so the next
+    // identical build short-circuits (and can verify what it finds rather
+    // than trusting the path). Best-effort: a read-only cache dir, or an
+    // artifact set the record can't describe, just means the next build
+    // re-evaluates.
+    if let Some(fp) = fingerprint.as_deref()
+        && let Err(e) = write_cache_record_for_result(fp, &result)
+    {
+        tracing::debug!(error = %e, "failed to write build-cache record");
     }
     Ok(result)
+}
+
+/// Build and persist an [`mvm_core::action::ActionCacheRecord`] for a
+/// freshly built `result`, keyed by the input `fingerprint`.
+///
+/// `rootfs.ext4` is the one universal artifact; every other candidate
+/// (`vmlinux`, `initrd`, `bin/microvm-run`, `image.tar.gz`) is recorded only
+/// when it actually exists in the revision dir. When `rootfs.ext4` is
+/// absent, no record is written at all — an absent record reads back as a
+/// cold miss, never as a false hit (S3).
+#[cfg(feature = "builder-vm")]
+fn write_cache_record_for_result(fingerprint: &str, result: &DevBuildResult) -> Result<()> {
+    let build_dir = Path::new(&result.build_dir);
+    if !build_dir.join("rootfs.ext4").is_file() {
+        return Ok(());
+    }
+    let mut rel_paths: Vec<&str> = vec!["rootfs.ext4"];
+    if build_dir.join("vmlinux").is_file() {
+        rel_paths.push("vmlinux");
+    }
+    if build_dir.join("initrd").is_file() {
+        rel_paths.push("initrd");
+    }
+    if build_dir.join("bin").join("microvm-run").is_file() {
+        rel_paths.push("bin/microvm-run");
+    }
+    if build_dir.join("image.tar.gz").is_file() {
+        rel_paths.push("image.tar.gz");
+    }
+
+    let action_digest = mvm_core::action::ActionDigest::from_fingerprint_hex(fingerprint)
+        .map_err(|e| anyhow::anyhow!("invalid build-cache fingerprint {fingerprint:?}: {e}"))?;
+    let record = mvm_core::action::build_record(
+        action_digest,
+        result.revision_hash.clone(),
+        build_dir,
+        &rel_paths,
+    )?;
+    crate::pipeline::build_cache::write_cache_record(fingerprint, &record)
 }
 
 /// Compute the host-side build fingerprint for the cache, or `None` when
@@ -531,19 +577,27 @@ fn build_cache_fingerprint(
     }
 }
 
-/// Reconstruct a cache-hit [`DevBuildResult`] from a recorded revision,
-/// or `None` when there is no record or its artifacts are incomplete.
-/// The completeness gate is `rootfs.ext4` — the one universal artifact;
-/// a kernel-less mkGuest image carries no `vmlinux` and relies on the
-/// cached-builder-kernel fallback resolved at boot.
+/// Reconstruct a cache-hit [`DevBuildResult`] from a recorded
+/// [`mvm_core::action::ActionCacheRecord`], or `None` when there is no
+/// record, it fails to parse, or verification against the artifacts
+/// actually on disk fails.
+///
+/// A verification failure **evicts** the stale record (deletes it) before
+/// returning `None`, so a tampered or partially-collected cache entry is
+/// never served twice and a fresh build runs unconditionally (S3: fail
+/// closed, never trust the path).
 #[cfg(feature = "builder-vm")]
 fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
-    let revision_hash = crate::pipeline::build_cache::read_cached_revision(fingerprint)?;
-    let build_dir = dev_build_dir(&revision_hash);
-    let rootfs_path = format!("{build_dir}/rootfs.ext4");
-    if !std::path::Path::new(&rootfs_path).is_file() {
+    let record = crate::pipeline::build_cache::read_cache_record(fingerprint)?;
+    let build_dir = dev_build_dir(&record.revision);
+    if let Err(e) = mvm_core::action::verify_artifacts_on_disk(Path::new(&build_dir), &record) {
+        tracing::debug!(error = %e, "build-cache entry failed verification; evicting");
+        crate::pipeline::build_cache::evict_cache_record(fingerprint);
         return None;
     }
+
+    let revision_hash = record.revision;
+    let rootfs_path = format!("{build_dir}/rootfs.ext4");
     let initrd_path = detect_initrd(&build_dir);
     let runner_dir = detect_runner(&build_dir);
     let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
@@ -741,6 +795,11 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     };
     let staging = unique_dev_staging_dir();
     std::fs::create_dir_all(&staging).with_context(|| format!("creating staging dir {staging}"))?;
+    // Armed the moment the dir exists, so every early return below (the
+    // builder error, the install-volume bail) cleans it up on drop. Only
+    // `disarm()`ed once the artifacts have actually left `staging` behind
+    // (renamed, copied-then-removed, or discarded on a cache hit).
+    let mut staging_guard = StagingDirGuard::new(std::path::PathBuf::from(&staging));
 
     // dev_build_with_builder_vm is called for
     // user-flake builds (mvmctl build against the user's flake).
@@ -782,6 +841,9 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
         let _ = std::fs::remove_dir_all(&staging);
         tracing::debug!(error = %e, "rename failed; fell back to copy");
     }
+    // The staging dir is gone one way or another by this point (renamed
+    // away, or removed above) — disarm so Drop doesn't redundantly try.
+    staging_guard.disarm();
 
     let build_dir = final_dir;
     let vmlinux_path = format!("{build_dir}/vmlinux");
@@ -1064,6 +1126,44 @@ fn unique_dev_staging_dir() -> String {
         std::process::id(),
         nanos
     )
+}
+
+/// Removes a staging directory on drop unless [`Self::disarm`] was called
+/// first.
+///
+/// `dev_build_with_builder_vm` used to leak `.staging-*` dirs under
+/// `dev_builds_dir()` on a mid-build failure: the cleanup was only reached
+/// on the success path, so a builder error or an unexpected artifact shape
+/// (`InstallVolume` for a flake build) returned early and left the staged
+/// files behind forever. Tying removal to `Drop` makes every exit path —
+/// present and future — clean up structurally instead of needing a matching
+/// `remove_dir_all` at each `return`/`?`/`bail!`.
+#[cfg(feature = "builder-vm")]
+struct StagingDirGuard {
+    path: std::path::PathBuf,
+    armed: bool,
+}
+
+#[cfg(feature = "builder-vm")]
+impl StagingDirGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// Call once the staging dir has already been consumed (renamed away)
+    /// or removed, so `Drop` doesn't attempt a redundant no-op removal.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+impl Drop for StagingDirGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1714,6 +1814,169 @@ mod tests {
             exec_log.iter().all(|entry| !entry.contains("nix ")),
             "builder failure path must not fall back to host-side Nix: {exec_log:?}"
         );
+
+        // The regression this guards: a builder error used to return before
+        // the staging dir (created just before `run_build` is invoked) was
+        // ever cleaned up, leaking a `.staging-*` dir under the builds dir
+        // on every failed build.
+        let leaked_staging = std::fs::read_dir(dev_builds_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            })
+            .unwrap_or(false);
+        assert!(
+            !leaked_staging,
+            "a builder failure must not leave a .staging-* dir behind"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn staging_dir_guard_removes_dir_on_drop_without_disarm() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staging = tmp.path().join("staging-guard-armed");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        {
+            let _guard = StagingDirGuard::new(staging.clone());
+            assert!(staging.exists());
+        }
+        assert!(
+            !staging.exists(),
+            "an armed guard must remove the dir on drop"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn staging_dir_guard_leaves_dir_when_disarmed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let staging = tmp.path().join("staging-guard-disarmed");
+        std::fs::create_dir_all(&staging).expect("create staging dir");
+        {
+            let mut guard = StagingDirGuard::new(staging.clone());
+            guard.disarm();
+        }
+        assert!(
+            staging.exists(),
+            "a disarmed guard must leave the dir alone on drop"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn cache_hit_verifies_and_serves() {
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
+        let mut env_guard = mvm_core::util::test_env::TestEnv::new();
+        env_guard.isolate_mvm_home(temp.path());
+
+        let fingerprint = "a".repeat(64);
+        let revision = "rev-cache-hit";
+        let build_dir_path = std::path::PathBuf::from(dev_build_dir(revision));
+        std::fs::create_dir_all(&build_dir_path).expect("create revision dir");
+        std::fs::write(build_dir_path.join("rootfs.ext4"), b"rootfs contents")
+            .expect("write rootfs.ext4");
+
+        let action_digest = mvm_core::action::ActionDigest::from_fingerprint_hex(&fingerprint)
+            .expect("valid fingerprint");
+        let record = mvm_core::action::build_record(
+            action_digest,
+            revision.to_string(),
+            &build_dir_path,
+            &["rootfs.ext4"],
+        )
+        .expect("build_record over real artifacts");
+        crate::pipeline::build_cache::write_cache_record(&fingerprint, &record)
+            .expect("write cache record");
+
+        let result = cached_build_result(&fingerprint).expect("verified cache entry should hit");
+        assert!(result.cached);
+        assert_eq!(result.revision_hash, revision);
+        assert_eq!(result.build_dir, build_dir_path.to_str().unwrap());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn tampered_cache_entry_is_evicted() {
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
+        let mut env_guard = mvm_core::util::test_env::TestEnv::new();
+        env_guard.isolate_mvm_home(temp.path());
+
+        let fingerprint = "b".repeat(64);
+        let revision = "rev-tampered";
+        let build_dir_path = std::path::PathBuf::from(dev_build_dir(revision));
+        std::fs::create_dir_all(&build_dir_path).expect("create revision dir");
+        std::fs::write(build_dir_path.join("rootfs.ext4"), b"original bytes")
+            .expect("write rootfs.ext4");
+
+        let action_digest = mvm_core::action::ActionDigest::from_fingerprint_hex(&fingerprint)
+            .expect("valid fingerprint");
+        let record = mvm_core::action::build_record(
+            action_digest,
+            revision.to_string(),
+            &build_dir_path,
+            &["rootfs.ext4"],
+        )
+        .expect("build_record over real artifacts");
+        crate::pipeline::build_cache::write_cache_record(&fingerprint, &record)
+            .expect("write cache record");
+
+        // Flip a byte after the record was written — the recorded digest no
+        // longer matches what's on disk.
+        let mut bytes = std::fs::read(build_dir_path.join("rootfs.ext4")).expect("read rootfs");
+        bytes[0] ^= 0xFF;
+        std::fs::write(build_dir_path.join("rootfs.ext4"), bytes).expect("rewrite rootfs");
+
+        assert!(
+            cached_build_result(&fingerprint).is_none(),
+            "a tampered artifact must never be served"
+        );
+        assert!(
+            crate::pipeline::build_cache::read_cache_record(&fingerprint).is_none(),
+            "a failed verification must evict the stale record, not merely refuse it"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn missing_record_is_cold_miss() {
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
+        let mut env_guard = mvm_core::util::test_env::TestEnv::new();
+        env_guard.isolate_mvm_home(temp.path());
+
+        let fingerprint = "c".repeat(64);
+        let revision = "rev-no-record";
+        let build_dir_path = std::path::PathBuf::from(dev_build_dir(revision));
+        std::fs::create_dir_all(&build_dir_path).expect("create revision dir");
+        std::fs::write(build_dir_path.join("rootfs.ext4"), b"bytes").expect("write rootfs.ext4");
+        // Deliberately no cache record written for `fingerprint`.
+
+        assert!(cached_build_result(&fingerprint).is_none());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn legacy_plaintext_record_is_cold_miss() {
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
+        let mut env_guard = mvm_core::util::test_env::TestEnv::new();
+        env_guard.isolate_mvm_home(temp.path());
+
+        let fingerprint = "d".repeat(64);
+        let revision = "rev-legacy";
+        let build_dir_path = std::path::PathBuf::from(dev_build_dir(revision));
+        std::fs::create_dir_all(&build_dir_path).expect("create revision dir");
+        std::fs::write(build_dir_path.join("rootfs.ext4"), b"bytes").expect("write rootfs.ext4");
+
+        // Pre-typed-record cache entries were a bare `<revision>\n` marker.
+        let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
+            .join("dev")
+            .join("build-cache");
+        std::fs::create_dir_all(&cache_dir).expect("create build-cache dir");
+        std::fs::write(cache_dir.join(&fingerprint), format!("{revision}\n"))
+            .expect("write legacy record");
+
+        assert!(cached_build_result(&fingerprint).is_none());
     }
 
     #[test]

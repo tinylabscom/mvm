@@ -107,6 +107,45 @@ pub fn verify_artifacts_on_disk(dir: &Path, record: &ActionCacheRecord) -> Resul
     Ok(())
 }
 
+/// Build an [`ActionCacheRecord`] for a freshly produced action output set:
+/// stream each of `rel_paths` under `dir` through the same sha256 primitive
+/// [`verify_artifacts_on_disk`] re-checks against later, and pack the
+/// results into the typed record. Reuses [`hash_file_streaming`] so the
+/// write side and the verify side can never disagree about how a digest is
+/// computed.
+///
+/// Errors identically to [`verify_artifacts_on_disk`]'s per-artifact
+/// failures (`UnsafePath`, `Missing`, `Io`) — a path that couldn't be
+/// hashed on the way in could never have verified on the way out either.
+pub fn build_record(
+    action_digest: ActionDigest,
+    revision: String,
+    dir: &Path,
+    rel_paths: &[&str],
+) -> Result<ActionCacheRecord, VerifyError> {
+    let mut artifacts = Vec::with_capacity(rel_paths.len());
+    for rel_path in rel_paths {
+        if !artifact_path_is_safe(rel_path) {
+            return Err(VerifyError::UnsafePath {
+                path: (*rel_path).to_string(),
+            });
+        }
+        let path = dir.join(rel_path);
+        let (sha256_hex, size_bytes) = hash_file_streaming(&path, rel_path)?;
+        artifacts.push(ArtifactDigest {
+            path: (*rel_path).to_string(),
+            sha256: Sha256Hex::new(sha256_hex)
+                .expect("stream_sha256 always returns a valid 64-hex digest"),
+            size_bytes,
+        });
+    }
+    Ok(ActionCacheRecord {
+        action_digest,
+        revision,
+        artifacts,
+    })
+}
+
 /// True when `path` cannot escape the directory it will be joined onto:
 /// relative, and every component a plain path segment (no `..`, no root, no
 /// Windows-style prefix).
@@ -350,6 +389,51 @@ mod tests {
 
         let escaping = unsafe_record("../escape");
         let error = verify_artifacts_on_disk(dir.path(), &escaping).unwrap_err();
+        match error {
+            VerifyError::UnsafePath { path } => assert_eq!(path, "../escape"),
+            other => panic!("expected UnsafePath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_record_produces_a_record_verify_accepts() {
+        let dir = TempDir::new().expect("tempdir");
+        let matching = write_matching_fixture(dir.path());
+        let digest = ActionDigest::from_fingerprint_hex(&valid_hex()).expect("valid fingerprint");
+
+        let built = build_record(
+            digest,
+            "rev-1".to_string(),
+            dir.path(),
+            &["vmlinux", "rootfs.ext4"],
+        )
+        .expect("build_record should succeed on real files");
+
+        // Same digests/sizes the fixture recorded by hand.
+        assert_eq!(built.artifacts, matching.artifacts);
+        verify_artifacts_on_disk(dir.path(), &built).expect("built record should verify");
+    }
+
+    #[test]
+    fn build_record_fails_on_missing_artifact() {
+        let dir = TempDir::new().expect("tempdir");
+        let digest = ActionDigest::from_fingerprint_hex(&valid_hex()).expect("valid fingerprint");
+
+        let error =
+            build_record(digest, "rev-1".to_string(), dir.path(), &["rootfs.ext4"]).unwrap_err();
+        match error {
+            VerifyError::Missing { path } => assert_eq!(path, "rootfs.ext4"),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_record_rejects_unsafe_rel_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let digest = ActionDigest::from_fingerprint_hex(&valid_hex()).expect("valid fingerprint");
+
+        let error =
+            build_record(digest, "rev-1".to_string(), dir.path(), &["../escape"]).unwrap_err();
         match error {
             VerifyError::UnsafePath { path } => assert_eq!(path, "../escape"),
             other => panic!("expected UnsafePath, got {other:?}"),
