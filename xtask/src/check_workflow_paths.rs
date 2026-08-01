@@ -206,6 +206,32 @@ fn parse_fuzz_args(args: &str, crate_dir: &str) -> Option<FuzzInvocation> {
 mod tests {
     use super::*;
 
+    fn ci_workflow() -> String {
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(".github/workflows/ci.yml"),
+        )
+        .expect("CI workflow must be readable")
+    }
+
+    fn ci_job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
+        let marker = format!("  {job}:\n");
+        let start = workflow
+            .find(&marker)
+            .unwrap_or_else(|| panic!("CI workflow is missing the {job} job"));
+        let rest_start = start + marker.len();
+        let rest = &workflow[rest_start..];
+        let end = rest
+            .match_indices("\n  ")
+            .find_map(|(offset, _)| {
+                let line = rest[offset + 1..].lines().next()?;
+                (!line.starts_with("    ") && line.ends_with(':')).then_some(rest_start + offset)
+            })
+            .unwrap_or(workflow.len());
+        &workflow[start..end]
+    }
+
     #[test]
     fn working_directories_are_unquoted() {
         let src = "    working-directory: crates/mvm-agentd\n  working-directory: \"crates/x\"\n";
@@ -259,6 +285,87 @@ mod tests {
                 fuzz_dir: "fuzz".to_string(),
                 target: "fuzz_runtime_recording".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn pull_request_ci_does_not_repeat_the_workspace_or_upload_target_caches() {
+        let workflow = ci_workflow();
+        let lint = ci_job_block(&workflow, "lint");
+        for unexpected in [
+            "cargo nextest run --workspace --features test-support",
+            "cargo nextest run -p xtask --features man",
+            "uses: actions/cache@v5",
+            "uses: ./.github/actions/free-disk",
+        ] {
+            assert!(
+                !lint.contains(unexpected),
+                "CI lint job must not contain {unexpected:?}"
+            );
+        }
+
+        for expected in [
+            "cargo nextest run -p mvm-runtime --features test-support --lib",
+            "cargo nextest run -p mvm-client --features test-support --lib",
+            "cargo nextest run -p mvm-cli --features test-support --lib",
+            "cargo nextest run -p mvmctl --features test-support --test audit_emissions_live",
+            "cargo check -p mvm-cli --features test-support --example verification_loop",
+        ] {
+            assert!(
+                lint.contains(expected),
+                "CI lint job must contain {expected:?}"
+            );
+        }
+
+        let test = ci_job_block(&workflow, "test");
+        assert!(!test.contains("uses: actions/cache@v5"));
+        assert!(test.contains("cargo nextest run -p xtask --features man"));
+    }
+
+    #[test]
+    fn mcp_smoke_reuses_the_test_runner_without_dropping_the_required_check_name() {
+        let workflow = ci_workflow();
+        let test = ci_job_block(&workflow, "test");
+        assert!(test.contains("sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld"));
+        assert!(test.contains("- name: Install MCP smoke dependency"));
+        assert!(test.contains("run: sudo apt-get install -y jq"));
+        assert!(test.contains("run: ./scripts/test-mcp-roundtrip.sh"));
+
+        let compatibility = ci_job_block(&workflow, "mcp-server-smoke");
+        assert!(compatibility.contains("name: MCP server stdio roundtrip"));
+        assert!(compatibility.contains("if: github.event_name == 'mcp-check-compatibility-shim'"));
+        assert!(!compatibility.contains("./scripts/test-mcp-roundtrip.sh"));
+    }
+
+    #[test]
+    fn test_support_source_owners_match_the_targeted_ci_lane() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut unexpected = Vec::new();
+        crate::fs_walk::for_each_file(&workspace, Some("rs"), &mut |path, contents| {
+            if !contents.contains("feature = \"test-support\"") {
+                return;
+            }
+            let relative = path
+                .strip_prefix(&workspace)
+                .expect("workspace-relative path");
+            let owned = [
+                "crates/mvm-cli/",
+                "crates/mvm-client/",
+                "crates/mvm-core/",
+                "crates/mvm-runtime/",
+                "tests/audit_emissions_live.rs",
+            ]
+            .iter()
+            .any(|prefix| relative.to_string_lossy().starts_with(*prefix));
+            if !owned {
+                unexpected.push(relative.display().to_string());
+            }
+        })
+        .expect("test-support source scan must succeed");
+
+        assert!(
+            unexpected.is_empty(),
+            "new test-support source owners need an explicit targeted CI command: {unexpected:?}"
         );
     }
 }

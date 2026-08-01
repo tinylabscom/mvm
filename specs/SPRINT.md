@@ -86,6 +86,14 @@
       speculative pre-PR and redundant post-merge `main` runs without changing
       required check names.
 
+- [ ] Plan 280 CI latency: stop the lint lane from repeating the full workspace
+      under `test-support`, remove unshareable multi-gigabyte `target/` caches,
+      share `mvm-cli`'s nested build graph across feature fingerprints, and
+      reuse Test's warm compile graph for man-page tests and the merge-queue MCP
+      smoke while preserving every required check name. Structural, targeted
+      feature, and full workspace tests are green; Linux verification is in
+      progress.
+
 - [x] #1840 faithful flake-image revert: boot the recorded slot revision,
       reconcile signed artifact hashes, and preserve the admitted restore path.
       Implementation, focused tests, workspace tests, check, and clippy pass;

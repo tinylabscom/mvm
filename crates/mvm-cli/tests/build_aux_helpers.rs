@@ -1,7 +1,9 @@
 #[path = "../build_aux_helpers.rs"]
 mod build_aux_helpers;
 
-use build_aux_helpers::{AuxHelperSpec, aux_helper_specs};
+use std::path::Path;
+
+use build_aux_helpers::{AuxHelperSpec, aux_helper_specs, shared_nested_target_dir};
 
 fn bins(specs: &[AuxHelperSpec]) -> Vec<&str> {
     specs.iter().map(|s| s.bin).collect()
@@ -39,4 +41,19 @@ fn libkrun_supervisor_only_when_libkrun_present() {
 fn helper_specs_are_never_globally_skipped() {
     assert!(!aux_helper_specs("linux", "x86_64", false).is_empty());
     assert!(!aux_helper_specs("macos", "aarch64", true).is_empty());
+}
+
+#[test]
+fn nested_builds_share_one_target_across_feature_fingerprints() {
+    let default_out = Path::new("/workspace/target/debug/build/mvm-cli-default/out");
+    let feature_out = Path::new("/workspace/target/debug/build/mvm-cli-feature/out");
+
+    assert_eq!(
+        shared_nested_target_dir(default_out),
+        shared_nested_target_dir(feature_out)
+    );
+    assert_eq!(
+        shared_nested_target_dir(default_out),
+        Path::new("/workspace/target/debug/build/mvm-cli-nested-target")
+    );
 }

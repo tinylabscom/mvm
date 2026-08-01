@@ -26,9 +26,11 @@ fn main() {
     // script, this script waits on the nested cargo, the nested cargo waits
     // on the outer's lock. That deadlock is why cold release builds hung
     // (warm builds slip through because the nested step does almost nothing).
-    // A separate target dir under OUT_DIR has its own lock → no contention,
-    // and it persists across rebuilds for incremental reuse.
-    let host_target_dir = out_dir.join("host-vm-target");
+    // A separate target dir under the profile's build directory has its own
+    // lock → no contention. It is shared across mvm-cli feature fingerprints,
+    // so identical embedded binaries are not rebuilt for each OUT_DIR.
+    let nested_target_dir = build_aux_helpers::shared_nested_target_dir(&out_dir);
+    let host_target_dir = nested_target_dir.join("host-vm-target");
 
     let pin = read_pinned_toolchain(&workspace_root);
     println!("cargo:rustc-env=MVM_PINNED_ZIG={}", pin.zig);
@@ -78,7 +80,38 @@ fn main() {
         );
     }
 
-    build_native_aux_helpers(&workspace_root, &out_dir);
+    // Guest runtime binaries for OCI rootfs injection (guest arch = host arch).
+    // Embedded alongside the host bins so an end-user mvmctl with no source
+    // checkout can inject the full OCI runtime set into a `run --image` rootfs.
+    // Built in one cargo invocation; they ride the same `EMBEDDED` array and are
+    // looked up by name.
+    run_guest_zigbuild(
+        &workspace_root,
+        &host_target_dir,
+        &pin.target,
+        &pin.zig,
+        &bins_out,
+    );
+    for name in [
+        "mvm-guest-agent",
+        "mvm-guest-netinit",
+        "mvm-egress-client",
+        "mvm-verity-init",
+    ] {
+        let out_file = bins_out.join(name);
+        let sha = sha256_hex(&out_file);
+        entries.push((name.to_string(), out_file, sha));
+    }
+    // Watch the guest source trees file-by-file, not as a directory. Cargo's
+    // directory-level `rerun-if-changed` does not reliably fire on a content
+    // edit to an existing file (only on add/remove), so a change to e.g. the
+    // guest agent's request handler would otherwise leave the *embedded* agent
+    // stale on an incremental build — `machine run --image` would then inject an
+    // out-of-date agent. Emitting one `rerun-if-changed` per file guarantees the
+    // cross-compile re-runs on any edit.
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-agentd/src"));
+
+    build_native_aux_helpers(&workspace_root, &nested_target_dir);
 
     let embedded_rs = render_embedded_rs(&entries);
     std::fs::write(out_dir.join("embedded.rs"), embedded_rs).unwrap();
@@ -130,11 +163,11 @@ fn emit_rerun_for_tree(root: &Path) {
 /// them during its build phase rather than mvmctl shelling out to `cargo` at
 /// run time. The dedicated target dir avoids the outer build-lock deadlock the
 /// same way the embedded-bins path does (see the note in `main`).
-fn build_native_aux_helpers(workspace_root: &Path, out_dir: &Path) {
+fn build_native_aux_helpers(workspace_root: &Path, nested_target_dir: &Path) {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let aux_target = out_dir.join("aux-helper-target");
+    let aux_target = nested_target_dir.join("aux-helper-target");
     let bin_dir = aux_target.join(&profile);
 
     // Always export the dir — even on skip or an unbuildable helper — so

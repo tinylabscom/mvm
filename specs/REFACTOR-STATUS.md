@@ -66,12 +66,20 @@ for detailed scope and acceptance criteria.
         allow-list so a docs-only edit stops invalidating every guest binary
         (416 of 1872 files, 22%, stop being cache keys)
 
-- [~] Plan 270 — universal initramfs + vsock-activated boot
+ - [~] Plan 270 — universal initramfs + vsock-activated boot
   (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
   - [x] Retire the obsolete CLI workload-guest payload and dead skip-embedding
         switch; the universal initramfs/runtime overlay owns workload binaries
   - [x] Pin `mvmctl` embedding to the builder/bootstrap host and seed manifests
   - [~] Remaining rollout, snapshot, BDD, and live-smoke work stays in the plan
+- [~] Plan 280 — CI lint and merge-queue latency
+  (`specs/plans/280-ci-lint-latency.md`)
+  - [x] Target only the packages that own `test-support` code
+  - [x] Remove branch-local multi-gigabyte Cargo target caches
+  - [x] Share nested `mvm-cli` builds across feature fingerprints
+  - [x] Move man-page tests onto Test's warm compile graph
+  - [x] Reuse Test's runner for the merge-queue MCP roundtrip
+  - [ ] Complete workspace and Linux clippy verification
 
 - [~] Plan 265 — Fast-start SLO, backend sequencing & competitive positioning
   (`specs/plans/265-fast-start-slo-sequencing-positioning.md`)
