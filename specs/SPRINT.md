@@ -97,7 +97,7 @@
       speculative pre-PR and redundant post-merge `main` runs without changing
       required check names.
 
-- [x] Plan 280 CI latency: stop the lint lane from repeating the full workspace
+- [x] Plan 284 CI latency: stop the lint lane from repeating the full workspace
       under `test-support`, remove unshareable multi-gigabyte `target/` caches,
       share `mvm-cli`'s nested build graph across feature fingerprints, and
       reuse Test's warm compile graph for man-page tests and the merge-queue MCP

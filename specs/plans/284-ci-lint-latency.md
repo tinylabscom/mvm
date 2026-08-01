@@ -1,4 +1,4 @@
-# Plan 280 — CI lint and merge-queue latency
+# Plan 284 — CI lint and merge-queue latency
 
 **Status: Complete**
 
