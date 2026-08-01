@@ -210,7 +210,15 @@ fn main() -> Result<()> {
                 (false, true) => check_mutation_witnesses::Mode::Run,
                 (false, false) => check_mutation_witnesses::Mode::PinOnly,
             };
-            check_mutation_witnesses::run(&workspace, mode)
+            // `--package <name>` shards a `--run` by cargo package so each
+            // CI job finishes inside the six-hour job cap; unset means the
+            // whole surface.
+            let package = args
+                .iter()
+                .position(|a| a == "--package")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+            check_mutation_witnesses::run(&workspace, mode, package)
         }
         Some("check-conformance") => {
             let workspace = workspace_root();

@@ -162,7 +162,18 @@ pub struct Miss {
     pub mutant: String,
 }
 
-pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
+/// Restrict a `--run` to one cargo package.
+///
+/// The whole surface takes about six hours end to end, and a
+/// GitHub-hosted job is killed at six. Split per package the slowest is
+/// well under two and a half, so the lane is one job per package rather
+/// than one job that cannot reliably finish.
+///
+/// Only the mutation step narrows. The surface pin and the uncovered-claim
+/// diff still run over the *whole* ledger in every job, so a claim
+/// dropping out of coverage fails every shard rather than only the one
+/// that happens to own it.
+pub fn run(workspace: &Path, mode: Mode, package: Option<&str>) -> Result<()> {
     let Surface {
         files: resolved,
         uncovered,
@@ -183,7 +194,10 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
         let previous = read_baseline(&baseline_path).ok();
         let accepted_misses = if mode == Mode::RewriteBaseline {
             let scoped = carry_scopes_forward(resolved.clone(), previous.as_ref());
-            seed_accepted(&run_mutants_over(workspace, &scoped)?)
+            seed_accepted(&run_mutants_over(
+                workspace,
+                &for_package(&scoped, package),
+            )?)
         } else {
             previous
                 .as_ref()
@@ -212,6 +226,7 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
     let baseline = read_baseline(&baseline_path)?;
     let mut errors = check_accepted_reasons(&baseline.accepted_misses);
     errors.extend(check_scope_reasons(&baseline.surface));
+    errors.extend(check_shard_matrix(workspace, &baseline.surface));
     errors.extend(diff_surface(&baseline.surface, &resolved));
     errors.extend(diff_uncovered(&baseline.uncovered_claims, &uncovered));
 
@@ -226,8 +241,33 @@ pub fn run(workspace: &Path, mode: Mode) -> Result<()> {
         // The committed surface, not the freshly resolved one: resolution
         // cannot know about scopes, and running the unscoped surface would
         // report every out-of-claim mutant as a new miss.
-        let observed = run_mutants_over(workspace, &baseline.surface)?;
-        let verdict = ratchet(&baseline.accepted_misses, &observed);
+        let surface = for_package(&baseline.surface, package);
+        if surface.is_empty() {
+            bail!(
+                "check-mutation-witnesses: --package {} matches no surface file. A shard that \
+                 measures nothing must fail rather than pass silently.",
+                package.unwrap_or("<none>")
+            );
+        }
+        if let Some(pkg) = package {
+            eprintln!(
+                "check-mutation-witnesses: shard for package {pkg} ({} of {} surface files)",
+                surface.len(),
+                baseline.surface.len()
+            );
+        }
+        let observed = run_mutants_over(workspace, &surface)?;
+        // The accepted set narrows with the surface, or every other
+        // package's entries would be reported as "now caught" by a shard
+        // that never looked at them.
+        let paths: BTreeSet<&str> = surface.iter().map(|s| s.path.as_str()).collect();
+        let accepted: Vec<AcceptedMiss> = baseline
+            .accepted_misses
+            .iter()
+            .filter(|a| paths.contains(a.file.as_str()))
+            .cloned()
+            .collect();
+        let verdict = ratchet(&accepted, &observed);
         for m in &verdict.new_misses {
             errors.push(format!(
                 "new surviving mutant in {}: {} — a claim witness does not detect this change",
@@ -425,6 +465,99 @@ pub fn diff_uncovered(committed: &[UncoveredClaim], resolved: &[UncoveredClaim])
         ));
     }
     errors
+}
+
+/// Where the nightly lane declares its per-package shards.
+const SECURITY_WORKFLOW_REL: &str = ".github/workflows/security.yml";
+
+/// The lane's shard matrix must name exactly the packages on the surface.
+///
+/// The shards exist because the whole surface cannot finish inside a
+/// GitHub job's six-hour cap. That makes the matrix a second place the
+/// surface is written down, and a package that joins the ledger but not
+/// the matrix is simply never mutated — while every shard stays green.
+/// That is the same silent-loss failure the committed surface pin exists
+/// to prevent, one level out, so it is checked the same way.
+pub fn check_shard_matrix(workspace: &Path, surface: &[SurfaceFile]) -> Vec<String> {
+    let path = workspace.join(SECURITY_WORKFLOW_REL);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return vec![format!(
+            "cannot read {SECURITY_WORKFLOW_REL} to verify the mutation shard matrix"
+        )];
+    };
+    let declared = shard_packages(&text);
+    if declared.is_empty() {
+        return vec![format!(
+            "{SECURITY_WORKFLOW_REL} declares no mutation shard matrix; the nightly lane would \
+             measure nothing"
+        )];
+    }
+    let wanted: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
+    let mut errors = Vec::new();
+    for pkg in &wanted {
+        if !declared.contains(*pkg) {
+            errors.push(format!(
+                "package {pkg} is on the mutation surface but has no shard in \
+                 {SECURITY_WORKFLOW_REL}, so nothing ever mutates it"
+            ));
+        }
+    }
+    for pkg in &declared {
+        if !wanted.contains(pkg.as_str()) {
+            errors.push(format!(
+                "{SECURITY_WORKFLOW_REL} declares a mutation shard for {pkg}, which owns no \
+                 surface file; the shard would fail on an empty surface"
+            ));
+        }
+    }
+    errors
+}
+
+/// The `package:` list under the mutation job's matrix.
+///
+/// Text-scanned rather than YAML-parsed, matching the sibling gates and
+/// the workspace's deliberate dependency floor.
+pub fn shard_packages(workflow: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut in_job = false;
+    let mut in_list = false;
+    for line in workflow.lines() {
+        if line.starts_with("  mutation-witnesses:") {
+            in_job = true;
+            continue;
+        }
+        if in_job && line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':') {
+            break; // next job at the same indent
+        }
+        if !in_job {
+            continue;
+        }
+        let t = line.trim();
+        if t == "package:" {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            if let Some(name) = t.strip_prefix("- ") {
+                out.insert(name.trim().to_string());
+            } else if !t.is_empty() {
+                in_list = false;
+            }
+        }
+    }
+    out
+}
+
+/// The surface files owned by `package`, or all of them when unfiltered.
+pub fn for_package(surface: &[SurfaceFile], package: Option<&str>) -> Vec<SurfaceFile> {
+    match package {
+        None => surface.to_vec(),
+        Some(pkg) => surface
+            .iter()
+            .filter(|s| s.package == pkg)
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Copy each committed file's `scope` onto the freshly resolved surface.
@@ -1142,6 +1275,120 @@ a.rs:5:1: replace x with y
             Some(&previous),
         );
         assert!(carried[0].scope.is_none());
+    }
+
+    const SHARD_WORKFLOW: &str = "\
+jobs:
+  other-job:
+    name: not this one
+    strategy:
+      matrix:
+        package:
+          - not-a-real-package
+  mutation-witnesses:
+    name: Claim witnesses
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - mvm-cli
+          - mvm-hostd
+    steps:
+      - run: true
+  later-job:
+    name: after
+";
+
+    #[test]
+    fn shard_packages_reads_only_the_mutation_jobs_matrix() {
+        let got = shard_packages(SHARD_WORKFLOW);
+        assert_eq!(
+            got,
+            ["mvm-cli", "mvm-hostd"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<BTreeSet<_>>(),
+            "a sibling job's matrix must not leak into the mutation shard list"
+        );
+    }
+
+    #[test]
+    fn a_surface_package_with_no_shard_is_reported() {
+        let declared = shard_packages(SHARD_WORKFLOW);
+        // mvm-core is on the surface but absent from the matrix above.
+        let surface = [
+            surface("crates/mvm-cli/src/a.rs", vec![1]),
+            surface("crates/mvm-core/src/b.rs", vec![2]),
+        ];
+        let missing: Vec<&str> = surface
+            .iter()
+            .map(|s| s.package.as_str())
+            .filter(|p| !declared.contains(*p))
+            .collect();
+        assert_eq!(
+            missing,
+            vec!["mvm-core"],
+            "a package on the surface with no shard must be visible"
+        );
+    }
+
+    #[test]
+    fn a_shard_for_a_package_with_no_surface_file_is_reported() {
+        let declared = shard_packages(SHARD_WORKFLOW);
+        let surface = [surface("crates/mvm-cli/src/a.rs", vec![1])];
+        let wanted: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
+        let extra: Vec<&String> = declared
+            .iter()
+            .filter(|p| !wanted.contains(p.as_str()))
+            .collect();
+        assert_eq!(
+            extra.len(),
+            1,
+            "a shard whose package owns no surface file must be visible"
+        );
+    }
+
+    #[test]
+    fn a_package_shard_selects_only_that_packages_files() {
+        let surface = [
+            surface("crates/mvm-cli/src/a.rs", vec![1]),
+            surface("crates/mvm-cli/src/b.rs", vec![2]),
+            surface("crates/mvm-hostd/src/c.rs", vec![3]),
+        ];
+        let cli = for_package(&surface, Some("mvm-cli"));
+        assert_eq!(cli.len(), 2);
+        assert!(cli.iter().all(|s| s.package == "mvm-cli"));
+
+        assert_eq!(for_package(&surface, Some("mvm-hostd")).len(), 1);
+        // Unfiltered is the whole surface, so a non-sharded run is
+        // unchanged.
+        assert_eq!(for_package(&surface, None).len(), 3);
+        // A package with no surface files yields nothing, which the caller
+        // turns into a failure rather than a silent pass.
+        assert!(for_package(&surface, Some("mvm-sdk")).is_empty());
+    }
+
+    /// Every shard together must cover the surface exactly once. A package
+    /// dropped from the matrix would otherwise go unmeasured while every
+    /// job stayed green.
+    #[test]
+    fn the_shards_partition_the_surface() {
+        let surface = [
+            surface("crates/mvm-cli/src/a.rs", vec![1]),
+            surface("crates/mvm-hostd/src/c.rs", vec![3]),
+            surface("crates/mvm-core/src/d.rs", vec![4]),
+        ];
+        let packages: BTreeSet<&str> = surface.iter().map(|s| s.package.as_str()).collect();
+        let mut seen: Vec<String> = Vec::new();
+        for p in &packages {
+            for f in for_package(&surface, Some(p)) {
+                seen.push(f.path);
+            }
+        }
+        seen.sort();
+        let mut all: Vec<String> = surface.iter().map(|s| s.path.clone()).collect();
+        all.sort();
+        assert_eq!(seen, all, "the shards must cover every file exactly once");
     }
 
     #[test]
