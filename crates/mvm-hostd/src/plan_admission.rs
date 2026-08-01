@@ -350,8 +350,18 @@ pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<(
 /// in scope; `microvm` reads it back from disk inside the
 /// `target_os = "linux"` bridge-spawn block.
 pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Result<()> {
+    stash_plan_and_mint_verb_grant(cfg).map(|_| ())
+}
+
+/// Persist a VM's admitted plan material and mint its optional signed agent
+/// verb grant, returning the exact envelope written to disk. Warm-restore
+/// callers use the returned value in the post-restore handshake because there
+/// is no new kernel boot at which to consume the sidecar.
+pub fn stash_plan_and_mint_verb_grant(
+    cfg: &mvm_core::vm_backend::VmStartConfig,
+) -> Result<Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>> {
     let Some(plan_json) = cfg.plan_json.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
     let state_dir = mvm_core::config::vm_state_dir(&cfg.name);
     std::fs::create_dir_all(&state_dir)
@@ -360,8 +370,7 @@ pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Resul
     if let Some(bundle_json) = cfg.bundle_json.as_deref() {
         write_secret_file(&state_dir.join("bundle.json"), bundle_json.as_bytes())?;
     }
-    mint_verb_grant_sidecar(plan_json, &cfg.name, &state_dir)?;
-    Ok(())
+    mint_verb_grant_sidecar(plan_json, &cfg.name, &state_dir)
 }
 
 /// If the plan carries `agent_verbs`, mint a signed `VerbGrantEnvelope` and
@@ -375,7 +384,7 @@ fn mint_verb_grant_sidecar(
     plan_json: &str,
     vm_name: &str,
     state_dir: &std::path::Path,
-) -> Result<()> {
+) -> Result<Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>> {
     use mvm_core::plan::SignedExecutionPlan;
     use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
@@ -396,15 +405,15 @@ fn mint_verb_grant_sidecar(
     // sidecar (grant-less boot), matching the fail-open posture of the
     // other cmdline token producers.
     let Ok(signed) = serde_json::from_str::<SignedExecutionPlan>(plan_json) else {
-        return Ok(());
+        return Ok(None);
     };
     let Ok(plan) = serde_json::from_slice::<ExecutionPlan>(&signed.0.payload) else {
-        return Ok(());
+        return Ok(None);
     };
 
     let Some(verbs) = plan.agent_verbs else {
         // No verb grant requested — grant-less boot, sidecar already removed.
-        return Ok(());
+        return Ok(None);
     };
 
     let keys_dir = mvm_core::config::mvm_keys_dir();
@@ -438,7 +447,7 @@ fn mint_verb_grant_sidecar(
     };
     let envelope_json = serde_json::to_vec(&envelope).context("serialize VerbGrantEnvelope")?;
     write_secret_file(&state_dir.join("verb-grant.json"), &envelope_json)?;
-    Ok(())
+    Ok(Some(envelope))
 }
 
 /// Admission enforcement: every volume about to be attached must be
@@ -1523,7 +1532,9 @@ mod tests {
             ..Default::default()
         };
         populate_audit_substrate(&mut cfg, &admitted, None).expect("populate");
-        stash_plan_for_bridge(&cfg).expect("stash succeeds");
+        let issued = stash_plan_and_mint_verb_grant(&cfg)
+            .expect("stash succeeds")
+            .expect("agent verbs mint a grant");
 
         let grant_path = dir.path().join("vms/vm-verb-grant/verb-grant.json");
         assert!(grant_path.exists(), "verb-grant.json must be written");
@@ -1533,6 +1544,11 @@ mod tests {
         // Parse the envelope and verify the grant under the signer key.
         let raw = std::fs::read(&grant_path).unwrap();
         let envelope: VerbGrantEnvelope = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&issued).unwrap(),
+            serde_json::to_vec(&envelope).unwrap(),
+            "the returned envelope is exactly the sidecar payload"
+        );
         assert!(!envelope.pubkey_hex.is_empty(), "pubkey_hex must be set");
         assert_eq!(
             envelope.plan_nonce_hex,

@@ -28,7 +28,7 @@ use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::CheckpointStore;
 use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
-use mvm_runtime::workload_runner::{ClaimContext, SpawnContext};
+use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, SpawnContext};
 use sha2::{Digest, Sha256};
 
 use super::Cli;
@@ -37,8 +37,19 @@ use super::vm::checkpoint::SignedChainAnchor;
 use super::vm::host_signer;
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 use mvm_hostd::plan_admission::{
-    AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_for_bridge,
+    AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_and_mint_verb_grant,
 };
+
+struct HostChildGrantIssuer;
+
+impl ChildGrantIssuer for HostChildGrantIssuer {
+    fn issue(
+        &self,
+        config: &VmStartConfig,
+    ) -> Result<Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>> {
+        stash_plan_and_mint_verb_grant(config)
+    }
+}
 
 /// Lowercase-hex sha256 of a kernel image — part of the base-compat key.
 pub fn kernel_sha256_hex(kernel: &Path) -> Result<String> {
@@ -508,6 +519,7 @@ where
     let snapshots = FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
     let anchor = SignedChainAnchor::load()?;
     let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    let grant_issuer = HostChildGrantIssuer;
     let ctx = ClaimContext {
         pool,
         checkpoints: &checkpoints,
@@ -515,6 +527,7 @@ where
         anchor: &anchor,
         parent_checkpoint: &parent_checkpoint,
         registry_path: &registry_path,
+        grant_issuer: Some(&grant_issuer),
     };
     match backend.claim_standby_via_runner(&ctx, &handle, &claim) {
         Ok(vm_id) => {
@@ -652,11 +665,6 @@ pub fn try_warm_claim(
         start_config.plan_json = Some(plan_json.clone());
         start_config.bundle_json = bundle_json.clone();
         start_config.network_policy = cfg.network_policy.clone();
-        if mvm_runtime::catalog::descriptor(backend.kind()).needs_plan_json && !plan_json.is_empty()
-        {
-            stash_plan_for_bridge(&start_config)
-                .with_context(|| format!("stash admitted plan for claimed VM '{}'", handle.id))?;
-        }
         Ok(StandbyClaim {
             start_config: Some(start_config),
             rootfs_path: rootfs.clone(),

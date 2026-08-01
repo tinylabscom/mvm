@@ -73,6 +73,8 @@ for detailed scope and acceptance criteria.
   - [x] Template-scoped warm-parent reservation and memory bounds
   - [x] QEMU Stage 0 raw-egress proof on the FC host
   - [x] Linux regression coverage for concurrent raw-egress handlers
+  - [x] Final-child verb grant issuance, validation, persistence, and
+        PostRestore delivery without granting authority to the parent
   - [~] Live warm-launch, fork-isolation, and restore-clock verification
   - [ ] Typed-connector egress-policy enrichment
   - [ ] OCI-image template build path and CLI facade completion

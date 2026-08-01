@@ -1024,24 +1024,20 @@ connection with `rejecting control connection without a pinned host key`. It
 predates this branch's merge base. Track it separately; expect it to be the next
 blocker once BUG-1 is fixed.
 
-**BLOCKER-3 — a restored child has no host-signer anchor, so it cannot be
-authorized at all.** Found by review of the BUG-1 fix, not by the run, and
-**not** a variant of BUG-2: BUG-2 is a missing sidecar on one code path, this is
-a structural consequence of a shared parent and survives BUG-2's fix. The
-grant cmdline tokens are derived per-VM from `<vm_state_dir>/verb-grant.json`; a
-factory parent holds no plan, so it has no sidecar and boots with no
-`mvm.host_signer_pub=` anchor — correctly, since a parent must hold no workload
-authority. But a child inherits the parent's cmdline out of restored memory
-rather than deriving its own, nothing re-pins an anchor after the restore (the
-production `VsockPostRestoreSignal` hardcodes `grant_envelope: None`), and the
-guest-side `re_pin_verb_grant` verifies a replacement grant against the
-**boot-pinned** anchor — which is absent. So the child refuses the PostRestore
-RPC, `require_fresh_child_identity` refuses the child, and every claim
-cold-boots. Fail-closed, no security hole, but the warm claim is structurally
-unreachable until it is fixed. Suggested shape (recorded, not implemented) in
-the validation note: pin `mvm.host_signer_pub=` on the parent as *host
-identity*, keep withholding `mvm.verb_grant=` / `mvm.require_grant=` as
-*workload authority*, and carry a replacement grant over the PostRestore signal.
+**BLOCKER-3 — resolved in code; live delivery remains gated behind #1962.**
+#1959 established the host-signer public key as boot-pinned *host identity*
+while the factory parent still receives no workload grant. The claim path now
+mints the admitted `VerbGrant` only after the final child identity exists,
+validates that its session, nonce, expiry, verbs, predecessor set, signer key,
+and signature exactly match that child and plan, persists it only in the
+child's state, and carries the envelope with the fresh generation token over
+the PostRestore signal. The guest verifies the replacement grant under the
+boot-pinned host key before accepting it. A grant-bearing claim without an
+issuer, or with any mismatched envelope field, refuses before fork; the parent
+never receives workload authority. Hermetic BDD coverage verifies the real
+host signature against the trusted host public key. The live claim still
+cannot reach this delivery while #1962 refuses the parent for its missing
+`checkpoint.created` audit entry, so this does not justify the capability flip.
 
 **BLOCKER-4 — a claimed child is wired none of the host channels a cold boot
 gets.** Also found by review. `wire_guest_dial_bridges` and
@@ -1211,6 +1207,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 - [ ] **Step 5: Re-validate live, then and only then consider the flip**
 
+  - [x] Issue and persist the admitted grant only after the final child
+        identity is materialized, validate it fail-closed, and deliver it with
+        the generation token over PostRestore. The hermetic warm-claim BDD
+        verifies the grant under the trusted host signer; missing-issuer and
+        mismatch tests prove refusal before fork with no orphaned child.
+
 Re-run Task 7 on the KVM host. The capability stays `false` until that run is green. Expect BUG-2 to surface next; if it blocks, record it and stop rather than working around a pre-existing bug inside this slice.
 
 **Partially done.** A live run on the KVM host with the corrected boot shape
@@ -1232,8 +1234,9 @@ error=claim standby: parent has no signed audit entry;
 Correct behaviour meeting a missing emit: nothing on the spawn path writes the
 `checkpoint.created` entry the claim's parent verification requires, so every
 captured parent is unclaimable by construction (issue #1962). BUG-2 and the
-double-reserve no longer block the claim; BLOCKER-3's boot half is fixed by
-#1959; BLOCKER-4 remains open and unexercised.
+double-reserve no longer block the claim; BLOCKER-3 is fixed in code but its
+post-restore delivery cannot be exercised live until #1962 is closed;
+BLOCKER-4 remains open and unexercised.
 
 Cold boot to activation, measured over 10 reps: median 1837.5 ms (min 1766,
 p90 2027, max 2119, spread 353), 10/10 activated. Warm is **not** measurable

@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
+use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
     StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
@@ -147,10 +148,11 @@ pub trait VmmDriver: Send + Sync {
         })
     }
 
-    /// Hand a freshly forked child its own generation token and report, verbatim,
-    /// what the guest agent says it did with it — whether it acknowledged the
-    /// signal, rotated its generation identity (reseeding its CSPRNG off the
-    /// parent's cloned state), and resynchronized its wall clock off the host's.
+    /// Hand a freshly forked child its generation token and optional signed verb
+    /// grant, then report verbatim what the guest agent says it did with them —
+    /// whether it acknowledged the signal, rotated its generation identity
+    /// (reseeding its CSPRNG off the parent's cloned state), and resynchronized
+    /// its wall clock off the host's.
     ///
     /// The reported flags are the guest's own claims, not a verdict: judging them
     /// is the role layer's job, so a driver never decides whether a child is
@@ -165,10 +167,14 @@ pub trait VmmDriver: Send + Sync {
         &self,
         child_vm_name: &str,
         token: [u8; GENID_BYTES],
+        grant_envelope: Option<VerbGrantEnvelope>,
     ) -> Result<PostRestoreOutcome> {
         crate::vm::instance_snapshot::signal_post_restore(
             child_vm_name,
-            &crate::vm::instance_snapshot::VsockPostRestoreSignal { token },
+            &crate::vm::instance_snapshot::VsockPostRestoreSignal {
+                token,
+                grant_envelope,
+            },
             crate::vm::instance_snapshot::POST_RESTORE_READY_TIMEOUT,
         )
     }

@@ -278,6 +278,9 @@ pub struct WarmClaimWitness {
     pub child_dir_has_rootfs: bool,
     pub fork_genid_nonzero: bool,
     pub fork_genid_content_hash_matches_parent: bool,
+    pub post_restore_grant_session_matches_child: bool,
+    pub post_restore_grant_verbs: Vec<String>,
+    pub post_restore_grant_verifies_under_host_key: bool,
 }
 
 impl fmt::Debug for CliWorld {

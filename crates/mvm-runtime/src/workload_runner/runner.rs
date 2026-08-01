@@ -13,9 +13,10 @@ use mvm_agentd::vsock::BROKER_PORT;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
-use mvm_core::plan::SecretBinding;
+use mvm_core::plan::{ExecutionPlan, SecretBinding};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
+use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyClaim, StandbyError,
     StandbyHandle, StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
@@ -38,6 +39,7 @@ use crate::vm::instance_snapshot::PostRestoreOutcome;
 use crate::vm::name_registry::{VmNameRegistry, acquire_registry_lock, generate_vm_name};
 use crate::warm_snapshot::materialize_child_from_parent;
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
+use crate::workload_runner::child_grant::{ChildGrantIssuer, issue_child_grant};
 use crate::workload_runner::claim::{
     ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_plan_to_parent, parent_rootfs_digest,
 };
@@ -275,6 +277,10 @@ pub struct ClaimContext<'a> {
     /// VM name registry file whose sibling lock serializes the parent reserve
     /// and the child-name mint, so two claims never double-claim one parent.
     pub registry_path: &'a Path,
+    /// Host signing authority invoked only after the runner has minted the
+    /// final child identity. Grant-less test contexts may omit it; a plan that
+    /// requests agent verbs fails closed when it is absent.
+    pub grant_issuer: Option<&'a dyn ChildGrantIssuer>,
 }
 
 /// The warm-pool substrate a spawn-and-capture needs beyond the runner's
@@ -422,8 +428,8 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
 
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
-        let plan_image = claim_plan_image_sha256(claim)?;
-        bind_plan_to_parent(&plan_image, &parent).map_err(refuse)?;
+        let plan = claim_plan(claim)?;
+        bind_plan_to_parent(&plan.image.sha256, &parent).map_err(refuse)?;
 
         // (6a) Fresh, registry-unique identity for the child.
         let child = fresh_child_id(ctx)?;
@@ -450,6 +456,9 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         guards
             .admit_overlay_contract(&child_cfg)
             .map_err(|e| StandbyError::ClaimFailed(format!("overlay contract: {e}")))?;
+
+        let grant_envelope = issue_child_grant(&plan, &child_cfg, ctx.grant_issuer)
+            .map_err(|e| StandbyError::ClaimFailed(format!("issue child verb grant: {e}")))?;
 
         let secrets =
             mvm_core::plan::secrets_from_signed_json(&claim.plan_json).unwrap_or_default();
@@ -513,7 +522,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // of one parent that skipped this would draw identical randomness, which
         // is the whole reason a warm child needs a fresh identity — so a child
         // that cannot prove it is never admitted.
-        if let Err(refusal) = self.take_fresh_child_identity(&child.0, token) {
+        if let Err(refusal) = self.take_fresh_child_identity(&child.0, token, grant_envelope) {
             // The child is live and still carrying its parent's random state.
             // Unwinding alone would leave running exactly the VM this refusal
             // exists to prevent, so stop it before returning.
@@ -536,10 +545,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         &self,
         child_vm_name: &str,
         token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+        grant_envelope: Option<VerbGrantEnvelope>,
     ) -> std::result::Result<(), StandbyError> {
         let outcome = self
             .driver
-            .deliver_child_identity(child_vm_name, token)
+            .deliver_child_identity(child_vm_name, token, grant_envelope)
             .map_err(|e| {
                 StandbyError::ClaimFailed(format!(
                     "forked child '{child_vm_name}' never answered the post-restore identity \
@@ -843,14 +853,14 @@ fn reserve_and_verify_parent(
     Ok(parent)
 }
 
-/// The admitted plan's bound image digest (`plan.image.sha256`) from the claim.
+/// The admitted plan from the claim.
 /// The runner does not re-verify the signature — the host admitted the plan and
-/// the supervisor re-verifies at attach — it only reads the digest it must bind
-/// to the parent. A claim carrying no parseable plan fails closed.
-fn claim_plan_image_sha256(claim: &StandbyClaim) -> std::result::Result<String, StandbyError> {
-    let plan = mvm_core::plan::plan_from_admitted_json(&claim.plan_json)
-        .map_err(|_| refuse(ClaimRefusal::PlanMissing))?;
-    Ok(plan.image.sha256)
+/// the supervisor re-verifies at attach. The runner reads the image binding and
+/// child-grant fields it must enforce. A claim carrying no parseable plan fails
+/// closed.
+fn claim_plan(claim: &StandbyClaim) -> std::result::Result<ExecutionPlan, StandbyError> {
+    mvm_core::plan::plan_from_admitted_json(&claim.plan_json)
+        .map_err(|_| refuse(ClaimRefusal::PlanMissing))
 }
 
 /// How many times to redraw a fresh child name before giving up. A collision is
@@ -893,6 +903,8 @@ fn child_start_config(claim: &StandbyClaim, child: &VmId, child_dir: &Path) -> V
     cfg.rootfs_path = child_dir.join("rootfs.ext4").to_string_lossy().into_owned();
     cfg.tenant_id = Some(claim.tenant_id.clone());
     cfg.network_policy = claim.network_policy.clone();
+    cfg.plan_json = Some(claim.plan_json.clone());
+    cfg.bundle_json = claim.bundle_json.clone();
     cfg
 }
 
@@ -2776,12 +2788,49 @@ mod tests {
     /// parent's own verified rootfs content-address (claim-8 authority), the way
     /// the CLI mints it before handing the runner the claim.
     fn signed_child_plan_json(image_sha256: &str) -> String {
+        signed_child_plan_json_with_verbs(image_sha256, None)
+    }
+
+    fn signed_child_plan_json_with_verbs(
+        image_sha256: &str,
+        agent_verbs: Option<Vec<VerbId>>,
+    ) -> String {
         let mut plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("tenant-x")
             .build();
         plan.image.sha256 = image_sha256.to_string();
+        plan.agent_verbs = agent_verbs;
         let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap()
+    }
+
+    #[derive(Default)]
+    struct TestChildGrantIssuer {
+        seen_child: Mutex<Option<String>>,
+    }
+
+    impl ChildGrantIssuer for TestChildGrantIssuer {
+        fn issue(&self, config: &VmStartConfig) -> Result<Option<VerbGrantEnvelope>> {
+            let plan_json = config.plan_json.as_deref().context("child plan missing")?;
+            let plan = mvm_core::plan::plan_from_admitted_json(plan_json)?;
+            let Some(verbs) = plan.agent_verbs else {
+                return Ok(None);
+            };
+            *self.seen_child.lock().unwrap() = Some(config.name.clone());
+            Ok(Some(VerbGrantEnvelope {
+                pubkey_hex: "ab".repeat(32),
+                plan_nonce_hex: plan.nonce.as_hex().to_string(),
+                predecessor_session_id: None,
+                predecessor_plan_nonce_hex: None,
+                grant: mvm_core::plan::VerbGrant {
+                    session_id: config.name.clone(),
+                    plan_nonce: plan.nonce,
+                    not_after: plan.valid_until,
+                    verbs,
+                    sig: vec![3u8; 64],
+                },
+            }))
+        }
     }
 
     fn idle_parent_handle(id: &str, control_socket: &Path) -> StandbyHandle {
@@ -2848,7 +2897,10 @@ mod tests {
 
         let claim = admitted_child_claim(
             &src.path().join("rootfs.ext4"),
-            signed_child_plan_json(&parent_digest),
+            signed_child_plan_json_with_verbs(
+                &parent_digest,
+                Some(vec![VerbId::new("run-entrypoint").unwrap()]),
+            ),
         );
 
         let runner = WorkloadRunner::new(
@@ -2856,6 +2908,7 @@ mod tests {
             KeyingSpawner::default(),
             RecordingBrokerRegistrar::new(),
         );
+        let grant_issuer = TestChildGrantIssuer::default();
         let ctx = ClaimContext {
             pool: &pool,
             checkpoints: &checkpoints,
@@ -2863,6 +2916,7 @@ mod tests {
             anchor: &anchor,
             parent_checkpoint: &parent_id,
             registry_path: &registry_path,
+            grant_issuer: Some(&grant_issuer),
         };
 
         let child = runner.claim_standby(&ctx, &handle, &claim).expect("claim");
@@ -2907,10 +2961,22 @@ mod tests {
         // The fork alone only resumes the child on the parent's saved memory, so
         // the claim also handed that same token to the child's guest agent and
         // committed only once the guest reported it had rotated onto it.
+        let delivered = runner.driver.delivered_child_identities();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].child_vm_name, child.0);
+        assert_eq!(delivered[0].token, forks[0].genid.token);
+        let delivered_grant = delivered[0]
+            .grant_envelope
+            .as_ref()
+            .expect("the child grant rides the post-restore handshake");
+        assert_eq!(delivered_grant.grant.session_id, child.0);
         assert_eq!(
-            runner.driver.delivered_child_identities(),
-            vec![(child.0.clone(), forks[0].genid.token)],
-            "the claim delivers the forked token to the child's own guest agent, exactly once"
+            delivered_grant.grant.verbs,
+            vec![VerbId::new("run-entrypoint").unwrap()]
+        );
+        assert_eq!(
+            grant_issuer.seen_child.lock().unwrap().as_deref(),
+            Some(child.0.as_str())
         );
 
         // The runner-side overlay-contract gate ran on the materialized child:
@@ -2991,6 +3057,7 @@ mod tests {
             anchor: &anchor,
             parent_checkpoint: &parent_id,
             registry_path: &registry_path,
+            grant_issuer: None,
         };
 
         runner
@@ -3115,6 +3182,7 @@ mod tests {
                     anchor: &anchor,
                     parent_checkpoint: &parent_id,
                     registry_path: &registry_path,
+                    grant_issuer: None,
                 },
                 &handle,
                 &claim,
@@ -3235,6 +3303,14 @@ mod tests {
     /// claim touches (MVM_HOME, stores, pool, registry) is fresh per call, so the
     /// handshake outcomes are independent of each other.
     fn claim_with_scripted_handshake(driver: MockDriver) -> HandshakeClaimOutcome {
+        claim_with_scripted_handshake_and_grant(driver, None, None)
+    }
+
+    fn claim_with_scripted_handshake_and_grant(
+        driver: MockDriver,
+        agent_verbs: Option<Vec<VerbId>>,
+        grant_issuer: Option<&dyn ChildGrantIssuer>,
+    ) -> HandshakeClaimOutcome {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -3255,7 +3331,7 @@ mod tests {
         let anchor = ClaimTestAnchor::audited(&parent_meta);
         let claim = admitted_child_claim(
             &src.path().join("rootfs.ext4"),
-            signed_child_plan_json(&parent_digest),
+            signed_child_plan_json_with_verbs(&parent_digest, agent_verbs),
         );
 
         let probe = driver.clone();
@@ -3271,6 +3347,7 @@ mod tests {
             anchor: &anchor,
             parent_checkpoint: &parent_id,
             registry_path: &registry_path,
+            grant_issuer,
         };
 
         let result = runner.claim_standby(&ctx, &handle, &claim);
@@ -3280,6 +3357,24 @@ mod tests {
             parent_state: pool.load("warm-parent").unwrap().state,
             orphan_child_dirs: orphan_child_dirs(),
         }
+    }
+
+    #[test]
+    fn claim_refuses_a_grant_bearing_plan_before_fork_when_no_issuer_is_configured() {
+        let out = claim_with_scripted_handshake_and_grant(
+            MockDriver::default(),
+            Some(vec![VerbId::new("run-entrypoint").unwrap()]),
+            None,
+        );
+
+        let err = out.result.expect_err("the missing issuer must fail closed");
+        assert!(err.to_string().contains("no child grant issuer"));
+        assert!(
+            out.driver.forked_children().is_empty(),
+            "grant issuance is checked before a child is resumed"
+        );
+        assert_eq!(out.parent_state, StandbyState::Idle);
+        assert_eq!(out.orphan_child_dirs, 0);
     }
 
     /// A forked child comes back resumed on its parent's saved memory, so until
@@ -3360,9 +3455,9 @@ mod tests {
         let delivered = out.driver.delivered_child_identities();
         let forks = out.driver.forked_children();
         assert_eq!(delivered.len(), 1, "the token is delivered exactly once");
-        assert_eq!(delivered[0].0, forks[0].child_vm_name);
+        assert_eq!(delivered[0].child_vm_name, forks[0].child_vm_name);
         assert_eq!(
-            delivered[0].1, forks[0].genid.token,
+            delivered[0].token, forks[0].genid.token,
             "the delivered token is the one the fork minted"
         );
     }
@@ -3451,6 +3546,7 @@ mod tests {
             anchor: &anchor,
             parent_checkpoint: &parent_id,
             registry_path: &registry_path,
+            grant_issuer: None,
         };
 
         let err = runner
@@ -3520,6 +3616,7 @@ mod tests {
             anchor: &anchor,
             parent_checkpoint: &parent_id,
             registry_path: &registry_path,
+            grant_issuer: None,
         };
 
         let err = runner
@@ -3588,6 +3685,7 @@ mod tests {
             anchor: &anchor,
             parent_checkpoint: &parent_id,
             registry_path: &registry_path,
+            grant_issuer: None,
         };
 
         let err = runner
@@ -3673,6 +3771,7 @@ mod tests {
             anchor: &anchor,
             parent_checkpoint: &parent_id,
             registry_path: &registry_path,
+            grant_issuer: None,
         };
 
         let err = runner
@@ -3750,6 +3849,7 @@ mod tests {
                     anchor: &anchor1,
                     parent_checkpoint: &parent_id,
                     registry_path: &registry_path,
+                    grant_issuer: None,
                 };
                 runner.claim_standby(&ctx, &handle, &claim)
             });
@@ -3761,6 +3861,7 @@ mod tests {
                     anchor: &anchor2,
                     parent_checkpoint: &parent_id,
                     registry_path: &registry_path,
+                    grant_issuer: None,
                 };
                 runner.claim_standby(&ctx, &handle, &claim)
             });

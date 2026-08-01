@@ -558,6 +558,19 @@ pub struct VsockPostRestoreSignal {
     /// it rotates its VMGenID. Random per resume; an all-zero token requests
     /// no rotation (template restore).
     pub token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    /// Signed capability to pin while the restored guest adopts its fresh
+    /// identity. Ordinary resume paths carry no new grant.
+    pub grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+}
+
+impl VsockPostRestoreSignal {
+    fn request(&self, host_epoch_secs: u64) -> mvm_agentd::vsock::GuestRequest {
+        mvm_agentd::vsock::GuestRequest::PostRestore {
+            token: self.token,
+            host_epoch_secs: Some(host_epoch_secs),
+            grant_envelope: self.grant_envelope.clone(),
+        }
+    }
 }
 
 impl PostRestoreSignal for VsockPostRestoreSignal {
@@ -571,7 +584,7 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
     }
 
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
-        use mvm_agentd::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_unary};
+        use mvm_agentd::vsock::{GUEST_AGENT_PORT, GuestResponse, call_unary};
         let transport = crate::vsock_transport::for_vm(vm_name)
             .with_context(|| format!("resolving vsock transport for {vm_name}"))?;
         let mut stream = transport
@@ -580,19 +593,11 @@ impl PostRestoreSignal for VsockPostRestoreSignal {
         // `call_unary` enforces PostRestore's response contract — the agent
         // `Error` / off-contract cases surface as a typed `RpcError`, so the
         // only `Ok` variant here is the contracted `PostRestoreAck`.
-        match call_unary(
-            &mut stream,
-            &GuestRequest::PostRestore {
-                token: self.token,
-                host_epoch_secs: Some(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .context("reading host wall clock for post-restore")?
-                        .as_secs(),
-                ),
-                grant_envelope: None,
-            },
-        )? {
+        let host_epoch_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("reading host wall clock for post-restore")?
+            .as_secs();
+        match call_unary(&mut stream, &self.request(host_epoch_secs))? {
             GuestResponse::PostRestoreAck {
                 success,
                 detail,
@@ -1021,6 +1026,46 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn post_restore_request_carries_the_child_grant_envelope() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+
+        let nonce = Nonce::from_bytes([5u8; 16]);
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: "ab".repeat(32),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant: VerbGrant {
+                session_id: "child-final".into(),
+                plan_nonce: nonce,
+                not_after: mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap(),
+                verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+                sig: vec![7u8; 64],
+            },
+        };
+        let signal = VsockPostRestoreSignal {
+            token: [9u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            grant_envelope: Some(envelope),
+        };
+
+        let mvm_agentd::vsock::GuestRequest::PostRestore {
+            token,
+            host_epoch_secs,
+            grant_envelope,
+        } = signal.request(42)
+        else {
+            panic!("post-restore signal built the wrong request variant");
+        };
+        assert_eq!(token, [9u8; mvm_core::crypto::vmgenid::GENID_BYTES]);
+        assert_eq!(host_epoch_secs, Some(42));
+        assert_eq!(
+            grant_envelope.expect("grant is carried").grant.session_id,
+            "child-final"
+        );
+    }
 
     /// Run a closure with `MVM_HOME` overridden to a tempdir
     /// so each test gets an isolated `~/.mvm/instances/...` tree.

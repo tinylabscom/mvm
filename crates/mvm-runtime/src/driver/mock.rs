@@ -16,6 +16,7 @@ use mvm_core::vm_backend::{
 };
 
 use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
+use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
 use crate::driver::spec::{VmmSpec, VsockPort};
 use crate::driver::traits::{
@@ -31,8 +32,16 @@ type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
 /// transport error takes); `Some` scripts the flags a live agent would report.
 type ScriptedChildIdentity = Option<PostRestoreOutcome>;
 
-/// One `(child_vm_name, token)` pair `deliver_child_identity` was handed.
-type DeliveredIdentity = (String, [u8; GENID_BYTES]);
+/// One post-restore child identity delivery recorded by the mock driver.
+#[derive(Clone, Debug)]
+pub struct DeliveredChildIdentity {
+    /// Final runner-minted identity of the restored child.
+    pub child_vm_name: String,
+    /// Fresh VMGenID token delivered to the child.
+    pub token: [u8; GENID_BYTES],
+    /// Optional signed agent authority delivered in the same handshake.
+    pub grant_envelope: Option<VerbGrantEnvelope>,
+}
 
 /// A clean post-restore answer: the guest acknowledged, rotated its generation
 /// identity off the delivered token, and took the host's wall clock. The
@@ -79,9 +88,9 @@ pub struct MockDriver {
     /// child, so a test can drive the claim's fresh-identity gate — including
     /// the refusal arms — with no live guest.
     child_identity: ScriptedChildIdentity,
-    /// Every `(child, token)` this driver was asked to deliver, so a test can
-    /// prove the claim handed the guest the same token it forked with.
-    delivered_identities: Arc<Mutex<Vec<DeliveredIdentity>>>,
+    /// Every identity and grant this driver was asked to deliver, so a test can
+    /// prove the claim handed the guest the same values it minted.
+    delivered_identities: Arc<Mutex<Vec<DeliveredChildIdentity>>>,
     /// Names of the VMs killed through any handle this driver produced, so a
     /// test can prove a refused claim actually tore its child down instead of
     /// leaving it resumed.
@@ -165,9 +174,8 @@ impl MockDriver {
         self
     }
 
-    /// Every `(child_vm_name, token)` handed to `deliver_child_identity`, in
-    /// order.
-    pub fn delivered_child_identities(&self) -> Vec<DeliveredIdentity> {
+    /// Every identity and grant handed to `deliver_child_identity`, in order.
+    pub fn delivered_child_identities(&self) -> Vec<DeliveredChildIdentity> {
         self.delivered_identities.lock().unwrap().clone()
     }
 
@@ -292,11 +300,16 @@ impl VmmDriver for MockDriver {
         &self,
         child_vm_name: &str,
         token: [u8; GENID_BYTES],
+        grant_envelope: Option<VerbGrantEnvelope>,
     ) -> Result<PostRestoreOutcome> {
         self.delivered_identities
             .lock()
             .unwrap()
-            .push((child_vm_name.to_string(), token));
+            .push(DeliveredChildIdentity {
+                child_vm_name: child_vm_name.to_string(),
+                token,
+                grant_envelope,
+            });
         self.child_identity.clone().ok_or_else(|| {
             anyhow!("mock guest agent for '{child_vm_name}' did not answer the post-restore signal")
         })

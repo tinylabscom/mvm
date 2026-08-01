@@ -116,7 +116,10 @@ pub fn warm_restore_instance_from_path(
     // reachable; a zero token's honest outcome is `NotRotated`, not `Rotated`.
     let reseed = match signal_post_restore(
         name,
-        &VsockPostRestoreSignal { token },
+        &VsockPostRestoreSignal {
+            token,
+            grant_envelope: None,
+        },
         POST_RESTORE_READY_TIMEOUT,
     ) {
         Ok(outcome) if outcome.reseeded => mvm_core::vm_backend::ReseedStatus::Rotated,

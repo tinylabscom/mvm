@@ -2068,6 +2068,7 @@ mod tests {
                     anchor: &self.anchor,
                     parent_checkpoint: &self.parent,
                     registry_path: &self.registry_path,
+                    grant_issuer: None,
                 }
             }
         }
