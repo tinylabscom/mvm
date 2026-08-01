@@ -22,10 +22,23 @@ mod linux {
     const EGRESS_CLIENT: &str = "/usr/local/bin/mvm-egress-client";
     const EGRESS_CLIENT_OVERLAY: &str = "/mvm/runtime/egress-client";
 
+    /// Tools the image ships that cannot work in this guest, and the overlay
+    /// binary that stands in for each.
+    ///
+    /// A NIC-less guest has no route and no raw socket, so the image's own
+    /// `ping` fails at `socket()` before a packet exists. The replacement is
+    /// bind-mounted over it rather than written into the image: the rootfs keeps
+    /// exactly the bytes the registry served (which is what the recorded OCI
+    /// provenance refers to), `/proc/mounts` records the substitution for anyone
+    /// who wonders, and the original stays underneath. It also reaches a caller
+    /// that runs `/bin/ping` outright, which no `PATH` order does.
+    const MEDIATED_TOOLS: &[(&str, &str)] = &[("/mvm/runtime/ping", "/bin/ping")];
+
     pub fn main() {
         mount_pseudofs();
         ensure_runtime_dirs();
         mount_user_volumes();
+        mount_mediated_tools();
         provision_egress_ca();
         provision_verb_grant();
         provision_host_signer_pub();
@@ -142,6 +155,52 @@ mod linux {
             }
             let flags = if mode == "ro" { libc::MS_RDONLY } else { 0 };
             mount_fs(tag, &upath, "virtiofs", flags, None);
+        }
+    }
+
+    /// Bind-mount each mediated tool over the image's own copy.
+    ///
+    /// Skipped silently when either side is absent: an image that ships no
+    /// `ping` has nothing to mount over (and the rootfs is read-only under
+    /// verity, so one cannot be created), and a launch shape with no runtime
+    /// overlay has no replacement to offer. In both cases the image behaves as
+    /// it would have without mvm, which is the honest outcome.
+    fn mount_mediated_tools() {
+        for (source, target) in MEDIATED_TOOLS {
+            if !Path::new(source).is_file() || !Path::new(target).exists() {
+                continue;
+            }
+            bind_mount_file(source, target);
+        }
+    }
+
+    /// `mount(source, target, NULL, MS_BIND, NULL)` over an existing file.
+    ///
+    /// Distinct from [`mount_fs`], which creates its target as a directory: the
+    /// target here is a file that must already exist, and creating it is exactly
+    /// what we are avoiding.
+    fn bind_mount_file(source: &str, target: &str) {
+        let (Some(source_c), Some(target_c)) = (cstring_str(source), cstring_str(target)) else {
+            return;
+        };
+        // SAFETY: both paths are NUL-terminated and live for the call; MS_BIND
+        // with a null fstype/data is the documented file-bind form.
+        let rc = unsafe {
+            libc::mount(
+                source_c.as_ptr(),
+                target_c.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        };
+        if rc != 0 {
+            // Non-fatal: the workload keeps the image's own tool, which simply
+            // does not work here. Failing PID 1 over a `ping` would be worse.
+            eprintln!(
+                "mvm-oci-init: bind {source} over {target}: {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 

@@ -282,6 +282,51 @@ impl EgressGate {
         ports
     }
 
+    /// Decide an ICMP echo to `host`, resolved host-side against the pins.
+    ///
+    /// ICMP has no port, so the `host:port` allow-list cannot express "may ping
+    /// this". The rule is that a host admitted for *any* port may be pinged:
+    /// `--allow-host example.com` (which means `example.com:443`) admits echo to
+    /// example.com. A host absent from the allow-list is refused, so ping never
+    /// widens the set of destinations a workload can reach — only what it may do
+    /// with one it was already given.
+    ///
+    /// Returns the pinned addresses to echo, IPv4 first, matching the ordering
+    /// every other verdict uses.
+    pub fn decide_icmp_request(&self, host: &str) -> EgressVerdict {
+        let Some(pin) = self.pins.lookup(host) else {
+            return EgressVerdict::Deny(if self.admitted_hosts().is_empty() {
+                DenyReason::NoEgressAdmitted
+            } else {
+                DenyReason::HostNotAdmitted {
+                    host: host.to_string(),
+                    admitted_hosts: self.admitted_hosts(),
+                }
+            });
+        };
+        // Mandatory-deny still applies: a pinned loopback/link-local address is
+        // refused for echo exactly as it is for a stream, so ping cannot become a
+        // probe of the host's own private networks.
+        let mut v4 = Vec::new();
+        let mut v6 = Vec::new();
+        for ip in pin.ips.iter().copied().filter(|ip| !is_icmp_denied(*ip)) {
+            match ip {
+                IpAddr::V4(_) => v4.push(ip),
+                IpAddr::V6(_) => v6.push(ip),
+            }
+        }
+        v4.extend(v6);
+        if v4.is_empty() {
+            return EgressVerdict::Deny(DenyReason::HostNotAdmitted {
+                host: host.to_string(),
+                admitted_hosts: self.admitted_hosts(),
+            });
+        }
+        // Port 0 marks "no port applies" — ICMP carries none, and no rule can
+        // admit port 0, so this can never be mistaken for a stream grant.
+        EgressVerdict::Allow { ips: v4, port: 0 }
+    }
+
     fn decide_addr_for_proto(&self, proto: Proto, ip: IpAddr, port: u16) -> EgressVerdict {
         if !self.egress.permits(&proto, ip, port) {
             // A pinned address on the wrong port is the port-mismatch case even
@@ -412,6 +457,15 @@ impl EgressGate {
     }
 }
 
+/// Whether ICMP echo to `ip` is refused outright. ICMP has no port, so this asks
+/// the shared claim-10 predicate the only way it can: an address that no TCP port
+/// could ever reach is one mandatory-deny refuses, and it is refused for echo too.
+fn is_icmp_denied(ip: IpAddr) -> bool {
+    // `permits` applies mandatory-deny before consulting any rule, so an
+    // unrestricted grant isolates exactly that check.
+    !CanonicalEgress::Unrestricted.permits(&Proto::Tcp, ip, 443)
+}
+
 fn admitted_ips(
     egress: &CanonicalEgress,
     proto: &Proto,
@@ -526,6 +580,84 @@ mod tests {
             }
         );
         assert!(reason.to_string().contains("example.com"));
+    }
+
+    /// ICMP has no port, so a host admitted for any port may be pinged. This is
+    /// the decision that makes `--allow-host example.com` (meaning
+    /// `example.com:443`) enough for `ping example.com`, without letting ping
+    /// reach a host the allow-list never named.
+    #[test]
+    fn icmp_is_admitted_for_a_host_on_the_allow_list_whatever_its_port() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "example.com",
+            vec!["93.184.216.34".parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort {
+            host: "example.com".into(),
+            port: 443,
+        }]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        assert_eq!(
+            gate.decide_icmp_request("example.com"),
+            EgressVerdict::Allow {
+                ips: vec!["93.184.216.34".parse().unwrap()],
+                port: 0,
+            },
+            "a host admitted on any port may be pinged"
+        );
+
+        // ...but ping never widens the destination set.
+        let verdict = gate.decide_icmp_request("evil.test");
+        let EgressVerdict::Deny(reason) = verdict else {
+            panic!("an unlisted host must not be pingable, got {verdict:?}");
+        };
+        assert!(reason.to_string().contains("example.com"), "{reason}");
+    }
+
+    /// Mandatory-deny outranks the allow-list for echo exactly as it does for a
+    /// stream, so an explicitly pinned loopback address cannot turn ping into a
+    /// probe of the host's own networks.
+    #[test]
+    fn icmp_refuses_a_pinned_mandatory_deny_address() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "localhost.test",
+            vec!["127.0.0.1".parse().unwrap()],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort {
+            host: "localhost.test".into(),
+            port: 443,
+        }]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, "2026-01-01T00:00:00Z");
+
+        assert!(
+            gate.decide_icmp_request("localhost.test").is_deny(),
+            "a pinned loopback address must not be pingable"
+        );
+    }
+
+    /// A deny-all workload cannot ping anything, and says so as a policy answer
+    /// rather than an unknown-host one.
+    #[test]
+    fn icmp_on_a_deny_all_gate_reports_no_egress() {
+        let gate = EgressGate::default_deny();
+        let verdict = gate.decide_icmp_request("example.com");
+        let EgressVerdict::Deny(reason) = verdict else {
+            panic!("deny-all must refuse echo, got {verdict:?}");
+        };
+        assert_eq!(reason, DenyReason::NoEgressAdmitted);
     }
 
     #[test]

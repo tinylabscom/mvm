@@ -1,7 +1,7 @@
 use crate::catalog;
 use anyhow::Result;
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
+    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, SnapshotCapability, VmBackend,
     VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartOutcome,
 };
 
@@ -606,14 +606,24 @@ impl AnyBackend {
     /// Single source of truth for `mvmctl ls` and `mvmctl down` (no-arg) so
     /// a VM started under any VMM — including QEMU and libkrun — is visible
     /// and stoppable, not just whichever backend the CLI defaulted to.
+    ///
+    /// Deduplicated by name, keeping the row from the backend that owns the
+    /// VM. Backend listings are not disjoint: they all scan the same per-VM
+    /// state dir, so one running VM is discovered by every backend — but only
+    /// the marker-file owner reads its true status, the rest report `Stopped`
+    /// because *their* marker is absent. Picking by declaration order would
+    /// therefore render a running VM as stopped.
     pub fn list_all() -> Vec<VmInfo> {
-        let mut vms = Vec::new();
-        for backend in catalog::list_all_descriptors().map(|descriptor| descriptor.instantiate()) {
-            if let Ok(found) = backend.list() {
-                vms.extend(found);
-            }
-        }
-        vms
+        let rows = catalog::list_all_descriptors()
+            .map(|descriptor| (descriptor.kind, descriptor.instantiate()))
+            .flat_map(|(kind, backend)| {
+                backend
+                    .list()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |vm| (kind, vm))
+            });
+        dedup_by_owning_backend(rows, |name| Self::for_started_vm(name).map(|b| b.kind()))
     }
 
     /// The typed discriminant for this backend. Lets callers branch on
@@ -773,10 +783,10 @@ impl AnyBackend {
             AnyBackend::Firecracker(runner) => runner.spawn_standby_captured(ctx, spec),
             AnyBackend::Libkrun(runner) => runner.spawn_standby_captured(ctx, spec),
             AnyBackend::Hvf(runner) => runner.spawn_standby_captured(ctx, spec),
-            // The hermetic lifecycle double has no runner and no checkpoint
-            // store; it services the spawn from its own in-memory state.
+            // The hermetic lifecycle double mirrors the runner's captured
+            // checkpoint contract while keeping the VM itself in memory.
             #[cfg(feature = "test-support")]
-            AnyBackend::Mock(backend) => backend.spawn_standby(spec),
+            AnyBackend::Mock(backend) => backend.spawn_standby_captured(ctx, spec),
             // Not workload-bearing backends — no warm pool, fail closed.
             AnyBackend::Qemu(_)
             | AnyBackend::Wasm(_)
@@ -920,9 +930,142 @@ impl AnyBackend {
     }
 }
 
+/// Collapse per-backend listings to one row per VM name, preserving discovery
+/// order. `owner_of` names the backend that actually owns a VM (the one whose
+/// marker file is present); that backend's row wins, since it is the only one
+/// reporting a true status. A name no backend claims — a stopped VM, where no
+/// marker exists — keeps its first-discovered row.
+///
+/// The name is the identity every listing consumer joins on: the name
+/// registry, the state dir, `mvmctl down <name>`.
+fn dedup_by_owning_backend(
+    rows: impl IntoIterator<Item = (BackendKind, VmInfo)>,
+    owner_of: impl Fn(&str) -> Option<BackendKind>,
+) -> Vec<VmInfo> {
+    let mut order: Vec<String> = Vec::new();
+    let mut chosen: std::collections::BTreeMap<String, (bool, VmInfo)> =
+        std::collections::BTreeMap::new();
+
+    for (kind, vm) in rows {
+        let is_owner = owner_of(&vm.name) == Some(kind);
+        match chosen.get(&vm.name) {
+            // An owner's row is authoritative; nothing later displaces it.
+            Some((true, _)) => continue,
+            Some((false, _)) if !is_owner => continue,
+            Some(_) => {
+                chosen.insert(vm.name.clone(), (is_owner, vm));
+            }
+            None => {
+                order.push(vm.name.clone());
+                chosen.insert(vm.name.clone(), (is_owner, vm));
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|name| chosen.remove(&name).map(|(_, vm)| vm))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vm_named(name: &str, cpus: u32) -> VmInfo {
+        VmInfo {
+            id: VmId(name.to_string()),
+            name: name.to_string(),
+            status: VmStatus::Running,
+            guest_ip: None,
+            cpus,
+            memory_mib: 512,
+            profile: None,
+            revision: None,
+            flake_ref: None,
+            ports: Vec::new(),
+        }
+    }
+
+    fn stopped(name: &str) -> VmInfo {
+        VmInfo {
+            status: VmStatus::Stopped,
+            ..vm_named(name, 0)
+        }
+    }
+
+    /// Every backend scans the shared per-VM state dir, so one running VM is
+    /// discovered by all of them — but only the marker-file owner sees it as
+    /// running. The owner's row must win regardless of declaration order, or
+    /// a running VM lists as stopped.
+    #[test]
+    fn dedup_keeps_the_owning_backends_row_over_earlier_stopped_rows() {
+        // Mirrors the observed host: firecracker/libkrun/qemu each rediscover
+        // an HVF-owned VM and report it stopped, hvf reports it running.
+        let rows = vec![
+            (BackendKind::Firecracker, stopped("shared")),
+            (BackendKind::Libkrun, stopped("shared")),
+            (BackendKind::Qemu, stopped("shared")),
+            (BackendKind::Hvf, vm_named("shared", 2)),
+            (BackendKind::AppleContainer, vm_named("shared", 99)),
+        ];
+
+        let listed = dedup_by_owning_backend(rows, |_| Some(BackendKind::Hvf));
+
+        assert_eq!(listed.len(), 1, "one VM must produce one row");
+        assert_eq!(listed[0].status, VmStatus::Running);
+        assert_eq!(
+            listed[0].cpus, 2,
+            "the owning backend's row wins, not a later rediscovery"
+        );
+    }
+
+    /// A stopped VM has no marker file, so no backend claims it. It must still
+    /// list exactly once, keeping its first-discovered row.
+    #[test]
+    fn dedup_keeps_one_row_for_an_unclaimed_vm() {
+        let rows = vec![
+            (BackendKind::Firecracker, stopped("orphan")),
+            (BackendKind::Libkrun, stopped("orphan")),
+        ];
+
+        let listed = dedup_by_owning_backend(rows, |_| None);
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, VmStatus::Stopped);
+    }
+
+    /// Distinct VMs must survive dedup, in discovery order.
+    #[test]
+    fn dedup_preserves_distinct_names_in_discovery_order() {
+        let rows = vec![
+            (BackendKind::Hvf, vm_named("first", 1)),
+            (BackendKind::Firecracker, vm_named("second", 2)),
+            (BackendKind::Libkrun, vm_named("third", 3)),
+        ];
+
+        let listed = dedup_by_owning_backend(rows, |_| None);
+
+        assert_eq!(
+            listed.iter().map(|vm| vm.name.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
+    }
+
+    /// The host-wide aggregate `mvmctl ls` and `mvmctl down` read must never
+    /// surface a name twice, whatever the host happens to be running.
+    #[test]
+    fn list_all_returns_no_duplicate_names() {
+        let listed = AnyBackend::list_all();
+        let unique: std::collections::BTreeSet<_> =
+            listed.iter().map(|vm| vm.name.clone()).collect();
+        assert_eq!(
+            unique.len(),
+            listed.len(),
+            "list_all emitted a duplicate name: {:?}",
+            listed.iter().map(|vm| &vm.name).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn test_firecracker_backend_name() {

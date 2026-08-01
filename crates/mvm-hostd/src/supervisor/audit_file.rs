@@ -211,9 +211,19 @@ pub enum VerifyError {
 /// against `verifying_key`. Returns the number of valid entries on
 /// success. Stops at the first failure and reports its line index.
 pub fn verify_audit_chain(path: &Path, verifying_key: &VerifyingKey) -> Result<usize, VerifyError> {
+    verify_audit_chain_entries(path, verifying_key).map(|entries| entries.len())
+}
+
+/// Verify a chain-signed audit file and return its authenticated entries in
+/// chain order. Consumers use this when a decision depends on signed labels,
+/// rather than parsing an already-verified file a second time.
+pub fn verify_audit_chain_entries(
+    path: &Path,
+    verifying_key: &VerifyingKey,
+) -> Result<Vec<AuditEntry>, VerifyError> {
     let content = std::fs::read_to_string(path).map_err(|e| VerifyError::Io(e.to_string()))?;
     let mut prev_hash = [0u8; 32];
-    let mut count = 0usize;
+    let mut entries = Vec::new();
     for (idx, line) in content.lines().enumerate() {
         if line.is_empty() {
             continue;
@@ -260,9 +270,9 @@ pub fn verify_audit_chain(path: &Path, verifying_key: &VerifyingKey) -> Result<u
             .verify(&to_verify, &signature)
             .map_err(|_| VerifyError::SignatureInvalid { line: idx })?;
         prev_hash = hash_line(line.as_bytes());
-        count += 1;
+        entries.push(envelope.entry);
     }
-    Ok(count)
+    Ok(entries)
 }
 
 fn hash_line(bytes: &[u8]) -> [u8; 32] {
@@ -356,6 +366,10 @@ mod tests {
         }
         let count = verify_audit_chain(&signer.tenant_path("tenant-a"), &vk).unwrap();
         assert_eq!(count, 5);
+        let entries = verify_audit_chain_entries(&signer.tenant_path("tenant-a"), &vk).unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].event, "event-0");
+        assert_eq!(entries[4].event, "event-4");
     }
 
     // Pin the wasm-clean `mvm_protocol::verify` re-implementation to the

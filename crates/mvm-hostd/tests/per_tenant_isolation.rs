@@ -75,19 +75,33 @@ async fn emit_audit(sock: &Path, event: &str) -> Result<ServiceResponse> {
     read_frame(&mut conn).await
 }
 
+/// Hang guard — deliberately **not** a budget.
+///
+/// This waits on a real spawned broker becoming ready. That it becomes ready
+/// is the assertion; how fast is a property of the host scheduler. A deadline
+/// sized to "ready is quick, 10s is plenty" is a guess about machine load, and
+/// under full workspace parallelism the guess loses. Chosen to be unreachable
+/// by a merely-slow machine, and never to be tuned toward "fast enough".
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 async fn wait_for_emit(sock: &Path, event: &str) -> ServiceResponse {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let started = Instant::now();
+    let deadline = started + HANG_GUARD;
     let mut last_error = None;
+    let mut attempts = 0usize;
     while Instant::now() < deadline {
         match emit_audit(sock, event).await {
             Ok(resp) => return resp,
             Err(e) => last_error = Some(e),
         }
+        attempts += 1;
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!(
-        "broker at {} did not become ready before deadline: {:#}",
+        "broker at {} did not become ready after {attempts} attempt(s) in {:.1}s \
+         (hang guard, not a budget): {:#}",
         sock.display(),
+        started.elapsed().as_secs_f64(),
         last_error.expect("at least one attempt")
     );
 }

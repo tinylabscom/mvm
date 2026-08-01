@@ -8,14 +8,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use mvm_core::policy::EmergencyDeny;
-use tokio::sync::mpsc;
 
 use crate::supervisor::gateway_audit::GatewayAuditSink;
 use crate::supervisor::network::latency::ObserverLatency;
 use crate::supervisor::network::stages::{RedactingSubstitution, build_egress_scan};
 
 use super::config::{BridgeConfig, BridgeEndpoints};
-use super::events::{BRIDGE_MTU, EVENT_CHANNEL_CAPACITY, ObserverWiring};
+use super::events::{BRIDGE_MTU, EVENT_CHANNEL_CAPACITY, ObserverWiring, audit_event_channel};
 use super::flow_policy::{
     FlowPolicy, PlanFlowPolicy, bare_network_policy_egress, resolve_bare_dns_pins,
 };
@@ -117,7 +116,7 @@ fn run_native_audit_inner(cfg: BridgeConfig) {
         };
         let broadcast_tx = sink.sender();
 
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (event_tx, event_rx) = audit_event_channel(EVENT_CHANNEL_CAPACITY);
         let signer_handle = tokio::task::spawn_local(signer_task(
             event_rx,
             cfg.plan.clone(),
@@ -187,7 +186,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
         };
         let broadcast_tx = sink.sender();
 
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (event_tx, event_rx) = audit_event_channel(EVENT_CHANNEL_CAPACITY);
 
         // Signer task — sole writer of sign_and_emit per VM. Observers
         // fan out BEFORE chain signing inside the task body; the
@@ -314,10 +313,9 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             }
         }
 
-        // Bridge ended (guest shut down, listener died, etc.).
-        // Drop the signer/sink handles — they'll exit naturally
-        // when the runtime tears down.
-        signer_handle.abort();
+        // The bridge owns the last sender. Once it returns, drain every queued
+        // flow close and transcript seal before ending the signer task.
+        let _ = signer_handle.await;
         sink_handle.abort();
     }));
 }

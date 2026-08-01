@@ -1,9 +1,16 @@
 //! Build and resolve the universal initramfs artifact.
 //!
-//! The initramfs is built by `nix/images/initramfs/flake.nix` and cached at
-//! `<cache_root>/<version>/<arch>/`. This module mirrors the runtime-overlay
-//! orchestration but is intentionally smaller because the artifact has no
-//! verity sidecar and no per-rootfs variation.
+//! The initramfs is a tiny deterministic **cargo artifact** — one static
+//! `mvm-guest-agent` binary packed as `/init` in an epoch-zero newc cpio —
+//! built locally by [`build_initramfs_with_cargo`] on Linux and cached at
+//! `<cache_root>/<version>/<arch>/`. Its attestability comes from the
+//! reproducible cargo build of the pinned agent source plus the content
+//! hash, not from Nix. Nix remains the build for kernels, images, and
+//! overlays, where toolchain variance matters; `nix/images/initramfs`
+//! stays as the optional publish-path build of the same artifact. This
+//! module mirrors the runtime-overlay orchestration but is intentionally
+//! smaller because the artifact has no verity sidecar and no per-rootfs
+//! variation.
 
 use std::path::{Path, PathBuf};
 
@@ -27,9 +34,10 @@ pub enum InitramfsBuildError {
         reason: &'static str,
     },
 
-    /// `nix build` failed.
-    #[error("nix build failed: {reason}")]
-    NixBuildFailed { reason: String },
+    /// The deterministic cargo build failed (agent cross-compile or the
+    /// cpio assembly).
+    #[error("cargo initramfs build failed: {reason}")]
+    CargoBuildFailed { reason: String },
 
     /// A downloaded artifact's sha256 didn't match the pre-committed entry.
     #[error("checksum mismatch for {name}: expected sha256 {expected}, computed {actual}")]
@@ -171,10 +179,8 @@ fn seed_from_default_cache(
 }
 
 /// Resolve a cached universal initramfs, or return an error describing why it
-/// is unavailable. A full `nix build` fallback is intentionally gated behind
-/// `#[cfg(target_os = "linux")]` and runs through the supplied
-/// `ShellEnvironment` so it executes on the current Linux execution boundary
-/// (the builder VM on macOS, the native host on Linux).
+/// is unavailable. A cold cache on Linux falls back to the deterministic
+/// cargo build; a cold cache elsewhere falls back to the published download.
 pub fn resolve_or_build_local_initramfs(
     _env: &dyn ShellEnvironment,
     cache_root: &Path,
@@ -191,13 +197,14 @@ pub fn resolve_or_build_local_initramfs(
 
     #[cfg(target_os = "linux")]
     {
-        build_initramfs_with_nix(_env, cache_root, version, arch)
+        build_initramfs_with_cargo(cache_root, version, arch)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // macOS / non-Linux hosts cannot run `nix build` for a Linux initramfs.
-        // Try to download a published release artifact into the cache before
-        // giving up. This mirrors the runtime-overlay download path.
+        // macOS / non-Linux hosts cannot run the cargo cross-compile for a
+        // Linux initramfs here. Try to download a published release artifact
+        // into the cache before giving up. This mirrors the runtime-overlay
+        // download path.
         match download_initramfs(version, arch, cache_root) {
             Ok(artifact) => Ok(artifact),
             Err(download_err) => {
@@ -206,7 +213,7 @@ pub fn resolve_or_build_local_initramfs(
                     "initramfs download fallback unavailable"
                 );
                 Err(InitramfsBuildError::HostUnsupported {
-                    operation: "nix build",
+                    operation: "cargo initramfs build",
                     reason: "universal initramfs build requires Linux and no published artifact was available; seed the cache from a Linux build",
                 })
             }
@@ -214,77 +221,111 @@ pub fn resolve_or_build_local_initramfs(
     }
 }
 
+/// Build the universal initramfs as a deterministic cargo artifact and
+/// install it into the cache.
+///
+/// The initramfs is a tiny artifact — one static binary in a deterministic
+/// cpio — so its attestability comes from the reproducible cargo build plus
+/// the content hash, not from Nix: the pinned agent source is
+/// cross-compiled once by the shared guest-binary builder (`cargo
+/// zigbuild` → the arch's musl triple, content-keyed cache, reused as-is),
+/// then packed as exactly `/init` (mode 0755) in an epoch-zero,
+/// stably-ordered newc cpio, gzipped without name/timestamp. Same source +
+/// same toolchain ⇒ the same `initramfs.hash`. Nix remains the build for
+/// kernels, images, and overlays, where toolchain variance matters; the
+/// flake's initramfs package stays as the optional publish-path build of
+/// the same artifact.
 #[cfg(target_os = "linux")]
-fn initramfs_source_checkout_root() -> Option<PathBuf> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?.parent()?;
-    workspace_root
-        .join("nix")
-        .join("images")
-        .join("initramfs")
-        .join("flake.nix")
-        .is_file()
-        .then(|| workspace_root.to_path_buf())
-}
-
-/// Build the universal initramfs via `nix build` and install it into the cache.
-#[cfg(target_os = "linux")]
-fn build_initramfs_with_nix(
-    env: &dyn ShellEnvironment,
+fn build_initramfs_with_cargo(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
 ) -> Result<InitramfsArtifact, InitramfsBuildError> {
-    let workspace_root =
-        initramfs_source_checkout_root().ok_or_else(|| InitramfsBuildError::NixBuildFailed {
-            reason: "cannot locate workspace root with nix/images/initramfs/flake.nix".into(),
-        })?;
-    let flake_ref = format!(
-        "path:{}/nix/images/initramfs#packages.{}.initramfs",
-        workspace_root.display(),
-        nix_system_for_arch(arch),
-    );
-
-    let tmp = tempfile::tempdir()?;
-    let out_link = tmp.path().join("result");
-    let script = format!(
-        "MVM_WORKSPACE_PATH={} nix build --extra-experimental-features 'nix-command flakes' --impure --out-link {} {}",
-        shell_quote(&workspace_root.display().to_string()),
-        shell_quote(&out_link.display().to_string()),
-        shell_quote(&flake_ref),
-    );
-
-    if let Err(e) = env.shell_exec_capture(&script) {
-        return Err(InitramfsBuildError::NixBuildFailed {
-            reason: format!("nix build failed: {e}"),
-        });
-    }
-
-    install_initramfs_into_cache(&out_link, cache_root, version, arch)
-}
-
-/// Quote a string for safe interpolation into a single-quoted POSIX shell word.
-#[cfg(target_os = "linux")]
-fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str(r"'\''");
-        } else {
-            out.push(c);
+    let workspace = crate::guest_agent_build::detect_source_workspace().ok_or_else(|| {
+        InitramfsBuildError::CargoBuildFailed {
+            reason: "no source checkout detected to build the guest agent from".into(),
         }
-    }
-    out.push('\'');
-    out
+    })?;
+    let cache_key = crate::guest_agent_build::source_cache_key(&workspace).map_err(|e| {
+        InitramfsBuildError::CargoBuildFailed {
+            reason: format!("fingerprint guest sources: {e}"),
+        }
+    })?;
+    let binaries = crate::guest_agent_build::resolve_or_build_guest_binaries(
+        cache_root, &cache_key, arch, &workspace,
+    )
+    .map_err(|e| InitramfsBuildError::CargoBuildFailed {
+        reason: format!("build the static guest agent: {e}"),
+    })?;
+    let agent_bytes = std::fs::read(&binaries.agent)?;
+
+    let staging = tempfile::tempdir()?;
+    assemble_initramfs_artifact(&agent_bytes, version, staging.path())?;
+    install_initramfs_into_cache(staging.path(), cache_root, version, arch)
 }
 
-#[cfg(target_os = "linux")]
-fn nix_system_for_arch(arch: GuestArch) -> &'static str {
-    match arch {
-        GuestArch::Aarch64 => "aarch64-linux",
-        GuestArch::X86_64 => "x86_64-linux",
-    }
+/// Write the four artifact files (image + sidecars) for `agent_bytes` into
+/// Write the four artifact files (image + sidecars) for `agent_bytes` into
+/// `out_dir`: the deterministic image, `initramfs.hash` = SHA-256 of the
+/// UNCOMPRESSED cpio, `initramfs.size` = the compressed byte length, and
+/// `VERSION` — the same contract the publish-path build emits. `pub` as
+/// the deterministic-assembly contract surface (the conformance suite
+/// drives it hermetically).
+pub fn assemble_initramfs_artifact(
+    agent_bytes: &[u8],
+    version: &str,
+    out_dir: &Path,
+) -> Result<(), InitramfsBuildError> {
+    let cpio = initramfs_cpio(agent_bytes);
+    let image = gzip_deterministic(&cpio)?;
+    std::fs::create_dir_all(out_dir)?;
+    std::fs::write(
+        out_dir.join(mvm_fs::initramfs::INITRAMFS_IMAGE_FILE),
+        &image,
+    )?;
+    std::fs::write(
+        out_dir.join(mvm_fs::initramfs::INITRAMFS_HASH_FILE),
+        format!("{}\n", sha256_hex(&cpio)),
+    )?;
+    std::fs::write(
+        out_dir.join(mvm_fs::initramfs::INITRAMFS_SIZE_FILE),
+        format!("{}\n", image.len()),
+    )?;
+    std::fs::write(
+        out_dir.join(mvm_fs::initramfs::VERSION_FILE),
+        format!("{version}\n"),
+    )?;
+    Ok(())
+}
+
+/// The deterministic cpio payload: exactly `.` and `./init` (the static
+/// agent, mode 0755), epoch-zero metadata in a stable order — the Rust
+/// equivalent of `find . | sort | cpio -o -H newc --owner=0:0` with all
+/// timestamps touched to the epoch. No `/dev` nodes: PID 1 mounts
+/// devtmpfs itself, so the kernel creates the device nodes. `pub` as the
+/// determinism contract surface (the conformance suite builds it twice
+/// and compares bytes).
+pub fn initramfs_cpio(agent_bytes: &[u8]) -> Vec<u8> {
+    crate::rootfs_inject::build_newc_cpio(&[
+        crate::rootfs_inject::CpioEntry::dir("."),
+        crate::rootfs_inject::CpioEntry::file("./init", 0o755, agent_bytes.to_vec()),
+    ])
+}
+
+/// Gzip at the maximum level with no name/timestamp header — the
+/// deterministic counterpart of `gzip -n -9` (the flate2 encoder writes a
+/// zero mtime and no original filename by default).
+fn gzip_deterministic(data: &[u8]) -> Result<Vec<u8>, InitramfsBuildError> {
+    use std::io::Write as _;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    enc.write_all(data)?;
+    Ok(enc.finish()?)
+}
+
+/// Lowercase-hex SHA-256 of `data`.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(data))
 }
 
 /// Install a prebuilt initramfs directory into the cache atomically.
@@ -705,7 +746,10 @@ mod tests {
     /// to prove absent, and hung for hours once it genuinely could not.
     #[test]
     fn resolve_returns_missing_when_cache_empty() {
-        let dir = tempfile::tempdir().unwrap();
+        // Isolate the whole mvm world so the seed-from-default-cache step
+        // cannot find the developer's real cache — the assertion is that a
+        // truly cold cache errors, which only holds when the default cache
+        // is cold too.
         // HOME has to move with the cache root: a miss is seeded from
         // `$HOME/.mvm/cache`, so without this the assertion holds only on a
         // machine that has never built an initramfs — which CI is and a
@@ -718,8 +762,13 @@ mod tests {
         // test ran for 20,000+ seconds in CI and took the job to its six-hour
         // limit. Isolating HOME is what made it reachable — before that the test
         // passed on Linux by finding an artifact it was supposed to prove absent.
+        //
+        // One lock, taken once: `ENV_TEST_LOCK` is a plain `std::sync::Mutex`
+        // and is not reentrant, so acquiring it twice on this thread deadlocks
+        // the test rather than failing it.
         let _lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(dir.path());
         let cache = dir.path().join("cache");
         let err = resolve_or_seed_from_default_cache(&cache, "0.18.0", GuestArch::Aarch64)
@@ -913,6 +962,177 @@ mod tests {
         header.set_size(u64::try_from(bytes.len()).unwrap());
         header.set_cksum();
         tar.append_data(&mut header, path, bytes).unwrap();
+    }
+
+    // --- deterministic cargo artifact assembly ---
+
+    /// Parse the entry names of a newc archive, stopping at the trailer.
+    /// Test-only: the layout assertions need the exact entry sequence.
+    fn newc_names(cpio: &[u8]) -> Vec<String> {
+        fn hex8(cpio: &[u8], off: usize) -> usize {
+            usize::from_str_radix(std::str::from_utf8(&cpio[off..off + 8]).unwrap(), 16).unwrap()
+        }
+        let mut names = Vec::new();
+        let mut off = 0;
+        loop {
+            assert_eq!(&cpio[off..off + 6], b"070701", "bad magic at {off}");
+            let filesize = hex8(cpio, off + 54);
+            let namesize = hex8(cpio, off + 94);
+            let name =
+                String::from_utf8(cpio[off + 110..off + 110 + namesize - 1].to_vec()).unwrap();
+            let done = name == "TRAILER!!!";
+            names.push(name);
+            off = (off + 110 + namesize).div_ceil(4) * 4;
+            off = (off + filesize).div_ceil(4) * 4;
+            if done {
+                return names;
+            }
+        }
+    }
+
+    /// Assert every record in the archive carries epoch-zero mtime and
+    /// zero uid/gid — the metadata side of the determinism guarantee.
+    fn assert_epoch_zero_metadata(cpio: &[u8]) {
+        let mut off = 0;
+        loop {
+            // uid + gid are zero (root-owned), and mtime is the epoch.
+            assert_eq!(&cpio[off + 22..off + 38], b"0000000000000000".as_slice());
+            assert_eq!(&cpio[off + 46..off + 54], b"00000000".as_slice());
+            let filesize =
+                usize::from_str_radix(std::str::from_utf8(&cpio[off + 54..off + 62]).unwrap(), 16)
+                    .unwrap();
+            let namesize =
+                usize::from_str_radix(std::str::from_utf8(&cpio[off + 94..off + 102]).unwrap(), 16)
+                    .unwrap();
+            let done = &cpio[off + 110..off + 110 + 9] == b"TRAILER!!";
+            off = (off + 110 + namesize).div_ceil(4) * 4;
+            off = (off + filesize).div_ceil(4) * 4;
+            if done {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn initramfs_cpio_is_byte_deterministic_across_builds() {
+        let a = initramfs_cpio(b"agent-bytes");
+        let b = initramfs_cpio(b"agent-bytes");
+        assert_eq!(a, b, "same agent bytes must produce the same cpio");
+        assert_eq!(sha256_hex(&a), sha256_hex(&b));
+        assert_epoch_zero_metadata(&a);
+
+        let gz_a = gzip_deterministic(&a).unwrap();
+        let gz_b = gzip_deterministic(&a).unwrap();
+        assert_eq!(gz_a, gz_b, "the gzip stream must be deterministic too");
+    }
+
+    #[test]
+    fn initramfs_cpio_layout_is_dot_and_init_only() {
+        let cpio = initramfs_cpio(b"agent-bytes");
+        assert_eq!(
+            newc_names(&cpio),
+            vec![
+                ".".to_string(),
+                "./init".to_string(),
+                "TRAILER!!!".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn assemble_writes_the_full_sidecar_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        assemble_initramfs_artifact(b"agent-bytes", "0.18.0", dir.path()).unwrap();
+
+        let image = std::fs::read(dir.path().join("initramfs.cpio.gz")).unwrap();
+        let hash = std::fs::read_to_string(dir.path().join("initramfs.hash")).unwrap();
+        let size = std::fs::read_to_string(dir.path().join("initramfs.size")).unwrap();
+        let version = std::fs::read_to_string(dir.path().join("VERSION")).unwrap();
+
+        // The hash covers the UNCOMPRESSED cpio; the size covers the
+        // compressed file — the resolver's two sidecars describe
+        // different bytes.
+        let mut uncompressed = Vec::new();
+        std::io::Read::read_to_end(
+            &mut flate2::read::GzDecoder::new(image.as_slice()),
+            &mut uncompressed,
+        )
+        .unwrap();
+        assert_eq!(uncompressed, initramfs_cpio(b"agent-bytes"));
+        assert_eq!(hash.trim(), sha256_hex(&uncompressed));
+        assert_eq!(size.trim().parse::<usize>().unwrap(), image.len());
+        assert_eq!(version.trim(), "0.18.0");
+    }
+
+    #[test]
+    fn cold_build_output_installs_and_resolves_through_the_resolver() {
+        // The hermetic cold-cache path: assemble with stand-in agent bytes,
+        // install, and resolve — the same pipeline the cargo build runs
+        // after the (separately cached and tested) agent cross-compile.
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let cache_root = tmp.path().join("cache");
+        assemble_initramfs_artifact(b"fake-agent", "0.18.0", &source).unwrap();
+
+        let artifact =
+            install_initramfs_into_cache(&source, &cache_root, "0.18.0", GuestArch::Aarch64)
+                .unwrap();
+        let resolved = InitramfsResolver::new(&cache_root, "0.18.0")
+            .resolve(&GuestArch::Aarch64.to_string())
+            .unwrap();
+        assert_eq!(resolved.image_path, artifact.image_path);
+    }
+
+    /// Shell double that fails loudly if the warm-cache resolve below ever
+    /// reaches for the shell — the point of that test is that a warm cache
+    /// resolves without one. A silent no-op double is what let the old
+    /// empty-cache resolve test fall into a real build and hang, so an empty
+    /// cache is exercised through `resolve_or_seed_from_default_cache`
+    /// instead of this path.
+    struct PanicShell;
+
+    impl ShellEnvironment for PanicShell {
+        fn shell_exec(&self, _script: &str) -> anyhow::Result<()> {
+            panic!("a warm-cache resolve must not run shell commands")
+        }
+
+        fn shell_exec_stdout(&self, _script: &str) -> anyhow::Result<String> {
+            panic!("a warm-cache resolve must not run shell commands")
+        }
+
+        fn shell_exec_visible(&self, _script: &str) -> anyhow::Result<()> {
+            panic!("a warm-cache resolve must not run shell commands")
+        }
+
+        fn log_info(&self, _msg: &str) {}
+
+        fn log_success(&self, _msg: &str) {}
+    }
+
+    #[test]
+    fn warm_cache_resolve_skips_any_build_or_download() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let cache_root = tmp.path().join("cache");
+        assemble_initramfs_artifact(b"fake-agent", "0.18.0", &source).unwrap();
+        install_initramfs_into_cache(&source, &cache_root, "0.18.0", GuestArch::Aarch64).unwrap();
+
+        // A warm cache resolves without touching the shell environment
+        // (PanicShell proves it) and without network.
+        let artifact = resolve_or_build_local_initramfs(
+            &PanicShell,
+            &cache_root,
+            "0.18.0",
+            GuestArch::Aarch64,
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.image_path,
+            cache_root
+                .join("0.18.0")
+                .join(GuestArch::Aarch64.to_string())
+                .join("initramfs.cpio.gz")
+        );
     }
 
     #[test]

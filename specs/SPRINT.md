@@ -10,6 +10,47 @@
 
 ## Current issue delivery
 
+- [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
+      basename deny-list over the whole workspace root to an allow-list of the
+      top-level entries cargo can actually read. The filtered tree is `mvmSrc`,
+      so every surviving file was a cache key for every guest binary — a
+      Markdown edit, which the contribution rules require on essentially every
+      change, forced a full guest-agent rebuild. 416 of 1872 files (22%) stop
+      being cache keys, including all 111 spec files and 167 doc-site pages.
+      The soundness binding inverts with the list (the fingerprint's walked
+      entries must now be a *superset* of the filter's, not a subset), so both
+      directions are enforced by tests that parse the specific named nix list;
+      both were planted against and recorded in `specs/VERIFICATION.md`.
+
+- [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
+      <rev>/` is served on a hit if `rootfs.ext4` merely exists as a file: no
+      digest, no signature, so content substitution is undetected, and the
+      provenance recorder then signs whatever bytes are on disk. The audit log
+      faithfully records a substituted image as legitimate. Plan 276 is written
+      and Proposed; this moves WS6 into the sprint. Prerequisite for plan 279
+      WS1 so the new cache key and the new verification do not land together.
+
+- [ ] Build action identity + artifact manifest — **plan 279**
+      (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).
+      Sourced from `specs/research/deterministic-attestable-builds-and-lean4.md`.
+      Wrap Nix rather than replace it: the CAS, the SLSA-shaped pack manifest,
+      the deterministic ext4 writer and the signing chain already exist; what is
+      missing is a typed action identity and a tree manifest that can see a
+      permission bit.
+
+- [x] Transcript evidence is now authenticated as one ordered ciphertext
+      evidence set before decryption. Version-2 manifests carry an RFC-6962
+      Merkle root over capture bindings, bounds, wrapped-key metadata, and
+      ordered ciphertext chunk records; the gateway persists the sealed
+      manifest atomically before emitting a chain-signed
+      `gateway.transcript_sealed` entry. Export requires exactly one matching
+      tenant audit-chain anchor before KEK unwrap and fails closed for legacy
+      version-1 manifests or any root, binding, chunk, or chain drift. The real
+      `mvmctl trust audit transcript export` path is covered by success and
+      tamper-refusal scenarios; 8,403 workspace tests, doctests, clippy/model
+      gates, and all 76 BDD scenarios pass. Tracked in
+      `specs/plans/280-transcript-root-audit-binding.md`.
+
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added
       `xtask` gates for R1 (`check-conformance`), R2 (`check-honesty`), and R4
@@ -193,6 +234,34 @@
       from `ci:fuzz` — which matched the job key and stayed green through
       all ten dead nightlies — to the three fuzz targets it actually names.
 
+- [x] A claim-bearing CI lane can stop backing its claim two ways, and only
+      one was watched. #1970 reports a *red* Security lane, but it triggers on
+      `workflow_run: completed`, so it fires only when Security finishes —
+      when the schedule itself stops firing, nothing completes, nothing
+      reports, and silence reads as health. That is not hypothetical: Security
+      ran nightly to 2026-06-16 and not again until 2026-07-21. Five weeks in
+      which sixteen claims kept green ledger entries with no evidence behind
+      them, and no watcher could have said so.
+
+      `xtask check-claim-witness-freshness` covers absence, on its own
+      schedule rather than on `workflow_run`, because the whole point is to
+      notice a lane that never ran. It maps each `ci:` witness onto the
+      workflow anchoring it (reusing #1980's resolver, lifted into
+      `claims_ledger` so one implementation serves both gates), derives the
+      allowance from the cron, and fails when the newest run is older than
+      three missed firings. It deliberately does *not* re-check conclusions —
+      that is #1970's job, and two gates on one property would eventually
+      disagree. Lanes with no daily-or-better cron are reported as notes, not
+      judged: a pull-request lane is legitimately idle. Falsified by making
+      Security's cron hourly, which reported it 14h stale and named all eight
+      claims it backs.
+
+      Bundled: `ci-full.yml` now `cargo check`s the cargo-fuzz crates. They
+      are workspace-excluded, so no lane compiled them and the nightly aborts
+      on its first failure — which is how a syntactically invalid harness
+      survived eleven days. Run against main the step rediscovered both real
+      defects in seconds.
+
 - [ ] Witness rigor (`specs/plans/274-witness-rigor.md`). **WS1 shipped
       (#1940):** 13 of 17 `#[repr(C)]` types carried no compile-time layout
       contract and the other four asserted size only, so nothing was protected
@@ -318,10 +387,19 @@
       program alongside the tier filter; and the notify TOCTOU is harmless here
       because the authorization decision is made at the host endpoint from the
       SOCKS request, not from the address read out of guest memory. **W0 is
-      blocking**: reading the destination needs `ptrace_may_access` to pass
-      against a workload the guest currently sets `PR_SET_DUMPABLE = 0` on, and
-      the choice between a co-uid supervisor and relaxing `DUMPABLE` is an
-      explicit hardening decision that must be settled before any code lands.
+      measured and it refuted the plan's own framing.** A four-case matrix on
+      Linux 6.8.0 (`ptrace_scope=1`, supervisor as parent, both read routes
+      probed) shows the two candidate resolutions are a conjunction, not a
+      choice: same-uid alone is denied under `DUMPABLE=0`, and `DUMPABLE=1`
+      alone is denied across a uid boundary. Exactly one configuration reads.
+      Separately, a privilege drop leaves the process at `dumpable = 2`
+      (`SUID_DUMP_ROOT`), so "relax `DUMPABLE`" means *affirmatively raising* it
+      after the drop in the launch path, not deleting a `prctl` in
+      `hardening.rs`. `CAP_SYS_PTRACE` was considered and rejected against the
+      emptied bounding set. One maintainer decision remains — accept the
+      surviving design (workload `/proc/<pid>/mem` readable at its own uid, for
+      a feature that is explicitly not a security control) or close the plan.
+      W1–W3 stay frozen until it lands.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.
@@ -941,6 +1019,62 @@ status line and discards the body, so a wget user still needs the host log
 (`/tmp/mvm-substitution-endpoint-<vm>.log`). Surfacing a failed run's egress
 denials through `mvmctl` itself is the follow-up.
 
+### ICMP echo over vsock
+
+`ping` could not work in a NIC-less guest: no route, no raw socket, so busybox
+`ping` fails at `socket()` before a packet exists. The vsock egress path carries
+TCP streams (`host:port` + ack + splice) and DNS (its own frame marker), and had
+nothing for ICMP — not a misconfiguration, an absent transport.
+
+The host now echoes on the guest's behalf behind an `MVM_ICMP/1` frame on the
+shared egress stream, decided by the same claim-10 gate every other verb uses.
+`EgressGate::decide_icmp_request` admits a host the allow-list named on *any*
+port (ICMP has none), refuses one it did not, and keeps mandatory-deny above the
+allow-list so a pinned loopback address cannot turn ping into a probe of the
+host's own networks. The socket is the unprivileged `SOCK_DGRAM`/`IPPROTO_ICMP`
+ping socket, never `SOCK_RAW`: raw would need `CAP_NET_RAW` and would let this
+code read every ICMP packet on the host.
+
+Delivery is a **bind mount, not an image edit**. `mvm-ping` ships in the runtime
+overlay and is mounted over the image's own `/bin/ping`, so the rootfs keeps
+exactly the bytes the registry served (which is what the recorded OCI provenance
+refers to), `/proc/mounts` records the substitution, and an absolute-path caller
+still reaches the working tool. An earlier attempt copied over the image
+instead; the mount is both more honest and materially smaller — `ping` leaves the
+four OCI-injection lists entirely and lives only in the overlay.
+
+Two findings the tests could not have produced:
+
+- **Batched round trips measure the reader's buffer, not the network.** The
+  first working run reported `seq=0 36.6ms, seq=1 0.1ms, seq=2 0.0ms`: later
+  reply lines were already in memory. Each echo is now its own request, the way
+  `ping` times each packet.
+- **The audit emitted nothing while compiling cleanly.** `EventCategory::Flow`
+  is mandatorily plan-bound and the per-VM egress endpoint holds no
+  `ExecutionPlan`, so every entry was dropped with a warning only the endpoint's
+  own log carried. ICMP now has its own category, as DNS does and for the same
+  reason.
+
+Live on macOS 26.5.2 / arm64 / HVF, `--allow-host google.com` with
+`/bin/ping -c 2 google.com`:
+
+```
+PING google.com (56 bytes) via host
+56 bytes from 142.251.218.174: seq=0 time=13.8 ms (host leg 8.9 ms)
+2 sent, 2 received, 0% packet loss
+```
+
+with `icmp.admitted` in the chain-signed log carrying host, pinned IP and count.
+An unadmitted host answers `example.com is not admitted; allowed: google.com`.
+
+**Blocking, and not caused by this work:** once `~/.mvm/cache/initramfs/` is
+seeded, boots take the universal-initramfs path and fail with `send
+ActivateEnvironment to guest: Failed to read frame length`. Setting that cache
+aside restores working boots, which isolates it: the universal-initramfs boot is
+broken independently of ICMP, and anyone who seeds that cache gets a dead guest.
+This is the other half of the legacy-cmdline story — the legacy path now works,
+and the path meant to replace it does not.
+
 ### The universal-initramfs cache could not see source fixes
 
 A boot that attached the universal initramfs died at its first RPC with
@@ -980,7 +1114,6 @@ contract is the one the name claims, and completes in milliseconds.
 That a shell double reporting success can make the nix path hang rather than
 error is worth closing separately: a build producing no artifact should fail,
 not wait.
-
 HVF real rootfs bring-up remains the long pole tracked in Plan 255/265/214; Plan 270 designs for HVF but does not duplicate that work. Plan 268 (`specs/plans/268-backend-shim-removal.md`) stays a separate future workstream and is not absorbed here.
 
 ### Deferred: a dry run should not require a bootable backend

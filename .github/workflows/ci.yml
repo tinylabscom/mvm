@@ -1,13 +1,13 @@
 name: CI
 
 on:
-  # Keep pull-request validation cheap and predictable. This workflow is
-  # intentionally capped at four runner jobs:
-  # lint, test, MCP smoke, and Nix eval. Expensive platform, live-VM,
-  # OCI ratification, security, Windows, and release artifact jobs live
-  # in release/manual workflows.
+  # Keep pull-request validation cheap and predictable. On a pull request this
+  # workflow runs two jobs: lint and test. MCP smoke and Nix eval run only in
+  # the merge queue and on manual dispatch, so ordinary PR updates do not pay
+  # for them on every push. Expensive platform, live-VM, OCI ratification,
+  # security, Windows, and release artifact jobs live in release/manual workflows.
   pull_request:
-  # Required for the merge queue: checks must run against the merge_group event.
+  # Required for the merge queue: all checks must run against the merge_group event.
   merge_group:
   workflow_dispatch:
 
@@ -189,6 +189,47 @@ jobs:
       # This resolves those paths here, where the rename happens.
       - name: workflow paths and fuzz targets still exist
         run: cargo run -p xtask -- check-workflow-paths
+
+      # The cargo-fuzz crates are workspace-excluded (libfuzzer-sys needs
+      # cargo-fuzz's linker flags), so clippy and every other lane skip them.
+      # Nothing compiles these files until the nightly runs them, and that
+      # lane aborts on its first failure — one broken target hides every
+      # target after it, which is how a syntactically invalid harness
+      # survived eleven days.
+      #
+      # Only PRs that touch a fuzz crate pay for this: the per-crate dep
+      # trees do not share artifacts with the workspace build above, and
+      # this lane is deliberately capped. A crate rename — the change that
+      # actually broke them — touches these paths, so it is still covered.
+      - name: Detect fuzz-crate changes
+        id: fuzz_changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_SHA:-}" ]; then
+            # merge_group / dispatch: no PR base to diff against, so check.
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" >/dev/null 2>&1 || true
+          if git diff --name-only "$BASE_SHA"...HEAD 2>/dev/null | grep -qE '(^|/)fuzz[^/]*/'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: cargo-fuzz crates still compile
+        if: steps.fuzz_changed.outputs.changed == 'true'
+        run: |
+          set -uo pipefail
+          fail=0
+          for manifest in crates/*/fuzz*/Cargo.toml crates/deps/*/fuzz*/Cargo.toml; do
+            [ -f "$manifest" ] || continue
+            echo "::group::$manifest"
+            cargo check --manifest-path "$manifest" --all-targets || fail=1
+            echo "::endgroup::"
+          done
+          exit "$fail"
 
       - name: mvm-guest agent closure is runtime-free
         run: cargo run -p xtask -- check-guest-agent-runtime-free
@@ -433,6 +474,8 @@ jobs:
 
   mcp-server-smoke:
     name: MCP server stdio roundtrip
+    # Not needed on every PR push; the merge queue exercises it once before merge.
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -462,6 +505,9 @@ jobs:
 
   nix-flake-check:
     name: Nix flake check (Linux eval)
+    # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
+    # not on every PR update.
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

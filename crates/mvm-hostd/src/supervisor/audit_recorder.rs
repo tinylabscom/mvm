@@ -88,6 +88,14 @@ pub enum EventCategory {
     Audit,
     /// Policy-gated DNS decisions. `dns.<verdict>`.
     Dns,
+    /// Policy-gated ICMP echo decisions. `icmp.<verdict>`.
+    ///
+    /// Its own category rather than `flow` for the same reason `dns` is: both
+    /// are verbs the host performs on a guest's behalf from the per-VM egress
+    /// endpoint, which holds no `ExecutionPlan`, and `flow` is mandatorily
+    /// plan-bound. Recording echo under `flow` would mean either threading a
+    /// plan into that process or silently dropping every entry.
+    Icmp,
     /// Workload-emitted audit entries via `host.audit.v1`. Distinct
     /// from system-emitted categories so the chain verifier can
     /// compute workload-asserted
@@ -112,6 +120,7 @@ impl EventCategory {
             Self::Host => "host",
             Self::Audit => "audit",
             Self::Dns => "dns",
+            Self::Icmp => "icmp",
             Self::WorkloadAudit => "workload_audit",
         }
     }
@@ -273,6 +282,7 @@ impl Recorder {
             EventCategory::Host => &m.audit_host_total,
             EventCategory::Audit => &m.audit_audit_total,
             EventCategory::Dns => &m.audit_dns_total,
+            EventCategory::Icmp => &m.audit_icmp_total,
             EventCategory::WorkloadAudit => &m.audit_workload_audit_total,
         };
         counter.fetch_add(1, Ordering::Relaxed);

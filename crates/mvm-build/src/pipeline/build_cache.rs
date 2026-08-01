@@ -26,12 +26,27 @@
 //!
 //! `buildRustPackage { src = mvmSrc; }` derives its output path from the
 //! *whole* filtered source NAR, so the nix revision changes on **any**
-//! included-file change. The fingerprint therefore hashes the entire
-//! workspace tree with the same basename excludes as
-//! `workspace-filter.nix`. Hashing a *superset* of nix's inputs is always
-//! sound (we bust the cache at least as often as nix would); the only
-//! unsound move is excluding a basename nix includes, so `EXCLUDED_BASENAMES`
-//! must stay a subset of the nix filter's excludes.
+//! included-file change. The fingerprint therefore has to cover everything
+//! that filter admits.
+//!
+//! The safe direction is one-way: hashing a *superset* of nix's inputs only
+//! costs a redundant rebuild, while hashing too few serves a stale image. Two
+//! bindings keep us on the safe side of that line, and they point in opposite
+//! directions because the nix filter admits by top-level entry and prunes by
+//! basename:
+//!
+//!   - [`INCLUDED_TOP_LEVEL`] must be a **superset** of the filter's
+//!     `includedTopLevel` — a top-level dir nix feeds into the build that we
+//!     skip would go unhashed.
+//!   - [`EXCLUDED_BASENAMES`] must be a **subset** of the filter's
+//!     `excludedBasenames` — a basename we prune that nix keeps would likewise
+//!     go unhashed.
+//!
+//! Both are enforced against the real `workspace-filter.nix` by tests below.
+//!
+//! The top-level allow-list only applies to the mvm workspace, which is the
+//! tree that filter governs. A user flake is an arbitrary project directory
+//! that nix ingests whole, so it keeps the conservative deny-list-only walk.
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +54,43 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::BuildMode;
+
+/// Which tree a walk is covering. The mvm workspace is the one
+/// `nix/lib/workspace-filter.nix` governs, so only that walk applies the
+/// top-level allow-list; a user flake is an arbitrary project directory nix
+/// ingests whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeScope {
+    /// An arbitrary user project directory. Walk everything, minus
+    /// [`EXCLUDED_BASENAMES`].
+    UserFlake,
+    /// The mvm workspace root. Walk only [`INCLUDED_TOP_LEVEL`].
+    MvmWorkspace,
+}
+
+/// Top-level workspace entries the fingerprint walks.
+///
+/// Bound to `includedTopLevel` in `nix/lib/workspace-filter.nix`: this list
+/// MUST stay a **superset** of that one. Admitting more than nix does is
+/// merely conservative (we hash files nix drops and occasionally rebuild when
+/// nix would have cached); admitting fewer is unsound — we would skip a tree
+/// nix feeds into the build and serve a stale image.
+///
+/// Everything outside this set — docs, the site, language SDK surfaces, BDD
+/// features, examples, scripts — cannot reach a compiled target, so editing it
+/// no longer busts the build cache.
+const INCLUDED_TOP_LEVEL: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "build.rs",
+    "src",
+    "crates",
+    "xtask",
+    "tests",
+    "schema",
+    "nix",
+];
 
 /// Directory basenames excluded from the source fingerprint.
 ///
@@ -98,7 +150,7 @@ pub fn workload_build_fingerprint(
     fold_field(
         &mut hasher,
         "user-flake-tree",
-        hash_source_tree(user_flake)
+        hash_source_tree(user_flake, TreeScope::UserFlake)
             .with_context(|| format!("hashing user flake at {}", user_flake.display()))?
             .as_bytes(),
     );
@@ -106,7 +158,7 @@ pub fn workload_build_fingerprint(
     // The workspace covers both `path:/work/nix` and `path:$MVM_SRC`
     // (nix/ is a subtree of the workspace root).
     let workspace_digest = match mvm_workspace {
-        Some(ws) => hash_source_tree(ws)
+        Some(ws) => hash_source_tree(ws, TreeScope::MvmWorkspace)
             .with_context(|| format!("hashing mvm workspace at {}", ws.display()))?,
         None => "no-workspace".to_string(),
     };
@@ -207,8 +259,8 @@ fn fold_field(hasher: &mut Sha256, tag: &str, value: &[u8]) {
 /// `<relpath>\0<len>\0<bytes>` so a rename, a resize, or a content edit
 /// all move the digest. A missing `root` is an error — the caller decides
 /// what a missing input means (it never silently hashes to empty).
-fn hash_source_tree(root: &Path) -> Result<String> {
-    let files = walk_source_files_sorted(root)
+fn hash_source_tree(root: &Path, scope: TreeScope) -> Result<String> {
+    let files = walk_source_files_sorted(root, scope)
         .with_context(|| format!("walking source tree {}", root.display()))?;
     let mut hasher = Sha256::new();
     for path in &files {
@@ -231,9 +283,38 @@ fn hash_source_tree(root: &Path) -> Result<String> {
 /// any directory or file whose basename is in [`EXCLUDED_BASENAMES`].
 /// Sorted output makes the walk order — and thus the fingerprint —
 /// independent of filesystem enumeration order.
-fn walk_source_files_sorted(root: &Path) -> Result<Vec<PathBuf>> {
+///
+/// Under [`TreeScope::MvmWorkspace`] the walk starts from
+/// [`INCLUDED_TOP_LEVEL`] rather than from `root`'s full listing, mirroring
+/// the nix filter's allow-list. An entry named there but absent on disk is
+/// skipped silently: the list is a superset of the filter's by construction,
+/// so a missing one means nix has nothing to ingest either.
+fn walk_source_files_sorted(root: &Path, scope: TreeScope) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    collect_files(root, &mut out)?;
+    match scope {
+        TreeScope::UserFlake => collect_files(root, &mut out)?,
+        TreeScope::MvmWorkspace => {
+            // Keep the "a missing root is an error, never a silent empty
+            // hash" contract: without this, an unreadable workspace would
+            // skip every allow-listed entry and fingerprint as empty.
+            anyhow::ensure!(
+                root.is_dir(),
+                "mvm workspace {} is not a readable directory",
+                root.display()
+            );
+            for entry in INCLUDED_TOP_LEVEL {
+                let path = root.join(entry);
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    collect_files(&path, &mut out)?;
+                } else if meta.is_file() {
+                    out.push(path);
+                }
+            }
+        }
+    }
     out.sort();
     Ok(out)
 }
@@ -360,28 +441,153 @@ mod tests {
         );
     }
 
-    #[test]
-    fn excluded_basenames_are_a_subset_of_the_nix_workspace_filter() {
-        // Soundness binding: excluding a basename that `workspace-filter.nix`
-        // includes would skip a file nix feeds into the build and serve a
-        // stale image. Read the nix filter and assert every basename we skip
-        // is one the filter also skips. (We may skip fewer — that's safe.)
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+    /// Read the workspace root above `crates/mvm-build`.
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|p| p.parent())
-            .expect("workspace root above crates/mvm-build");
-        let filter = workspace_root.join("nix/lib/workspace-filter.nix");
-        let body = std::fs::read_to_string(&filter)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", filter.display()));
-        for base in EXCLUDED_BASENAMES {
-            let quoted = format!("\"{base}\"");
+            .expect("workspace root above crates/mvm-build")
+            .to_path_buf()
+    }
+
+    /// Extract the quoted entries of a named Nix list (`<name> = [ ... ];`)
+    /// out of `workspace-filter.nix`. Both bindings live in the same file, so
+    /// a whole-file substring search would let an entry in one list satisfy a
+    /// claim about the other.
+    fn nix_filter_list(name: &str) -> Vec<String> {
+        let path = workspace_root().join("nix/lib/workspace-filter.nix");
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let start = body
+            .find(&format!("{name} = ["))
+            .unwrap_or_else(|| panic!("{name} list not found in {}", path.display()));
+        let rest = &body[start..];
+        let end = rest
+            .find(']')
+            .unwrap_or_else(|| panic!("{name} list is unterminated in {}", path.display()));
+        rest[..end]
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn included_top_level_is_a_superset_of_the_nix_filter_allowlist() {
+        // Soundness binding, allow-list direction: a top-level entry nix feeds
+        // into the build that we do NOT walk goes unhashed, so a change to it
+        // would serve a stale image. We may walk more than nix admits — that
+        // only costs a redundant rebuild.
+        let nix_included = nix_filter_list("includedTopLevel");
+        assert!(
+            !nix_included.is_empty(),
+            "parsed an empty includedTopLevel — the parser or the nix file drifted"
+        );
+        for entry in &nix_included {
             assert!(
-                body.contains(&quoted),
+                INCLUDED_TOP_LEVEL.contains(&entry.as_str()),
+                "workspace-filter.nix admits top-level {entry:?}, which INCLUDED_TOP_LEVEL does \
+                 not walk — that is unsound (nix would feed it into the build but the \
+                 fingerprint would not see it change). Add it here or drop it from the filter."
+            );
+        }
+    }
+
+    #[test]
+    fn excluded_basenames_are_a_subset_of_the_nix_workspace_filter() {
+        // Soundness binding, deny-list direction: pruning a basename that
+        // `workspace-filter.nix` keeps would skip a file nix feeds into the
+        // build. We may prune fewer — that's safe.
+        let nix_excluded = nix_filter_list("excludedBasenames");
+        assert!(
+            !nix_excluded.is_empty(),
+            "parsed an empty excludedBasenames — the parser or the nix file drifted"
+        );
+        for base in EXCLUDED_BASENAMES {
+            assert!(
+                nix_excluded.iter().any(|e| e == base),
                 "EXCLUDED_BASENAMES contains {base:?}, which workspace-filter.nix does not \
                  exclude — that is unsound (nix would feed it into the build). Remove it here \
                  or add it to the nix filter."
             );
         }
+    }
+
+    #[test]
+    fn documentation_only_workspace_change_does_not_move_the_fingerprint() {
+        // The point of the allow-list. Editing a spec, a doc page, an SDK
+        // surface, a BDD feature, or an example cannot reach a compiled
+        // target, so it must not invalidate the build cache.
+        let flake = tempfile::tempdir().unwrap();
+        write(flake.path(), "flake.nix", "{}");
+        let ws = tempfile::tempdir().unwrap();
+        write(ws.path(), "crates/mvm-agentd/src/lib.rs", "fn a() {}");
+        write(ws.path(), "specs/plans/1-thing.md", "before");
+
+        let before =
+            workload_build_fingerprint(flake.path(), None, BuildMode::Prod, Some(ws.path()))
+                .unwrap();
+        write(
+            ws.path(),
+            "specs/plans/1-thing.md",
+            "after — a whole new plan",
+        );
+        write(ws.path(), "public/docs/guide.md", "new page");
+        write(ws.path(), "sdks/python/README.md", "docs");
+        write(ws.path(), "features/s9_kernel_pin.feature", "Scenario: x");
+        write(ws.path(), "examples/python/hello/app.py", "print(1)");
+        let after =
+            workload_build_fingerprint(flake.path(), None, BuildMode::Prod, Some(ws.path()))
+                .unwrap();
+        assert_eq!(
+            before, after,
+            "a documentation-only workspace change must not bust the build cache"
+        );
+    }
+
+    #[test]
+    fn every_walked_top_level_entry_still_moves_the_fingerprint() {
+        // The converse guard: each allow-listed entry must actually be walked.
+        // A typo in INCLUDED_TOP_LEVEL would silently stop hashing a real
+        // input, which is the stale-image failure mode.
+        let flake = tempfile::tempdir().unwrap();
+        write(flake.path(), "flake.nix", "{}");
+
+        for entry in INCLUDED_TOP_LEVEL {
+            let ws = tempfile::tempdir().unwrap();
+            write(ws.path(), "crates/anchor/src/lib.rs", "fn anchor() {}");
+            let rel = if entry.ends_with(".toml") || entry.ends_with(".rs") {
+                (*entry).to_string()
+            } else {
+                format!("{entry}/probe.txt")
+            };
+            write(ws.path(), &rel, "before");
+            let before =
+                workload_build_fingerprint(flake.path(), None, BuildMode::Prod, Some(ws.path()))
+                    .unwrap();
+            write(ws.path(), &rel, "after");
+            let after =
+                workload_build_fingerprint(flake.path(), None, BuildMode::Prod, Some(ws.path()))
+                    .unwrap();
+            assert_ne!(
+                before, after,
+                "a change under {entry:?} must move the fingerprint"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_workspace_is_an_error_not_an_empty_hash() {
+        // Regression guard for the allow-list walk: iterating a fixed entry
+        // list over a nonexistent root must not silently produce the
+        // "everything absent" digest.
+        let flake = tempfile::tempdir().unwrap();
+        write(flake.path(), "flake.nix", "{}");
+        let missing = Path::new("/nonexistent/mvm-workspace-does-not-exist");
+        assert!(
+            workload_build_fingerprint(flake.path(), None, BuildMode::Prod, Some(missing)).is_err()
+        );
     }
 
     #[test]

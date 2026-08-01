@@ -15,7 +15,10 @@ natively.
 
 ## The universal initramfs
 
-The initramfs is built by `nix/images/initramfs/flake.nix`. It is a small,
+The initramfs is a deterministic **cargo artifact**: the pinned agent
+source is cross-compiled once (`cargo zigbuild` → musl, content-keyed
+cache) and packed as an epoch-zero, stably-ordered cpio — no Nix on the
+boot path. It is a small,
 deterministic cpio that contains exactly one file:
 
 - `/init` — the static `mvm-guest-agent` binary.

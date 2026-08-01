@@ -55,10 +55,14 @@ pub mod gateway_audit;
 // through a per-VM signer_task into the claim-8 chain, broadcasts
 // NDJSON to gateway_audit subscribers, and exposes a `FlowPolicy` hook
 // for SNI / L7 inspectors.
+pub mod egress_rate;
 pub mod gateway_bridge;
 #[cfg(feature = "custom-dns")]
 pub mod hickory_dns;
 pub mod http_forward;
+pub mod icmp_audit;
+pub mod icmp_echo;
+pub mod icmp_handler;
 pub mod injection_guard;
 pub mod inspector;
 pub mod instance_sampler;
@@ -125,7 +129,9 @@ pub use artifact::{
 };
 pub use audit::{AuditEntry, AuditError, AuditSigner, CapturingAuditSigner, NoopAuditSigner};
 pub use audit_dedup::{Decision, DedupKey, RetryStormSummary, RetryStormSuppressor};
-pub use audit_file::{FileAuditSigner, SignedEnvelope, VerifyError, verify_audit_chain};
+pub use audit_file::{
+    FileAuditSigner, SignedEnvelope, VerifyError, verify_audit_chain, verify_audit_chain_entries,
+};
 pub use audit_recorder::{
     EventCategory, Recorder, RecorderError, UNBOUND_IMAGE_NAME, UNBOUND_IMAGE_SHA256,
     UNBOUND_PLAN_ID,

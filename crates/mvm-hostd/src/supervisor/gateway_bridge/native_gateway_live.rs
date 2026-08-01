@@ -4,9 +4,7 @@
 //! both files a manageable size; every test here is opt-in (env-gated)
 //! and soft-skips when the gateway binary is absent.
 
-use tokio::sync::mpsc;
-
-use super::events::{FlowEvent, FlowEventKind};
+use super::events::{FlowEventKind, audit_event_channel};
 use super::native_gateway::{libkrun_reply_path, run_libkrun_native_gateway_bridge};
 use super::test_support::{unrestricted_flow_policy, wiring_with};
 
@@ -148,7 +146,7 @@ async fn native_gateway_dhcp_offer_roundtrips_through_bridge() {
     // Bridge: gateway-facing = the gateway's socket; libkrun-facing =
     // a listener the harness connects to.
     let sup_listen = tmp.path().join("sup.sock");
-    let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
+    let (tx, mut rx) = audit_event_channel(64);
     let policy = unrestricted_flow_policy();
     let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
         gw_sock.clone(),
@@ -204,6 +202,7 @@ async fn native_gateway_dhcp_offer_roundtrips_through_bridge() {
     // the real-gateway path).
     let mut saw_open = false;
     while let Ok(ev) = rx.try_recv() {
+        let ev = ev.into_flow().expect("bridge emits a flow event");
         if matches!(ev.kind, FlowEventKind::Opened) {
             saw_open = true;
         }

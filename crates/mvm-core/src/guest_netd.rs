@@ -22,6 +22,10 @@ pub const DEFAULT_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
 pub const DEFAULT_DNS_STUB_LISTEN: &str = "127.0.0.1:53";
 /// First-line marker selecting DNS on the shared host egress stream.
 pub const DNS_FRAME_LINE: &str = "MVM_DNS/1";
+/// First-line marker selecting ICMP echo on the shared host egress stream.
+/// A NIC-less guest cannot originate ICMP, so the host echoes for it; see
+/// [`mvm_core::icmp_wire`] for the request/reply contract.
+pub const ICMP_FRAME_LINE: &str = "MVM_ICMP/1";
 
 /// The host's connect-result acknowledgement on the raw-egress stream.
 ///

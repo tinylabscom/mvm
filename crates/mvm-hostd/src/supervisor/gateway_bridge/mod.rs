@@ -15,7 +15,7 @@
 //!   bridge binds an outer listener libkrun connects to, shuffles
 //!   datagrams both ways. SOCK_DGRAM preserves packet boundaries.
 //!
-//! Both feed one `mpsc::Sender<FlowEvent>` into a per-VM
+//! Both feed one ordered audit-event channel into a per-VM
 //! `signer_task` that is the **sole** caller of
 //! `AuditSigner::sign_and_emit` — combined with the
 //! `FileAuditSigner` flock precursor (commit 2), this guarantees
