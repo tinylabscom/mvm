@@ -100,8 +100,6 @@ pub(in crate::commands) enum Commands {
     /// Report whether a verified runtime pack is ready for instant launch
     #[command(display_order = 6)]
     Prepare(vm::prepare::Args),
-    /// List running VMs
-    Ls(vm::ps::Args),
     /// Explain a run after the fact from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),

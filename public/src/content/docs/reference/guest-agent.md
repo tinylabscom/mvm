@@ -135,7 +135,7 @@ payload bytes. The list is the authoritative one:
 - Receipts written by `mvmctl run` / `mvmctl machine run` / `mvmctl build`
   store hashes and metadata. Raw stdout / stderr /
   stdin / env / argv values are never written.
-- `mvmctl ls --json` rows — the `readiness` and
+- `mvmctl machine ls --json` rows — the `readiness` and
   `last_readiness_change_at` fields render directly from the
   registry; the registry only stores the closed enum + RFC 3339
   timestamps.
@@ -306,7 +306,7 @@ mvmctl machine logs my-vm
 mvmctl machine logs my-vm -f
 
 # List VMs and their status
-mvmctl ls
+mvmctl machine ls
 ```
 
 Health check results and probe output are included in the guest console logs.

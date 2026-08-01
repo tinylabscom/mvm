@@ -1532,27 +1532,27 @@ fn audit_verify_does_not_emit_local_audit_entry() {
 }
 
 #[test]
-fn top_level_ls_does_not_emit_audit_entry() {
-    // `mvmctl ls` reports running VMs. Pure read. Top-level
-    // `("ls", AuditPosture::ReadOnly)` row in `AUDIT_POSTURE`.
-    // Pinning the empty-sandbox case — output is "No running VMs."
-    // and the audit log stays empty.
+fn machine_ls_does_not_emit_audit_entry() {
+    // `mvmctl machine ls` is the one listing: persistent specs joined with
+    // live VMs. Pure read, `("ls", AuditPosture::ReadOnly)` under
+    // `MACHINE_SUB`. Pinning the empty-sandbox case — output is
+    // "no machines" and the audit log stays empty.
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .args(["ls"])
+        .args(["machine", "ls"])
         .output()
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl ls failed: stderr={}",
+        "mvmctl machine ls failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 
     let log = read_audit_log(&sandbox.audit_log_path());
     assert!(
         log.is_empty(),
-        "read-only `mvmctl ls` must not write to the LocalAudit \
+        "read-only `mvmctl machine ls` must not write to the LocalAudit \
          stream. Full log:\n{log}"
     );
 }

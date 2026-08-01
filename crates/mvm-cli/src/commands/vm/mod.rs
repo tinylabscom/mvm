@@ -24,7 +24,6 @@ pub(super) mod plan_persist;
 pub(super) mod policy_resolver;
 pub(in crate::commands) mod prepare;
 pub(super) mod proc;
-pub(super) mod ps;
 pub(super) mod readiness;
 pub(super) mod redaction_flags;
 pub(super) mod rekernel;

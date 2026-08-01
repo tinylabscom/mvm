@@ -18,7 +18,7 @@ mvmctl machine run --flake ./agent-sandbox --name agent-sandbox -d
 ## Inspect
 
 ```sh
-mvmctl ls
+mvmctl machine ls
 mvmctl boot-report agent-sandbox
 mvmctl machine logs agent-sandbox
 ```

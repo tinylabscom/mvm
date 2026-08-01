@@ -137,7 +137,6 @@ impl Commands {
     /// reserve that channel before reconcile-on-entry or other startup chrome.
     pub(super) fn emits_machine_readable_stdout(&self) -> bool {
         match self {
-            Commands::Ls(a) => a.json,
             Commands::Run(a) => a.json,
             Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
@@ -152,6 +151,7 @@ impl Commands {
                 // A `--json` restore reuses the fork path's structured output.
                 machine::MachineAction::Revert(a) | machine::MachineAction::Rewind(a) => a.json,
                 machine::MachineAction::Advance(a) => a.json,
+                machine::MachineAction::Ls(a) => a.json,
                 _ => false,
             },
             _ => false,
@@ -164,9 +164,6 @@ impl Commands {
     /// of caches, build/compile, config, …) skip it. `reconcile` itself
     /// is excluded — it *is* the convergence pass, run with its own opts.
     pub(super) fn touches_vm_state(&self) -> bool {
-        if let Commands::Ls(a) = self {
-            return a.touches_vm_state();
-        }
         // `machine <sub>` — named/persistent lifecycle commands touch
         // running-VM state. Unnamed foreground `machine run` is throwaway
         // cattle: running global convergence before it can auto-resume
@@ -181,6 +178,11 @@ impl Commands {
             }
             if let machine::MachineAction::Run(ref run) = a.action {
                 return machine_run_touches_vm_state(run);
+            }
+            // `machine ls --all` is the listing that must render registry-only
+            // stopped rows before any convergence pass can sweep them.
+            if let machine::MachineAction::Ls(ref list) = a.action {
+                return !list.all;
             }
             return true;
         }
@@ -204,7 +206,6 @@ impl Commands {
             Commands::Bootstrap(_) => "bootstrap",
             Commands::BuilderVmBootstrap(_) => "__builder-vm-bootstrap",
             Commands::BuilderEgressSupervisor(_) => "__builder-egress-supervisor",
-            Commands::Ls(_) => "ls",
             Commands::Explain(_) => "explain",
             Commands::Run(_) => "run",
             Commands::SdkNoVm(_) => "__sdk-no-vm",

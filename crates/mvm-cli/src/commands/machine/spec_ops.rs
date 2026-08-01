@@ -18,45 +18,6 @@ pub(super) fn create_machine(args: MachineCreateArgs) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn list_machines(args: MachineListArgs) -> Result<()> {
-    let specs = list_machine_specs()?;
-    if args.json {
-        let entries: Vec<MachineListEntry<'_>> = specs
-            .iter()
-            .map(|spec| MachineListEntry {
-                spec,
-                status: machine_status_label(&spec.name),
-                build_mode: runtime::resolve_machine_build_mode(
-                    spec.manifest.as_deref(),
-                    &spec.name,
-                ),
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&entries)?);
-    } else if specs.is_empty() {
-        println!("no machines");
-    } else {
-        let now = chrono::Utc::now();
-        let rows: Vec<MachineLsRow> = specs
-            .iter()
-            .map(|spec| MachineLsRow {
-                name: spec.name.clone(),
-                status: machine_status_label(&spec.name).to_string(),
-                health: health_cell(mvm_client::readiness_of(&spec.name).as_ref()),
-                source: spec
-                    .image
-                    .as_deref()
-                    .or(spec.manifest.as_deref())
-                    .unwrap_or("<no source>")
-                    .to_string(),
-                age: humanize_age(spec.created_at.as_deref(), now),
-            })
-            .collect();
-        println!("{}", format_machine_table(&rows));
-    }
-    Ok(())
-}
-
 pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
     let spec = load_machine_spec(&args.name)?;
     if args.json {

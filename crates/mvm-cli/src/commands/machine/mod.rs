@@ -16,6 +16,7 @@
 
 mod checkpoint;
 mod lifecycle;
+mod list;
 mod portable;
 mod receipt;
 mod runtime;
@@ -62,7 +63,7 @@ use receipt::{
 };
 pub(in crate::commands) use runtime::boot_persistent_by_name;
 use runtime::run_dispatch;
-use spec_ops::{create_machine, inspect_machine, list_machines, remove_machine, run_reconfigure};
+use spec_ops::{create_machine, inspect_machine, remove_machine, run_reconfigure};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -99,7 +100,7 @@ pub(in crate::commands) enum MachineAction {
     /// Remove one or more persistent named machine specs (or --all)
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
-    /// List persistent named machine specs (alias: `ps`)
+    /// List every microVM: persistent machines and running transients (alias: `ps`)
     #[command(name = "ls", visible_alias = "ps", display_order = 7)]
     Ls(MachineListArgs),
     /// Show one persistent named machine spec
@@ -643,9 +644,19 @@ pub(in crate::commands) struct MachineCreateArgs {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineListArgs {
-    /// Print machine specs as JSON.
+    /// Print the listing as JSON.
     #[arg(long)]
     pub json: bool,
+    /// Include transient machines that are no longer running.
+    #[arg(short, long)]
+    pub all: bool,
+    /// Filter by sandbox tag (`KEY=VALUE`). Repeatable; all must match.
+    #[arg(long = "tag", value_name = "KEY=VALUE")]
+    pub tags: Vec<String>,
+    /// Include machines whose TTL has expired but the reaper has not yet
+    /// torn down. By default these are hidden from the listing.
+    #[arg(long)]
+    pub show_expired: bool,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -1105,21 +1116,6 @@ fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
     })
 }
 
-/// `machine ls` row: the persisted spec plus its live run status. `status` is
-/// `running` when the backend reports the VM up, else `stopped`. SDK facades
-/// read this field so `MvmClient::list_machines` reports real status instead of
-/// assuming every persisted machine is stopped.
-#[derive(serde::Serialize)]
-struct MachineListEntry<'a> {
-    #[serde(flatten)]
-    spec: &'a MachineSpec,
-    status: &'static str,
-    /// `"dev"` / `"prod"`, resolved the same way as the boot-time SDK
-    /// envelope. Read by `Sandbox.connect(id)` to inherit the dev-only exec
-    /// guard when attaching to a running machine from a fresh process.
-    build_mode: &'static str,
-}
-
 /// Live status label for a persisted machine, resolved through the backend.
 fn machine_status_label(name: &str) -> &'static str {
     if lifecycle::machine_is_running(name) {
@@ -1127,15 +1123,6 @@ fn machine_status_label(name: &str) -> &'static str {
     } else {
         "stopped"
     }
-}
-
-/// One rendered `machine ls` row (already stringified for display).
-struct MachineLsRow {
-    name: String,
-    status: String,
-    health: &'static str,
-    source: String,
-    age: String,
 }
 
 /// Health label for a machine's readiness, as shown in `machine ls`'s HEALTH
@@ -1170,34 +1157,6 @@ fn humanize_age(created: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> St
         s if s < 86400 => format!("{}h", s / 3600),
         s => format!("{}d", s / 86400),
     }
-}
-
-/// Render the `machine ls` table: a header plus left-aligned, padded columns
-/// (docker-style). Pure so the alignment is unit-testable.
-fn format_machine_table(rows: &[MachineLsRow]) -> String {
-    let header = MachineLsRow {
-        name: "NAME".to_string(),
-        status: "STATUS".to_string(),
-        health: "HEALTH",
-        source: "SOURCE".to_string(),
-        age: "AGE".to_string(),
-    };
-    let all = std::iter::once(&header).chain(rows);
-    let wn = all.clone().map(|r| r.name.len()).max().unwrap_or(0);
-    let ws = all.clone().map(|r| r.status.len()).max().unwrap_or(0);
-    let wh = all.clone().map(|r| r.health.len()).max().unwrap_or(0);
-    let wsrc = all.clone().map(|r| r.source.len()).max().unwrap_or(0);
-    std::iter::once(&header)
-        .chain(rows)
-        .map(|r| {
-            // AGE is the last column, so it needs no trailing pad.
-            format!(
-                "{:<wn$}  {:<ws$}  {:<wh$}  {:<wsrc$}  {}",
-                r.name, r.status, r.health, r.source, r.age
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Resolve the concrete set of machine names a `rm` invocation targets. With
@@ -1323,7 +1282,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Run(run_args) => run_dispatch(cli, run_args, cfg),
         MachineAction::Build(build_args) => build::run(cli, build_args, cfg),
         MachineAction::Create(create_args) => create_machine(create_args),
-        MachineAction::Ls(list_args) => list_machines(list_args),
+        MachineAction::Ls(list_args) => list::list_machines(list_args),
         MachineAction::Inspect(inspect_args) => inspect_machine(inspect_args),
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
