@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-07-31
+Last updated: 2026-08-01
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -12,7 +12,7 @@ for detailed scope and acceptance criteria.
   - [x] Keep privileged execution on the trusted base ref with no checkout
   - [x] Complete repository validation and queue the PR
 
-- [x] Plan 270 — Universal initramfs + vsock-activated boot
+ - [x] Plan 270 — Universal initramfs + vsock-activated boot
       (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
   - [x] Core boot contract: `ActivateEnvironment` over the authenticated
         vsock session, `ActivationState` gate, PID-1 agent with mount
@@ -29,14 +29,22 @@ for detailed scope and acceptance criteria.
         guest-side activation idle timeout and focused zombie-reaping tests
         remain open
 
-- [~] Plan 271 — Apple Container backend
+- [~] Plan 271 — Apple Container backend: Apple's container kernel on HVF
       (`specs/plans/271-apple-container-backend.md`)
-  - [x] Kernel artifact resolution + thin HVF-runner delegation shipped
-        (#1968): Apple's prebuilt container kernel boots the same universal
-        initramfs on the HVF runner; 100% Rust-native, `check-no-vz` guard
-  - [x] Hermetic BDD coverage for the backend contract (#1996)
-  - [ ] Live e2e validation with a real fetched kernel, then the
-        claim-by-claim security-profile review (plan's stage 2)
+  - [x] Stage 1 — fail-closed skeleton: kernel artifact resolution + thin
+        HVF-runner delegation
+  - [x] Stage 2 — live validation + claim review (2026-08-01): required
+        `vmlinux.sha256` digest sidecar (fail-closed on absence/mismatch),
+        sealed dm-verity boot proven on macOS HVF (gated e2e, 4.27s), CLI
+        smoke via `machine run --hypervisor apple-container`, claims array
+        stays a verbatim HVF-runner mirror (claim 3 stays DoesNotHold for
+        the virtiofs-root path — owner decision)
+  - [x] Admitted workload funnel un-barred (2026-08-01): `WorkloadBackend`
+        implemented with the runner's `VsockUdsChannel` transport,
+        `as_workload_backend` returns the backend, and
+        `require_workload_backend` / `start_prepared` / the admitted
+        persistent-OCI path accept `--hypervisor apple-container`
+  - [ ] Container-mode closure (later stage)
 
 - [ ] Plan 279 — Build action identity and a real artifact manifest
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`)

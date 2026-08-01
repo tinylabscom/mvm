@@ -127,6 +127,9 @@ pub struct CliWorld {
     pub auto_selected_kind: Option<String>,
     /// The kernel path after the apple-container backend's substitution.
     pub overridden_kernel_path: Option<String>,
+    /// The backend kind (`Debug` token) the admitted workload funnel
+    /// returned for the apple-container selector.
+    pub apple_container_workload_kind: Option<String>,
     /// Fixed stand-in guest-agent bytes an initramfs scenario builds from.
     pub initramfs_agent_bytes: Option<Vec<u8>>,
     /// The two deterministic cpio builds a determinism scenario compares.

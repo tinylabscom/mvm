@@ -9,7 +9,10 @@ Feature: Apple Container backend contract
   prefers the apple-container backend on the HVF tier, but only when its
   kernel is cached — without the artifact the tier falls back to the plain
   HVF backend. Once its kernel is cached the launch's kernel image is
-  always that cached kernel, never a caller-supplied one.
+  always that cached kernel, never a caller-supplied one. The backend is
+  admitted to the workload funnel — the egress endpoint, broker
+  registration, and activation gate are the HVF runner's verbatim; only
+  the kernel image differs.
 
   Scenario: A missing container kernel fails closed with a hint-carrying error
     Given an isolated mvm home for the apple-container backend
@@ -28,3 +31,7 @@ Feature: Apple Container backend contract
     And an apple-container kernel is cached in the isolated home
     When I apply the backend's kernel substitution to a caller config
     Then the kernel path is the cached apple-container kernel, not the caller's kernel
+
+  Scenario: The admitted workload funnel accepts the apple-container backend
+    When I ask the admitted workload funnel for the apple-container backend
+    Then the funnel accepts it as a workload backend of kind apple-container

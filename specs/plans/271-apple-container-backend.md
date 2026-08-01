@@ -34,6 +34,15 @@ package the containerization project recommends, or any compatible arm64
 Linux `Image`) — no toolchain, no Swift, nothing Apple-built runs on the
 host or as guest PID 1.
 
+The backend is admitted to the workload funnel: it implements
+`WorkloadBackend` (the same `VsockUdsChannel` egress transport as the
+runner), so `require_workload_backend` — the single boundary of the
+admitted launch path — accepts it, and `mvm_client::start_prepared` plus
+the admitted persistent-OCI path boot `--hypervisor apple-container`
+exactly as they boot `--hypervisor hvf`. Egress, broker registration,
+and the admitted funnel are shared verbatim; only the kernel image
+differs.
+
 ## Design
 
 ```text

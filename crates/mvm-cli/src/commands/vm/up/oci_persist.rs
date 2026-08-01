@@ -34,13 +34,18 @@ use super::runtime_source::{
 /// off disk to decide whether to stand up its egress endpoint needs the pre-start
 /// persist:
 ///
-/// - **Firecracker / libkrun / hvf**: the runner-backed endpoint reads
-///   `<state_dir>/plan.json` during endpoint setup.
+/// - **Firecracker / libkrun / hvf / apple-container**: the runner-backed
+///   endpoint reads `<state_dir>/plan.json` during endpoint setup. The
+///   apple-container backend holds the same HVF runner, so its `start()` reads
+///   the same file.
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
 pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
-    matches!(hypervisor, "firecracker" | "libkrun" | "hvf")
+    matches!(
+        hypervisor,
+        "firecracker" | "libkrun" | "hvf" | "apple-container"
+    )
 }
 
 pub(in crate::commands::vm) fn load_workload_ir(
@@ -667,9 +672,10 @@ mod persists_plan_before_start_tests {
     fn persists_plan_before_start_covers_the_substitution_backends() {
         // The substitution endpoint reads <state_dir>/plan.json inside start() to
         // decide whether to spawn, so every backend that spawns it must persist the
-        // plan first — including the hvf backend. QEMU must not (it would
+        // plan first — including the hvf backend and the apple-container backend,
+        // which holds the same HVF runner. QEMU must not (it would
         // overwrite the in-memory config).
-        for hv in ["firecracker", "libkrun", "hvf"] {
+        for hv in ["firecracker", "libkrun", "hvf", "apple-container"] {
             assert!(
                 persists_plan_before_start(hv),
                 "{hv} spawns the substitution endpoint and must persist plan.json"

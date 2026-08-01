@@ -131,3 +131,25 @@ fn kernel_is_the_cached_one(world: &mut CliWorld) {
         "a caller-supplied kernel must never win over the backend's own"
     );
 }
+
+#[when("I ask the admitted workload funnel for the apple-container backend")]
+fn admitted_funnel(world: &mut CliWorld) {
+    // The funnel boundary is pure permission — it matches the backend kind
+    // and never probes the artifact cache, so no isolated home is needed.
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("apple-container");
+    let workload = mvm_runtime::workload_backend::require_workload_backend(&backend)
+        .expect("the admitted funnel must accept the apple-container backend");
+    world.apple_container_workload_kind = Some(format!("{:?}", workload.kind()));
+}
+
+#[then("the funnel accepts it as a workload backend of kind apple-container")]
+fn funnel_accepts(world: &mut CliWorld) {
+    let kind = world
+        .apple_container_workload_kind
+        .as_deref()
+        .expect("a prior step must ask the admitted funnel");
+    assert_eq!(
+        kind, "AppleContainer",
+        "the funnel must return the backend under its own kind"
+    );
+}
