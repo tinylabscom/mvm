@@ -222,6 +222,7 @@ fn rejects_persist_volume() {
 fn rejects_network_none_with_ports() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::None,
         ports: vec![PortForward {
             guest: 8080,
@@ -240,6 +241,7 @@ fn rejects_network_none_with_ports() {
 fn accepts_network_none_with_empty_ports() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::None,
         ports: vec![],
         egress: None,
@@ -253,6 +255,7 @@ fn accepts_network_none_with_empty_ports() {
 fn accepts_bridge_network_with_ports() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![PortForward {
             guest: 8080,
@@ -291,6 +294,7 @@ fn function_workload_rejects_host_network_mode() {
     let mut w = base_workload();
     w.apps[0] = function_app();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Host,
         ports: vec![],
         peers: vec![],
@@ -351,6 +355,7 @@ fn function_workload_with_bridge_network_validates() {
     let mut w = base_workload();
     w.apps[0] = function_app();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![],
         peers: vec![],
@@ -367,6 +372,7 @@ fn command_workload_with_host_network_still_validates() {
     // command-style workloads keep their current network surface.
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Host,
         ports: vec![],
         peers: vec![],
@@ -434,6 +440,7 @@ fn rejects_host_network_on_function_entrypoint() {
         concurrency: None,
     }];
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Host,
         ports: vec![],
         egress: None,
@@ -456,6 +463,7 @@ fn rejects_host_network_on_function_entrypoint() {
 fn allows_host_network_on_command_entrypoint() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Host,
         ports: vec![],
         egress: None,
@@ -618,6 +626,7 @@ fn accepts_innocent_field_names_in_schema() {
 fn rejects_wildcard_host_in_egress_allowlist() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![],
         egress: Some(NetworkEgress {
@@ -646,6 +655,7 @@ fn rejects_wildcard_host_in_egress_allowlist() {
 fn rejects_invalid_peer_id() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![],
         egress: None,
@@ -663,6 +673,7 @@ fn rejects_invalid_peer_id() {
 fn accepts_well_formed_egress_and_peers() {
     let mut w = base_workload();
     w.apps[0].network = Some(Network {
+        raw_ip_stack: false,
         mode: NetworkMode::Bridge,
         ports: vec![],
         egress: Some(NetworkEgress {

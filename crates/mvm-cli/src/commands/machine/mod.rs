@@ -188,53 +188,60 @@ impl MachineAction {
 
 /// How a machine reaches the network.
 ///
-/// **Not an operator choice.** There is one networking configuration and
-/// mvm always uses the strongest one available — exposing a transport
-/// selector could only let someone pick a weaker posture than the one they
-/// would otherwise have had.
+/// **Not an operator choice, and not a host-dependent one.** The transport
+/// follows from a single question: does this workload need a real in-guest
+/// IP stack?
 ///
-/// The derivation has two inputs, and neither is a preference:
+/// - **No** (almost always) → the socket-aware transport. It is the
+///   stronger posture: the host originates every connection, so secret
+///   substitution, cleartext redaction, and L7 policy all apply.
+/// - **Yes** → the L3 tunnel, which is the compatibility mode for raw
+///   sockets, ICMP, non-TCP/UDP protocols, and in-guest resolvers.
 ///
-/// 1. **What the plan requires.** A workload that depends on the host
-///    seeing its outbound cleartext — one that binds secrets, or enables
-///    reversible replacement or redaction — must have the socket-aware
-///    transport, because the tunnel cannot provide it.
-/// 2. **What the host can serve.** The tunnel needs an L3 datapath. Where
-///    there is none, the socket-aware transport is what this host has.
-///
-/// Note the direction of the second clause: it can only ever move a
-/// workload to *more* host visibility, never less. Moving the other way is
-/// what must never happen silently, and the compatibility gate refuses it
-/// outright.
-///
-/// The mode still lives in the *signed plan*: it is the admitted contract a
-/// control plane sets and the node enforces. This is only the derivation
-/// local `machine run` uses.
+/// The need is declared by the *workload*, so the same workload resolves
+/// the same way on every host and the plan is reproducible. Host capability
+/// is deliberately **not** an input here — it is an admission check
+/// ([`check_host_can_serve`]), because a host that silently rewrote the
+/// transport would make one plan mean different things in different places.
 pub(in crate::commands) fn derive_network_mode(
-    requirements: &mvm_net::l3::SubstitutionRequirements,
-    host_serves_l3: bool,
+    needs_raw_ip_stack: bool,
 ) -> mvm_protocol::plan::NetworkMode {
-    if requirements.needs_owned_cleartext() || !host_serves_l3 {
-        mvm_protocol::plan::NetworkMode::HostVsockProxy
-    } else {
+    if needs_raw_ip_stack {
         mvm_protocol::plan::NetworkMode::L3Vsock
+    } else {
+        mvm_protocol::plan::NetworkMode::HostVsockProxy
     }
 }
 
-/// Whether this host can serve the L3 tunnel.
-pub(in crate::commands) fn host_serves_l3() -> bool {
-    mvm_hostd::netd::host_datapath().is_available().is_ok()
+/// Refuse a launch this host cannot serve.
+///
+/// Separate from the derivation on purpose: the mode is a property of the
+/// workload, and whether *this* machine can run it is a property of the
+/// host. Conflating them is how a plan starts meaning different things in
+/// different places.
+pub(in crate::commands) fn check_host_can_serve(
+    mode: mvm_protocol::plan::NetworkMode,
+) -> anyhow::Result<()> {
+    if !mode.is_l3_vsock() {
+        return Ok(());
+    }
+    if let Err(err) = mvm_hostd::netd::host_datapath().is_available() {
+        anyhow::bail!(
+            "this workload needs a real in-guest IP stack, which this host cannot \
+             provide: {err}\n\
+             Workloads that do not set `raw_ip_stack` run here normally."
+        );
+    }
+    Ok(())
 }
 
-/// Settle the networking configuration before anything boots.
-///
-/// Returns the derived mode rather than a warning: there is nothing for an
-/// operator to decide, so there is nothing to caution them about. Both
-/// outcomes are serviceable, which is why this cannot fail.
+/// Settle and validate the networking configuration before anything boots.
 pub(in crate::commands) fn preflight_network(
-    requirements: &mvm_net::l3::SubstitutionRequirements,
-) -> mvm_protocol::plan::NetworkMode {
-    derive_network_mode(requirements, host_serves_l3())
+    needs_raw_ip_stack: bool,
+) -> anyhow::Result<mvm_protocol::plan::NetworkMode> {
+    let mode = derive_network_mode(needs_raw_ip_stack);
+    check_host_can_serve(mode)?;
+    Ok(mode)
 }
 
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
@@ -386,7 +393,9 @@ impl MachineRunArgs {
     fn into_run_args(self) -> RunArgs {
         RunArgs {
             // Derived, never selected: see `derive_network_mode`.
-            network_mode: preflight_network(&mvm_net::l3::SubstitutionRequirements::default()),
+            // Derived from the workload, never selected. A manifest that
+            // declares `raw_ip_stack` is what moves it onto the tunnel.
+            network_mode: derive_network_mode(false),
             manifest: self.manifest,
             // Default off; `run_dispatch` sets it for the warm-claim-eligible
             // transient mode.

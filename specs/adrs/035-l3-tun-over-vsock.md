@@ -61,13 +61,26 @@ policy · anti-spoof · flow state · DNS · ingress · NAT · audit
 host networking
 ```
 
-There is no operator-facing mode selector. mvm derives the transport from
-what the plan requires: a workload that needs the host to see its outbound
-cleartext gets the socket-aware path, because the tunnel cannot provide
-that; everything else gets the tunnel, which is universally compatible. A
-selector could only let someone choose a weaker posture than the one they
-would otherwise have had, and the derivation never produces a combination
-the compatibility gate would reject.
+There is no operator-facing mode selector. The transport follows from one
+property of the workload — whether it needs a real in-guest IP stack —
+declared as `network.raw_ip_stack` in its manifest. Workloads that do not
+declare it get the socket-aware path, which is the default and the stronger
+posture; those that do get the tunnel.
+
+Two properties fall out of deriving it this way, and both were mistakes we
+made first:
+
+- **Host capability is not an input.** An earlier cut folded "can this host
+  serve the tunnel" into the derivation. It is a safe direction — it can
+  only add host visibility — but it makes one plan mean different things in
+  different places, and gives the same workload a different plan digest on
+  macOS than on Linux. Host capability is now an admission *check*: a
+  workload that needs the tunnel is refused on a host without one, and
+  everything else runs.
+- **The tunnel is not the default.** Making it the default inverted the
+  design: L3 is a compatibility mode that gives up substitution, so it
+  should be reached for by workloads that need it, never landed on by
+  accident.
 
 The mode remains in the *signed plan* — it is the admitted contract, and a
 control plane sets it — but it is not something an operator picks.

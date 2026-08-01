@@ -28,27 +28,35 @@ mvmctl machine run \
 ## There is no transport to choose
 
 **You do not select a networking mode, and there is no flag to do it with.**
-mvm always uses the strongest configuration the workload can actually use.
+The transport follows from one question about the *workload*:
 
-A selector could only ever let someone pick a weaker posture than the one
-they would otherwise have had, and the right answer is the same every time:
+> Does it need a real in-guest IP stack — raw sockets, ICMP, non-TCP/UDP
+> protocols, or its own resolver?
 
-- a workload whose plan needs the host to see its outbound cleartext — one
-  that binds secrets, or enables reversible replacement or redaction — gets
-  the socket-aware transport, because the tunnel cannot provide that;
-- on a host with no L3 datapath (macOS today), every workload gets the
-  socket-aware transport, because that is what the host can serve;
-- every other workload gets the tunnel, which is universally compatible.
+- **No** (almost always) → the socket-aware transport. This is the default
+  and the stronger posture: the host originates every connection, so secret
+  substitution, cleartext redaction, and L7 policy all apply.
+- **Yes** → the L3 tunnel described here.
 
-Note the direction of the middle clause: it can only ever give the host
-*more* visibility, never less. Moving the other way is what must never
-happen quietly, and the compatibility gate refuses it outright.
+The need is declared by the workload, not chosen at run time:
 
-All of that is derived, so it cannot be got wrong. The mode is still
-recorded in the *signed plan* — it is the admitted contract, and a control
-plane sets it — but it is not an operator knob.
+```toml
+# mvm.toml
+[network]
+raw_ip_stack = true   # needs ICMP / raw sockets / its own resolver
+```
 
-## What you give up
+Two consequences worth knowing:
+
+- **The plan is host-independent.** The same workload derives the same
+  transport everywhere, so a plan built on your laptop means what it means
+  in production. Host capability is deliberately *not* an input to the
+  derivation.
+- **A host that cannot serve the tunnel refuses only the workloads that
+  need it.** On macOS today there is no L3 datapath, so a `raw_ip_stack`
+  workload is refused with a stated reason. Everything else runs normally.
+
+## What you give up## What you give up
 
 :::caution[L3 mode cannot inspect or substitute inside encrypted traffic]
 In L3 mode mvm sees **packets**, not connections. Once your application
@@ -112,7 +120,7 @@ Choosing L3 mode does not weaken the boundary. It still guarantees:
 |---|---|
 | **Linux** (Firecracker) | Supported and tested, including a privileged lane with a real host TUN and nftables, and a live boot witness (below). |
 | **Linux** (libkrun) | Not selectable. libkrun attaches a drained virtio-net device; L3 mode requires the guest to have no network device at all, so libkrun does not advertise the capability and selection fails closed. |
-| **macOS** (Apple Silicon) | No L3 datapath, so workloads run on the socket-aware transport — which is the stronger posture, and everything still works. The intended backend is a userspace socket gateway (TCP, UDP, controlled DNS); it is not implemented, and is never faked or routed through a proxy runtime. |
+| **macOS** (Apple Silicon) | No L3 datapath. Ordinary workloads run normally on the socket-aware transport; a `raw_ip_stack` workload is refused with a stated reason. The intended backend is a userspace socket gateway (TCP, UDP, controlled DNS); it is not implemented, and is never faked or routed through a proxy runtime. |
 | **Windows via WSL2** | Architecturally supported — WSL2 is a Linux node, the guest's vsock terminates inside it, and the Linux backend is used. Not yet validated on a WSL2 runner. |
 | **Native Windows** | **Not supported.** mvm has no native Windows VMM backend. "Works on Windows" here always means WSL2. |
 

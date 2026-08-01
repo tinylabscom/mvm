@@ -268,7 +268,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // Settle the networking configuration before any build or boot work.
     // There is no mode to choose: the derivation picks the strongest
     // transport this workload and this host can actually support.
-    let network_mode = super::preflight_network(&mvm_net::l3::SubstitutionRequirements::default());
+    let network_mode = super::preflight_network(false)?;
     tracing::debug!(?network_mode, "derived machine networking");
 
     if args.entrypoint {

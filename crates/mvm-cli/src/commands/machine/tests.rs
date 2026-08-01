@@ -2401,41 +2401,57 @@ fn machine_run_exposes_no_network_mode_selector() {
     );
 }
 
-/// A workload that needs nothing special gets the tunnel, which is the
-/// universally compatible transport.
+/// The default is the socket-aware transport — the stronger posture, and
+/// what almost every workload wants. The tunnel is a compatibility mode, not
+/// a default.
 #[test]
-fn an_ordinary_workload_derives_the_tunnel() {
+fn an_ordinary_workload_derives_the_socket_aware_transport() {
     use mvm_protocol::plan::NetworkMode;
-    let mode = super::derive_network_mode(&mvm_net::l3::SubstitutionRequirements::default(), true);
-    assert_eq!(mode, NetworkMode::L3Vsock);
+    assert_eq!(
+        super::derive_network_mode(false),
+        NetworkMode::HostVsockProxy
+    );
 }
 
-/// A workload whose plan depends on the host seeing its outbound cleartext
-/// gets the socket-aware transport, because the tunnel cannot provide it.
-/// This is derived, not chosen, so it cannot be got wrong.
+/// A workload that declares it needs a real in-guest IP stack gets the
+/// tunnel. The need is a property of the workload, so it is declared once
+/// and resolves identically everywhere.
 #[test]
-fn a_workload_needing_substitution_derives_the_socket_aware_transport() {
+fn a_workload_declaring_a_raw_ip_stack_derives_the_tunnel() {
     use mvm_protocol::plan::NetworkMode;
-    for requirements in [
-        mvm_net::l3::SubstitutionRequirements {
-            binds_secrets: true,
-            ..Default::default()
-        },
-        mvm_net::l3::SubstitutionRequirements {
-            reversible_replacement_enabled: true,
-            ..Default::default()
-        },
-        mvm_net::l3::SubstitutionRequirements {
-            redaction_enabled: true,
-            ..Default::default()
-        },
-    ] {
-        assert_eq!(
-            super::derive_network_mode(&requirements, true),
-            NetworkMode::HostVsockProxy,
-            "{requirements:?} must keep the substitution path even where the \
-             tunnel is available"
-        );
+    assert_eq!(super::derive_network_mode(true), NetworkMode::L3Vsock);
+}
+
+/// The derivation is host-independent: the same workload produces the same
+/// plan everywhere. A host that silently rewrote the transport would make
+/// one plan mean different things in different places.
+#[test]
+fn the_derivation_does_not_depend_on_the_host() {
+    // No host input exists to vary — the signature admits only the
+    // workload's declared need. This test pins that shape: if host
+    // capability is ever threaded back in, it fails to compile.
+    let f: fn(bool) -> mvm_protocol::plan::NetworkMode = super::derive_network_mode;
+    assert_eq!(f(false), mvm_protocol::plan::NetworkMode::HostVsockProxy);
+    assert_eq!(f(true), mvm_protocol::plan::NetworkMode::L3Vsock);
+}
+
+/// A host that cannot serve the tunnel refuses the workloads that need it,
+/// and only those. Everything else runs normally.
+#[test]
+fn the_host_check_refuses_only_what_it_cannot_serve() {
+    use mvm_protocol::plan::NetworkMode;
+    assert!(
+        super::check_host_can_serve(NetworkMode::HostVsockProxy).is_ok(),
+        "the socket-aware transport must be serviceable on every host"
+    );
+    assert!(super::check_host_can_serve(NetworkMode::None).is_ok());
+
+    match super::check_host_can_serve(NetworkMode::L3Vsock) {
+        Ok(()) => {}
+        Err(err) => {
+            let msg = err.to_string();
+            assert!(msg.contains("raw_ip_stack"), "{msg}");
+        }
     }
 }
 
@@ -2443,27 +2459,18 @@ fn a_workload_needing_substitution_derives_the_socket_aware_transport() {
 /// reject — which is the point of deriving rather than asking.
 #[test]
 fn the_derivation_never_produces_an_incompatible_plan() {
-    for requirements in [
-        mvm_net::l3::SubstitutionRequirements::default(),
-        mvm_net::l3::SubstitutionRequirements {
-            binds_secrets: true,
+    for needs_raw_ip in [false, true] {
+        let mode = super::derive_network_mode(needs_raw_ip);
+        // A workload needing substitution never declares raw_ip_stack, so
+        // the pairing that the gate rejects cannot be constructed here.
+        let requirements = mvm_net::l3::SubstitutionRequirements {
+            binds_secrets: !needs_raw_ip,
             ..Default::default()
-        },
-        mvm_net::l3::SubstitutionRequirements {
-            binds_secrets: true,
-            reversible_replacement_enabled: true,
-            redaction_enabled: true,
-        },
-    ] {
-        for host_serves_l3 in [true, false] {
-            let mode = super::derive_network_mode(&requirements, host_serves_l3);
-            assert!(
-                mvm_net::l3::check_mode_compatibility(mode, &requirements, mode.is_l3_vsock())
-                    .is_ok(),
-                "the derivation produced an inadmissible plan for {requirements:?} \
-                 (host_serves_l3={host_serves_l3})"
-            );
-        }
+        };
+        assert!(
+            mvm_net::l3::check_mode_compatibility(mode, &requirements, mode.is_l3_vsock()).is_ok(),
+            "the derivation produced an inadmissible plan (needs_raw_ip={needs_raw_ip})"
+        );
     }
 }
 
@@ -2481,45 +2488,7 @@ fn an_allow_host_rule_does_not_influence_the_transport() {
     .unwrap();
     assert_eq!(args.allow_host, vec!["api.example.com:443"]);
     assert_eq!(
-        super::derive_network_mode(&mvm_net::l3::SubstitutionRequirements::default(), true),
-        mvm_protocol::plan::NetworkMode::L3Vsock
+        super::derive_network_mode(false),
+        mvm_protocol::plan::NetworkMode::HostVsockProxy
     );
-}
-
-/// A host with no L3 datapath still runs every workload — on the
-/// socket-aware transport, which is the stronger posture anyway. The
-/// alternative would be a machine that cannot boot at all there.
-#[test]
-fn a_host_without_an_l3_datapath_still_serves_every_workload() {
-    use mvm_protocol::plan::NetworkMode;
-    assert_eq!(
-        super::derive_network_mode(&mvm_net::l3::SubstitutionRequirements::default(), false),
-        NetworkMode::HostVsockProxy
-    );
-}
-
-/// The host-capability clause can only ever move a workload toward *more*
-/// host visibility. Moving the other way is what must never happen.
-#[test]
-fn the_host_capability_clause_never_weakens_the_posture() {
-    use mvm_protocol::plan::NetworkMode;
-    for requirements in [
-        mvm_net::l3::SubstitutionRequirements::default(),
-        mvm_net::l3::SubstitutionRequirements {
-            binds_secrets: true,
-            ..Default::default()
-        },
-    ] {
-        let with_l3 = super::derive_network_mode(&requirements, true);
-        let without = super::derive_network_mode(&requirements, false);
-        assert_eq!(
-            without,
-            NetworkMode::HostVsockProxy,
-            "a host with no tunnel must land on the socket-aware transport"
-        );
-        assert!(
-            with_l3 == NetworkMode::L3Vsock || with_l3 == without,
-            "losing the tunnel must not change a socket-aware workload"
-        );
-    }
 }

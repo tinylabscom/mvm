@@ -1,7 +1,7 @@
 //! Step definitions, one module per scenario surface.
 
 mod apple_container;
-mod cli;
+pub(crate) mod cli;
 mod initramfs;
 mod kernel_pin;
 mod l3_vsock;

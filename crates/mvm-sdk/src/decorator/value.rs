@@ -488,6 +488,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
     let _ = kwargs;
     Ok(Network {
         mode,
+        raw_ip_stack: false,
         ports,
         egress: None::<NetworkEgress>,
         peers: vec![],
