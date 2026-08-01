@@ -206,8 +206,15 @@ pub(super) fn ensure_rootfs_verity_sidecars(
 /// Callback signature used to inject the mvm guest runtime and seal a rootfs.
 /// A type alias rather than a bare fn pointer everywhere it's threaded, and
 /// swappable in tests for a fake that skips the real Nix/ext4 machinery.
-pub(super) type RuntimeMaterializer =
-    fn(&Path, &Path, &Path, &str, Option<&OciEntrypointConfig>, bool) -> Result<()>;
+pub(super) type RuntimeMaterializer = fn(
+    &Path,
+    &Path,
+    &Path,
+    &str,
+    Option<&OciEntrypointConfig>,
+    bool,
+    Vec<mvm_fs::ext4::Node>,
+) -> Result<()>;
 
 pub(super) fn rematerialize_cached_image(
     cache_root: &Path,
@@ -240,6 +247,7 @@ pub(super) fn rematerialize_cached_image(
             &image.reference,
             oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?.as_ref(),
             prod,
+            super::cache::read_deferred_nodes(cache_root, &image.resolved_digest)?,
         )
         .with_context(|| {
             format!(
@@ -284,6 +292,7 @@ pub(super) fn inject_runtime_and_materialize(
     image_label: &str,
     entrypoint: Option<&OciEntrypointConfig>,
     sealed: bool,
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
 ) -> Result<()> {
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(
@@ -296,6 +305,7 @@ pub(super) fn inject_runtime_and_materialize(
         .entrypoint(entrypoint)
         .prebuilt(embedded_guest_binaries())
         .sealed(sealed)
+        .deferred_nodes(deferred_nodes)
         .build(),
     )
 }
@@ -342,6 +352,7 @@ pub(super) fn materialize_overlay_lean_rootfs(
     raw_unpacked_root: &Path,
     rootfs_abs: &Path,
     image_label: &str,
+    deferred_nodes: Vec<mvm_fs::ext4::Node>,
 ) -> Result<()> {
     let staging_root = rootfs_abs.with_extension("staging");
     if staging_root.exists() {
@@ -362,6 +373,7 @@ pub(super) fn materialize_overlay_lean_rootfs(
         image_label,
         None,
         false,
+        deferred_nodes,
     );
     let cleanup = fs::remove_dir_all(&staging_root);
     if let Err(err) = cleanup

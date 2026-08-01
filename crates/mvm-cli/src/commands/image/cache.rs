@@ -162,6 +162,53 @@ pub(super) fn unpacked_dir_if_present(cache_root: &Path, resolved_digest: &str) 
     dir.is_dir().then_some(dir)
 }
 
+/// Sidecar holding the nodes the layer unpack could not place on the
+/// host tree. It sits *beside* the unpacked root, never inside it, so it
+/// can never be walked into the image as a file of its own.
+fn deferred_nodes_sidecar(cache_root: &Path, resolved_digest: &str) -> Result<PathBuf> {
+    let hex = sha256_hex(resolved_digest)?;
+    Ok(cache_root
+        .join("unpacked")
+        .join(format!("{hex}.deferred-nodes.json")))
+}
+
+/// Persist the unpack's deferred nodes next to the unpacked tree.
+///
+/// Without this, the cache self-heal path — which re-materializes an
+/// ext4 from a surviving unpacked tree, with no layer tarballs in hand —
+/// would emit an image quietly missing every path a case-folding host
+/// could not hold. Writing nothing for the (overwhelmingly common) empty
+/// case keeps the cache layout unchanged on a case-sensitive host.
+pub(super) fn write_deferred_nodes(
+    cache_root: &Path,
+    resolved_digest: &str,
+    nodes: &[mvm_fs::ext4::Node],
+) -> Result<()> {
+    let path = deferred_nodes_sidecar(cache_root, resolved_digest)?;
+    if nodes.is_empty() {
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let body = serde_json::to_vec_pretty(nodes).context("serialize deferred unpack nodes")?;
+    fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+}
+
+/// Read back what [`write_deferred_nodes`] stored. A missing sidecar is
+/// the normal case (nothing was deferred) and reads as empty.
+pub(super) fn read_deferred_nodes(
+    cache_root: &Path,
+    resolved_digest: &str,
+) -> Result<Vec<mvm_fs::ext4::Node>> {
+    let path = deferred_nodes_sidecar(cache_root, resolved_digest)?;
+    let Ok(body) = fs::read(&path) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_slice(&body).with_context(|| format!("parse {}", path.display()))
+}
+
 pub(super) fn sha256_hex(digest: &str) -> Result<String> {
     let Some(hex) = digest.strip_prefix("sha256:") else {
         bail!("unsupported digest algorithm in {digest:?}");
@@ -626,5 +673,76 @@ mod tests {
         let index = load_index(tmp.path()).expect("load index");
         assert_eq!(index.images.len(), 1);
         assert_eq!(index.images[0].reference, "docker.io/library/busybox:1");
+    }
+
+    const SAMPLE_DIGEST: &str =
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn deferred_nodes_roundtrip_through_the_sidecar() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nodes = vec![
+            mvm_fs::ext4::Node::Symlink {
+                path: "/usr/share/man/man7/pam.7.gz".to_string(),
+                target: "PAM.7.gz".to_string(),
+            },
+            mvm_fs::ext4::Node::File {
+                path: "/opt/run".to_string(),
+                mode: 0o755,
+                data: b"body".to_vec(),
+                xattrs: Vec::new(),
+            },
+        ];
+        write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
+        assert_eq!(
+            read_deferred_nodes(tmp.path(), SAMPLE_DIGEST).expect("read"),
+            nodes
+        );
+    }
+
+    #[test]
+    fn absent_sidecar_reads_as_nothing_deferred() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(
+            read_deferred_nodes(tmp.path(), SAMPLE_DIGEST)
+                .expect("read")
+                .is_empty(),
+            "a case-sensitive host writes no sidecar, and that is not an error"
+        );
+    }
+
+    #[test]
+    fn writing_an_empty_set_clears_a_stale_sidecar() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nodes = vec![mvm_fs::ext4::Node::Symlink {
+            path: "/a".to_string(),
+            target: "b".to_string(),
+        }];
+        write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
+        write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &[]).expect("clear");
+        assert!(
+            read_deferred_nodes(tmp.path(), SAMPLE_DIGEST)
+                .expect("read")
+                .is_empty(),
+            "a re-pull that defers nothing must not inherit the old sidecar"
+        );
+    }
+
+    #[test]
+    fn the_sidecar_sits_beside_the_unpacked_tree_not_inside_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nodes = vec![mvm_fs::ext4::Node::Symlink {
+            path: "/a".to_string(),
+            target: "b".to_string(),
+        }];
+        write_deferred_nodes(tmp.path(), SAMPLE_DIGEST, &nodes).expect("write");
+
+        let hex = sha256_hex(SAMPLE_DIGEST).unwrap();
+        let unpacked_root = tmp.path().join("unpacked").join(&hex);
+        std::fs::create_dir_all(&unpacked_root).unwrap();
+        assert!(
+            std::fs::read_dir(&unpacked_root).unwrap().next().is_none(),
+            "the sidecar must never be walked into the image as a file of its own"
+        );
     }
 }

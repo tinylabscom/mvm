@@ -121,7 +121,21 @@
 //! 3. **Leaf opens use `O_NOFOLLOW` + `O_EXCL`** so a symlink or a
 //!    pre-existing file planted *at the leaf* is refused (`ELOOP` /
 //!    `EEXIST`) rather than followed or overwritten.
-//! 4. **Timestamps zeroed by default.** OCI layer tarballs are
+//! 4. **A case-folding host cannot silently lose an entry.** An OCI
+//!    layer routinely carries two paths that differ only by case —
+//!    Debian's `libpam-runtime` ships `usr/share/man/man7/PAM.7.gz`
+//!    plus a `pam.7.gz` symlink to it, so every Debian-derived image
+//!    has the pair. A default macOS APFS volume names the same file for
+//!    both. The second entry is therefore **deferred**: kept out of the
+//!    host tree and carried in [`UnpackReport::deferred_nodes`] for the
+//!    ext4 writer to merge, so the image that boots holds both paths
+//!    even though the host tree cannot. Overwriting on `EEXIST` would
+//!    be corruption, not a fix — it destroys the regular file and
+//!    leaves a dangling self-referential symlink. Deferral requires the
+//!    colliding path to have been written **by this same unpack**, so
+//!    the `O_EXCL` refusal stays in force for an externally planted
+//!    file. See [`case_fold`].
+//! 5. **Timestamps zeroed by default.** OCI layer tarballs are
 //!    notoriously timestamp-dependent; the same image pulled twice
 //!    can produce non-byte-identical rootfs trees if mtime is
 //!    preserved. [`UnpackOptions::strip_timestamps`] (default `true`)
@@ -146,8 +160,11 @@
 //! writer plus directory/symlink/hardlink primitives; [`regular_file`],
 //! [`device_nodes`], and [`whiteout`] each add their own `impl Rooted`
 //! fragment and free-standing helpers for their entry kind; [`xattr`]
-//! collects and applies pax extended attributes.
+//! collects and applies pax extended attributes; [`case_fold`] detects
+//! a case-folding host and decides which entries the host tree cannot
+//! hold.
 
+mod case_fold;
 mod device_nodes;
 mod entries;
 mod fs_ops;
@@ -161,11 +178,15 @@ use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use crate::ext4::Node;
+
+use case_fold::{CaseFoldIndex, HostCaseFolding, probe_host_case_folding};
 use entries::{
-    EntryCtx, unpack_device_entry, unpack_directory_entry, unpack_hardlink_entry,
-    unpack_regular_entry, unpack_symlink_entry,
+    EntryCtx, defer_colliding_entry, unpack_device_entry, unpack_directory_entry,
+    unpack_hardlink_entry, unpack_regular_entry, unpack_symlink_entry,
 };
 use fs_ops::{Rooted, parent_chain_has_symlink};
+use whiteout::{WhiteoutKind, classify_whiteout};
 use xattr::{XattrWarningReason, collect_entry_xattrs};
 
 /// How [`unpack_layer`] handles xattrs carried in pax headers.
@@ -307,6 +328,21 @@ pub struct UnpackReport {
     /// the stream. Each carries a [`RefusalReason`] so a downstream
     /// audit / debugging surface can render them.
     pub refused: Vec<RefusedEntry>,
+    /// Entries the host filesystem could not hold, expressed as ext4
+    /// nodes for the image writer to merge on top of the walked tree.
+    ///
+    /// Non-empty only on a case-folding host (macOS APFS by default),
+    /// where a layer carrying two paths that differ only by case —
+    /// Debian ships `usr/share/man/man7/PAM.7.gz` alongside a
+    /// `pam.7.gz` symlink to it — can materialize only the first on
+    /// disk. The rest ride here so the ext4 image stays faithful even
+    /// though the host tree cannot be. Always empty on Linux.
+    ///
+    /// Callers that materialize an image from the unpacked tree **must**
+    /// merge these; callers that consume the host tree directly (a
+    /// virtiofs share, say) cannot, and are lossy on such a host by
+    /// construction.
+    pub deferred_nodes: Vec<Node>,
 }
 
 /// One regular file whose setuid or setgid mode bit was preserved.
@@ -339,7 +375,7 @@ pub struct XattrWarning {
 /// a `String`) because the tar header can carry non-UTF-8 paths and
 /// we don't want to mask that with lossy decoding before the audit
 /// gets a chance to see it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RefusedEntry {
     /// Path bytes from the tar header, verbatim. Render via
     /// `String::from_utf8_lossy` for human-readable output;
@@ -347,6 +383,18 @@ pub struct RefusedEntry {
     pub raw_path: Vec<u8>,
     /// Which policy rejected the entry.
     pub reason: RefusalReason,
+}
+
+/// Hand-written so the refusal an operator sees names the path. The
+/// derived form renders `raw_path` as a byte array, which turns the
+/// one fact that identifies the entry into a wall of integers.
+impl std::fmt::Debug for RefusedEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefusedEntry")
+            .field("path", &String::from_utf8_lossy(&self.raw_path))
+            .field("reason", &self.reason)
+            .finish()
+    }
 }
 
 /// Why a tar entry was rejected. Each variant maps to one of the
@@ -390,6 +438,13 @@ pub enum RefusalReason {
     /// was enforcing production-without-cosign policy. Equivalent
     /// operator-facing error code: `E_OCI_SETUID_UNSIGNED`.
     SetuidUnsigned,
+    /// The entry's path collides, under the host filesystem's case
+    /// folding, with a path this unpack already wrote, and the entry
+    /// is of a kind the image node list cannot express (a hardlink or
+    /// a device node). Deferrable kinds — files, directories, symlinks
+    /// — never reach this variant; they land in
+    /// [`UnpackReport::deferred_nodes`] instead.
+    HostPathCollision,
     /// Tar header was malformed (unreadable path bytes, etc.). We
     /// refuse the entry rather than failing the whole unpack — a
     /// single bad entry shouldn't poison a multi-thousand-entry
@@ -412,6 +467,7 @@ impl RefusalReason {
             Self::HardlinkTargetMissing => "hardlink_target_missing",
             Self::DeviceNodeRefused => "device_node_refused",
             Self::SetuidUnsigned => "E_OCI_SETUID_UNSIGNED",
+            Self::HostPathCollision => "host_path_collision",
             Self::MalformedHeader => "malformed_header",
         }
     }
@@ -485,7 +541,7 @@ pub fn unpack_layer<R: Read>(
 /// first-creation safety for paths that are genuinely new. Same-layer
 /// duplicates remain refused.
 pub fn unpack_layer_with_prior_paths<R: Read>(
-    mut layer_tar: R,
+    layer_tar: R,
     output_root: &Path,
     options: &UnpackOptions,
     prior_layer_paths: &HashSet<PathBuf>,
@@ -499,6 +555,21 @@ pub fn unpack_layer_with_prior_paths<R: Read>(
         return Err(UnpackError::OutputRootNotADir(output_root.to_path_buf()));
     }
 
+    let folding = probe_host_case_folding(output_root);
+    unpack_layer_inner(layer_tar, output_root, options, prior_layer_paths, folding)
+}
+
+/// The unpack loop, with the host's case behavior supplied rather than
+/// probed, so tests can exercise the case-folding path on a
+/// case-sensitive host (Linux CI) and the case-sensitive path on a
+/// case-folding one (a developer's Mac).
+fn unpack_layer_inner<R: Read>(
+    mut layer_tar: R,
+    output_root: &Path,
+    options: &UnpackOptions,
+    prior_layer_paths: &HashSet<PathBuf>,
+    folding: HostCaseFolding,
+) -> Result<UnpackReport, UnpackError> {
     // Open the root once. On Linux every materialization resolves and
     // writes through this handle via `openat2(RESOLVE_IN_ROOT |
     // RESOLVE_NO_SYMLINKS)`, so the resolve-then-write is atomic
@@ -517,6 +588,7 @@ pub fn unpack_layer_with_prior_paths<R: Read>(
 
     let mut report = UnpackReport::default();
     let mut current_layer_paths = HashSet::new();
+    let mut case_fold_index = CaseFoldIndex::new(folding, prior_layer_paths);
 
     for entry_result in archive.entries()? {
         let mut entry = match entry_result {
@@ -631,6 +703,29 @@ pub fn unpack_layer_with_prior_paths<R: Read>(
             target: &target,
             prior_layer_paths,
         };
+
+        // Safety check 6 — the host name this entry wants is already
+        // held by a differently-spelled path *this unpack wrote*. The
+        // host filesystem folds case (macOS APFS) and cannot represent
+        // both, so carry the entry into the image instead of letting
+        // the write clobber the occupant. A path we did not write is
+        // deliberately not covered: that keeps the `O_EXCL` refusal in
+        // place for a planted file. Whiteout markers are exempt — they
+        // remove a sibling rather than occupy a name of their own.
+        if case_fold_index.collides(&rel_path)
+            && matches!(classify_whiteout(&raw_path), WhiteoutKind::None)
+        {
+            defer_colliding_entry(
+                &mut entry,
+                entry_type,
+                &ctx,
+                entry_xattrs,
+                options,
+                &mut report,
+            );
+            continue;
+        }
+
         match entry_type {
             tar::EntryType::Regular | tar::EntryType::Continuous => unpack_regular_entry(
                 &mut entry,
@@ -671,6 +766,13 @@ pub fn unpack_layer_with_prior_paths<R: Read>(
                     reason: RefusalReason::UnsupportedEntryType,
                 });
             }
+        }
+
+        // The handlers insert into `current_layer_paths` only on a
+        // successful materialization, so this mirrors exactly the host
+        // names that are now occupied.
+        if current_layer_paths.contains(&rel_path) {
+            case_fold_index.record(&rel_path);
         }
     }
 
@@ -857,6 +959,254 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use tempfile::TempDir;
+
+    /// The `PAM.7.gz` / `pam.7.gz` pair that Debian's `libpam-runtime`
+    /// puts in every Debian-derived image, including the `python:*`
+    /// family. This is the exact shape that broke
+    /// `machine run --image python:3.12` on macOS.
+    fn debian_pam_manpage_layer() -> Vec<u8> {
+        build_tar(|b| {
+            add_dir(b, "usr/share/man/man7");
+            add_file(b, "usr/share/man/man7/PAM.7.gz", b"the real page");
+            add_symlink(b, "usr/share/man/man7/pam.7.gz", "PAM.7.gz");
+        })
+    }
+
+    fn unpack_forcing(
+        tar_bytes: Vec<u8>,
+        root: &Path,
+        folding: HostCaseFolding,
+    ) -> Result<UnpackReport, UnpackError> {
+        unpack_layer_inner(
+            Cursor::new(tar_bytes),
+            root,
+            &UnpackOptions::default(),
+            &HashSet::new(),
+            folding,
+        )
+    }
+
+    #[test]
+    fn case_folding_host_defers_the_colliding_entry_into_the_image() {
+        let tmp = TempDir::new().unwrap();
+        let report = unpack_forcing(
+            debian_pam_manpage_layer(),
+            tmp.path(),
+            HostCaseFolding::Insensitive,
+        )
+        .expect("unpack ok");
+
+        assert!(
+            report.refused.is_empty(),
+            "a case collision must not fail the layer: {:?}",
+            report.refused
+        );
+        assert_eq!(report.files_written, 1);
+        assert_eq!(
+            report.symlinks_written, 0,
+            "the symlink cannot occupy the folded host name"
+        );
+        assert_eq!(
+            report.deferred_nodes,
+            vec![Node::Symlink {
+                path: "/usr/share/man/man7/pam.7.gz".to_string(),
+                target: "PAM.7.gz".to_string(),
+            }],
+            "the symlink must survive as an image node with its exact path"
+        );
+        // The occupant is intact — not clobbered by the colliding write.
+        assert_eq!(
+            std::fs::read(tmp.path().join("usr/share/man/man7/PAM.7.gz")).unwrap(),
+            b"the real page"
+        );
+    }
+
+    #[test]
+    fn both_case_variants_reach_the_image_on_any_host() {
+        // The property that has to hold everywhere, through the real
+        // probing entry point: after unpacking Debian's man-page pair,
+        // both spellings are present in what the image writer will see
+        // — on disk where the host can hold them, deferred where it
+        // cannot. This is the regression that broke
+        // `machine run --image python:3.12` on macOS.
+        let tmp = TempDir::new().unwrap();
+        let report = unpack_layer(
+            Cursor::new(debian_pam_manpage_layer()),
+            tmp.path(),
+            &UnpackOptions::default(),
+        )
+        .expect("unpack ok");
+
+        assert!(report.refused.is_empty(), "{:?}", report.refused);
+        for spelling in ["PAM.7.gz", "pam.7.gz"] {
+            let rel = format!("usr/share/man/man7/{spelling}");
+            let on_disk = report.paths_written.contains(&PathBuf::from(&rel));
+            let deferred = report
+                .deferred_nodes
+                .iter()
+                .any(|node| node.path() == format!("/{rel}"));
+            assert!(
+                on_disk || deferred,
+                "{rel} reached neither the host tree nor the deferred node list"
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_layer_redeclaring_a_directory_keeps_the_earlier_layer_contents() {
+        // Every OCI layer re-lists the parent chain of everything it
+        // touches, so `usr/` and `usr/lib/` appear in layer after layer.
+        // A re-declaration carries the directory's metadata; it does NOT
+        // mean "clear this directory" — only an explicit `.wh..wh..opq`
+        // marker does. Treating it as a replacement recursively deletes
+        // everything the earlier layers put there, which empties a
+        // multi-layer image down to whatever its last layer happened to
+        // list.
+        let tmp = TempDir::new().unwrap();
+        let opts = UnpackOptions::default();
+
+        let layer1 = build_tar(|b| {
+            add_dir(b, "usr");
+            add_dir(b, "usr/lib");
+            add_file(b, "usr/lib/libc.so", b"from layer 1");
+        });
+        let first = unpack_layer(Cursor::new(layer1), tmp.path(), &opts).expect("layer 1 unpacks");
+        assert!(first.refused.is_empty(), "{:?}", first.refused);
+
+        let layer2 = build_tar(|b| {
+            add_dir(b, "usr");
+            add_dir(b, "usr/lib");
+            add_file(b, "usr/lib/libm.so", b"from layer 2");
+        });
+        let second = unpack_layer_with_prior_paths(
+            Cursor::new(layer2),
+            tmp.path(),
+            &opts,
+            &first.paths_written,
+        )
+        .expect("layer 2 unpacks");
+        assert!(second.refused.is_empty(), "{:?}", second.refused);
+
+        assert_eq!(
+            std::fs::read(tmp.path().join("usr/lib/libc.so")).ok(),
+            Some(b"from layer 1".to_vec()),
+            "re-declaring usr/lib must not delete what an earlier layer put in it"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("usr/lib/libm.so")).ok(),
+            Some(b"from layer 2".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_later_layer_replacing_a_file_with_a_directory_still_replaces_it() {
+        // The other side of the same rule: a genuine *type* change from a
+        // prior layer must still remove the occupant, or the directory
+        // could never be created.
+        let tmp = TempDir::new().unwrap();
+        let opts = UnpackOptions::default();
+
+        let layer1 = build_tar(|b| add_file(b, "opt/thing", b"i am a file"));
+        let first = unpack_layer(Cursor::new(layer1), tmp.path(), &opts).expect("layer 1 unpacks");
+
+        let layer2 = build_tar(|b| {
+            add_dir(b, "opt/thing");
+            add_file(b, "opt/thing/inner", b"now a directory");
+        });
+        let second = unpack_layer_with_prior_paths(
+            Cursor::new(layer2),
+            tmp.path(),
+            &opts,
+            &first.paths_written,
+        )
+        .expect("layer 2 unpacks");
+        assert!(second.refused.is_empty(), "{:?}", second.refused);
+
+        assert!(tmp.path().join("opt/thing").is_dir());
+        assert_eq!(
+            std::fs::read(tmp.path().join("opt/thing/inner")).ok(),
+            Some(b"now a directory".to_vec())
+        );
+    }
+
+    #[test]
+    fn deferral_does_not_excuse_a_path_this_unpack_never_wrote() {
+        // A file planted at the target out-of-band is exactly what the
+        // O_EXCL guard exists for. It is not in the fold index, so the
+        // entry must not be deferred past the guard — on a folding host
+        // it refuses, and on either host the plant is left alone.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("usr")).unwrap();
+        std::fs::write(tmp.path().join("usr/Planted"), b"pre-existing").unwrap();
+
+        let tar_bytes = build_tar(|b| add_file(b, "usr/planted", b"layer content"));
+        let report =
+            unpack_forcing(tar_bytes, tmp.path(), HostCaseFolding::Insensitive).expect("unpack ok");
+
+        assert!(
+            report.deferred_nodes.is_empty(),
+            "an unwritten path must not be treated as our own collision"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("usr/Planted")).unwrap(),
+            b"pre-existing",
+            "the planted file must survive untouched"
+        );
+    }
+
+    #[test]
+    fn colliding_hardlink_refuses_rather_than_silently_dropping_the_alias() {
+        let tmp = TempDir::new().unwrap();
+        let tar_bytes = build_tar(|b| {
+            add_file(b, "bin/Tool", b"payload");
+            add_hardlink(b, "bin/tool", "bin/Tool");
+        });
+        let report =
+            unpack_forcing(tar_bytes, tmp.path(), HostCaseFolding::Insensitive).expect("unpack ok");
+
+        assert!(report.deferred_nodes.is_empty());
+        assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
+        assert_eq!(
+            report.refused[0].reason,
+            RefusalReason::HostPathCollision,
+            "a hardlink has no image-node form, so it must refuse loudly"
+        );
+    }
+
+    #[test]
+    fn deferred_file_carries_its_bytes_and_mode() {
+        let tmp = TempDir::new().unwrap();
+        let tar_bytes = build_tar(|b| {
+            add_file_with_mode(b, "opt/Run", b"first", 0o644);
+            add_file_with_mode(b, "opt/run", b"second", 0o755);
+        });
+        let report =
+            unpack_forcing(tar_bytes, tmp.path(), HostCaseFolding::Insensitive).expect("unpack ok");
+
+        assert!(report.refused.is_empty(), "{:?}", report.refused);
+        assert_eq!(
+            report.deferred_nodes,
+            vec![Node::File {
+                path: "/opt/run".to_string(),
+                mode: 0o755,
+                data: b"second".to_vec(),
+                xattrs: Vec::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn refused_entry_debug_names_the_path() {
+        let refused = RefusedEntry {
+            raw_path: b"usr/share/man/man7/pam.7.gz".to_vec(),
+            reason: RefusalReason::HostPathCollision,
+        };
+        let rendered = format!("{refused:?}");
+        assert!(
+            rendered.contains("usr/share/man/man7/pam.7.gz"),
+            "a refusal must name the path, got {rendered}"
+        );
+    }
 
     #[test]
     fn happy_path_writes_files_dirs_symlinks() {

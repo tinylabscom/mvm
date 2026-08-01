@@ -177,7 +177,7 @@ impl<E> From<Ext4Error> for EmitImageError<E> {
 
 /// A filesystem node to place in the image. Paths are absolute (`/`-rooted);
 /// `/` (the root) is implicit and always present.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Node {
     Dir {
         path: String,
@@ -199,7 +199,7 @@ pub enum Node {
 /// An extended attribute (name + raw value) to store in an inode's inline xattr
 /// area. `name` is fully-qualified (e.g. `security.capability`, `user.foo`);
 /// `value` is preserved verbatim.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Xattr {
     pub name: String,
     pub value: Vec<u8>,
@@ -226,7 +226,9 @@ impl BuildOptions {
 }
 
 impl Node {
-    fn path(&self) -> &str {
+    /// The node's guest-absolute path — the identity callers merge and
+    /// deduplicate node lists on.
+    pub fn path(&self) -> &str {
         match self {
             Node::Dir { path, .. } | Node::File { path, .. } | Node::Symlink { path, .. } => path,
         }

@@ -8,10 +8,13 @@ use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use crate::ext4::Node;
+
 use super::device_nodes::DeviceNodeAction;
 use super::fs_ops::{HardlinkAction, Rooted};
+use super::regular_file::{classify_regular_file_mode, record_setid_entry};
 use super::whiteout::{WhiteoutKind, classify_whiteout};
-use super::xattr::{PendingXattr, apply_collected_xattrs};
+use super::xattr::{PendingXattr, apply_collected_xattrs, into_ext4_xattrs};
 use super::{RefusalReason, RefusedEntry, UnpackOptions, UnpackReport};
 
 /// Per-entry inputs threaded from `unpack_layer`'s tar-iteration loop
@@ -27,6 +30,101 @@ pub(super) struct EntryCtx<'a> {
     pub(super) raw_path: &'a [u8],
     pub(super) target: &'a Path,
     pub(super) prior_layer_paths: &'a HashSet<PathBuf>,
+}
+
+/// Carry an entry the host tree cannot hold into the image instead of
+/// writing it.
+///
+/// Reached when the entry's path collides, under the host filesystem's
+/// case folding, with a path this same unpack already materialized —
+/// `usr/share/man/man7/pam.7.gz` arriving after
+/// `usr/share/man/man7/PAM.7.gz` on a default macOS APFS volume. Writing
+/// it would clobber the occupant, so the entry is captured as an ext4
+/// [`Node`] in [`UnpackReport::deferred_nodes`] and merged by the image
+/// writer, leaving both paths present in the rootfs that actually boots.
+///
+/// Only the kinds the [`Node`] enum can express are deferrable. A
+/// colliding hardlink or device node refuses with
+/// [`RefusalReason::HostPathCollision`] — an honest refusal beats an
+/// image that silently lost an inode alias.
+pub(super) fn defer_colliding_entry<R: Read>(
+    entry: &mut tar::Entry<R>,
+    entry_type: tar::EntryType,
+    ctx: &EntryCtx,
+    entry_xattrs: Vec<PendingXattr>,
+    options: &UnpackOptions,
+    report: &mut UnpackReport,
+) {
+    let path = guest_path_of(ctx.rel_path);
+    let node = match entry_type {
+        tar::EntryType::Regular | tar::EntryType::Continuous => {
+            let mode =
+                match classify_regular_file_mode(entry.header().mode().unwrap_or(0o644), options) {
+                    Ok(mode) => mode,
+                    Err(refuse) => {
+                        report.refused.push(RefusedEntry {
+                            raw_path: ctx.raw_path.to_vec(),
+                            reason: refuse,
+                        });
+                        return;
+                    }
+                };
+            let mut data = Vec::new();
+            if entry.read_to_end(&mut data).is_err() {
+                report.refused.push(RefusedEntry {
+                    raw_path: ctx.raw_path.to_vec(),
+                    reason: RefusalReason::MalformedHeader,
+                });
+                return;
+            }
+            record_setid_entry(report, ctx.raw_path, mode, options.setid_policy);
+            Node::File {
+                path,
+                mode: mode as u16,
+                data,
+                xattrs: into_ext4_xattrs(entry_xattrs),
+            }
+        }
+        tar::EntryType::Symlink => {
+            let target = match entry.link_name_bytes() {
+                Some(bytes) if !bytes.is_empty() && !bytes.contains(&0) => {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                }
+                _ => {
+                    report.refused.push(RefusedEntry {
+                        raw_path: ctx.raw_path.to_vec(),
+                        reason: RefusalReason::MalformedHeader,
+                    });
+                    return;
+                }
+            };
+            Node::Symlink { path, target }
+        }
+        // Directories are created 0o755 regardless of header mode on the
+        // host path too, so the deferred node matches what the tree would
+        // otherwise have held.
+        tar::EntryType::Directory => Node::Dir {
+            path,
+            mode: 0o755,
+            xattrs: into_ext4_xattrs(entry_xattrs),
+        },
+        _ => {
+            report.refused.push(RefusedEntry {
+                raw_path: ctx.raw_path.to_vec(),
+                reason: RefusalReason::HostPathCollision,
+            });
+            return;
+        }
+    };
+
+    report.deferred_nodes.push(node);
+}
+
+/// Guest-absolute path string for the ext4 [`Node`] list, matching the
+/// shape [`crate::rootfs::collect_nodes`] produces when it walks the
+/// host tree, so deferred nodes and walked nodes are interchangeable.
+fn guest_path_of(rel: &Path) -> String {
+    format!("/{}", rel.to_string_lossy())
 }
 
 /// Materialize a `Regular`/`Continuous` tar entry: either write the
