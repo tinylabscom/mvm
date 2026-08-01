@@ -64,9 +64,24 @@ fn start_pool_with_behavior(cfg: WarmProcessConfig, behavior: Option<&str>) -> A
 }
 
 fn dispatch(pool: &Arc<WorkerPool>, payload: &[u8]) -> DispatchOutcome {
-    pool.dispatch(payload.to_vec(), 30, Vec::new())
+    pool.dispatch(payload.to_vec(), CALL_HANG_GUARD_SECS, Vec::new())
         .expect("dispatch returns outcome")
 }
+
+/// Per-call timeout for dispatches whose test asserts a *result* — ordering,
+/// recycling, which slot served it — rather than a duration.
+///
+/// Not a budget. Sizing it as a small multiple of the expected call is what
+/// made this file flaky: `idle_timeout_skips_busy_workers` gave a `slow_secs=2`
+/// worker a 5s timeout and failed at 5.099s under a loaded run, and
+/// `fifo_queue_serializes_callers` is tighter still by construction — five
+/// calls serialize through a one-slot pool, so the last caller's budget has to
+/// cover the four ahead of it, and each was given the same 5s.
+///
+/// Reached only when a call never returns, which is a hang rather than a slow
+/// host. Never tune it toward "what seems fast enough"; the only test here that
+/// asserts a timeout *occurs* is the readiness-probe one, which sets its own.
+const CALL_HANG_GUARD_SECS: u64 = 120;
 
 /// Block until `cond` holds, or fail the test.
 ///
@@ -239,7 +254,7 @@ fn idle_timeout_skips_busy_workers() {
     let pool_clone = Arc::clone(&pool);
     let dispatch_handle = std::thread::spawn(move || {
         pool_clone
-            .dispatch(b"x".to_vec(), 5, Vec::new())
+            .dispatch(b"x".to_vec(), CALL_HANG_GUARD_SECS, Vec::new())
             .expect("dispatch")
     });
 
@@ -306,12 +321,12 @@ fn wrapper_crash_returns_error_and_recycles() {
     let first_pid = idle_pid(&pool);
 
     let out1 = pool
-        .dispatch(b"first".to_vec(), 5, Vec::new())
+        .dispatch(b"first".to_vec(), CALL_HANG_GUARD_SECS, Vec::new())
         .expect("dispatch returns outcome");
     assert!(matches!(out1.outcome, WorkerOutcome::Exit { code: 0 }));
 
     let out2 = pool
-        .dispatch(b"second".to_vec(), 5, Vec::new())
+        .dispatch(b"second".to_vec(), CALL_HANG_GUARD_SECS, Vec::new())
         .expect("dispatch returns outcome even on crash");
     assert!(
         matches!(out2.outcome, WorkerOutcome::Error { .. }),
@@ -348,7 +363,11 @@ fn pool_size_4_parallel_dispatches() {
         handles.push(std::thread::spawn(move || {
             let payload = format!("call-{i}");
             let out = p
-                .dispatch(payload.clone().into_bytes(), 30, Vec::new())
+                .dispatch(
+                    payload.clone().into_bytes(),
+                    CALL_HANG_GUARD_SECS,
+                    Vec::new(),
+                )
                 .expect("ok");
             assert_eq!(out.stdout, payload.as_bytes());
             assert!(matches!(out.outcome, WorkerOutcome::Exit { code: 0 }));
@@ -384,7 +403,8 @@ fn fifo_queue_serializes_callers() {
     for i in 0..5u8 {
         let p = Arc::clone(&pool_clone);
         handles.push(std::thread::spawn(move || {
-            p.dispatch(vec![i], 5, Vec::new()).expect("dispatch")
+            p.dispatch(vec![i], CALL_HANG_GUARD_SECS, Vec::new())
+                .expect("dispatch")
         }));
     }
     let outs: Vec<DispatchOutcome> = handles
@@ -438,20 +458,22 @@ fn queue_full_returns_error() {
 
     let p1 = Arc::clone(&pool);
     let p2 = Arc::clone(&pool);
-    let h1 = std::thread::spawn(move || p1.dispatch(b"a".to_vec(), 10, Vec::new()));
+    let h1 =
+        std::thread::spawn(move || p1.dispatch(b"a".to_vec(), CALL_HANG_GUARD_SECS, Vec::new()));
     // The first caller must hold the only slot before the second can
     // queue behind it; the second must be parked in the queue before a
     // third can overflow it. Both are observable, so neither is timed.
     wait_until("the first caller to occupy the only slot", || {
         any_slot_busy(&pool)
     });
-    let h2 = std::thread::spawn(move || p2.dispatch(b"b".to_vec(), 10, Vec::new()));
+    let h2 =
+        std::thread::spawn(move || p2.dispatch(b"b".to_vec(), CALL_HANG_GUARD_SECS, Vec::new()));
     wait_until("the second caller to park in the queue", || {
         pool.queued_waiters() == 1
     });
 
     // Third should hit QueueFull.
-    let res = pool.dispatch(b"c".to_vec(), 10, Vec::new());
+    let res = pool.dispatch(b"c".to_vec(), CALL_HANG_GUARD_SECS, Vec::new());
     assert!(
         res.is_err(),
         "third dispatch must hit queue cap, got {:?}",
@@ -495,13 +517,13 @@ fn start_pool_unready(cfg: WarmProcessConfig) -> Arc<WorkerPool> {
 #[test]
 fn dispatch_refuses_until_readiness_marked() {
     let pool = start_pool_unready(cfg(1, 100, 1024));
-    let res = pool.dispatch(b"hello".to_vec(), 5, Vec::new());
+    let res = pool.dispatch(b"hello".to_vec(), CALL_HANG_GUARD_SECS, Vec::new());
     assert!(matches!(res, Err(DispatchError::NotReady)));
     assert!(!pool.is_ready());
     pool.mark_ready();
     assert!(pool.is_ready());
     let out = pool
-        .dispatch(b"hello".to_vec(), 5, Vec::new())
+        .dispatch(b"hello".to_vec(), CALL_HANG_GUARD_SECS, Vec::new())
         .expect("post-ready dispatch ok");
     assert_eq!(out.stdout, b"hello");
 }
@@ -519,7 +541,7 @@ fn wait_for_ready_succeeds_against_passing_probe() {
         .with_interval(Duration::from_millis(50));
     pool.wait_for_ready(&cfg_probe).expect("ready");
     assert!(pool.is_ready());
-    pool.dispatch(b"ok".to_vec(), 5, Vec::new())
+    pool.dispatch(b"ok".to_vec(), CALL_HANG_GUARD_SECS, Vec::new())
         .expect("dispatch ok after ready");
 }
 
@@ -545,14 +567,14 @@ fn wait_for_ready_succeeds_after_initial_failures() {
 
     // While warming, dispatch should fail-closed.
     assert!(matches!(
-        pool.dispatch(b"early".to_vec(), 5, Vec::new()),
+        pool.dispatch(b"early".to_vec(), CALL_HANG_GUARD_SECS, Vec::new()),
         Err(DispatchError::NotReady)
     ));
 
     pool.wait_for_ready(&cfg_probe).expect("warmed up");
     assert!(pool.is_ready());
     let out = pool
-        .dispatch(b"after-warmup".to_vec(), 5, Vec::new())
+        .dispatch(b"after-warmup".to_vec(), CALL_HANG_GUARD_SECS, Vec::new())
         .expect("dispatch after warmup");
     assert_eq!(out.stdout, b"after-warmup");
 }
@@ -570,7 +592,7 @@ fn wait_for_ready_marks_ready_when_probe_missing() {
     pool.wait_for_ready(&cfg_probe)
         .expect("missing probe is ok");
     assert!(pool.is_ready());
-    pool.dispatch(b"ok".to_vec(), 5, Vec::new())
+    pool.dispatch(b"ok".to_vec(), CALL_HANG_GUARD_SECS, Vec::new())
         .expect("dispatch ok with absent probe");
 }
 
@@ -592,7 +614,7 @@ fn wait_for_ready_timeout_leaves_pool_not_ready() {
     );
     assert!(!pool.is_ready(), "timeout must leave pool NotReady");
     assert!(matches!(
-        pool.dispatch(b"x".to_vec(), 5, Vec::new()),
+        pool.dispatch(b"x".to_vec(), CALL_HANG_GUARD_SECS, Vec::new()),
         Err(DispatchError::NotReady)
     ));
 }
