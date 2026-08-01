@@ -240,14 +240,18 @@ fn native_vmm_recipes_are_source_built_and_pinned() {
         );
     }
 
-    const KERNEL_VERSION: &str = "6.12.98";
-    const KERNEL_HASH: &str = "sha256-pitqLSB/9yUQ5fRxVrcHjh5xeXNXQSQRuOT/+X/I9Mc=";
+    const KERNEL_VERSION: &str = "6.12.100";
+    const KERNEL_HASH: &str = "sha256-Z/lzUzQGSS6Gd0usvO+uUNUNXDTL9wPEfsUmpe/c7pA=";
     assert!(
         libkrunfw.contains(&format!("linux-{KERNEL_VERSION}.tar.xz"))
             && libkrunfw.contains(&format!("hash = \"{KERNEL_HASH}\""))
             && libkrunfw.contains("KERNEL_REMOTE")
-            && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)"),
-        "libkrunfw must pin and substitute the kernel source instead of downloading it during build"
+            && libkrunfw.contains(&format!(
+                "'KERNEL_VERSION = linux-6.12.91' 'KERNEL_VERSION = linux-{KERNEL_VERSION}'"
+            ))
+            && libkrunfw.contains("ln -s ${kernelSrc} $(KERNEL_TARBALL)")
+            && libkrunfw.contains("'virtio_transport_alloc_skb(&info, dgram_len, false, NULL,'"),
+        "libkrunfw must pin the kernel version, substitute the source, and keep its datagram patch compatible with that kernel"
     );
     assert!(
         kernel_base.contains(&format!("kernelVersion = \"{KERNEL_VERSION}\""))

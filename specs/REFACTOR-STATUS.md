@@ -1,11 +1,20 @@
 # Refactor status
 
-Last updated: 2026-07-31
+Last updated: 2026-08-01
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [ ] Plan 284 — Zero-open-issue reconciliation
+      (`specs/plans/284-zero-open-issue-reconciliation.md`)
+  - [x] Classify and reconcile the original 19 open issues
+  - [x] Land the queued fixes for #2007, #2028, and #2029
+  - [ ] Land the security, kernel-pin, installer-fixture, and cold-cache-test
+        fixes for #1983, #1937, #1972, and #2035
+  - [ ] Repair newly filed #2039 and #2042, and execute the refiled volume
+        epic #2040
+
 - [x] Plan 282 — Merge queue auto-requeue
       (`specs/plans/282-merge-queue-auto-requeue.md`)
   - [x] Refuse conflicts and bound retry attempts per PR

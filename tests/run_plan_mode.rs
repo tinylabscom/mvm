@@ -67,6 +67,7 @@ fn mvmctl_run_plan_cmd(home_dir: &std::path::Path) -> Command {
     #[allow(deprecated)]
     let mut cmd = Command::cargo_bin("mvmctl").expect("locate mvmctl binary");
     cmd.env("HOME", home_dir);
+    cmd.env("MVM_HOME", home_dir.join(".mvm"));
     cmd.env_remove("MVM_SDK_MODE");
     cmd
 }

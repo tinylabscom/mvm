@@ -2,12 +2,52 @@
 //! assets over a loopback HTTP server and drives the script with its
 //! documented env overrides.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
+
+const MAX_REQUEST_HEADER_BYTES: usize = 8 * 1024;
+
+fn read_request_path(reader: &mut impl Read) -> std::io::Result<Option<String>> {
+    let mut request = Vec::with_capacity(512);
+    let mut chunk = [0u8; 512];
+
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        if request.len().saturating_add(read) > MAX_REQUEST_HEADER_BYTES {
+            return Ok(None);
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    if !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        return Ok(None);
+    }
+
+    let request = String::from_utf8_lossy(&request);
+    let mut fields = request
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    let method = fields.next();
+    let path = fields.next();
+    let version = fields.next();
+    if method != Some("GET") || version.is_none() || fields.next().is_some() {
+        return Ok(None);
+    }
+    Ok(path.map(str::to_owned))
+}
 
 fn host_target() -> &'static str {
     if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
@@ -76,17 +116,17 @@ fn serve(routes: Vec<(String, Vec<u8>)>) -> (String, mpsc::Sender<()>) {
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let mut buf = [0u8; 2048];
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]);
-                    let path = req
-                        .lines()
-                        .next()
-                        .and_then(|l| l.split_whitespace().nth(1))
-                        .unwrap_or("/");
+                    // The listener is non-blocking so the stop channel can be
+                    // observed. Accepted sockets are request/response streams:
+                    // make that contract explicit on every platform, then read
+                    // through the header terminator instead of assuming one
+                    // `read` contains the entire request line.
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let path = read_request_path(&mut stream).ok().flatten();
                     let body = routes
                         .iter()
-                        .find(|(p, _)| p == path)
+                        .find(|(candidate, _)| Some(candidate.as_str()) == path.as_deref())
                         .map(|(_, b)| b.clone());
                     match body {
                         Some(b) => {
@@ -107,6 +147,44 @@ fn serve(routes: Vec<(String, Vec<u8>)>) -> (String, mpsc::Sender<()>) {
         }
     });
     (format!("http://{addr}"), tx)
+}
+
+#[test]
+fn request_reader_collects_fragmented_headers() {
+    struct FragmentedReader<'a> {
+        fragments: VecDeque<&'a [u8]>,
+    }
+
+    impl Read for FragmentedReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some(fragment) = self.fragments.pop_front() else {
+                return Ok(0);
+            };
+            assert!(fragment.len() <= buf.len());
+            buf[..fragment.len()].copy_from_slice(fragment);
+            Ok(fragment.len())
+        }
+    }
+
+    let mut reader = FragmentedReader {
+        fragments: VecDeque::from([
+            b"G".as_slice(),
+            b"ET /artifact HTTP/1.1\r\nHo".as_slice(),
+            b"st: 127.0.0.1\r\nConnection: close\r\n\r\n".as_slice(),
+        ]),
+    };
+
+    assert_eq!(
+        read_request_path(&mut reader).unwrap().as_deref(),
+        Some("/artifact")
+    );
+}
+
+#[test]
+fn request_reader_rejects_incomplete_headers() {
+    let mut reader = b"GET /artifact HTTP/1.1\r\nHost: localhost\r\n".as_slice();
+
+    assert_eq!(read_request_path(&mut reader).unwrap(), None);
 }
 
 fn repo_root() -> PathBuf {
