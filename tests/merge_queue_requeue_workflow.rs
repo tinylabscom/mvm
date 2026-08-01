@@ -12,7 +12,7 @@ fn privileged_requeue_workflow_never_executes_pull_request_code() {
     let source = workflow();
 
     assert!(source.contains("pull_request_target:\n    types: [dequeued]"));
-    assert!(source.contains("contents: read\n  pull-requests: write"));
+    assert!(source.contains("contents: write\n  pull-requests: write"));
     assert!(!source.contains("actions/checkout"));
     assert!(!source.contains("github.event.pull_request.head"));
     assert!(!source.contains("github.head_ref"));

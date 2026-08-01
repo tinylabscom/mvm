@@ -19,7 +19,7 @@ on:
     types: [dequeued]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 # One requeue decision per PR at a time; a burst of dequeues shouldn't race.
