@@ -61,10 +61,16 @@ policy · anti-spoof · flow state · DNS · ingress · NAT · audit
 host networking
 ```
 
-The managed socket-aware vsock mode (`host-vsock-proxy`) remains the
-**default and the preferred mode**. `l3-vsock` is a compatibility mode
-that trades application-layer visibility for IP-stack fidelity, and the
-plan records which one was admitted.
+There is no operator-facing mode selector. mvm derives the transport from
+what the plan requires: a workload that needs the host to see its outbound
+cleartext gets the socket-aware path, because the tunnel cannot provide
+that; everything else gets the tunnel, which is universally compatible. A
+selector could only let someone choose a weaker posture than the one they
+would otherwise have had, and the derivation never produces a combination
+the compatibility gate would reject.
+
+The mode remains in the *signed plan* — it is the admitted contract, and a
+control plane sets it — but it is not something an operator picks.
 
 ## Why TUN over vsock, and not the alternatives
 
@@ -688,6 +694,27 @@ the machine is told so. If an established tunnel disconnects, the guest
 agent marks `mvm0` down; there is no fallback to a NIC, to host
 networking, or to the managed mode. Startup failure tears down partial
 state on the same path as normal stop.
+
+## Live boot witness
+
+A real Firecracker microVM on the mvm workload kernel (`CONFIG_TUN=y`,
+built in — `CONFIG_MODULES=n`, so `=m` was never an option), configured with
+no `network-interfaces` entry. Observed from inside the guest:
+
+```text
+L3WITNESS tun_device_present=true
+L3WITNESS interfaces_before=lo
+L3WITNESS interfaces_after=lo,mvm0
+L3WITNESS mvm0_mac=
+L3WITNESS mvm0_arphrd=65534
+L3WITNESS mvm0_created=true
+```
+
+`interfaces_before=lo` is the no-NIC invariant, observed rather than
+asserted: the guest has loopback and nothing else. `arphrd=65534` is
+`ARPHRD_NONE` — the device is layer 3, not Ethernet — and the empty MAC
+follows from that, because a point-to-point IP interface has no hardware
+address to report.
 
 ## Measured overhead
 

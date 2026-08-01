@@ -2371,123 +2371,51 @@ fn advance_does_not_collide_with_the_port_forward_verb() {
     assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
 }
 
-// ---- network mode -------------------------------------------------
+// ---- networking -----------------------------------------------------
 
-/// The default is the socket-aware mode. `l3-vsock` is a deliberate
-/// selection, never something a workload lands in by accident.
+/// There is one networking configuration and no way to ask for another.
+/// A transport selector could only ever let someone choose a weaker posture
+/// than the one they would otherwise have had.
 #[test]
-fn machine_run_defaults_to_the_socket_aware_network_mode() {
-    let args = parse_run(&["run", "--image", "alpine"]).unwrap();
-    assert_eq!(args.network_mode, CliNetworkMode::HostVsockProxy);
-    assert!(!args.network_mode.forfeits_payload_visibility());
-}
-
-#[test]
-fn machine_run_accepts_every_network_mode_spelling() {
-    for (flag, expected) in [
-        ("none", CliNetworkMode::None),
-        ("host-vsock-proxy", CliNetworkMode::HostVsockProxy),
-        ("l3-vsock", CliNetworkMode::L3Vsock),
-    ] {
-        let args = parse_run(&["run", "--image", "alpine", "--network-mode", flag]).unwrap();
-        assert_eq!(args.network_mode, expected, "--network-mode {flag}");
+fn machine_run_exposes_no_network_mode_selector() {
+    let command = TestCli::command();
+    let run = command
+        .find_subcommand("run")
+        .expect("machine run must exist");
+    for arg in run.get_arguments() {
+        let id = arg.get_id().as_str();
+        assert!(
+            !id.contains("network_mode") && !id.contains("network-mode"),
+            "machine run must not expose a networking transport selector, found {id:?}"
+        );
     }
+    // `argv` is a trailing var-arg, so a stray `--network-mode` is not
+    // rejected — it is collected as workload arguments. What matters is
+    // that it configures nothing: the transport is derived either way.
+    let args = parse_run(&["run", "--image", "alpine", "--network-mode", "l3-vsock"])
+        .expect("trailing args parse as workload argv");
+    assert!(
+        args.argv.iter().any(|a| a == "--network-mode"),
+        "a stray flag must land in the workload's argv, not configure mvm: {:?}",
+        args.argv
+    );
 }
 
-/// An egress rule says *where* traffic may go, not *how* it travels. A
-/// workload that declares one must not be silently moved onto the L3
-/// tunnel and lose the substitution path with it.
+/// A workload that needs nothing special gets the tunnel, which is the
+/// universally compatible transport.
 #[test]
-fn an_allow_host_rule_does_not_imply_the_l3_mode() {
-    let args = parse_run(&[
-        "run",
-        "--image",
-        "alpine",
-        "--allow-host",
-        "api.example.com:443",
-    ])
-    .unwrap();
-    assert_eq!(args.allow_host, vec!["api.example.com:443"]);
-    assert_eq!(args.network_mode, CliNetworkMode::HostVsockProxy);
-}
-
-#[test]
-fn an_unknown_network_mode_is_rejected_rather_than_defaulted() {
-    let parsed = parse_run(&["run", "--image", "alpine", "--network-mode", "bridge"]);
-    assert!(parsed.is_err(), "a mode mvm does not have must not parse");
-}
-
-#[test]
-fn each_cli_mode_maps_to_its_signed_plan_value() {
+fn an_ordinary_workload_derives_the_tunnel() {
     use mvm_protocol::plan::NetworkMode;
-    assert_eq!(CliNetworkMode::None.to_plan_mode(), NetworkMode::None);
-    assert_eq!(
-        CliNetworkMode::HostVsockProxy.to_plan_mode(),
-        NetworkMode::HostVsockProxy
-    );
-    assert_eq!(CliNetworkMode::L3Vsock.to_plan_mode(), NetworkMode::L3Vsock);
-    assert!(CliNetworkMode::L3Vsock.to_plan_mode().is_l3_vsock());
+    let mode = super::derive_network_mode(&mvm_net::l3::SubstitutionRequirements::default());
+    assert_eq!(mode, NetworkMode::L3Vsock);
 }
 
-/// Only the L3 mode gives up payload visibility, and the preflight says so
-/// exactly once — or refuses outright where no datapath exists.
+/// A workload whose plan depends on the host seeing its outbound cleartext
+/// gets the socket-aware transport, because the tunnel cannot provide it.
+/// This is derived, not chosen, so it cannot be got wrong.
 #[test]
-fn the_preflight_states_the_capability_trade_or_refuses() {
-    assert_eq!(
-        super::preflight_network_mode(CliNetworkMode::HostVsockProxy).unwrap(),
-        None
-    );
-    assert_eq!(
-        super::preflight_network_mode(CliNetworkMode::None).unwrap(),
-        None
-    );
-
-    match super::preflight_network_mode(CliNetworkMode::L3Vsock) {
-        Ok(Some(warning)) => {
-            assert!(warning.contains("opaque"), "{warning}");
-            assert!(warning.contains("substitution"), "{warning}");
-        }
-        Ok(None) => panic!("selecting l3-vsock must always state the trade"),
-        Err(err) => {
-            // No datapath on this host: the refusal must name the mode and
-            // point at the alternative rather than failing obscurely.
-            let msg = err.to_string();
-            assert!(msg.contains("l3-vsock"), "{msg}");
-            assert!(msg.contains("host-vsock-proxy"), "{msg}");
-        }
-    }
-}
-
-/// A plan that binds secrets depends on the host originating its outbound
-/// connections, which the L3 tunnel does not do. Selecting both is refused
-/// before any build or boot, with a message that names the fix.
-#[test]
-fn a_plan_needing_substitution_cannot_select_the_l3_mode() {
-    let needs_secrets = mvm_net::l3::SubstitutionRequirements {
-        binds_secrets: true,
-        ..Default::default()
-    };
-    let err = super::preflight_network_mode_for(CliNetworkMode::L3Vsock, &needs_secrets)
-        .expect_err("substitution and l3-vsock must not be admitted together");
-    let msg = err.to_string();
-    assert!(msg.contains("host-vsock-proxy"), "{msg}");
-    assert!(msg.contains("ciphertext"), "{msg}");
-}
-
-#[test]
-fn the_socket_aware_mode_still_serves_a_plan_that_needs_substitution() {
-    let needs_secrets = mvm_net::l3::SubstitutionRequirements {
-        binds_secrets: true,
-        ..Default::default()
-    };
-    assert_eq!(
-        super::preflight_network_mode_for(CliNetworkMode::HostVsockProxy, &needs_secrets).unwrap(),
-        None
-    );
-}
-
-#[test]
-fn every_substitution_requirement_blocks_the_l3_mode_on_its_own() {
+fn a_workload_needing_substitution_derives_the_socket_aware_transport() {
+    use mvm_protocol::plan::NetworkMode;
     for requirements in [
         mvm_net::l3::SubstitutionRequirements {
             binds_secrets: true,
@@ -2502,9 +2430,53 @@ fn every_substitution_requirement_blocks_the_l3_mode_on_its_own() {
             ..Default::default()
         },
     ] {
-        assert!(
-            super::preflight_network_mode_for(CliNetworkMode::L3Vsock, &requirements).is_err(),
-            "{requirements:?} must not be admitted on l3-vsock"
+        assert_eq!(
+            super::derive_network_mode(&requirements),
+            NetworkMode::HostVsockProxy,
+            "{requirements:?} must keep the substitution path"
         );
     }
+}
+
+/// The derivation never produces a combination the compatibility gate would
+/// reject — which is the point of deriving rather than asking.
+#[test]
+fn the_derivation_never_produces_an_incompatible_plan() {
+    for requirements in [
+        mvm_net::l3::SubstitutionRequirements::default(),
+        mvm_net::l3::SubstitutionRequirements {
+            binds_secrets: true,
+            ..Default::default()
+        },
+        mvm_net::l3::SubstitutionRequirements {
+            binds_secrets: true,
+            reversible_replacement_enabled: true,
+            redaction_enabled: true,
+        },
+    ] {
+        let mode = super::derive_network_mode(&requirements);
+        assert!(
+            mvm_net::l3::check_mode_compatibility(mode, &requirements, mode.is_l3_vsock()).is_ok(),
+            "the derivation produced an inadmissible plan for {requirements:?}"
+        );
+    }
+}
+
+/// An egress rule says *where* traffic may go, not *how* it travels, and
+/// there is no longer any way for it to influence the transport at all.
+#[test]
+fn an_allow_host_rule_does_not_influence_the_transport() {
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine",
+        "--allow-host",
+        "api.example.com:443",
+    ])
+    .unwrap();
+    assert_eq!(args.allow_host, vec!["api.example.com:443"]);
+    assert_eq!(
+        super::derive_network_mode(&mvm_net::l3::SubstitutionRequirements::default()),
+        mvm_protocol::plan::NetworkMode::L3Vsock
+    );
 }

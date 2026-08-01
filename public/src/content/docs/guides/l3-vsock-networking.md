@@ -13,18 +13,34 @@ ignores proxy environment variables, anything wanting ICMP, and anything
 running its own resolver all get nothing, because there is no route
 anywhere.
 
-`--network-mode l3-vsock` closes that gap. The guest gets a normal Linux IP
-interface, `mvm0`, and every packet it sends is framed over vsock to a
-host-side gateway that applies policy before anything touches the network.
-**The guest still has no NIC.**
+mvm closes that gap. The guest gets a normal Linux IP interface, `mvm0`, and
+every packet it sends is framed over vsock to a host-side gateway that
+applies policy before anything touches the network. **The guest still has no
+NIC.**
 
 ```sh
 mvmctl machine run \
-  --network-mode l3-vsock \
   --allow-host api.example.com:443 \
   --image alpine \
   -- curl https://api.example.com/
 ```
+
+## There is no transport to choose
+
+**You do not select a networking mode, and there is no flag to do it with.**
+mvm always uses the strongest configuration the workload can actually use.
+
+A selector could only ever let someone pick a weaker posture than the one
+they would otherwise have had, and the right answer is the same every time:
+
+- a workload whose plan needs the host to see its outbound cleartext — one
+  that binds secrets, or enables reversible replacement or redaction — gets
+  the socket-aware transport, because the tunnel cannot provide that;
+- every other workload gets the tunnel, which is universally compatible.
+
+That is derived from the plan, so it cannot be got wrong. The mode is still
+recorded in the *signed plan* — it is the admitted contract, and a control
+plane sets it — but it is not an operator knob.
 
 ## What you give up
 
@@ -39,11 +55,11 @@ That means these do **not** apply in L3 mode:
 - HTTP-level or SNI-based policy;
 - hostname attribution independent of the controlled resolver.
 
-If your workload depends on any of them, stay on the default
-`--network-mode host-vsock-proxy`. You do not have to remember this:
-a plan that binds secrets, enables reversible replacement, or enables
-per-destination redaction **cannot** select `l3-vsock`. mvm refuses the
-combination before anything builds or boots, and names the fix.
+You do not have to remember any of this, and you cannot get it wrong: a
+plan that binds secrets, enables reversible replacement, or enables
+per-destination redaction is *derived* onto the socket-aware transport, and
+the compatibility gate refuses the combination outright if anything ever
+tried to construct it directly.
 
 Worth being precise about what is and is not lost. The guarantee that raw
 secrets never enter the guest is enforced at the host-services broker and is
@@ -88,7 +104,7 @@ Choosing L3 mode does not weaken the boundary. It still guarantees:
 
 | Platform | Status |
 |---|---|
-| **Linux** (Firecracker) | Supported and tested, including a privileged lane with a real host TUN and nftables. |
+| **Linux** (Firecracker) | Supported and tested, including a privileged lane with a real host TUN and nftables, and a live boot witness (below). |
 | **Linux** (libkrun) | Not selectable. libkrun attaches a drained virtio-net device; L3 mode requires the guest to have no network device at all, so libkrun does not advertise the capability and selection fails closed. |
 | **macOS** (Apple Silicon) | **Not available.** The intended backend is a userspace socket gateway (TCP, UDP, controlled DNS). It is not implemented, so `l3-vsock` is refused at admission with a stated reason. It is never degraded and never routed through a proxy runtime. |
 | **Windows via WSL2** | Architecturally supported — WSL2 is a Linux node, the guest's vsock terminates inside it, and the Linux backend is used. Not yet validated on a WSL2 runner. |
@@ -117,6 +133,26 @@ host networking
 Control messages and packet data use **separate** vsock connections, so a
 saturated uplink cannot starve the machine's own control plane or its
 shutdown path.
+
+## Live boot witness
+
+From a real Firecracker microVM on the mvm workload kernel, with no
+network-interface entry in its configuration. Every line is observed from
+inside the guest:
+
+```text
+L3WITNESS tun_device_present=true
+L3WITNESS interfaces_before=lo
+L3WITNESS interfaces_after=lo,mvm0
+L3WITNESS mvm0_mac=
+L3WITNESS mvm0_arphrd=65534
+L3WITNESS mvm0_created=true
+```
+
+Reading it: before the agent runs the guest has **only loopback** — no
+`eth0`, no virtio-net, nothing routable. After, it has `mvm0`, whose
+`arphrd` is 65534 (`ARPHRD_NONE`, the layer-3 device type) and whose MAC
+address is empty, because a point-to-point IP interface has none.
 
 ## Limits in this version
 

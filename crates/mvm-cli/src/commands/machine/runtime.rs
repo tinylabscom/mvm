@@ -265,11 +265,11 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
         None
     };
 
-    // Refuse an unserveable mode and state the capability trade before any
-    // build or boot work happens.
-    if let Some(warning) = super::preflight_network_mode(args.network_mode)? {
-        eprintln!("{warning}");
-    }
+    // Refuse a host that cannot serve this workload's networking before any
+    // build or boot work happens. There is no mode to choose and nothing to
+    // warn about — the derivation always picks the strongest transport the
+    // workload can use.
+    super::preflight_network(&mvm_net::l3::SubstitutionRequirements::default())?;
 
     if args.entrypoint {
         return run_entrypoint_action(args, resolved_flake_slot);
@@ -318,7 +318,6 @@ pub(in crate::commands) fn boot_persistent_by_name(
     run_dispatch(
         cli,
         MachineRunArgs {
-            network_mode: CliNetworkMode::HostVsockProxy,
             name: Some(name),
             flake,
             kernel_pin,

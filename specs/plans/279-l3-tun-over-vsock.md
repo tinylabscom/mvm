@@ -22,8 +22,9 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       `RequiredCapabilities { l3_vsock, no_routable_guest_nic }`
 - [x] `VmCapabilities::l3_vsock` + `shortfall` wiring; backends that
       cannot serve it fail closed with a named shortfall
-- [x] `mvmctl machine run --network-mode <none|host-vsock-proxy|l3-vsock>`;
-      never implicit, never inferred from the presence of an egress rule
+- [x] **no operator-facing mode selector.** The transport is derived from
+      what the plan requires, so it cannot be chosen wrongly; the mode stays
+      in the signed plan as the admitted contract
 - [x] `--allow-host` compiles into the same `CanonicalEgress` the
       gateway consumes — no second policy representation
 - [x] machine inspect / receipt output names the admitted mode
@@ -136,6 +137,9 @@ Read ADR-035 first; this plan is the sequencing and the checkbox ledger.
       the guest init resolves and starts `mvm-net-agent`, waits for the
       readiness file, and refuses to start the workload if the tunnel does
       not come up; `mvm-net-agent` staged into the runtime overlay
+- [x] live boot witness on real Firecracker: `CONFIG_TUN` kernel built,
+      guest has only loopback before the agent runs, `mvm0` created with
+      `ARPHRD_NONE` and no MAC — recorded in ADR-035 §"Live boot witness"
 - [x] mode/plan compatibility gate — a plan that binds secrets, enables
       reversible replacement, or enables redaction cannot select
       `l3-vsock`, and the two plan fields cannot disagree in the hermetic lane: launch
