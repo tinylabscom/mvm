@@ -24,6 +24,14 @@ pub mod watch;
 
 pub use commands::run;
 
+/// Boot-policy contract surface for the dev-only conformance harness, which
+/// drives the real effective-initrd decision instead of re-stating it in
+/// Gherkin steps. Not a general-purpose API; other consumers must not take a
+/// dependency on it.
+pub mod boot_policy {
+    pub use crate::commands::vm::up::oci_persist::persistent_oci_effective_initrd;
+}
+
 /// Plan synthesis for library consumers — building an
 /// [`mvm_core::plan::ExecutionPlan`] from typed inputs.
 ///

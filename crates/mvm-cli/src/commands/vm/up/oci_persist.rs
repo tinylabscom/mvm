@@ -99,21 +99,48 @@ fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) 
     runtime_lean && verity_path.is_some() && roothash.is_some()
 }
 
-pub(crate) fn persistent_oci_effective_initrd(
+/// The legacy per-rootfs verity initrd that ships next to the rootfs image,
+/// when present.
+fn sibling_rootfs_initrd(rootfs_path: &std::path::Path) -> Option<String> {
+    rootfs_path
+        .parent()
+        .map(|dir| dir.join("rootfs.initrd"))
+        .filter(|path| path.is_file())
+        .map(|path| path.display().to_string())
+}
+
+/// Resolve the initrd a persistent OCI boot should carry: the on-disk
+/// sibling when the universal initramfs is warm in the cache (it replaces the
+/// initrd later in the boot), otherwise the legacy per-rootfs verity initrd
+/// ladder (sibling, then cached/embedded/built verity initrd, failing the
+/// boot when none is available).
+///
+/// This is the boot-policy contract surface the dev-only conformance harness
+/// drives directly; it is re-exported at `mvm_cli::boot_policy` for that
+/// harness and is not a general-purpose API.
+pub fn persistent_oci_effective_initrd(
     rootfs_path: &std::path::Path,
     runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
 ) -> Result<Option<String>> {
+    // When the universal initramfs is warm in the cache, the attach step later
+    // in the boot overwrites `initrd_path` with it, so resolving the legacy
+    // verity initrd here is dead work — and the resolution can cross-compile
+    // every guest binary or hard-fail a boot the universal initramfs would
+    // have carried. Skip it and hand back only what is already on disk. On a
+    // cold universal cache the legacy initrd becomes the real PID 1, so the
+    // full resolution below must run.
+    if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+        && super::runtime_source::universal_initramfs_available()
+    {
+        return Ok(sibling_rootfs_initrd(rootfs_path));
+    }
     if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
         && runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
         && crate::commands::env::builder_vm::find_builder_vm_flake_is_source_checkout()
     {
         return Ok(Some(ensure_workload_verity_initrd()?));
     }
-    let sibling = rootfs_path
-        .parent()
-        .map(|dir| dir.join("rootfs.initrd"))
-        .filter(|path| path.is_file())
-        .map(|path| path.display().to_string());
+    let sibling = sibling_rootfs_initrd(rootfs_path);
     if sibling.is_some() {
         return Ok(sibling);
     }
@@ -491,6 +518,119 @@ mod runtime_source_policy_for_workload_boot_tests {
                     .to_str()
                     .expect("utf-8 cached initrd path")
             )
+        );
+    }
+
+    /// Install a fixture universal initramfs into `<mvm_home>/cache/initramfs`
+    /// exactly the way the real build/install path lays it out.
+    fn seed_warm_universal_initramfs(mvm_home: &std::path::Path) {
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = mvm_core::arch::GuestArch::host();
+        let source = mvm_home.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        // The installer verifies the image against its hash sidecar, so the
+        // fixture has to match what the build emits: a real gzip stream, the
+        // SHA-256 of the uncompressed payload, and the compressed length.
+        let payload = b"cpio-payload";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, payload).unwrap();
+        let image = encoder.finish().unwrap();
+        std::fs::write(source.join("initramfs.cpio.gz"), &image).unwrap();
+        std::fs::write(
+            source.join("initramfs.hash"),
+            format!(
+                "{}\n",
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(payload))
+            ),
+        )
+        .unwrap();
+        std::fs::write(source.join("initramfs.size"), format!("{}\n", image.len())).unwrap();
+        std::fs::write(source.join("VERSION"), version).unwrap();
+
+        let cache_root = mvm_home.join("cache").join("initramfs");
+        mvm_build::initramfs::install_initramfs_into_cache(&source, &cache_root, version, arch)
+            .unwrap();
+        // A warm cache in a source checkout has to say what built it, or the
+        // fingerprint eviction treats it as stale and discards it.
+        if let Some(workspace_root) =
+            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+            && let Ok(fingerprint) =
+                mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
+                    &workspace_root,
+                )
+        {
+            mvm_build::initramfs::record_source_fingerprint(
+                &cache_root,
+                version,
+                arch,
+                &fingerprint,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn persistent_oci_warm_universal_initramfs_skips_legacy_resolution_without_sibling() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+
+        let cache = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(cache.path());
+        env.set(
+            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            "download",
+        );
+        seed_warm_universal_initramfs(cache.path());
+
+        let resolved =
+            super::persistent_oci_effective_initrd(&rootfs, RuntimeSourcePolicy::RequiredOverlay)
+                .unwrap();
+
+        // No sibling and no verity-initrd cache: the legacy ladder would fail
+        // the boot here, so reaching Ok(None) proves the legacy resolution
+        // never ran — the universal attach later in the boot supplies the
+        // initramfs instead.
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn persistent_oci_warm_universal_initramfs_skips_source_checkout_verity_build() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(_workspace_root) =
+            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
+        else {
+            // The source-checkout branch only exists in a source checkout.
+            return;
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let sibling = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&sibling, b"initrd").unwrap();
+
+        let cache = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(cache.path());
+        env.set(
+            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            "build",
+        );
+        seed_warm_universal_initramfs(cache.path());
+
+        let resolved =
+            super::persistent_oci_effective_initrd(&rootfs, RuntimeSourcePolicy::RequiredOverlay)
+                .unwrap();
+
+        // Source-checkout mode would normally rebuild/refresh the verity
+        // initrd and ignore the sibling; with a warm universal initramfs the
+        // sibling is returned as-is and no build runs.
+        assert_eq!(
+            resolved.as_deref(),
+            Some(sibling.to_str().expect("utf-8 initrd path"))
         );
     }
 

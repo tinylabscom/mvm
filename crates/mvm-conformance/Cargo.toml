@@ -73,6 +73,11 @@ hex.workspace = true
 # `sdk-sidecar-image` job publishes, so the download path runs against staged
 # local bytes instead of the network.
 flate2.workspace = true
+# The sealed-OCI initrd scenarios drive the real boot-policy decision
+# (`mvm_cli::boot_policy`) in-process rather than re-stating it. Same feature
+# set the `mvmctl` binary builds with, so this adds no new closure. Dev-only:
+# `cargo tree -p mvm-conformance -e no-dev` must not gain it.
+mvm-cli = { workspace = true, features = ["builder-vm", "pure-mkfs"] }
 
 [lints]
 workspace = true

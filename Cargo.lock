@@ -2790,6 +2790,7 @@ dependencies = [
  "flate2",
  "hex",
  "mvm-build",
+ "mvm-cli",
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
