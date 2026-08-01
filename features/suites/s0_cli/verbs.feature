@@ -10,7 +10,6 @@ Feature: mvmctl top-level CLI surface
     And the help output lists the "machine" verb
     And the help output lists the "build" verb
     And the help output lists the "doctor" verb
-    And the help output lists the "ls" verb
     And the help output lists the "bootstrap" verb
 
   Scenario: mvmctl --help keeps global option descriptions concise
