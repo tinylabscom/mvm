@@ -2144,8 +2144,7 @@ mod tests {
             "an empty cache dir is not a complete overlay"
         );
 
-        // Each artifact alone is still incomplete — this is the half a
-        // disjunction gets wrong, and it needs every file tried, not one.
+        // Each artifact alone is still incomplete.
         for present in every {
             std::fs::write(present, b"x").unwrap();
             assert!(
@@ -2154,6 +2153,26 @@ mod tests {
                 present.display()
             );
             std::fs::remove_file(present).unwrap();
+        }
+
+        // Every artifact but one. This is the case a single-file fixture
+        // cannot reach: weakening any `&&` to `||` splits the chain into
+        // two groups, and a one-file cache leaves both groups false, so
+        // the result is unchanged. Only a cache that satisfies one whole
+        // group while missing a member of the other tells them apart.
+        for missing in every {
+            for f in every {
+                std::fs::write(f, b"x").unwrap();
+            }
+            std::fs::remove_file(missing).unwrap();
+            assert!(
+                !all_required_files_present(&layout),
+                "a cache missing only {} is not complete",
+                missing.display()
+            );
+            for f in every {
+                let _ = std::fs::remove_file(f);
+            }
         }
 
         for f in every {
