@@ -183,9 +183,8 @@ bdd:
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
 # a targeted rebuild or CI.
 build-supervisors:
-    cargo build -p mvm-hostd --bin mvm-substitution-endpoint
-    cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
-    cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
+    cargo build -p mvm-hostd --bin mvm-substitution-endpoint --bin mvm-hvf-supervisor
+    cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys
 
 # Build the dm-verity-capable workload kernel into the local mvm cache.
 kernel-workload:

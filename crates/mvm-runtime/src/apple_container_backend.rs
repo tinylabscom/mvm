@@ -18,9 +18,11 @@
 //! Honest reporting, not silent degradation: `capabilities()` and the
 //! claims array of `security_profile()` are the HVF runner's verbatim
 //! (the isolation story is identical — only the kernel image differs);
-//! the profile's notes record that the kernel is a fetched artifact whose
-//! provenance is not an mvm build. The backend is opt-in only —
-//! `AnyBackend::auto_select` never returns this kind.
+//! the profile's notes record that the kernel is a fetched artifact
+//! trusted only with a matching digest sidecar in the artifact cache,
+//! and that the sealed boot path is live-proven on this kernel. The
+//! backend is opt-in only — `AnyBackend::auto_select` never returns this
+//! kind.
 
 use std::path::Path;
 
@@ -194,8 +196,14 @@ impl VmBackend for AppleContainerBackend {
                  kernel: the same universal initramfs, guest agent, activation flow, egress \
                  gate, and isolation boundary as the HVF backend — only the kernel image differs.",
                 "The kernel is a fetched binary artifact (Apple's container kernel), not an \
-                 mvm-built image: its provenance is the artifact cache, exactly like any \
-                 externally-sourced kernel a launch config names.",
+                 mvm-built image: it is trusted only with a matching vmlinux.sha256 digest \
+                 sidecar in the artifact cache — resolution fails closed when the sidecar is \
+                 absent, malformed, or disagrees with the kernel bytes, and an unverified \
+                 kernel never makes this backend available.",
+                "The sealed block+ext4 boot path is live-proven on macOS HVF with this \
+                 kernel: dm-verity-verified rootfs and runtime-overlay mounts, activation \
+                 acknowledged by the guest agent, and the uid-901 privilege drop all observed \
+                 in the gated end-to-end boot test.",
                 "Opt-in only; never selected by auto-detect.",
             ],
         }
@@ -343,6 +351,14 @@ mod tests {
                 .iter()
                 .any(|n| n.contains("prebuilt container kernel")),
             "the notes must record the kernel provenance honestly"
+        );
+        assert!(
+            profile.notes.iter().any(|n| n.contains("vmlinux.sha256")),
+            "the notes must record the digest-sidecar attestation requirement"
+        );
+        assert!(
+            profile.notes.iter().any(|n| n.contains("live-proven")),
+            "the notes must record that the sealed boot path is live-proven on this kernel"
         );
     }
 

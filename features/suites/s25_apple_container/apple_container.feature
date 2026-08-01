@@ -5,16 +5,6 @@ Feature: Apple Container backend contract
   initramfs, same agent-as-PID-1, same activation flow as every other
   backend. The kernel is a fetched binary artifact cached under
   "apple-container", so resolution fails closed with a typed error that
-<<<<<<< HEAD
-  says what is missing, where it belongs, and how to fetch it. Auto-select
-  prefers the apple-container backend on the HVF tier, but only when its
-  kernel is cached — without the artifact the tier falls back to the plain
-  HVF backend. Once its kernel is cached the launch's kernel image is
-  always that cached kernel, never a caller-supplied one. The backend is
-  admitted to the workload funnel — the egress endpoint, broker
-  registration, and activation gate are the HVF runner's verbatim; only
-  the kernel image differs.
-=======
   says what is missing, where it belongs, and how to fetch it. Because the
   kernel is fetched rather than built by mvm, it is trusted only with a
   matching digest sidecar — a "vmlinux.sha256" beside the kernel naming
@@ -22,12 +12,14 @@ Feature: Apple Container backend contract
   initramfs sidecars already enforce. A kernel whose sidecar is missing,
   malformed, or disagrees with its bytes is refused with a typed
   untrusted-artifact error and never makes the backend available.
-  Auto-select prefers the apple-container backend on the HVF tier, but
-  only when its kernel is cached — without the artifact the tier falls
-  back to the plain HVF backend. Once its kernel is cached and attested
-  the launch's kernel image is always that cached kernel, never a
-  caller-supplied one.
->>>>>>> 702ecf7dc (fix(apple-container): require a digest sidecar for the fetched kernel artifact)
+  Auto-select never lands on the apple-container backend — it is opt-in
+  only, selected explicitly with "--hypervisor apple-container" — and the
+  availability probe itself requires the verified artifact. Once its
+  kernel is cached and attested the launch's kernel image is always that
+  cached kernel, never a caller-supplied one. The backend is admitted to
+  the workload funnel — the egress endpoint, broker registration, and
+  activation gate are the HVF runner's verbatim; only the kernel image
+  differs.
 
   Scenario: A missing container kernel fails closed with a hint-carrying error
     Given an isolated mvm home for the apple-container backend
