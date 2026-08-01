@@ -872,6 +872,17 @@ Then unify + retire the old paths:
       the capture path does not emit `checkpoint.created` (#1962), so the
       post-restore grant delivery and the child's egress/broker/exit channels
       remain live-unproven. The flip is gated on that run.
+  - [x] Ordinary persistent-machine Firecracker teardown now fails closed
+        (#2007): non-interactive or declined confirmation exits non-zero, state
+        is retained unless process exit is verified, and a restart cannot
+        overwrite the PID marker of a still-live process. Reconcile-on-entry
+        also recognizes `fc.pid`, so it cannot delete a live Firecracker's
+        state before the stop path attaches. The 2026-07-31 KVM recheck passed:
+        refusal retained PID 4124113 and the exact process, then `--yes`
+        removed the marker and process. Eleven regressions cover confirmation,
+        marker ownership, exact-PID teardown, cleanup ordering, and
+        reconciliation. The analogous warm-pool claim-refusal cleanup remains
+        a separate open gate.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.

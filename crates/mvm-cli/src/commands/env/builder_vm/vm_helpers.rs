@@ -98,9 +98,10 @@ pub(super) const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 
 /// Sidecar PID file names a workload VM dir under `~/.mvm/vms/<name>/`.
 /// `vz.pid` stays recognised so a leftover from the removed Vz backend still
-/// gets reaped; live HVF supervisors write `hvf.pid` (mvm-runtime's
-/// `vm::reconcile::PID_FILE_NAMES` recognises the same pair).
-pub(super) const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid"];
+/// gets reaped. Keep this aligned with the workload supervisor markers in
+/// mvm-runtime's reconciliation pass so every live backend protects its
+/// associated helper processes.
+pub(super) const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid", "fc.pid"];
 
 /// Dir-name prefix of the persistent dev builder VM.
 const PERSISTENT_BUILDER_DIR_PREFIX: &str = "mvm-persistent-builder-";
@@ -286,7 +287,7 @@ fn reap_or_track(
 fn is_supervisor_sidecar(name: &str) -> bool {
     matches!(
         name,
-        "builder.pid" | "stage0.pid" | "vz.pid" | "libkrun.pid" | "hvf.pid"
+        "builder.pid" | "stage0.pid" | "vz.pid" | "libkrun.pid" | "hvf.pid" | "fc.pid"
     )
 }
 

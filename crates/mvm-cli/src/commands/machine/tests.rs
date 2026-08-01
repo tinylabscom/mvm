@@ -2023,6 +2023,38 @@ fn machine_stop_yes_skips_confirmation() {
 }
 
 #[test]
+fn machine_stop_without_tty_refuses_with_an_error() {
+    let err = super::lifecycle::confirm_stop(false, false, || {
+        panic!("a non-interactive stop must not try to prompt")
+    })
+    .expect_err("non-interactive stop without --yes must fail");
+
+    assert!(
+        err.to_string().contains("pass --yes"),
+        "error must tell automation how to proceed: {err:#}"
+    );
+}
+
+#[test]
+fn machine_stop_yes_bypasses_confirmation_without_a_tty() {
+    super::lifecycle::confirm_stop(true, false, || {
+        panic!("--yes must bypass the confirmation prompt")
+    })
+    .expect("--yes must permit a non-interactive stop");
+}
+
+#[test]
+fn machine_stop_declined_at_tty_refuses_with_an_error() {
+    let err = super::lifecycle::confirm_stop(false, true, || false)
+        .expect_err("declining a stop must not report success");
+
+    assert!(
+        err.to_string().contains("aborted"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
 fn machine_stop_requires_target() {
     let err = parse(&["stop"]).expect_err("no name and no --all must be rejected");
     assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);

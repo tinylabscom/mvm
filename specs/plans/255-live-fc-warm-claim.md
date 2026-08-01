@@ -1247,6 +1247,16 @@ The ordered gate list — the one to work from — is "What must happen before
 `standby_pool` can flip to `true`" in
 `specs/notes/2026-07-28-plan-255-live-fc-warm-claim-validation.md`.
 
+- [x] Close the ordinary persistent-machine stop leak found during live
+  validation (#2007). A non-interactive or declined confirmation now fails
+  non-zero, reconcile-on-entry recognizes `fc.pid`, both Firecracker stop paths
+  retain a captured process identity through teardown, and a new start refuses
+  to replace the PID marker of a process still alive. Hermetic regressions cover
+  those boundaries. The 2026-07-31 KVM recheck retained the exact process and
+  marker after non-TTY refusal, then removed both after `--yes`. The warm-pool
+  claim-refusal cleanup remains a separate open gate because it owns and
+  removes child state through `ClaimCleanup`, not this ordinary stop path.
+
 ## Done when
 
 - All eight tasks' boxes are ticked.
