@@ -374,10 +374,19 @@
       program alongside the tier filter; and the notify TOCTOU is harmless here
       because the authorization decision is made at the host endpoint from the
       SOCKS request, not from the address read out of guest memory. **W0 is
-      blocking**: reading the destination needs `ptrace_may_access` to pass
-      against a workload the guest currently sets `PR_SET_DUMPABLE = 0` on, and
-      the choice between a co-uid supervisor and relaxing `DUMPABLE` is an
-      explicit hardening decision that must be settled before any code lands.
+      measured and it refuted the plan's own framing.** A four-case matrix on
+      Linux 6.8.0 (`ptrace_scope=1`, supervisor as parent, both read routes
+      probed) shows the two candidate resolutions are a conjunction, not a
+      choice: same-uid alone is denied under `DUMPABLE=0`, and `DUMPABLE=1`
+      alone is denied across a uid boundary. Exactly one configuration reads.
+      Separately, a privilege drop leaves the process at `dumpable = 2`
+      (`SUID_DUMP_ROOT`), so "relax `DUMPABLE`" means *affirmatively raising* it
+      after the drop in the launch path, not deleting a `prctl` in
+      `hardening.rs`. `CAP_SYS_PTRACE` was considered and rejected against the
+      emptied bounding set. One maintainer decision remains — accept the
+      surviving design (workload `/proc/<pid>/mem` readable at its own uid, for
+      a feature that is explicitly not a security control) or close the plan.
+      W1–W3 stay frozen until it lands.
 - [x] Lightweight guest WS-2: replace the static util-linux privilege-drop
       binary with the dedicated static-musl `mvm-setpriv` helper, including
       UID/GID, group, no-new-privileges, and optional loopback capability paths.

@@ -1,6 +1,11 @@
 # Plan 278 — Transparent connect interception for non-cooperative workloads
 
-**Status: Proposed**
+**Status: Proposed — W0 measured, blocked on one maintainer decision**
+
+W0's investigation is done and it refuted the plan's own framing: the two
+candidate resolutions are a conjunction, not a choice, and one of them means a
+more deliberate weakening than originally written. Nothing is implemented and
+W1–W3 stay frozen until the decision in W0 lands.
 
 Workload microVMs have no NIC. Egress leaves the guest over vsock, to the
 host-side substitution endpoint, and that is what makes claim 10 (default-deny),
@@ -101,7 +106,7 @@ against it: `runner/hardening.rs` sets `prctl(PR_SET_DUMPABLE, 0)`, which makes
 the process unreadable to non-root peers, and the agent runs as uid 901 while
 the workload runs under its own per-service uid.
 
-Two candidate resolutions, neither yet chosen:
+Two candidate resolutions were proposed:
 
 1. **Co-uid supervisor.** Run the notify supervisor as the workload's uid — a
    small dedicated task rather than the agent proper — so `ptrace_may_access`
@@ -109,23 +114,93 @@ Two candidate resolutions, neither yet chosen:
    Costs a process per workload.
 2. **Relax `DUMPABLE` and lean on `RLIMIT_CORE=0`.** `hardening.rs`'s own comment
    describes `PR_SET_DUMPABLE` as belt-and-suspenders on top of the agent-side
-   `RLIMIT_CORE = 0` for the coredump property. If that holds, `DUMPABLE=1`
-   costs the `/proc/<pid>/mem` hardening but not the coredump guarantee. That is
-   a real reduction in the guest's internal hardening and needs an explicit
-   decision, not a silent flip.
+   `RLIMIT_CORE = 0` for the coredump property.
 
-Resolving this is W0 and blocks everything after it.
+**They are not alternatives. Measured, the design needs both.**
+
+### Measured result
+
+Run against Linux 6.8.0 with `yama/ptrace_scope=1`, modelling the real shape —
+supervisor as the **parent**, workload as the child, so the Yama descendant rule
+is satisfied and `DUMPABLE` is the only variable under test. Both read routes
+(`process_vm_readv` and `/proc/<pid>/mem`) were probed per case.
+
+| supervisor | workload | `DUMPABLE` | result |
+|---|---|---|---|
+| uid 1001 | uid 1001 | 1 | **readable** — both routes return the payload |
+| uid 1001 | uid 1001 | 0 | denied — `EPERM` / `EACCES` at `open` |
+| uid 1001 | uid 1002 | 1 | denied — `EPERM` / `EACCES` at `open` |
+| uid 1001 | uid 1002 | 0 | denied — `EPERM` / `EACCES` at `open` |
+
+**Candidate 1 alone is refuted.** Same uid, parent of the target, Yama satisfied
+— still denied when `DUMPABLE=0`. The dumpable check in `__ptrace_may_access` is
+independent of credentials, so matching uids does not buy past it.
+
+**Candidate 2 alone is insufficient.** Row 3 shows `DUMPABLE=1` is still denied
+across a uid boundary. Exactly one configuration reads: same uid **and**
+`DUMPABLE=1`.
+
+Because the denial in row 2 arrives despite Yama being satisfied, the result
+does not depend on Yama at all — it comes from the core-kernel dumpable check,
+so it holds identically on a guest built without `CONFIG_SECURITY_YAMA`.
+
+### The finding that changes the shape of candidate 2
+
+"Relax `DUMPABLE`" is not "delete the `prctl` in `hardening.rs`". Measured
+separately: a credential change leaves the process at `dumpable = 2`
+(`SUID_DUMP_ROOT`), not 0 —
+
+```
+as root, before drop     : dumpable=1
+explicitly set to 1      : dumpable=1
+AFTER setuid(1001)       : dumpable=2
+re-raised after the drop : dumpable=1
+```
+
+`ptrace_may_access` requires `SUID_DUMP_USER` (1), so a workload that simply
+drops privileges and sets nothing is *already* unreadable. Interception would
+therefore require the launch path to **affirmatively raise `dumpable` to 1 after
+the privilege drop** — a stronger, more deliberate weakening than "stop
+hardening", and it has to live in the launch path (`mvm-seccomp-apply` /
+`setpriv` sequence), not in `hardening.rs`.
+
+### Surviving design, and its cost
+
+Same-uid supervisor **and** an explicit post-drop `dumpable = 1`. What that
+costs: the workload's `/proc/<pid>/mem` becomes readable by anything running at
+the workload's uid. Since uids are per-service the blast radius is one service,
+and the coredump property is unaffected because it rests on the agent-side
+`RLIMIT_CORE = 0`, not on `DUMPABLE`.
+
+`CAP_SYS_PTRACE` for the supervisor would sidestep all of it and is **rejected**:
+the guest empties the bounding set under `setpriv --bounding-set=-all`, and
+re-introducing a capability that reads any process's memory to buy an app-compat
+feature is the wrong trade against claims 1 and 2.
+
+Caveat on transfer: measured on 6.8.0, guest kernels pin 6.12.x. The dumpable
+gate in `__ptrace_may_access` is long-stable, but the numbers above are from
+6.8.0 and should be re-run once against a real guest before W1 lands.
 
 ## Workstreams
 
 ### W0 — settle address reading *(blocking)*
 
-- [ ] Confirm `ptrace_may_access` behaviour for both candidates against a live
-      guest, not by reasoning about the docs.
-- [ ] Decide co-uid supervisor vs `DUMPABLE` relaxation; record the decision and
-      the hardening delta in this plan.
-- [ ] If neither is acceptable, stop here and close the plan — the cooperative
-      path stays as-is and this is a documented non-goal.
+- [x] Confirm `ptrace_may_access` behaviour for both candidates, measured rather
+      than reasoned from the docs. Four-case matrix on Linux 6.8.0 with
+      `ptrace_scope=1`; both read routes probed. See "Measured result" above.
+- [x] Establish that the two candidates are a conjunction, not a choice:
+      candidate 1 alone is refuted, candidate 2 alone is insufficient, and only
+      same-uid + `DUMPABLE=1` reads.
+- [x] Establish that a privilege drop leaves `dumpable = 2`, so candidate 2 means
+      affirmatively raising it post-drop in the launch path, not deleting a
+      `prctl` in `hardening.rs`.
+- [ ] **Maintainer decision: accept or reject the surviving design.** Accepting
+      means the workload's `/proc/<pid>/mem` is readable at the workload's own
+      uid, for an app-compat feature that is explicitly not a security control.
+      Rejecting closes the plan and keeps the cooperative path as a documented
+      non-goal. This is the remaining blocker; W1–W3 stay frozen until it lands.
+- [ ] Re-run the matrix once on a real guest at the pinned 6.12.x kernel to
+      confirm the 6.8.0 numbers transfer.
 
 ### W1 — notify listener install
 
