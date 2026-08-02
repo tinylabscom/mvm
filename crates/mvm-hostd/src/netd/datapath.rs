@@ -208,6 +208,14 @@ pub trait DatapathHandle: Send {
 
     /// Human-readable name, for audit and diagnostics.
     fn description(&self) -> String;
+
+    /// A descriptor that becomes readable when this datapath has work.
+    ///
+    /// `None` means the datapath makes progress only when called, so the
+    /// driver polls it on its timer tick rather than on readiness.
+    fn readiness_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
 }
 
 /// Opens per-machine datapaths.
@@ -544,5 +552,15 @@ mod tests {
             .to_string();
         assert!(msg.contains("not implemented"), "{msg}");
         assert!(msg.contains("refused rather than degraded"), "{msg}");
+    }
+
+    #[test]
+    fn a_loopback_handle_has_no_readiness_descriptor() {
+        let dp = LoopbackDatapath::sink();
+        let handle = dp.open(&request()).expect("open");
+        assert!(
+            handle.readiness_fd().is_none(),
+            "an in-memory datapath is driven synchronously and has nothing to poll"
+        );
     }
 }

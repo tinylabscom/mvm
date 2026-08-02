@@ -284,6 +284,10 @@ impl DatapathHandle for LinuxHandle {
             self.iface, self.table, self.machine_id
         )
     }
+
+    fn readiness_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.file.as_ref().map(std::fs::File::as_raw_fd)
+    }
 }
 
 impl Drop for LinuxHandle {
