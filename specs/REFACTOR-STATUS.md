@@ -51,7 +51,7 @@ for detailed scope and acceptance criteria.
   - [x] Keep privileged execution on the trusted base ref with no checkout
   - [x] Complete repository validation and queue the PR
 
- - [x] Plan 270 — Universal initramfs + vsock-activated boot
+- [~] Plan 270 — Universal initramfs + vsock-activated boot
       (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
   - [x] Core boot contract: `ActivateEnvironment` over the authenticated
         vsock session, `ActivationState` gate, PID-1 agent with mount
@@ -62,11 +62,18 @@ for detailed scope and acceptance criteria.
   - [x] Activation agent-readiness retry on the wire (#1985)
   - [x] Deterministic cargo initramfs replaces the Nix initramfs build
         (#1996); attestation stays the content hash + sidecar contract
+  - [x] Retire the obsolete CLI workload-guest payload and dead
+        skip-embedding switch; the universal initramfs/runtime overlay owns
+        workload binaries (#2013)
+  - [x] Pin `mvmctl` embedding to the builder/bootstrap host and seed
+        manifests
   - [~] Deviations recorded at the unticked steps in the plan: capability-bit
         negotiation, chain-signed boot events, and vm_id/session binding were
         superseded by the path discriminator + session-key pinning; the
         guest-side activation idle timeout and focused zombie-reaping tests
         remain open
+  - [~] Remaining rollout, snapshot, BDD, and live-smoke work stays in the
+        plan
 
 - [~] Plan 271 — Apple Container backend: Apple's container kernel on HVF
       (`specs/plans/271-apple-container-backend.md`)
@@ -103,12 +110,6 @@ for detailed scope and acceptance criteria.
         allow-list so a docs-only edit stops invalidating every guest binary
         (416 of 1872 files, 22%, stop being cache keys)
 
- - [~] Plan 270 — universal initramfs + vsock-activated boot
- (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
-  - [x] Retire the obsolete CLI workload-guest payload and dead skip-embedding
-        switch; the universal initramfs/runtime overlay owns workload binaries
-  - [x] Pin `mvmctl` embedding to the builder/bootstrap host and seed manifests
-  - [~] Remaining rollout, snapshot, BDD, and live-smoke work stays in the plan
 - [x] Plan 284 — CI lint and merge-queue latency
   (`specs/plans/284-ci-lint-latency.md`)
   - [x] Target only the packages that own `test-support` code
@@ -118,7 +119,7 @@ for detailed scope and acceptance criteria.
   - [x] Keep the removed MCP server and smoke lane out of CI
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
- - [~] Plan 276 — Content-addressing conformance and defense
+- [~] Plan 276 — Content-addressing conformance and defense
       (`specs/plans/276-content-addressing-conformance-and-defense.md`)
   - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
   - [ ] WS1 — reconcile the two claim tier vocabularies (`model/claims.toml`
