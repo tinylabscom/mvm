@@ -13,19 +13,7 @@ use crate::config;
 use crate::transcript::GapMarker;
 
 use super::opts::StreamOpts;
-use super::wire::{MAX_BATCH_PAYLOAD_BYTES, StreamBatch, read_batch};
-
-/// Largest frame a reader will accept. A broker caps one batch's payload at
-/// [`crate::stream_client::MAX_BATCH_PAYLOAD_BYTES`] and JSON-encodes each byte as a small integer
-/// plus a separator, so a legitimate frame lands well inside this; the
-/// remaining headroom covers per-record metadata for a batch of tiny writes.
-pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-
-/// JSON renders each payload byte as up to four characters. If the frame cap
-/// ever stopped covering that expansion, a legitimate full-size batch would be
-/// refused as hostile — so the relation is checked at compile time, not left
-/// to whoever next edits one of the two numbers.
-const _: () = assert!(MAX_BATCH_PAYLOAD_BYTES * 4 < MAX_FRAME_BYTES);
+use super::wire::{MAX_FRAME_BYTES, StreamBatch, read_batch};
 
 /// Why a consumer could not read the next record.
 #[derive(Debug, thiserror::Error)]
@@ -70,8 +58,8 @@ pub trait StreamReader {
 /// window chains from the hash of the last record this reader saw, which it
 /// computes itself rather than trusting the broker to repeat. The broker's
 /// anchor is used only where the reader has none of its own — the first
-/// window, and the window after a loss, which is exactly the case the
-/// reader cannot reconstruct because the linking record was evicted.
+/// window, and the first batch reporting a *new* loss, which is exactly the
+/// case the reader cannot reconstruct because the linking record was evicted.
 pub struct FramedStreamReader<R> {
     source: R,
     opts: StreamOpts,
@@ -95,8 +83,10 @@ impl<R: Read> FramedStreamReader<R> {
     }
 
     /// What this reader has lost to the broker's retention ring so far, or
-    /// `None` if it has kept up. Cumulative, so a consumer polls it to
-    /// notice new loss.
+    /// `None` if it has kept up. Cumulative and monotone in `after_seq`, so a
+    /// consumer polls it to notice new loss and never sees loss un-report
+    /// itself — a batch arriving without a marker means "nothing new since",
+    /// not "recovered".
     pub fn gap(&self) -> Option<GapMarker> {
         self.gap
     }
@@ -114,21 +104,20 @@ impl<R: Read> FramedStreamReader<R> {
     /// filter removes records from the middle of a window, so verifying
     /// afterwards would check a chain the broker never sent.
     fn absorb(&mut self, batch: StreamBatch) -> Result<(), StreamError> {
-        let lost_records = batch.gap != self.gap;
-        self.gap = batch.gap;
-        if lost_records || self.anchor.is_none() {
-            self.anchor = Some(batch.anchor);
-        }
-        let anchor = self
-            .anchor
-            .expect("the branch above sets an anchor whenever there was none");
+        let anchor = match self.new_loss(batch.gap) {
+            // The record that linked this window to the last one was
+            // evicted, so the running anchor is stale and the broker's is
+            // the only value that can close the window.
+            Some(reported) => {
+                self.gap = Some(reported);
+                batch.anchor
+            }
+            None => self.anchor.unwrap_or(batch.anchor),
+        };
+        self.anchor = Some(anchor);
 
-        if !batch.records.is_empty() {
+        if let Some(last) = batch.records.last() {
             verify_chain_from(&batch.records, anchor)?;
-            let last = batch
-                .records
-                .last()
-                .expect("the emptiness check above guarantees a last record");
             self.anchor = Some(last.hash());
         }
 
@@ -141,6 +130,27 @@ impl<R: Read> FramedStreamReader<R> {
             }
         }
         Ok(())
+    }
+
+    /// The marker on a batch, if it reports loss this reader has not already
+    /// folded in — which is exactly when the broker's anchor is worth taking.
+    ///
+    /// Strictly advancing, on two counts. A window big enough to split
+    /// arrives as several frames and the marker rides the first of them, so
+    /// treating a later frame's absent marker as recovery would drop a loss
+    /// the consumer is owed and then read the *next* window's repeat of it as
+    /// a fresh one — re-anchoring a caught-up reader onto a hash from
+    /// hundreds of records back, which surfaces as tampering. And the anchor
+    /// is the one value this side takes from the broker on trust, so the
+    /// moment it is trusted has to be the moment the reader provably cannot
+    /// compute it: any looser rule lets a broker re-anchor a live stream by
+    /// toggling a marker, and splice in a window that then verifies.
+    fn new_loss(&self, reported: Option<GapMarker>) -> Option<GapMarker> {
+        let reported = reported?;
+        match self.gap {
+            Some(seen) if reported.after_seq <= seen.after_seq => None,
+            _ => Some(reported),
+        }
     }
 }
 
@@ -452,6 +462,120 @@ mod tests {
         let mut reader = FramedStreamReader::new(bytes.as_slice(), opts);
         let seqs: Vec<u64> = drain(&mut reader).iter().map(|r| r.seq).collect();
         assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_split_window_does_not_erase_the_loss_it_reported() {
+        // A window too big for one frame arrives as several, and the marker
+        // rides the first. If a later frame's absent marker cleared the
+        // reader's, the next window's repeat of the same marker would read as
+        // a fresh loss and re-anchor a caught-up reader onto a stale hash.
+        let full = chained(0, 12, [0u8; 32]);
+        let gap = GapMarker {
+            after_seq: 3,
+            dropped_chunks: 4,
+            dropped_bytes: 40,
+        };
+        let bytes = framed(&[
+            // Window one, split in two: survivors 4..6 then 7..9.
+            StreamBatch {
+                anchor: full[3].hash(),
+                records: full[4..7].to_vec(),
+                gap: Some(gap),
+                caught_up: false,
+            },
+            StreamBatch {
+                anchor: full[6].hash(),
+                records: full[7..10].to_vec(),
+                gap: None,
+                caught_up: true,
+            },
+            // Window two: no new loss, so the same cumulative marker rides
+            // again — over a queue anchor that has not moved since the loss.
+            StreamBatch {
+                anchor: full[3].hash(),
+                records: full[10..].to_vec(),
+                gap: Some(gap),
+                caught_up: true,
+            },
+        ]);
+
+        let opts = StreamOpts::builder().follow(true).build();
+        let mut reader = FramedStreamReader::new(bytes.as_slice(), opts);
+        let seqs: Vec<u64> = drain(&mut reader).iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, vec![4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(
+            reader.gap(),
+            Some(gap),
+            "the loss stays reported across the split"
+        );
+    }
+
+    #[test]
+    fn a_repeated_gap_cannot_re_anchor_a_continuing_stream() {
+        // The anchor is the one value taken from the broker on trust, so it
+        // is taken only when the marker advances. Re-sending an old marker
+        // beside an anchor of the broker's choosing must not move the reader.
+        let full = chained(0, 8, [0u8; 32]);
+        let gap = GapMarker {
+            after_seq: 1,
+            dropped_chunks: 2,
+            dropped_bytes: 20,
+        };
+        let bytes = framed(&[
+            StreamBatch {
+                anchor: full[1].hash(),
+                records: full[2..5].to_vec(),
+                gap: Some(gap),
+                caught_up: true,
+            },
+            StreamBatch {
+                anchor: [0xee; 32],
+                records: full[5..].to_vec(),
+                gap: Some(gap),
+                caught_up: true,
+            },
+        ]);
+
+        let opts = StreamOpts::builder().follow(true).build();
+        let mut reader = FramedStreamReader::new(bytes.as_slice(), opts);
+        let seqs: Vec<u64> = drain(&mut reader).iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, vec![2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn a_gap_that_did_not_advance_never_moves_the_reader_backwards() {
+        let full = chained(0, 8, [0u8; 32]);
+        let far = GapMarker {
+            after_seq: 4,
+            dropped_chunks: 5,
+            dropped_bytes: 50,
+        };
+        let stale = GapMarker {
+            after_seq: 1,
+            dropped_chunks: 2,
+            dropped_bytes: 20,
+        };
+        let bytes = framed(&[
+            StreamBatch {
+                anchor: full[4].hash(),
+                records: full[5..7].to_vec(),
+                gap: Some(far),
+                caught_up: true,
+            },
+            StreamBatch {
+                anchor: full[1].hash(),
+                records: full[7..].to_vec(),
+                gap: Some(stale),
+                caught_up: true,
+            },
+        ]);
+
+        let opts = StreamOpts::builder().follow(true).build();
+        let mut reader = FramedStreamReader::new(bytes.as_slice(), opts);
+        let seqs: Vec<u64> = drain(&mut reader).iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, vec![5, 6, 7]);
+        assert_eq!(reader.gap(), Some(far), "loss never un-reports itself");
     }
 
     #[test]

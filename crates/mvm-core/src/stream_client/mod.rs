@@ -34,7 +34,9 @@ mod wire;
 
 pub use opts::{KindFilter, StreamOpts, StreamOptsBuilder};
 pub use reader::{
-    FramedStreamReader, MAX_FRAME_BYTES, StreamError, StreamReader, connect_stream,
-    connect_stream_at,
+    FramedStreamReader, StreamError, StreamReader, connect_stream, connect_stream_at,
 };
-pub use wire::{MAX_BATCH_PAYLOAD_BYTES, StreamBatch, read_batch, write_batch};
+pub use wire::{
+    MAX_BATCH_PAYLOAD_BYTES, MAX_BATCH_RECORDS, MAX_FRAME_BYTES, MAX_RECORD_PAYLOAD_BYTES,
+    StreamBatch, read_batch, write_batch,
+};

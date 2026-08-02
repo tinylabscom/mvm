@@ -28,9 +28,9 @@
 //! `mvm-client` and never name the lower crate.
 
 pub use mvm_core::stream_client::{
-    FramedStreamReader, KindFilter, MAX_BATCH_PAYLOAD_BYTES, MAX_FRAME_BYTES, StreamBatch,
-    StreamError, StreamOpts, StreamOptsBuilder, StreamReader, connect_stream, connect_stream_at,
-    read_batch, write_batch,
+    FramedStreamReader, KindFilter, MAX_BATCH_PAYLOAD_BYTES, MAX_BATCH_RECORDS, MAX_FRAME_BYTES,
+    MAX_RECORD_PAYLOAD_BYTES, StreamBatch, StreamError, StreamOpts, StreamOptsBuilder,
+    StreamReader, connect_stream, connect_stream_at, read_batch, write_batch,
 };
 
 #[cfg(test)]

@@ -150,17 +150,34 @@ pub struct ReaderStart {
 /// The three values are only meaningful as a set. Read separately —
 /// [`ReaderHandle::recv`], then [`ReaderHandle::anchor`], then
 /// [`ReaderHandle::gap`] — an eviction landing between two of the calls
-/// yields a window that does not chain from the anchor beside it, and the
-/// consumer renders that mismatch as tampering. [`ReaderHandle::drain_verified`]
-/// takes all three under one lock so the triple is always self-consistent.
+/// yields a window whose anchor describes different records than the ones in
+/// hand, and the consumer renders that mismatch as tampering.
+/// [`ReaderHandle::drain_verified`] takes all three under one lock, so the
+/// anchor and gap always describe exactly the records handed back.
+///
+/// `anchor` is **not** in general the hash immediately preceding
+/// `records[0]`. It is the anchor this reader attached at, moved forward
+/// only by loss — so it is the right value for the first window and for the
+/// first window after each new loss, and a *stale* value for every window in
+/// between. Those chain from the hash of the previous window's last record,
+/// which the consumer computes itself.
+///
+/// `gap` is what tells the two apart: it advances exactly when `anchor`
+/// becomes the value to use. A consumer that re-anchors on anything looser
+/// than the gap advancing will eventually verify a caught-up window against
+/// an anchor from far behind it and report tampering. Keeping the contract
+/// this shape is what makes a delivery cost no hashing, and what stops this
+/// side from being able to re-anchor a live stream at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainedWindow {
     /// Every record this reader had buffered, in sequence order.
     pub records: Vec<StreamRecord>,
-    /// The hash `records` chains from: the reader's attach point, or the
-    /// hash of the last record it lost if retention has moved it since.
+    /// The hash the reader's *current* verification window chains from: its
+    /// attach point, or the hash of the last record it lost if retention has
+    /// moved it since. Meaningful for `records` only when `gap` advanced.
     pub anchor: [u8; 32],
-    /// What this reader has lost so far, folded into one marker.
+    /// What this reader has lost so far, folded into one marker. Monotone in
+    /// `after_seq`, and the signal that `anchor` has moved.
     pub gap: Option<GapMarker>,
 }
 
@@ -203,10 +220,12 @@ impl ReaderHandle {
     ///
     /// After a loss this moves: it becomes the hash of the last record the
     /// reader will never see, which is precisely what the surviving window
-    /// chains from. So the anchor covers every record handed to this reader
-    /// since it attached, or since its most recent loss, whichever is later
-    /// — a consumer that re-verifies as it drains restarts its window
-    /// whenever [`ReaderHandle::gap`] changes.
+    /// chains from. So the anchor opens the verification window that began
+    /// when the reader attached, or at its most recent loss, whichever is
+    /// later — a consumer restarts its window whenever
+    /// [`ReaderHandle::gap`] *advances*, and otherwise carries its own
+    /// running hash forward. See [`DrainedWindow`] for why the weaker rule
+    /// "whenever the gap changes" is wrong.
     pub fn anchor(&self) -> [u8; 32] {
         lock_queue(&self.queue)
             .resume_anchor

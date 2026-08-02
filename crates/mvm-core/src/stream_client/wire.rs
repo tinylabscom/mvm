@@ -16,7 +16,65 @@ use crate::transcript::GapMarker;
 /// drain into consecutive batches rather than emitting one huge frame, so
 /// this bounds a follower's per-frame allocation regardless of how far
 /// behind it fell or how the producer's ring was sized.
+///
+/// A batch is cut *before* the record that would overflow it, so this is a
+/// real ceiling and not a threshold the last record may cross. The one
+/// exception is a record whose own payload is larger: a record is atomic —
+/// the chain covers it whole — so it cannot be split, and it travels alone
+/// in a batch of its own.
 pub const MAX_BATCH_PAYLOAD_BYTES: usize = 256 * 1024;
+
+/// Records one [`StreamBatch`] carries.
+///
+/// The companion bound to [`MAX_BATCH_PAYLOAD_BYTES`], and there for the
+/// same reason a reader's ring has two: a workload writing a byte at a time
+/// reaches the payload cap only after a quarter of a million records, whose
+/// per-record JSON metadata would then dwarf the payload the cap is sized
+/// for.
+pub const MAX_BATCH_RECORDS: usize = 4 * 1024;
+
+/// Largest single record the plane can frame.
+///
+/// A record cannot be split without breaking the chain, so a bigger one is
+/// refused by the length gate in [`read_batch`] rather than truncated —
+/// loudly, and with the cap named. Both producers read in 64 KiB chunks, so
+/// this is four times the largest record either can emit.
+pub const MAX_RECORD_PAYLOAD_BYTES: usize = MAX_BATCH_PAYLOAD_BYTES;
+
+/// Largest frame a reader accepts, checked against the declared length
+/// before a body byte is read. Sized from the worst batch the split rules
+/// permit, with the headroom asserted at compile time below.
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// JSON bytes one record costs beyond its payload: the field names, three
+/// integers, and `prev_hash` rendered as 32 decimal numbers. The worst case
+/// measures 261; `a_worst_case_record_fits_its_modelled_overhead` pins that
+/// against the real encoder rather than trusting this arithmetic.
+const RECORD_JSON_OVERHEAD_BYTES: usize = 512;
+
+/// JSON bytes one payload byte costs. `serde_json` renders a `Vec<u8>` as
+/// decimal numbers, so `255,` — four characters — is the worst case.
+const PAYLOAD_JSON_BYTES_PER_BYTE: usize = 4;
+
+/// JSON bytes a batch costs beyond its records: the anchor array, the gap
+/// marker, and the caught-up flag.
+const BATCH_JSON_OVERHEAD_BYTES: usize = 512;
+
+/// Largest a batch obeying the split rules can encode to.
+///
+/// Two payload terms, not one: a batch carries at most
+/// [`MAX_BATCH_PAYLOAD_BYTES`] of payload, *or* one oversized record up to
+/// [`MAX_RECORD_PAYLOAD_BYTES`] — summing both is the cheap way to bound
+/// either without a `max` in const position.
+const MAX_ENCODED_BATCH_BYTES: usize = BATCH_JSON_OVERHEAD_BYTES
+    + MAX_BATCH_RECORDS * RECORD_JSON_OVERHEAD_BYTES
+    + (MAX_BATCH_PAYLOAD_BYTES + MAX_RECORD_PAYLOAD_BYTES) * PAYLOAD_JSON_BYTES_PER_BYTE;
+
+/// A legitimate batch has to fit the cap that guards against a hostile one.
+/// If the two ever crossed, a full-size window would be refused as an attack
+/// — so the relation is checked at compile time rather than left to whoever
+/// next edits one of the numbers.
+const _: () = assert!(MAX_ENCODED_BATCH_BYTES < MAX_FRAME_BYTES);
 
 /// One window of a VM's output stream, plus everything needed to verify it.
 ///
@@ -174,5 +232,63 @@ mod tests {
     #[test]
     fn payload_bytes_sums_the_window() {
         assert_eq!(batch().payload_bytes(), 3);
+    }
+
+    /// The per-record term in [`MAX_ENCODED_BATCH_BYTES`] is arithmetic about
+    /// an encoder, so it is checked against the encoder. Worst case in every
+    /// field: the widest integers and an all-`0xff` hash, which is what makes
+    /// the number a bound rather than a guess.
+    #[test]
+    fn a_worst_case_record_fits_its_modelled_overhead() {
+        let payload = vec![0xffu8; 1024];
+        let record = StreamRecord {
+            seq: u64::MAX,
+            source: StreamSource::Entrypoint,
+            kind: StreamKind::Stderr,
+            host_unix_nanos: u64::MAX,
+            prev_hash: [0xff; 32],
+            payload: payload.clone(),
+        };
+        let encoded = serde_json::to_vec(&record).expect("encode").len();
+        let modelled = RECORD_JSON_OVERHEAD_BYTES + payload.len() * PAYLOAD_JSON_BYTES_PER_BYTE;
+        assert!(encoded <= modelled, "{encoded} exceeds modelled {modelled}");
+    }
+
+    /// The whole relation, against the encoder rather than against the
+    /// arithmetic: a batch at both split limits must frame inside the cap the
+    /// reading side refuses beyond.
+    #[test]
+    fn a_batch_at_both_split_limits_frames_inside_the_cap() {
+        // Byte-sized writes: the case the record bound exists for, and the
+        // one where per-record metadata dominates.
+        let mut records: Vec<StreamRecord> = (0..MAX_BATCH_RECORDS as u64)
+            .map(|seq| record(seq, &[0xff]))
+            .collect();
+        // Plus the one record a cut cannot help with, at its own ceiling.
+        records.push(record(
+            MAX_BATCH_RECORDS as u64,
+            &vec![0xffu8; MAX_RECORD_PAYLOAD_BYTES],
+        ));
+        let oversized = StreamBatch {
+            anchor: [0xff; 32],
+            records,
+            gap: Some(GapMarker {
+                after_seq: u64::MAX,
+                dropped_chunks: u64::MAX,
+                dropped_bytes: u64::MAX,
+            }),
+            caught_up: true,
+        };
+
+        let mut framed = Vec::new();
+        write_batch(&mut framed, &oversized).expect("write");
+        assert!(
+            framed.len() <= MAX_ENCODED_BATCH_BYTES,
+            "{} exceeds the modelled {MAX_ENCODED_BATCH_BYTES}",
+            framed.len()
+        );
+        read_batch(&mut framed.as_slice(), MAX_FRAME_BYTES)
+            .expect("a batch at the split limits must not read as hostile")
+            .expect("a frame");
     }
 }
