@@ -494,20 +494,23 @@ because it alone blocked boot loudly.
   had never run on the universal path, so this stayed latent until Step 2 wired
   it up. `replace_symlink_target` swaps the link for a plain file first and
   declines the substitution when it cannot, leaving the image's own tool alone.
-- [ ] **Step 5: Deliver mediated tools on a read-only rootfs**
+- [x] **Step 5: Deliver mediated tools on a read-only rootfs**
   A verity-sealed rootfs cannot be written, so the symlink cannot be replaced
-  and `/bin/ping` stays busybox — which fails at `socket()` in a NIC-less guest.
-  `/mvm/runtime/ping` works when invoked directly. Prepending the runtime
-  overlay to the workload `PATH` would cover unqualified `ping`; an absolute
-  `/bin/ping` needs something else.
+  and the bind mount cannot apply — the common case, since busybox links every
+  applet at one binary. The init now also links each stand-in into
+  `/run/mvm/bin` (on the tmpfs it just mounted, so always writable) and the
+  guest wrapper prepends that to `PATH`. The two routes are complementary: the
+  mount still wins for an absolute `/bin/ping` where it can apply, the link
+  covers the sealed case.
 - [ ] **Step 6: Regression witness**
   A live or BDD scenario asserting the workload environment is complete on the
   universal path, so this cannot regress silently a second time.
 
 Live verification on macOS/HVF, `machine run --image alpine`:
 `wget https://example.com` returns the page (`Network unreachable` before),
-`lo` is up, `/run/mvm` carries the signer anchor and resolver, and
-`/mvm/runtime/ping -c 2 google.com` reports 0% packet loss.
+`lo` is up, `/run/mvm` carries the signer anchor and resolver, and on a
+`ro` dm-verity root `which ping` resolves to `/run/mvm/bin/ping` with
+`ping -c 2 google.com` reporting 0% packet loss.
 
 ---
 
