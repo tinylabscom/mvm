@@ -250,6 +250,10 @@ export type Nonce = string
  */
 export type VerbId = string
 /**
+ * Device kind for a boot-time user volume.
+ */
+export type VolumeConfigKind = ("virtio_fs" | "block")
+/**
  * Guest-agent control protocol capability. Closed enum so host and guest fail loudly on drift instead of accepting arbitrary strings.
  */
 export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "unix_socket_forward" | "readiness")
@@ -738,9 +742,17 @@ sig: string
 verbs: VerbId[]
 }
 /**
- * virtio-fs volume to mount after rootfs activation.
+ * User volume to mount after rootfs activation.
  */
 export interface VolumeConfig {
+/**
+ * Guest block device for [`VolumeConfigKind::Block`]. Must be absent for virtio-fs and is validated against the bounded `/dev/vd[a-z]` range.
+ */
+device?: (string | null)
+/**
+ * Attachment kind. Missing on older messages means virtio-fs.
+ */
+kind?: (VolumeConfigKind & string)
 /**
  * Absolute guest mountpoint.  Must pass `MountPathPolicy`.
  */
@@ -750,7 +762,7 @@ mountpoint: string
  */
 read_only?: boolean
 /**
- * virtio-fs tag advertised by the host for this share.
+ * Stable attachment identifier. For virtio-fs this is the advertised tag; for block devices it preserves the host's `uvol{index}` identity.
  */
 tag: string
 }

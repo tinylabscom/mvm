@@ -1230,11 +1230,15 @@ class StageFile:
 VerbId = str
 
 
-@dataclass
-class VolumeConfig:
-    mountpoint: str
-    tag: str
-    read_only: Optional[bool] = False
+class VolumeConfigKind1(Enum):
+    virtio_fs = 'virtio_fs'
+
+
+class VolumeConfigKind2(Enum):
+    block = 'block'
+
+
+VolumeConfigKind = Union[VolumeConfigKind1, VolumeConfigKind2]
 
 
 class VolumeMountErrorKind1(Enum):
@@ -1484,6 +1488,15 @@ class VerbGrantEnvelope:
     pubkey_hex: str
     predecessor_plan_nonce_hex: Optional[str] = None
     predecessor_session_id: Optional[str] = None
+
+
+@dataclass
+class VolumeConfig:
+    mountpoint: str
+    tag: str
+    device: Optional[str] = None
+    kind: Optional[VolumeConfigKind] = 'virtio_fs'
+    read_only: Optional[bool] = False
 
 
 @dataclass
