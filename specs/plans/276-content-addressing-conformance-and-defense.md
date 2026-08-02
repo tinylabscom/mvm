@@ -170,13 +170,20 @@ There are two read paths and they fail differently. The dev-build artifact cache
 
 ### WS7 — σ/κ separation and the transform descriptor (recon §7.8)
 
-New scope from the 2026-08-01 revision. Every mvm content-address surface is `Identity`-transform today, so σ and κ are numerically equal everywhere and this is a type separation with no migration. The moment any surface compresses, encrypts, deltas or erasure-codes at rest, modelling this as one label — or as an "encrypted" boolean — costs a format migration per transform family. Precedent is unanimous: git object IDs never hash the bytes on disk (loose objects deflated, packed objects delta-encoded), and ZFS compresses and encrypts beneath a checksum carried in the parent block pointer.
+**Premise corrected.** This workstream said σ/κ was "cheap now because every mvm content-address surface is `Identity`-transform today." That is wrong, and the correction strengthens the case rather than weakening it — there are already two live non-identity transforms:
 
-- [ ] Introduce the pair as disjoint types with no conversion: **σ** the protocol digest over plaintext, **κ** the storage address over bytes at rest (path derivation, verification target, unit of transfer). Extend `mvm_core::semantic_address`'s identity taxonomy rather than starting a new one.
-- [ ] Model σ as a **set** — one κ reachable by ≥1 σ — which is what a dual-hash transition and multi-axis registration need, and what WS0's σ-set contract records as policy.
-- [ ] Represent the descriptor as an open enumeration, not a boolean: `framing: Whole | Fixed{frame_size} | Chunked{manifest}`, `per_frame: [Identity | Aead | Deflate | Delta{base} | Erasure{k,m}]`, `seek_map: Implicit | Explicit{cumulative} | None`. Framing is the outer layer; transforms apply per frame, which is what keeps ranged reads possible — whole-object sealing turns a ten-byte range request against a large object into a whole-object operation, removing the operation rather than slowing it.
-- [ ] Enforce S7 at the type level: an address family that admits MD5/CRC32C/CRC64 must not compile. Compile-fail test, not review.
-- [ ] `VERIFICATION.md` row (planted: add a σ→κ conversion → compile-fail test fires).
+- An **OCI layer is `tar+gzip`**. The digest the fetch path verifies is over the compressed bytes — κ. The config's `diff_id` is the uncompressed digest — σ. `diff_id` is written only into test fixtures and is never read or verified; not a vulnerability, since verifying κ transitively pins what it decompresses to, but σ is declared-and-unconsumed.
+- A **sealed transcript stores ciphertext**, so `ChunkRecord.sha256_hex` is κ. σ is deliberately absent, because a plaintext digest on a third-party-verifiable chain is a confirmation oracle (S2).
+
+The tree was already keeping them apart correctly, under different names. What it lacked was a type that makes the distinction unrepresentable-if-wrong rather than a convention.
+
+- [x] `mvm_core::at_rest`: `ProtocolDigest` (σ) and `StorageAddress` (κ) as disjoint newtypes over the validated `Sha256Hex`, with no `From`/`Into`/`Deref` between them.
+- [x] σ modelled as a **set** — `AddressBinding` holds one κ and a `BTreeSet` of σ, which is what a dual-hash transition and multi-axis registration need and what a single-value σ forecloses.
+- [x] The descriptor as an open enumeration, not a boolean: `Framing` (whole / fixed / chunked-by-manifest) × `per_frame: Vec<FrameTransform>` (identity / aead / deflate / delta / erasure) × `SeekMap` (implicit / explicit / absent). A chunked manifest is typed κ, since it is itself a stored object.
+- [x] S7 enforced by construction: both constructors go through `Sha256Hex`, whose width check rejects MD5 (32 hex), CRC32C (8) and CRC64 (16). Those stay legitimate attestations and are disqualified as addresses without review having to catch it.
+- [x] Compile-fail doctest, and it needed sharpening: the first version used a bare `let kappa: StorageAddress = sigma;`, which never compiles whatever impls exist, so it passed **with a `From` bridge present** — a vacuous test. Rewritten to `sigma.into()`, which compiles exactly when a bridge exists; planting the bridge now fails it.
+- [x] Cross-referenced from the `semantic_address` taxonomy prose, which separates *what* is identified; this is the orthogonal *which bytes* axis.
+- [ ] Adopt the types at the two live sites — the OCI layer/`diff_id` pair and the transcript chunk records. Deliberately separate: introducing the vocabulary is additive, and changing what those paths store is a format question that wants its own review.
 
 ## Sequencing
 

@@ -152,10 +152,12 @@ for detailed scope and acceptance criteria.
           Scoped as plan 288
           (`specs/plans/288-kernel-cache-verify-on-read.md`)
     - [ ] Cold-tier background scrub (recon §7.9)
-  - [ ] WS7 — σ/κ separation and the transform descriptor: the protocol digest
+  - [~] WS7 — σ/κ separation: `mvm_core::at_rest` gives the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint
-        types, σ as a set, descriptor as an open enumeration. Free while every
-        surface is `Identity`; a format migration per transform family later
+        types, σ as a set, and the transform descriptor as an open enumeration.
+        The plan's "everything is Identity today" premise was wrong — OCI
+        layers are tar+gzip and transcripts store ciphertext — which
+        strengthens the case. Remaining: adopt the types at those two sites
   - [x] Discharged elsewhere: sealed transcript root anchored into the audit
         chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
         (recon §7.7 → #2019)
