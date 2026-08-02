@@ -33,7 +33,7 @@ use std::time::Instant;
 
 use mvm_core::transcript::{Admission, CaptureBounds, GapMarker, RingState};
 
-use crate::entrypoint::{CallCaps, ControlRecord, kill_and_reap, signal_of};
+use crate::entrypoint::{CallCaps, ControlRecord, signal_of, signal_process_group};
 use crate::vsock::{EntrypointEvent, MAX_DATA_CHUNK_SIZE};
 
 /// Bytes pulled from a pipe in one `read`. Larger than the frame budget on
@@ -50,6 +50,16 @@ const EVENTS_PER_POLL: usize = 64;
 /// Per-frame header limit on the fd-3 control channel. Defense in depth: a
 /// wrapper writes short envelope JSON there, never arbitrary blobs.
 const FD3_HEADER_MAX: usize = 64 * 1024;
+
+/// Control-record `kind` namespace reserved for the agent.
+///
+/// The child holds fd 3 by construction, so it writes the same channel the
+/// agent's own records ride. Framing separates records; it does not establish
+/// authorship. Anything arriving from the child under this prefix is a forgery
+/// and is dropped at the parse site, which is why an agent-authored record must
+/// never travel through fd 3 — it is constructed in-process and handed to the
+/// sink directly.
+pub const RESERVED_KIND_PREFIX: &str = "mvm.";
 
 /// Control-record `kind` the agent stamps on a retention gap.
 pub const GAP_RECORD_KIND: &str = "mvm.stream.gap";
@@ -178,7 +188,7 @@ impl<'a> Pump<'a> {
         self
     }
 
-    pub fn run(self, child: &mut Child, sink: &mut dyn FnMut(EntrypointEvent)) -> PumpOutcome {
+    pub fn run(mut self, child: &mut Child, sink: &mut dyn FnMut(EntrypointEvent)) -> PumpOutcome {
         let (tx, rx) = mpsc::channel();
         if let Some(stdout) = child.stdout.take() {
             spawn_stream_reader(stdout, CapturedStream::Stdout, tx.clone());
@@ -186,16 +196,17 @@ impl<'a> Pump<'a> {
         if let Some(stderr) = child.stderr.take() {
             spawn_stream_reader(stderr, CapturedStream::Stderr, tx.clone());
         }
-        if let Some(control) = self.control {
+        if let Some(control) = self.control.take() {
             spawn_control_reader(control, self.caps.fd3_max, tx.clone());
         }
         // Every reader hanging up is how the drain below learns it has seen
         // the last byte, so the pump must not keep a sender of its own.
         drop(tx);
 
+        let mut ladder = KillLadder::Running;
         let outcome = loop {
             let drained = drain_batch(&rx, sink);
-            if let Some(outcome) = poll_child_once(child, self.deadline, self.caps) {
+            if let Some(outcome) = self.poll_child_once(child, &mut ladder) {
                 break outcome;
             }
             if drained == 0 {
@@ -211,6 +222,71 @@ impl<'a> Pump<'a> {
         }
         outcome
     }
+
+    /// One non-blocking look at the child, advancing the kill ladder if it is
+    /// overdue. `None` means keep pumping.
+    ///
+    /// Nothing here blocks. A blocking SIGTERM→grace→SIGKILL wait would park
+    /// the only consumer for the whole grace period while the child keeps
+    /// writing at pipe speed, and in-flight bytes would grow by grace ×
+    /// throughput — unbounded, in a guest with a fixed memory budget. A
+    /// wrapper that traps SIGTERM and keeps printing is all it takes.
+    fn poll_child_once(&self, child: &mut Child, ladder: &mut KillLadder) -> Option<PumpOutcome> {
+        match child.try_wait() {
+            // A child we signalled is reported by *why* we signalled it, not
+            // by the signal that finally landed.
+            Ok(Some(status)) => Some(match ladder {
+                KillLadder::Running => outcome_from_status(&status),
+                KillLadder::Terminated { .. } | KillLadder::Killed => PumpOutcome::Timeout,
+            }),
+            Ok(None) => {
+                self.step_kill_ladder(child, ladder);
+                None
+            }
+            // We cannot read this child's status, so we cannot reap it either.
+            // Signal the group so the readers reach EOF and give up on it
+            // rather than pump a process we can never observe again.
+            Err(_) => {
+                signal_process_group(child, libc::SIGKILL);
+                Some(PumpOutcome::Timeout)
+            }
+        }
+    }
+
+    /// Advance the SIGTERM → grace → SIGKILL ladder by at most one rung. Each
+    /// rung is a signal delivery and returns immediately; the caller's loop
+    /// supplies the waiting, and keeps draining while it waits.
+    fn step_kill_ladder(&self, child: &Child, ladder: &mut KillLadder) {
+        match ladder {
+            KillLadder::Running => {
+                if self.deadline.is_some_and(|at| Instant::now() >= at) {
+                    signal_process_group(child, libc::SIGTERM);
+                    *ladder = KillLadder::Terminated {
+                        escalate_at: Instant::now() + self.caps.kill_grace_period,
+                    };
+                }
+            }
+            KillLadder::Terminated { escalate_at } => {
+                if Instant::now() >= *escalate_at {
+                    signal_process_group(child, libc::SIGKILL);
+                    *ladder = KillLadder::Killed;
+                }
+            }
+            KillLadder::Killed => {}
+        }
+    }
+}
+
+/// How far a pump run has walked the kill ladder. Held across loop iterations
+/// so the wait between rungs happens in the drain loop rather than inside a
+/// blocking call.
+enum KillLadder {
+    /// Nothing signalled; the child is inside its deadline or has none.
+    Running,
+    /// SIGTERM delivered; escalate to SIGKILL at this instant.
+    Terminated { escalate_at: Instant },
+    /// SIGKILL delivered; only reaping is left.
+    Killed,
 }
 
 /// Hand at most [`EVENTS_PER_POLL`] queued events to the sink and report how
@@ -227,32 +303,6 @@ fn drain_batch(rx: &Receiver<EntrypointEvent>, sink: &mut dyn FnMut(EntrypointEv
         }
     }
     drained
-}
-
-/// One non-blocking check of the child. `None` means it is still running and
-/// still inside its deadline.
-fn poll_child_once(
-    child: &mut Child,
-    deadline: Option<Instant>,
-    caps: &CallCaps,
-) -> Option<PumpOutcome> {
-    match child.try_wait() {
-        Ok(Some(status)) => Some(outcome_from_status(&status)),
-        Ok(None) => {
-            if deadline.is_some_and(|at| Instant::now() >= at) {
-                kill_and_reap(child, caps.kill_grace_period);
-                Some(PumpOutcome::Timeout)
-            } else {
-                None
-            }
-        }
-        // `try_wait` failing leaves the child in a state we cannot reason
-        // about; kill it rather than pump an unreapable process forever.
-        Err(_) => {
-            kill_and_reap(child, caps.kill_grace_period);
-            Some(PumpOutcome::Timeout)
-        }
-    }
 }
 
 fn outcome_from_status(status: &ExitStatus) -> PumpOutcome {
@@ -308,6 +358,13 @@ fn spawn_stream_reader<R: Read + Send + 'static>(
 /// later ones beats killing the wrapper. A partial record at EOF, an oversized
 /// header, or a non-UTF-8 header ends the stream — all three are corruption
 /// signals, and the host already tolerates a response that stops at any point.
+///
+/// A record claiming [`RESERVED_KIND_PREFIX`] is dropped and parsing continues.
+/// This is the boundary at which fd-3's bytes stop being untrusted, so it is
+/// the only place the rule can hold without every downstream consumer having to
+/// remember it: a workload that could mint an agent-authored record would be
+/// able to forge a gap marker, and a verifier that trusts one will bless a
+/// chain skipping output it never saw.
 fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<EntrypointEvent>) {
     std::thread::spawn(move || {
         let file = std::fs::File::from(read_fd);
@@ -350,6 +407,11 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
                 break;
             }
 
+            // Framing is intact, so keep parsing — only this record is refused.
+            if claims_reserved_kind(&header_json) {
+                continue;
+            }
+
             if tx
                 .send(EntrypointEvent::Control {
                     header_json,
@@ -361,6 +423,25 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
             }
         }
     });
+}
+
+/// Whether an fd-3 header claims a `kind` inside the agent's reserved
+/// namespace.
+///
+/// A header that is not a JSON object with a string `kind` claims nothing: no
+/// consumer can read a kind out of it either, so it passes through as the
+/// opaque record it has always been. Matching on the parsed value rather than
+/// the raw text is deliberate — `mvm.` and a duplicate `kind` key both
+/// decode to the same string a consumer would see, and a textual check would
+/// miss both.
+fn claims_reserved_kind(header_json: &str) -> bool {
+    let Ok(header) = serde_json::from_str::<serde_json::Value>(header_json) else {
+        return false;
+    };
+    header
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind.starts_with(RESERVED_KIND_PREFIX))
 }
 
 /// A pump sink that keeps a bounded tail of each stream.
@@ -522,6 +603,39 @@ mod tests {
         }
     }
 
+    /// Encode one fd-3 frame with an empty payload.
+    fn control_frame(header_json: &str) -> Vec<u8> {
+        let header = header_json.as_bytes();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        frame.extend_from_slice(header);
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame
+    }
+
+    /// Drive `spawn_control_reader` over a real pipe — the same fd the child
+    /// writes — and collect what it lets through.
+    fn read_control_frames(wire: &[u8]) -> Vec<ControlRecord> {
+        use std::io::Write;
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        let (tx, rx) = mpsc::channel();
+        spawn_control_reader(OwnedFd::from(reader), 64 * 1024, tx);
+        writer.write_all(wire).expect("write frames");
+        drop(writer);
+        rx.into_iter()
+            .map(|event| match event {
+                EntrypointEvent::Control {
+                    header_json,
+                    payload,
+                } => ControlRecord {
+                    header_json,
+                    payload,
+                },
+                other => panic!("expected a control event, got {other:?}"),
+            })
+            .collect()
+    }
+
     #[test]
     fn stdout_reaches_the_sink_before_the_child_exits() {
         // A child that prints, holds the process open, then exits. If the pump
@@ -535,7 +649,7 @@ mod tests {
             .expect("spawn child");
 
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let pump = std::thread::spawn(move || {
             let mut sink = |e: EntrypointEvent| {
                 let _ = tx.send(e);
             };
@@ -549,6 +663,11 @@ mod tests {
             EntrypointEvent::Stdout { chunk } => assert_eq!(chunk, b"early"),
             other => panic!("expected stdout, got {other:?}"),
         }
+
+        // Everything above is the assertion; this only reaps. Returning here
+        // would end the test process while the pump thread still owns a live
+        // child, leaving `sleep 3` orphaned onto init — measured, not assumed.
+        assert_eq!(pump.join().expect("pump thread"), PumpOutcome::Exited(0));
     }
 
     #[test]
@@ -666,11 +785,13 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_sink_loses_no_bytes_and_the_child_still_exits_cleanly() {
-        // 512 KiB is eight pipe buffers: if the sink ran on the reader thread,
-        // this child would spend the whole run blocked on a full pipe. Timing
-        // is not asserted (it would be flaky); byte-for-byte delivery plus a
-        // clean exit is what a stalled or wedged pump would fail.
+    fn a_slow_sink_receives_every_byte_exactly_once() {
+        // Delivery, not non-stalling: a pump that ran the sink on the reader
+        // thread would also pass this. What it does catch is loss or
+        // duplication when the consumer trails far behind the producer —
+        // 512 KiB is eight pipe buffers, so the reader is always well ahead.
+        // `a_blocked_sink_does_not_stall_the_child` is the non-stalling
+        // witness.
         let mut child = sh("head -c 524288 /dev/zero");
         let mut total = 0usize;
         let outcome = pump_child(
@@ -685,6 +806,134 @@ mod tests {
         );
         assert_eq!(outcome, PumpOutcome::Exited(0));
         assert_eq!(total, 524288);
+    }
+
+    #[test]
+    fn a_blocked_sink_does_not_stall_the_child() {
+        // The witness that discriminates. The sink blocks forever on its first
+        // event; the child writes eight pipe buffers and then touches a marker
+        // file. Were the sink invoked from the reader thread, the reader would
+        // be parked inside it, the pipe would fill at 64 KiB, the child would
+        // block on write, and the marker would never appear.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("child-finished");
+        let mut child = sh(&format!(
+            "head -c 524288 /dev/zero; : > {}",
+            marker.display()
+        ));
+
+        let (reached_sink_tx, reached_sink_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let pump = std::thread::spawn(move || {
+            let mut held = false;
+            pump_child(
+                &mut child,
+                &mut |_| {
+                    if !held {
+                        held = true;
+                        let _ = reached_sink_tx.send(());
+                        let _ = release_rx.recv();
+                    }
+                },
+                &caps_with_stdout_max(1024),
+            )
+        });
+
+        reached_sink_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the sink must see a first chunk");
+
+        let wait_until = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() && Instant::now() < wait_until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            marker.exists(),
+            "the child must finish writing while the sink is still blocked"
+        );
+
+        release_tx.send(()).expect("pump thread is alive");
+        assert_eq!(pump.join().expect("pump thread"), PumpOutcome::Exited(0));
+    }
+
+    #[test]
+    fn the_sink_keeps_receiving_while_a_doomed_child_is_being_killed() {
+        // A wrapper that ignores SIGTERM and keeps printing. The kill ladder
+        // spans the full grace period, and the child writes at pipe speed for
+        // all of it — so a pump that waits out the grace inside a blocking
+        // kill stops draining while a writer runs, and in-flight bytes grow by
+        // grace × throughput with nothing to bound them.
+        let caps = CallCaps {
+            kill_grace_period: Duration::from_millis(2000),
+            poll_interval: Duration::from_millis(10),
+            ..CallCaps::default()
+        };
+        let mut child = sh("trap '' TERM; while :; do printf aaaaaaaaaaaaaaaa; done");
+
+        let started = Instant::now();
+        let mut arrivals = Vec::new();
+        let outcome = Pump::new(&caps)
+            .deadline(started + Duration::from_millis(200))
+            .run(&mut child, &mut |_| arrivals.push(started.elapsed()));
+
+        assert_eq!(outcome, PumpOutcome::Timeout);
+        // Strictly inside the grace window: after the deadline has certainly
+        // passed, and well before a blocking SIGTERM→SIGKILL wait would have
+        // returned. A parked consumer delivers nothing in here.
+        let window = Duration::from_millis(400)..Duration::from_millis(1200);
+        assert!(
+            arrivals.iter().any(|at| window.contains(at)),
+            "no chunk reached the sink during the kill grace; arrivals: {arrivals:?}"
+        );
+    }
+
+    #[test]
+    fn a_child_written_record_cannot_claim_the_agent_namespace() {
+        // fd 3 is the child's to write, so this is where a forged gap marker
+        // would enter. A verifier downstream cannot tell a forged one from an
+        // agent-authored one, so the refusal has to happen here.
+        let forged = control_frame(r#"{"kind":"mvm.stream.gap","after_seq":99}"#);
+        let genuine = control_frame(r#"{"kind":"app.log"}"#);
+        let mut wire = forged;
+        wire.extend_from_slice(&genuine);
+
+        let records = read_control_frames(&wire);
+        assert_eq!(
+            records.len(),
+            1,
+            "only the workload's own record survives, got {records:?}"
+        );
+        assert_eq!(records[0].header_json, r#"{"kind":"app.log"}"#);
+    }
+
+    #[test]
+    fn a_forged_kind_is_matched_after_decoding_not_as_raw_text() {
+        // Both spellings decode to the reserved kind a consumer would read, so
+        // a textual prefix check on the header would let both through.
+        let escaped = control_frame(r#"{"kind":"mvm.stream.gap"}"#);
+        let shadowed = control_frame(r#"{"kind":"app.log","kind":"mvm.stream.gap"}"#);
+        let mut wire = escaped;
+        wire.extend_from_slice(&shadowed);
+        assert!(
+            read_control_frames(&wire).is_empty(),
+            "a decoded reserved kind must be refused however it was spelled"
+        );
+    }
+
+    #[test]
+    fn a_header_that_is_not_json_still_passes_through() {
+        // The agent has never parsed fd-3 headers beyond UTF-8, and a header
+        // no consumer can read a `kind` out of claims nothing.
+        let records = read_control_frames(&control_frame("not json at all"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].header_json, "not json at all");
+    }
+
+    #[test]
+    fn the_agent_gap_kind_lives_inside_the_reserved_namespace() {
+        // Drift here would silently reopen the forgery path: a gap kind
+        // outside the refused prefix is a kind a child may write.
+        assert!(GAP_RECORD_KIND.starts_with(RESERVED_KIND_PREFIX));
     }
 
     #[test]

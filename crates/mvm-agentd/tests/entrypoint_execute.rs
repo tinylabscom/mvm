@@ -355,6 +355,55 @@ fn test_execute_stdout_cap_prunes_and_marks_a_gap_without_killing_the_wrapper() 
 }
 
 #[test]
+fn test_execute_wrapper_cannot_forge_an_agent_gap_record_on_fd3() {
+    // The wrapper writes fd 3 itself, through the production
+    // `install_fd3_in_child` path, so this is the real forgery surface: a
+    // record claiming the agent's reserved kind alongside a legitimate one,
+    // while a genuine cap breach produces an agent-authored gap. The forged
+    // record must not reach the caller at all — a verifier downstream would
+    // otherwise bless a chain skipping output it never saw.
+    //
+    // Frames: `{"kind":"mvm.stream.gap","after_seq":99,"dropped_chunks":1,
+    // "dropped_bytes":1}` then `{"kind":"app.log"}`, both with empty payloads.
+    let (tmp, entry) = make_wrapper();
+    let mut caps = caps_with_timeout(1024, 1024);
+    caps.poll_interval = Duration::from_millis(10);
+    let outcome = execute(
+        &entry,
+        tmp.path(),
+        b"FD3_HEX 4d0000007b226b696e64223a226d766d2e73747265616d2e676170222c2261667465725f736571223a39392c2264726f707065645f6368756e6b73223a312c2264726f707065645f6279746573223a317d00000000\n\
+          FD3_HEX 120000007b226b696e64223a226170702e6c6f67227d00000000\n\
+          UNBOUNDED_STDOUT\n\n",
+        Duration::from_millis(300),
+        caps,
+        Vec::new(),
+    );
+    match outcome {
+        CallOutcome::Timeout { output } => {
+            assert_eq!(
+                output.controls.len(),
+                1,
+                "only the wrapper's own record survives, got {:?}",
+                output.controls
+            );
+            assert_eq!(output.controls[0].header_json, r#"{"kind":"app.log"}"#);
+            assert_eq!(
+                output.gaps.len(),
+                1,
+                "the agent's own gap must still be reported, got {:?}",
+                output.gaps
+            );
+            assert_eq!(output.gaps[0].stream, CapturedStream::Stdout);
+            assert_ne!(
+                output.gaps[0].marker.after_seq, 99,
+                "the reported gap must be the agent's, not the wrapper's forged one"
+            );
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_execute_spawn_failed_when_program_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let bogus = tmp.path().join("does-not-exist");

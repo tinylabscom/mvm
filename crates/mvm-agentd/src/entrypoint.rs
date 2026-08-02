@@ -753,16 +753,29 @@ pub(crate) fn spawn_path(entrypoint: &ValidatedEntrypoint) -> PathBuf {
     }
 }
 
-pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
-    // Negate the pid to address the entire process group — the child
-    // is its own process group leader (see `.process_group(0)` above),
-    // so `kill(-pgid, ...)` reaches the wrapper plus any descendants
-    // (e.g. a shell that exec'd a long-running `sleep`).
+/// Deliver `signal` to the child's whole process group.
+///
+/// Negating the pid is what makes this reach descendants: the child is its own
+/// group leader (`.process_group(0)` at spawn), so `kill(-pgid, …)` hits the
+/// wrapper plus anything it forked — e.g. a shell that exec'd a long-running
+/// `sleep`, which would otherwise survive and hold the output pipes open.
+pub(crate) fn signal_process_group(child: &Child, signal: libc::c_int) {
     let pgid = child.id() as i32;
-    // SAFETY: kill is async-signal-safe.
+    // SAFETY: kill performs no memory access; the negated pgid names the
+    // child's process group (it is the group leader via process_group(0)).
     unsafe {
-        libc::kill(-pgid, libc::SIGTERM);
+        libc::kill(-pgid, signal);
     }
+}
+
+/// Blocking SIGTERM → grace → SIGKILL → reap.
+///
+/// Callers that must keep servicing something else while the child winds down
+/// cannot use this — it owns the calling thread for up to `grace`. The stream
+/// pump drives the same ladder step-by-step from its own loop for exactly that
+/// reason.
+pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
+    signal_process_group(child, libc::SIGTERM);
     let escalate_at = Instant::now() + grace;
     while Instant::now() < escalate_at {
         if let Ok(Some(_)) = child.try_wait() {
@@ -770,11 +783,7 @@ pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    // SAFETY: kill performs no memory access; the negated pgid signals the
-    // child's process group (it is the group leader via process_group(0)).
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
+    signal_process_group(child, libc::SIGKILL);
     let _ = child.wait();
 }
 
