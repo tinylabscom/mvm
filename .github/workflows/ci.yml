@@ -2,18 +2,25 @@ name: CI
 
 on:
   # Keep pull-request validation cheap and predictable. On a pull request this
-  # workflow runs two jobs: lint and test. Nix eval runs only in the merge
-  # queue and on manual dispatch, so ordinary PR updates do not pay for it on
-  # every push. Expensive platform, live-VM, OCI ratification, security,
-  # Windows, and release artifact jobs live in release/manual workflows.
+  # workflow runs two jobs: lint and test. The merge queue also runs Nix eval.
+  # Expensive platform, live-VM, OCI ratification, security, Windows, and
+  # release artifact jobs live in release/manual workflows.
   pull_request:
   # Required for the merge queue: all checks must run against the merge_group event.
   merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
+# Pull-request refs are stable across updates, so a new commit cancels only the
+# superseded run for that PR. Merge-group refs identify exact queue commits and
+# must finish; manual dispatches receive a unique key so independent diagnostics
+# do not block each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,8 +32,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -49,16 +54,6 @@ jobs:
           node-version: "22"
 
       - uses: ./.github/actions/install-zigbuild
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-lint-
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -280,12 +275,6 @@ jobs:
         # every moved unit test.
         run: cargo nextest run -p mvm-core --features client-remote
 
-      - name: xtask man-page tests
-        # gen-man lives behind xtask's off-by-default `man` feature (it pulls
-        # mvm-cli + its heavy build.rs out of the default xtask graph), so the
-        # default workspace run skips its tests. Exercise the man-page path.
-        run: cargo nextest run -p xtask --features man
-
       - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
           cargo test -p mvm-build --features builder-vm --lib \
@@ -297,11 +286,16 @@ jobs:
         run: cargo test -p mvm-build --features pure-mkfs --lib rootfs::tests::pure
 
       - name: test-support feature tests (mock backend)
-        # The mock VM backend + its tests are gated behind `test-support` so the
-        # mock never ships in the production closure. The default workspace run
-        # skips its tests — run the workspace with the feature on so they stay
-        # covered on every PR.
-        run: cargo nextest run --workspace --features test-support
+        # Only these packages own code gated by `test-support`. Re-running the
+        # whole workspace here repeated more than eight thousand tests from the
+        # Test job to reach a handful of mock-backend cases. Keep the feature's
+        # unit, integration, and required-example surfaces explicit instead.
+        run: |
+          cargo nextest run -p mvm-runtime --features test-support --lib
+          cargo nextest run -p mvm-client --features test-support --lib
+          cargo nextest run -p mvm-cli --features test-support --lib
+          cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
+          cargo check -p mvm-cli --features test-support --example verification_loop
 
   test:
     name: Test
@@ -326,16 +320,6 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal \
             --target wasm32-unknown-unknown,wasm32-wasip1,riscv32imac-unknown-none-elf
 
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -348,6 +332,12 @@ jobs:
 
       - name: Build
         run: cargo build --all-targets
+
+      - name: xtask man-page tests
+        # gen-man lives behind xtask's off-by-default `man` feature. It pulls
+        # mvm-cli and its build script, so exercise it on Test's already-warm
+        # test-profile graph instead of rebuilding that graph in Lint.
+        run: cargo nextest run -p xtask --features man
 
       - name: Run tests
         run: cargo nextest run --workspace --all-targets

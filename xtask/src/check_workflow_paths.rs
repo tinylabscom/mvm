@@ -206,6 +206,37 @@ fn parse_fuzz_args(args: &str, crate_dir: &str) -> Option<FuzzInvocation> {
 mod tests {
     use super::*;
 
+    fn ci_workflow() -> String {
+        workflow("ci.yml")
+    }
+
+    fn workflow(name: &str) -> String {
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(".github/workflows")
+                .join(name),
+        )
+        .unwrap_or_else(|error| panic!("{name} must be readable: {error}"))
+    }
+
+    fn ci_job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
+        let marker = format!("  {job}:\n");
+        let start = workflow
+            .find(&marker)
+            .unwrap_or_else(|| panic!("CI workflow is missing the {job} job"));
+        let rest_start = start + marker.len();
+        let rest = &workflow[rest_start..];
+        let end = rest
+            .match_indices("\n  ")
+            .find_map(|(offset, _)| {
+                let line = rest[offset + 1..].lines().next()?;
+                (!line.starts_with("    ") && line.ends_with(':')).then_some(rest_start + offset)
+            })
+            .unwrap_or(workflow.len());
+        &workflow[start..end]
+    }
+
     #[test]
     fn working_directories_are_unquoted() {
         let src = "    working-directory: crates/mvm-agentd\n  working-directory: \"crates/x\"\n";
@@ -259,6 +290,124 @@ mod tests {
                 fuzz_dir: "fuzz".to_string(),
                 target: "fuzz_runtime_recording".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn pull_request_ci_does_not_repeat_the_workspace_or_upload_target_caches() {
+        let workflow = ci_workflow();
+        let lint = ci_job_block(&workflow, "lint");
+        for unexpected in [
+            "cargo nextest run --workspace --features test-support",
+            "cargo nextest run -p xtask --features man",
+            "uses: actions/cache@v5",
+            "uses: ./.github/actions/free-disk",
+        ] {
+            assert!(
+                !lint.contains(unexpected),
+                "CI lint job must not contain {unexpected:?}"
+            );
+        }
+
+        for expected in [
+            "cargo nextest run -p mvm-runtime --features test-support --lib",
+            "cargo nextest run -p mvm-client --features test-support --lib",
+            "cargo nextest run -p mvm-cli --features test-support --lib",
+            "cargo nextest run -p mvmctl --features test-support --test audit_emissions_live",
+            "cargo check -p mvm-cli --features test-support --example verification_loop",
+        ] {
+            assert!(
+                lint.contains(expected),
+                "CI lint job must contain {expected:?}"
+            );
+        }
+
+        let test = ci_job_block(&workflow, "test");
+        assert!(!test.contains("uses: actions/cache@v5"));
+        assert!(test.contains("cargo nextest run -p xtask --features man"));
+    }
+
+    #[test]
+    fn removed_mcp_server_stays_out_of_ci() {
+        let workflow = ci_workflow();
+        for removed in [
+            "MCP server stdio roundtrip",
+            "mcp-server-smoke",
+            "test-mcp-roundtrip.sh",
+            "Install MCP smoke dependency",
+        ] {
+            assert!(
+                !workflow.contains(removed),
+                "removed MCP server CI surface returned: {removed}"
+            );
+        }
+    }
+
+    #[test]
+    fn required_workflows_keep_merge_group_runs_independent_and_conclusive() {
+        let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}";
+        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}";
+
+        for name in ["ci.yml", "architecture.yml"] {
+            let source = workflow(name);
+            assert!(
+                source.contains("merge_group:\n    types: [checks_requested]"),
+                "{name} must handle merge-queue check requests explicitly"
+            );
+            assert!(
+                source.contains(expected_group),
+                "{name} concurrency key drifted"
+            );
+            assert!(
+                source.contains(expected_cancel),
+                "{name} must cancel only superseded pull-request runs"
+            );
+            assert!(!source.contains("cancel-in-progress: true"));
+        }
+
+        let ci = ci_workflow();
+        assert!(ci.contains("permissions:\n  contents: read"));
+        for required_name in [
+            "name: Lint (fmt + clippy + policy)",
+            "name: Test",
+            "name: Nix flake check (Linux eval)",
+        ] {
+            assert!(ci.contains(required_name), "required check name drifted");
+        }
+
+        let architecture = workflow("architecture.yml");
+        assert!(architecture.contains("name: Invariant #1"));
+    }
+
+    #[test]
+    fn test_support_source_owners_match_the_targeted_ci_lane() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut unexpected = Vec::new();
+        crate::fs_walk::for_each_file(&workspace, Some("rs"), &mut |path, contents| {
+            if !contents.contains("feature = \"test-support\"") {
+                return;
+            }
+            let relative = path
+                .strip_prefix(&workspace)
+                .expect("workspace-relative path");
+            let owned = [
+                "crates/mvm-cli/",
+                "crates/mvm-client/",
+                "crates/mvm-core/",
+                "crates/mvm-runtime/",
+                "tests/audit_emissions_live.rs",
+            ]
+            .iter()
+            .any(|prefix| relative.to_string_lossy().starts_with(*prefix));
+            if !owned {
+                unexpected.push(relative.display().to_string());
+            }
+        })
+        .expect("test-support source scan must succeed");
+
+        assert!(
+            unexpected.is_empty(),
+            "new test-support source owners need an explicit targeted CI command: {unexpected:?}"
         );
     }
 }

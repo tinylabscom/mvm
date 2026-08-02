@@ -36,6 +36,17 @@
       one. Workflow validation, focused tests, workspace check, clippy, and
       formatting pass. Tracked in plan 282.
 
+- [x] Merge-queue latency audit and workflow hardening: measured 50 recent
+      queued merges and 101 merge-group jobs, confirmed runner admission and
+      long required-job execution as the dominant critical path, and found
+      regenerated speculative groups adding up to 2h04m of rebuild delay. The
+      two required workflows now declare `checks_requested` explicitly, cancel
+      only superseded pull-request runs, never cancel merge-group validation,
+      and give manual runs unique concurrency keys. All five required check
+      names and exact-merge-commit validation remain intact. Plan 281 records
+      the measured 38m26s p50 / 2h14m03s p95 queue latency. The live ruleset is
+      now set to build concurrency 3, group wait 0, and timeout 90 minutes.
+
 - [x] Build-cache invalidation: narrowed `nix/lib/workspace-filter.nix` from a
       basename deny-list over the whole workspace root to an allow-list of the
       top-level entries cargo can actually read. The filtered tree is `mvmSrc`,
@@ -91,6 +102,16 @@
       keep the SDK publication dry-run in the manual full matrix, and remove
       speculative pre-PR and redundant post-merge `main` runs without changing
       required check names.
+
+- [x] Plan 284 CI latency: stop the lint lane from repeating the full workspace
+      under `test-support`, remove unshareable multi-gigabyte `target/` caches,
+      share `mvm-cli`'s nested build graph across feature fingerprints, move
+      man-page tests onto Test's warm compile graph, and keep the removed MCP
+      server and smoke lane out of CI. Structural, targeted feature, full
+      workspace, and Linux verification are green. The first
+      post-change run measured 19–21 minutes of runner wait; its 37m36s Lint
+      execution did not beat the 36-minute cold-run baseline because the
+      remaining `mvm-cli` and live audit tests dominate the lane.
 
 - [x] #1840 faithful flake-image revert: boot the recorded slot revision,
       reconcile signed artifact hashes, and preserve the admitted restore path.

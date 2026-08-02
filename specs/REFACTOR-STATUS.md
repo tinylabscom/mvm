@@ -58,6 +58,13 @@ for detailed scope and acceptance criteria.
         `require_workload_backend` / `start_prepared` / the admitted
         persistent-OCI path accept `--hypervisor apple-container`
   - [ ] Container-mode closure (later stage)
+- [x] Plan 281 — Merge queue latency audit
+      (`specs/plans/281-merge-queue-latency.md`)
+  - [x] Measure queue, merge-group, runner, execution, rebuild, and post-check
+        latency from live GitHub metadata and logs
+  - [x] Preserve required exact-commit validation while making merge-group
+        triggering and cancellation behavior explicit
+  - [x] Apply capacity-backed merge-queue settings in the repository ruleset
 
 - [ ] Plan 279 — Build action identity and a real artifact manifest
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`)
@@ -70,12 +77,21 @@ for detailed scope and acceptance criteria.
         allow-list so a docs-only edit stops invalidating every guest binary
         (416 of 1872 files, 22%, stop being cache keys)
 
-- [~] Plan 270 — universal initramfs + vsock-activated boot
-  (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
+ - [~] Plan 270 — universal initramfs + vsock-activated boot
+ (`specs/plans/270-universal-initramfs-vsock-activated-boot.md`)
   - [x] Retire the obsolete CLI workload-guest payload and dead skip-embedding
         switch; the universal initramfs/runtime overlay owns workload binaries
   - [x] Pin `mvmctl` embedding to the builder/bootstrap host and seed manifests
   - [~] Remaining rollout, snapshot, BDD, and live-smoke work stays in the plan
+- [x] Plan 284 — CI lint and merge-queue latency
+  (`specs/plans/284-ci-lint-latency.md`)
+  - [x] Target only the packages that own `test-support` code
+  - [x] Remove branch-local multi-gigabyte Cargo target caches
+  - [x] Share nested `mvm-cli` builds across feature fingerprints
+  - [x] Move man-page tests onto Test's warm compile graph
+  - [x] Keep the removed MCP server and smoke lane out of CI
+  - [x] Complete workspace and Linux clippy verification; the first live run
+        passed and measured a 19–21 minute runner wait
 
 - [~] Plan 265 — Fast-start SLO, backend sequencing & competitive positioning
   (`specs/plans/265-fast-start-slo-sequencing-positioning.md`)
