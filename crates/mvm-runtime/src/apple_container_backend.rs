@@ -34,6 +34,7 @@ use thiserror::Error;
 
 use crate::apple_container::artifacts;
 use crate::backend::HvfRunner;
+use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 
 /// Typed, fail-closed errors for requests this backend cannot satisfy.
 /// Every error names what was refused and why, rather than silently falling
@@ -188,6 +189,16 @@ impl VmBackend for AppleContainerBackend {
     }
 }
 
+impl WorkloadBackend for AppleContainerBackend {
+    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
+        // The same posture as the HVF runner this backend delegates to:
+        // proxy-aware substitution over the vsock UDS channel, no
+        // transparent :80/:443 terminator. Delegating keeps the two in
+        // lock-step if the runner's transport ever changes.
+        self.runner.egress_substitution_transport()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +339,51 @@ mod tests {
         let b = AppleContainerBackend::new();
         // No kernel in the isolated cache: unavailable regardless of platform.
         assert!(!b.is_available().unwrap());
+    }
+
+    #[test]
+    fn workload_transport_mirrors_the_hvf_runner() {
+        let b = AppleContainerBackend::new();
+        let transport = b.egress_substitution_transport();
+        assert_eq!(
+            transport,
+            b.runner.egress_substitution_transport(),
+            "the transport delegates to the runner's own declaration"
+        );
+        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
+        assert!(transport.supports_proxy_aware_substitution());
+        assert!(!transport.supports_transparent_terminator());
+    }
+
+    #[test]
+    fn workload_identity_and_capabilities_delegate() {
+        let b = AppleContainerBackend::new();
+        // `&dyn WorkloadBackend` still carries the full VmBackend surface:
+        // identity and capabilities are the backend's own delegations.
+        let workload: &dyn WorkloadBackend = &b;
+        assert_eq!(workload.name(), "apple-container");
+        assert_eq!(workload.kind(), BackendKind::AppleContainer);
+        let (mine, theirs) = (
+            workload.capabilities(),
+            crate::backend::hvf_runner().capabilities(),
+        );
+        assert_eq!(mine.vsock, theirs.vsock);
+        assert_eq!(mine.no_routable_guest_nic, theirs.no_routable_guest_nic);
+        assert_eq!(mine.standby_pool, theirs.standby_pool);
+        assert_eq!(mine.snapshot_capability, theirs.snapshot_capability);
+        assert_eq!(mine.pause_resume, theirs.pause_resume);
+    }
+
+    #[test]
+    fn require_workload_backend_accepts_apple_container() {
+        // The admitted-funnel boundary is pure permission — it matches the
+        // backend kind and never probes the artifact cache, so no isolated
+        // MVM_HOME is needed here (the kernel is resolved at `start`).
+        let backend = AnyBackend::from_hypervisor("apple-container");
+        let workload = crate::workload_backend::require_workload_backend(&backend)
+            .expect("apple-container boots the full admitted stack — it is a workload backend");
+        assert_eq!(workload.name(), "apple-container");
+        assert_eq!(workload.kind(), BackendKind::AppleContainer);
     }
 
     #[test]

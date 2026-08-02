@@ -588,9 +588,9 @@ impl AnyBackend {
     ///
     /// Returns `None` when no marker is present — the VM doesn't exist, or
     /// isn't one of the pid-file backends (Apple Container boots through
-    /// the same HVF supervisor, so its live VMs surface under the HVF
-    /// marker until its own lifecycle lands). Callers fall back to the
-    /// platform default in that case.
+    /// the same HVF supervisor, so its live VMs deliberately surface under
+    /// the HVF marker — same supervisor, same lifecycle). Callers fall back
+    /// to the platform default in that case.
     pub fn for_started_vm(name: &str) -> Option<Self> {
         let dir = mvm_core::config::vm_state_dir(name);
         catalog::started_vm_probe_descriptors()
@@ -724,11 +724,11 @@ impl AnyBackend {
             // egress seam). Barred from the admitted launch funnel until
             // then, the same carve-out as `Qemu`.
             AnyBackend::Wasm(_) => None,
-            // The apple-container skeleton has no boot path at all — it
-            // cannot carry an untrusted workload until the framework shim
-            // and the activation channel land, so it is barred from the
-            // admitted launch funnel the same way `Qemu`/`Wasm` are.
-            AnyBackend::AppleContainer(_) => None,
+            // Apple Container boots the full admitted stack — it IS the HVF
+            // workload runner with only the kernel image substituted, so the
+            // same egress endpoint, broker registration, and activation gate
+            // apply verbatim.
+            AnyBackend::AppleContainer(b) => Some(b),
             // Docker is a shared-kernel container dev tier: namespaces are
             // not a hardware boundary, so it must never carry an untrusted
             // production workload. Barred from the admitted launch funnel
@@ -787,7 +787,9 @@ impl AnyBackend {
             // checkpoint contract while keeping the VM itself in memory.
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(backend) => backend.spawn_standby_captured(ctx, spec),
-            // Not workload-bearing backends — no warm pool, fail closed.
+            // No warm pool on these backends: qemu, wasm, and docker are not
+            // workload-bearing; apple-container is, but the HVF driver has no
+            // standby support — all fail closed.
             AnyBackend::Qemu(_)
             | AnyBackend::Wasm(_)
             | AnyBackend::AppleContainer(_)
@@ -830,7 +832,9 @@ impl AnyBackend {
             // its own in-memory state (the context is a runner detail it ignores).
             #[cfg(feature = "test-support")]
             AnyBackend::Mock(backend) => backend.claim_standby(handle, claim),
-            // Not workload-bearing backends — no warm pool, fail closed.
+            // No warm pool on these backends: qemu, wasm, and docker are not
+            // workload-bearing; apple-container is, but the HVF driver has no
+            // standby support — all fail closed.
             AnyBackend::Qemu(_)
             | AnyBackend::Wasm(_)
             | AnyBackend::AppleContainer(_)
@@ -1857,14 +1861,15 @@ mod tests {
     }
 
     #[test]
-    fn as_workload_backend_none_for_apple_container_skeleton() {
-        // The skeleton has no boot path; it must not carry an untrusted
-        // workload until the framework shim and activation channel land.
+    fn as_workload_backend_some_for_apple_container() {
+        // Apple Container boots the full admitted stack through the shared
+        // HVF runner — only the kernel image differs — so it is a workload
+        // backend under its own kind.
         let backend = AnyBackend::from_hypervisor("apple-container");
-        assert!(
-            backend.as_workload_backend().is_none(),
-            "apple-container: skeleton must not be a workload backend"
-        );
+        let workload = backend
+            .as_workload_backend()
+            .expect("apple-container boots the admitted stack — it is a workload backend");
+        assert_eq!(workload.kind(), BackendKind::AppleContainer);
     }
 
     #[test]
