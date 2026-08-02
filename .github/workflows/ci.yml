@@ -161,6 +161,9 @@ jobs:
       - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
         run: cargo run -p xtask -- check-uniform-vsock-egress
 
+      - name: guest init parity (both inits share one post-mount bootstrap)
+        run: cargo run -p xtask -- check-guest-init-parity
+
       - name: require-grant token confined to allowlist (guards mvmd no-brick invariant)
         run: cargo run -p xtask -- check-require-grant-token-allowlist
 

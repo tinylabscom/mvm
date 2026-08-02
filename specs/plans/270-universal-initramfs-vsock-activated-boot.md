@@ -502,9 +502,14 @@ because it alone blocked boot loudly.
   guest wrapper prepends that to `PATH`. The two routes are complementary: the
   mount still wins for an absolute `/bin/ping` where it can apply, the link
   covers the sealed case.
-- [ ] **Step 6: Regression witness**
-  A live or BDD scenario asserting the workload environment is complete on the
-  universal path, so this cannot regress silently a second time.
+- [x] **Step 6: Regression witness**
+  `xtask check-guest-init-parity`, gated in CI's Lint job. A live scenario was
+  the obvious shape and the wrong one: this regression was a missing call site,
+  and a live boot only catches it on the lanes that boot a guest. The gate
+  asserts the three properties whose absence caused it — both inits reach the
+  shared bootstrap, the bootstrap still performs every step, and the agent runs
+  it before dropping privilege — and each assertion was confirmed to fail when
+  its regression is reintroduced.
 
 Live verification on macOS/HVF, `machine run --image alpine`:
 `wget https://example.com` returns the page (`Network unreachable` before),
