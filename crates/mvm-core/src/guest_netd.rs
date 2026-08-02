@@ -66,6 +66,16 @@ impl ConnectAck {
     }
 }
 
+/// Directory the guest init installs mediated tool replacements into.
+///
+/// Part of the same contract as [`proxy_env_vars`]: a NIC-less guest reaches
+/// the network through host-mediated stand-ins, and some of those are programs
+/// rather than environment variables. It lives on the `/run` tmpfs because the
+/// workload rootfs is read-only under verity — the stand-in cannot be written
+/// into the image, and on a busybox image `/bin/ping` is a symlink to the
+/// multi-call binary, so it cannot be mounted over either.
+pub const MEDIATED_TOOLS_BIN: &str = "/run/mvm/bin";
+
 /// Build the standard proxy environment for a cooperative app, pointing it at
 /// the in-guest loopback proxy at `proxy_addr` (e.g. `127.0.0.1:3128`). Both
 /// upper- and lower-case variants are emitted because tooling is inconsistent

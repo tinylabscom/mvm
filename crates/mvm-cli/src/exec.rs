@@ -763,6 +763,13 @@ pub fn build_guest_wrapper(req: &ExecRequest, add_dir_labels: &[String]) -> Stri
     for (k, v) in &req.env {
         script.push_str(&format!("export {k}={}\n", shell_quote(v)));
     }
+    // After the caller's exports, and composed against `$PATH` in the guest, so
+    // the mediated tools win whatever the image or the caller sets. A NIC-less
+    // guest's `ping` is one of these: the image's own copy fails at `socket()`.
+    script.push_str(&format!(
+        "export PATH={}:\"$PATH\"\n",
+        shell_quote(mvm_core::guest_netd::MEDIATED_TOOLS_BIN),
+    ));
     if let ExecTarget::LaunchPlan { entrypoint } = &req.target
         && let Some(wd) = &entrypoint.working_dir
     {
@@ -2283,7 +2290,47 @@ mod tests {
         assert!(script.starts_with("set -e\n"));
         assert!(script.contains("exec 'true'"));
         assert!(!script.contains("mount"));
-        assert!(!script.contains("export"));
+        // The mediated-tool PATH is always emitted; no caller export joins it.
+        assert_eq!(script.matches("export ").count(), 1);
+        assert!(script.contains(mvm_core::guest_netd::MEDIATED_TOOLS_BIN));
+    }
+
+    /// The image's own `ping` fails at `socket()` in a NIC-less guest, so the
+    /// mediated stand-in has to win even when the caller sets `PATH` itself.
+    #[test]
+    fn build_guest_wrapper_mediated_path_outranks_a_caller_supplied_path() {
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            add_dirs: Vec::new(),
+            env: vec![("PATH".into(), "/usr/bin".into())],
+            target: ExecTarget::Inline {
+                argv: vec!["true".into()],
+            },
+            timeout_secs: Some(30),
+            pty: false,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+            hypervisor: None,
+            sdk_sidecar: None,
+        };
+        let script = build_guest_wrapper(&req, &[]);
+        let caller = script.find("export PATH='/usr/bin'").expect("caller PATH");
+        let mediated = script
+            .find(mvm_core::guest_netd::MEDIATED_TOOLS_BIN)
+            .expect("mediated PATH");
+        assert!(
+            mediated > caller,
+            "mediated PATH must come last to win; got:\n{script}"
+        );
+        // Composed against $PATH rather than replacing it, so the caller's
+        // entry survives behind ours.
+        assert!(script.contains(":\"$PATH\""), "got:\n{script}");
     }
 
     #[test]
@@ -2753,7 +2800,8 @@ mod tests {
         };
         let script = build_guest_wrapper(&req, &[]);
         assert!(!script.contains("cd "));
-        assert!(!script.contains("export "));
+        assert_eq!(script.matches("export ").count(), 1);
+        assert!(script.contains(mvm_core::guest_netd::MEDIATED_TOOLS_BIN));
         assert!(script.contains("exec 'true'"));
     }
 

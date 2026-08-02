@@ -95,19 +95,53 @@ pub fn ensure_runtime_dirs() {
     }
 }
 
-/// Bind-mount each mediated tool over the image's own copy.
+/// Deliver each mediated tool, by both routes available.
 ///
-/// Skipped silently when either side is absent: an image that ships no
-/// `ping` has nothing to mount over (and the rootfs is read-only under
-/// verity, so one cannot be created), and a launch shape with no runtime
-/// overlay has no replacement to offer. In both cases the image behaves as
-/// it would have without mvm, which is the honest outcome.
+/// A launch shape with no runtime overlay has no replacement to offer, and
+/// that case is skipped silently — the image behaves as it would have without
+/// mvm, which is the honest outcome.
 pub fn mount_mediated_tools() {
     for (source, target) in MEDIATED_TOOLS {
-        if !Path::new(source).is_file() || !Path::new(target).exists() {
+        if !Path::new(source).is_file() {
             continue;
         }
-        bind_mount_file(source, target);
+        // Always reachable by name, even when the image ships no copy to mount
+        // over and even when the rootfs is sealed against the mount.
+        install_mediated_tool(source, target);
+        if Path::new(target).exists() {
+            bind_mount_file(source, target);
+        }
+    }
+}
+
+/// Link a stand-in into the mediated-tool directory so `PATH` finds it.
+///
+/// The bind mount is the stronger delivery — it reaches a caller that runs
+/// `/bin/ping` outright, which no `PATH` order does — but it cannot apply to a
+/// symlink on a read-only rootfs. This route always applies: `/run` is a tmpfs
+/// the init just mounted.
+pub fn install_mediated_tool(source: &str, target: &str) {
+    install_mediated_tool_in(
+        Path::new(mvm_core::guest_netd::MEDIATED_TOOLS_BIN),
+        source,
+        target,
+    );
+}
+
+fn install_mediated_tool_in(dir: &Path, source: &str, target: &str) {
+    let Some(name) = Path::new(target).file_name() else {
+        return;
+    };
+    if let Err(e) = fs::create_dir_all(dir) {
+        eprintln!("mvm-guest-init: mkdir {}: {e}", dir.display());
+        return;
+    }
+    let link = dir.join(name);
+    // Replace rather than fail: activation can retry, and a stale link from a
+    // previous boot would shadow the current overlay.
+    let _ = fs::remove_file(&link);
+    if let Err(e) = std::os::unix::fs::symlink(source, &link) {
+        eprintln!("mvm-guest-init: link {source} to {}: {e}", link.display());
     }
 }
 
@@ -614,5 +648,58 @@ mod tests {
             leftovers.is_empty(),
             "staging file left behind: {leftovers:?}"
         );
+    }
+
+    /// The delivery that still works when the rootfs is sealed: a link in the
+    /// mediated-tool dir, which `PATH` finds even though the bind mount cannot
+    /// apply to a symlink on a read-only filesystem.
+    #[test]
+    fn install_mediated_tool_links_the_stand_in_under_its_target_name() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+
+        install_mediated_tool_in(&bin, "/mvm/runtime/ping", "/bin/ping");
+
+        // Named for the tool it stands in for, so `ping` on PATH finds it.
+        let link = bin.join("ping");
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            Path::new("/mvm/runtime/ping")
+        );
+    }
+
+    #[test]
+    fn install_mediated_tool_replaces_a_stale_link_from_a_previous_boot() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink("/stale/ping", bin.join("ping")).unwrap();
+
+        install_mediated_tool_in(&bin, "/mvm/runtime/ping", "/bin/ping");
+
+        assert_eq!(
+            fs::read_link(bin.join("ping")).unwrap(),
+            Path::new("/mvm/runtime/ping")
+        );
+    }
+
+    #[test]
+    fn mediated_tools_bin_is_an_absolute_guest_path() {
+        assert!(Path::new(mvm_core::guest_netd::MEDIATED_TOOLS_BIN).is_absolute());
+    }
+
+    #[test]
+    fn mediated_tools_name_the_target_binary() {
+        for (source, target) in MEDIATED_TOOLS {
+            assert!(target.starts_with('/'), "{target} must be absolute");
+            assert!(
+                source.starts_with("/mvm/runtime/"),
+                "{source} is an overlay path"
+            );
+            assert!(
+                Path::new(target).file_name().is_some(),
+                "{target} must name a binary for the PATH route"
+            );
+        }
     }
 }
