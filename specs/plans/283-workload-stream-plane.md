@@ -140,7 +140,17 @@ one process per VM"* (`broker/daemon.rs:3`). It ingests both sources, stamps the
 host-monotonic sequence, runs redaction outbound and the secret gate inbound,
 fans one producer out to N readers, arbitrates the input lease, and emits
 chain-signed audit on subscribe, input-session-open, and input-refusal — never
-payload bytes, so `audit_chain_carries_no_payload_bytes` keeps passing.
+payload bytes.
+
+**Correction, found during execution.** Earlier drafts cited
+`audit_chain_carries_no_payload_bytes` as the inherited guard here. That test
+does not exist — not on this branch, not on main. It is named only in
+`CLAUDE.md`'s claim-12 narrative, which is stale. The real ledger row
+(`specs/adrs/001-microvm-security-posture.md:476`) names
+`fn:unbound_service_returns_not_bound` and
+`fn:service_call_rejects_unknown_envelope_fields`, so
+`xtask check-claim-catalog` was never broken. Payload-freedom has no inherited
+guard; this plan must supply its own.
 
 Redaction lives here and only here. Mirrors `EgressGate` as the sole claim-10
 decision point: if redaction were per-consumer, every new consumer would be a
@@ -341,7 +351,8 @@ gates them:
 - Input refused without a plan grant.
 - Input refused under `--prod` with a shell-shaped entrypoint.
 - Secret material refused inbound, including split across frames.
-- `audit_chain_carries_no_payload_bytes` still passes with the stream plane live.
+- A stream-plane audit entry carries no payload bytes. This plan writes the
+  test; the guard earlier drafts cited does not exist.
 - `prod_console_attachment_has_no_input` still passes — the console capture
   keeps no host input fd.
 - Retention mode recorded in `plan.admitted`, so "was this run recorded?" is
@@ -354,9 +365,13 @@ gates them:
 - [ ] Claim 15 reworded and claim 17 added to the claims table in
       `specs/adrs/001-microvm-security-posture.md`, each with `fn:`/`ci:`
       witnesses that `xtask check-claim-catalog` resolves.
-- [ ] `CLAUDE.md` corrected on two points this plan had to work around: the
-      claims ledger lives in ADR-001, not `specs/claims/catalog.md`; and
-      `mvm-client` has no `dyn MvmClient` facade.
+- [ ] `CLAUDE.md` corrected on three drifts this plan had to work around: the
+      claims ledger lives in ADR-001, not `specs/claims/catalog.md`;
+      `mvm-client` has no `dyn MvmClient` facade; and the claim-12 narrative
+      names `audit_chain_carries_no_payload_bytes` as a witness, which exists
+      nowhere in the tree. The ADR-001 ledger row is correct, so
+      `check-claim-catalog` never caught it — only the prose is wrong. Audit the
+      rest of that narrative for the same failure while fixing it.
 - [ ] Website documentation:
       `public/src/content/docs/guides/workload-output-streaming.md` (following
       output live and after exit, the retention and verification model, feeding
@@ -1049,6 +1064,62 @@ git commit -m "feat(hostd): stream broker with redaction, chaining, and fan-out"
 
 ---
 
+### Task 6b: batch chunks so the durable store can hold a continuous stream
+
+Added during execution. The design's store section requires chunks to "batch by
+size-or-interval instead of one file per push", but no task implemented it, and
+Task 6's review showed why that is not a performance footnote:
+
+`TranscriptWriter::push_inner` writes one file per chunk, so `max_chunks` is the
+only thing standing between a chatty workload and inode exhaustion. Task 6 set
+`DEFAULT_CAPTURE_BOUNDS.max_chunks = 4096` for exactly that reason — and 4096
+chunks is under a second of output at the guest pump's per-pipe-read rate. The
+same constant is what makes D3 false of the durable copy: past it the writer
+fails closed and the transcript silently stops, which is the fail-closed
+behaviour this plan set out to replace. The cap cannot be lifted without
+batching, and batching cannot be deferred past the first real caller.
+
+**Files:**
+- Modify: `crates/mvm-core/src/transcript.rs` (`push_inner`, segment accounting)
+- Modify: `crates/mvm-hostd/src/stream/` (bounds, persist path)
+
+**Interfaces:**
+- Consumes: `TranscriptWriter`, `ChunkRecord`, `RingState`.
+- Produces: size-or-interval batching where one on-disk segment carries many
+  logical chunks, with `ChunkRecord` still addressing individual chunks so
+  `verify_chunks` and the sealed root keep their current meaning.
+
+- [ ] **Step 1: Write the failing tests**
+
+Cover: 100k one-byte chunks produce a bounded number of files, not 100k; a
+sealed manifest over batched segments still passes `verify_sealed_root` and
+`verify_chunks`; `export` reproduces the original byte stream in order across
+segment boundaries; a torn final segment fails closed rather than silently
+truncating.
+
+- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-core transcript` — FAIL.
+
+- [ ] **Step 3: Implement.** Preserve the chunk-level `prev_hash` linkage and
+  the ciphertext-digest semantics; batching changes the file layout, not what
+  the root commits to.
+
+- [ ] **Step 4: Raise the broker's chunk bound** now that files no longer scale
+  with chunk count, and make the durable path ring rather than fail closed, so
+  D3 holds of the persisted copy and not only of the reader queues.
+
+- [ ] **Step 5: Run to verify it passes**
+
+Run: `cargo nextest run -p mvm-core transcript && cargo nextest run -p mvm-hostd stream::`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```sh
+git commit -am "feat(transcript): batch stream chunks into segments"
+```
+
+---
+
 ### Task 7: console capture becomes a broker source on every backend
 
 **Files:**
@@ -1364,10 +1435,16 @@ entry carrying the reason and no payload bytes.
 
 - [ ] **Step 4: Run to verify it passes** — PASS, 4 tests.
 
-- [ ] **Step 5: Assert the chain still carries no payload**
+- [ ] **Step 5: Assert the chain carries no payload**
 
-Run: `cargo nextest run -p mvm-hostd audit_chain_carries_no_payload_bytes`
-Expected: PASS.
+Write the test — do not assume one exists. Earlier drafts pointed at
+`audit_chain_carries_no_payload_bytes`, which is absent from the tree; running
+that filter exits 0 having executed nothing, so the step was vacuously green.
+Assert that an input-refusal entry records the reason and the binding but no
+frame bytes, including the refused secret material.
+
+Run: `cargo nextest run -p mvm-hostd stream_input_audit`
+Expected: PASS, and the filter must match a nonzero number of tests.
 
 - [ ] **Step 6: Commit** — `git commit -am "feat(hostd): plan-gated, leased, secret-scanned workload input"`
 
