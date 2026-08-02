@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_agentd::vsock::{
-    CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, WORKLOAD_EXIT_PORT, connect_to_port,
-    dev_console_data_ports,
+    CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, GuestRequest, GuestResponse,
+    WORKLOAD_EXIT_PORT, connect_to_port, dev_console_data_ports, send_request_stream,
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{
@@ -45,6 +45,10 @@ const VSOCK_CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Overall deadline for the guest agent to answer its first CONNECT after
 /// `InstanceStart` — the boot-confirmation signal that the guest is up.
 const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bound the guest's stop-time filesystem drain. A clean stop refuses to tear
+/// down Firecracker until the guest confirms its filesystems are durable.
+const GUEST_STOP_DRAIN_TIMEOUT_SECS: u64 = 10;
 
 /// The Firecracker VMM driver: pure VMM mechanics, no policy and no admission.
 /// It boots what a `VmmSpec` describes and relays the guest's egress port to the
@@ -323,6 +327,20 @@ enum KillOutcome {
     StillRunning,
 }
 
+#[cfg(target_os = "linux")]
+fn fc_linux_signal_args(pid: u32, signal: FcStopSignal) -> Vec<String> {
+    let signal_arg = match signal {
+        FcStopSignal::Terminate => "-TERM",
+        FcStopSignal::ForceKill => "-KILL",
+    };
+    vec![
+        "-n".to_string(),
+        "kill".to_string(),
+        signal_arg.to_string(),
+        pid.to_string(),
+    ]
+}
+
 /// Deliver `signal` to an already-captured, identity-checked Firecracker PID.
 /// Firecracker is started under `sudo` and runs as **root**, so a
 /// non-root `mvmctl` cannot signal it directly — a plain `libc::kill` returns
@@ -332,13 +350,29 @@ enum KillOutcome {
 /// process actually stopped (so a lost race with a self-exiting process is not
 /// mistaken for a failure).
 fn fc_sudo_signal(pid: u32, signal: FcStopSignal) {
+    #[cfg(target_os = "linux")]
+    {
+        let args = fc_linux_signal_args(pid, signal);
+        match std::process::Command::new("sudo").args(&args).output() {
+            Ok(output) if output.status.success() => {}
+            Ok(_) | Err(_) => tracing::warn!(
+                "Firecracker stop signal {signal:?} to pid {pid} did not report success \
+                 (the process may have already exited)"
+            ),
+        }
+        return;
+    }
+
+    #[cfg(not(target_os = "linux"))]
     let flag = match signal {
         FcStopSignal::Terminate => "",
         FcStopSignal::ForceKill => " -9",
     };
+    #[cfg(not(target_os = "linux"))]
     let script = format!(
         r#"[ -f "/proc/{pid}/comm" ] && [ "$(cat /proc/{pid}/comm)" = "firecracker" ] && sudo kill{flag} {pid}"#
     );
+    #[cfg(not(target_os = "linux"))]
     match crate::base::shell::run_in_vm(&script) {
         Ok(out) if out.status.success() => {}
         Ok(_) | Err(_) => tracing::warn!(
@@ -696,6 +730,8 @@ impl VmmDriver for FcDriver {
             api_put_socket(&socket, &put.path, &put.body)
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;
         }
+        crate::microvm::secure_vsock_socket_for_caller(&vsock_uds)
+            .context("restrict Firecracker vsock socket to the invoking user")?;
 
         // Wire the guest-dial egress/broker bridges and bind the workload-exit
         // capture — the whole host channel set must be in place before the guest
@@ -793,6 +829,41 @@ struct FcRunningVm {
     vsock_uds: String,
 }
 
+fn require_guest_filesystem_flush(response: GuestResponse) -> Result<()> {
+    match response {
+        GuestResponse::SleepPrepAck { success: true, .. } => Ok(()),
+        GuestResponse::SleepPrepAck {
+            success: false,
+            detail,
+        } => bail!(
+            "guest refused the stop-time filesystem flush: {}",
+            detail.unwrap_or_else(|| "no detail supplied".to_string())
+        ),
+        other => bail!("guest returned an unexpected stop-time flush response: {other:?}"),
+    }
+}
+
+fn prepare_guest_filesystems_for_stop(vsock_uds: &str) -> Result<()> {
+    let mut stream = connect_to_port(vsock_uds, GUEST_AGENT_PORT, GUEST_STOP_DRAIN_TIMEOUT_SECS)
+        .with_context(|| format!("connect to guest agent for filesystem flush via {vsock_uds}"))?;
+    let response = send_request_stream(
+        &mut stream,
+        &GuestRequest::SleepPrep {
+            drain_timeout_secs: GUEST_STOP_DRAIN_TIMEOUT_SECS,
+        },
+    )
+    .context("request guest filesystem flush before Firecracker stop")?;
+    require_guest_filesystem_flush(response)
+}
+
+fn stop_after_guest_flush(
+    prepare: impl FnOnce() -> Result<()>,
+    terminate: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    prepare()?;
+    terminate()
+}
+
 impl RunningVm for FcRunningVm {
     fn id(&self) -> &VmId {
         &self.id
@@ -814,7 +885,14 @@ impl RunningVm for FcRunningVm {
         let Some(pid) = self.pid else {
             return Ok(());
         };
-        terminate_firecracker_pid(&self.id.0, pid, &self.pid_file)
+        if !crate::firecracker::is_firecracker_pid_running(pid)? {
+            remove_pid_marker_if_matches(&self.pid_file, pid);
+            return Ok(());
+        }
+        stop_after_guest_flush(
+            || prepare_guest_filesystems_for_stop(&self.vsock_uds),
+            || terminate_firecracker_pid(&self.id.0, pid, &self.pid_file),
+        )
     }
 
     fn pause(&self) -> Result<()> {
@@ -935,6 +1013,67 @@ mod tests {
             .find(|p| p.path == path)
             .map(|p| p.body.as_str())
             .unwrap_or_else(|| panic!("no PUT for {path}"))
+    }
+
+    #[test]
+    fn guest_filesystem_flush_requires_a_positive_sleep_prep_ack() {
+        assert!(
+            require_guest_filesystem_flush(GuestResponse::SleepPrepAck {
+                success: true,
+                detail: Some("synced".into()),
+            })
+            .is_ok()
+        );
+
+        let refused = require_guest_filesystem_flush(GuestResponse::SleepPrepAck {
+            success: false,
+            detail: Some("sync failed".into()),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(refused.contains("sync failed"), "got: {refused}");
+
+        let unexpected = require_guest_filesystem_flush(GuestResponse::Pong)
+            .unwrap_err()
+            .to_string();
+        assert!(unexpected.contains("unexpected"), "got: {unexpected}");
+    }
+
+    #[test]
+    fn firecracker_stop_is_ordered_after_a_successful_guest_flush() {
+        use std::cell::RefCell;
+
+        let events = RefCell::new(Vec::new());
+        stop_after_guest_flush(
+            || {
+                events.borrow_mut().push("flush");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("terminate");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(events.into_inner(), ["flush", "terminate"]);
+    }
+
+    #[test]
+    fn firecracker_stop_refuses_termination_when_guest_flush_fails() {
+        use std::cell::Cell;
+
+        let terminated = Cell::new(false);
+        let err = stop_after_guest_flush(
+            || anyhow::bail!("guest flush unavailable"),
+            || {
+                terminated.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("guest flush unavailable"), "got: {err}");
+        assert!(!terminated.get());
     }
 
     #[test]
@@ -1283,20 +1422,13 @@ mod tests {
     }
 
     #[test]
-    fn kill_tracks_the_captured_pid_after_the_marker_disappears() {
+    fn termination_tracks_the_captured_pid_after_the_marker_disappears() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("fc.pid");
         std::fs::write(&pid_file, "4242").unwrap();
-        let vm = FcRunningVm {
-            id: VmId("marker-race-vm".into()),
-            state_dir: dir.path().to_path_buf(),
-            pid_file: pid_file.clone(),
-            pid: Some(4242),
-            vsock_uds: "/state/marker-race-vm/runtime/v.sock".into(),
-        };
         let probes = Arc::new(AtomicUsize::new(0));
         let handler_probes = Arc::clone(&probes);
         let marker = pid_file.clone();
@@ -1315,7 +1447,7 @@ mod tests {
             crate::base::shell_mock::MockResponse::ok(if probe == 0 { "yes" } else { "no" })
         });
 
-        vm.kill()
+        terminate_firecracker_pid("marker-race-vm", 4242, &pid_file)
             .expect("marker loss must not lose the captured process identity");
 
         assert_eq!(probes.load(Ordering::SeqCst), 2);
@@ -1452,6 +1584,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn fc_sudo_signal_routes_terminate_and_forcekill_through_sudo() {
         use std::sync::{Arc, Mutex};
         // Capture the emitted shell script to prove SIGTERM omits -9 and the
@@ -1483,6 +1616,19 @@ mod tests {
             captured[1]
         );
         assert!(captured[1].ends_with("sudo kill -9 4242"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn fc_signal_arguments_are_noninteractive_and_explicit() {
+        assert_eq!(
+            fc_linux_signal_args(4242, FcStopSignal::Terminate),
+            ["-n", "kill", "-TERM", "4242"]
+        );
+        assert_eq!(
+            fc_linux_signal_args(4242, FcStopSignal::ForceKill),
+            ["-n", "kill", "-KILL", "4242"]
+        );
     }
 
     #[test]

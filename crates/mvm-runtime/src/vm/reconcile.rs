@@ -226,12 +226,22 @@ const PID_FILE_NAMES: &[&str] = &[
 ];
 
 /// `kill(pid, 0)` existence probe — delivers no signal, just checks the
-/// process is alive. The cheap half of the live-vs-orphan discrimination
+/// process is alive. `EPERM` is a positive existence result for a supervisor
+/// owned by another uid (notably root-owned Firecracker); only `ESRCH` means
+/// the process is absent. The cheap half of the live-vs-orphan discrimination
 /// (see module docs); the heavier argv/ppid sweep stays in `cache prune`.
 fn pid_is_alive(pid: i32) -> bool {
     // SAFETY: kill with signal 0 performs only a permission/existence
     // check and never delivers a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    let result = unsafe { libc::kill(pid, 0) };
+    let error = (result != 0)
+        .then(|| std::io::Error::last_os_error().raw_os_error())
+        .flatten();
+    kill_zero_reports_alive(result, error)
+}
+
+fn kill_zero_reports_alive(result: i32, error: Option<i32>) -> bool {
+    result == 0 || error == Some(libc::EPERM)
 }
 
 fn read_pid_file(path: &Path) -> Option<i32> {
@@ -466,6 +476,14 @@ fn emit_audit(report: &ConvergeReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_zero_treats_permission_denied_as_a_live_process() {
+        assert!(kill_zero_reports_alive(0, None));
+        assert!(kill_zero_reports_alive(-1, Some(libc::EPERM)));
+        assert!(!kill_zero_reports_alive(-1, Some(libc::ESRCH)));
+        assert!(!kill_zero_reports_alive(-1, Some(libc::EINVAL)));
+    }
     use crate::vm::name_registry::RegisterParams;
     use mvm_core::util::test_env::TestEnv;
     use std::cell::RefCell;

@@ -5,6 +5,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use cucumber::{given, then, when};
+use mvm_build::guest_agent_build::{
+    GuestBinarySource, GuestRuntimeBinaryPaths, RuntimeOverlayGuestLayout, guest_binary_source,
+    install_into_cache, runtime_overlay_source_checkout_fingerprint,
+};
+use mvm_build::verity_initrd::install_verity_initrd_from_binary;
+use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmVolume, VmVolumeKind};
 use mvm_runtime::docker_backend::DockerBackend;
@@ -61,6 +67,73 @@ fn cached_live_workload_kernel(world: &mut CliWorld) {
     fs::copy(&source, &destination).unwrap_or_else(|error| {
         panic!("copy live workload kernel {source:?} to {destination:?}: {error}")
     });
+    cache_live_guest_binaries(world);
+}
+
+fn cache_live_guest_binaries(world: &CliWorld) {
+    let source_dir = PathBuf::from(
+        std::env::var_os("MVM_BDD_GUEST_BIN_DIR")
+            .expect("MVM_BDD_GUEST_BIN_DIR must name the prebuilt guest-runtime directory"),
+    );
+    assert!(
+        source_dir.is_dir(),
+        "MVM_BDD_GUEST_BIN_DIR does not name a directory: {source_dir:?}"
+    );
+    let source = guest_binary_source().expect("resolve guest-runtime cache generation");
+    install_into_cache(
+        GuestRuntimeBinaryPaths {
+            oci_init: &source_dir.join("mvm-oci-init"),
+            agent: &source_dir.join("mvm-guest-agent"),
+            netinit: &source_dir.join("mvm-guest-netinit"),
+            egress_client: &source_dir.join("mvm-egress-client"),
+            entrypoint_runner: &source_dir.join("mvm-oci-entrypoint"),
+            verity_init: &source_dir.join("mvm-verity-init"),
+        },
+        &isolated_home(world).join("cache").join("oci"),
+        source.cache_key(),
+        GuestArch::host(),
+    )
+    .expect("seed isolated guest-runtime cache from prebuilt binaries");
+    if let GuestBinarySource::SourceCheckout { workspace_root, .. } = source {
+        let fingerprint = runtime_overlay_source_checkout_fingerprint(&workspace_root)
+            .expect("fingerprint local runtime-overlay sources");
+        install_verity_initrd_from_binary(
+            &source_dir.join("mvm-verity-init"),
+            &isolated_home(world).join("cache"),
+            env!("CARGO_PKG_VERSION"),
+            GuestArch::host(),
+            Some(&fingerprint),
+        )
+        .expect("seed isolated verity initrd cache from the prebuilt runtime");
+        cache_live_runtime_overlay(world, &source_dir, &fingerprint);
+    }
+}
+
+fn cache_live_runtime_overlay(world: &CliWorld, source_dir: &Path, fingerprint: &str) {
+    let layout = RuntimeOverlayGuestLayout::under(
+        &isolated_home(world).join("cache"),
+        env!("CARGO_PKG_VERSION"),
+        GuestArch::host(),
+        fingerprint,
+    );
+    fs::create_dir_all(&layout.dir).expect("create isolated runtime-overlay cache");
+    for (source_name, destination) in [
+        ("mvm-guest-agent-prod", &layout.agent),
+        ("mvm-guest-agent", &layout.agent_interactive),
+        ("mvm-guest-netinit", &layout.netinit),
+        ("mvm-seccomp-apply", &layout.seccomp_apply),
+        ("mvm-verity-init", &layout.verity_init),
+        ("mvm-runner", &layout.runner),
+        ("mvm-egress-client", &layout.egress_client),
+        ("mvm-addon-dns", &layout.addon_dns),
+        ("mvm-exit-report", &layout.exit_report),
+        ("mvm-ping", &layout.ping),
+    ] {
+        let source = source_dir.join(source_name);
+        fs::copy(&source, destination).unwrap_or_else(|error| {
+            panic!("copy runtime-overlay binary {source:?} to {destination:?}: {error}")
+        });
+    }
 }
 
 #[when(expr = "I write byte {int} to the end of managed volume {string}")]

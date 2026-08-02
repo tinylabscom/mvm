@@ -165,9 +165,13 @@ scenarios now cover immutable restore, locked/path-policy refusal, signed-plan
 refusal, typed backend refusal, failed-start lease cleanup, persistence across
 restart, and guest read-only enforcement. The five hermetic scenarios pass in
 the full 88-scenario/442-step suite. The live failed-start cleanup scenario
-passes on KVM; writable restart persistence passes all 23 steps after an
-explicit guest `sync`, and guest read-only refusal passes all 17 steps with the
-write rejected by the mounted filesystem. On the final integrated Linux tree,
+passes on KVM; writable restart persistence passes all 23 steps using the
+driver's authenticated stop-time filesystem flush, and guest read-only refusal
+passes all 17 steps with the write rejected by the mounted filesystem. Process
+monitoring independently proves both restart PIDs and the read-only PID are
+reaped. The run found and fixed reconciliation treating `kill(pid, 0)` `EPERM`
+as dead for root-owned Firecracker, which previously deleted live state before
+stop could attach. On the final integrated Linux tree,
 all 24 guest-mount tests, all 9 Linux OCI-init tests, and workspace all-target
 Clippy with warnings denied pass. The host all-target gate passes as part of the
 commit hook. WS2 is complete.

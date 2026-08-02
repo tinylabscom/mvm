@@ -61,10 +61,13 @@
       suites pass 19 and 21 tests respectively. Five new hermetic volume BDD
       scenarios pass in the 88-scenario/442-step suite. Live KVM proves
       failed-start lease cleanup, writable restart persistence (23/23 steps),
-      and guest read-only refusal (17/17 steps). On the final integrated Linux
-      tree, 24 guest-mount tests, 9 OCI-init tests, and workspace all-target
-      clippy pass with warnings denied; the host all-target commit gate is also
-      green.
+      and guest read-only refusal (17/17 steps). The restart uses the driver's
+      authenticated stop-time filesystem flush; PID monitoring proves every
+      observed Firecracker is reaped. The run also fixed root-owned process
+      reconciliation incorrectly treating `kill(pid, 0)` `EPERM` as a dead PID.
+      On the final integrated Linux tree, 24 guest-mount tests, 9 OCI-init tests,
+      and workspace all-target clippy pass with warnings denied; the host
+      all-target commit gate is also green.
   - [x] WS3: mvmd now consumes the canonical mvm leaf contract and implements
         it over Apache Arrow `object_store` 0.14.1 for S3-compatible, GCS,
         Azure, and R2 providers. Remote data and names remain mandatorily

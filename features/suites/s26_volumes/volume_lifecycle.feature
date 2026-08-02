@@ -81,7 +81,7 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-persistent-volume --hypervisor firecracker"
     Then the command exits with code 0
-    When I execute shell command "printf volume-persisted > /data/marker && sync" in machine "bdd-persistent-volume"
+    When I execute shell command "printf volume-persisted > /data/marker" in machine "bdd-persistent-volume"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine stop bdd-persistent-volume --yes"
     Then the command exits with code 0
