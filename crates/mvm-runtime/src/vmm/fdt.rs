@@ -193,9 +193,9 @@ pub fn fresh_rng_seed() -> [u8; RNG_SEED_LEN] {
 /// `rng_seed` seeds the guest CSPRNG through `/chosen/rng-seed`. Pass fresh
 /// host entropy on every boot. Omitting it is what makes a workload sit at
 /// `random: crng init done` for seconds: this guest has no NIC, no rotating
-/// disk, and no virtio-rng, so there is almost no interrupt jitter for the
-/// kernel to harvest, and the first userspace `getrandom(2)` blocks until the
-/// pool initialises.
+/// disk, and the virtio-rng driver has not probed yet, so there is almost no
+/// interrupt jitter for the kernel to harvest and the first userspace
+/// `getrandom(2)` would otherwise block until the pool initialises.
 ///
 /// Linux credits the seed at `early_init_dt_scan_chosen` and zeroes the
 /// property afterwards. No kernel config is needed: the old
@@ -399,6 +399,35 @@ mod tests {
     }
 
     #[test]
+    fn emits_each_virtio_mmio_node_with_its_address_and_interrupt() {
+        let base = 0x0a00_0e00u64;
+        let irq = 55u32;
+        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[(base, irq)], None);
+
+        assert!(
+            dtb.windows(b"virtio_mmio@a000e00\0".len())
+                .any(|window| window == b"virtio_mmio@a000e00\0")
+        );
+        assert!(
+            dtb.windows(b"virtio,mmio\0".len())
+                .any(|window| window == b"virtio,mmio\0")
+        );
+        let reg = [0u32, base as u32, 0, 0x200]
+            .into_iter()
+            .flat_map(u32::to_be_bytes)
+            .collect::<Vec<_>>();
+        assert!(dtb.windows(reg.len()).any(|window| window == reg));
+        let interrupt = [FDT_IRQ_SPI, irq - 32, IRQ_EDGE_RISING]
+            .into_iter()
+            .flat_map(u32::to_be_bytes)
+            .collect::<Vec<_>>();
+        assert!(
+            dtb.windows(interrupt.len())
+                .any(|window| window == interrupt)
+        );
+    }
+
+    #[test]
     fn struct_block_is_4_byte_aligned() {
         let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], None);
         assert!(be32(&dtb, 8).is_multiple_of(4), "off_dt_struct 4-aligned");
@@ -407,9 +436,8 @@ mod tests {
 
     #[test]
     fn rng_seed_is_embedded_verbatim_when_supplied() {
-        // Without a seed the guest has no entropy source at all — no NIC, no
-        // rotating disk, no virtio-rng — and userspace blocks for seconds on
-        // CSPRNG init before the workload runs.
+        // The boot seed covers early userspace before the virtio-rng driver
+        // probes; steady-state entropy does not make this injection redundant.
         let seed: Vec<u8> = (0..RNG_SEED_LEN as u8).collect();
         let with = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], Some(&seed));
         assert!(

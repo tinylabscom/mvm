@@ -3,13 +3,12 @@
 //! Every guest boots with a device tree the VMM builds, and that tree must
 //! carry `/chosen/rng-seed`.
 //!
-//! A workload guest has no entropy source of its own: no NIC, no rotating
-//! disk, and no virtio-rng device on the host side. There is almost no
-//! interrupt jitter for the kernel to harvest, so without a credited
-//! bootloader seed the CSPRNG takes seconds to initialise — and the guest
-//! agent mints an Ed25519 identity key at startup, so its first
-//! `getrandom(2)` blocks for that entire window before the control plane
-//! comes up. A boot that should take tens of milliseconds took four seconds.
+//! A workload guest has almost no interrupt jitter before its virtio-rng driver
+//! probes. Without a credited bootloader seed the CSPRNG can therefore take
+//! seconds to initialise — and the guest agent mints an Ed25519 identity key at
+//! startup, so its first `getrandom(2)` blocks for that entire window before the
+//! control plane comes up. Steady-state virtio-rng and the early boot seed are
+//! complementary.
 //!
 //! The seed itself is unit-tested in `mvm_runtime::vmm::fdt`, which compiles
 //! everywhere. The *call site* cannot be: the HVF boot path is
@@ -63,8 +62,8 @@ pub fn run(workspace: &Path) -> Result<()> {
             "check-guest-entropy-seed: {} file(s) build a guest device tree without seeding \
              its CSPRNG: {}.\n\
              Pass `Some(&fdt::fresh_rng_seed())` as `build_dtb`'s `rng_seed`. Without it the \
-             guest has no entropy source at all and its first `getrandom(2)` blocks for \
-             seconds at boot.",
+             guest has no credited entropy before its virtio-rng driver probes, so its first \
+             `getrandom(2)` can block for seconds at boot.",
             unseeded.len(),
             unseeded.join(", ")
         );

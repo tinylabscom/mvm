@@ -1,7 +1,7 @@
 //! Portable, hypervisor-agnostic VMM device model.
 //!
 //! Guest memory access, the device tree (FDT), arm64 kernel-image loading, and
-//! the virtio-mmio devices (PL011 console, block, vsock) live here with **no
+//! the virtio-mmio devices (PL011 console, block, entropy, vsock) live here with **no
 //! hypervisor FFI** — so the same device model is driven by any backend's vCPU
 //! run loop: HVF on macOS today, and KVM (Linux) / WHP (Windows) as they land.
 //! A backend handles the platform-specific parts (create VM/vCPU, run, decode
@@ -27,6 +27,7 @@ pub mod run;
 
 pub mod virtio;
 pub mod virtio_fs;
+pub mod virtio_rng;
 pub mod vsock;
 pub(crate) mod vsock_handlers;
 mod vsock_io;
