@@ -53,8 +53,8 @@
       its default closure remains async-runtime-free. The isolated full `cargo
       test --workspace --no-fail-fast` gate passes with zero failures after the
       audit posture and process-global test-isolation fixes.
-  - [ ] WS2–WS7: live attachment, mvmd migration, durable checkpoint/restore,
-        remote operations, live provider/KVM proof, and closeout remain open.
+  - [ ] WS2 and WS4–WS7: live attachment, durable checkpoint/restore, remote
+        operations, live provider/KVM proof, and closeout remain open.
     - WS2 live attachment core is implemented: portable encrypted ext4 images,
       launch-time typed resolution, admitted VMM/guest handoff, crash recovery,
       durable exclusive attachment leases, and canonical immutable local
@@ -65,6 +65,17 @@
       scenarios for failed-start cleanup, restart persistence, and guest
       read-only refusal still require builder-VM/KVM execution before WS2 can
       complete.
+  - [x] WS3: mvmd now consumes the canonical mvm leaf contract and implements
+        it over Apache Arrow `object_store` 0.14.1 for S3-compatible, GCS,
+        Azure, and R2 providers. Remote data and names remain mandatorily
+        encrypted with tenant-scoped, zeroizing key material; credential
+        resolution has no environment fallback, and provider errors are
+        redacted. OpenDAL and its unused closure are gone. The secure dependency
+        graph keeps cloud XML parsing on `quick-xml` 0.41 while isolating iroh's
+        prerelease digest graph through a tested compatibility re-export.
+        mvmd PR #198 carries the implementation; 1,497 gateway library tests,
+        1,632 integration tests, the remaining workspace tests/doctests, check,
+        all-target clippy, formatting, focused docs, audit, and deny pass.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout

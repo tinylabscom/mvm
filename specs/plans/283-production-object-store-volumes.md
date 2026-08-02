@@ -170,34 +170,44 @@ and KVM proof remain open, so WS2 is not complete.
 
 ## WS3 — mvmd migration from OpenDAL to `object_store`
 
-- [ ] Create an mvmd feature worktree from its clean default branch without
+- [x] Create an mvmd feature worktree from its clean default branch without
       touching the existing dirty `fix/iam-storage-ci` checkout.
-- [ ] Add failing tests that run mvmd's backend behavior through mvm's canonical
+- [x] Add failing tests that run mvmd's backend behavior through mvm's canonical
       contract and prove the local mirror is unnecessary.
-- [ ] Replace OpenDAL with a narrowly featured `object_store` dependency and
+- [x] Replace OpenDAL with a narrowly featured `object_store` dependency and
       remove OpenDAL plus its unused transitive closure from the lockfile.
-- [ ] Implement the canonical mvm backend trait over `Arc<dyn ObjectStore>` with
+- [x] Implement the canonical mvm backend trait over `Arc<dyn ObjectStore>` with
       bounded streaming get/put, multipart upload, direct-child listing,
       metadata/ETag mapping, conditional destination creation, typed provider
       errors, copy/delete rename semantics, and a cheap permissions-aware health
       check.
-- [ ] Replace the duplicated mvmd backend key, entry, error, and trait types with
+- [x] Replace the duplicated mvmd backend key, entry, error, and trait types with
       mvm's canonical exports; update encryption, dispatch, snapshots, routes,
       and tests to use that single contract.
-- [ ] Build validated AWS S3/S3-compatible, GCS, and Azure stores from existing
+- [x] Build validated AWS S3/S3-compatible, GCS, and Azure stores from existing
       `StorageBucket` configuration. R2, MinIO, Hetzner, and B2 use the explicit
       S3-compatible endpoint path. Filesystem and memory builders remain
       impossible to select in production.
-- [ ] Resolve sealed credentials per tenant without environment-variable
+- [x] Resolve sealed credentials per tenant without environment-variable
       fallback, validate provider-specific required fields, install restrictive
       TLS roots/options, and redact provider errors at the API/audit boundary.
-- [ ] Preserve mandatory `EncryptedBackend<ObjectStoreBackend>`, scope-separated
+- [x] Preserve mandatory `EncryptedBackend<ObjectStoreBackend>`, scope-separated
       key derivation, wrapped-key persistence, and retry-safe rotation; add wrong
       key, tamper, replay/version, and cross-scope negative tests.
-- [ ] Preserve public `StorageBucket` API/schema/audit terminology and existing
+- [x] Preserve public `StorageBucket` API/schema/audit terminology and existing
       serialized payload compatibility.
-- [ ] Run mvmd workspace tests, docs, check, all-target clippy, audit/deny, and
+- [x] Run mvmd workspace tests, docs, check, all-target clippy, audit/deny, and
       formatting before marking WS3 complete.
+
+WS3 is implemented in mvmd draft PR
+[`tinylabscom/mvmd#198`](https://github.com/tinylabscom/mvmd/pull/198) at
+commit `6194cb3`. The final dependency is `object_store` 0.14.1 with cloud-only
+features and `quick-xml` 0.41; a tested `md-5` API re-export prevents Cargo
+from unifying its stable digest graph with iroh 0.96's prerelease graph. The
+verification run passed 1,497 gateway library tests, 1,632 gateway integration
+tests, all remaining workspace tests and doctests, workspace check, all-target
+clippy with warnings denied, formatting, focused rustdoc, audit with the
+repository's documented transitive exceptions, and cargo-deny.
 
 ## WS4 — Durable block-volume checkpoints and read-only artifacts
 

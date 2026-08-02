@@ -23,7 +23,7 @@ for detailed scope and acceptance criteria.
       (`specs/plans/283-production-object-store-volumes.md`, issue #2040)
   - [x] Canonical mvm contract and dead S3-path removal
   - [ ] Live local/block attachment through the admitted VM launch path
-  - [ ] mvmd OpenDAL → `object_store` migration with mandatory encryption
+  - [x] mvmd OpenDAL → `object_store` migration with mandatory encryption
   - [ ] Durable encrypted checkpoints, cross-worker restore, and remote CLI
   - [ ] MinIO integration plus Linux/KVM persistence and restore proof
 
