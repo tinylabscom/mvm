@@ -131,14 +131,26 @@ impl SegmentStore {
     /// Append one chunk's ciphertext, opening a fresh segment first when the
     /// active one is full. `plaintext_len` is carried for retention
     /// accounting only.
+    ///
+    /// Disturbance repair runs before the full check, never after. A
+    /// disturbance leaves `active.ciphertext_bytes` reporting *fewer* bytes
+    /// than are really on disk, and the full check decides purely from that
+    /// count — so a byte-bound crossing on the incoming chunk's width alone
+    /// can look tighter than it is and seal the segment first. Once sealed,
+    /// `active` is `None` and [`roll_if_disturbed`] no-ops, leaving the
+    /// residue behind the seal forever. Checking disturbance first means the
+    /// full check always reads a count that matches disk, whichever way it
+    /// decides.
+    ///
+    /// [`roll_if_disturbed`]: Self::roll_if_disturbed
     pub(crate) fn append(
         &mut self,
         ciphertext: &[u8],
         plaintext_len: u64,
     ) -> Result<ChunkPlacement, TranscriptError> {
         let width = ciphertext.len() as u64;
-        self.roll_if_full(width);
         self.roll_if_disturbed();
+        self.roll_if_full(width);
 
         let placement = match &self.active {
             Some(active) => ChunkPlacement {
@@ -204,6 +216,11 @@ impl SegmentStore {
     /// Close the active segment when one more chunk would overflow it. An
     /// active segment always holds at least one chunk, so an oversized chunk
     /// gets a segment to itself instead of rolling forever.
+    ///
+    /// Must run after [`Self::roll_if_disturbed`] in [`Self::append`]: this
+    /// reads `active.ciphertext_bytes` as ground truth, and only the
+    /// disturbance check keeps that field honest against what is really on
+    /// disk.
     fn roll_if_full(&mut self, incoming_ciphertext: u64) {
         let Some(active) = self.active.as_ref() else {
             return;
@@ -680,6 +697,44 @@ mod tests {
             record(1, &next.file, 3, b"bbb"),
         ];
         verify_segments(&chunks, dir.path()).expect("the capture still verifies");
+    }
+
+    #[test]
+    fn a_disturbance_is_repaired_before_a_bound_crossing_append_rolls_it() {
+        // `SegmentBounds::default()` (1 MiB / 1024 chunks) is so far from the
+        // bound that `roll_if_full` is always a no-op in the test above, so it
+        // cannot see append()'s call order. Here the *next* chunk's width
+        // alone crosses a tight byte bound: 8 accounted bytes + 2 incoming
+        // > 9. If the full check ran first, it would seal "0.seg" using the
+        // stale 8-byte count — sealing residue behind the seal forever,
+        // because roll_if_disturbed no-ops once `active` is `None`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = SegmentStore::new(
+            dir.path().to_path_buf(),
+            SegmentBounds {
+                max_ciphertext_bytes: 9,
+                max_chunks: u64::MAX,
+            },
+        );
+        let first = store.append(b"aaaaaaaa", 8).expect("first"); // one byte under the bound
+        leave_short_write_residue(dir.path(), &first.file, b"XX"); // disk now 10; store still says 8
+
+        let next = store.append(b"bb", 2).expect("the capture carries on");
+        assert_ne!(
+            next.file, first.file,
+            "8 accounted + 2 incoming already crosses the bound"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(&first.file)).expect("segment"),
+            b"aaaaaaaa",
+            "the residue must be repaired, not sealed in behind the roll"
+        );
+
+        let chunks = vec![
+            record(0, &first.file, 0, b"aaaaaaaa"),
+            record(1, &next.file, 0, b"bb"),
+        ];
+        verify_segments(&chunks, dir.path()).expect("the capture still verifies after the roll");
     }
 
     #[test]
