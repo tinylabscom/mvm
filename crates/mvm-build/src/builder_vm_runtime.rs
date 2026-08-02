@@ -31,6 +31,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderVmError, VmBackendForBuilder};
+pub use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 
 /// Wall-clock timeout for a builder VM run when the operator hasn't
 /// overridden it. 30 minutes covers a cold-cache `nix build` of the
@@ -42,7 +43,7 @@ pub const DEFAULT_BUILDER_VM_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// host-side file length. Reserve that tail when creating a new image so an
 /// ext4 filesystem formatted to the file's capacity never trips the guest's
 /// stale-geometry guard on the next boot.
-const LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES: u64 = 64 * 1024;
+pub(crate) const LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES: u64 = 64 * 1024;
 
 /// Env var the operator sets to override [`DEFAULT_BUILDER_VM_TIMEOUT`].
 /// Plain integer seconds; zero is rejected so a typo doesn't silently
@@ -1191,34 +1192,10 @@ impl NixStoreImageLock {
     }
 }
 
-/// Host-side guard for a custom persistent disk-image volume
-/// (`host:/guest:size` from `--volume` / `MVM_VOLUMES`).
-///
-/// Same discipline as [`NixStoreImageLock`]: a read-write volume holds
-/// a sidecar `<image>.lock` flock so two VMs can't RW-attach (and
-/// corrupt) the same ext4 image — and so HVF can take its own
-/// exclusive open. Read-only volumes hold no lock (multiple readers are
-/// safe). Either way the host keeps no fd on the image itself.
-#[derive(Debug)]
-pub struct VolumeImageLock {
-    path: PathBuf,
-    /// `Some` for read-write volumes (the sidecar lock handle), `None`
-    /// for read-only. Load-bearing for the RW case — see the type docs.
-    _lock: Option<std::fs::File>,
-}
-
-impl VolumeImageLock {
-    /// Path to the image file, handed to the hypervisor as a virtio-blk
-    /// device backing.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
 /// Sidecar lock path for an image: `<image>.lock` (appended, not an
 /// extension swap, so `foo.img` → `foo.img.lock`). Ends in `.lock` so
 /// it never matches `cache info`'s `nix-store-*.img` glob.
-fn sidecar_lock_path(image: &Path) -> PathBuf {
+pub(crate) fn sidecar_lock_path(image: &Path) -> PathBuf {
     let mut s = image.as_os_str().to_os_string();
     s.push(".lock");
     PathBuf::from(s)
@@ -1234,7 +1211,7 @@ fn sidecar_lock_path(image: &Path) -> PathBuf {
 /// The fd is dropped before returning — deliberately. The host must
 /// hold no open handle on the image so the hypervisor (HVF) can
 /// open it exclusively; serialisation lives on the sidecar lock.
-fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmError> {
+pub(crate) fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmError> {
     let existed_before_open = path.exists();
 
     let file = std::fs::OpenOptions::new()
@@ -1291,7 +1268,7 @@ fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmErro
 /// lock and the hypervisor can open it exclusively (required for
 /// HVF; harmless for libkrun). Returns the locked handle; dropping it
 /// releases the lock.
-fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, BuilderVmError> {
+pub(crate) fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, BuilderVmError> {
     use fs2::FileExt;
 
     let file = std::fs::OpenOptions::new()
@@ -1313,50 +1290,6 @@ fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, BuilderVmErro
     })?;
 
     Ok(file)
-}
-
-/// Materialise a custom persistent disk-image volume at `host_path` and
-/// return a [`VolumeImageLock`] guard the backend keeps alive across
-/// `vm.start()`.
-///
-/// Sparse-creates the image at `size_bytes` minus the libkrun tail reserve
-/// when it's missing or empty
-/// (an existing volume is preserved so data survives across runs). A
-/// read-write volume takes a sidecar `<host_path>.lock` exclusive
-/// `flock` — two VMs RW-attaching the same image corrupt its ext4, and
-/// HVF refuses it outright. Read-only volumes take no lock
-/// (multiple readers are safe). In both cases the host holds no fd on
-/// the image, mirroring the nix-store discipline so the hypervisor can
-/// open it. Shared with the nix-store path via `sparse_create_image` /
-/// `acquire_sidecar_lock`.
-pub fn ensure_persistent_volume_image(
-    host_path: &Path,
-    size_bytes: u64,
-    read_only: bool,
-) -> Result<VolumeImageLock, BuilderVmError> {
-    if let Some(parent) = host_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!(
-                "creating volume parent dir {}: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    sparse_create_image(host_path, size_bytes)?;
-
-    let lock = if read_only {
-        None
-    } else {
-        Some(acquire_sidecar_lock(&sidecar_lock_path(host_path))?)
-    };
-
-    Ok(VolumeImageLock {
-        path: host_path.to_path_buf(),
-        _lock: lock,
-    })
 }
 
 /// Find or create the persistent `<builder_cache_dir>/nix-store-<arch>.img`
@@ -2192,6 +2125,12 @@ mod tests {
             std::fs::metadata(&img).unwrap().len(),
             32 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES
         );
+        let mut file = std::fs::File::open(&img).unwrap();
+        use std::io::{Read as _, Seek as _};
+        file.seek(std::io::SeekFrom::Start(1024 + 56)).unwrap();
+        let mut magic = [0u8; 2];
+        file.read_exact(&mut magic).unwrap();
+        assert_eq!(u16::from_le_bytes(magic), 0xef53, "new volume is ext4");
         drop(guard);
         // Second call leaves the existing (non-empty) image untouched —
         // a warm volume's data must survive. Pass a different size to
@@ -2220,14 +2159,25 @@ mod tests {
     }
 
     #[test]
+    fn ensure_persistent_volume_image_refuses_existing_non_ext4_data() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let img = scratch.path().join("not-ext4.img");
+        std::fs::write(&img, vec![0xa5; 4096]).unwrap();
+
+        let err = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, true).unwrap_err();
+        assert!(err.to_string().contains("not a valid ext4 filesystem"));
+    }
+
+    #[test]
     fn ensure_persistent_volume_image_ro_allows_concurrent_and_takes_no_lock() {
         let scratch = tempfile::TempDir::new().unwrap();
         let img = scratch.path().join("ro.img");
         // Seed the image directly (no RW guard, so no sidecar is created)
         // — isolates the "RO takes no lock" assertion below.
-        let f = std::fs::File::create(&img).unwrap();
-        f.set_len(16 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES)
-            .unwrap();
+        let mut f = std::fs::File::create(&img).unwrap();
+        let image_bytes = 16 * 1024 * 1024 - LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES;
+        f.set_len(image_bytes).unwrap();
+        mvm_fs::ext4::mkfs::format_empty_ext4(&mut f, image_bytes).unwrap();
         drop(f);
         // Two concurrent RO guards coexist (read-only = no exclusive lock).
         let a = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, true).unwrap();

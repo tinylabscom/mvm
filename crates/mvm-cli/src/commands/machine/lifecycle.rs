@@ -306,7 +306,14 @@ pub(super) fn machine_is_running(name: &str) -> bool {
 
 pub(super) fn stop_running_machine(name: &str) {
     let hypervisor = shared::resolve_effective_hypervisor("firecracker");
-    if let Err(err) = mvm_client::backend_stop_by_name(&hypervisor, name) {
-        tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
+    match mvm_client::backend_stop_by_name(&hypervisor, name) {
+        Ok(()) => {
+            if let Err(err) = crate::commands::vm::volume::release_volume_leases_for_vm(name) {
+                tracing::warn!(error = %err, machine = name, "releasing volume leases after stop failed");
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
+        }
     }
 }

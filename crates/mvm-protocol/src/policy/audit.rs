@@ -39,6 +39,8 @@ pub enum LocalAuditKind {
     VolumeCreate,
     VolumeOpen,
     VolumeLock,
+    VolumeSnapshot,
+    VolumeRestore,
     UpdateInstall,
     Uninstall,
     // --- DX features ---
@@ -1064,6 +1066,8 @@ mod tests {
             LocalAuditKind::VolumeCreate,
             LocalAuditKind::VolumeOpen,
             LocalAuditKind::VolumeLock,
+            LocalAuditKind::VolumeSnapshot,
+            LocalAuditKind::VolumeRestore,
             LocalAuditKind::UpdateInstall,
             LocalAuditKind::Uninstall,
             LocalAuditKind::NetworkCreate,

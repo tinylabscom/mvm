@@ -29,6 +29,59 @@
       failures remain retryable. #2040 remains the final open epic.
       Tracked in plan 284.
 
+- [ ] Production object-store volumes — **plan 283 / issue #2040**. Standardize
+      remote volume I/O on Apache Arrow `object_store` while preserving the
+      accepted mvm↔mvmd ownership boundary and mvmd's distinction between
+      multi-attach `StorageBucket` and exclusive block `VolumeRecord`. Completion
+      requires canonical contracts, removal of the dead S3/OpenDAL split, live
+      local/block attachment, encrypted durable checkpoints and cross-worker
+      restore, working remote CLI/API policy, MinIO integration, and Linux/KVM
+      persistence/restore proof. Registry-only, compile-only, and mocked-only
+      paths do not satisfy the issue.
+  - [x] WS1: external implementations can run the canonical trait-object
+        contract; the unregistered member-only S3 mount provider is removed;
+        template-registry S3 remains independently gated; the two-surface gate
+        enforces fleet ownership. Focused tests, workspace check/doctests,
+        optional-feature check, host all-target clippy, format, model gates,
+        audit, and deny are green. The one failure among 8,516 nextest cases was
+        an installer-script flake that passed on its focused rerun.
+    - The contract, conformance fixture, and local implementation now live in
+      the dependency-light `mvm-volume-contract` leaf and are re-exported by
+      core and runtime. This lets mvmd depend on the exact mvm-owned type without
+      linking either repository's unrelated crypto/VMM dependency graph; the
+      leaf's four contract, symlink-refusal, listing, and serde tests pass, and
+      its default closure remains async-runtime-free. The isolated full `cargo
+      test --workspace --no-fail-fast` gate passes with zero failures after the
+      audit posture and process-global test-isolation fixes.
+  - [x] WS2: live attachment is complete. Portable encrypted ext4 images,
+      launch-time typed resolution, admitted VMM/guest handoff, crash recovery,
+      durable exclusive attachment leases, and canonical immutable local
+      snapshot/restore with tamper refusal and interrupted-restore convergence
+      are covered by focused tests. The local CLI lifecycle and runtime registry
+      suites pass 19 and 21 tests respectively. Five new hermetic volume BDD
+      scenarios pass in the 88-scenario/442-step suite. Live KVM proves
+      failed-start lease cleanup, writable restart persistence (23/23 steps),
+      and guest read-only refusal (17/17 steps). The restart uses the driver's
+      authenticated stop-time filesystem flush; PID monitoring proves every
+      observed Firecracker is reaped. The run also fixed root-owned process
+      reconciliation incorrectly treating `kill(pid, 0)` `EPERM` as a dead PID.
+      On the final integrated Linux tree, 24 guest-mount tests, 9 OCI-init tests,
+      and workspace all-target clippy pass with warnings denied; the host
+      all-target commit gate is also green.
+  - [x] WS3: mvmd now consumes the canonical mvm leaf contract and implements
+        it over Apache Arrow `object_store` 0.14.1 for S3-compatible, GCS,
+        Azure, and R2 providers. Remote data and names remain mandatorily
+        encrypted with tenant-scoped, zeroizing key material; credential
+        resolution has no environment fallback, and provider errors are
+        redacted. OpenDAL and its unused closure are gone. The secure dependency
+        graph keeps cloud XML parsing on `quick-xml` 0.41 while isolating iroh's
+        prerelease digest graph through a tested compatibility re-export.
+        mvmd PR #198 carries the implementation; 1,497 gateway library tests,
+        1,632 integration tests, the remaining workspace tests/doctests, check,
+        all-target clippy, formatting, focused docs, audit, and deny pass.
+  - [ ] WS4–WS7: durable checkpoint/restore, remote operations, live provider
+        and cross-worker KVM proof, documentation, and closeout remain open.
+
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout
       of untrusted code, and structural security tests. The label counter now
@@ -786,7 +839,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
   - [x] **Tier 4 — COMPLETE** (the substantive rewire happened incrementally; each split repointed its own facade + fixed imports, so the workspace was green after every batch — no broken imports remained). Closeout was documentation: the 2 "deferred" items resolved to **permanent `mvm-core` residents**, NOT pending moves — `policy/security_profile` (a `Copy` runtime value, not a serde DTO, + `crypto::seccomp` dep) and `protocol/protocol.rs` `HostdRequest`/`HostdResponse` (host-side mvmd↔hostd IPC embedding `domain::{VolumeAttach,TenantNet}` — which stay in core per architecture — over `hostd-transport` tokio framing; nothing runs in guest/browser). This is the clean line: **mvm-protocol = DTOs a no_std/edge/guest/browser consumer needs; host-only IPC + orchestration domain stay in mvm-core.** Design doc `10-…` updated to Status:COMPLETE. (Cosmetic: 1 masked test-only `ToString` import left as-is — adding it risks a redundant-import lint under the std/schema build.)
   - [x] **INCREMENT 3 COMPLETE** — the `mvm-core`→`mvm-protocol` DTO inversion (the Phase 1a long pole) is done. Entire signed plan + all wire/policy/plan DTOs compile no_std on wasm32; the wasm-container core-goal (WS11) foundation is real.
   - [ ] **Tier 4** — logic rewire (imports→mvm_protocol) + `mod.rs` re-export shims; deferred items (`security_profile`, `protocol.rs` HostdRequest/domain).
-- [x] `mvm-storage` placement — folded into `mvm-runtime` as `crate::storage::volume` (nested under the pre-existing `crate::storage` dm-thin CoW pool module — a naming collision the original decision didn't anticipate — to avoid clashing `backend.rs`/`mod.rs` filenames and a second unrelated `StorageError`). `s3` feature renamed `storage-s3`, off by default (`cargo tree -p mvm-runtime -e no-dev` carries no `object_store` by default, present only with `--features storage-s3`); Linux `tempfile` dep was already an unconditional normal dep of `mvm-runtime`, no change needed; `SnapshotUpper` import in `libkrun.rs` repointed. Crate deleted, workspace member + `[workspace.dependencies]` entries removed. Crate count 15 → 14.
+- [x] `mvm-storage` placement — folded into `mvm-runtime` as `crate::storage::volume` (nested under the pre-existing `crate::storage` dm-thin CoW pool module — a naming collision the original decision didn't anticipate — to avoid clashing `backend.rs`/`mod.rs` filenames and a second unrelated `StorageError`). The original fold renamed its S3 prototype to `storage-s3`; plan 283 later removed that unregistered member-only provider to restore the fleet ownership boundary while retaining the independent S3 template registry. Linux `tempfile` dep was already an unconditional normal dep of `mvm-runtime`, no change needed; `SnapshotUpper` import in `libkrun.rs` repointed. Crate deleted, workspace member + `[workspace.dependencies]` entries removed. Crate count 15 → 14.
 - [x] Full `nextest --workspace` ran — **6598 passed / 0 failed** (`176adc793`) after fixing a class the ident-rewrites missed: **stale crate-name STRING literals** (dir paths, `-p` pkgs, features, allowlist paths) in the builder-VM guest-build/libkrun-supervisor paths. Excl `mvm-runtime` (macOS codesign-SIGKILL) + `mvm-conformance` (cucumber `harness=false` → `just bdd`). Also unblocked **5 xtask claim gates that were failing-open** (paths pointed at renamed `crates/mvm-guest`) + a vacuous `no_backend_dep` cycle guard. Lesson: after crate renames, grep strings, not just idents; `nextest --no-fail-fast` catches runtime-wrong-but-compiling.
 - [x] **CI/ADR stale-ref sweep** (`b0a9d2477`): the workflows + `ADR-022` were never updated through the 7 consolidations, so several jobs invoked deleted packages. Remapped every functional `cargo -p <gone>` (`mvm-guest`→`mvm-agentd`, `mvm-ext4`/`mvm-oci`→`mvm-fs`, `mvm-vm-host`→`mvm-hostd`, +3 stray `mvm-build`→`mvm-fs` test invocations) **verified by RUNNING each** (mvm-agentd 560/560, mvm-fs oci 25/25 + hermetic 4/4 + the 3 ext4 examples, mvm-hostd bins build); repointed `ci-full` OCI path-filters + `architecture` globs + `security` fuzz-cache paths; refreshed the `ADR-022` crate table (dropped `mvm-verify`). Both dead-crate-`-p` + stale-path-filter rg sweeps now EMPTY; all 5 YAMLs still parse. Config/doc only. **STILL DEFERRED (cosmetic/frozen/pre-existing, reported):** prose crate-name mentions in ADRs 001/002/009/010/014/016/020/024; the `security.yml` FROZEN fuzz-lane `working-directory: crates/mvm-{guest,oci,vm-host,ext4}` (needs care re pinned locks); two OLDER broken refs `mvm-jailer-lite`/`mvm-host-vm-init` (pre-this-session consolidation); a non-breaking `crates/mvm/src/hostd/**` glob + an `ext4-real-mount` job label. `scripts/*.sh` not yet swept.
 - [ ] **Follow-up (WS2↔WS10):** `check-guest-agent-runtime-free` now FAILS — merging the tokio addon bins (`addon-dns`/`vsock-bridge`/`egress-client`) into the single guest binary drags tokio into the guest closure, against the tokio-free/~8 MB goal. Single guest binary requires de-tokio'ing the addons (WS10) or a per-binary check scope.
@@ -806,7 +859,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [~] **Member-feature decision matrix (audited; the below need a maintainer call, so NOT executed blindly):**
   - `manifest-verify` "always-on" is **REJECTED** — it pulls the sigstore stack (tokio) into mvm-core's default closure and would break the shipped `check-core-runtime-free` gate + the runtime-free invariant. It stays opt-in (the SPRINT "always-on" wording was over-simplified). `builder-vm`/`pure-mkfs` stay member composition units (a VM-driving consumer must be able to skip the builder pipeline); not made unconditional.
   - `attestation-tpm2`/`attestation-sev-snp`/`attestation-tdx` are **stub providers** (return `NotYetImplemented`) gating hardware-backed key attestation, which ADR-002 lists **out of scope**. Candidate for YAGNI deletion (3 features + `HwProviderKind` arms + stub impls) — but that removes documented future scaffolding, so it's a maintainer ratification call, flagged not executed.
-  - `storage-s3`/`wasm-backend`: legit heavy-dep opt-ins intentionally outside both shipped surfaces (a consumer opts in at the member level); leave as-is (optionally add to the root internal allowlist for discoverability — cosmetic).
+  - `wasm-backend` remains a legitimate heavy-dependency member opt-in. The prior `storage-s3` conclusion is superseded by plan 283: the provider had no production registrant, bypassed both shipped surfaces, and crossed the accepted fleet storage boundary, so it was removed and `check-two-surfaces` now guards that boundary.
   - `schema` is already codegen/tooling-only (in no product surface); "move to build-time" is satisfied in spirit — the schemars derives can't be build-time-only without the feature enabling the derive, so the feature stays as the codegen knob.
 - Gate: `xtask check-two-surfaces` green (2 surfaces, 7 internal). **WS5 substantially COMPLETE**; only the attestation-stub deletion awaits ratification.
 

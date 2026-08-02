@@ -129,6 +129,7 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
         profile,
     )
     .context("inject mvm runtime into OCI rootfs")?;
+    ensure_volume_mount_roots(unpacked_root)?;
 
     // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
     let tree_size = unpacked_tree_size(unpacked_root)
@@ -157,6 +158,18 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
     )
     .write_to_dir(rootfs_dir)
     .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
+    Ok(())
+}
+
+/// Materialize the admitted top-level guest volume roots into every sealed OCI
+/// image. The root becomes dm-verity read-only before PID 1 runs, so mountpoints
+/// cannot be created lazily inside the guest.
+fn ensure_volume_mount_roots(unpacked_root: &Path) -> Result<()> {
+    for relative in ["data", "work", "mnt"] {
+        let path = unpacked_root.join(relative);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("create guest volume mount root {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -520,6 +533,17 @@ pub fn select_root_strategy(s: RootStrategySelection) -> RootStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sealed_oci_tree_contains_volume_mount_roots() {
+        let root = tempfile::tempdir().unwrap();
+
+        ensure_volume_mount_roots(root.path()).expect("create mount roots");
+
+        for relative in ["data", "work", "mnt"] {
+            assert!(root.path().join(relative).is_dir());
+        }
+    }
 
     #[cfg(not(target_os = "linux"))]
     #[test]

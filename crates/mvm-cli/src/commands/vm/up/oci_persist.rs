@@ -186,6 +186,10 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         has_ad_hoc_argv,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
+    let mut prepared_volumes =
+        super::super::volume::merge_registered_volumes_for_launch(name, volumes)
+            .context("resolving registered local volumes before admission")?;
+    let volumes = &prepared_volumes.volumes;
     register_vm_name(name, "default");
     let image_sealed = crate::commands::vm::agent_verbs::image_is_sealed(rootfs_path);
     let overlay_required_oci = persistent_oci_rootfs_requires_overlay_policy(rootfs_path);
@@ -303,6 +307,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         emit_failed_if(&admission, "backend-start", &err);
         return Err(err);
     }
+    prepared_volumes.commit();
     emit_launched_if(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);

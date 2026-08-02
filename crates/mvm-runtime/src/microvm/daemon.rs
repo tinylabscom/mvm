@@ -84,6 +84,18 @@ pub(crate) fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()>
     fc_api_call("PUT", socket, path, Some(data))
 }
 
+/// Hand the Firecracker-created vsock multiplexer socket to the mvmctl user.
+///
+/// Firecracker runs as root and consequently creates this socket as root. Only
+/// the invoking user needs to dial it, so transfer ownership and keep the mode
+/// private instead of making the control plane world-writable.
+pub(crate) fn secure_vsock_socket_for_caller(vsock: &str) -> Result<()> {
+    let quoted = shell_quote(vsock);
+    run_in_vm_visible(&format!(
+        "set -eu\nsudo chown -- \"$(id -u):$(id -g)\" {quoted}\nchmod 0600 {quoted}"
+    ))
+}
+
 /// Shared body for FC's PUT/PATCH calls. Writes `data` (if Some) to a
 /// `NamedTempFile`, then shells out to curl with `--data @<file>` so
 /// the JSON body never goes through bash. All paths flowing into the
@@ -141,4 +153,32 @@ pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
         .trim()
         .parse::<u32>()
         .with_context(|| format!("parse Firecracker pid from {abs_dir}/fc.pid"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vsock_socket_access_is_private_to_the_invoking_user() {
+        use crate::base::shell_mock;
+        use std::sync::{Arc, Mutex};
+
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = scripts.clone();
+        let _guard = shell_mock::install_handler(move |script| {
+            captured.lock().unwrap().push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_vsock_socket_for_caller("/tmp/vm with quote'/runtime/v.sock")
+            .expect("secure socket");
+
+        let scripts = scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert!(scripts[0].contains("sudo chown -- \"$(id -u):$(id -g)\""));
+        assert!(scripts[0].contains("chmod 0600"));
+        assert!(scripts[0].contains("'/tmp/vm with quote'\\''/runtime/v.sock'"));
+        assert!(!scripts[0].contains("chmod 0666"));
+    }
 }

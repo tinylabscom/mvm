@@ -290,10 +290,26 @@ pub fn is_vm_running(pid_file: &str) -> Result<bool> {
 /// the process is proven gone so a concurrently removed marker cannot turn a
 /// live process into a false "stopped" result.
 pub fn is_firecracker_pid_running(pid: u32) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        comm_path_is_firecracker(&std::path::PathBuf::from(format!("/proc/{pid}/comm")))
+    }
+
+    #[cfg(not(target_os = "linux"))]
     let result = run_in_vm_stdout(&format!(
         r#"[ -f "/proc/{pid}/comm" ] && [ "$(cat /proc/{pid}/comm)" = "firecracker" ] && echo yes || echo no"#,
     ))?;
+    #[cfg(not(target_os = "linux"))]
     Ok(result.trim() == "yes")
+}
+
+#[cfg(target_os = "linux")]
+fn comm_path_is_firecracker(path: &std::path::Path) -> Result<bool> {
+    match std::fs::read_to_string(path) {
+        Ok(comm) => Ok(comm.trim() == "firecracker"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 /// Name of the Firecracker VM-state file produced by `PUT /snapshot/create`.
@@ -525,6 +541,30 @@ mod tests {
     use super::*;
     use crate::checkpoint::VmFullControl as _;
     use mvm_core::util::test_env::TestEnv;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn firecracker_comm_probe_accepts_only_the_exact_process_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let comm = tmp.path().join("comm");
+
+        std::fs::write(&comm, "firecracker\n").unwrap();
+        assert!(comm_path_is_firecracker(&comm).unwrap());
+
+        std::fs::write(&comm, "firecracker-helper\n").unwrap();
+        assert!(!comm_path_is_firecracker(&comm).unwrap());
+
+        std::fs::remove_file(&comm).unwrap();
+        assert!(!comm_path_is_firecracker(&comm).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn firecracker_comm_probe_surfaces_non_missing_read_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = comm_path_is_firecracker(tmp.path()).unwrap_err();
+        assert!(error.to_string().contains("read"), "got: {error}");
+    }
 
     /// `save_memory` requires an absolute path — a relative path would be
     /// misinterpreted by the Firecracker API.

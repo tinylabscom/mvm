@@ -27,7 +27,7 @@ Method: structure-first / easy-first, on a single long-lived green branch. Each 
 | `mvm-mcp` → `mvm-cli` (`crate::mcp`, behind `mcp` feature) | `42b432b89` |
 | `mvm` + `mvm-backend` → `mvm-runtime` (flat; ~96 files rewired) | `764b7d897` |
 | `mvm-guest` + `mvm-guest-helpers` → `mvm-agentd` (~214 files) | `19f1830ba` |
-| `mvm-storage` → `mvm-runtime` `crate::storage::volume` (nested to dodge a `backend.rs`/`mod.rs` collision with the pre-existing dm-thin `crate::storage`; `s3` feature renamed `storage-s3`) | — |
+| `mvm-storage` → `mvm-runtime` `crate::storage::volume` (nested to dodge a `backend.rs`/`mod.rs` collision with the pre-existing dm-thin `crate::storage`; the temporary `storage-s3` feature was later removed because production providers are fleet-owned) | — |
 
 Current crate set (14): `mvm-agentd, mvm-build, mvm-cli, mvm-client, mvm-conformance, mvm-core, mvm-fs, mvm-host-services-ffi, mvm-hostd, mvm-net, mvm-runtime, mvm-sdk, mvm-verify` + `crates/deps/libkrun-sys`.
 

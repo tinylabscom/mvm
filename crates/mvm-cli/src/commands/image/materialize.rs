@@ -30,7 +30,9 @@ use super::oci_types::OciImageConfig;
 /// teaches that same `/init` to skip re-mounting `/mvm/runtime` when
 /// `mvm-verity-init` already mounted the verity-protected overlay there; stale
 /// cached runtime-lean rootfs entries otherwise panic after the verity handoff.
-const OCI_RUNTIME_EPOCH: u32 = 6;
+/// Epoch 7 adds the allowed top-level block-volume mount roots to sealed OCI
+/// images; an older read-only image cannot create those mountpoints at boot.
+const OCI_RUNTIME_EPOCH: u32 = 7;
 
 /// Identity of the legacy guest runtime injected from the invoking source
 /// checkout. Cheap and build-free so it can gate the cache-hit path without
@@ -64,11 +66,15 @@ fn source_runtime_fingerprint() -> Option<String> {
 /// source fingerprint. Split out from [`oci_runtime_tag`] so the
 /// source-checkout invalidation is unit-testable without a real workspace.
 fn oci_runtime_tag_with(source_fp: Option<&str>) -> String {
+    oci_runtime_tag_with_epoch(OCI_RUNTIME_EPOCH, source_fp)
+}
+
+fn oci_runtime_tag_with_epoch(epoch: u32, source_fp: Option<&str>) -> String {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     hasher.update(b"epoch=");
-    hasher.update(OCI_RUNTIME_EPOCH.to_string().as_bytes());
+    hasher.update(epoch.to_string().as_bytes());
     hasher.update(b"\n");
     if let Some(fp) = source_fp {
         hasher.update(b"guest-source=");
@@ -484,6 +490,18 @@ mod tests {
             assert!(tag.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-guest-")));
             assert_eq!(tag.rsplit_once("-guest-").unwrap().1.len(), 16);
         }
+    }
+
+    #[test]
+    fn injection_epoch_change_invalidates_cached_oci_rootfs() {
+        let old_tag = oci_runtime_tag_with_epoch(OCI_RUNTIME_EPOCH - 1, Some("same-source"));
+        let current_tag = oci_runtime_tag_with_epoch(OCI_RUNTIME_EPOCH, Some("same-source"));
+        assert_ne!(old_tag, current_tag);
+
+        let mut cached = sample_image("docker.io/library/alpine:3.20", "sha256:dead", "blobs/a");
+        cached.rootfs_path = Some(format!("rootfs/{old_tag}/rootfs.ext4"));
+        cached.runtime_tag = Some(old_tag);
+        assert!(!cached_rootfs_is_current(&cached, &current_tag));
     }
 
     #[test]

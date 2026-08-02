@@ -26,7 +26,10 @@ mod linux {
     pub fn main() {
         mount_pseudofs();
         ensure_runtime_dirs();
-        mount_user_volumes();
+        if let Err(error) = mount_user_volumes() {
+            eprintln!("mvm-oci-init: user-volume activation failed: {error}");
+            std::process::exit(1);
+        }
         provision_host_signer_pub();
         if provision_guest_environment().is_err() {
             std::process::exit(1);
@@ -72,37 +75,102 @@ mod linux {
         );
     }
 
-    fn mount_user_volumes() {
+    fn mount_user_volumes() -> Result<(), String> {
         let Some(encoded) = cmdline_value("mvm.uvols") else {
-            return;
+            return Ok(());
         };
+        let mut volumes = parse_user_volumes(&encoded)?;
+        let block_count = volumes
+            .iter()
+            .filter(|volume| volume.kind == mvm_agentd::vsock::VolumeConfigKind::Block)
+            .count();
+        let mut block_devices = user_block_devices(block_count)?.into_iter();
+
+        for volume in &mut volumes {
+            if volume.kind == mvm_agentd::vsock::VolumeConfigKind::Block {
+                volume.device = block_devices
+                    .next()
+                    .map(|device| device.to_string_lossy().into_owned());
+            }
+        }
+
+        mvm_agentd::guest_mount::mount_volumes(&volumes, Path::new("/"))
+            .map_err(|error| error.to_string())
+    }
+
+    fn parse_user_volumes(encoded: &str) -> Result<Vec<mvm_agentd::vsock::VolumeConfig>, String> {
+        let mut volumes = Vec::new();
         for item in encoded.split(';').filter(|s| !s.is_empty()) {
             let mut parts = item.splitn(4, ':');
             let (Some(tag), Some(path_hex), Some(mode), Some(kind)) =
                 (parts.next(), parts.next(), parts.next(), parts.next())
             else {
-                eprintln!("mvm-oci-init: malformed user volume token");
-                continue;
+                return Err("malformed user volume token".to_string());
             };
-            let Some(path_bytes) = hex_decode(path_hex) else {
-                eprintln!("mvm-oci-init: malformed user volume path");
-                continue;
+            let path_bytes = hex_decode(path_hex)
+                .ok_or_else(|| "malformed user volume path encoding".to_string())?;
+            let mountpoint = String::from_utf8(path_bytes)
+                .map_err(|_| "user volume path is not valid UTF-8".to_string())?;
+            let read_only = match mode {
+                "ro" => true,
+                "rw" => false,
+                other => return Err(format!("unsupported user volume mode {other:?}")),
             };
-            let upath = PathBuf::from(OsStr::from_bytes(&path_bytes));
-            if kind == "blk" {
-                eprintln!(
-                    "mvm-oci-init: user disk volume for '{}' attached; guest auto-mount not wired",
-                    upath.display()
-                );
-                continue;
-            }
-            if let Err(e) = fs::create_dir_all(&upath) {
-                eprintln!("mvm-oci-init: mkdir user volume {}: {e}", upath.display());
-                continue;
-            }
-            let flags = if mode == "ro" { libc::MS_RDONLY } else { 0 };
-            mount_fs(tag, &upath, "virtiofs", flags, None);
+            let kind = match kind {
+                "fs" => mvm_agentd::vsock::VolumeConfigKind::VirtioFs,
+                "blk" => mvm_agentd::vsock::VolumeConfigKind::Block,
+                other => return Err(format!("unsupported user volume kind {other:?}")),
+            };
+            volumes.push(mvm_agentd::vsock::VolumeConfig {
+                tag: tag.to_string(),
+                mountpoint,
+                read_only,
+                kind,
+                device: None,
+            });
         }
+        Ok(volumes)
+    }
+
+    fn user_block_devices(count: usize) -> Result<Vec<PathBuf>, String> {
+        let entries = fs::read_dir("/sys/block")
+            .map_err(|error| format!("read /sys/block for user volumes: {error}"))?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("read /sys/block entry: {error}"))?;
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+        trailing_user_block_devices(names, count)
+    }
+
+    fn trailing_user_block_devices(
+        names: Vec<String>,
+        count: usize,
+    ) -> Result<Vec<PathBuf>, String> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let mut devices: Vec<String> = names
+            .into_iter()
+            .filter(|name| {
+                let bytes = name.as_bytes();
+                bytes.len() == 3 && bytes.starts_with(b"vd") && bytes[2].is_ascii_lowercase()
+            })
+            .collect();
+        devices.sort_unstable();
+        if devices.len() < count {
+            return Err(format!(
+                "expected {count} user block devices, found only {} virtio disks",
+                devices.len()
+            ));
+        }
+        Ok(devices
+            .split_off(devices.len() - count)
+            .into_iter()
+            .map(|name| Path::new("/dev").join(name))
+            .collect())
     }
 
     /// Provision the out-of-band host-signer trust anchor delivered on the kernel
@@ -259,6 +327,63 @@ mod linux {
     mod tests {
         use super::*;
 
+        #[test]
+        fn user_block_devices_are_the_trailing_virtio_disks() {
+            let devices = trailing_user_block_devices(
+                vec![
+                    "loop0".to_string(),
+                    "vdc".to_string(),
+                    "vda".to_string(),
+                    "vdb".to_string(),
+                    "nvme0n1".to_string(),
+                ],
+                2,
+            )
+            .unwrap();
+            assert_eq!(
+                devices,
+                vec![PathBuf::from("/dev/vdb"), PathBuf::from("/dev/vdc")]
+            );
+        }
+
+        #[test]
+        fn user_block_devices_refuse_an_incomplete_vmm_disk_set() {
+            let error = trailing_user_block_devices(vec!["vda".to_string()], 2).unwrap_err();
+            assert!(error.contains("expected 2 user block devices"));
+        }
+
+        #[test]
+        fn user_block_devices_are_empty_when_no_block_volume_was_requested() {
+            assert!(
+                trailing_user_block_devices(Vec::new(), 0)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn user_volume_manifest_decodes_block_and_virtiofs_entries() {
+            let volumes =
+                parse_user_volumes("uvol0:2f64617461:rw:blk;uvol1:2f726561646f6e6c79:ro:fs")
+                    .unwrap();
+            assert_eq!(volumes.len(), 2);
+            assert_eq!(volumes[0].tag, "uvol0");
+            assert_eq!(volumes[0].mountpoint, "/data");
+            assert!(!volumes[0].read_only);
+            assert_eq!(volumes[0].kind, mvm_agentd::vsock::VolumeConfigKind::Block);
+            assert_eq!(volumes[1].mountpoint, "/readonly");
+            assert!(volumes[1].read_only);
+            assert_eq!(
+                volumes[1].kind,
+                mvm_agentd::vsock::VolumeConfigKind::VirtioFs
+            );
+        }
+
+        #[test]
+        fn user_volume_manifest_rejects_unknown_mode_and_kind() {
+            assert!(parse_user_volumes("uvol0:2f64617461:maybe:blk").is_err());
+            assert!(parse_user_volumes("uvol0:2f64617461:rw:mystery").is_err());
+        }
         // The anchor writer moved to `mvm_agentd::vsock::write_host_signer_anchor`
         // so both inits share one implementation; its byte layout, 0644 mode and
         // malformed-token refusal are covered there rather than duplicated here.

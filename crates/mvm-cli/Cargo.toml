@@ -47,6 +47,7 @@ rustls.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_jcs = "0.1"
 sha2.workspace = true
 tar = "0.4"
 flate2.workspace = true

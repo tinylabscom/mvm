@@ -290,9 +290,8 @@ new 267-crate baseline.
 ### Remaining work (unchanged, decision-gated)
 
 - **B4 + C1** (`aws-lc-rs`): **DONE** — see B4/C1 completion section below.
-- **B1 / B2**: no default-build benefit left; only the cross-repo sigstore
-  relocation + the `opendal`→`object_store` feature-build swap remain,
-  sequenced with plan 123.
+- **B1 / B2**: the `opendal`→`object_store` template-registry swap is complete.
+  Only the cross-repo sigstore relocation remains decision-gated.
 
 ## B4/C1 completion (2026-07-20)
 
@@ -328,13 +327,9 @@ ADR-002-clean. The full RustCrypto 0.11 line is confirmed stable:
 in `xtask check-forbidden-deps`. `cargo tree -i aws-lc-rs` (default build)
 returns no match.
 
-**Residual (C1, minor):** `reqwest 0.12.28` (via `object_store`) coexists with
-`reqwest 0.13.4` (workspace) in the lockfile. `object_store` is behind the
-off-by-default `storage-s3` feature, so this dual-version situation is inert
-for the default `mvmctl` closure. `deny.toml` skip comment updated to reflect
-the current reality (workspace is 0.13; 0.12 is the holdout via `object_store`).
-`aws-lc-rs` does not enter through either reqwest version — the workspace
-`reqwest 0.13` uses the `rustls-no-provider` feature (ring provider installed
-in-process by the caller), and `reqwest 0.12` is optional and ring-based.
+**Residual resolved:** `object_store 0.14` now shares the workspace's
+`reqwest 0.13` line. In mvm it is activated only by the optional S3 template
+registry; production tenant object-store volume providers are fleet-owned.
+`check-two-surfaces` enforces that member-feature boundary.
 
 **B4 is closed. C1 residual is documented and inert.**
