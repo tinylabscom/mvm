@@ -181,14 +181,29 @@ mod linux {
             let rc = unsafe { libc::prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) };
             // EINVAL means the capability number does not exist on this
             // kernel, which is not a failure to drop it.
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::EINVAL) {
-                    ok = false;
-                }
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            if !bounding_set_drop_succeeded(rc, errno) {
+                ok = false;
             }
         }
         ok
+    }
+
+    fn bounding_set_drop_succeeded(rc: libc::c_int, errno: Option<libc::c_int>) -> bool {
+        rc == 0 || errno == Some(libc::EINVAL)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::bounding_set_drop_succeeded;
+
+        #[test]
+        fn bounding_set_drop_result_classification_is_fail_closed() {
+            assert!(bounding_set_drop_succeeded(0, None));
+            assert!(bounding_set_drop_succeeded(0, Some(libc::EPERM)));
+            assert!(bounding_set_drop_succeeded(-1, Some(libc::EINVAL)));
+            assert!(!bounding_set_drop_succeeded(-1, Some(libc::EPERM)));
+        }
     }
 }
 

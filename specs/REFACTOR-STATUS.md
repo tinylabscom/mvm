@@ -32,6 +32,8 @@ for detailed scope and acceptance criteria.
         exposed by #2067's exact security rerun
   - [x] Pin libkrun's L3 refusal and classify its default-equivalent mutation
         exposed by #2067's exact security rerun
+  - [x] Add a fail-closed bounding-set result classifier whose Linux mutation
+        witness kills the final comparison survivor from the corrected-head run
 
 - [x] Plan 283 — Production object-store volumes
       (`specs/plans/283-production-object-store-volumes.md`, issue #2040)

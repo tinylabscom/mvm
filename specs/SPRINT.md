@@ -52,7 +52,11 @@
       adds a PR-time structural regression test, proves in an isolated
       privileged child that `NoNewPrivs` and every capability set are actually
       cleared, and pins the libkrun L3 declaration; its merge closes #2067 and
-      restores the zero-open-issue state.
+      restores the zero-open-issue state. A fresh full-security run on the
+      merged head then exposed one remaining bounding-set result-classification
+      mutant. The follow-up extracts a pure syscall-result classifier with a
+      fail-closed truth-table test; the exact Linux `mvm-agentd` mutation shard
+      is clean with 27 relevant privilege-drop mutants caught.
       Tracked in plan 284.
 
 - [x] Production object-store volumes — **plan 283 / issue #2040**. Standardize

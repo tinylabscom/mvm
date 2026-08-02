@@ -76,6 +76,11 @@ open GitHub issues.
       libkrun's explicit `l3_vsock: false` falls back to the same derived
       `VmCapabilities` default. Pin the declared L3 refusal in the capability
       tests and the exact equivalent mutation in the ratchet.
+- [x] Close the final post-merge `mvm-agentd` witness gap: classify bounding-set
+      syscall results through a pure fail-closed helper, cover success, stale
+      errno, unsupported-capability, and permission-denied cases, and confirm
+      the exact Linux mutation shard catches every relevant privilege-drop
+      mutant.
 
 Closeout evidence (2026-08-02): the production-volume implementation merged
 across mvm PRs #2044 and #2064 and mvmd PRs #198 through #202. The independent
@@ -87,7 +92,10 @@ older main commit; its two reproducible workflow failures are repaired by the
 follow-up above. Its exact branch rerun additionally exposed the L3
 privilege-drop mutation gap and the equivalent libkrun capability deletion,
 which the same closing PR repairs and classifies before restoring the zero-issue
-state.
+state. The corrected-head security run then found one additional comparison
+mutation in bounding-set result handling; the follow-up truth-table witness
+kills it, and the exact Linux shard is clean at 27 files across 8 packages with
+83 accepted misses.
 
 ## Verified upstream inputs
 
