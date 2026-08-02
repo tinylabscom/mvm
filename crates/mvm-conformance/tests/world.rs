@@ -104,6 +104,12 @@ impl Drop for ScenarioEnvGuard {
 #[derive(cucumber::World, Default)]
 pub struct CliWorld {
     pub last_run: Option<Output>,
+    /// Result of exercising the signed-plan share gate with an attachment the
+    /// plan did not authorize.
+    pub volume_admission_result: Option<Result<(), String>>,
+    /// Result of asking a backend to accept a block-volume shape it cannot
+    /// honestly support.
+    pub volume_backend_result: Option<Result<(), String>>,
     /// `semantic_address` per fixture name, populated on a zero-exit
     /// `build address` run.
     pub addresses: HashMap<String, String>,

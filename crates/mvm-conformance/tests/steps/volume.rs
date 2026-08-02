@@ -1,0 +1,182 @@
+//! Volume lifecycle, admission, backend-capability, and live guest witnesses.
+
+use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+use cucumber::{given, then, when};
+use mvm_core::plan::test_support::PlanFixture;
+use mvm_core::vm_backend::{VmBackend, VmStartConfig, VmVolume, VmVolumeKind};
+use mvm_runtime::docker_backend::DockerBackend;
+use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
+
+use crate::world::CliWorld;
+
+use super::cli::{mvmctl_command, workspace_root};
+
+fn isolated_home(world: &CliWorld) -> &Path {
+    world
+        .isolated_home
+        .as_ref()
+        .expect("an isolated mvm home must be created first")
+        .path()
+}
+
+fn managed_volume_path(world: &CliWorld, volume_name: &str) -> PathBuf {
+    let mut guard = mvm_core::util::test_env::TestEnv::new();
+    guard.set("MVM_HOME", isolated_home(world));
+    PathBuf::from(
+        LocalVolumeCatalog::load()
+            .expect("load managed volume catalog")
+            .get(volume_name)
+            .unwrap_or_else(|| panic!("managed volume {volume_name:?} must exist"))
+            .host_path
+            .clone(),
+    )
+}
+
+#[when(expr = "I write byte {int} to the end of managed volume {string}")]
+fn write_managed_volume_marker(world: &mut CliWorld, value: i64, volume_name: String) {
+    let value = u8::try_from(value).expect("volume marker must fit in one byte");
+    let path = managed_volume_path(world, &volume_name);
+    let mut image = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("open materialized volume {path:?}: {error}"));
+    image.seek(SeekFrom::End(-1)).expect("seek volume marker");
+    image.write_all(&[value]).expect("write volume marker");
+    image.sync_all().expect("sync volume marker");
+}
+
+#[then(expr = "managed volume {string} ends with byte {int}")]
+fn managed_volume_has_marker(world: &mut CliWorld, volume_name: String, value: i64) {
+    let expected = u8::try_from(value).expect("volume marker must fit in one byte");
+    let path = managed_volume_path(world, &volume_name);
+    let mut image = fs::File::open(&path)
+        .unwrap_or_else(|error| panic!("open materialized volume {path:?}: {error}"));
+    image.seek(SeekFrom::End(-1)).expect("seek volume marker");
+    let mut actual = [0u8; 1];
+    image.read_exact(&mut actual).expect("read volume marker");
+    assert_eq!(actual[0], expected);
+}
+
+#[given("a signed execution plan with no admitted volume shares")]
+fn plan_without_volume_shares(world: &mut CliWorld) {
+    let plan = PlanFixture::new().build();
+    let volume = VmVolume {
+        host: "/private/unadmitted.ext4".to_string(),
+        guest: "/data".to_string(),
+        read_only: true,
+        kind: VmVolumeKind::Disk,
+        ..Default::default()
+    };
+    world.volume_admission_result = Some(
+        mvm_hostd::plan_admission::enforce_admitted_shares(&[volume], &plan)
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[then("the unadmitted volume attachment is refused")]
+fn unadmitted_volume_is_refused(world: &mut CliWorld) {
+    let error = world
+        .volume_admission_result
+        .as_ref()
+        .expect("the admission gate must run")
+        .as_ref()
+        .expect_err("an unadmitted volume must be refused");
+    assert!(
+        error.contains("not named in the signed ExecutionPlan"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[when("I ask the Docker backend to attach a block volume")]
+fn ask_docker_for_block_volume(world: &mut CliWorld) {
+    let config = VmStartConfig {
+        name: "bdd-docker-volume".to_string(),
+        rootfs_path: "alpine:latest".to_string(),
+        volumes: vec![VmVolume {
+            host: "/private/work.ext4".to_string(),
+            guest: "/data".to_string(),
+            read_only: true,
+            kind: VmVolumeKind::Disk,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    world.volume_backend_result = Some(
+        DockerBackend::new()
+            .start(&config)
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+    );
+}
+
+#[then("the backend refuses the unsupported block volume before boot")]
+fn unsupported_block_volume_is_refused(world: &mut CliWorld) {
+    let error = world
+        .volume_backend_result
+        .as_ref()
+        .expect("the backend capability check must run")
+        .as_ref()
+        .expect_err("Docker must refuse block volumes");
+    assert!(
+        error.contains("cannot attach block volume"),
+        "unexpected refusal: {error}"
+    );
+}
+
+#[when(expr = "I execute shell command {string} in machine {string}")]
+fn execute_machine_shell(world: &mut CliWorld, script: String, machine: String) {
+    let home = isolated_home(world);
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(["machine", "exec", &machine, "--", "/bin/sh", "-c", &script])
+        .env("HOME", home)
+        .env("MVM_HOME", home)
+        .output()
+        .expect("execute command in live volume machine");
+    world.last_run = Some(output);
+}
+
+#[when(expr = "I attempt a direct start of machine {string} with backend {string}")]
+fn attempt_direct_start(world: &mut CliWorld, machine: String, backend: String) {
+    let home = isolated_home(world);
+    let fixture_dir = home.join("direct-boot-fixture");
+    fs::create_dir_all(&fixture_dir).expect("create direct-boot fixture directory");
+    let kernel = fixture_dir.join("vmlinux");
+    let rootfs = fixture_dir.join("rootfs.ext4");
+    fs::write(&kernel, b"not-a-kernel").expect("write direct-boot kernel fixture");
+    fs::write(&rootfs, b"not-a-rootfs").expect("write direct-boot rootfs fixture");
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(["machine", "start", &machine, "--hypervisor", &backend])
+        .env("HOME", home)
+        .env("MVM_HOME", home)
+        .env("MVM_DIRECT_BOOT", "1")
+        .env("MVM_KERNEL_PATH", &kernel)
+        .env("MVM_ROOTFS_PATH", &rootfs)
+        .output()
+        .expect("attempt direct machine start");
+    world.last_run = Some(output);
+}
+
+#[then("the local volume attachment lease catalog is empty")]
+fn attachment_lease_catalog_is_empty(world: &mut CliWorld) {
+    let path = isolated_home(world)
+        .join("volumes")
+        .join("attachments.json");
+    if !path.exists() {
+        return;
+    }
+    let value: serde_json::Value = serde_json::from_slice(
+        &fs::read(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("parse {path:?}: {error}"));
+    let leases = value
+        .get("leases")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("lease catalog {path:?} has no leases object"));
+    assert!(leases.is_empty(), "failed start leaked leases: {leases:?}");
+}

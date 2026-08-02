@@ -146,8 +146,13 @@ payloads are refused without replacing current ciphertext; an interrupted
 prepared restore converges and recovers the prior bytes. Focused evidence: 21
 runtime registry tests, 19 CLI lifecycle tests, four persistent-image tests,
 activation/guest mount/QEMU tests, touched-crate check, all-target Clippy,
-formatting, and the production file-size gate are green. BDD and builder-VM/KVM
-proof remain open, so WS2 is not complete.
+formatting, and the production file-size gate are green. Eight volume BDD
+scenarios now cover immutable restore, locked/path-policy refusal, signed-plan
+refusal, typed backend refusal, failed-start lease cleanup, persistence across
+restart, and guest read-only enforcement. The five hermetic scenarios pass in
+the full 88-scenario/442-step suite; the three live scenarios compile but still
+require their builder-VM/KVM run before the BDD checkbox can close. Builder-VM
+and KVM proof remain open, so WS2 is not complete.
 
 ## WS3 — mvmd migration from OpenDAL to `object_store`
 

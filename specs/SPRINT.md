@@ -52,8 +52,11 @@
       durable exclusive attachment leases, and canonical immutable local
       snapshot/restore with tamper refusal and interrupted-restore convergence
       are covered by focused tests. The local CLI lifecycle and runtime registry
-      suites pass 19 and 21 tests respectively; BDD and builder-VM/KVM proof
-      still gate WS2 completion.
+      suites pass 19 and 21 tests respectively. Five new hermetic volume BDD
+      scenarios pass in the 88-scenario/442-step suite; three compiled live
+      scenarios for failed-start cleanup, restart persistence, and guest
+      read-only refusal still require builder-VM/KVM execution before WS2 can
+      complete.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout

@@ -10,6 +10,7 @@ mod sdk_sidecar;
 mod snapshot;
 mod transcript;
 mod verified_boot;
+mod volume;
 mod warm_claim;
 mod warm_restore;
 mod workload_identity;
