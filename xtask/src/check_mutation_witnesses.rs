@@ -85,6 +85,16 @@ pub struct SurfaceFile {
     /// Optionally restrict which mutants in this file are in claim scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<SurfaceScope>,
+    /// Cargo features the mutation build must enable for this file.
+    ///
+    /// cargo-mutants generates mutants by parsing source, and `syn` does
+    /// not evaluate `cfg`. A function behind a feature the run does not
+    /// enable is therefore mutated, never compiled, and reported as a
+    /// survivor that no test could ever kill. Naming the feature here is
+    /// the difference between measuring the code and tolerating a mutant
+    /// nothing can reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
 }
 
 /// A narrowing of one file's mutation surface.
@@ -356,6 +366,7 @@ pub fn resolve_surface(workspace: &Path) -> Result<Surface> {
                 // hand to the committed baseline, which is what makes it
                 // a reviewable act rather than a silent one.
                 scope: None,
+                features: Vec::new(),
             })
         })
         .collect();
@@ -576,9 +587,18 @@ pub fn carry_scopes_forward(
         .iter()
         .filter_map(|s| s.scope.as_ref().map(|sc| (s.path.as_str(), sc)))
         .collect();
+    let features: BTreeMap<&str, &Vec<String>> = previous
+        .surface
+        .iter()
+        .filter(|s| !s.features.is_empty())
+        .map(|s| (s.path.as_str(), &s.features))
+        .collect();
     for file in &mut resolved {
         if let Some(scope) = scopes.get(file.path.as_str()) {
             file.scope = Some((*scope).clone());
+        }
+        if let Some(f) = features.get(file.path.as_str()) {
+            file.features = (*f).clone();
         }
     }
     resolved
@@ -846,6 +866,11 @@ fn run_mutants_for_file(
         ])
         .arg("--output")
         .arg(out_dir);
+    if !file.features.is_empty() {
+        let joined = file.features.join(",");
+        eprintln!("      features {joined}");
+        cmd.args(["--features", &joined]);
+    }
     if let Some(scope) = &file.scope {
         eprintln!(
             "      scoped to /{}/ — {}",
@@ -1160,6 +1185,7 @@ a.rs:5:1: replace x with y
             package: package_for(path).unwrap_or_else(|| "unknown".into()),
             claims,
             scope: None,
+            features: Vec::new(),
         }
     }
 
@@ -1200,6 +1226,7 @@ a.rs:5:1: replace x with y
             path: path.into(),
             package: package_for(path).unwrap_or_else(|| "unknown".into()),
             claims: vec![2],
+            features: Vec::new(),
             scope: Some(SurfaceScope {
                 examine_re: examine_re.into(),
                 why: why.into(),
