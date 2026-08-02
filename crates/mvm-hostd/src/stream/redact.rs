@@ -59,6 +59,42 @@ pub trait StreamRedactor: Send + Sync {
     fn redact(&self, body: &[u8]) -> Result<Redacted, RedactionFailed>;
 }
 
+/// The seam a [`StreamBroker`](crate::stream::StreamBroker) is built over —
+/// and the only way to build one.
+///
+/// A trait alone would not close the hole it opens: a `PiiRedactor` carrying
+/// an empty ruleset satisfies [`StreamRedactor`] exactly as well as the real
+/// one, so a broker constructed from a bare seam can be silently
+/// non-redacting. Wrapping the seam in a type whose field is private and
+/// whose only production constructor is [`StreamRedaction::curated`] moves
+/// that from a convention nobody can see broken into something the compiler
+/// refuses to build. `xtask check-stream-redaction-seam` pins the same
+/// property at the call sites.
+pub struct StreamRedaction(Box<dyn StreamRedactor>);
+
+impl StreamRedaction {
+    /// The shipped ruleset. The only way to obtain a `StreamRedaction`
+    /// outside this crate's own tests.
+    pub fn curated() -> Self {
+        Self(Box::new(PiiRedactor::with_default_rules()))
+    }
+
+    /// A seam that is not the curated ruleset — a stricter detector, or one
+    /// that refuses. Test-only: the fail-closed path needs a detector that
+    /// *can* fail, and `PiiRedactor` cannot, but a production build must not
+    /// be able to reach past `curated`.
+    #[cfg(test)]
+    pub(in crate::stream) fn from_seam(seam: Box<dyn StreamRedactor>) -> Self {
+        Self(seam)
+    }
+}
+
+impl StreamRedactor for StreamRedaction {
+    fn redact(&self, body: &[u8]) -> Result<Redacted, RedactionFailed> {
+        self.0.redact(body)
+    }
+}
+
 impl StreamRedactor for PiiRedactor {
     fn redact(&self, body: &[u8]) -> Result<Redacted, RedactionFailed> {
         // The inherent curated-regex pass; it masks in place and cannot fail.
@@ -136,6 +172,18 @@ mod tests {
         assert!(text.contains("console"));
         assert!(text.contains("stderr"));
         assert!(text.contains("4096"));
+    }
+
+    #[test]
+    fn the_curated_seam_is_the_full_ruleset_not_an_empty_one() {
+        // The hole this type closes: an empty ruleset satisfies the trait just
+        // as well as the real one, so `curated` must demonstrably redact.
+        let seam = StreamRedaction::curated();
+        let out = seam
+            .redact(b"card 4111111111111111 end")
+            .expect("the curated pass cannot fail");
+        assert!(!out.body.windows(TEST_CARD.len()).any(|w| w == TEST_CARD));
+        assert!(out.rules_fired.contains(&"credit_card"));
     }
 
     #[test]

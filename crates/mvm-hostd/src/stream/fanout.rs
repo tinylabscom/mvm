@@ -17,7 +17,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use mvm_core::transcript::{Admission, CaptureBounds, GapMarker, RingState};
+use mvm_core::transcript::{CaptureBounds, GapMarker, RingState};
 use mvm_protocol::stream::StreamRecord;
 
 /// Payload bytes one follower may fall behind by before its oldest records
@@ -40,10 +40,15 @@ pub const DEFAULT_READER_BOUNDS: CaptureBounds = CaptureBounds {
 
 /// One follower's bounded delivery queue. Lives behind an `Arc<Mutex<_>>`
 /// shared with the broker so ingest and `recv` never borrow each other.
-pub(crate) struct ReaderQueue {
+///
+/// Visible only inside [`crate::stream`]: the broker's `fan_out` is the one
+/// writer, and a queue reachable from anywhere else in the crate is a way to
+/// hand a reader a record that never crossed the redaction seam.
+pub(in crate::stream) struct ReaderQueue {
     records: VecDeque<Arc<StreamRecord>>,
     ring: RingState,
     gap: Option<GapMarker>,
+    resume_anchor: Option<[u8; 32]>,
 }
 
 impl ReaderQueue {
@@ -52,22 +57,31 @@ impl ReaderQueue {
             records: VecDeque::new(),
             ring: RingState::new(bounds),
             gap: None,
+            resume_anchor: None,
         }
     }
 
     /// Enqueue one record, evicting this reader's oldest if it no longer
     /// fits. Never refuses — the newest write always wins, which is what
     /// keeps a stalled follower from stalling the producer.
-    pub(crate) fn push(&mut self, record: Arc<StreamRecord>) {
+    pub(in crate::stream) fn push(&mut self, record: Arc<StreamRecord>) {
         let size = record.payload.len() as u64;
-        if let Admission::AcceptAfterPruning { pruned_seqs, .. } = self.ring.admit(size) {
-            self.evict_oldest(pruned_seqs.len());
-        }
+        let evicted = self.ring.admit_counted(size);
+        self.evict_oldest(usize::try_from(evicted.chunks).unwrap_or(usize::MAX));
         self.records.push_back(record);
     }
 
-    /// Drop the `count` oldest records the ring just evicted and fold them
-    /// into this reader's gap.
+    /// Drop the `count` oldest records the ring just evicted, fold them into
+    /// this reader's gap, and keep the hash of the newest one as the anchor
+    /// the surviving window chains from.
+    ///
+    /// Keeping that hash is what makes a pruned window verifiable at all. A
+    /// follower that falls behind is handed survivors whose first `prev_hash`
+    /// is a real predecessor's — so `verify_chain` rejects them (not genesis)
+    /// and the anchor it attached with is now stale. The hash of the last
+    /// record it will never see is the one value that closes the gap, and it
+    /// is computed from a record the reader does *not* keep, so the check is
+    /// evidence rather than a restatement of the window's own bytes.
     ///
     /// Work is proportional to `count`, not to queue length: a full scan per
     /// eviction turns steady-state draining into quadratic work.
@@ -78,20 +92,23 @@ impl ReaderQueue {
     /// much higher stream sequence numbers, so the two disagree — and it is
     /// the stream number a consumer needs to resume from.
     fn evict_oldest(&mut self, count: usize) {
-        let mut after_seq = None;
+        let mut last = None;
         let mut chunks = 0u64;
         let mut bytes = 0u64;
         for _ in 0..count {
             let Some(evicted) = self.records.pop_front() else {
                 break;
             };
-            after_seq = Some(evicted.seq);
             chunks = chunks.saturating_add(1);
             bytes = bytes.saturating_add(evicted.payload.len() as u64);
+            last = Some(evicted);
         }
-        let Some(after_seq) = after_seq else {
+        let Some(last) = last else {
             return;
         };
+        let after_seq = last.seq;
+        // One hash per eviction batch, not per evicted record.
+        self.resume_anchor = Some(last.hash());
         self.gap = Some(match self.gap {
             Some(prev) => GapMarker {
                 after_seq,
@@ -136,7 +153,7 @@ pub struct ReaderHandle {
 }
 
 impl ReaderHandle {
-    pub(crate) fn new(start: ReaderStart, bounds: CaptureBounds) -> Self {
+    pub(in crate::stream) fn new(start: ReaderStart, bounds: CaptureBounds) -> Self {
         Self {
             start,
             queue: Arc::new(Mutex::new(ReaderQueue::new(bounds))),
@@ -145,7 +162,7 @@ impl ReaderHandle {
 
     /// The broker's half of the shared queue. Weak so a dropped handle
     /// really does free its buffered records.
-    pub(crate) fn weak_queue(&self) -> Weak<Mutex<ReaderQueue>> {
+    pub(in crate::stream) fn weak_queue(&self) -> Weak<Mutex<ReaderQueue>> {
         Arc::downgrade(&self.queue)
     }
 
@@ -163,11 +180,22 @@ impl ReaderHandle {
     ///
     /// A follower that attached mid-stream holds a window, not a chain from
     /// genesis, so `verify_chain` rejects it by design and
-    /// `verify_chain_from` against this anchor is the right check. Once
-    /// [`ReaderHandle::gap`] is set the window no longer starts here — it
-    /// resumes after the gap, and the anchor for it is the hash of the
-    /// record at `after_seq`, which the reader no longer holds.
+    /// `verify_chain_from` against this anchor is the right check.
+    ///
+    /// After a loss this moves: it becomes the hash of the last record the
+    /// reader will never see, which is precisely what the surviving window
+    /// chains from. So the anchor covers every record handed to this reader
+    /// since it attached, or since its most recent loss, whichever is later
+    /// — a consumer that re-verifies as it drains restarts its window
+    /// whenever [`ReaderHandle::gap`] changes.
     pub fn anchor(&self) -> [u8; 32] {
+        lock_queue(&self.queue)
+            .resume_anchor
+            .unwrap_or(self.start.anchor)
+    }
+
+    /// The anchor this reader attached at, before any loss moved it.
+    pub fn attach_anchor(&self) -> [u8; 32] {
         self.start.anchor
     }
 
@@ -211,7 +239,7 @@ impl ReaderHandle {
 /// A reader that panicked mid-`recv` must not silence ingest for everyone
 /// else. The queue is plain data and is never left half-updated across a
 /// panic point, so the poison flag carries nothing to act on.
-pub(crate) fn lock_queue(queue: &Mutex<ReaderQueue>) -> MutexGuard<'_, ReaderQueue> {
+pub(in crate::stream) fn lock_queue(queue: &Mutex<ReaderQueue>) -> MutexGuard<'_, ReaderQueue> {
     queue.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -303,6 +331,74 @@ mod tests {
         let gap = handle.gap().expect("the reader fell behind");
         assert_eq!(gap.after_seq, 502, "gap must speak in stream sequence");
         assert_eq!(gap.dropped_chunks, 3);
+    }
+
+    /// A real chain: each record's `prev_hash` is its predecessor's hash, so
+    /// an anchor is evidence rather than a restatement of the window's bytes.
+    fn chained(from: u64, count: u64) -> Vec<Arc<StreamRecord>> {
+        let mut out = Vec::new();
+        let mut prev = [0u8; 32];
+        for seq in from..from + count {
+            let record = StreamRecord {
+                seq,
+                source: StreamSource::Entrypoint,
+                kind: StreamKind::Stdout,
+                host_unix_nanos: 1_000 + seq,
+                prev_hash: prev,
+                payload: seq.to_le_bytes().to_vec(),
+            };
+            prev = record.hash();
+            out.push(Arc::new(record));
+        }
+        out
+    }
+
+    #[test]
+    fn a_pruned_window_verifies_against_the_anchor_the_queue_kept() {
+        // The pruned reader's own path: no second reader, no broker lookup —
+        // the survivors must verify from the anchor this queue stashed when it
+        // evicted, or a follower that fell behind holds records it cannot check.
+        let mut handle = ReaderHandle::new(start_at(0), bounds(1 << 20, 4));
+        let records = chained(0, 10);
+        {
+            let mut q = lock_queue(&handle.queue);
+            for record in &records {
+                q.push(Arc::clone(record));
+            }
+        }
+        let gap = handle.gap().expect("the reader fell behind");
+        let anchor = handle.anchor();
+        let survivors: Vec<_> = std::iter::from_fn(|| handle.recv()).collect();
+
+        assert_eq!(survivors.len(), 4);
+        assert_eq!(survivors[0].seq, gap.after_seq + 1);
+        assert_eq!(
+            anchor,
+            records[gap.after_seq as usize].hash(),
+            "the anchor is the hash of the last record this reader lost"
+        );
+        assert_ne!(anchor, handle.attach_anchor(), "the anchor moved on loss");
+        mvm_protocol::stream::verify_chain_from(&survivors, anchor)
+            .expect("the surviving window is unbroken from the anchor the queue kept");
+    }
+
+    #[test]
+    fn a_reader_that_never_fell_behind_keeps_the_anchor_it_attached_with() {
+        let start = ReaderStart {
+            id: 3,
+            from_seq: 0,
+            anchor: [0xab; 32],
+        };
+        let handle = ReaderHandle::new(start, bounds(1 << 20, 8));
+        {
+            let mut q = lock_queue(&handle.queue);
+            for record in chained(0, 4) {
+                q.push(record);
+            }
+        }
+        assert_eq!(handle.gap(), None);
+        assert_eq!(handle.anchor(), [0xab; 32]);
+        assert_eq!(handle.anchor(), handle.attach_anchor());
     }
 
     #[test]

@@ -16,8 +16,16 @@
 //! Steps 3 and 4 are deliberately not fate-shared. A follower that stops
 //! draining loses its own oldest records and nobody else's; a transcript
 //! write that fails leaves a hole on disk without silencing the live stream.
-//! Neither can reach back and stall ingest, which is the whole point: a
-//! workload must not slow down, or die, because logging did.
+//! Neither can *refuse* a chunk and neither can block on a consumer, so no
+//! reader and no full disk can ever silence or wedge a workload.
+//!
+//! What ingest is **not** is free. Step 3 is a synchronous write, hash, and
+//! `fsync`-less re-read per record on the caller's thread — around 200 µs,
+//! against roughly 2 µs for the other three steps combined. A workload
+//! producing chunks faster than about 5,000/sec is therefore paced by the
+//! durable store, not merely observed by it. That is a real throughput
+//! ceiling, not a caveat: chunk batching is what lifts it, and until it
+//! lands `persist_failures` is what makes the shortfall visible.
 //!
 //! One broker per VM, resident in the per-tenant daemon rather than spawned
 //! per VM.
@@ -26,15 +34,16 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mvm_core::plan::ExecutionPlan;
-use mvm_core::transcript::{CaptureBounds, Direction, TranscriptManifest, TranscriptWriter};
+use mvm_core::transcript::{
+    CaptureBounds, Direction, TranscriptError, TranscriptManifest, TranscriptWriter,
+};
 use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
 
 use crate::audit::emitter::AuditEmitter;
 use crate::stream::fanout::{
     DEFAULT_READER_BOUNDS, ReaderHandle, ReaderQueue, ReaderStart, lock_queue,
 };
-use crate::stream::redact::{StreamRedactor, redaction_failure_marker};
-use crate::supervisor::pii_redactor::PiiRedactor;
+use crate::stream::redact::{StreamRedaction, StreamRedactor, redaction_failure_marker};
 
 /// Default budget for the durable transcript one broker writes into.
 ///
@@ -70,6 +79,11 @@ pub struct StreamCounters {
     /// Records the durable transcript refused or failed to take. Each one is
     /// a hole on disk that the live stream does not have.
     pub persist_failures: u64,
+    /// How many times persistence went from working to failing. One long
+    /// outage counts once; a flapping disk counts every time. This is what
+    /// the broker logs, because a per-record warning turns a bounded-disk
+    /// problem into an unbounded-log one at a few thousand chunks a second.
+    pub persist_lapses: u64,
     /// Followers that have attached over this broker's lifetime.
     pub subscribers: u64,
     /// Subscribe events that could not be written to the chain-signed log.
@@ -102,7 +116,7 @@ impl StreamAudit {
 pub struct StreamBroker {
     vm: String,
     writer: TranscriptWriter,
-    redactor: Box<dyn StreamRedactor>,
+    redaction: StreamRedaction,
     audit: Option<StreamAudit>,
     reader_bounds: CaptureBounds,
     readers: Vec<Weak<Mutex<ReaderQueue>>>,
@@ -110,26 +124,21 @@ pub struct StreamBroker {
     next_seq: u64,
     prev_hash: [u8; 32],
     last_stamp_nanos: u64,
+    persist_degraded: bool,
     counters: StreamCounters,
 }
 
 impl StreamBroker {
-    /// Build a broker for `vm` over the curated PII ruleset.
-    pub fn new(vm: &str, writer: TranscriptWriter, redactor: PiiRedactor) -> Self {
-        Self::with_redactor(vm, writer, Box::new(redactor))
-    }
-
-    /// Build a broker over an arbitrary redaction seam — a stricter ruleset,
-    /// or a detector that can refuse.
-    pub fn with_redactor(
-        vm: &str,
-        writer: TranscriptWriter,
-        redactor: Box<dyn StreamRedactor>,
-    ) -> Self {
+    /// Build a broker for `vm` over a redaction seam.
+    ///
+    /// The only seam a production caller can supply is
+    /// [`StreamRedaction::curated`] — see that type for why the parameter is
+    /// not a bare [`StreamRedactor`].
+    pub fn new(vm: &str, writer: TranscriptWriter, redaction: StreamRedaction) -> Self {
         Self {
             vm: vm.to_string(),
             writer,
-            redactor,
+            redaction,
             audit: None,
             reader_bounds: DEFAULT_READER_BOUNDS,
             readers: Vec::new(),
@@ -137,6 +146,7 @@ impl StreamBroker {
             next_seq: 0,
             prev_hash: [0u8; 32],
             last_stamp_nanos: 0,
+            persist_degraded: false,
             counters: StreamCounters::default(),
         }
     }
@@ -223,8 +233,14 @@ impl StreamBroker {
         self.fan_out(Arc::new(record));
     }
 
-    /// Seal the transcript and hand back its manifest. The sealed Merkle
-    /// root covers every chunk that reached disk.
+    /// Seal the transcript and hand back its manifest.
+    ///
+    /// The sealed Merkle root covers every chunk that reached disk **and**
+    /// the count of those that did not, so a consumer can tell a complete
+    /// transcript from one that stopped at its bound. Without that count the
+    /// truncated artifact passes every verification with nothing saying it is
+    /// incomplete — worse than a loud refusal, because it looks trustworthy.
+    /// `manifest.refused_chunks` equals this broker's `persist_failures`.
     pub fn seal(self) -> TranscriptManifest {
         self.writer.seal()
     }
@@ -240,7 +256,7 @@ impl StreamBroker {
         kind: StreamKind,
         bytes: &[u8],
     ) -> (StreamKind, Vec<u8>) {
-        match self.redactor.redact(bytes) {
+        match self.redaction.redact(bytes) {
             Ok(redacted) => {
                 if !redacted.rules_fired.is_empty() {
                     self.counters.redacted = self.counters.redacted.saturating_add(1);
@@ -308,23 +324,55 @@ impl StreamBroker {
     /// The transcript's own budget fails closed, which is right for a
     /// forensic capture and wrong for a live stream: refusing here would
     /// silence followers to protect a disk bound. A failed append is counted
-    /// and logged instead, so an absent chunk on disk is distinguishable
-    /// from one that was never produced.
+    /// instead, so an absent chunk on disk is distinguishable from one that
+    /// was never produced, and the sealed manifest carries the same shortfall
+    /// as `refused_chunks`.
     fn persist(&mut self, record: &StreamRecord) {
         let direction = match record.kind {
             StreamKind::Stdout => Direction::Stdout,
             StreamKind::Stderr => Direction::Stderr,
             StreamKind::Trace => Direction::Trace,
         };
-        if let Err(err) = self.writer.push(direction, &record.payload) {
-            self.counters.persist_failures = self.counters.persist_failures.saturating_add(1);
-            tracing::warn!(
-                vm = %self.vm,
-                seq = record.seq,
-                error = %err,
-                "stream chunk not persisted"
-            );
+        match self.writer.push(direction, &record.payload) {
+            Ok(()) => self.note_persist_recovered(),
+            Err(err) => {
+                self.counters.persist_failures = self.counters.persist_failures.saturating_add(1);
+                self.note_persist_failed(record.seq, &err);
+            }
         }
+    }
+
+    /// Log the *transition* into a persistence outage, never the records.
+    ///
+    /// Once the budget is exhausted every subsequent record fails, so a
+    /// warning per record would emit thousands of lines a second for the
+    /// life of the workload — trading a bounded disk problem for an
+    /// unbounded log one. The count keeps climbing in `persist_failures`; the
+    /// log says it started.
+    fn note_persist_failed(&mut self, seq: u64, err: &TranscriptError) {
+        if self.persist_degraded {
+            return;
+        }
+        self.persist_degraded = true;
+        self.counters.persist_lapses = self.counters.persist_lapses.saturating_add(1);
+        tracing::warn!(
+            vm = %self.vm,
+            from_seq = seq,
+            error = %err,
+            "stream chunks no longer reaching the transcript; live readers unaffected"
+        );
+    }
+
+    fn note_persist_recovered(&mut self) {
+        if !self.persist_degraded {
+            return;
+        }
+        self.persist_degraded = false;
+        tracing::info!(
+            vm = %self.vm,
+            missed = self.counters.persist_failures,
+            "stream chunks reaching the transcript again"
+        );
     }
 
     /// Hand the record to every live follower.
@@ -443,7 +491,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), vm, DEFAULT_CAPTURE_BOUNDS);
         TestBroker {
-            broker: StreamBroker::new(vm, writer, PiiRedactor::with_default_rules()),
+            broker: StreamBroker::new(vm, writer, StreamRedaction::curated()),
             dir,
         }
     }
@@ -470,7 +518,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), vm, DEFAULT_CAPTURE_BOUNDS);
         TestBroker {
-            broker: StreamBroker::with_redactor(vm, writer, Box::new(FailingRedactor)),
+            broker: StreamBroker::new(
+                vm,
+                writer,
+                StreamRedaction::from_seam(Box::new(FailingRedactor)),
+            ),
             dir,
         }
     }
@@ -578,7 +630,7 @@ mod tests {
                 max_chunks: 0,
             },
         );
-        let mut b = StreamBroker::new("vm-a", writer, PiiRedactor::with_default_rules());
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
         let slow = b.subscribe();
 
         for i in 0..10_000u32 {
@@ -638,7 +690,7 @@ mod tests {
     fn the_transcript_holds_every_redacted_record_and_verifies() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
-        let mut b = StreamBroker::new("vm-a", writer, PiiRedactor::with_default_rules());
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"out");
         b.ingest(StreamSource::Entrypoint, StreamKind::Stderr, b"err");
         b.ingest(
@@ -740,6 +792,7 @@ mod tests {
         assert_eq!(full.len(), 10, "the drained reader misses nothing");
         assert_eq!(keeping_up.gap(), None);
         let gap = falling_behind.gap().expect("the slow reader lost records");
+        let falling_behind_anchor = falling_behind.anchor();
         let survivors: Vec<_> = std::iter::from_fn(|| falling_behind.recv()).collect();
 
         assert_eq!(survivors.len(), 4, "the window holds its bound, not more");
@@ -750,6 +803,52 @@ mod tests {
             .expect("the record before the gap")
             .hash();
         verify_chain_from(&survivors, anchor).expect("the surviving window is unbroken");
+        // What the second reader supplied above, the pruned reader already
+        // carried: this test only passes because `keeping_up` kept a copy of
+        // the record that was evicted, which a real lone follower never has.
+        assert_eq!(
+            falling_behind_anchor, anchor,
+            "the pruned reader's own anchor is that same hash"
+        );
+    }
+
+    #[test]
+    fn a_pruned_reader_verifies_its_own_window_with_no_second_reader() {
+        // The normal read once the broker starts pruning, exercised the way a
+        // real follower sees it: one reader, no keeping-up sibling handing it
+        // the evicted record, no broker call. Before the queue kept the
+        // evicted hash this was unverifiable — `verify_chain` rejects a
+        // non-genesis first `prev_hash`, and the attach anchor is stale.
+        let mut b = broker_with_reader_bounds(
+            "vm-a",
+            CaptureBounds {
+                max_duration_secs: u64::MAX,
+                max_bytes: 1 << 20,
+                max_chunks: 4,
+            },
+        );
+        let mut lone = b.subscribe();
+        for i in 0..10u8 {
+            b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, &[i]);
+        }
+
+        let gap = lone.gap().expect("the lone reader lost records");
+        let anchor = lone.anchor();
+        let survivors: Vec<_> = std::iter::from_fn(|| lone.recv()).collect();
+
+        assert_eq!(survivors.len(), 4);
+        assert_eq!(survivors[0].seq, gap.after_seq + 1);
+        assert!(
+            verify_chain(&survivors).is_err(),
+            "a pruned window is not a genesis chain"
+        );
+        assert_ne!(
+            anchor,
+            lone.attach_anchor(),
+            "the attach anchor is stale once records were lost"
+        );
+        verify_chain_from(&survivors, anchor)
+            .expect("a pruned follower must be able to verify what it was handed");
     }
 
     #[test]
@@ -783,7 +882,7 @@ mod tests {
                 max_chunks: 1,
             },
         );
-        let mut b = StreamBroker::new("vm-a", writer, PiiRedactor::with_default_rules());
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
         let mut r = b.subscribe();
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"one");
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"two");
@@ -792,6 +891,103 @@ mod tests {
         let records: Vec<_> = std::iter::from_fn(|| r.recv()).take(2).collect();
         assert_eq!(records.len(), 2, "the live stream outlives the disk bound");
         verify_chain(&records).expect("the chain does not skip an unpersisted record");
+    }
+
+    #[test]
+    fn a_transcript_that_stopped_persisting_seals_as_truncated() {
+        // A sealed transcript that quietly stopped at the chunk cap is worse
+        // than a loud refusal: it verifies clean and reads as the whole of a
+        // quiet workload's output. The manifest must say it is a prefix.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = writer_at(
+            dir.path(),
+            "vm-a",
+            CaptureBounds {
+                max_duration_secs: u64::MAX,
+                max_bytes: 1 << 20,
+                max_chunks: 2,
+            },
+        );
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        for i in 0..7u8 {
+            b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, &[i, i, i]);
+        }
+        assert_eq!(b.counters().persist_failures, 5);
+
+        let manifest = b.seal();
+        verify_sealed_root(&manifest).expect("the truncated manifest still seals");
+        verify_chunks(&manifest, dir.path()).expect("the chunks that landed verify");
+        assert_eq!(manifest.chunks.len(), 2);
+        assert!(
+            manifest.is_truncated(),
+            "the sealed artifact must declare itself incomplete"
+        );
+        assert_eq!(
+            manifest.refused_chunks, 5,
+            "one per record that never landed"
+        );
+        assert_eq!(manifest.refused_bytes, 15);
+    }
+
+    #[test]
+    fn a_complete_capture_seals_without_a_truncation_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"all of it");
+        assert_eq!(b.counters().persist_failures, 0);
+        let manifest = b.seal();
+        assert!(!manifest.is_truncated());
+        assert_eq!(manifest.refused_chunks, 0);
+    }
+
+    #[test]
+    fn a_persistence_outage_is_reported_once_not_once_per_record() {
+        // A 5k-chunk/sec workload against an exhausted budget would otherwise
+        // emit 5k warnings a second forever, trading a bounded-disk problem
+        // for an unbounded-log one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = writer_at(
+            dir.path(),
+            "vm-a",
+            CaptureBounds {
+                max_duration_secs: u64::MAX,
+                max_bytes: 1 << 20,
+                max_chunks: 1,
+            },
+        );
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        for _ in 0..5_000 {
+            b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"x");
+        }
+        assert_eq!(b.counters().persist_failures, 4_999);
+        assert_eq!(
+            b.counters().persist_lapses,
+            1,
+            "one outage is one report, however many records it swallows"
+        );
+    }
+
+    #[test]
+    fn persistence_recovering_and_failing_again_counts_two_lapses() {
+        // The counter has to be a transition count, not a latch: a flapping
+        // store must stay visible rather than reporting its first outage and
+        // going quiet forever.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"ok");
+
+        // Remove the directory out from under the writer, then put it back.
+        std::fs::remove_dir_all(dir.path()).expect("remove capture dir");
+        b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"lost");
+        std::fs::create_dir_all(dir.path()).expect("restore capture dir");
+        b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"ok again");
+        std::fs::remove_dir_all(dir.path()).expect("remove capture dir again");
+        b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"lost again");
+
+        assert_eq!(b.counters().persist_failures, 2);
+        assert_eq!(b.counters().persist_lapses, 2);
     }
 
     #[test]
@@ -807,7 +1003,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), "vm-a", DEFAULT_CAPTURE_BOUNDS);
-        let mut b = StreamBroker::new("vm-a", writer, PiiRedactor::with_default_rules())
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated())
             .with_audit(StreamAudit::new(emitter, plan));
 
         let _reader = b.subscribe();

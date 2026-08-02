@@ -166,6 +166,9 @@ jobs:
       - name: uniform vsock egress (Firecracker + libkrun + HVF use the WorkloadRunner seam)
         run: cargo run -p xtask -- check-uniform-vsock-egress
 
+      - name: one stream redaction seam (every StreamBroker is built over the curated ruleset)
+        run: cargo run -p xtask -- check-stream-redaction-seam
+
       - name: require-grant token confined to allowlist (guards mvmd no-brick invariant)
         run: cargo run -p xtask -- check-require-grant-token-allowlist
 

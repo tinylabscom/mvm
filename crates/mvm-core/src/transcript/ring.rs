@@ -41,6 +41,22 @@ pub enum Admission {
     },
 }
 
+/// How much one admission evicted, without naming what.
+///
+/// The counting answer to [`Admission`], for a store that evicts from its own
+/// front by count (a delivery queue holding the records themselves) rather
+/// than by unlinking `{seq}.chunk` files. [`Admission::AcceptAfterPruning`]
+/// heap-allocates its `pruned_seqs` on every pruning admission, which in a
+/// saturated steady state is one allocation per record on the producer's
+/// path — paid for a `Vec` such a caller only ever reads the length of.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Evicted {
+    /// How many chunks the admission evicted. Zero means it simply fit.
+    pub chunks: u64,
+    /// Total bytes freed by those evictions.
+    pub bytes: u64,
+}
+
 /// What one pruning admission dropped. Not produced by `RingState` itself —
 /// the caller builds one from an `Admission::AcceptAfterPruning` after it
 /// has unlinked the pruned chunk files, as the one gap record for that
@@ -137,19 +153,11 @@ impl RingState {
     pub fn admit(&mut self, size: u64) -> Admission {
         let mut pruned_seqs = Vec::new();
         let mut dropped_bytes = 0u64;
-        while self.would_exceed_bounds(size) {
-            let Some(oldest) = self.live.pop_front() else {
-                break;
-            };
-            self.bytes = self.bytes.saturating_sub(oldest.size);
-            dropped_bytes = dropped_bytes.saturating_add(oldest.size);
-            pruned_seqs.push(oldest.seq);
-        }
-
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.live.push_back(LiveChunk { seq, size });
-        self.bytes = self.bytes.saturating_add(size);
+        self.prune_for(size, |seq, bytes| {
+            pruned_seqs.push(seq);
+            dropped_bytes = dropped_bytes.saturating_add(bytes);
+        });
+        self.push_live(size);
 
         if pruned_seqs.is_empty() {
             Admission::Accept
@@ -159,6 +167,43 @@ impl RingState {
                 dropped_bytes,
             }
         }
+    }
+
+    /// Admit one more chunk of `size` bytes, reporting only *how much* was
+    /// evicted rather than which sequence numbers.
+    ///
+    /// Same state transition as [`RingState::admit`] — same eviction order,
+    /// same "the newest write always wins" guarantee — without the
+    /// per-admission `Vec`. For a caller that evicts from its own front by
+    /// count and never needs the sequence numbers back.
+    pub fn admit_counted(&mut self, size: u64) -> Evicted {
+        let mut evicted = Evicted::default();
+        self.prune_for(size, |_seq, bytes| {
+            evicted.chunks = evicted.chunks.saturating_add(1);
+            evicted.bytes = evicted.bytes.saturating_add(bytes);
+        });
+        self.push_live(size);
+        evicted
+    }
+
+    /// Evict from the front until one more `size`-byte chunk fits, reporting
+    /// each eviction as `(seq, size)`.
+    fn prune_for(&mut self, size: u64, mut evicted: impl FnMut(u64, u64)) {
+        while self.would_exceed_bounds(size) {
+            let Some(oldest) = self.live.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(oldest.size);
+            evicted(oldest.seq, oldest.size);
+        }
+    }
+
+    /// Take the next sequence number and start counting the chunk.
+    fn push_live(&mut self, size: u64) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.live.push_back(LiveChunk { seq, size });
+        self.bytes = self.bytes.saturating_add(size);
     }
 
     /// Stop counting the oldest live chunk because the store handed it on
@@ -281,6 +326,40 @@ mod tests {
         let mut tally = GapTally::default();
         tally.record(&r.admit(10));
         assert_eq!(tally.marker(), None);
+    }
+
+    #[test]
+    fn counting_admission_matches_the_naming_one_step_for_step() {
+        // Two rings driven identically must agree at every step, or the
+        // allocation-free path is a second policy rather than the same one.
+        let mut naming = RingState::new(bounds(100, 3));
+        let mut counting = RingState::new(bounds(100, 3));
+        for size in [60u64, 30, 50, 5, 500, 1] {
+            let expected = match naming.admit(size) {
+                Admission::Accept => Evicted::default(),
+                Admission::AcceptAfterPruning {
+                    pruned_seqs,
+                    dropped_bytes,
+                } => Evicted {
+                    chunks: pruned_seqs.len() as u64,
+                    bytes: dropped_bytes,
+                },
+            };
+            assert_eq!(counting.admit_counted(size), expected, "size {size}");
+        }
+    }
+
+    #[test]
+    fn counting_admission_keeps_assigning_sequence_numbers() {
+        // `admit_counted` must not skip the seq counter, or a later `admit`
+        // on the same ring would report sequence numbers that never existed.
+        let mut r = RingState::new(bounds(10, 1));
+        r.admit_counted(9);
+        r.admit_counted(9);
+        match r.admit(9) {
+            Admission::AcceptAfterPruning { pruned_seqs, .. } => assert_eq!(pruned_seqs, vec![1]),
+            other => panic!("expected pruning, got {other:?}"),
+        }
     }
 
     #[test]

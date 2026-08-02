@@ -33,7 +33,11 @@ pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 /// `validate_format` (which every verifier calls before touching the root)
 /// reject it first, with an honest "old format" error instead of a false
 /// tamper signal.
-pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 3;
+///
+/// Bumped 3 -> 4 when the manifest grew `refused_chunks`/`refused_bytes`, for
+/// the same reason: the sealed root now commits to them, so an old manifest
+/// would recompute to a different root and look tampered.
+pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 4;
 
 /// Direction of a captured chunk relative to the workload: network egress/
 /// ingress, or one of the workload's own output streams (stdout/stderr) plus
@@ -109,11 +113,34 @@ pub struct TranscriptManifest {
     /// Recipient binding allowed to decrypt later (e.g. a host key id).
     pub recipient: String,
     pub chunks: Vec<ChunkRecord>,
+    /// Chunks the writer was offered and did not store, because a bound was
+    /// reached or the write failed. Nonzero means `chunks` is a **prefix** of
+    /// what was captured, not the whole of it.
+    ///
+    /// Without this, a capture that stopped at its bound seals into a
+    /// manifest that passes both [`verify_sealed_root`] and [`verify_chunks`]
+    /// with nothing saying it is incomplete — a silently truncated artifact
+    /// that looks trustworthy. The sealed root commits to it, so it cannot be
+    /// stripped without breaking verification.
+    #[serde(default)]
+    pub refused_chunks: u64,
+    /// Plaintext bytes in the chunks counted by `refused_chunks`.
+    #[serde(default)]
+    pub refused_bytes: u64,
     /// RFC-6962 Merkle root over the capture binding, sealed-key metadata,
-    /// bounds, and ordered chunk records. The chunk records contain ciphertext
-    /// digests, never plaintext digests.
+    /// bounds, refusal counts, and ordered chunk records. The chunk records
+    /// contain ciphertext digests, never plaintext digests.
     #[serde(default)]
     pub sealed_root_hex: String,
+}
+
+impl TranscriptManifest {
+    /// Whether this transcript is missing chunks it was offered. A consumer
+    /// must not read a truncated capture as a complete record of the
+    /// workload's output.
+    pub fn is_truncated(&self) -> bool {
+        self.refused_chunks > 0
+    }
 }
 
 /// Why a transcript operation refused. Fail-closed: any variant means the
@@ -164,6 +191,8 @@ struct RootMetadata<'a> {
     wrapped_data_key_b64: &'a str,
     recipient: &'a str,
     chunk_count: usize,
+    refused_chunks: u64,
+    refused_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -187,6 +216,8 @@ pub fn sealed_root_hex(manifest: &TranscriptManifest) -> Result<String, Transcri
         wrapped_data_key_b64: &manifest.wrapped_data_key_b64,
         recipient: &manifest.recipient,
         chunk_count: manifest.chunks.len(),
+        refused_chunks: manifest.refused_chunks,
+        refused_bytes: manifest.refused_bytes,
     };
     let mut leaves = Vec::with_capacity(manifest.chunks.len() + 1);
     leaves.push(
@@ -341,6 +372,8 @@ pub struct TranscriptWriter {
     created_unix_secs: u64,
     wrapped_data_key_b64: String,
     recipient: String,
+    refused_chunks: u64,
+    refused_bytes: u64,
 }
 
 /// Construction parameters for a [`TranscriptWriter`] (grouped to keep the
@@ -370,7 +403,21 @@ impl TranscriptWriter {
             created_unix_secs: config.created_unix_secs,
             wrapped_data_key_b64: config.wrapped_data_key_b64,
             recipient: config.recipient,
+            refused_chunks: 0,
+            refused_bytes: 0,
         }
+    }
+
+    /// Chunks offered to [`push`](Self::push)/[`push_dropped`](Self::push_dropped)
+    /// that never landed. Nonzero means the capture is truncated.
+    pub fn refused_chunks(&self) -> u64 {
+        self.refused_chunks
+    }
+
+    /// Plaintext bytes in the chunks counted by
+    /// [`refused_chunks`](Self::refused_chunks).
+    pub fn refused_bytes(&self) -> u64 {
+        self.refused_bytes
     }
 
     /// Encrypt and append one payload chunk, or fail closed on a bound. The
@@ -390,7 +437,28 @@ impl TranscriptWriter {
         self.push_inner(direction, true, plaintext)
     }
 
+    /// Write the chunk, and remember it if it did not land.
+    ///
+    /// Every refusal — a bound reached, a write that failed — is a hole in
+    /// the capture. Counting it here, at the one place a chunk can fail to
+    /// land, is what lets [`seal`](Self::seal) mark the manifest truncated
+    /// instead of handing back an artifact that verifies clean while being
+    /// silently incomplete.
     fn push_inner(
+        &mut self,
+        direction: Direction,
+        dropped: bool,
+        plaintext: &[u8],
+    ) -> Result<(), TranscriptError> {
+        let result = self.write_chunk(direction, dropped, plaintext);
+        if result.is_err() {
+            self.refused_chunks = self.refused_chunks.saturating_add(1);
+            self.refused_bytes = self.refused_bytes.saturating_add(plaintext.len() as u64);
+        }
+        result
+    }
+
+    fn write_chunk(
         &mut self,
         direction: Direction,
         dropped: bool,
@@ -426,7 +494,8 @@ impl TranscriptWriter {
         Ok(())
     }
 
-    /// Finalize the manifest for the chunks written so far.
+    /// Finalize the manifest for the chunks written so far, carrying forward
+    /// how many were refused so the artifact declares its own completeness.
     pub fn seal(self) -> TranscriptManifest {
         let mut manifest = TranscriptManifest {
             format_version: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
@@ -437,6 +506,8 @@ impl TranscriptWriter {
             wrapped_data_key_b64: self.wrapped_data_key_b64,
             recipient: self.recipient,
             chunks: self.chunks,
+            refused_chunks: self.refused_chunks,
+            refused_bytes: self.refused_bytes,
             sealed_root_hex: String::new(),
         };
         manifest.sealed_root_hex =
@@ -525,6 +596,8 @@ mod tests {
             wrapped_data_key_b64: String::new(),
             recipient: "host-key-1".to_string(),
             chunks,
+            refused_chunks: 0,
+            refused_bytes: 0,
             sealed_root_hex: String::new(),
         };
         manifest.sealed_root_hex = sealed_root_hex(&manifest).unwrap();
@@ -611,7 +684,27 @@ mod tests {
         let m = two_chunk_manifest();
         assert_eq!(
             m.sealed_root_hex,
-            "73b077cace4f804b2d2d83d293d12a0d63a398423bad12c611eb633b15c90206"
+            "1c0d5a649e45081b0f2ac16d30744b97aff3117002717719e9ba1601d9ca1c29"
+        );
+    }
+
+    /// The root `sealed_root_vector_is_pinned` pinned before the manifest
+    /// grew `refused_chunks`/`refused_bytes`.
+    const PRE_REFUSAL_ROOT_HEX: &str =
+        "73b077cace4f804b2d2d83d293d12a0d63a398423bad12c611eb633b15c90206";
+
+    #[test]
+    fn a_manifest_sealed_before_the_refusal_count_fails_on_version_not_root() {
+        // The whole reason the format version moved with the field: an honest
+        // old capture must be refused as old, never as tampered.
+        let mut m = manifest_with_root(PRE_REFUSAL_ROOT_HEX);
+        m.format_version = 3;
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::UnknownFormatVersion {
+                got: 3,
+                expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION
+            })
         );
     }
 
@@ -673,7 +766,7 @@ mod tests {
             verify_sealed_root(&m),
             Err(TranscriptError::UnknownFormatVersion {
                 got: 2,
-                expected: 3
+                expected: 4
             })
         );
     }
@@ -925,6 +1018,72 @@ mod tests {
         assert_eq!(
             export(&manifest, dir.path(), &fixed_key(7)).unwrap(),
             b"alloweddenied"
+        );
+    }
+
+    #[test]
+    fn a_complete_capture_declares_itself_complete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = writer_at(dir.path());
+        w.push(Direction::Stdout, b"all of it").expect("push");
+        let manifest = w.seal();
+        assert!(!manifest.is_truncated());
+        assert_eq!(manifest.refused_chunks, 0);
+        assert_eq!(manifest.refused_bytes, 0);
+    }
+
+    #[test]
+    fn a_capture_that_hit_its_bound_seals_as_truncated() {
+        // The forensic failure this exists for: without the refusal count a
+        // capture that stopped at its bound verifies clean and reads as the
+        // whole of a quiet workload's output.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 1 << 20,
+            max_chunks: 1,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        w.push(Direction::Stdout, b"first").expect("first fits");
+        assert!(w.push(Direction::Stdout, b"second").is_err());
+        assert!(w.push_dropped(Direction::Stderr, b"third!").is_err());
+        assert_eq!(w.refused_chunks(), 2);
+        assert_eq!(w.refused_bytes(), 12);
+
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 1);
+        assert!(
+            manifest.is_truncated(),
+            "a manifest missing chunks must say so"
+        );
+        assert_eq!(manifest.refused_chunks, 2);
+        assert_eq!(manifest.refused_bytes, 12);
+        verify_sealed_root(&manifest).expect("a truncated capture still seals a valid root");
+        verify_chunks(&manifest, dir.path()).expect("the chunks that did land verify");
+    }
+
+    #[test]
+    fn hiding_the_refusal_count_breaks_the_sealed_root() {
+        // The count is only worth anything if it cannot be filed off: the root
+        // commits to it, so a truncated capture cannot be passed off as whole.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 1 << 20,
+            max_chunks: 1,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        w.push(Direction::Stdout, b"first").expect("first fits");
+        assert!(w.push(Direction::Stdout, b"second").is_err());
+        let mut manifest = w.seal();
+
+        manifest.refused_chunks = 0;
+        manifest.refused_bytes = 0;
+        assert_eq!(
+            verify_sealed_root(&manifest),
+            Err(TranscriptError::SealedRootMismatch)
         );
     }
 

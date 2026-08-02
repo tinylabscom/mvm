@@ -1051,7 +1051,7 @@ fn a_slow_reader_does_not_stall_ingest() {
 queue drops that reader's oldest and marks its gap — never blocks ingest. This
 is the one place redaction runs.
 
-- [x] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-hostd stream::` — PASS, 26 tests
+- [x] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-hostd stream::` — PASS, 34 tests
   (the 5 required plus fan-out ring bounds, gap anchoring, transcript
   round-trip, persist-failure isolation, and the payload-free subscribe audit).
 
@@ -1061,6 +1061,28 @@ is the one place redaction runs.
 git add crates/mvm-hostd/src/stream crates/mvm-hostd/src/lib.rs
 git commit -m "feat(hostd): stream broker with redaction, chaining, and fan-out"
 ```
+
+- [x] **Step 6: Review fixes (round 1)** — three defects, all closed:
+
+1. *A pruned reader could not verify its own window.* `ReaderQueue` now keeps
+   the hash of the newest evicted record, and `ReaderHandle::anchor()` returns
+   it once a loss has happened, so `verify_chain_from(window, handle.anchor())`
+   works for a lone follower. `attach_anchor()` exposes the pre-loss value.
+2. *`seal()` discarded the truncation evidence.* `TranscriptWriter` counts
+   every chunk it refused, `TranscriptManifest` carries `refused_chunks` /
+   `refused_bytes` + `is_truncated()`, and the sealed root commits to both, so
+   the count cannot be filed off. Manifest format version 3 → 4, so an old
+   capture is refused as old rather than as tampered.
+3. *The single redaction seam was a convention.* `StreamRedaction` is a
+   newtype over a private `Box<dyn StreamRedactor>` whose only production
+   constructor installs the curated ruleset; `with_redactor` is gone.
+   `xtask check-stream-redaction-seam` pins the seam shape, the broker's one
+   door, and every construction site.
+
+Folded in with them: the persistence warning is logged once per outage
+(`StreamCounters::persist_lapses`) instead of once per record; the module doc
+no longer claims ingest is free of the durable write's ~200 µs; and
+`RingState::admit_counted` gives the fan-out an allocation-free admission.
 
 ---
 
@@ -1075,9 +1097,11 @@ only thing standing between a chatty workload and inode exhaustion. Task 6 set
 `DEFAULT_CAPTURE_BOUNDS.max_chunks = 4096` for exactly that reason — and 4096
 chunks is under a second of output at the guest pump's per-pipe-read rate. The
 same constant is what makes D3 false of the durable copy: past it the writer
-fails closed and the transcript silently stops, which is the fail-closed
-behaviour this plan set out to replace. The cap cannot be lifted without
-batching, and batching cannot be deferred past the first real caller.
+fails closed and the transcript stops, which is the fail-closed behaviour this
+plan set out to replace. Task 6's fix round made that stop *visible* — the
+sealed manifest carries `refused_chunks` and `is_truncated()` — but visible is
+not the same as not happening. The cap cannot be lifted without batching, and
+batching cannot be deferred past the first real caller.
 
 **Files:**
 - Modify: `crates/mvm-core/src/transcript.rs` (`push_inner`, segment accounting)

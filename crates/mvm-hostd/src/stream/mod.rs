@@ -8,7 +8,10 @@
 //!
 //! - **[`redact`] is the only seam.** Redaction runs before the chain, so
 //!   the chain proves what was *shown*. Storing raw and redacting per
-//!   consumer would make every new consumer a new leak path.
+//!   consumer would make every new consumer a new leak path. A broker can
+//!   only be built over a [`redact::StreamRedaction`], whose one production
+//!   constructor installs the curated ruleset, so "the seam always runs" is
+//!   a type, not a convention.
 //! - **The host owns ordering.** The broker stamps `seq` and
 //!   `host_unix_nanos`; the guest proposes neither.
 //! - **[`fanout`] rings, it never blocks.** A follower that stops draining
@@ -30,4 +33,6 @@ pub use fanout::{
     DEFAULT_READER_BOUNDS, DEFAULT_READER_MAX_BYTES, DEFAULT_READER_MAX_RECORDS, ReaderHandle,
     ReaderStart,
 };
-pub use redact::{REDACTION_FAILED_EVENT, Redacted, RedactionFailed, StreamRedactor};
+pub use redact::{
+    REDACTION_FAILED_EVENT, Redacted, RedactionFailed, StreamRedaction, StreamRedactor,
+};
