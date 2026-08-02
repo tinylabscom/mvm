@@ -122,9 +122,11 @@ for detailed scope and acceptance criteria.
 - [~] Plan 276 — Content-addressing conformance and defense
       (`specs/plans/276-content-addressing-conformance-and-defense.md`)
   - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
-  - [ ] WS1 — reconcile the two claim tier vocabularies (`model/claims.toml`
-        `level` vs ADR claim-frontmatter `status`) so a mistier cannot
-        silently disengage `check-no-overclaim`
+  - [x] WS1 — pin the evidence each claim rests on: `witness_kinds` per claim
+        in `model/claims.toml`, gated by `check-claim-catalog`. The original
+        premise (two tier vocabularies over the same claims) was wrong — the
+        registers share no key; the real gap was that a claim could be
+        delisted from a whole kind of witness with every gate green
   - [x] WS2 — prose over-claim meta-gate, shipped as `xtask check-no-overclaim`
   - [ ] WS3 — replay golden-vector corpus across every content-address surface,
         recording σ and κ where a transform is in play (no corpus in tree;

@@ -89,7 +89,7 @@ Recorded so no workstream re-proposes them.
 - **S7 — an address digest must be collision-resistant; an attestation digest need not be.** MD5, CRC32C and CRC64 are legitimate *attestations* and disqualified as *addresses*. Enforce the distinction with disjoint types and a compile-fail test, not with review — the same posture `mvm_core::semantic_address` already takes by having no conversions between identity families.
 - **S8 — never sign state that cannot be substantiated.** The order is content → index → root → signature → publication. A crash before signing is recoverable; the reverse order forks the chain with no recovery path. This binds WS3's transcript-root vector and any future signed root.
 - **S9 — a reconciliation root is not a commitment.** If distributed transport is ever revisited (recon Phase 3), the fingerprint must be multiset-homomorphic — an XOR aggregation lets a peer withhold arbitrary data by claiming absence, with no collision-finding and no functional-test signal — and an MST page/root digest from a non-cryptographic hash must never be signed. Out of scope here; recorded so it is not rediscovered late.
-- **S6 — one tier vocabulary, or the gates disagree.** Two independent honesty axes are live: `model/claims.toml` `level` (`some-true` | `build` | `open`) and the ADR claim-frontmatter `status` (`Planned` | `Preview` | `Shipped` | `Not-claimed`) that `check-no-overclaim` enforces. Nothing currently checks them against each other, so a claim can read `open` in the register and `Shipped` in its frontmatter — which would silently disengage the over-claim gate on a property that was only ever measured. WS1 exists to close that, and must not introduce a third vocabulary.
+- **S6 — the two honesty registers are separate, and the witness bar is the real gap.** *(Corrected 2026-08-02. The first draft of this said `model/claims.toml` `level` and the ADR claim-frontmatter `status` were two vocabularies over the same claims, and that a claim reading `open` in one and `Shipped` in the other would silently disengage `check-no-overclaim`. That is wrong. They are separate registers with no shared key: the model holds 16 numbered `MVM-SEC-NN` claims keyed by number, the frontmatter holds 3 phrase-gating claims keyed by name — `trust-gradient`, `catalog`, `egress-no-secret-to-guest` — and no claim appears in both. No mistiering of the kind described is reachable.)* The register's honesty half is already enforced: `check-honesty` is the behavioural gate over `open`/`some-true` IDs and `check-conformance` the structural one. What nothing enforced was the **evidence** half — a claim could be delisted from a whole kind of witness with every gate green.
 
 ## Workstreams
 
@@ -99,15 +99,18 @@ Recorded so no workstream re-proposes them.
 - [ ] Record the **σ-set contract** as the address-identity policy (one storage address reachable by ≥1 protocol digest), superseding the earlier "pin SHA-256 as the canonical axis" line. SHA-256 remains what mvm mints on.
 - [ ] Owner moves WS1 + WS3–WS7 into `specs/SPRINT.md` when scheduling; until then they stay Proposed.
 
-### WS1 — Reconcile the claim evidence tiers (U1)
+### WS1 — Pin the evidence each claim rests on (U1)
 
-Scope changed: the tier fields exist, unreconciled (S6). Do not add a `tier:` column.
+Scope corrected twice on contact with the data, and both corrections are worth recording because each was a plausible-sounding rule that the tree refuses.
 
-- [ ] Define the mapping between `model/claims.toml` `level` and ADR claim-frontmatter `status`, and record it in ADR-001 next to the ledger table (the exhaustive pairs, including which combinations are illegal).
-- [ ] Extend `xtask check-claim-catalog` to fail on a claim whose `level` and `status` disagree — specifically, `level = "open"` with `status = "Shipped"`, which would disengage `check-no-overclaim` on a measured-not-asserted property.
-- [ ] Enforce the witness bar per status: `Shipped` requires a live `fn:` **and** `ci:` witness; `Preview` requires ≥1; `open` must not appear in the ADR-001 numbered prose table.
-- [ ] Backfill any claim whose two fields currently disagree; claim 16 (egress-substitution leak-gate) and the OCI-provenance claim are the known promotion-pending cases.
-- [ ] Gate wired into `ci.yml` + `ci-full.yml` Lint; falsifiability row in `VERIFICATION.md` (planted: flip an `open` claim's frontmatter to `Shipped` → gate fires).
+**U1 as written is not implementable here.** It asks that a `shipped` claim carry both a live `fn:` and a live `ci:` witness. Eight of the fifteen `build`-level claims fail that bar today, and for several the failure is structural rather than an oversight: MVM-SEC-04 ("no `do_exec` in a production build") and MVM-SEC-05 (fuzz coverage) are properties of a shipped artifact and a CI lane, observable in CI and nowhere else. Forcing an `fn:` witness for them buys a fabricated test, not assurance. Enforcing one bar across claims that differ in kind is the wrong shape.
+
+**What the tree actually lacked** was any pin on the evidence a claim rests on. `check-claim-catalog` verifies that *listed* witnesses exist, and the ledger cross-check catches a witness removed from one file — but removing it from both `model/claims.toml` and the ADR-001 row, which is how a witness would really be retired, left every gate green. Demonstrated: delisting `ci:seccomp-functional` from both files reported `clean (16 claims, 48 witnesses verified)`, with claim 1 having quietly lost its only CI evidence.
+
+- [x] Add `witness_kinds` to each claim in `model/claims.toml`, declaring the kinds of evidence that claim legitimately rests on, with the non-uniformity explained in the file rather than left implicit.
+- [x] Extend `check-claim-catalog`: every declared kind must have ≥1 live witness, and every present kind must be declared. Dropping a kind becomes an explicit edit to the declaration — visible in review, and reading as the reduction in evidence it is.
+- [x] Falsifiability rows for both directions, each with the planted defect recorded.
+- [ ] Consider whether the three frontmatter claims should also carry a witness declaration; they are gated by phrase today and by nothing else.
 
 ### WS2 — Prose over-claim meta-gate (U2) — shipped
 - [x] `xtask check-no-overclaim` scans user-facing `.md` and `.rs` for phrases gated by a claim whose `status` is not `Shipped`, honouring per-claim `exempt_paths`.
@@ -172,7 +175,19 @@ New scope from the 2026-08-01 revision. Every mvm content-address surface is `Id
 
 ## Sequencing
 
-Reordered by the 2026-08-01 revision. **WS6 first** — integrity-on-read is the unenforced property, and plan 279 WS1 is blocked behind it. **WS3 second**, freezing address behavior before anything else touches it. **WS7 alongside WS3** — the σ/κ types are what WS3's vectors record, and doing it while every transform is still `Identity` is the whole reason it is cheap. Then WS1 (it makes `check-no-overclaim` trustworthy per S6), then WS4 (consumes WS3's corpus). WS5 is independent throughout. WS0's remaining ratification items are paperwork and gate nothing. Each workstream is its own PR.
+**Done:** WS2 (shipped before this plan was written), WS6's dev-build half (#2053), WS1.
+
+**Next, in order:**
+
+1. **WS3 — the replay golden-vector corpus.** The foundational item, and the only one with no substrate in the tree at all: `check-content-address-determinism` pins the `serde_json preserve_order` drift mechanism, not any address. It goes first because it freezes address behaviour before anything else touches it, and because WS4 consumes its corpus.
+2. **WS7 — σ/κ separation**, alongside WS3. The types are what WS3's vectors record, and every surface being `Identity` today is the entire reason this is cheap now and a per-transform-family migration later.
+3. **WS4 — the ≥2-verifier bar.** Blocked on WS3's corpus existing; the verifiers themselves (host, no_std/wasm, riscv32) already do.
+4. **WS5 — falsifiability binding.** Independent of the rest. The mutation surface, the freshness gate and the `VERIFICATION.md` rows all exist, so this is the witness → red-proof binding and nothing more.
+5. **WS6's kernel half** — scoped separately as plan 288, because it needs the published pin threaded through the release surface.
+
+WS0's remaining ratification items are paperwork and gate nothing. Each workstream is its own PR.
+
+**A note for whoever picks these up.** Two of this plan's workstreams turned out to be specified against a tree that did not match the spec: WS2 was already shipped and broader than described, and WS1's premise — two tier vocabularies over the same claims — was simply false, since the two registers share no key. Both were caught by reading the code before writing any, and both corrections are recorded above rather than quietly amended. Treat the remaining descriptions as hypotheses to verify first, not as instructions.
 
 ## Relationship to the build/CAS thread
 

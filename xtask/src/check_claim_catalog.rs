@@ -37,6 +37,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     let mut errors: Vec<String> = Vec::new();
     structural_checks(&rows, &mut errors);
     ledger_witnesses_are_known_to_the_model(&rows, &model_toml, &mut errors);
+    declared_witness_kinds_are_populated(&model_toml, &mut errors);
 
     let mut needles: Vec<Needle> = Vec::new();
     for row in &rows {
@@ -103,6 +104,88 @@ impl Needle {
             found: false,
         }
     }
+}
+
+/// Every kind a claim declares in `witness_kinds` must have at least one
+/// witness of that kind.
+///
+/// The gate this sits beside verifies that *listed* witnesses exist in the
+/// tree, which says nothing about a witness being deleted from the list. A
+/// claim can quietly go from "proved by a test and by a CI lane" to "proved by
+/// a test" with every check still green. Declaring the kinds makes giving one
+/// up an explicit edit to this field rather than a silent deletion.
+///
+/// The kinds are deliberately not uniform across claims — some properties are
+/// only observable in CI (a symbol absent from a release binary), others only
+/// in a unit test — so this enforces each claim's own declaration rather than
+/// one bar for all of them.
+fn declared_witness_kinds_are_populated(model_toml: &str, errors: &mut Vec<String>) {
+    for block in model_toml.split("[[claim]]").skip(1) {
+        let Some(id) = toml_string_field(block, "id") else {
+            continue;
+        };
+        let declared = toml_array_field(block, "witness_kinds");
+        if declared.is_empty() {
+            errors.push(format!(
+                "claim {id}: no `witness_kinds` declared — state which kinds of evidence this \
+                 claim rests on so one cannot be dropped silently"
+            ));
+            continue;
+        }
+        let present = witness_kinds_present(block);
+        for kind in &declared {
+            if !present.contains(kind) {
+                errors.push(format!(
+                    "claim {id}: declares witness kind `{kind}` but has no `{kind}:` witness — \
+                     either restore the witness or drop `{kind}` from `witness_kinds`, which is \
+                     a deliberate reduction in evidence and should read as one"
+                ));
+            }
+        }
+        for kind in &present {
+            if !declared.contains(kind) {
+                errors.push(format!(
+                    "claim {id}: has a `{kind}:` witness that `witness_kinds` does not declare — \
+                     add `{kind}` so the evidence is pinned and cannot be dropped unnoticed"
+                ));
+            }
+        }
+    }
+}
+
+/// The witness kinds actually present in a `[[claim]]` block.
+fn witness_kinds_present(block: &str) -> Vec<String> {
+    let mut kinds = Vec::new();
+    for kind in ["fn", "ci"] {
+        if block.contains(&format!("\"{kind}:")) {
+            kinds.push(kind.to_string());
+        }
+    }
+    kinds
+}
+
+/// Read `name = "value"` out of a `[[claim]]` block.
+fn toml_string_field(block: &str, name: &str) -> Option<String> {
+    let idx = block.find(&format!("{name} = \""))?;
+    let rest = &block[idx + name.len() + 4..];
+    rest.find('"').map(|end| rest[..end].to_string())
+}
+
+/// Read `name = ["a", "b"]` out of a `[[claim]]` block.
+fn toml_array_field(block: &str, name: &str) -> Vec<String> {
+    let Some(idx) = block.find(&format!("{name} = [")) else {
+        return Vec::new();
+    };
+    let rest = &block[idx..];
+    let Some(end) = rest.find(']') else {
+        return Vec::new();
+    };
+    rest[..end]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Every witness the ADR ledger names must also appear in
@@ -437,3 +520,81 @@ mod tests {
 
 #[cfg(test)]
 mod ci_anchor_tests {}
+
+#[cfg(test)]
+mod witness_kind_tests {
+    use super::declared_witness_kinds_are_populated;
+
+    fn claim(id: &str, kinds: &str, witnesses: &[&str]) -> String {
+        let ws = witnesses
+            .iter()
+            .map(|w| format!("    \"{w}\",\n"))
+            .collect::<String>();
+        format!(
+            "[[claim]]\nid = \"{id}\"\nlevel = \"build\"\nwitness_kinds = [{kinds}]\n\
+             suite = \"s\"\nstatement = \"x\"\nwitnesses = [\n{ws}]\n"
+        )
+    }
+
+    fn errors_for(toml: &str) -> Vec<String> {
+        let mut e = Vec::new();
+        declared_witness_kinds_are_populated(toml, &mut e);
+        e
+    }
+
+    #[test]
+    fn a_claim_whose_declared_kinds_are_all_present_is_accepted() {
+        let t = claim("MVM-SEC-01", "\"fn\", \"ci\"", &["fn:a", "ci:b"]);
+        assert!(errors_for(&t).is_empty());
+    }
+
+    #[test]
+    fn declaring_a_kind_with_no_witness_of_that_kind_is_refused() {
+        // The silent-delisting case: the claim still declares CI evidence but
+        // the witness is gone from the list, so nothing else would notice.
+        let t = claim("MVM-SEC-01", "\"fn\", \"ci\"", &["fn:a"]);
+        let e = errors_for(&t);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!(e[0].contains("declares witness kind `ci`"), "{}", e[0]);
+    }
+
+    #[test]
+    fn a_witness_kind_the_claim_does_not_declare_is_refused() {
+        // The converse: evidence that exists but is unpinned can be dropped
+        // again later without the gate objecting.
+        let t = claim("MVM-SEC-08", "\"fn\"", &["fn:a", "ci:b"]);
+        let e = errors_for(&t);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!(e[0].contains("does not declare"), "{}", e[0]);
+    }
+
+    #[test]
+    fn a_claim_with_no_declaration_at_all_is_refused() {
+        let t =
+            "[[claim]]\nid = \"MVM-SEC-99\"\nlevel = \"build\"\nwitnesses = [\n    \"fn:a\",\n]\n";
+        let e = errors_for(t);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!(e[0].contains("no `witness_kinds` declared"), "{}", e[0]);
+    }
+
+    #[test]
+    fn a_ci_only_claim_is_legitimate_and_accepted() {
+        // Not every property has a meaningful unit test. "No `do_exec` symbol
+        // in a production build" is observable in CI and nowhere else, so the
+        // gate must not push toward inventing an `fn:` witness for it.
+        let t = claim("MVM-SEC-04", "\"ci\"", &["ci:prod-agent-no-exec"]);
+        assert!(errors_for(&t).is_empty());
+    }
+
+    #[test]
+    fn each_claim_is_checked_independently() {
+        let t = format!(
+            "{}{}",
+            claim("MVM-SEC-01", "\"fn\", \"ci\"", &["fn:a", "ci:b"]),
+            claim("MVM-SEC-02", "\"fn\", \"ci\"", &["fn:c"])
+        );
+        let e = errors_for(&t);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!(e[0].contains("MVM-SEC-02"), "{}", e[0]);
+    }
+}

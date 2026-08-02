@@ -159,7 +159,16 @@
       directions are enforced by tests that parse the specific named nix list;
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
-- [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
+- [x] Claim evidence pinned — **plan 276 WS1**. Each claim in
+      `model/claims.toml` now declares the `witness_kinds` it rests on, and
+      `check-claim-catalog` fails if a declared kind has no live witness, or if
+      a present kind is undeclared. Retiring a witness is now an explicit edit
+      to that declaration rather than a deletion nothing notices. Before this,
+      delisting a witness from both the model and the ADR-001 ledger left the
+      board green — claim 1 lost its only CI evidence and the run still
+      reported `clean (16 claims, 48 witnesses verified)`.
+
+- [~] Build cache verify-on-read — **plan 276 WS6**. `~/.mvm/dev/builds/
       <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
       digest, no signature, so content substitution went undetected and the
       provenance recorder then signed whatever bytes were on disk — the audit
