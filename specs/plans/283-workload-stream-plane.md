@@ -1467,6 +1467,63 @@ git commit -am "feat(cli): stream logs from the broker and attach on run"
 
 ---
 
+### Task 9b: construct the stream plane in production
+
+Added during execution. Every piece of the plane now exists and **nothing runs
+it**: `StreamBroker::new` and `serve_stream` have zero non-test callers, and
+`ConsoleStreamer` has no real implementation. Tasks 6 and 7 each deferred the
+production wiring to Task 9; Task 9 found the same gap and deferred it again.
+Phase 1's exit criterion cannot be met until this lands, because a `logs -f`
+with no broker to read falls through to the degraded host-local console tail
+every time.
+
+**Files:**
+- Modify: `crates/mvm-hostd/src/broker/daemon.rs` (per-tenant resident daemon)
+- Modify: `crates/mvm-hostd/src/stream/` (a real `ConsoleStreamer` impl)
+- Modify: the per-VM start path that already registers standing sockets
+
+**Interfaces:**
+- Consumes: `StreamBroker::new(vm, writer, StreamRedaction::curated())`,
+  `serve_stream`, `ConsoleSource::follow`, `stream_capture_config`.
+- Produces: a broker per running VM, its socket served at
+  `config::vm_stream_socket`, and the console source attached — created on VM
+  start, torn down on stop.
+
+- [ ] **Step 1: Write the failing test**
+
+An integration test that starts a workload through the normal path and asserts
+a stream socket exists and serves records, without the test constructing a
+broker itself. It must fail today.
+
+- [ ] **Step 2: Run to verify it fails** — FAIL, no socket.
+
+- [ ] **Step 3: Implement the lifetime.** The broker is resident per tenant
+  (`broker/daemon.rs:3` — "one daemon per tenant, not one process per VM"), so
+  a per-VM broker's life is bounded by VM registration, not by a process.
+  Construct through `stream_capture_config`: it is the single door for ring and
+  bounds and still has no production caller, so nothing yet forces the ring
+  semantics the durable path depends on.
+
+- [ ] **Step 4: Attach the console source** through the real `ConsoleStreamer`
+  impl that Task 7's trait inversion exists for — unconditionally, never
+  admission-gated.
+
+- [ ] **Step 5: Tear down cleanly.** A stopped VM releases its broker, seals its
+  transcript, and stops its follower without losing buffered bytes or wedging
+  on a follower that stopped reading.
+
+- [ ] **Step 6: Verify the degraded fallback is now the exception.** With a real
+  producer, `logs -f` must read the broker rather than the host-local console
+  tail. Assert which source served the read.
+
+- [ ] **Step 7: Commit**
+
+```sh
+git commit -am "feat(hostd): construct the stream plane on VM start"
+```
+
+---
+
 ### Task 10: retention mode in the signed plan, plus Phase 1 documentation
 
 **Files:**
