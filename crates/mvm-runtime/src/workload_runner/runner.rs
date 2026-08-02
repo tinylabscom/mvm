@@ -461,9 +461,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
     /// the child's rootfs from the parent's own verified content; run the
     /// host-side overlay-contract gate, spawn the child's own 0700 substitution
     /// endpoint keyed on its fresh id, resolve its host channel set and register
-    /// its host-services broker; then fork the VMM and require the restored
-    /// guest to prove it adopted a fresh VMGenID before the claim commits, so
-    /// the child's CSPRNG diverges from the parent's.
+    /// its host-services broker; then fork the VMM, start following its console
+    /// (the only channel that would show a hang or panic inside the handshake
+    /// window that follows), and require the restored guest to prove it adopted
+    /// a fresh VMGenID before the claim commits, so the child's CSPRNG diverges
+    /// from the parent's.
     ///
     /// The host-side plumbing is deliberately all on the near side of the fork.
     /// A cold boot has a kernel boot between wiring its channels and the guest
@@ -584,6 +586,15 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             channels: &channels,
         })?;
 
+        // Unconditional and best-effort, mirroring `start_workload`: started
+        // the moment the restored guest is live, before the fallible
+        // post-restore handshake below. A cold boot has a kernel boot to
+        // blame a silent hang on; a fork has none — the guest is already
+        // running the instant the fork resumes it — so the handshake window
+        // this call precedes is the one place a restore can wedge or panic
+        // with nothing else to show why.
+        self.console_streamer.start(&child.0, &socks.console_log);
+
         // (7) Close that window before the claim commits: deliver the token to
         // the now-reachable guest and make it prove, on its own report, that it
         // rotated its generation identity and took the host's clock. Two children
@@ -593,7 +604,12 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         if let Err(refusal) = self.take_fresh_child_identity(&child.0, token, grant_envelope) {
             // The child is live and still carrying its parent's random state.
             // Unwinding alone would leave running exactly the VM this refusal
-            // exists to prevent, so stop it before returning.
+            // exists to prevent, so stop it before returning. `force_stop`
+            // only tears down the VMM, not the console follower this claim
+            // started above and `VmBackend::stop` never runs for a name that
+            // is refused here and never becomes live state, so this is the
+            // one place responsible for reaping it.
+            self.console_streamer.stop(&child.0);
             self.force_stop(&child.0, "refused forked standby child");
             return Err(refusal);
         }
@@ -3479,6 +3495,11 @@ mod tests {
         driver: MockDriver,
         parent_state: StandbyState,
         orphan_child_dirs: usize,
+        /// Records every `ConsoleStreamer::start`/`stop` the claim made, so a
+        /// test can prove the console follower was wired into `claim_standby`
+        /// itself, not only the cold-boot path — every existing caller of this
+        /// helper ignores the field, so threading it through costs them nothing.
+        console_streamer: Arc<RecordingConsoleStreamer>,
     }
 
     /// Drive one full claim over a clean audited parent against `driver`, whose
@@ -3518,11 +3539,13 @@ mod tests {
         );
 
         let probe = driver.clone();
+        let streamer = Arc::new(RecordingConsoleStreamer::default());
         let runner = WorkloadRunner::new(
             driver,
             KeyingSpawner::default(),
             RecordingBrokerRegistrar::new(),
-        );
+        )
+        .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
         let ctx = ClaimContext {
             pool: &pool,
             checkpoints: &checkpoints,
@@ -3539,6 +3562,7 @@ mod tests {
             driver: probe,
             parent_state: pool.load("warm-parent").unwrap().state,
             orphan_child_dirs: orphan_child_dirs(),
+            console_streamer: streamer,
         }
     }
 
@@ -3642,6 +3666,94 @@ mod tests {
         assert_eq!(
             delivered[0].token, forks[0].genid.token,
             "the delivered token is the one the fork minted"
+        );
+    }
+
+    /// The standby-fork analogue of
+    /// `start_workload_starts_console_streaming_and_stop_tears_it_down_without_losing_bytes`:
+    /// a claim that commits must have started console streaming for the
+    /// child's own fresh name, at the same console-log path a cold boot would
+    /// use.
+    #[test]
+    fn claim_standby_starts_console_streaming_for_the_committed_child() {
+        let out = claim_with_scripted_handshake(MockDriver::default());
+        let child = out.result.expect("a clean handshake commits the claim");
+
+        // Not compared against a freshly-recomputed `vm_state_dir(&child.0)`:
+        // that helper's `MVM_HOME` override is already unwound by the time this
+        // assertion runs, so a second computation here would silently drift to
+        // the real (un-isolated) home instead of proving anything. The path's
+        // *shape* -- console.log directly under a dir named for the child --
+        // is what `standing_sockets` actually guarantees, isolation or not.
+        let started = out.console_streamer.started.lock().unwrap();
+        assert_eq!(
+            started.len(),
+            1,
+            "console streaming must start exactly once"
+        );
+        assert_eq!(started[0].0, child.0);
+        assert_eq!(
+            started[0].1.file_name(),
+            Some(std::ffi::OsStr::new("console.log"))
+        );
+        assert_eq!(
+            started[0].1.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new(child.0.as_str())),
+            "the console log must live under the child's own state dir, not the parent's"
+        );
+        drop(started);
+        assert!(
+            out.console_streamer.stopped.lock().unwrap().is_empty(),
+            "a committed claim leaves the console streamer running for the \
+             ordinary VmBackend::stop path to tear down later, exactly like a \
+             cold boot"
+        );
+    }
+
+    /// A restored child that never proves a fresh identity fails inside a real
+    /// window: the post-restore handshake, where the guest is already live but
+    /// not yet admitted. Without a console follower running through that
+    /// window, a hang or panic there leaves an operator with nothing but an
+    /// opaque `ClaimFailed` string. Also proves the follower is torn down on
+    /// refusal rather than leaked -- `force_stop` only kills the VMM, so
+    /// `claim_standby` itself must reap the streamer it started.
+    #[test]
+    fn claim_standby_stops_console_streaming_when_the_post_restore_handshake_is_refused() {
+        let out =
+            claim_with_scripted_handshake(MockDriver::default().with_unreachable_child_agent());
+        let err = out
+            .result
+            .expect_err("an unanswered handshake must refuse the claim");
+        assert!(matches!(err, StandbyError::ClaimFailed(_)));
+
+        let forks = out.driver.forked_children();
+        assert_eq!(
+            forks.len(),
+            1,
+            "the child was forked and resumed before the handshake ran"
+        );
+        let child_name = forks[0].child_vm_name.clone();
+
+        // Started while the child was live -- the only way an operator would
+        // see a hang or panic inside the handshake window this refusal covers.
+        let started = out.console_streamer.started.lock().unwrap();
+        assert_eq!(
+            started.len(),
+            1,
+            "console streaming must have started for the forked child"
+        );
+        assert_eq!(started[0].0, child_name);
+        assert_eq!(
+            started[0].1.parent().and_then(|p| p.file_name()),
+            Some(std::ffi::OsStr::new(child_name.as_str())),
+            "the console log must live under the child's own state dir"
+        );
+        drop(started);
+        // ...and stopped once the claim gave up on it, so the follower thread
+        // does not outlive a child that was never admitted.
+        assert_eq!(
+            out.console_streamer.stopped.lock().unwrap().as_slice(),
+            [child_name]
         );
     }
 

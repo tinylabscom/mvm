@@ -21,9 +21,16 @@
 //! production guest must never gain one); nothing here adds one — it reads a
 //! plain file the backend already writes, the same way any other log reader
 //! would.
+//!
+//! **Fails closed on spawn, not open.** [`ConsoleSource::follow`] reports a
+//! thread-spawn failure as `Err` rather than panicking. Fd/thread exhaustion
+//! is the realistic cause, which is exactly the resource-starved state an
+//! operator most needs this stream in — panicking there would take down
+//! whatever booted the workload instead of just leaving that one workload
+//! without a console stream.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,18 +65,52 @@ impl ConsoleSource {
     /// Start following `path` on a dedicated thread. Returns immediately;
     /// `path` need not exist yet — see the module docs on the boot-failure
     /// case this exists for.
-    pub fn follow(path: &Path, broker: SharedBroker) -> ConsoleSourceHandle {
+    ///
+    /// Returns `Err` if the OS refuses to create the follower thread instead
+    /// of panicking — fd/thread exhaustion is the realistic cause, and that
+    /// is precisely the resource-starved state an operator most needs this
+    /// stream in. This function already logs the reason before returning it,
+    /// so the failure is visible even to a caller that only matches `Err`
+    /// and moves on; a caller must do exactly that (log-and-continue, the
+    /// same best-effort contract the runtime's `ConsoleStreamer::start` hook
+    /// documents) rather than propagate it into a workload boot failure over
+    /// what is, at bottom, an observability feature.
+    pub fn follow(path: &Path, broker: SharedBroker) -> io::Result<ConsoleSourceHandle> {
+        Self::follow_with(std::thread::Builder::new(), path, broker)
+    }
+
+    /// Same as [`follow`](Self::follow), parameterized on the thread
+    /// `Builder` to spawn on — the seam a test uses to force a deterministic
+    /// spawn failure (an unsatisfiable `stack_size`) without exhausting the
+    /// process's real thread/fd limits, which would starve every other test
+    /// running alongside it under full-suite parallelism.
+    fn follow_with(
+        builder: std::thread::Builder,
+        path: &Path,
+        broker: SharedBroker,
+    ) -> io::Result<ConsoleSourceHandle> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let owned_path = path.to_path_buf();
-        let thread = std::thread::Builder::new()
+        let thread = match builder
             .name(format!("mvm-console-source-{}", path.display()))
             .spawn(move || run(&owned_path, &broker, &thread_stop))
-            .expect("spawn console-source follower thread");
-        ConsoleSourceHandle {
+        {
+            Ok(thread) => thread,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "console-source follower thread could not be spawned; \
+                     console capture will not be streamed for this workload"
+                );
+                return Err(err);
+            }
+        };
+        Ok(ConsoleSourceHandle {
             stop,
             thread: Some(thread),
-        }
+        })
     }
 }
 
@@ -279,7 +320,8 @@ mod tests {
     fn bytes_appended_after_follow_starts_reach_the_broker_tagged_console() {
         let fx = broker_fixture("vm-a");
         let mut reader = fx.broker.lock().unwrap().subscribe();
-        let handle = ConsoleSource::follow(&fx.console_path(), Arc::clone(&fx.broker));
+        let handle = ConsoleSource::follow(&fx.console_path(), Arc::clone(&fx.broker))
+            .expect("follow the console log");
 
         std::fs::write(fx.console_path(), b"booting kernel...\n").expect("write console log");
 
@@ -297,7 +339,8 @@ mod tests {
         let path = fx.console_path();
         assert!(!path.exists(), "fixture must not pre-create the file");
 
-        let handle = ConsoleSource::follow(&path, Arc::clone(&fx.broker));
+        let handle =
+            ConsoleSource::follow(&path, Arc::clone(&fx.broker)).expect("follow the console log");
 
         // Give the follower a couple of poll ticks against the absent file —
         // proving it neither panics nor errors out permanently.
@@ -319,7 +362,8 @@ mod tests {
         let path = fx.console_path();
         std::fs::write(&path, b"line one\n").expect("write console log");
 
-        let handle = ConsoleSource::follow(&path, Arc::clone(&fx.broker));
+        let handle =
+            ConsoleSource::follow(&path, Arc::clone(&fx.broker)).expect("follow the console log");
         let record = wait_for(Duration::from_secs(5), || reader.recv());
         assert_eq!(record.payload, b"line one\n");
 
@@ -331,6 +375,42 @@ mod tests {
         std::fs::write(&path, b"line two\n").expect("append after stop");
         std::thread::sleep(POLL_INTERVAL * 3);
         assert_eq!(fx.broker.lock().unwrap().counters().ingested, 1);
+    }
+
+    // --- spawn failure ------------------------------------------------------
+
+    /// Before this fix, an unspawnable follower thread panicked via
+    /// `.expect(...)` — exactly the fd/thread-exhaustion condition an
+    /// operator most needs the console stream for. Forces that OS-level
+    /// failure deterministically (an unsatisfiable `stack_size`, which
+    /// `std::thread::Builder::spawn` rejects with an `Err` before it ever
+    /// asks the OS for real thread/fd resources) rather than by starving the
+    /// test process of real threads, which would also wedge every other test
+    /// running alongside this one under full-suite parallelism.
+    #[test]
+    fn follow_returns_err_instead_of_panicking_when_the_thread_cannot_be_spawned() {
+        let fx = broker_fixture("vm-spawn-fail");
+        let path = fx.console_path();
+
+        let doomed = std::thread::Builder::new().stack_size(usize::MAX);
+        let result = ConsoleSource::follow_with(doomed, &path, Arc::clone(&fx.broker));
+        assert!(
+            result.is_err(),
+            "an unspawnable follower thread must surface as Err, not a panic"
+        );
+
+        // Not contagious: a normal follow against the same path and broker
+        // right after the failed attempt still works, proving nothing was
+        // left poisoned or half-initialized by it — the process (and, by
+        // extension, the workload that would have booted alongside it) just
+        // keeps running.
+        let mut reader = fx.broker.lock().unwrap().subscribe();
+        let handle = ConsoleSource::follow(&path, Arc::clone(&fx.broker))
+            .expect("a normal-stack follow must still succeed");
+        std::fs::write(&path, b"still working\n").expect("write console log");
+        let record = wait_for(Duration::from_secs(5), || reader.recv());
+        assert_eq!(record.payload, b"still working\n");
+        handle.stop();
     }
 
     // --- truncation / rotation --------------------------------------------
