@@ -479,6 +479,15 @@ pub enum AgentRequest {
         instance_id: String,
         action: InstanceAction,
     },
+    /// Start an instance with fleet-resolved encrypted block volumes.
+    StartInstanceWithBlockVolumes {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        #[serde(default)]
+        workspace_id: Option<String>,
+        volumes: Vec<crate::instance::BlockVolumeAttach>,
+    },
     /// Forward a sandbox operation (filesystem, exec, logs) to the guest agent.
     SandboxAction {
         tenant_id: String,
@@ -2087,6 +2096,22 @@ mod tests {
                 pool_id: "p1".to_string(),
                 instance_id: "i1".to_string(),
                 action: InstanceAction::Start,
+            },
+            AgentRequest::StartInstanceWithBlockVolumes {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                volumes: vec![crate::instance::BlockVolumeAttach {
+                    org_id: "org1".to_string(),
+                    workspace_id: "ws1".to_string(),
+                    volume_id: "vol1".to_string(),
+                    guest_path: "/data".to_string(),
+                    read_only: false,
+                    encrypted: true,
+                    fencing_token: 1,
+                    data_key_version: 1,
+                }],
             },
             AgentRequest::SandboxAction {
                 tenant_id: "t1".to_string(),

@@ -42,6 +42,57 @@ pub struct VolumeAttach {
     pub mode: VolumeMode,
 }
 
+/// Fleet-resolved block volume attached to an instance at boot.
+///
+/// This carries only identity and admitted mount intent. Provider credentials,
+/// encryption keys, object names, and host paths are deliberately absent; the
+/// mvmd worker resolves its local encrypted image from these identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlockVolumeAttach {
+    pub org_id: String,
+    pub workspace_id: String,
+    pub volume_id: String,
+    pub guest_path: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub encrypted: bool,
+    /// Exclusive-writer epoch admitted by the fleet control plane.
+    pub fencing_token: u64,
+    /// Version of the resource data-key derivation used by this image.
+    pub data_key_version: u32,
+}
+
+impl BlockVolumeAttach {
+    /// Reject malformed or unsafe identity and mount intent before dispatch.
+    pub fn validate(&self) -> Result<()> {
+        for (label, value) in [
+            ("org_id", self.org_id.as_str()),
+            ("workspace_id", self.workspace_id.as_str()),
+            ("volume_id", self.volume_id.as_str()),
+        ] {
+            if value.is_empty()
+                || value.len() > 128
+                || !value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                bail!("{label} is not a valid volume identity");
+            }
+        }
+        crate::crypto::policy::validate_mount_path(&self.guest_path)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        if self.fencing_token == 0 {
+            bail!("fencing_token must be non-zero");
+        }
+        if self.data_key_version == 0 {
+            bail!("data_key_version must be non-zero");
+        }
+        Ok(())
+    }
+}
+
 /// Workload class — drives sleep policy, auto-provision rules, and
 /// resource defaults. Sandbox is the user-controlled ephemeral default;
 /// Service is workspace-owned, auto-provisioned, long-running (e.g. the
@@ -825,6 +876,50 @@ mod tests {
         let json = serde_json::to_string(&attach).unwrap();
         let parsed: VolumeAttach = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, attach);
+    }
+
+    #[test]
+    fn block_volume_attach_validates_and_carries_no_secrets_or_paths() {
+        let attach = BlockVolumeAttach {
+            org_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            volume_id: "vol-1".into(),
+            guest_path: "/data".into(),
+            read_only: false,
+            encrypted: true,
+            fencing_token: 4,
+            data_key_version: 1,
+        };
+        attach.validate().unwrap();
+        let json = serde_json::to_string(&attach).unwrap();
+        assert!(!json.contains("credential"));
+        assert!(!json.contains("encryption_key"));
+        assert!(!json.contains("host_path"));
+        assert_eq!(
+            serde_json::from_str::<BlockVolumeAttach>(&json).unwrap(),
+            attach
+        );
+    }
+
+    #[test]
+    fn block_volume_attach_rejects_bad_identity_path_and_epoch() {
+        let mut attach = BlockVolumeAttach {
+            org_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            volume_id: "../vol".into(),
+            guest_path: "/data".into(),
+            read_only: true,
+            encrypted: true,
+            fencing_token: 1,
+            data_key_version: 1,
+        };
+        assert!(attach.validate().is_err());
+        attach.volume_id = "vol-1".into();
+        attach.guest_path = "/etc".into();
+        assert!(attach.validate().is_err());
+        attach.guest_path = "/data".into();
+        attach.fencing_token = 0;
+        assert!(attach.validate().is_err());
     }
 
     // ------------- DesiredInstance -------------

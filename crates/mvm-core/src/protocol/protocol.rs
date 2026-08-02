@@ -87,6 +87,15 @@ pub enum HostdRequest {
         #[serde(default)]
         volumes: Vec<VolumeAttach>,
     },
+    /// Start with exclusive fleet block volumes already materialized locally.
+    StartInstanceWithBlockVolumes {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        #[serde(default)]
+        workspace_id: Option<String>,
+        volumes: Vec<crate::instance::BlockVolumeAttach>,
+    },
     /// Stop a running instance (kill FC, teardown cgroup, TAP).
     StopInstance {
         tenant_id: String,
@@ -367,6 +376,36 @@ mod tests {
             }
             _ => panic!("Wrong variant"),
         }
+    }
+
+    #[test]
+    fn hostd_block_volume_start_roundtrip_has_no_secret_material() {
+        let request = HostdRequest::StartInstanceWithBlockVolumes {
+            tenant_id: "tenant-1".into(),
+            pool_id: "pool-1".into(),
+            instance_id: "inst-1".into(),
+            workspace_id: Some("ws-1".into()),
+            volumes: vec![crate::instance::BlockVolumeAttach {
+                org_id: "org-1".into(),
+                workspace_id: "ws-1".into(),
+                volume_id: "vol-1".into(),
+                guest_path: "/data".into(),
+                read_only: false,
+                encrypted: true,
+                fencing_token: 8,
+                data_key_version: 1,
+            }],
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("credential"));
+        assert!(!json.contains("encryption_key"));
+        assert!(!json.contains("host_path"));
+        let parsed: HostdRequest = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed,
+            HostdRequest::StartInstanceWithBlockVolumes { volumes, .. }
+                if volumes.len() == 1 && volumes[0].fencing_token == 8
+        ));
     }
 
     #[test]
