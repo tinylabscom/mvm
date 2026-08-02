@@ -260,13 +260,15 @@ let
 
     # Every supported VMM exposes one uniform guest-memory node and direct
     # virtio DMA. There is no physical contiguous-memory consumer, Qualcomm
-    # IPC transport, SCSI-generic block endpoint, UDP-Lite contract, or raw
-    # link-layer device behind the host-mediated network boundary.
+    # IPC transport, SCSI-generic block endpoint, or raw link-layer device
+    # behind the host-mediated network boundary. UDP-Lite remains because Linux
+    # builds it as part of the required INET core rather than behind a Kconfig
+    # selector.
     "NUMA"
     "CMA"
     "QRTR"
-    "BLK_DEV_BSG"
-    "IP_UDP_LITE"
+    "BLK_DEV_BSG_COMMON"
+    "BLK_DEV_BSGLIB"
     "PACKET"
 
     # No guest agent consumes process accounting, file-handle syscalls, the

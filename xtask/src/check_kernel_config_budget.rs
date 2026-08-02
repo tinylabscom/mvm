@@ -38,9 +38,9 @@ use std::path::Path;
 /// physical-network, SoC, filesystem, tracing/debug, kexec/hibernate, legacy
 /// crypto, power-management, task-accounting, NetLabel and unprovisioned
 /// swap/huge-page families. Resolved Linux 6.12.100 configs contain exactly
-/// 938 aarch64 and 902 x86_64 built-ins. PCI, virtio-net, virtio-balloon, KVM
+/// 936 aarch64 and 902 x86_64 built-ins. PCI, virtio-net, virtio-balloon, KVM
 /// time, and x86 ACPI core remain because supported backends exercise them.
-const BUDGET_AARCH64: usize = 938;
+const BUDGET_AARCH64: usize = 936;
 const BUDGET_X86_64: usize = 902;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →

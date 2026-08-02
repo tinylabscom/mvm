@@ -1,6 +1,6 @@
 # Plan 286 — Drive the guest kernel toward its hardware floor
 
-**Status:** IN PROGRESS
+**Status:** IMPLEMENTATION COMPLETE — CI AND LANDING IN PROGRESS
 **Opened:** 2026-08-02
 
 ## Goal
@@ -28,7 +28,7 @@ x86_64 built-ins in a 7,656,448-byte `bzImage`, and 1,314 aarch64 built-ins in a
       explicit supported-backend hardware contract.
 - [x] Remove x86 physical-PC, laptop, non-KVM guest, VGA, DVFS and appliance ACPI
       leaves while retaining ACPI core, PCI, KVM paravirtualization and ttyS0.
-- [x] Resolve and ratchet both architecture configs: 902 x86_64 and 938
+- [x] Resolve and ratchet both architecture configs: 902 x86_64 and 936
       aarch64 built-ins.
 - [x] Build the x86_64 workload kernel and verify its 4,072,448-byte image boots
       under Firecracker 1.14.1 on KVM through the production ELF extraction
@@ -39,8 +39,10 @@ x86_64 built-ins in a 7,656,448-byte `bzImage`, and 1,314 aarch64 built-ins in a
 - [x] Build the 955-symbol, 4,977,664-byte builder kernel; verify its Nix
       sandbox/network/filesystem features remain present and boot it to PID 1
       under Firecracker.
-- [ ] Build the native aarch64 workload artifact and boot the ARM image through
-      the supported HVF/VZ path.
+- [x] Build the native aarch64 workload artifact and boot the ARM image through
+      the supported HVF path. The checksum-verified PR artifact contains 938
+      built-ins in an 8,216,584-byte `Image`; the raw-HVF block-root harness
+      reached `Run /init as init process` at 26.7 ms.
 - [x] Run format, workspace tests/check, Linux all-target clippy and Nix checks;
       record the final byte and symbol deltas in the sprint and refactor rollup.
 
