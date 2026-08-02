@@ -27,6 +27,11 @@ pub use segment::{SEGMENT_MAX_CHUNKS, SEGMENT_MAX_CIPHERTEXT_BYTES};
 /// Filename of the host transcript key-encryption key, under the keys dir.
 pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 
+/// Filename of the sealed manifest inside a capture directory. Shared by every
+/// side that names it — the operator CLI, the supervisor's capture sink, and
+/// the stream reader — so a capture written by one is found by the others.
+pub const MANIFEST_FILENAME: &str = "manifest.json";
+
 /// Current sealed-transcript manifest format. Unknown versions fail closed.
 ///
 /// Bumped 2 -> 3 when `ChunkRecord` grew `prev_hash`: that field is part of
@@ -611,20 +616,40 @@ impl TranscriptWriter {
     }
 }
 
-/// Verify a sealed transcript and decrypt its chunks back to the original
-/// plaintext stream. Integrity is checked first ([`verify_chunks`]); a wrong
-/// key or tampered ciphertext fails closed on decrypt.
-pub fn export(
+/// One decrypted chunk, still carrying the metadata the manifest recorded for
+/// it.
+///
+/// [`export`] concatenates a capture into one byte run, which is what a
+/// forensic dump wants and exactly wrong for a workload's output: a consumer
+/// rendering stdout separately from stderr, or resuming at a sequence number,
+/// needs the boundaries back. Both readers decrypt through the same verified
+/// path — see [`export_chunks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedChunk {
+    /// Capture-local sequence number, as issued by the writer. Monotonic
+    /// across ring eviction, so a hole in this run is a real hole.
+    pub seq: u64,
+    pub direction: Direction,
+    /// Whether egress policy denied the frame rather than forwarding it.
+    pub dropped: bool,
+    pub plaintext: Vec<u8>,
+}
+
+/// Verify a sealed transcript and decrypt it chunk by chunk, preserving each
+/// chunk's sequence number and direction. Integrity is checked first
+/// ([`verify_sealed_root`] then [`verify_chunks`]); a wrong key or tampered
+/// ciphertext fails closed on decrypt.
+pub fn export_chunks(
     manifest: &TranscriptManifest,
     dir: &Path,
     key: &aead::Key,
-) -> Result<Vec<u8>, TranscriptError> {
+) -> Result<Vec<ExportedChunk>, TranscriptError> {
     verify_sealed_root(manifest)?;
     verify_chunks(manifest, dir)?;
     // Verification proved every segment is exactly as long as its records
     // account for, so each read below is bounded by bytes already on disk and
     // each slice is in range.
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(manifest.chunks.len());
     for span in segment::segment_spans(&manifest.chunks)? {
         let bytes = std::fs::read(dir.join(span.file)).map_err(|e| TranscriptError::Io {
             file: span.file.to_string(),
@@ -636,8 +661,32 @@ pub fn export(
                 seq: chunk.seq,
                 file: chunk.file.clone(),
             })?;
-            out.extend_from_slice(&plaintext);
+            out.push(ExportedChunk {
+                seq: chunk.seq,
+                direction: chunk.direction,
+                dropped: chunk.dropped,
+                plaintext,
+            });
         }
+    }
+    // Segments are visited in manifest order, which is append order, so the
+    // run is already sorted; stating it here keeps a future out-of-order
+    // segment layout from silently reordering a capture.
+    debug_assert!(out.windows(2).all(|w| w[0].seq < w[1].seq));
+    Ok(out)
+}
+
+/// Verify a sealed transcript and decrypt its chunks back to the original
+/// plaintext stream. Integrity is checked first ([`verify_chunks`]); a wrong
+/// key or tampered ciphertext fails closed on decrypt.
+pub fn export(
+    manifest: &TranscriptManifest,
+    dir: &Path,
+    key: &aead::Key,
+) -> Result<Vec<u8>, TranscriptError> {
+    let mut out = Vec::new();
+    for chunk in export_chunks(manifest, dir, key)? {
+        out.extend_from_slice(&chunk.plaintext);
     }
     Ok(out)
 }
@@ -646,14 +695,30 @@ pub fn export(
 /// (mode 0600) on first use. Every per-capture data key is wrapped under this
 /// KEK so payloads stay unreadable without host access.
 pub fn load_or_init_kek(keys_dir: &Path) -> std::io::Result<aead::Key> {
-    let path = keys_dir.join(TRANSCRIPT_KEK_FILENAME);
-    if path.exists() {
-        return aead::Key::load(&path);
+    if let Some(kek) = load_kek(keys_dir)? {
+        return Ok(kek);
     }
-    std::fs::create_dir_all(keys_dir)?;
     let kek = aead::Key::random();
-    kek.persist(&path, 0o600)?;
+    std::fs::create_dir_all(keys_dir)?;
+    kek.persist(&keys_dir.join(TRANSCRIPT_KEK_FILENAME), 0o600)?;
     Ok(kek)
+}
+
+/// Load the host transcript KEK if it exists, without creating one.
+///
+/// The read-only half of [`load_or_init_kek`], for a caller that only wants to
+/// *open* a capture. Minting a KEK from a read path is worse than failing:
+/// every existing capture's wrapped data key was sealed under the old one, so
+/// the new key turns a missing-key problem into a permanent decrypt failure —
+/// and a second process minting concurrently makes it non-deterministic which
+/// one wins.
+pub fn load_kek(keys_dir: &Path) -> std::io::Result<Option<aead::Key>> {
+    let path = keys_dir.join(TRANSCRIPT_KEK_FILENAME);
+    match std::fs::metadata(&path) {
+        Ok(_) => aead::Key::load(&path).map(Some),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 /// Wrap a per-capture data key under the host KEK, base64 for the manifest's

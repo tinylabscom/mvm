@@ -10,7 +10,7 @@ use std::{fmt, io};
 use mvm_protocol::stream::{ChainError, StreamRecord, verify_chain_from};
 
 use crate::config;
-use crate::transcript::GapMarker;
+use crate::transcript::{Direction, GapMarker, TranscriptError};
 
 use super::opts::StreamOpts;
 use super::wire::{MAX_FRAME_BYTES, StreamBatch, read_batch};
@@ -38,6 +38,53 @@ pub enum StreamError {
     /// break would render tampering as the end of output.
     #[error("stream window failed chain verification: {0}")]
     Chain(#[from] ChainError),
+    /// No source answered: no broker is serving this microVM, it has no
+    /// durable transcript, and no console capture exists for it either.
+    #[error(
+        "no output capture for microVM `{vm}`: no live broker at {}, no transcript at {}, \
+         and no console capture at {}",
+        socket.display(),
+        transcript.display(),
+        console.display()
+    )]
+    NoCapture {
+        /// The microVM the consumer asked for.
+        vm: String,
+        /// The broker socket that was dialled.
+        socket: PathBuf,
+        /// The capture directory that was looked in.
+        transcript: PathBuf,
+        /// The console capture that was looked for.
+        console: PathBuf,
+    },
+    /// The durable transcript exists but could not be verified or decrypted.
+    ///
+    /// Distinct from "no history": an unreadable capture reported as an empty
+    /// one would hide the tamper the sealed root exists to catch.
+    #[error("output transcript for microVM `{vm}` at {}: {source}", dir.display())]
+    Transcript {
+        /// The microVM the consumer asked for.
+        vm: String,
+        /// The capture directory.
+        dir: PathBuf,
+        /// Why the capture could not be read.
+        #[source]
+        source: TranscriptError,
+    },
+    /// The transcript at this location captures network frames, not workload
+    /// output — an operator-armed forensic capture pointed at by mistake.
+    #[error(
+        "transcript at {} captures network traffic, not workload output (chunk {seq} is {direction:?})",
+        dir.display()
+    )]
+    NotOutputTranscript {
+        /// The capture directory.
+        dir: PathBuf,
+        /// The offending chunk.
+        seq: u64,
+        /// The direction it recorded.
+        direction: Direction,
+    },
 }
 
 /// A verified, filtered source of one microVM's output records.
@@ -49,6 +96,17 @@ pub enum StreamError {
 pub trait StreamReader {
     /// The next record, or `None` when this reader is finished.
     fn next_record(&mut self) -> Result<Option<StreamRecord>, StreamError>;
+
+    /// What this reader has lost, or `None` if it has kept up.
+    ///
+    /// On the trait rather than only on the concrete reader because a
+    /// consumer holds a `Box<dyn StreamReader>`: a loss it cannot see is a
+    /// loss it renders as a clean, complete log. Defaults to `None` for a
+    /// source that cannot drop records (a durable transcript reports its
+    /// incompleteness through its manifest instead).
+    fn gap(&self) -> Option<GapMarker> {
+        None
+    }
 }
 
 /// A [`StreamReader`] over any framed byte source — a broker socket in
@@ -80,15 +138,6 @@ impl<R: Read> FramedStreamReader<R> {
             gap: None,
             finished: false,
         }
-    }
-
-    /// What this reader has lost to the broker's retention ring so far, or
-    /// `None` if it has kept up. Cumulative and monotone in `after_seq`, so a
-    /// consumer polls it to notice new loss and never sees loss un-report
-    /// itself — a batch arriving without a marker means "nothing new since",
-    /// not "recovered".
-    pub fn gap(&self) -> Option<GapMarker> {
-        self.gap
     }
 
     /// Pull one batch and stage the records this consumer asked for.
@@ -135,16 +184,22 @@ impl<R: Read> FramedStreamReader<R> {
     /// The marker on a batch, if it reports loss this reader has not already
     /// folded in — which is exactly when the broker's anchor is worth taking.
     ///
-    /// Strictly advancing, on two counts. A window big enough to split
+    /// Strictly advancing, for one reason: a window big enough to split
     /// arrives as several frames and the marker rides the first of them, so
     /// treating a later frame's absent marker as recovery would drop a loss
     /// the consumer is owed and then read the *next* window's repeat of it as
     /// a fresh one — re-anchoring a caught-up reader onto a hash from
-    /// hundreds of records back, which surfaces as tampering. And the anchor
-    /// is the one value this side takes from the broker on trust, so the
-    /// moment it is trusted has to be the moment the reader provably cannot
-    /// compute it: any looser rule lets a broker re-anchor a live stream by
-    /// toggling a marker, and splice in a window that then verifies.
+    /// hundreds of records back, which surfaces as tampering. Narrowing when
+    /// the broker's anchor is taken also narrows the blast radius of a *buggy*
+    /// broker: a stale marker beside a wrong anchor moves nothing.
+    ///
+    /// It is not a defence against a hostile one, and must not be read as
+    /// such. The gate compares only `after_seq`, and `verify_chain_from` never
+    /// cross-checks the anchor against the sequence numbers delivered beside
+    /// it, so a broker that raises `after_seq` on every window keeps full
+    /// re-anchoring control. That is by design: a malicious host is outside
+    /// the threat model — it owns the hypervisor, the transcript, and the
+    /// signing keys, so a client-side rule here could not constrain it anyway.
     fn new_loss(&self, reported: Option<GapMarker>) -> Option<GapMarker> {
         let reported = reported?;
         match self.gap {
@@ -165,6 +220,14 @@ impl<R: Read> StreamReader for FramedStreamReader<R> {
             }
             self.fetch()?;
         }
+    }
+
+    /// What this reader has lost to the broker's retention ring so far.
+    /// Cumulative and monotone in `after_seq`, so a consumer polls it to
+    /// notice new loss and never sees loss un-report itself — a batch arriving
+    /// without a marker means "nothing new since", not "recovered".
+    fn gap(&self) -> Option<GapMarker> {
+        self.gap
     }
 }
 

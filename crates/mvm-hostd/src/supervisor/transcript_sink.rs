@@ -13,11 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use mvm_core::transcript::{
-    self, Direction, TranscriptError, TranscriptManifest, TranscriptWriter, TranscriptWriterConfig,
+    self, Direction, MANIFEST_FILENAME, TranscriptError, TranscriptManifest, TranscriptWriter,
+    TranscriptWriterConfig,
 };
-
-/// Manifest filename inside a capture dir — matches the operator CLI.
-const MANIFEST_FILE: &str = "manifest.json";
 
 /// An open capture for one VM. Holds the encrypting writer over the capture dir
 /// and re-seals the manifest on [`seal`](Self::seal).
@@ -113,14 +111,14 @@ impl TranscriptCaptureSink {
         let manifest = self.writer.seal();
         let json =
             serde_json::to_vec_pretty(&manifest).map_err(|e| io_err("serialize manifest", &e))?;
-        mvm_core::atomic_io::atomic_write(&self.dir.join(MANIFEST_FILE), &json)
-            .map_err(|e| io_err(MANIFEST_FILE, &e))?;
+        mvm_core::atomic_io::atomic_write(&self.dir.join(MANIFEST_FILENAME), &json)
+            .map_err(|e| io_err(MANIFEST_FILENAME, &e))?;
         Ok(manifest)
     }
 }
 
 fn read_manifest(dir: &Path) -> Option<TranscriptManifest> {
-    let bytes = std::fs::read(dir.join(MANIFEST_FILE)).ok()?;
+    let bytes = std::fs::read(dir.join(MANIFEST_FILENAME)).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -164,7 +162,7 @@ mod tests {
         };
         let manifest = TranscriptWriter::new(&dir, data_key, cfg).seal();
         std::fs::write(
-            dir.join(MANIFEST_FILE),
+            dir.join(MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
@@ -250,7 +248,7 @@ mod tests {
         let keys = t.path().join("keys");
         arm(&transcripts, &keys, "t1", "vm1", "cap-1");
 
-        let path = transcripts.join("t1/cap-1").join(MANIFEST_FILE);
+        let path = transcripts.join("t1/cap-1").join(MANIFEST_FILENAME);
         let mut manifest: TranscriptManifest =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         manifest.bounds.max_bytes += 1;

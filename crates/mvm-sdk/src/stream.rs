@@ -31,10 +31,18 @@
 //! Records arrive verified. A window that does not chain from its anchor is
 //! a [`StreamError::Chain`], never a short read, so a workload author cannot
 //! mistake tampering or loss for the end of output.
+//!
+//! [`connect_stream`] is the *live* half, and it attaches at the broker's
+//! current head: it shows nothing an idle VM has already printed, and it fails
+//! outright once the VM exits and its broker is gone. A caller that wants a
+//! workload's whole output — the after-exit case included — uses
+//! [`open_vm_output`], which splices the VM's durable transcript ahead of the
+//! live stream and reports what, if anything, either source is missing.
 
 pub use mvm_core::stream_client::{
-    FramedStreamReader, KindFilter, StreamError, StreamOpts, StreamOptsBuilder, StreamReader,
-    connect_stream, connect_stream_at,
+    FramedStreamReader, KindFilter, OutputLocator, OutputRecord, OutputRequest, RecordOrigin,
+    StreamAvailability, StreamError, StreamOpts, StreamOptsBuilder, StreamReader, Truncation,
+    VmOutputStream, connect_stream, connect_stream_at, open_vm_output, open_vm_output_at,
 };
 pub use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
 

@@ -19,8 +19,8 @@ use mvm_core::config;
 use mvm_core::crypto::aead;
 use mvm_core::policy::audit::{LocalAuditBuilder, LocalAuditKind, event};
 use mvm_core::transcript::{
-    self, CaptureBinding, CaptureBounds, RetentionPolicy, TranscriptManifest, TranscriptWriter,
-    TranscriptWriterConfig,
+    self, CaptureBinding, CaptureBounds, MANIFEST_FILENAME, RetentionPolicy, TranscriptManifest,
+    TranscriptWriter, TranscriptWriterConfig,
 };
 use mvm_hostd::supervisor::audit::{
     LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
@@ -30,7 +30,6 @@ use mvm_hostd::supervisor::verify_audit_chain_entries;
 
 use super::super::vm::host_signer::PUBLIC_FILENAME;
 
-const MANIFEST_FILE: &str = "manifest.json";
 const KEK_RECIPIENT: &str = "transcript-kek";
 const DEFAULT_TENANT: &str = "local";
 const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -192,7 +191,7 @@ impl TranscriptCtx {
         capture_id: &str,
     ) -> Result<(PathBuf, TranscriptManifest)> {
         let dir = self.capture_dir(tenant, capture_id);
-        let path = dir.join(MANIFEST_FILE);
+        let path = dir.join(MANIFEST_FILENAME);
         let raw = std::fs::read_to_string(&path).with_context(|| {
             format!("no such capture {capture_id} (looked in {})", dir.display())
         })?;
@@ -378,7 +377,7 @@ impl TranscriptCtx {
 }
 
 fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
-    let path = dir.join(MANIFEST_FILE);
+    let path = dir.join(MANIFEST_FILENAME);
     let json = serde_json::to_string_pretty(manifest)?;
     mvm_core::atomic_io::atomic_write(&path, json.as_bytes())
         .with_context(|| format!("writing {}", path.display()))

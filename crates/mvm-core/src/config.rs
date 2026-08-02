@@ -562,6 +562,16 @@ pub fn vm_console_log(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("console.log")
 }
 
+/// The VMM's own diagnostic log: `<vm_state_dir>/firecracker.log`.
+///
+/// Hypervisor-side, not workload-side — the guest's stdout/stderr live in the
+/// stream capture, not here. Written by Firecracker's `/logger` device; other
+/// backends leave it absent, which a reader reports as such rather than
+/// inventing a substitute.
+pub fn vm_hypervisor_log(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("firecracker.log")
+}
+
 /// Per-VM Unix socket the host-side stream broker serves captured output on:
 /// `<socket-dir>/stream.sock`. Host-local only: a follower connects and the
 /// broker fans records to it. Lives in the socket dir rather than the state
@@ -577,6 +587,28 @@ pub fn vm_stream_socket(name: &str) -> std::path::PathBuf {
 /// entry points — they must not drift.
 pub fn vm_stream_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     vm_socket_dir_at(state_dir).join("stream.sock")
+}
+
+/// The AEAD-encrypted transcript of one VM's captured output:
+/// `<vm_state_dir>/stream/`, holding `manifest.json` plus segment files.
+///
+/// Deliberately per-VM state rather than a capture under
+/// [`mvm_transcripts_dir`]. That tree is the operator-armed *forensic* egress
+/// namespace, keyed `<tenant>/<capture-id>/` and discovered by scanning for a
+/// binding — a shape a reader holding only a VM name cannot resolve. A
+/// workload's output capture is always-on, exactly one per VM, and lives and
+/// dies with the VM, so it is addressed the way the rest of that VM's state is.
+///
+/// Survives the VM exiting: this is what `mvmctl logs` reads once the broker is
+/// gone, which is half of "capturable while it runs *and* when it exits".
+pub fn vm_stream_transcript_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join("stream")
+}
+
+/// The stream transcript directory for a VM by name. See
+/// [`vm_stream_transcript_dir_at`].
+pub fn vm_stream_transcript_dir(name: &str) -> std::path::PathBuf {
+    vm_stream_transcript_dir_at(&vm_state_dir(name))
 }
 
 /// Per-VM JSON file of `(guest var, placeholder)` pairs the

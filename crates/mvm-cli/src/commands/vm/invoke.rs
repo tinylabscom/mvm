@@ -608,6 +608,7 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on '{vm_name}'"))?;
 
+    let mut sinks = EventSinks::inherited();
     let terminal = mvm_agentd::vsock::send_run_entrypoint(
         &mut stream,
         stdin,
@@ -615,38 +616,7 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         // Secret-bearing workloads route through the in-guest forward proxy;
         // plain vsock-egress workloads route through the loopback SOCKS5 client.
         workload_egress_env(vm_name),
-        |event| match event {
-            mvm_agentd::vsock::EntrypointEvent::Stdout { chunk } => {
-                let _ = std::io::stdout().write_all(chunk);
-            }
-            mvm_agentd::vsock::EntrypointEvent::Stderr { chunk } => {
-                let _ = std::io::stderr().write_all(chunk);
-            }
-            mvm_agentd::vsock::EntrypointEvent::Control {
-                header_json,
-                payload,
-            } => {
-                // Surface fd-3 control records to the operator with a
-                // clearly-labelled prefix the user's stderr can't spoof
-                // (these come from mvmctl, not the wrapper). A future
-                // SDK-facing `--envelope-fd <n>` flag will write raw
-                // frames out for structured consumption; until then this
-                // human-readable form is the default.
-                if payload.is_empty() {
-                    let _ = writeln!(std::io::stderr(), "[mvmctl-control] {header_json}");
-                } else {
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "[mvmctl-control] {header_json} (+{} payload bytes)",
-                        payload.len()
-                    );
-                }
-            }
-            // Terminal events (Exit / Error) are returned by
-            // send_run_entrypoint; the handler is only invoked for
-            // streaming chunks above.
-            _ => {}
-        },
+        |event| write_entrypoint_event(event, &mut sinks),
     )
     .context("Streaming RunEntrypoint response")?;
 
@@ -655,6 +625,68 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
     let _ = std::io::stderr().flush();
 
     Ok(exit_code_for(&terminal))
+}
+
+/// Where a streamed entrypoint event's bytes land. Behind a struct so a test
+/// asserts on what the handler wrote and when, rather than on the process's
+/// real fds.
+struct EventSinks<'a> {
+    out: Box<dyn Write + 'a>,
+    err: Box<dyn Write + 'a>,
+}
+
+impl EventSinks<'static> {
+    fn inherited() -> Self {
+        Self {
+            out: Box::new(std::io::stdout()),
+            err: Box::new(std::io::stderr()),
+        }
+    }
+}
+
+/// Write one streamed entrypoint event, as it arrives.
+///
+/// **Flushed per event, deliberately.** Rust's stdout is block-buffered
+/// whenever it is not a terminal, so without this the agent could stream
+/// perfectly and `mvmctl … | tee` would still show nothing until exit —
+/// reinstating, at the last hop, exactly the buffer-to-exit behaviour the
+/// streaming response exists to remove.
+fn write_entrypoint_event(event: &mvm_agentd::vsock::EntrypointEvent, sinks: &mut EventSinks<'_>) {
+    match event {
+        mvm_agentd::vsock::EntrypointEvent::Stdout { chunk } => {
+            let _ = sinks.out.write_all(chunk);
+            let _ = sinks.out.flush();
+        }
+        mvm_agentd::vsock::EntrypointEvent::Stderr { chunk } => {
+            let _ = sinks.err.write_all(chunk);
+            let _ = sinks.err.flush();
+        }
+        mvm_agentd::vsock::EntrypointEvent::Control {
+            header_json,
+            payload,
+        } => {
+            // Surface fd-3 control records to the operator with a
+            // clearly-labelled prefix the user's stderr can't spoof
+            // (these come from mvmctl, not the wrapper). A future
+            // SDK-facing `--envelope-fd <n>` flag will write raw
+            // frames out for structured consumption; until then this
+            // human-readable form is the default.
+            if payload.is_empty() {
+                let _ = writeln!(sinks.err, "[mvmctl-control] {header_json}");
+            } else {
+                let _ = writeln!(
+                    sinks.err,
+                    "[mvmctl-control] {header_json} (+{} payload bytes)",
+                    payload.len()
+                );
+            }
+            let _ = sinks.err.flush();
+        }
+        // Terminal events (Exit / Error) are returned by
+        // send_run_entrypoint; the handler is only invoked for
+        // streaming chunks above.
+        _ => {}
+    }
 }
 
 /// The workload launch env that routes egress through the active vsock path.
@@ -793,6 +825,148 @@ fn exit_code_for(event: &mvm_agentd::vsock::EntrypointEvent) -> i32 {
             ui::warn("invoke: dispatcher returned non-terminal event");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::{EventSinks, write_entrypoint_event};
+    use mvm_agentd::vsock::EntrypointEvent;
+
+    /// Sinks over borrowed buffers, so a test reads back exactly what the
+    /// handler wrote.
+    fn buffers<'a>(out: &'a mut Vec<u8>, err: &'a mut Vec<u8>) -> EventSinks<'a> {
+        EventSinks {
+            out: Box::new(out),
+            err: Box::new(err),
+        }
+    }
+
+    #[test]
+    fn each_entrypoint_channel_goes_to_its_own_fd() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        {
+            let mut sinks = buffers(&mut out, &mut err);
+            write_entrypoint_event(
+                &EntrypointEvent::Stdout {
+                    chunk: b"to-stdout".to_vec(),
+                },
+                &mut sinks,
+            );
+            write_entrypoint_event(
+                &EntrypointEvent::Stderr {
+                    chunk: b"to-stderr".to_vec(),
+                },
+                &mut sinks,
+            );
+        }
+        assert_eq!(out, b"to-stdout");
+        assert_eq!(err, b"to-stderr");
+    }
+
+    #[test]
+    fn a_control_record_is_labelled_and_kept_off_stdout() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        {
+            let mut sinks = buffers(&mut out, &mut err);
+            write_entrypoint_event(
+                &EntrypointEvent::Control {
+                    header_json: r#"{"event":"ready"}"#.to_string(),
+                    payload: vec![1, 2, 3],
+                },
+                &mut sinks,
+            );
+        }
+        assert!(out.is_empty(), "a control record is not workload stdout");
+        let rendered = String::from_utf8(err).expect("utf8");
+        assert!(rendered.starts_with("[mvmctl-control] "), "{rendered}");
+        assert!(rendered.contains("(+3 payload bytes)"), "{rendered}");
+    }
+
+    /// A sink that records *when* it was pushed, not just what it holds.
+    ///
+    /// Buffered bytes prove output was produced; the flush is what proves it
+    /// left the process. Rust's stdout is block-buffered off a terminal, so a
+    /// handler that writes without flushing produces a `| tee` that shows
+    /// nothing until exit — indistinguishable, to the operator, from the
+    /// buffer-to-exit agent this whole path replaced.
+    #[derive(Default)]
+    struct RecordingSink {
+        ops: Vec<Op>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Op {
+        Wrote(Vec<u8>),
+        Flushed,
+    }
+
+    impl std::io::Write for &mut RecordingSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.ops.push(Op::Wrote(buf.to_vec()));
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.ops.push(Op::Flushed);
+            Ok(())
+        }
+    }
+
+    /// Every chunk is pushed out of the process before the next one is taken,
+    /// so a running workload's output is visible while it runs rather than at
+    /// exit.
+    ///
+    /// This is the hop `mvmctl` owns. The other two legs are proven where they
+    /// live: the guest pump emitting before the child exits, and
+    /// `send_run_entrypoint` invoking this handler once per non-terminal event
+    /// rather than collecting them, both in `mvm-agentd`.
+    #[test]
+    fn output_reaches_the_operator_before_the_child_exits() {
+        let mut out = RecordingSink::default();
+        let mut err = RecordingSink::default();
+        {
+            let mut sinks = EventSinks {
+                out: Box::new(&mut out),
+                err: Box::new(&mut err),
+            };
+            for chunk in [&b"first"[..], &b"second"[..]] {
+                write_entrypoint_event(
+                    &EntrypointEvent::Stdout {
+                        chunk: chunk.to_vec(),
+                    },
+                    &mut sinks,
+                );
+            }
+        }
+        assert_eq!(
+            out.ops,
+            vec![
+                Op::Wrote(b"first".to_vec()),
+                Op::Flushed,
+                Op::Wrote(b"second".to_vec()),
+                Op::Flushed,
+            ],
+            "each chunk must leave the process before the next is handled"
+        );
+    }
+
+    /// The handler is for streaming chunks only: a terminal event is returned
+    /// by `send_run_entrypoint` and rendered by the exit-code path, so nothing
+    /// this writes is deferred until one arrives.
+    #[test]
+    fn a_terminal_event_writes_nothing_through_the_streaming_handler() {
+        let mut out = RecordingSink::default();
+        let mut err = RecordingSink::default();
+        {
+            let mut sinks = EventSinks {
+                out: Box::new(&mut out),
+                err: Box::new(&mut err),
+            };
+            write_entrypoint_event(&EntrypointEvent::Exit { code: 0 }, &mut sinks);
+        }
+        assert!(out.ops.is_empty(), "{:?}", out.ops);
+        assert!(err.ops.is_empty(), "{:?}", err.ops);
     }
 }
 

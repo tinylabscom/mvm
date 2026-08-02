@@ -1,62 +1,24 @@
-//! VM observability: logs, layered diagnostics, the running-VM listing, and
-//! slot allocation/reservation bookkeeping.
+//! VM observability: layered diagnostics, the running-VM listing, and slot
+//! allocation/reservation bookkeeping.
+//!
+//! Workload output is **not** here. It used to be: a `logs` entry point that
+//! shelled `tail`/`tail -f` at the console capture through
+//! `require_linux_env()` + [`run_in_vm_stdout`]. That indirection is a no-op
+//! on Linux and macOS 13-25 and hands back the dev-VM environment on macOS
+//! 26+, where nothing is left to dispatch to — so the same command read a
+//! host file on two tiers and failed outright on the third, for a file that
+//! was always host-side. Output is read through `mvm_core::stream_client`
+//! instead, which resolves the host broker, the VM's durable transcript, and
+//! that same console capture, directly and identically everywhere.
 
 use anyhow::{Context, Result};
 use tracing::{instrument, warn};
 
 use crate::base::config::{RunInfo, VmSlot};
-use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible, shell_quote};
-use crate::base::ui;
+use crate::base::shell::{run_in_vm, run_in_vm_stdout, shell_quote};
 use crate::firecracker;
 
 use super::{abs_vms_dir, firecracker_vsock_uds_path, require_linux_env};
-
-/// Show logs from a named VM.
-///
-/// By default shows the guest serial console (`console.log`).
-/// With `hypervisor=true`, shows Firecracker hypervisor logs (`firecracker.log`).
-pub fn logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()> {
-    require_linux_env()?;
-
-    let abs_vms = abs_vms_dir();
-    let filename = if hypervisor {
-        "firecracker.log"
-    } else {
-        "console.log"
-    };
-    let log_file = format!("{}/{}/{}", abs_vms, name, filename);
-
-    // Check the log file exists; fall back to firecracker.log for VMs started before
-    // the console.log split.
-    let exists = run_in_vm_stdout(&format!("[ -f {} ] && echo yes || echo no", log_file))?;
-    if exists.trim() != "yes" {
-        if !hypervisor {
-            // Try legacy location (pre-split VMs wrote everything to firecracker.log)
-            let fallback = format!("{}/{}/firecracker.log", abs_vms, name);
-            let fb_exists =
-                run_in_vm_stdout(&format!("[ -f {} ] && echo yes || echo no", fallback))?;
-            if fb_exists.trim() == "yes" {
-                ui::warn(
-                    "console.log not found; showing firecracker.log (VM started before log split)",
-                );
-                return show_log_file(&fallback, follow, lines);
-            }
-        }
-        anyhow::bail!("No logs found for VM '{}' (is the name correct?)", name);
-    }
-
-    show_log_file(&log_file, follow, lines)
-}
-
-fn show_log_file(log_file: &str, follow: bool, lines: u32) -> Result<()> {
-    if follow {
-        run_in_vm_visible(&format!("tail -f {}", log_file))?;
-    } else {
-        let output = run_in_vm_stdout(&format!("tail -n {} {}", lines, log_file))?;
-        print!("{}", output);
-    }
-    Ok(())
-}
 
 // ============================================================================
 // VM diagnostics

@@ -1350,50 +1350,116 @@ git commit -m "feat(client): stream consumer trait, tracing bridge, and SDK surf
 
 ---
 
-### Task 9: `mvmctl logs -f` reads the broker; `run`/`up` attach by default
+### Task 9: `mvmctl logs` reads the broker *and* the transcript; `run` attaches
+
+**Status: COMPLETE.**
 
 **Files:**
 - Modify: `crates/mvm-cli/src/commands/vm/logs.rs`
-- Modify: `crates/mvm-runtime/src/microvm/observe.rs:18-59` (retire `logs`)
-- Modify: `crates/mvm-cli/src/commands/machine/runtime.rs:153` (attach on run)
+- Create: `crates/mvm-core/src/stream_client/output.rs` (source resolution + splice)
+- Create: `crates/mvm-core/src/stream_client/console.rs` (console-capture fallback)
+- Modify: `crates/mvm-core/src/transcript.rs` (`export_chunks`, `load_kek`,
+  `MANIFEST_FILENAME`)
+- Modify: `crates/mvm-core/src/config.rs` (`vm_stream_transcript_dir`, `vm_hypervisor_log`)
+- Modify: `crates/mvm-core/src/stream_client/reader.rs` (`StreamReader::gap`)
+- Modify: `crates/mvm-runtime/src/microvm/observe.rs` (delete `logs` + `show_log_file`)
+- Modify: `crates/mvm-cli/src/commands/machine/runtime.rs` (attach on run)
 - Test: `crates/mvm-cli/src/commands/machine/tests.rs`
 
 **Interfaces:**
-- Consumes: `mvm_client::stream::{connect_stream, StreamOpts, StreamReader}` (T8).
-- Produces: `logs::run` honouring `--follow`, `--lines`, and a new
+- Consumes: `mvm_core::stream_client::{connect_stream, StreamOpts, StreamReader}` (T8)
+  plus `mvm_core::transcript::{export_chunks, verify_sealed_root, verify_chunks}`.
+- Produces: `mvm_core::stream_client::open_vm_output` → `VmOutputStream`
+  (history spliced ahead of live, with `StreamAvailability` + `Truncation`);
+  `logs::run` honouring `--follow`, `--lines`, and a new
   `--stream <stdout|stderr|trace|all>` filter defaulting to `all`; `machine run`
   attaching to the stream unless `--detach`.
 
-- [ ] **Step 1: Write the failing tests**
+**Why this is three things, not one.** `subscribe()` attaches at the broker's
+*live head*, so a non-following read of an idle VM returns nothing — the history
+is in the durable transcript, not in the fan-out queue. And an exited VM has no
+broker at all, so the after-exit half of the requirement cannot come from the
+socket. The task therefore owns live following, a **history splice** from the
+transcript, and a **transcript-only** path for an exited VM.
+
+**Correction to this plan's premise, found during T9.** "`mvmctl machine logs`
+cannot reach the native backends" (above, under *What is broken today*) is only
+true on macOS 26+. `require_linux_env()` is `Ok(())` unconditionally
+(`microvm/mod.rs`), and `create_linux_env()` returns `NativeEnv` — i.e. runs on
+the host — on Linux and macOS 13-25. So the retired path was a host-local
+`tail` at `<vm_state_dir>/console.log` on two of three tiers, and a dead end
+only on the third. Deleting it with nothing behind it would therefore have been
+a regression, not a cleanup: no boot path builds a broker or writes a stream
+transcript yet, so both new sources are empty on a real VM. T9 keeps the
+capability by reading that same console file **directly**, as a third
+fail-open-to-nothing source used only when neither of the others answers. The
+bug the plan wanted gone — a shell-out through an environment abstraction — is
+gone; the data is not.
+
+- [x] **Step 1: Write the failing tests**
 
 Cover: `--stream stderr` parses and filters; `logs -f` on a VM with no capture
 exits nonzero with a message naming the VM; a chain verification failure exits
 nonzero (mirroring `trust audit verify`); `machine run` without `--detach`
-attaches; `machine run --detach` does not and prints the machine id.
+attaches; `machine run --detach` does not and prints the machine id. Plus, for
+the scope above: history is returned for an idle VM; an exited VM's logs are
+readable with no broker running; a truncated transcript is reported as
+truncated rather than shown as complete.
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-cli logs` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-cli logs` — FAIL.
 
-- [ ] **Step 3: Implement and delete the dead path**
+- [x] **Step 3: Implement and delete the dead path**
 
-`logs::run` connects to the broker and streams. Replace `runtime.rs:153`'s
-"attach with `machine shell`" hint — that points at the dev-only interactive
-path barred in production — with a real attach to the output stream. Delete
-`microvm::logs` and `show_log_file`: the `require_linux_env` + in-VM `tail -f`
-path cannot reach the native backends and must not survive as a fallback, or
-the bug reappears.
+`open_vm_output` **attaches before reading history** — the order is
+load-bearing: subscribing first pins a live start point, so a record produced
+during the transcript read is still delivered, and the resulting overlap is
+suppressed by sequence number. The reverse order would drop it. Durable records
+carry `RecordOrigin::Durable` rather than an invented `StreamSource` and
+timestamp, because the transcript records a chunk's channel and order and
+nothing else. The two sources keep their own integrity proofs: `verify_chain_from`
+for the live window, `verify_sealed_root` + `verify_chunks` for the durable one.
 
-- [ ] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-cli` — PASS.
+Replace `runtime.rs`'s "attach with `machine shell`" hint — that points at the
+dev-only interactive path barred in production — with a real attach to the
+output stream. Delete `microvm::logs` and `show_log_file`: the
+`require_linux_env` + in-VM `tail -f` path cannot reach the native backends and
+must not survive as a fallback, or the bug reappears.
 
-- [ ] **Step 5: Confirm `invoke` streams end to end**
+`TranscriptManifest::is_truncated()` and the live reader's `gap()` are both
+rendered as stderr notices; a chain failure exits nonzero, a pruned window does
+not. `StreamReader::gap` moved onto the trait so a consumer holding a
+`Box<dyn StreamReader>` can see a loss at all, and the gap is polled *inside*
+the read loop because a following read has no end at which to check.
+
+**Known limits, recorded rather than papered over:**
+
+- The dial-then-read order narrows but does not close the window between the
+  two sources: the broker subscribes on its own accept thread up to one accept
+  tick after `connect` returns, and a record ingested inside that gap is in
+  neither the transcript snapshot nor any follower's queue. Closing it needs
+  the broker to state a follower's start sequence on the wire — a change to the
+  batch DTO, which belongs with the broker rather than the reader.
+- The transcript manifest is written at `seal()`, so durable history is only as
+  current as the last seal. A live VM has none to splice, and a VM that was
+  killed never seals. Keeping a manifest current is the writing side's job.
+- Neither source has a producer yet: nothing binds `serve_stream` or writes
+  `vm_stream_transcript_dir`. The console fallback is what makes the command
+  useful in the meantime.
+
+- [x] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-cli` — PASS.
+
+- [x] **Step 5: Confirm `invoke` streams end to end**
 
 Task 5b wired the RPC response; this step only proves the CLI end is honest.
-Add a test that output appears before the child exits, not merely that it
-appears.
+Added a per-event flush at the CLI's handler — Rust's stdout is block-buffered
+off a terminal, so without it `mvmctl … | tee` showed nothing until exit,
+reinstating buffer-to-exit at the last hop — and a test asserting the
+write/flush order per chunk rather than only the final buffer contents.
 
 Run: `cargo nextest run -p mvm-cli invoke`
-Expected: PASS.
+Result: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git commit -am "feat(cli): stream logs from the broker and attach on run"

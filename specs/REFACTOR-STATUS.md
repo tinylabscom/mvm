@@ -1,11 +1,36 @@
 # Refactor status
 
-Last updated: 2026-07-31
+Last updated: 2026-08-02
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] Plan 283 — Workload stream plane
+      (`specs/plans/283-workload-stream-plane.md`)
+  - [x] T1–T3 — stream record DTOs + chain verify; transcript stream
+        directions and per-chunk linkage; ring retention
+  - [x] T4–T5b — guest pump emits as produced; fd-3 control records; the
+        entrypoint RPC response streams
+  - [x] T6–T6b — host broker ingest/redact/chain/fan-out; chunks batched into
+        segments
+  - [x] T7–T8 — console capture as a second broker source; the client reader
+        trait, tracing bridge, and SDK surface
+  - [x] T9 — `mvmctl logs` over the broker, the durable transcript, and the
+        console capture (history splice + exited-VM path), `machine run`
+        attaches unless `--detach`, and the builder-VM `tail -f` path is gone
+  - [ ] T10 — signed stream-retention mode, ADR-035, and the Phase 1 guide
+  - [ ] T11–T16 — the input plane (Phase 2)
+  - [ ] Not yet wired: nothing in a boot path builds a `StreamBroker` or binds
+        `serve_stream`/`vm_stream_transcript_dir`, so the broker and transcript
+        sources are reachable but empty on a real VM; `logs` falls back to the
+        console capture until that lands
+  - [ ] Deferred to the broker task: state a follower's start sequence in the
+        first batch, so the reader can close the accept-window gap between the
+        transcript snapshot and the live subscription
+  - [ ] Deferred to the broker task: re-seal the stream transcript periodically,
+        so durable history exists for a *running* VM and survives a kill
+
 - [x] Plan 282 — Merge queue auto-requeue
       (`specs/plans/282-merge-queue-auto-requeue.md`)
   - [x] Refuse conflicts and bound retry attempts per PR

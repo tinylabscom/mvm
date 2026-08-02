@@ -68,8 +68,9 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine ls -a` | Also show transient machines that are no longer running |
 | `mvmctl machine ls --json` | Output as JSON |
 | `mvmctl machine forward <name> -p PORT` | Forward a port from a running VM to localhost |
-| `mvmctl machine logs <name>` | View guest console logs (`-f` to follow, `-n` for line count) |
-| `mvmctl machine logs <name> --hypervisor` | View Firecracker hypervisor logs |
+| `mvmctl machine logs <name>` | View the workload's captured stdout/stderr — live while it runs, and still readable after it exits (`-f` to follow, `-n` for how many recorded records to replay first; a record is one captured write, not one line). Falls back to the machine's console log when no output capture exists, saying so. Exits nonzero when there is no source at all, and warns on stderr when what it shows is a window rather than the whole run |
+| `mvmctl machine logs <name> --stream <stdout\|stderr\|trace\|all>` | Show one channel only (default `all`). Workload stdout goes to stdout and stderr to stderr, so a pipeline filters the channel it asked for |
+| `mvmctl machine logs <name> --hypervisor` | View the VMM's own diagnostic log (`firecracker.log`) rather than workload output, `-f` to follow it. Firecracker writes one; the other backends do not |
 | `mvmctl machine diff <name>` | Show filesystem changes in a running VM (created/modified/deleted since boot) |
 | `mvmctl machine diff <name> --json` | Output filesystem diff as JSON |
 | `mvmctl machine wait <name> --for <component>` | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2. |

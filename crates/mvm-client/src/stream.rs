@@ -21,6 +21,12 @@
 //! consumer that ignores nothing still cannot mistake tampering for the end
 //! of output. Anchors never appear in this API — the reader tracks them.
 //!
+//! [`connect_stream`] is the live half only. A broker attaches a follower at
+//! its current head and an exited VM has no broker at all, so a consumer that
+//! wants everything a workload printed — before it attached, and after the VM
+//! died — reads through [`open_vm_output`] instead, which resolves the durable
+//! transcript alongside the broker.
+//!
 //! The implementation lives in `mvm-core` and is re-exported here. That is
 //! the same split the `MvmClient` facade already uses, and it is what lets
 //! `mvm-sdk` (which sits *below* `mvm-hostd`, which this crate depends on)
@@ -29,8 +35,10 @@
 
 pub use mvm_core::stream_client::{
     FramedStreamReader, KindFilter, MAX_BATCH_PAYLOAD_BYTES, MAX_BATCH_RECORDS, MAX_FRAME_BYTES,
-    MAX_RECORD_PAYLOAD_BYTES, StreamBatch, StreamError, StreamOpts, StreamOptsBuilder,
-    StreamReader, connect_stream, connect_stream_at, read_batch, write_batch,
+    MAX_RECORD_PAYLOAD_BYTES, OutputLocator, OutputRecord, OutputRequest, RecordOrigin,
+    StreamAvailability, StreamBatch, StreamError, StreamOpts, StreamOptsBuilder, StreamReader,
+    Truncation, VmOutputStream, connect_stream, connect_stream_at, open_vm_output,
+    open_vm_output_at, read_batch, write_batch,
 };
 
 #[cfg(test)]

@@ -27,12 +27,26 @@
 //! - **A break is an error, never a short read.** A window that fails
 //!   verification surfaces as [`StreamError::Chain`]. Truncating silently
 //!   would make tampering look like the end of output.
+//!
+//! [`StreamReader`] is the *live* half. A broker attaches a follower at the
+//! live head and an exited VM has no broker at all, so on its own it answers
+//! neither "what has this VM already printed" nor "what did it print before it
+//! died". [`output`] resolves both sources — the broker and the VM's durable
+//! transcript — and is what a consumer wanting a workload's output reads
+//! through.
 
+mod console;
 mod opts;
+mod output;
 mod reader;
 mod wire;
 
+pub use console::ConsoleTail;
 pub use opts::{KindFilter, StreamOpts, StreamOptsBuilder};
+pub use output::{
+    OutputLocator, OutputRecord, OutputRequest, RecordOrigin, StreamAvailability, Truncation,
+    VmOutputStream, open_vm_output, open_vm_output_at,
+};
 pub use reader::{
     FramedStreamReader, StreamError, StreamReader, connect_stream, connect_stream_at,
 };

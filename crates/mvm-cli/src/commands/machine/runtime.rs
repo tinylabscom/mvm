@@ -1,6 +1,6 @@
 use super::*;
 use crate::commands::shared;
-use crate::commands::vm::invoke;
+use crate::commands::vm::{invoke, logs};
 use mvm_client::MvmClient;
 
 pub(super) fn resolve_persistent_spec(
@@ -136,24 +136,78 @@ fn run_persistent_post_start(
             cfg,
         );
     }
-    if args.up_json {
-        let build_mode_str = resolve_build_mode_for_envelope(args, name);
-        let envelope = serde_json::json!({
-            "schema_version": 1,
-            "vm_id": name,
-            "build_mode": build_mode_str,
-        });
-        println!("{envelope}");
-        return Ok(());
-    }
-    if !args.json {
-        if args.detach {
+    match post_start_action(args) {
+        PostStart::Envelope => {
+            let build_mode_str = resolve_build_mode_for_envelope(args, name);
+            let envelope = serde_json::json!({
+                "schema_version": 1,
+                "vm_id": name,
+                "build_mode": build_mode_str,
+            });
+            println!("{envelope}");
+            Ok(())
+        }
+        PostStart::Quiet => Ok(()),
+        PostStart::PrintId => {
             println!("{name}");
-        } else {
-            println!("machine {name} is up; attach with `machine shell {name}`");
+            Ok(())
+        }
+        PostStart::Attach => attach_to_output(name),
+    }
+}
+
+/// What `machine run` does once a persistent machine is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PostStart {
+    /// `--up-json`: the SDK boot envelope, and nothing else on stdout.
+    Envelope,
+    /// `--json`: the caller is parsing stdout, so say nothing extra.
+    Quiet,
+    /// `-d`/`--detach`: the machine id, for a caller that will come back later.
+    PrintId,
+    /// The default: follow the machine's output.
+    Attach,
+}
+
+/// Resolve the post-start behaviour from the flags alone, so the choice is
+/// testable without booting anything.
+pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
+    if args.up_json {
+        PostStart::Envelope
+    } else if args.json {
+        PostStart::Quiet
+    } else if args.detach {
+        PostStart::PrintId
+    } else {
+        PostStart::Attach
+    }
+}
+
+/// Follow a freshly-started machine's output.
+///
+/// Replaces a hint pointing at `machine shell`, which is the dev-only
+/// interactive path a sealed production machine bars outright — so the advice
+/// was unusable exactly where output matters most. Attaching to the capture
+/// works on every backend and in production, because the host owns it.
+///
+/// A machine with no capture is a note, not a failure: the machine booted, and
+/// that is what `machine run` was asked to do.
+fn attach_to_output(name: &str) -> Result<()> {
+    // Say what attaching means before it blocks. The machine is persistent, so
+    // interrupting detaches from the output and leaves it running — the
+    // opposite of what Ctrl-C does to a foreground transient run, and worth
+    // stating rather than leaving to be discovered.
+    eprintln!("attached to machine {name}; press Ctrl-C to detach (it keeps running)");
+    match logs::attach(name)? {
+        logs::AttachOutcome::Followed => Ok(()),
+        logs::AttachOutcome::NoCapture => {
+            eprintln!(
+                "note: machine {name} has no output capture to attach to; \
+                 `machine logs {name}` will show it once one exists"
+            );
+            Ok(())
         }
     }
-    Ok(())
 }
 
 fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
