@@ -157,6 +157,13 @@ fn build_native_aux_helpers(workspace_root: &Path, out_dir: &Path) {
         "cargo:rerun-if-changed={}",
         workspace_root.join("crates/deps/libkrun-sys/src").display()
     );
+    // The per-VM supervisors link `mvm-runtime` — it owns the VMM, the device
+    // model, and the FDT the guest boots on. Without this watch an edit there
+    // rebuilds `mvmctl` but leaves the supervisor binaries stale, so the change
+    // never reaches a running guest and the edit appears to do nothing. Use the
+    // file-by-file walk rather than a directory entry, for the same reason the
+    // `mvm-build` watch does.
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-runtime/src"));
 
     let libkrun_present = libkrun_header_present();
     for spec in build_aux_helpers::aux_helper_specs(&target_os, &target_arch, libkrun_present) {
