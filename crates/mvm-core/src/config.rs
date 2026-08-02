@@ -360,6 +360,10 @@ pub fn host_agent_root() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("host-agent")
 }
 
+/// Per-VM marker containing the supervisor PID-file path that owns a
+/// host-agent registration.
+pub const HOST_AGENT_OWNER_PID_REF_FILE: &str = "host-agent.owner-pid";
+
 /// Per-tenant host-agent daemon directory: `<mvm_home>/host-agent/<tenant>/`.
 /// Holds the resident daemon's control UDS, pid file, worker pid file, and
 /// spawn lock — one set per tenant, so the daemon is `O(active tenants)` not

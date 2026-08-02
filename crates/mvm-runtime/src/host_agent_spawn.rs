@@ -222,6 +222,7 @@ pub fn register_host_agent_services_if_admitted(
 
     let control_socket = ensure_host_agent_daemon(tenant)?;
     let key = load_host_signing_key()?;
+    write_host_agent_owner_ref(state_dir)?;
     register_vm(
         &control_socket,
         &key,
@@ -260,6 +261,18 @@ pub fn reap_host_agent_services(state_dir: &Path, tenant: &str, vm_name: &str) {
     }
     crate::broker_services_spawn::reap_audit_signer(state_dir);
     let _ = std::fs::remove_file(state_dir.join(HOST_AGENT_TENANT_REF));
+    let _ = std::fs::remove_file(state_dir.join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE));
+}
+
+fn write_host_agent_owner_ref(state_dir: &Path) -> Result<()> {
+    let reference = state_dir.join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE);
+    let Some(owner_pid_path) = crate::vm::reconcile::live_process_pid_file(state_dir) else {
+        let _ = std::fs::remove_file(reference);
+        return Ok(());
+    };
+    let bytes = serde_json::to_vec(&owner_pid_path).context("encode host-agent owner PID path")?;
+    std::fs::write(&reference, bytes)
+        .with_context(|| format!("write host-agent owner ref {}", reference.display()))
 }
 
 /// The `stop()`-side reap: if this VM registered with a daemon (the tenant-ref
@@ -637,6 +650,35 @@ mod tests {
         drop(guard); // defused Drop reaps nothing
         // No tenant-ref written, no audit-signer pid.
         assert!(!dir.path().join(HOST_AGENT_TENANT_REF).exists());
+    }
+
+    #[test]
+    fn owner_ref_records_the_live_supervisor_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("hvf.pid");
+        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+
+        write_host_agent_owner_ref(dir.path()).unwrap();
+
+        let bytes = std::fs::read(
+            dir.path()
+                .join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE),
+        )
+        .unwrap();
+        assert_eq!(serde_json::from_slice::<PathBuf>(&bytes).unwrap(), pid_path);
+    }
+
+    #[test]
+    fn owner_ref_removes_stale_marker_without_a_live_supervisor() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir
+            .path()
+            .join(mvm_core::config::HOST_AGENT_OWNER_PID_REF_FILE);
+        std::fs::write(&reference, b"stale").unwrap();
+
+        write_host_agent_owner_ref(dir.path()).unwrap();
+
+        assert!(!reference.exists());
     }
 
     #[test]
