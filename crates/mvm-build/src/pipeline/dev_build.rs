@@ -91,11 +91,14 @@ fn dev_builds_dir() -> String {
     format!("{}/dev/builds", mvm_core::config::mvm_home())
 }
 
-/// Path the CLI writes when a build notices the host-backed Nix
-/// store has grown past the GC threshold. Lives under the data dir
-/// because the data dir is the only path the dev VM and the host
-/// agree on (via the `datadir` VirtioFS share mounted at the same
-/// absolute path in both).
+/// Path the GC sentinel would live at, under the data dir.
+///
+/// Vestigial, and `cfg(test)` for that reason: the only caller is
+/// [`run_gc_if_requested`], itself reachable only from the `cfg(test)`
+/// [`dev_build_via_shell_env`]. Nothing in a production build writes or reads
+/// this sentinel. The scheme it belonged to shared the data dir between the
+/// host and a long-lived Lima guest at the same absolute path; that runtime is
+/// gone, and today a build reaches its Nix store through the builder VM.
 #[cfg(test)]
 fn gc_sentinel_path() -> String {
     format!("{}/dev/nix-store-needs-gc", mvm_core::config::mvm_home())
