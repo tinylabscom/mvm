@@ -352,20 +352,28 @@ fn spawn_stream_reader<R: Read + Send + 'static>(
 /// Why [`decode_fd3_frame`] could not produce a record from the front of its
 /// input.
 ///
-/// [`Fd3Error::Incomplete`] is the only variant that means "not yet" rather
-/// than "not ever": `buf` simply hasn't accumulated a whole frame, and the
-/// same bytes are still good once more have arrived. Every other variant is
-/// fatal — the frame that failed to validate is also the one carrying the
-/// offset of whatever comes next, so there is no way to skip past it and keep
-/// framing the bytes behind it.
+/// [`Fd3Error::Incomplete`] means "not yet": `buf` simply hasn't accumulated a
+/// whole frame, and the same bytes are still good once more have arrived. The
+/// other three variants mean the frame at the front of `buf` is bad, but each
+/// carries the length(s) `decode_fd3_frame` already parsed before giving up —
+/// exactly what a caller needs to walk past the bad frame and resync on the
+/// one behind it, without ever buffering the bytes it is skipping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fd3Error {
-    /// `header_len` exceeds [`FD3_HEADER_MAX`].
-    HeaderTooLarge,
-    /// `payload_len` exceeds [`FD3_PAYLOAD_MAX`].
-    PayloadTooLarge,
-    /// The header bytes are not valid UTF-8.
-    NonUtf8Header,
+    /// `header_len` exceeds [`FD3_HEADER_MAX`]. Carries the declared length so
+    /// a caller can walk past the whole header field without buffering it.
+    HeaderTooLarge { header_len: usize },
+    /// `payload_len` exceeds [`FD3_PAYLOAD_MAX`]. The header behind it already
+    /// validated, so both lengths are carried for a caller to skip the whole
+    /// record.
+    PayloadTooLarge {
+        header_len: usize,
+        payload_len: usize,
+    },
+    /// The header bytes are not valid UTF-8. Framing is intact — the header is
+    /// already fully buffered — so the declared length is carried for a
+    /// caller to skip past it.
+    NonUtf8Header { header_len: usize },
     /// `buf` does not yet hold a complete frame.
     Incomplete,
 }
@@ -373,9 +381,18 @@ pub enum Fd3Error {
 impl std::fmt::Display for Fd3Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Fd3Error::HeaderTooLarge => write!(f, "header exceeds {FD3_HEADER_MAX} bytes"),
-            Fd3Error::PayloadTooLarge => write!(f, "payload exceeds {FD3_PAYLOAD_MAX} bytes"),
-            Fd3Error::NonUtf8Header => write!(f, "header is not valid UTF-8"),
+            Fd3Error::HeaderTooLarge { header_len } => {
+                write!(f, "header of {header_len} bytes exceeds {FD3_HEADER_MAX}")
+            }
+            Fd3Error::PayloadTooLarge { payload_len, .. } => {
+                write!(
+                    f,
+                    "payload of {payload_len} bytes exceeds {FD3_PAYLOAD_MAX}"
+                )
+            }
+            Fd3Error::NonUtf8Header { header_len } => {
+                write!(f, "{header_len}-byte header is not valid UTF-8")
+            }
             Fd3Error::Incomplete => write!(f, "frame is incomplete"),
         }
     }
@@ -400,7 +417,10 @@ impl std::error::Error for Fd3Error {}
 /// `Err(Fd3Error::Incomplete)` means the opposite of advancing: the caller
 /// must retry the same bytes once more have arrived, not skip any of them.
 /// Every declared length is bounds-checked before the allocation it gates, so
-/// a hostile length never buys more than one rejected comparison.
+/// a hostile length never buys more than one rejected comparison. The other
+/// `Err` variants carry the length(s) already parsed, so a caller can skip
+/// exactly that many bytes and resync on the frame behind this one instead of
+/// abandoning the rest of the stream.
 pub fn decode_fd3_frame(buf: &[u8]) -> Result<(usize, EntrypointEvent), Fd3Error> {
     const LEN: usize = 4;
 
@@ -409,15 +429,15 @@ pub fn decode_fd3_frame(buf: &[u8]) -> Result<(usize, EntrypointEvent), Fd3Error
     }
     let header_len = read_u32_le(&buf[..LEN]) as usize;
     if header_len > FD3_HEADER_MAX {
-        return Err(Fd3Error::HeaderTooLarge);
+        return Err(Fd3Error::HeaderTooLarge { header_len });
     }
 
     let header_end = LEN + header_len;
     if buf.len() < header_end {
         return Err(Fd3Error::Incomplete);
     }
-    let header_json =
-        String::from_utf8(buf[LEN..header_end].to_vec()).map_err(|_| Fd3Error::NonUtf8Header)?;
+    let header_json = String::from_utf8(buf[LEN..header_end].to_vec())
+        .map_err(|_| Fd3Error::NonUtf8Header { header_len })?;
 
     let payload_len_end = header_end + LEN;
     if buf.len() < payload_len_end {
@@ -425,7 +445,10 @@ pub fn decode_fd3_frame(buf: &[u8]) -> Result<(usize, EntrypointEvent), Fd3Error
     }
     let payload_len = read_u32_le(&buf[header_end..payload_len_end]) as usize;
     if payload_len > FD3_PAYLOAD_MAX {
-        return Err(Fd3Error::PayloadTooLarge);
+        return Err(Fd3Error::PayloadTooLarge {
+            header_len,
+            payload_len,
+        });
     }
 
     let payload_end = payload_len_end + payload_len;
@@ -453,12 +476,15 @@ fn read_u32_le(src: &[u8]) -> u32 {
 /// read, decode whatever is buffered, apply the reserved-kind gate, hand the
 /// rest to the sink, and enforce the per-call byte budget.
 ///
-/// Reads until EOF or `total_max` bytes, whichever comes first. Past the cap,
-/// or on any frame [`decode_fd3_frame`] refuses, the reader logs why and
-/// stops: a corrupt or hostile stream must not read the same as a call that
-/// never opened fd-3's control channel at all. A partial frame still open at
-/// real EOF is logged too, for the same reason — a wrapper cut off mid-record
-/// is not the same as one that wrote nothing.
+/// A frame [`decode_fd3_frame`] refuses for its size, or for its header not
+/// being valid UTF-8, does not end the channel: the length(s) that condemned
+/// it are exactly what is needed to walk past it and land on the frame behind
+/// it, so one bad record costs one record. Only two things stop the reader
+/// outright: the cumulative byte budget (`total_max`) being exceeded — by an
+/// accepted frame or a skipped one, since both occupy real bytes on the wire
+/// — and the stream ending before a skip in progress can finish, because at
+/// that point there genuinely is no byte offset left for "the next frame" to
+/// resync onto.
 ///
 /// A record claiming [`RESERVED_KIND_PREFIX`] is dropped and parsing
 /// continues. This is the boundary at which fd-3's bytes stop being
@@ -471,18 +497,14 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
         let mut reader = std::fs::File::from(read_fd);
         let mut pending: Vec<u8> = Vec::new();
         let mut read_buf = vec![0u8; READ_BUF_BYTES];
-        let mut total_consumed: usize = 0;
+        let mut cap = CumulativeCap::new(total_max);
 
         loop {
             match decode_fd3_frame(&pending) {
                 Ok((consumed, event)) => {
                     pending.drain(..consumed);
-                    total_consumed = total_consumed.saturating_add(consumed);
-                    if total_consumed > total_max {
-                        eprintln!(
-                            "mvm-guest-agent: fd-3 control channel closed: cumulative cap of \
-                             {total_max} bytes exceeded"
-                        );
+                    if !cap.bump(consumed) {
+                        cap.log_exceeded();
                         return;
                     }
                     // Framing is intact, so keep parsing — only this record is refused.
@@ -497,9 +519,40 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
                     continue; // `pending` may already hold the next frame
                 }
                 Err(Fd3Error::Incomplete) => {} // fall through and read more
-                Err(err) => {
-                    eprintln!("mvm-guest-agent: fd-3 control channel closed: {err}");
-                    return;
+                Err(
+                    err @ (Fd3Error::HeaderTooLarge { header_len }
+                    | Fd3Error::NonUtf8Header { header_len }),
+                ) => {
+                    if !skip_header_record(
+                        &mut reader,
+                        &mut pending,
+                        &mut read_buf,
+                        &mut cap,
+                        header_len,
+                        err,
+                    ) {
+                        return;
+                    }
+                    continue; // `pending` now starts at the frame behind the bad one
+                }
+                Err(
+                    err @ Fd3Error::PayloadTooLarge {
+                        header_len,
+                        payload_len,
+                    },
+                ) => {
+                    if !skip_payload_record(
+                        &mut reader,
+                        &mut pending,
+                        &mut read_buf,
+                        &mut cap,
+                        header_len,
+                        payload_len,
+                        err,
+                    ) {
+                        return;
+                    }
+                    continue;
                 }
             }
 
@@ -523,6 +576,166 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
             }
         }
     });
+}
+
+/// Running tally against the fd-3 control channel's per-call byte budget.
+/// Every byte a record occupies counts here — accepted, reserved-kind-
+/// dropped, or skipped for being malformed — so the cap bounds total channel
+/// activity rather than just the frames that reached the sink. Without that,
+/// a stream of nothing but oversized headers would never be capped, since it
+/// would never produce an accepted frame to count.
+struct CumulativeCap {
+    consumed: usize,
+    max: usize,
+}
+
+impl CumulativeCap {
+    fn new(max: usize) -> Self {
+        Self { consumed: 0, max }
+    }
+
+    /// Add `n` wire bytes to the running total. `false` means the cap no
+    /// longer holds.
+    fn bump(&mut self, n: usize) -> bool {
+        self.consumed = self.consumed.saturating_add(n);
+        self.consumed <= self.max
+    }
+
+    fn log_exceeded(&self) {
+        eprintln!(
+            "mvm-guest-agent: fd-3 control channel closed: cumulative cap of {} bytes exceeded",
+            self.max
+        );
+    }
+}
+
+/// Skip a record refused for its header — too large, or not valid UTF-8 —
+/// then the payload field behind it, whose length is unknowable until the
+/// header is behind us. `false` means the reader must stop: either the
+/// cumulative cap was exceeded, or the stream ended before the skip could
+/// complete, in which case there is no reliable offset left to resync onto.
+fn skip_header_record(
+    reader: &mut impl Read,
+    pending: &mut Vec<u8>,
+    scratch: &mut [u8],
+    cap: &mut CumulativeCap,
+    header_len: usize,
+    reason: Fd3Error,
+) -> bool {
+    let header_field_len = 4 + header_len;
+    if !cap.bump(header_field_len) {
+        cap.log_exceeded();
+        return false;
+    }
+    if !discard_exact(reader, pending, header_field_len, scratch) {
+        eprintln!(
+            "mvm-guest-agent: fd-3 control channel closed: stream ended while skipping a \
+             malformed header ({reason})"
+        );
+        return false;
+    }
+    let Some(payload_len) = read_len_prefix(reader, pending, scratch) else {
+        eprintln!(
+            "mvm-guest-agent: fd-3 control channel closed: stream ended while skipping the \
+             payload behind a malformed header ({reason})"
+        );
+        return false;
+    };
+    if !cap.bump(4 + payload_len) {
+        cap.log_exceeded();
+        return false;
+    }
+    if !discard_exact(reader, pending, payload_len, scratch) {
+        eprintln!(
+            "mvm-guest-agent: fd-3 control channel closed: stream ended while skipping the \
+             payload behind a malformed header ({reason})"
+        );
+        return false;
+    }
+    eprintln!("mvm-guest-agent: fd-3 dropped a malformed header ({reason}); continuing");
+    true
+}
+
+/// Skip a record refused only for its payload. The header behind it and both
+/// length prefixes already validated in full and sit in `pending` in their
+/// entirety, so only the oversized payload itself remains unread. See
+/// [`skip_header_record`] for the cap/logging shape this mirrors.
+fn skip_payload_record(
+    reader: &mut impl Read,
+    pending: &mut Vec<u8>,
+    scratch: &mut [u8],
+    cap: &mut CumulativeCap,
+    header_len: usize,
+    payload_len: usize,
+    reason: Fd3Error,
+) -> bool {
+    let prefix_len = 4 + header_len + 4;
+    if !cap.bump(prefix_len + payload_len) {
+        cap.log_exceeded();
+        return false;
+    }
+    pending.drain(..prefix_len);
+    if !discard_exact(reader, pending, payload_len, scratch) {
+        eprintln!(
+            "mvm-guest-agent: fd-3 control channel closed: stream ended while skipping an \
+             oversized payload ({reason})"
+        );
+        return false;
+    }
+    eprintln!("mvm-guest-agent: fd-3 dropped an oversized payload ({reason}); continuing");
+    true
+}
+
+/// Discard exactly `n` bytes from the logical stream — whatever `pending`
+/// already holds, then directly from `reader` — without ever holding more
+/// than one `scratch`-sized read in memory at once. This is what lets a
+/// hostile declared length cost this thread time, never memory: the bytes
+/// themselves are worthless, but their count on the wire is real, and reading
+/// past them (rather than buffering them) is the only way to know where the
+/// next frame starts. `false` means the stream ended or errored before all
+/// `n` bytes were seen.
+fn discard_exact(
+    reader: &mut impl Read,
+    pending: &mut Vec<u8>,
+    n: usize,
+    scratch: &mut [u8],
+) -> bool {
+    let from_pending = n.min(pending.len());
+    pending.drain(..from_pending);
+    let mut remaining = n - from_pending;
+    while remaining > 0 {
+        let want = remaining.min(scratch.len());
+        match reader.read(&mut scratch[..want]) {
+            Ok(0) => return false,
+            Ok(read) => remaining -= read,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Read and consume the next 4-byte little-endian length prefix from the
+/// logical stream — `pending` first, then `reader`. `None` means the stream
+/// ended before a full prefix arrived. Bytes read past the prefix itself are
+/// left in `pending` rather than discarded, since they belong to whatever
+/// comes next (typically the payload the caller is about to skip).
+fn read_len_prefix(
+    reader: &mut impl Read,
+    pending: &mut Vec<u8>,
+    scratch: &mut [u8],
+) -> Option<usize> {
+    while pending.len() < 4 {
+        match reader.read(scratch) {
+            Ok(0) => return None,
+            Ok(n) => pending.extend_from_slice(&scratch[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    let len = read_u32_le(&pending[..4]) as usize;
+    pending.drain(..4);
+    Some(len)
 }
 
 /// Whether an fd-3 header claims a `kind` inside the agent's reserved
@@ -716,10 +929,19 @@ mod tests {
     /// Drive `spawn_control_reader` over a real pipe — the same fd the child
     /// writes — and collect what it lets through.
     fn read_control_frames(wire: &[u8]) -> Vec<ControlRecord> {
+        read_control_frames_with_cap(wire, 64 * 1024)
+    }
+
+    /// As [`read_control_frames`], with an explicit cumulative cap — for
+    /// fixtures whose wire is deliberately bigger than the default (a skipped
+    /// oversized record still counts its bytes against the cap, so a fixture
+    /// built around one needs enough headroom to prove resync rather than the
+    /// cap itself).
+    fn read_control_frames_with_cap(wire: &[u8], total_max: usize) -> Vec<ControlRecord> {
         use std::io::Write;
         let (reader, mut writer) = std::io::pipe().expect("pipe");
         let (tx, rx) = mpsc::channel();
-        spawn_control_reader(OwnedFd::from(reader), 64 * 1024, tx);
+        spawn_control_reader(OwnedFd::from(reader), total_max, tx);
         writer.write_all(wire).expect("write frames");
         drop(writer);
         rx.into_iter()
@@ -771,7 +993,28 @@ mod tests {
         // The length prefix alone is enough to refuse — no header bytes,
         // let alone a payload, ever need to arrive.
         let oversized = ((FD3_HEADER_MAX + 1) as u32).to_le_bytes();
-        assert_eq!(decode_fd3_frame(&oversized), Err(Fd3Error::HeaderTooLarge));
+        assert_eq!(
+            decode_fd3_frame(&oversized),
+            Err(Fd3Error::HeaderTooLarge {
+                header_len: FD3_HEADER_MAX + 1
+            })
+        );
+    }
+
+    #[test]
+    fn decode_accepts_a_header_at_exactly_the_size_cap() {
+        // A boundary check that only ever tests `cap + 1` cannot catch an
+        // off-by-one that also rejects the legal boundary value itself.
+        let header = "x".repeat(FD3_HEADER_MAX);
+        let frame = frame_bytes(&header, b"");
+        let (consumed, event) = decode_fd3_frame(&frame).expect("boundary-sized header decodes");
+        assert_eq!(consumed, frame.len());
+        match event {
+            EntrypointEvent::Control { header_json, .. } => {
+                assert_eq!(header_json.len(), FD3_HEADER_MAX)
+            }
+            other => panic!("expected Control, got {other:?}"),
+        }
     }
 
     #[test]
@@ -782,7 +1025,25 @@ mod tests {
         frame.extend_from_slice(header);
         frame.extend_from_slice(&((FD3_PAYLOAD_MAX + 1) as u32).to_le_bytes());
         // No payload bytes needed — same fail-fast property as the header.
-        assert_eq!(decode_fd3_frame(&frame), Err(Fd3Error::PayloadTooLarge));
+        assert_eq!(
+            decode_fd3_frame(&frame),
+            Err(Fd3Error::PayloadTooLarge {
+                header_len: header.len(),
+                payload_len: FD3_PAYLOAD_MAX + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn decode_accepts_a_payload_at_exactly_the_size_cap() {
+        let payload = vec![0xab_u8; FD3_PAYLOAD_MAX];
+        let frame = frame_bytes(r#"{"kind":"app.log"}"#, &payload);
+        let (consumed, event) = decode_fd3_frame(&frame).expect("boundary-sized payload decodes");
+        assert_eq!(consumed, frame.len());
+        match event {
+            EntrypointEvent::Control { payload, .. } => assert_eq!(payload.len(), FD3_PAYLOAD_MAX),
+            other => panic!("expected Control, got {other:?}"),
+        }
     }
 
     #[test]
@@ -791,7 +1052,12 @@ mod tests {
         let mut frame = Vec::new();
         frame.extend_from_slice(&(bad_header.len() as u32).to_le_bytes());
         frame.extend_from_slice(&bad_header);
-        assert_eq!(decode_fd3_frame(&frame), Err(Fd3Error::NonUtf8Header));
+        assert_eq!(
+            decode_fd3_frame(&frame),
+            Err(Fd3Error::NonUtf8Header {
+                header_len: bad_header.len()
+            })
+        );
     }
 
     #[test]
@@ -843,19 +1109,68 @@ mod tests {
         assert_eq!(consumed_first + consumed_second, both.len());
     }
 
-    // -- spawn_control_reader: the fatal cases stop the stream ---------
+    // -- spawn_control_reader: malformed records are skipped, not fatal ---
 
     #[test]
-    fn a_header_too_large_frame_ends_the_control_stream() {
-        // Once one frame fails structural validation there is no reliable
-        // offset for the next one, so the reader must stop rather than try
-        // to resync on what looks like a fresh frame.
+    fn a_header_too_large_frame_ends_the_stream_when_the_wire_runs_out_mid_skip() {
+        // The declared header is bigger than the rest of the wire actually
+        // supplies, so the reader is still walking past it when it hits EOF.
+        // There is no byte offset for "the next frame" in that case — the
+        // stream simply stopped short — so this, not the oversized length by
+        // itself, is what must end the reader.
         let mut wire = ((FD3_HEADER_MAX + 1) as u32).to_le_bytes().to_vec();
         wire.extend_from_slice(&control_frame(r#"{"kind":"app.log"}"#));
         assert!(
             read_control_frames(&wire).is_empty(),
-            "a fatal decode error must end the stream, not resync on the next frame"
+            "the stream ended before the oversized header could be fully skipped"
         );
+    }
+
+    #[test]
+    fn a_record_after_an_oversized_header_still_arrives() {
+        // Unlike the fixture above, this wire actually supplies every byte
+        // the bad record declares, so the reader can walk all the way past it
+        // and land on the frame behind it — proof that one oversized header
+        // costs one record, not the rest of the channel.
+        let oversized_len = FD3_HEADER_MAX + 1;
+        let mut wire = (oversized_len as u32).to_le_bytes().to_vec();
+        wire.extend(std::iter::repeat_n(b'x', oversized_len)); // discarded regardless of content
+        wire.extend_from_slice(&0u32.to_le_bytes()); // the bad record's own (empty) payload
+        wire.extend_from_slice(&control_frame(r#"{"kind":"survivor"}"#));
+
+        let records = read_control_frames_with_cap(&wire, 1024 * 1024);
+        assert_eq!(
+            records.len(),
+            1,
+            "the oversized header must be dropped but the record behind it must survive, got \
+             {records:?}"
+        );
+        assert_eq!(records[0].header_json, r#"{"kind":"survivor"}"#);
+    }
+
+    #[test]
+    fn a_record_after_an_oversized_payload_still_arrives() {
+        // Same property as the header case, exercised on the other resync
+        // path: the payload declares more than FD3_PAYLOAD_MAX, the wire
+        // supplies every byte of it, and the frame behind it must still
+        // arrive.
+        let header = br#"{"kind":"app.log"}"#;
+        let oversized_payload_len = FD3_PAYLOAD_MAX + 1;
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        wire.extend_from_slice(header);
+        wire.extend_from_slice(&(oversized_payload_len as u32).to_le_bytes());
+        wire.extend(std::iter::repeat_n(0u8, oversized_payload_len));
+        wire.extend_from_slice(&control_frame(r#"{"kind":"survivor"}"#));
+
+        let records = read_control_frames_with_cap(&wire, 1024 * 1024);
+        assert_eq!(
+            records.len(),
+            1,
+            "the oversized payload must be dropped but the record behind it must survive, got \
+             {records:?}"
+        );
+        assert_eq!(records[0].header_json, r#"{"kind":"survivor"}"#);
     }
 
     #[test]
