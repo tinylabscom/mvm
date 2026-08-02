@@ -1370,6 +1370,7 @@ mod tests {
         assert_eq!(vm.status().unwrap(), VmStatus::Stopped);
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn status_uses_the_ownership_independent_probe_not_libc_kill() {
         // A sudo-launched Firecracker runs as root, so libc::kill(pid, 0) from a
@@ -1420,6 +1421,7 @@ mod tests {
         assert!(!pid_file.exists(), "pid marker must be removed on kill");
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn termination_tracks_the_captured_pid_after_the_marker_disappears() {
         use std::sync::Arc;
