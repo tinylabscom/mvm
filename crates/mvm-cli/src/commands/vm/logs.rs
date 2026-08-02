@@ -311,6 +311,9 @@ fn announce(args: &Args, stream: &VmOutputStream, sinks: &mut Sinks<'_>) {
         StreamAvailability::HistoryOnly => {}
         StreamAvailability::ConsoleOnly => announce_console_only(args, sinks),
     }
+    if let Some(line) = describe_console_merge(args) {
+        notice(sinks, &line);
+    }
     if let Some(line) = stream.empty_history().and_then(|e| describe_empty(e, args)) {
         notice(sinks, &line);
     }
@@ -340,6 +343,33 @@ fn describe_empty(empty: EmptyHistory, args: &Args) -> Option<String> {
         )),
         EmptyHistory::NotRequested => None,
     }
+}
+
+/// What a channel selection *cannot* reach, even on a healthy capture.
+///
+/// A capture has two sources and only one of them can name a channel. The
+/// entrypoint frames arrive tagged `Stdout` or `Stderr` the way the guest sent
+/// them; the console capture is one merged byte stream, so every record it
+/// contributes is recorded as `Stdout` whichever fd wrote it. That covers
+/// everything outside the entrypoint call — boot, and whatever the guest says
+/// after the agent is gone — which is exactly the output an operator narrowing
+/// to `--stream stderr` is often hunting for.
+///
+/// Only said when a channel was selected: on an unnarrowed read every record
+/// is shown regardless of its tag, so there is nothing the merge hides. A
+/// console-only VM needs no exclusion here — the resolver refuses a channel
+/// selection outright rather than reaching this point.
+fn describe_console_merge(args: &Args) -> Option<String> {
+    if args.stream == StreamSelector::All {
+        return None;
+    }
+    Some(format!(
+        "note: microVM {:?} records console output as stdout, so a {} read shows only what the \
+         entrypoint call separated — boot output, and anything written once the guest agent is \
+         gone, is on the stdout channel whichever fd produced it",
+        args.name,
+        args.stream.label()
+    ))
 }
 
 /// The console fallback cannot do three things the broker can, and a user who
@@ -1082,6 +1112,43 @@ mod tests {
             let captured = read_all(&parse(&["vm"]).expect("parse"), &locator);
             assert_eq!(captured.out, b"h-0h-1h-2live-3live-4");
             assert_eq!(notices(captured), "", "an unbroken splice says nothing");
+        }
+
+        #[test]
+        fn a_channel_selection_names_the_half_of_the_capture_that_cannot_honour_it() {
+            // The correction this replaces a lie with: before the entrypoint
+            // source was wired, a live read said nothing at all and
+            // `--stream stderr` came back empty forever. It can honour the
+            // request now — for the entrypoint's own frames. The console half
+            // is still one merged stream, and silence about that reads as
+            // "the workload wrote nothing to stderr".
+            let root = tempfile::tempdir().expect("tempdir");
+            let locator = seal_history(root.path(), &["only-stdout"]);
+
+            let rendered = notices(read_all(
+                &parse(&["vm", "--stream", "stderr"]).expect("parse"),
+                &locator,
+            ));
+            assert!(
+                rendered.contains("records console output as stdout"),
+                "{rendered}"
+            );
+            assert!(rendered.contains("a stderr read"), "{rendered}");
+        }
+
+        #[test]
+        fn an_unnarrowed_read_is_not_told_about_a_merge_that_hides_nothing_from_it() {
+            // Every record is shown whatever its tag, so the caveat would be
+            // noise on the default read — and noise is how a notice that
+            // matters stops being read.
+            let root = tempfile::tempdir().expect("tempdir");
+            let locator = seal_history(root.path(), &["one", "two"]);
+
+            let rendered = notices(read_all(&parse(&["vm"]).expect("parse"), &locator));
+            assert!(
+                !rendered.contains("records console output as stdout"),
+                "{rendered}"
+            );
         }
 
         #[test]

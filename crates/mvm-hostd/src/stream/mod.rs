@@ -31,18 +31,27 @@
 //! registration and takes it down again, and
 //! [`install_host_console_streamer`] is where the host process wires it to
 //! the workload runner's console hook.
+//!
+//! Two sources feed one broker. [`console_source`] republishes the write-only
+//! console capture, which covers boot and the window after the agent dies but
+//! cannot separate the two channels. [`entrypoint_source`] takes the guest
+//! agent's `stdout`/`stderr` frames, which can. Within either, order is exact;
+//! between them it is host arrival order and nothing stronger, because the two
+//! travel different transports at different latencies.
 
 pub mod broker;
 pub mod console_source;
+pub mod entrypoint_source;
 pub mod fanout;
 pub mod plane;
 pub mod redact;
 pub mod serve;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub use broker::{DEFAULT_CAPTURE_BOUNDS, StreamAudit, StreamBroker, StreamCounters};
 pub use console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
+pub use entrypoint_source::{EntrypointSink, ShownChunk};
 pub use fanout::{
     DEFAULT_READER_BOUNDS, DEFAULT_READER_MAX_BYTES, DEFAULT_READER_MAX_RECORDS, DrainedWindow,
     ReaderHandle, ReaderStart,
@@ -66,5 +75,28 @@ pub use serve::{StreamServerHandle, serve_stream};
 /// no-op. Idempotent so a binary that starts workloads from more than one
 /// entry point can register defensively at each.
 pub fn install_host_console_streamer() -> bool {
-    mvm_runtime::workload_runner::install_console_streamer(Arc::new(StreamPlane::new()))
+    let plane = Arc::new(StreamPlane::new());
+    if !mvm_runtime::workload_runner::install_console_streamer(Arc::clone(&plane) as _) {
+        return false;
+    }
+    // Only ever the plane the runtime actually took. A second, discarded plane
+    // reachable through `host_stream_plane` would send this process's
+    // entrypoint output to a broker no VM is attached to, which reads as a
+    // workload that printed nothing.
+    let _ = HOST_PLANE.set(plane);
+    true
 }
+
+/// The plane [`install_host_console_streamer`] registered, for a producer that
+/// is not the console follower — the entrypoint dispatch, which needs to reach
+/// a running VM's broker by name.
+///
+/// `None` in a process that never registered one, which is every embedder that
+/// does not start workloads.
+pub fn host_stream_plane() -> Option<Arc<StreamPlane>> {
+    HOST_PLANE.get().map(Arc::clone)
+}
+
+/// Set by [`install_host_console_streamer`], and only when the runtime
+/// accepted the registration.
+static HOST_PLANE: OnceLock<Arc<StreamPlane>> = OnceLock::new();

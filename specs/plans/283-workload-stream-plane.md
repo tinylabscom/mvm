@@ -1634,26 +1634,36 @@ notice that would have explained it is suppressed, because the read resolves
 - Produces: entrypoint frames ingested as `StreamSource::Entrypoint` with their
   true `StreamKind`, so stdout and stderr stay separable.
 
-- [ ] **Step 1: Write the failing test** — with a plane up, a workload writing
+- [x] **Step 1: Write the failing test** — with a plane up, a workload writing
   to stderr is readable via `--stream stderr`, and stdout and stderr are
   distinguishable. Must fail today (returns empty).
 
-- [ ] **Step 2: Run to verify it fails.**
+- [x] **Step 2: Run to verify it fails.** Five `captured_tests` in
+  `invoke.rs` red against a sink that never reaches a broker — every one
+  reporting an empty capture, which is today's symptom exactly.
 
-- [ ] **Step 3: Implement the ingest.** Do not duplicate the guest's bytes: a
-  record must not arrive twice because it went to both the RPC consumer and the
-  broker. Decide whether the broker becomes the single consumer that `invoke`
-  reads through, or whether the RPC consumer tees — and justify it. Teeing is
-  simpler; routing through the broker is what makes `invoke` and `logs` show the
-  same, redacted, chained bytes.
+- [x] **Step 3: Implement the ingest.** **Routed, not teed.** `StreamBroker::ingest`
+  now returns the record it sealed, and `EntrypointSink` (the entrypoint sibling
+  of `console_source`) hands that back to the RPC consumer, which writes *those*
+  bytes to the caller's fds. One ingest per frame is the only fan-out point, so
+  nothing arrives twice. `invoke` does **not** subscribe as a follower: the
+  reader queues are bounded rings that evict, and putting the answer to a
+  synchronous call behind one would lose exactly the bytes an SDK is waiting on.
 
-- [ ] **Step 4: Redaction and chaining still apply.** Entrypoint bytes are
-  workload output and must pass the same single redaction seam as console bytes.
+- [x] **Step 4: Redaction and chaining still apply.** Entrypoint bytes cross the
+  same seam as console bytes, and the caller can only print what came back
+  through it. A VM this process holds no broker for (an attach into a machine
+  another process booted) gets a redact-only sink rather than a raw passthrough,
+  so "no capture" never silently means "no redaction". The fail-closed marker
+  substitution moved to one shared `redact::clear_for_display` rather than being
+  spelled out per ingest path.
 
-- [ ] **Step 5: Correct the suppressed notice** so it reflects what the read
-  can actually deliver.
+- [x] **Step 5: Correct the suppressed notice** so it reflects what the read
+  can actually deliver. A channel-narrowed read now says that console-sourced
+  records are recorded as stdout, so a `--stream stderr` read shows only what
+  the entrypoint call separated.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git commit -am "feat(hostd): ingest entrypoint output into the stream plane"

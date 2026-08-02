@@ -288,7 +288,12 @@ fn poll_once(path: &Path, state: &mut FollowState, broker: &SharedBroker) -> boo
     }
 }
 
-fn lock_broker(broker: &SharedBroker) -> MutexGuard<'_, StreamBroker> {
+/// Take the lock on a shared broker, ignoring poisoning.
+///
+/// A panic under this lock leaves a broker whose fields are each individually
+/// consistent, and refusing to capture a workload's output for the rest of the
+/// process would be a far worse outcome than carrying on with it.
+pub(in crate::stream) fn lock_broker(broker: &SharedBroker) -> MutexGuard<'_, StreamBroker> {
     broker.lock().unwrap_or_else(PoisonError::into_inner)
 }
 

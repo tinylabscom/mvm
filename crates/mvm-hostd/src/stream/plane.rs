@@ -53,6 +53,7 @@ use mvm_runtime::workload_runner::ConsoleStreamer;
 
 use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
 use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
+use crate::stream::entrypoint_source::EntrypointSink;
 use crate::stream::redact::StreamRedaction;
 use crate::stream::serve::{StreamServerHandle, serve_stream};
 
@@ -136,6 +137,20 @@ impl StreamPlane {
             },
         );
         Ok(())
+    }
+
+    /// The entrypoint-side ingest for `vm`: a sink over its broker when this
+    /// plane holds one, and a redact-only sink when it does not.
+    ///
+    /// One per call. The sink keeps the broker alive, and [`release`](Self::release)
+    /// seals a transcript by taking sole ownership of that broker — so a sink
+    /// held past its dispatch turns a sealed capture into an unsealed one.
+    pub fn entrypoint_sink(&self, vm: &str) -> EntrypointSink {
+        self.registry()
+            .get(vm)
+            .map_or_else(EntrypointSink::unrecorded, |stream| {
+                EntrypointSink::recorded(Arc::clone(&stream.broker))
+            })
     }
 
     /// Tear `vm`'s capture down and seal its transcript.
@@ -324,6 +339,7 @@ mod tests {
         OutputRecord, OutputRequest, RecordOrigin, StreamAvailability, StreamOpts, open_vm_output,
     };
     use mvm_core::util::test_env::TestEnv;
+    use mvm_protocol::stream::StreamKind;
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
 
@@ -409,6 +425,15 @@ mod tests {
 
     /// Every record a sealed capture holds, oldest first.
     fn sealed_payloads(vm: &str) -> Vec<Vec<u8>> {
+        sealed_records(vm)
+            .into_iter()
+            .map(|(_, body)| body)
+            .collect()
+    }
+
+    /// Every record a sealed capture holds, with the channel it was recorded
+    /// on — the half a console-only capture could never supply.
+    fn sealed_records(vm: &str) -> Vec<(StreamKind, Vec<u8>)> {
         let mut stream =
             open_vm_output(vm, OutputRequest::default()).expect("the sealed transcript must open");
         assert_eq!(
@@ -419,7 +444,7 @@ mod tests {
         let mut out = Vec::new();
         while let Some(record) = stream.next_output().expect("read the sealed capture") {
             assert_eq!(record.origin, RecordOrigin::Durable);
-            out.push(record.payload);
+            out.push((record.kind, record.payload));
         }
         out
     }
@@ -531,6 +556,57 @@ mod tests {
         plane.release("plane-last-words");
 
         assert_eq!(sealed_payloads("plane-last-words"), [b"kernel panic\n"]);
+    }
+
+    #[test]
+    fn both_sources_land_in_one_capture_with_the_entrypoint_keeping_its_channels() {
+        // The design's premise, end to end: the console covers the windows the
+        // agent cannot and is merged into stdout because a console cannot do
+        // better; the entrypoint frames carry the channel the guest sent them
+        // on. One broker, one chain, two sources.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-two-sources");
+        let plane = StreamPlane::new();
+        plane.attach("plane-two-sources", &console).expect("attach");
+
+        // Wait for the console record before producing the entrypoint ones:
+        // between sources the order is host arrival order and nothing
+        // stronger, so a test that raced them would be asserting on the
+        // follower's poll interval.
+        let follower = Follower::attach("plane-two-sources");
+        std::fs::write(&console, b"booting\n").expect("write the console capture");
+        assert_eq!(follower.next().payload, b"booting\n");
+
+        let mut sink = plane.entrypoint_sink("plane-two-sources");
+        assert!(
+            sink.is_recorded(),
+            "an attached VM has a broker to record to"
+        );
+        sink.ingest(StreamKind::Stdout, b"result");
+        sink.ingest(StreamKind::Stderr, b"warning");
+        drop(sink);
+
+        plane.release("plane-two-sources");
+        assert_eq!(
+            sealed_records("plane-two-sources"),
+            vec![
+                (StreamKind::Stdout, b"booting\n".to_vec()),
+                (StreamKind::Stdout, b"result".to_vec()),
+                (StreamKind::Stderr, b"warning".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_vm_this_plane_never_attached_gets_an_unrecorded_sink_rather_than_a_refusal() {
+        // The `--attach`-into-someone-else's-machine case. The call still has
+        // to run and still has to print; what it loses is the capture.
+        let (_env, _tmp) = isolated_home();
+        assert!(
+            !StreamPlane::new()
+                .entrypoint_sink("elsewhere")
+                .is_recorded()
+        );
     }
 
     #[test]

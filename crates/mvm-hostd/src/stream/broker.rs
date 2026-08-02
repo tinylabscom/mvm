@@ -43,7 +43,7 @@ use crate::audit::emitter::AuditEmitter;
 use crate::stream::fanout::{
     DEFAULT_READER_BOUNDS, ReaderHandle, ReaderQueue, ReaderStart, lock_queue,
 };
-use crate::stream::redact::{StreamRedaction, StreamRedactor, redaction_failure_marker};
+use crate::stream::redact::{self, ClearOutcome, ClearedChunk, StreamRedaction};
 
 /// Default budget for the durable transcript one broker writes into.
 ///
@@ -270,12 +270,26 @@ impl StreamBroker {
     /// Always accepts. There is no bound, no error, and no backpressure at
     /// this end — a workload silenced or slowed at a cap is unobservable
     /// exactly when it matters most.
-    pub fn ingest(&mut self, source: StreamSource, kind: StreamKind, bytes: &[u8]) {
+    ///
+    /// Hands back the record it sealed, which is what lets a producer that is
+    /// *also* a consumer — `mvmctl invoke`, writing the entrypoint's output to
+    /// the caller's own fds — show the same redacted, chained bytes every
+    /// follower gets without subscribing to its own output. Reading them back
+    /// off a follower queue instead would put the answer to a synchronous call
+    /// behind a ring that evicts. Ignoring the return is fine and ordinary:
+    /// the console follower does.
+    pub fn ingest(
+        &mut self,
+        source: StreamSource,
+        kind: StreamKind,
+        bytes: &[u8],
+    ) -> Arc<StreamRecord> {
         self.counters.ingested = self.counters.ingested.saturating_add(1);
-        let (kind, payload) = self.clear_for_display(source, kind, bytes);
-        let record = self.seal_record(source, kind, payload);
+        let cleared = self.clear_for_display(source, kind, bytes);
+        let record = Arc::new(self.seal_record(source, cleared.kind, cleared.body));
         self.persist(&record);
-        self.fan_out(Arc::new(record));
+        self.fan_out(Arc::clone(&record));
+        record
     }
 
     /// Seal the transcript and hand back its manifest.
@@ -291,42 +305,43 @@ impl StreamBroker {
         self.writer.seal()
     }
 
-    /// Run the chunk through the seam, or replace it with a marker.
+    /// Run the chunk through the seam and count what it decided.
     ///
-    /// Fail closed: a byte nobody could check does not ship. The marker
-    /// keeps the gap visible — a reader learns output was suppressed instead
-    /// of silently seeing less than the workload wrote.
+    /// The decision itself lives in [`redact::clear_for_display`], shared with
+    /// the entrypoint sink's unrecorded arm; what belongs here is only this
+    /// broker's bookkeeping.
     fn clear_for_display(
         &mut self,
         source: StreamSource,
         kind: StreamKind,
         bytes: &[u8],
-    ) -> (StreamKind, Vec<u8>) {
-        match self.redaction.redact(bytes) {
-            Ok(redacted) => {
-                if !redacted.rules_fired.is_empty() {
-                    self.counters.redacted = self.counters.redacted.saturating_add(1);
-                    tracing::debug!(
-                        vm = %self.vm,
-                        rules = ?redacted.rules_fired,
-                        "stream chunk redacted"
-                    );
-                }
-                (kind, redacted.body)
+    ) -> ClearedChunk {
+        let cleared = redact::clear_for_display(&self.redaction, source, kind, bytes);
+        match &cleared.outcome {
+            ClearOutcome::Clean => {}
+            ClearOutcome::Redacted { rules_fired } => {
+                self.counters.redacted = self.counters.redacted.saturating_add(1);
+                tracing::debug!(
+                    vm = %self.vm,
+                    rules = ?rules_fired,
+                    "stream chunk redacted"
+                );
             }
-            Err(err) => {
+            ClearOutcome::Withheld {
+                reason,
+                dropped_bytes,
+            } => {
                 self.counters.redaction_failures =
                     self.counters.redaction_failures.saturating_add(1);
                 tracing::warn!(
                     vm = %self.vm,
-                    dropped_bytes = bytes.len(),
-                    reason = %err,
+                    dropped_bytes,
+                    reason,
                     "stream chunk withheld: redaction failed"
                 );
-                let marker = redaction_failure_marker(source, kind, bytes.len() as u64);
-                (StreamKind::Trace, marker)
             }
         }
+        cleared
     }
 
     /// Stamp the record and link it to its predecessor.
@@ -461,7 +476,7 @@ impl StreamBroker {
 mod tests {
     use super::*;
     use crate::stream::fanout::DEFAULT_READER_MAX_RECORDS;
-    use crate::stream::redact::{Redacted, RedactionFailed};
+    use crate::stream::redact::{Redacted, RedactionFailed, StreamRedactor};
     use crate::supervisor::verify_audit_chain;
     use ed25519_dalek::SigningKey;
     use mvm_core::crypto::aead;

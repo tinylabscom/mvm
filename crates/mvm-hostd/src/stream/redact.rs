@@ -103,6 +103,77 @@ impl StreamRedactor for PiiRedactor {
     }
 }
 
+/// One chunk after the seam has ruled on it: the bytes that may be shown, the
+/// channel they go out on, and what the seam decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClearedChunk {
+    /// The channel the bytes go out on — the one they arrived on, or
+    /// [`StreamKind::Trace`] when a marker stands in for them.
+    pub kind: StreamKind,
+    /// Bytes cleared for the chain, the transcript, and every consumer.
+    pub body: Vec<u8>,
+    /// What the seam decided, for the caller's own bookkeeping.
+    pub outcome: ClearOutcome,
+}
+
+/// What the seam decided about one chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClearOutcome {
+    /// Nothing matched; the bytes are the workload's own, unchanged.
+    Clean,
+    /// At least one rule fired. Names only — a value that fired a rule is
+    /// exactly the value that must not travel.
+    Redacted { rules_fired: Vec<&'static str> },
+    /// The seam would not vouch for the chunk, so a marker took its place.
+    Withheld {
+        /// Why the detector gave up. Describes the detector, never the bytes.
+        reason: String,
+        /// How much was dropped, for a caller that wants to say so.
+        dropped_bytes: usize,
+    },
+}
+
+/// Run one chunk through the seam, substituting a marker for anything it will
+/// not vouch for.
+///
+/// The one implementation of that policy. Both ingest paths — the broker's and
+/// the entrypoint sink's unrecorded arm — call this rather than each spelling
+/// out "redact, and on failure emit a `Trace` marker": a second copy of the
+/// fail-closed substitution is a second chance to ship a byte nobody checked,
+/// and the two would drift the first time either changed.
+pub(crate) fn clear_for_display(
+    seam: &StreamRedaction,
+    source: StreamSource,
+    kind: StreamKind,
+    bytes: &[u8],
+) -> ClearedChunk {
+    match seam.redact(bytes) {
+        Ok(redacted) if redacted.rules_fired.is_empty() => ClearedChunk {
+            kind,
+            body: redacted.body,
+            outcome: ClearOutcome::Clean,
+        },
+        Ok(redacted) => ClearedChunk {
+            kind,
+            body: redacted.body,
+            outcome: ClearOutcome::Redacted {
+                rules_fired: redacted.rules_fired,
+            },
+        },
+        // Fail closed: a byte nobody could check does not ship. The marker
+        // keeps the gap visible — a reader learns output was suppressed
+        // instead of silently seeing less than the workload wrote.
+        Err(err) => ClearedChunk {
+            kind: StreamKind::Trace,
+            body: redaction_failure_marker(source, kind, bytes.len() as u64),
+            outcome: ClearOutcome::Withheld {
+                reason: err.reason,
+                dropped_bytes: bytes.len(),
+            },
+        },
+    }
+}
+
 /// Payload of the `Trace` record that stands in for a chunk the seam could
 /// not check.
 ///
@@ -184,6 +255,76 @@ mod tests {
             .expect("the curated pass cannot fail");
         assert!(!out.body.windows(TEST_CARD.len()).any(|w| w == TEST_CARD));
         assert!(out.rules_fired.contains(&"credit_card"));
+    }
+
+    #[test]
+    fn a_clean_chunk_keeps_its_channel_and_reports_nothing_fired() {
+        let cleared = clear_for_display(
+            &StreamRedaction::curated(),
+            StreamSource::Entrypoint,
+            StreamKind::Stderr,
+            b"nothing to see here",
+        );
+        assert_eq!(cleared.kind, StreamKind::Stderr);
+        assert_eq!(cleared.body, b"nothing to see here");
+        assert_eq!(cleared.outcome, ClearOutcome::Clean);
+    }
+
+    #[test]
+    fn a_match_is_masked_in_place_and_names_the_rule_without_quoting_the_value() {
+        let cleared = clear_for_display(
+            &StreamRedaction::curated(),
+            StreamSource::Entrypoint,
+            StreamKind::Stdout,
+            b"card 4111111111111111 end",
+        );
+        assert_eq!(cleared.kind, StreamKind::Stdout);
+        assert!(
+            !cleared
+                .body
+                .windows(TEST_CARD.len())
+                .any(|w| w == TEST_CARD)
+        );
+        match cleared.outcome {
+            ClearOutcome::Redacted { rules_fired } => assert!(rules_fired.contains(&"credit_card")),
+            other => panic!("expected a redaction, got {other:?}"),
+        }
+    }
+
+    /// A seam that cannot decide — the shape a detector with a timeout or a
+    /// crashed subprocess presents, which the curated regex pass never can.
+    struct FailingRedactor;
+
+    impl StreamRedactor for FailingRedactor {
+        fn redact(&self, _body: &[u8]) -> Result<Redacted, RedactionFailed> {
+            Err(RedactionFailed::new("detector unavailable"))
+        }
+    }
+
+    #[test]
+    fn a_chunk_the_seam_cannot_vouch_for_is_retagged_and_replaced_by_a_marker() {
+        // The whole reason this decision is shared rather than written once
+        // per ingest path: fail-closed is the policy, and a second copy of it
+        // is a second chance to get it wrong.
+        let cleared = clear_for_display(
+            &StreamRedaction::from_seam(Box::new(FailingRedactor)),
+            StreamSource::Entrypoint,
+            StreamKind::Stdout,
+            b"unscannable",
+        );
+        assert_eq!(
+            cleared.kind,
+            StreamKind::Trace,
+            "a marker on the stdout channel would look like the workload's own bytes"
+        );
+        assert!(!cleared.body.windows(11).any(|w| w == b"unscannable"));
+        assert_eq!(
+            cleared.outcome,
+            ClearOutcome::Withheld {
+                reason: "detector unavailable".to_string(),
+                dropped_bytes: 11,
+            }
+        );
     }
 
     #[test]

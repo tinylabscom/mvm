@@ -22,10 +22,12 @@ use mvm_core::config;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::stream_client::{
-    OutputRecord, OutputRequest, RecordOrigin, StreamAvailability, StreamOpts, open_vm_output,
+    KindFilter, OutputRecord, OutputRequest, RecordOrigin, StreamAvailability, StreamOpts,
+    open_vm_output,
 };
 use mvm_core::util::test_env::TestEnv;
 use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig};
+use mvm_protocol::stream::{StreamKind, StreamSource};
 use mvm_runtime::driver::MockDriver;
 use mvm_runtime::workload_runner::{
     EndpointSpawnRequest, EndpointSpawner, RealBrokerRegistrar, WorkloadLaunchInputs,
@@ -106,12 +108,18 @@ struct Follower {
 impl Follower {
     /// Attach through the same resolver `mvmctl logs -f` uses.
     fn attach(vm: &str) -> Self {
+        Self::attach_kinds(vm, KindFilter::all())
+    }
+
+    /// Attach narrowed to `kinds`, the way `mvmctl logs --stream <channel>`
+    /// does.
+    fn attach_kinds(vm: &str, kinds: KindFilter) -> Self {
         let (ready_tx, ready_rx) = channel();
         let (record_tx, record_rx) = channel();
         let vm = vm.to_string();
         std::thread::spawn(move || {
             let request = OutputRequest {
-                opts: StreamOpts::builder().follow(true).build(),
+                opts: StreamOpts::builder().follow(true).kinds(kinds).build(),
                 history_tail: Some(0),
                 console_tail_bytes: None,
             };
@@ -217,6 +225,55 @@ fn stopping_a_workload_releases_the_socket_and_seals_a_readable_transcript() {
         .expect("the sealed capture holds the run's output");
     assert_eq!(record.origin, RecordOrigin::Durable);
     assert_eq!(record.payload, b"ran and exited\n");
+}
+
+/// The second source, reached the way the entrypoint dispatch reaches it:
+/// through the plane the process registered, by VM name.
+///
+/// The console covers the windows the agent cannot and merges both channels
+/// into stdout; only these frames can say which channel a byte came out of. If
+/// they never reach the broker, `--stream stderr` matches nothing a workload
+/// ever wrote — with a plane up and looking healthy.
+#[test]
+fn the_entrypoints_stderr_reaches_a_reader_asking_for_the_stderr_channel() {
+    register();
+    let (_env, _tmp) = isolated_home();
+    let runner = runner();
+
+    launch(&runner, "entrypoint-vm");
+    let follower = Follower::attach_kinds("entrypoint-vm", KindFilter::only(StreamKind::Stderr));
+
+    let plane = mvm_hostd::stream::host_stream_plane()
+        .expect("registering the console streamer must publish its plane");
+    let mut sink = plane.entrypoint_sink("entrypoint-vm");
+    assert!(
+        sink.is_recorded(),
+        "a workload the runner started is attached to this process's plane"
+    );
+    sink.ingest(StreamKind::Stdout, b"the result\n");
+    sink.ingest(StreamKind::Stderr, b"the warning\n");
+    drop(sink);
+
+    let record = follower.next();
+    assert_eq!(
+        record.payload, b"the warning\n",
+        "a stderr read must skip the stdout frame, not return it"
+    );
+    assert!(
+        matches!(
+            record.origin,
+            RecordOrigin::Live {
+                source: StreamSource::Entrypoint,
+                ..
+            }
+        ),
+        "the frame must be attributed to the entrypoint, not the console: {:?}",
+        record.origin
+    );
+
+    runner
+        .stop(&VmId("entrypoint-vm".to_string()))
+        .expect("stop");
 }
 
 #[test]

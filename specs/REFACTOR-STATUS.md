@@ -30,6 +30,12 @@ for detailed scope and acceptance criteria.
         follower up on VM start and seals them on stop; `mvmctl` registers it
         at startup through the runtime's `ConsoleStreamer` hook, unconditional
         and never admission-gated
+  - [x] T9c — the second source is wired: entrypoint `stdout`/`stderr`/fd-3
+        frames are ingested as `StreamSource::Entrypoint` with their true
+        channel, so `logs --stream stderr` returns what the workload wrote
+        there. `mvmctl invoke` prints what the broker cleared rather than the
+        raw frame, so it and `logs` show the same redacted, chained bytes and
+        neither is a path around the redaction seam
   - [ ] T10 — signed stream-retention mode, ADR-035, and the Phase 1 guide
   - [ ] T11–T16 — the input plane (Phase 2)
   - [ ] Residual after T9b: the plane lives in the host process that owns the
