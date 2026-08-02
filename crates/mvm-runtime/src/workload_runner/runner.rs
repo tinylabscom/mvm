@@ -6,6 +6,7 @@
 //! real endpoint process.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -189,6 +190,54 @@ impl BrokerRegistrar for RealBrokerRegistrar {
     }
 }
 
+/// Republishes a workload's console capture (`<state_dir>/console.log`,
+/// write-only, written by every backend before the guest agent can say
+/// anything) into the per-VM output-stream broker — so a guest that panics
+/// on boot, fails dm-verity, or OOMs its agent still leaves a stream instead
+/// of an empty one.
+///
+/// A hook, not a direct call: the broker this republishes into is owned by
+/// the resident per-tenant daemon, which sits *above* this crate in the
+/// dependency graph (the daemon depends on the runtime, never the other way
+/// around), so this crate cannot name that broker's type. Same shape as
+/// [`EndpointSpawner`] and [`BrokerRegistrar`] just above — both exist to
+/// solve exactly this "the runtime needs the resident daemon to do
+/// something" problem — and, like the ordinary `VmBackend` methods this
+/// trait's two calls sit beside, `start`/`stop` are independent entry points
+/// keyed by `vm_name` rather than a value threaded between them: a `start`
+/// during `up` and the matching `stop` commonly run in different process
+/// invocations against the same disk-backed VM state, so nothing here can
+/// rely on an in-process object outliving the call that created it.
+///
+/// **Unconditional.** Unlike [`BrokerRegistrar`] (an unrelated, same-named
+/// host-services broker for `host.audit.v1`/`host.secrets.v1`), this is never
+/// gated on tenant admission. An unadmitted local run is exactly the case
+/// with the fewest other ways to see a boot failure, so it must not lose
+/// console capture either.
+pub trait ConsoleStreamer: Send + Sync {
+    /// Start following `console_log` for `vm_name`. Best-effort: a real
+    /// implementation logs and continues on failure rather than failing a
+    /// workload boot over an observability feature.
+    fn start(&self, vm_name: &str, console_log: &Path);
+
+    /// Stop following `vm_name`'s console, if anything started one.
+    /// Idempotent — a no-op for a VM whose console was never followed,
+    /// matching every other per-VM reaper `WorkloadRunner::stop` already
+    /// calls unconditionally.
+    fn stop(&self, vm_name: &str);
+}
+
+/// The default hook: nothing constructs a per-VM broker to follow into yet
+/// (a resident daemon that does is a later step), so this compiles to
+/// nothing at either call site rather than silently discarding console bytes
+/// that had nowhere real to go.
+pub struct NoopConsoleStreamer;
+
+impl ConsoleStreamer for NoopConsoleStreamer {
+    fn start(&self, _vm_name: &str, _console_log: &Path) {}
+    fn stop(&self, _vm_name: &str) {}
+}
+
 /// Everything the runner needs to start a workload: the admitted launch config,
 /// its tenant/secrets/redaction/policy, and the kernel cmdline the role above
 /// assembled.
@@ -304,6 +353,7 @@ pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> 
     driver: D,
     spawner: S,
     broker: B,
+    console_streamer: Arc<dyn ConsoleStreamer>,
 }
 
 impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
@@ -312,7 +362,18 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             driver,
             spawner,
             broker,
+            console_streamer: Arc::new(NoopConsoleStreamer),
         }
+    }
+
+    /// Override the console-streaming hook — the seam a resident daemon that
+    /// owns a real per-VM broker wires a live [`ConsoleStreamer`] through.
+    /// Optional: a runner that never calls this keeps the no-op default, so
+    /// every existing construction site is unaffected.
+    #[must_use]
+    pub fn with_console_streamer(mut self, streamer: Arc<dyn ConsoleStreamer>) -> Self {
+        self.console_streamer = streamer;
+        self
     }
 
     /// Spawn the gating endpoint, compose the spec, and boot. The endpoint is
@@ -354,6 +415,13 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         });
 
         let vm = self.driver.boot(&spec)?;
+
+        // Unconditional and best-effort, and before the fallible activation
+        // handshake below rather than after it: the console is the only
+        // channel that still carries output if boot never reaches the guest
+        // agent, which includes a failure in that very handshake.
+        self.console_streamer
+            .start(&inputs.config.name, &socks.console_log);
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
         // ActivateEnvironment before exposing operational RPCs. Send it now,
@@ -1018,6 +1086,12 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // that registered none.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
         crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
+        // Idempotent no-op for a VM whose console was never followed (the
+        // no-op default, or a cold-boot failure before `start` reached this
+        // point). Unconditional and ahead of the fallible attach+kill below
+        // so a leaked follower thread never depends on the VM having
+        // stopped cleanly.
+        self.console_streamer.stop(&id.0);
         self.driver.attach(id)?.kill()
     }
 
@@ -1101,6 +1175,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
@@ -1176,6 +1251,49 @@ mod tests {
                 broker_listen_socket: req.broker_listen_socket.map(Path::to_path_buf),
             });
             Ok(BrokerGuard::defused())
+        }
+    }
+
+    /// A `ConsoleStreamer` double proving the *wiring*, not re-proving the
+    /// follower's own polling correctness (that lives, and is tested, in
+    /// `mvm-hostd::stream::console_source` — the crate this one cannot
+    /// depend on, which is why the hook exists). Records every `start`/`stop`
+    /// call, and on `stop` snapshots whatever the console-log path holds at
+    /// that moment: a real follower's `stop` synchronously drains before
+    /// returning, so a wired `stop` that runs before the file is read back
+    /// would show up here as a snapshot missing bytes that were already on
+    /// disk.
+    #[derive(Default)]
+    struct RecordingConsoleStreamer {
+        started: Mutex<Vec<(String, PathBuf)>>,
+        stopped: Mutex<Vec<String>>,
+        captured_at_stop: Mutex<HashMap<String, Vec<u8>>>,
+    }
+
+    impl ConsoleStreamer for RecordingConsoleStreamer {
+        fn start(&self, vm_name: &str, console_log: &Path) {
+            self.started
+                .lock()
+                .unwrap()
+                .push((vm_name.to_string(), console_log.to_path_buf()));
+        }
+
+        fn stop(&self, vm_name: &str) {
+            self.stopped.lock().unwrap().push(vm_name.to_string());
+            let path = self
+                .started
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(name, _)| name == vm_name)
+                .map(|(_, path)| path.clone());
+            if let Some(path) = path {
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                self.captured_at_stop
+                    .lock()
+                    .unwrap()
+                    .insert(vm_name.to_string(), bytes);
+            }
         }
     }
 
@@ -1256,6 +1374,71 @@ mod tests {
         assert_eq!(spec.blocks[0].source, PathBuf::from("/img/rootfs.ext4"));
         // The write-only console capture path is set under the state dir.
         assert!(spec.console.log_path.ends_with("console.log"));
+    }
+
+    #[test]
+    fn start_workload_starts_console_streaming_and_stop_tears_it_down_without_losing_bytes() {
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let streamer = Arc::new(RecordingConsoleStreamer::default());
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        )
+        .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
+
+        let cfg = config("w-console");
+        let vm = runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "tenant-x",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: "root=/dev/vda".into(),
+            })
+            .expect("start_workload succeeds against the mock driver");
+
+        // Started exactly once, unconditionally (no admission gating: the
+        // hook must not inherit `BrokerRegistrar`'s tenant-gated posture),
+        // and pointed at the same console-log path the boot spec carries.
+        let expected_console_log = vm_state_dir(&cfg.name).join("console.log");
+        {
+            let started = streamer.started.lock().unwrap();
+            assert_eq!(
+                started.as_slice(),
+                [("w-console".to_string(), expected_console_log.clone())]
+            );
+        }
+        assert!(
+            streamer.stopped.lock().unwrap().is_empty(),
+            "must not stop before the workload ends"
+        );
+
+        // The boot-failure case this feature exists for: output that lands
+        // on the console between start and stop, with no agent involved.
+        std::fs::write(&expected_console_log, b"kernel panic\n")
+            .expect("write to the console-log path the hook was started with");
+
+        runner
+            .stop(vm.id())
+            .expect("stop succeeds against the mock driver");
+
+        // Stopped exactly once, by name, and the snapshot taken at that stop
+        // call sees the bytes written above -- proving `stop` is wired to run
+        // (and, for a real follower, drain) before the caller can observe the
+        // workload as torn down, not merely that the method was called.
+        assert_eq!(streamer.stopped.lock().unwrap().as_slice(), ["w-console"]);
+        assert_eq!(
+            streamer
+                .captured_at_stop
+                .lock()
+                .unwrap()
+                .get("w-console")
+                .expect("stop captured this vm's console"),
+            b"kernel panic\n"
+        );
     }
 
     #[test]

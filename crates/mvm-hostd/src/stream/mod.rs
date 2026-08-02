@@ -25,10 +25,12 @@
 //! VM.
 
 pub mod broker;
+pub mod console_source;
 pub mod fanout;
 pub mod redact;
 
 pub use broker::{DEFAULT_CAPTURE_BOUNDS, StreamAudit, StreamBroker, StreamCounters};
+pub use console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
 pub use fanout::{
     DEFAULT_READER_BOUNDS, DEFAULT_READER_MAX_BYTES, DEFAULT_READER_MAX_RECORDS, ReaderHandle,
     ReaderStart,
