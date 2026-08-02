@@ -9,9 +9,11 @@
 //!
 //! This module computes a **host-side input fingerprint** so an
 //! unchanged build can be short-circuited before the builder VM is ever
-//! booted: map `fingerprint -> revision_hash`, and on the next `up`
-//! resolve the fingerprint host-side and reuse the already-materialised
-//! `~/.mvm/dev/builds/<revision>/` artifacts.
+//! booted: map `fingerprint -> ActionCacheRecord` (the revision plus
+//! every artifact's sha256 + size), and on the next `up` resolve the
+//! fingerprint host-side, verify the record against what is actually on
+//! disk, and reuse the already-materialised `~/.mvm/dev/builds/<revision>/`
+//! artifacts only when it checks out.
 //!
 //! ## Soundness (the stale-image footgun)
 //!
@@ -51,6 +53,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use mvm_core::action::ActionCacheRecord;
 use sha2::{Digest, Sha256};
 
 use super::BuildMode;
@@ -171,53 +174,84 @@ pub fn workload_build_fingerprint(
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Directory holding `fingerprint -> revision` cache records
-/// (`~/.mvm/dev/build-cache/`).
-fn build_cache_dir() -> PathBuf {
+/// Directory holding `fingerprint -> ActionCacheRecord` cache records
+/// (`~/.mvm/dev/build-cache/`). `pub(crate)` so sibling-module tests can
+/// assert directly against the on-disk record path rather than
+/// reconstructing it.
+pub(crate) fn build_cache_dir() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_home())
         .join("dev")
         .join("build-cache")
 }
 
-/// Look up the nix revision a previous build recorded for `fingerprint`,
-/// or `None` if there is no record (or it is unreadable / malformed).
-/// Never returns a value that can't be a safe build-dir component.
-pub fn read_cached_revision(fingerprint: &str) -> Option<String> {
-    read_cached_revision_in(&build_cache_dir(), fingerprint)
+/// Look up the typed cache record a previous build wrote for
+/// `fingerprint`, or `None` if there is no record, it is unreadable,
+/// it fails to JSON-parse (including a legacy plaintext `<revision>\n`
+/// record from before this cache carried typed records), or its
+/// `revision` can't be trusted as a build-dir path component. Never
+/// returns a record whose `action_digest` doesn't match the key it was
+/// looked up under. This lookup alone does not verify the record's
+/// artifacts against disk — callers do that via
+/// `mvm_core::action::verify_artifacts_on_disk`.
+pub fn read_cache_record(fingerprint: &str) -> Option<ActionCacheRecord> {
+    read_cache_record_in(&build_cache_dir(), fingerprint)
 }
 
-/// Record `fingerprint -> revision` so the next build with the same
+/// Record `fingerprint -> record` so the next build with the same
 /// inputs can skip the builder VM. Best-effort and atomic (temp +
 /// rename) so a concurrent reader never sees a torn record.
-pub fn write_cached_revision(fingerprint: &str, revision: &str) -> Result<()> {
-    write_cached_revision_in(&build_cache_dir(), fingerprint, revision)
+pub fn write_cache_record(fingerprint: &str, record: &ActionCacheRecord) -> Result<()> {
+    write_cache_record_in(&build_cache_dir(), fingerprint, record)
 }
 
-fn read_cached_revision_in(dir: &Path, fingerprint: &str) -> Option<String> {
+/// Delete a stale cache record after verification against disk failed.
+/// Best-effort: an unwritable cache dir just means the entry keeps
+/// failing verification (and getting evicted again) on every future
+/// lookup, never that a bad entry is served.
+pub fn evict_cache_record(fingerprint: &str) {
+    evict_cache_record_in(&build_cache_dir(), fingerprint);
+}
+
+fn read_cache_record_in(dir: &Path, fingerprint: &str) -> Option<ActionCacheRecord> {
     if !is_safe_component(fingerprint) {
         return None;
     }
     let raw = std::fs::read_to_string(dir.join(fingerprint)).ok()?;
-    let rev = raw.trim();
+    let record: ActionCacheRecord = serde_json::from_str(&raw).ok()?;
+    if record.action_digest.as_str() != fingerprint {
+        return None;
+    }
     // The revision becomes a `~/.mvm/dev/builds/<rev>/` path component;
     // reject anything that isn't a plain store-hash token.
-    is_safe_component(rev).then(|| rev.to_string())
+    is_safe_component(&record.revision).then_some(record)
 }
 
-fn write_cached_revision_in(dir: &Path, fingerprint: &str, revision: &str) -> Result<()> {
+fn write_cache_record_in(dir: &Path, fingerprint: &str, record: &ActionCacheRecord) -> Result<()> {
     anyhow::ensure!(
-        is_safe_component(fingerprint) && is_safe_component(revision),
-        "refusing to write build-cache record with unsafe key/value"
+        is_safe_component(fingerprint) && is_safe_component(&record.revision),
+        "refusing to write build-cache record with unsafe key/revision"
+    );
+    anyhow::ensure!(
+        record.action_digest.as_str() == fingerprint,
+        "refusing to write build-cache record whose action_digest doesn't match its key"
     );
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating build-cache dir {}", dir.display()))?;
     let final_path = dir.join(fingerprint);
     let tmp = dir.join(format!(".{}.{}.tmp", fingerprint, std::process::id()));
-    std::fs::write(&tmp, format!("{revision}\n"))
+    let json = serde_json::to_string(record).with_context(|| "serializing build-cache record")?;
+    std::fs::write(&tmp, json)
         .with_context(|| format!("writing build-cache temp {}", tmp.display()))?;
     std::fs::rename(&tmp, &final_path)
         .with_context(|| format!("renaming build-cache record into {}", final_path.display()))?;
     Ok(())
+}
+
+fn evict_cache_record_in(dir: &Path, fingerprint: &str) {
+    if !is_safe_component(fingerprint) {
+        return;
+    }
+    let _ = std::fs::remove_file(dir.join(fingerprint));
 }
 
 /// A token safe to use as a single path component: non-empty, no path
@@ -590,34 +624,102 @@ mod tests {
         );
     }
 
+    fn sample_cache_record(fingerprint: &str, revision: &str) -> ActionCacheRecord {
+        ActionCacheRecord {
+            action_digest: mvm_core::action::ActionDigest::from_fingerprint_hex(fingerprint)
+                .expect("test fingerprint must be valid 64-hex"),
+            revision: revision.to_string(),
+            artifacts: vec![mvm_core::action::ArtifactDigest {
+                path: "rootfs.ext4".to_string(),
+                sha256: mvm_core::packs::Sha256Hex::from_bytes(b"rootfs bytes"),
+                size_bytes: 12,
+            }],
+        }
+    }
+
     #[test]
     fn cache_record_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let fp = "a".repeat(64);
-        assert_eq!(
-            read_cached_revision_in(dir.path(), &fp),
-            None,
-            "absent → None"
-        );
-        write_cached_revision_in(dir.path(), &fp, "l6fjg21gfazc98635yr2zjcfxm6ykilk").unwrap();
-        assert_eq!(
-            read_cached_revision_in(dir.path(), &fp).as_deref(),
-            Some("l6fjg21gfazc98635yr2zjcfxm6ykilk")
-        );
+        assert_eq!(read_cache_record_in(dir.path(), &fp), None, "absent → None");
+        let record = sample_cache_record(&fp, "l6fjg21gfazc98635yr2zjcfxm6ykilk");
+        write_cache_record_in(dir.path(), &fp, &record).unwrap();
+        assert_eq!(read_cache_record_in(dir.path(), &fp), Some(record));
     }
 
     #[test]
     fn cache_record_rejects_unsafe_revision_on_read() {
-        // A tampered record must never become a path component.
+        // A tampered record must never become a path component, even
+        // though the JSON parses fine.
         let dir = tempfile::tempdir().unwrap();
         let fp = "b".repeat(64);
-        std::fs::write(dir.path().join(&fp), "../../etc/passwd\n").unwrap();
-        assert_eq!(read_cached_revision_in(dir.path(), &fp), None);
+        let mut record = sample_cache_record(&fp, "placeholder");
+        record.revision = "../../etc/passwd".to_string();
+        let json = serde_json::to_string(&record).unwrap();
+        std::fs::write(dir.path().join(&fp), json).unwrap();
+        assert_eq!(read_cache_record_in(dir.path(), &fp), None);
+    }
+
+    #[test]
+    fn cache_record_rejects_mismatched_action_digest_on_read() {
+        // A record filed under one fingerprint but carrying another
+        // action_digest is a sign of a corrupted or spoofed cache dir;
+        // the key must match the recorded digest.
+        let dir = tempfile::tempdir().unwrap();
+        let fp = "c".repeat(64);
+        let other_digest = "d".repeat(64);
+        let record = sample_cache_record(&other_digest, "rev-1");
+        let json = serde_json::to_string(&record).unwrap();
+        std::fs::write(dir.path().join(&fp), json).unwrap();
+        assert_eq!(read_cache_record_in(dir.path(), &fp), None);
+    }
+
+    #[test]
+    fn legacy_plaintext_record_fails_to_parse_on_read() {
+        // Pre-typed-record cache entries were a bare `<revision>\n`
+        // marker; that is not valid JSON, so it must read back as a
+        // cold miss rather than a partially-trusted value.
+        let dir = tempfile::tempdir().unwrap();
+        let fp = "e".repeat(64);
+        std::fs::write(dir.path().join(&fp), "l6fjg21gfazc98635yr2zjcfxm6ykilk\n").unwrap();
+        assert_eq!(read_cache_record_in(dir.path(), &fp), None);
     }
 
     #[test]
     fn cache_record_write_refuses_unsafe_key() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(write_cached_revision_in(dir.path(), "../escape", "rev").is_err());
+        let fp = "f".repeat(64);
+        let record = sample_cache_record(&fp, "rev");
+        assert!(write_cache_record_in(dir.path(), "../escape", &record).is_err());
+    }
+
+    #[test]
+    fn cache_record_write_refuses_mismatched_action_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = "1".repeat(64);
+        let other_digest = "2".repeat(64);
+        let record = sample_cache_record(&other_digest, "rev");
+        assert!(write_cache_record_in(dir.path(), &fp, &record).is_err());
+    }
+
+    #[test]
+    fn evict_removes_an_existing_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = "3".repeat(64);
+        let record = sample_cache_record(&fp, "rev-1");
+        write_cache_record_in(dir.path(), &fp, &record).unwrap();
+        assert!(read_cache_record_in(dir.path(), &fp).is_some());
+
+        evict_cache_record_in(dir.path(), &fp);
+        assert!(read_cache_record_in(dir.path(), &fp).is_none());
+        assert!(!dir.path().join(&fp).exists());
+    }
+
+    #[test]
+    fn evict_is_a_no_op_when_no_record_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = "4".repeat(64);
+        // Must not panic or error when there is nothing to evict.
+        evict_cache_record_in(dir.path(), &fp);
     }
 }
