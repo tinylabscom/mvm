@@ -37,6 +37,13 @@ pub enum MountError {
     /// The activation message itself is contradictory or malformed.
     #[error("invalid activation config: {0}")]
     InvalidConfig(String),
+    /// Post-mount guest setup failed, so the workload environment is incomplete.
+    ///
+    /// Fail closed: booting on would hand the workload an environment missing
+    /// the egress path its plan admitted, which the workload cannot tell apart
+    /// from a policy denial.
+    #[error("guest bootstrap failed: {0}")]
+    GuestBootstrap(String),
 }
 
 impl MountError {

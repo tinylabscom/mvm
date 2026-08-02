@@ -466,6 +466,51 @@ though that switch no longer controlled `build.rs`.
 
 ---
 
+## Task 8: Carry the non-mount guest setup onto the universal path
+
+The plan replaces `mvm-oci-init`, but its steps were only ever enumerated as
+mounting. `mvm-oci-init` also provisioned the workload environment, and the
+universal path silently shipped without any of it: on the default boot the
+workload got no `/etc/resolv.conf`, `lo` down, and nothing listening on the
+loopback proxy port, so every egress attempt failed while the proxy environment
+variables were still exported. The host-signer anchor was the one step ported,
+because it alone blocked boot loudly.
+
+- [x] **Step 1: Extract the shared steps**
+  `crates/mvm-agentd/src/guest_bootstrap.rs` owns the post-mount setup —
+  mediated tools, egress CA, verb grant, netinit, loopback + resolver, egress
+  client — as one `provision_guest_environment()`. Both inits call it, so
+  neither can acquire or lose a step alone.
+- [x] **Step 2: Invoke it from the agent's activation**
+  `apply_activation` runs it after the pivot (it writes into the workload root)
+  and before the privilege drop (mounts and interface changes need root).
+- [x] **Step 3: Fail closed**
+  A required-but-unresolvable egress client aborts activation via
+  `MountError::GuestBootstrap` rather than booting a workload that cannot
+  reach its admitted egress.
+- [x] **Step 4: Stop the mediated-tool mount from following symlinks**
+  `MS_BIND` resolves its target, so mounting over `/bin/ping` on a busybox image
+  landed on `/bin/busybox` and replaced every applet — `sh` included. The step
+  had never run on the universal path, so this stayed latent until Step 2 wired
+  it up. `replace_symlink_target` swaps the link for a plain file first and
+  declines the substitution when it cannot, leaving the image's own tool alone.
+- [ ] **Step 5: Deliver mediated tools on a read-only rootfs**
+  A verity-sealed rootfs cannot be written, so the symlink cannot be replaced
+  and `/bin/ping` stays busybox — which fails at `socket()` in a NIC-less guest.
+  `/mvm/runtime/ping` works when invoked directly. Prepending the runtime
+  overlay to the workload `PATH` would cover unqualified `ping`; an absolute
+  `/bin/ping` needs something else.
+- [ ] **Step 6: Regression witness**
+  A live or BDD scenario asserting the workload environment is complete on the
+  universal path, so this cannot regress silently a second time.
+
+Live verification on macOS/HVF, `machine run --image alpine`:
+`wget https://example.com` returns the page (`Network unreachable` before),
+`lo` is up, `/run/mvm` carries the signer anchor and resolver, and
+`/mvm/runtime/ping -c 2 google.com` reports 0% packet loss.
+
+---
+
 ## Acceptance gate
 
 - `cargo nextest run --workspace` green.

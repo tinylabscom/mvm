@@ -112,6 +112,11 @@ pub(crate) fn apply_activation(
     } else {
         guest_mount::pivot_to_root(&new_root)?;
     }
+    // The same post-mount setup the legacy per-rootfs init performs: mediated
+    // tools, egress CA, verb grant, netinit, loopback + resolver, egress client.
+    // It has to land after the pivot (it writes into the workload's root) and
+    // before the privilege drop (mounts and interface changes need root).
+    bootstrap_guest_environment()?;
     guest_mount::drop_privilege(WORKLOAD_UID, WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
@@ -130,4 +135,22 @@ fn fatal(message: &str) -> ! {
     );
     std::thread::sleep(std::time::Duration::from_millis(200));
     std::process::exit(1);
+}
+
+/// Run the post-mount setup shared with the legacy per-rootfs init.
+#[cfg(target_os = "linux")]
+fn bootstrap_guest_environment() -> Result<(), guest_mount::MountError> {
+    mvm_agentd::guest_bootstrap::provision_guest_environment().map_err(|_| {
+        guest_mount::MountError::GuestBootstrap(
+            "egress was required but no egress client resolved".to_string(),
+        )
+    })
+}
+
+/// The agent is PID 1 only inside a Linux guest, so there is nothing to set up
+/// on a host build. Spelled out rather than left as a `cfg`-erased call site so
+/// the Linux path cannot quietly disappear.
+#[cfg(not(target_os = "linux"))]
+fn bootstrap_guest_environment() -> Result<(), guest_mount::MountError> {
+    Ok(())
 }
