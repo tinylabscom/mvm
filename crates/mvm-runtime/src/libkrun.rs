@@ -2343,7 +2343,7 @@ mod tests {
         assert!(caps.host_vsock_proxy);
         assert!(
             !caps.l3_vsock,
-            "libkrun's virtio-net device violates the L3 tunnel precondition"
+            "libkrun does not meet the stricter L3 tunnel precondition"
         );
 
         // The rest of the table, each pinned so its deletion is visible.
