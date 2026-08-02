@@ -245,6 +245,11 @@ libc = "0.2"
 # Readiness-driven event loop for the in-house VMM's host↔guest vsock I/O thread
 # (os-poll = kqueue/epoll + Waker; os-ext = SourceFd to register std sockets).
 mio = { version = "1", features = ["os-poll", "os-ext"] }
+# Non-blocking `connect()` on a socket the userspace datapath still owns as a
+# `std::net::TcpStream`. std has no non-blocking connect, and the alternative is
+# hand-marshalling `sockaddr_in`/`sockaddr_in6` through `unsafe`. Already in the
+# lockfile via tokio and mio, so this adds a name, not a build.
+socket2 = "0.6"
 
 # Seccomp BPF compilation (W2.4 — per-service syscall filtering inside
 # guests, applied via the `mvm-seccomp-apply` shim before execve into

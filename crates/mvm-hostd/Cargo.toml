@@ -120,6 +120,8 @@ ipnet.workspace = true
 # Readiness polling for the per-VM L3 gateway's drive loop: the guest data
 # channel and the datapath are independent sources of work.
 mio = { workspace = true }
+# Non-blocking host `connect()` for the userspace datapath's deferred handshake.
+socket2 = { workspace = true }
 # custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
 # carries no hickory and stays on the workspace 1.85 floor.
 hickory-resolver = { workspace = true, features = ["tokio"], optional = true }

@@ -13,6 +13,7 @@
 
 pub mod device;
 pub mod limits;
+pub mod tcp;
 
 use std::os::fd::{AsRawFd, RawFd};
 
