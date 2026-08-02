@@ -145,6 +145,25 @@ pub struct ReaderStart {
     pub anchor: [u8; 32],
 }
 
+/// Everything a follower needs to verify one delivery, sampled together.
+///
+/// The three values are only meaningful as a set. Read separately —
+/// [`ReaderHandle::recv`], then [`ReaderHandle::anchor`], then
+/// [`ReaderHandle::gap`] — an eviction landing between two of the calls
+/// yields a window that does not chain from the anchor beside it, and the
+/// consumer renders that mismatch as tampering. [`ReaderHandle::drain_verified`]
+/// takes all three under one lock so the triple is always self-consistent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrainedWindow {
+    /// Every record this reader had buffered, in sequence order.
+    pub records: Vec<StreamRecord>,
+    /// The hash `records` chains from: the reader's attach point, or the
+    /// hash of the last record it lost if retention has moved it since.
+    pub anchor: [u8; 32],
+    /// What this reader has lost so far, folded into one marker.
+    pub gap: Option<GapMarker>,
+}
+
 /// A follower's end of the stream. Dropping it releases the queue; the
 /// broker reaps the dangling reference on its next record.
 pub struct ReaderHandle {
@@ -204,6 +223,36 @@ impl ReaderHandle {
         let record = lock_queue(&self.queue).pop()?;
         // The last holder gets the record outright; earlier readers copy.
         Some(Arc::try_unwrap(record).unwrap_or_else(|shared| (*shared).clone()))
+    }
+
+    /// Take everything buffered together with the anchor and gap that make
+    /// it verifiable — one lock, one consistent [`DrainedWindow`].
+    ///
+    /// This is the delivery path a consumer should use. Draining record by
+    /// record and then asking for the anchor separately is a race: retention
+    /// can evict between the two calls, and the anchor that comes back then
+    /// describes a different window than the one in hand. The consumer has no
+    /// way to tell that apart from a tampered chain, so it reports the one
+    /// failure this whole subsystem exists to make trustworthy.
+    ///
+    /// Costs no hashing. The anchor is a value the queue already holds, and
+    /// the running anchor for a *subsequent* window is the hash of the last
+    /// record here — which the consumer computes itself from a record it has
+    /// verified, rather than trusting this side to repeat it.
+    pub fn drain_verified(&mut self) -> DrainedWindow {
+        let mut queue = lock_queue(&self.queue);
+        let anchor = queue.resume_anchor.unwrap_or(self.start.anchor);
+        let gap = queue.gap;
+        let mut records = Vec::with_capacity(queue.records.len());
+        while let Some(record) = queue.pop() {
+            // The last holder gets the record outright; earlier readers copy.
+            records.push(Arc::try_unwrap(record).unwrap_or_else(|shared| (*shared).clone()));
+        }
+        DrainedWindow {
+            records,
+            anchor,
+            gap,
+        }
     }
 
     /// What this reader missed, folded into one marker, or `None` when it
@@ -409,6 +458,97 @@ mod tests {
             assert_eq!(handle.recv().expect("record").seq, seq);
         }
         assert_eq!(handle.gap(), None, "a drained reader misses nothing");
+    }
+
+    #[test]
+    fn drain_verified_hands_back_the_window_with_its_own_anchor_and_gap() {
+        let mut handle = ReaderHandle::new(start_at(0), bounds(1 << 20, 4));
+        let records = chained(0, 10);
+        {
+            let mut q = lock_queue(&handle.queue);
+            for record in &records {
+                q.push(Arc::clone(record));
+            }
+        }
+
+        let window = handle.drain_verified();
+        let gap = window.gap.expect("the reader fell behind");
+        assert_eq!(window.records.len(), 4);
+        assert_eq!(window.records[0].seq, gap.after_seq + 1);
+        assert_eq!(
+            window.anchor,
+            records[gap.after_seq as usize].hash(),
+            "the anchor is the hash of the last record this reader lost"
+        );
+        mvm_protocol::stream::verify_chain_from(&window.records, window.anchor)
+            .expect("the triple must verify as a set");
+    }
+
+    #[test]
+    fn drain_verified_takes_the_anchor_before_a_later_eviction_can_move_it() {
+        // The race the separate accessors lose: drain, evict, then read the
+        // anchor, and the anchor describes a window the caller does not hold.
+        // Reading them as one value is what makes that unrepresentable.
+        let mut handle = ReaderHandle::new(start_at(0), bounds(1 << 20, 4));
+        let records = chained(0, 12);
+        {
+            let mut q = lock_queue(&handle.queue);
+            for record in &records[..4] {
+                q.push(Arc::clone(record));
+            }
+        }
+        let first = handle.drain_verified();
+        assert_eq!(first.anchor, [0u8; 32], "attached at genesis");
+        assert_eq!(first.gap, None);
+
+        {
+            // Overflow the ring so the anchor moves after the first drain.
+            let mut q = lock_queue(&handle.queue);
+            for record in &records[4..] {
+                q.push(Arc::clone(record));
+            }
+        }
+        let second = handle.drain_verified();
+        let gap = second.gap.expect("the second window lost records");
+        assert_ne!(second.anchor, first.anchor, "loss moved the anchor");
+        assert_eq!(second.records[0].seq, gap.after_seq + 1);
+        mvm_protocol::stream::verify_chain_from(&second.records, second.anchor)
+            .expect("the second window verifies against the anchor it came with");
+    }
+
+    #[test]
+    fn drain_verified_on_a_caught_up_reader_is_an_empty_window_not_a_stall() {
+        let mut handle = ReaderHandle::new(start_at(0), DEFAULT_READER_BOUNDS);
+        let window = handle.drain_verified();
+        assert!(window.records.is_empty());
+        assert_eq!(window.gap, None);
+        assert_eq!(window.anchor, [0u8; 32]);
+    }
+
+    #[test]
+    fn consecutive_drains_of_an_unpruned_reader_report_the_attach_anchor() {
+        // The queue's anchor only tracks loss; a consumer that never lost
+        // anything chains each window from the hash it computed itself. This
+        // pins that contract so the reader side can rely on it.
+        let mut handle = ReaderHandle::new(start_at(0), DEFAULT_READER_BOUNDS);
+        let records = chained(0, 6);
+        {
+            let mut q = lock_queue(&handle.queue);
+            for record in &records[..3] {
+                q.push(Arc::clone(record));
+            }
+        }
+        let first = handle.drain_verified();
+        {
+            let mut q = lock_queue(&handle.queue);
+            for record in &records[3..] {
+                q.push(Arc::clone(record));
+            }
+        }
+        let second = handle.drain_verified();
+        assert_eq!(first.anchor, second.anchor);
+        assert_eq!(second.gap, None, "no loss, so nothing re-anchors");
+        assert_eq!(second.records[0].seq, 3);
     }
 
     #[test]

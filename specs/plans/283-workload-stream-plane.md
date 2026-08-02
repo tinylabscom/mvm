@@ -446,6 +446,11 @@ Every task inherits these. They are repo-wide gates, not suggestions.
   new struct field made the conformance target fail `E0063` while every gate the
   implementer ran reported clean. Any change to a shared type must compile the
   feature-gated lane too.
+- **Off-by-default *features* have the same blind spot as `required-features`
+  targets.** `--all-targets` selects targets, not features, so an off-by-default
+  module compiles in no default gate at all. Task 8 added `mvm-client`'s
+  `tracing-bridge`; a task that touches a feature-gated module must run that
+  feature explicitly or it is shipping code nothing built.
 
 Per-task gate command, run before every commit:
 
@@ -454,6 +459,7 @@ cargo fmt --all -- --check && \
 cargo clippy --workspace --all-targets -- -D warnings && \
 cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings && \
 cargo nextest run -p <crate> && \
+cargo nextest run -p mvm-client --features tracing-bridge && \
 cargo run -p xtask check-no-spec-refs-in-comments
 ```
 
@@ -480,8 +486,11 @@ Full gate before any push: `just ci` plus `cargo run -p xtask check-file-size`,
 | `crates/mvm-hostd/src/stream/console_source.rs` | console-capture tail source |
 | `crates/mvm-hostd/src/stream/input_gate.rs` | grant check, lease, secret gate (Phase 2) |
 | `crates/mvm-cli/src/commands/vm/logs.rs` | `logs -f` against the broker |
-| `crates/mvm-client/src/stream.rs` | consumer trait over the broker UDS |
+| `crates/mvm-core/src/stream_client/` | consumer trait, opts/filter, batch frame, framed reader |
+| `crates/mvm-hostd/src/stream/serve.rs` | the per-VM broker socket followers connect to |
+| `crates/mvm-client/src/stream.rs` | consumer surface over the broker UDS (re-export) |
 | `crates/mvm-client/src/stream_tracing.rs` | feature-gated `tracing` republishing bridge |
+| `crates/mvm-sdk/src/stream.rs` | same reader on the runtime SDK surface (re-export) |
 
 ---
 
@@ -1254,22 +1263,41 @@ git commit -am "feat(hostd): follow console capture as a stream source"
 Ordered before the CLI because the CLI consumes this trait.
 
 **Files:**
-- Create: `crates/mvm-client/src/stream.rs`, `crates/mvm-client/src/stream_tracing.rs`
-- Modify: `crates/mvm-client/src/lib.rs`, `crates/mvm-client/Cargo.toml`
-- Modify: `crates/mvm-sdk/sdks/` runtime surface for the host-side stream consumer
+- Create: `crates/mvm-core/src/stream_client/{mod,opts,wire,reader}.rs`,
+  `crates/mvm-hostd/src/stream/serve.rs`, `crates/mvm-client/src/stream.rs`,
+  `crates/mvm-client/src/stream_tracing.rs`, `crates/mvm-sdk/src/stream.rs`
+- Modify: `crates/mvm-client/src/lib.rs`, `crates/mvm-client/Cargo.toml`,
+  `crates/mvm-sdk/src/lib.rs`, `crates/mvm-sdk/Cargo.toml`,
+  `crates/mvm-core/src/{lib,config}.rs`, `crates/mvm-core/src/transcript/ring.rs`,
+  `crates/mvm-hostd/src/stream/{mod,fanout}.rs`
 
 **Interfaces:**
-- Consumes: `StreamRecord`, `verify_chain` (T1).
+- Consumes: `StreamRecord`, `verify_chain_from` (T1), `ReaderHandle` (T6).
 - Produces: `trait StreamReader { fn next_record(&mut self) -> Result<Option<StreamRecord>>; }`;
   `connect_stream(vm: &str, opts: StreamOpts) -> Result<Box<dyn StreamReader>>`;
   `StreamOpts { follow: bool, from_seq: Option<u64>, kinds: KindFilter }`;
   `republish_to_tracing(reader: Box<dyn StreamReader>)` behind a `tracing-bridge`
-  feature.
+  feature; `ReaderHandle::drain_verified() -> DrainedWindow`;
+  `serve_stream(path, broker) -> io::Result<StreamServerHandle>`;
+  `config::vm_stream_socket(vm)`.
 
 This is the seam `mvmd` fronts remotely. It does not depend on the unlanded
 `dyn MvmClient` facade.
 
-- [ ] **Step 1: Write the failing tests**
+**Placement, resolved during execution.** The trait cannot live in `mvm-client`
+and also reach the SDK: `mvm-client` → `mvm-hostd` → `mvm-sdk`, so an SDK
+dependency on `mvm-client` closes a cycle. It lives in `mvm-core` and both
+crates re-export it — the same split `mvm-client`'s own manifest already
+documents for the `MvmClient` trait, and the reason `mvm-sdk` can enable
+`mvm-core/client` at all. A consumer still writes `mvm_client::stream::…`.
+
+**The broker socket is part of this task.** The brief said "implement the UDS
+client against the broker protocol"; no such protocol existed, and a client
+tested only against a server written in its own test file cannot falsify the
+assumption it encodes. Both ends ship here. T9 still owns the process-lifetime
+story — who calls `serve_stream` and when — exactly as T7 left `ConsoleSource`.
+
+- [x] **Step 1: Write the failing tests**
 
 Cover: `from_seq` resumes at the requested sequence; `follow: false` terminates
 at the last record; `KindFilter` excludes non-matching kinds; a broken chain
@@ -1286,22 +1314,34 @@ fn the_bridge_preserves_stdout_bytes_verbatim() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-client stream` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-client stream` — FAIL.
 
-- [ ] **Step 3: Implement** the UDS client against the broker protocol, plus the
+- [x] **Step 3: Implement** the UDS client against the broker protocol, plus the
   bridge that maps `Trace` records to real `tracing` events and `Stdout`/`Stderr`
   to events carrying the bytes unaltered. The bridge is feature-gated so a
   consumer that does not want `tracing` does not link it.
 
-- [ ] **Step 4: Run to verify it passes** — PASS.
+  Two properties the implementation turns on. **Verify, then filter**: a
+  `KindFilter` or a `from_seq` resume removes records from the middle of a
+  window, so the reader checks the whole delivered batch before narrowing it,
+  and the broker filters nothing. **`drain_verified` under one lock**: `recv`
+  then `anchor` then `gap` as three acquisitions lets an eviction land between
+  two of them, and the resulting mismatch is indistinguishable from tampering
+  to the consumer.
 
-- [ ] **Step 5: Expose the reader on the SDK runtime surface** so a workload
+  `tracing` has no byte-typed field, so the bridge carries the payload as
+  base64 in `payload_b64` and `decode_payload` returns the exact bytes. An
+  encoding, not a reframing: nothing is line-split, escaped, or dropped.
+
+- [x] **Step 4: Run to verify it passes** — PASS. 29 `mvm-core` stream_client, 24 `mvm-hostd` stream::{serve,fanout}, 27 `mvm-client` (bridge on), 326 `mvm-sdk`.
+
+- [x] **Step 5: Expose the reader on the SDK runtime surface** so a workload
   author can consume a stream programmatically without shelling out.
 
 Run: `cargo nextest run -p mvm-sdk`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git add crates/mvm-client/src/stream.rs crates/mvm-client/src/stream_tracing.rs crates/mvm-client/src/lib.rs crates/mvm-client/Cargo.toml crates/mvm-sdk

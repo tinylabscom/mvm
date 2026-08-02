@@ -20,6 +20,11 @@
 //!   unbounded when a workload writes a byte at a time.
 //! - **Audit records the attach, not the bytes.** One chain-signed entry per
 //!   subscribe keeps the audit log payload-free.
+//! - **[`serve`] is the only way out.** Followers reach the broker over one
+//!   per-VM Unix socket, and what goes on that wire is the whole window plus
+//!   the anchor that verifies it. Narrowing to a consumer's filter happens on
+//!   the reading side, because a hole punched here would break the very chain
+//!   the consumer is meant to check.
 //!
 //! One broker per VM, resident in the per-tenant daemon — not a process per
 //! VM.
@@ -28,13 +33,15 @@ pub mod broker;
 pub mod console_source;
 pub mod fanout;
 pub mod redact;
+pub mod serve;
 
 pub use broker::{DEFAULT_CAPTURE_BOUNDS, StreamAudit, StreamBroker, StreamCounters};
 pub use console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
 pub use fanout::{
-    DEFAULT_READER_BOUNDS, DEFAULT_READER_MAX_BYTES, DEFAULT_READER_MAX_RECORDS, ReaderHandle,
-    ReaderStart,
+    DEFAULT_READER_BOUNDS, DEFAULT_READER_MAX_BYTES, DEFAULT_READER_MAX_RECORDS, DrainedWindow,
+    ReaderHandle, ReaderStart,
 };
 pub use redact::{
     REDACTION_FAILED_EVENT, Redacted, RedactionFailed, StreamRedaction, StreamRedactor,
 };
+pub use serve::{StreamServerHandle, serve_stream};

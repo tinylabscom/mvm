@@ -562,6 +562,23 @@ pub fn vm_console_log(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("console.log")
 }
 
+/// Per-VM Unix socket the host-side stream broker serves captured output on:
+/// `<socket-dir>/stream.sock`. Host-local only: a follower connects and the
+/// broker fans records to it. Lives in the socket dir rather than the state
+/// dir so a deep worktree path falls back to the short hashed namespace
+/// instead of overflowing macOS's Unix-socket path limit.
+pub fn vm_stream_socket(name: &str) -> std::path::PathBuf {
+    vm_socket_dir(name).join("stream.sock")
+}
+
+/// Same as [`vm_stream_socket`] when the caller already holds the per-VM
+/// state dir. The broker binds through this arm; a consumer that only knows
+/// the VM name resolves through [`vm_stream_socket`]. One convention, two
+/// entry points — they must not drift.
+pub fn vm_stream_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    vm_socket_dir_at(state_dir).join("stream.sock")
+}
+
 /// Per-VM JSON file of `(guest var, placeholder)` pairs the
 /// substitution endpoint minted at boot. The backend writes it; the invoke
 /// path reads it to inject `HTTP_PROXY` + the placeholder env vars into the

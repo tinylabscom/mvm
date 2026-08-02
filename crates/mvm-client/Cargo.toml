@@ -17,6 +17,12 @@ default = []
 # The remote REST `GatewayBackend` + `connect(Target::Gateway)`. Off by default
 # so a pure-local consumer stays light; a fleet/studio build turns it on.
 remote = ["mvm-core/client-remote"]
+# Republish a workload's output stream into the consumer's own `tracing`
+# subscriber (`stream_tracing`). Off by default: `tracing` is already a
+# dependency here for diagnostics, but a consumer that only reads records
+# should not link the base64 encoder the bridge needs to carry payload bytes
+# through a field API that has no byte type.
+tracing-bridge = ["dep:base64", "dep:serde_json"]
 # Forwards to `mvm-runtime/test-support`: the hermetic in-memory mock backend
 # `LocalBackend::with_hypervisor("mock")` drives in `pause`/`resume`'s
 # canned-snapshot test path. Off by default so the mock never reaches a
@@ -51,7 +57,18 @@ async-trait = { workspace = true }
 # Non-fatal diagnostics on the pause path (fc.paused marker best-effort write).
 # Already in the mvmctl closure via mvm-runtime, so this adds no crates.
 tracing = { workspace = true }
+# `tracing-bridge` only: payload bytes are hash-chained and must reach an
+# event unaltered, and `tracing` has no byte-typed field to carry them in.
+base64 = { workspace = true, optional = true }
+# `tracing-bridge` only: a `Trace` record's payload is the JSON control object
+# the fd-3 convention defines, and its declared level drives the emitted event.
+serde_json = { workspace = true, optional = true }
+# `StreamRecord` and its tags are in this crate's re-exported public surface.
+mvm-protocol = { workspace = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+# The tracing bridge's tests install a capturing subscriber to assert the
+# emitted event carries the payload bytes back out unaltered.
+tracing-subscriber = { workspace = true }

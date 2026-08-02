@@ -74,7 +74,12 @@ pub struct Evicted {
 /// admission. Shaped so a verifier can use `after_seq` as the anchor point
 /// for the surviving window (the same role a `verify_chain_from` anchor
 /// plays once the window no longer starts at genesis).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializable because a live follower is told what it lost over the wire,
+/// not just in-process: a consumer that cannot see the gap reads a pruned
+/// window as a complete one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GapMarker {
     /// The highest sequence number this admission evicted; the surviving
     /// chain resumes at `after_seq + 1`.

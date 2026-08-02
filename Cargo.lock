@@ -2768,15 +2768,19 @@ name = "mvm-client"
 version = "0.18.0"
 dependencies = [
  "async-trait",
+ "base64",
  "flate2",
  "mvm-build",
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
+ "mvm-protocol",
  "mvm-runtime",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

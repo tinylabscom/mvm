@@ -108,6 +108,11 @@ pub mod residency;
 pub mod snapshot_frame;
 /// Shared SOCKS5 UDP datagram wire codec for the guest proxy and host relay.
 pub mod socks5_udp;
+/// Read side of the workload stream plane: the consumer trait, its filters,
+/// and the framed transport to a VM's host-side broker. Lives here rather
+/// than in `mvm-client` so `mvm-sdk` — which sits below `mvm-hostd`, which
+/// `mvm-client` depends on — can expose the same reader without a cycle.
+pub mod stream_client;
 /// The guest↔host substitution-endpoint wire contract, shared so the
 /// in-guest client and the host server serialize identical bytes.
 pub mod substitution_wire;

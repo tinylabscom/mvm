@@ -67,6 +67,10 @@ path = "src/bin/emit_schema.rs"
 mvm-agentd = { workspace = true }
 # Async tests for the subprocess MvmClient impl.
 tokio = { workspace = true, features = ["macros", "rt"] }
+# `compile::flake`'s tests drive `TestEnv` to isolate `MVM_HOME`. Declared
+# here rather than picked up from workspace feature unification, so
+# `cargo nextest run -p mvm-sdk` on its own compiles what a workspace run does.
+mvm-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
