@@ -69,6 +69,9 @@ mvm-hostd.workspace = true
 mvm-protocol.workspace = true
 sha2.workspace = true
 hex.workspace = true
+# The apple-container scenarios pin the fake cached kernel with a BLAKE3
+# sidecar, matching the backend's attestation contract.
+blake3.workspace = true
 # The sidecar acquire scenarios build the gzipped release tarball the
 # `sdk-sidecar-image` job publishes, so the download path runs against staged
 # local bytes instead of the network.

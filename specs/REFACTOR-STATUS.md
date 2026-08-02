@@ -47,7 +47,7 @@ for detailed scope and acceptance criteria.
   - [x] Stage 1 — fail-closed skeleton: kernel artifact resolution + thin
         HVF-runner delegation
   - [x] Stage 2 — live validation + claim review (2026-08-01): required
-        `vmlinux.sha256` digest sidecar (fail-closed on absence/mismatch),
+        `vmlinux.blake3` digest sidecar (fail-closed on absence/mismatch),
         sealed dm-verity boot proven on macOS HVF (gated e2e, 4.27s), CLI
         smoke via `machine run --hypervisor apple-container`, claims array
         stays a verbatim HVF-runner mirror (claim 3 stays DoesNotHold for

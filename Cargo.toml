@@ -214,6 +214,10 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem",
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
 secrecy = { version = "0.10", features = ["serde"] }
 sha2 = "0.11"
+# BLAKE3 for the Apple Container kernel's digest-pin sidecar — an order of
+# magnitude faster than SHA-256 on multi-hundred-MB kernels. Default
+# features (`std`) suffice for the streamed host-side hash; no rayon.
+blake3 = "1.8"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 # Serialization

@@ -63,7 +63,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// removed the vminitd gRPC client (`prost`/`prost-types`/`h2`/`http`) and
 /// their exclusive transitive set from the default closure. Lower it freely
 /// as deps drop.
-const CLOSURE_BUDGET: usize = 270;
+///
+/// 273 (was 270): the Apple Container kernel digest-pin contract uses BLAKE3
+/// for streamed multi-hundred-megabyte kernel verification. Its `blake3`
+/// package and three small support crates are part of the default host binary.
+const CLOSURE_BUDGET: usize = 273;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

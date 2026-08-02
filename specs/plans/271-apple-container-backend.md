@@ -1,6 +1,8 @@
 # Plan 271: Apple Container backend — Apple's container kernel on HVF
 
-**Status:** implemented (thin HVF-runner delegation + kernel artifact resolution); live e2e validation remaining.
+**Status:** stages 1–2 complete — digest-pinned kernel attestation, thin
+HVF-runner delegation, and live e2e validation (2026-08-01). Remaining:
+container-mode closure (later stage).
 **Owner:** mvm core.
 **Depends on:** universal initramfs + `ActivateEnvironment` (PR #1914) —
 the initramfs itself is a deterministic cargo artifact (reproducible
@@ -57,7 +59,12 @@ Apple Container:                           Apple's prebuilt container kernel + t
 - **Artifact resolution** (`apple_container/artifacts.rs`):
   `<mvm-cache>/apple-container/vmlinux`, probed at `start`; a missing
   kernel is a typed `ArtifactMissing { what, path, hint }` whose hint
-  names the fetch source. Pure `resolve_from(dir)` seam for tests.
+  names the fetch source. The kernel is trusted only with a matching
+  `vmlinux.blake3` digest sidecar beside it (bare `<hex>` or `b3sum`
+  `<hex>  <name>` form): a missing, malformed, or mismatching sidecar is
+  a typed `ArtifactUntrusted { path, reason, hint }`, and an unverified
+  kernel never makes the backend `is_available`. Pure `resolve_from(dir)`
+  seam for tests.
 - **Delegation** (`apple_container_backend.rs`): `start`/`start_with_mode`
   resolve the kernel, clone the config, set `kernel_path` (which the
   runner maps to `KernelImage::Path`), and delegate to
@@ -69,8 +76,9 @@ Apple Container:                           Apple's prebuilt container kernel + t
   exactly as for HVF; no gate of its own.
 - **Honesty**: `capabilities()` and the claims array of
   `security_profile()` are the HVF runner's verbatim; the notes record
-  that the kernel is a fetched artifact whose provenance is not an mvm
-  build. Opt-in only; `auto_select` never returns this backend.
+  that the kernel is a fetched artifact attested by a required digest
+  sidecar, and that the sealed boot path is live-proven on it. Opt-in
+  only; `auto_select` never returns this backend.
 
 What is honestly different, and documented as such: the kernel is an
 Apple-built artifact cached on the host, not bundled by mvm. Verified boot
@@ -95,15 +103,50 @@ bundled kernel.
   `prost`/`prost-types`/`h2`/`http` and their exclusive transitives left
   the default closure).
 
-### Stage 2 — Live e2e validation (remaining)
+### Stage 2 — Live e2e validation (complete, 2026-08-01)
 
-- Fetch a real Apple container kernel into the cache and boot a dev image
-  on macOS HVF: `mvmctl up --hypervisor apple-container` to an
-  authenticated `Ping`, exercise the operational RPC surface, `down`.
-- Sealed-boot smoke (universal initramfs + dm-verity rootfs + runtime
-  overlay) reusing the existing HVF lanes' artifacts.
-- Claim-by-claim review of `security_profile()` after the smoke; BDD
-  scenario under `features/suites/` mirroring the other runner backends.
+- [x] Kernel attestation landed first: the cached kernel boots only with
+      a matching `vmlinux.blake3` digest sidecar; missing, malformed, or
+      mismatching sidecars fail closed with the typed `ArtifactUntrusted`
+      error (same hash-sidecar honesty as the initramfs artifact). The pin
+      is BLAKE3, not SHA-256: it hashes a multi-hundred-MB kernel an order
+      of magnitude faster on every supported host, and SHA-256 stays where
+      it is contractually locked (OCI digests, dm-verity, snapshot
+      signing, the shipped `initramfs.hash` contract).
+- [x] Live CLI smoke on macOS HVF: `mvmctl machine run --hypervisor
+      apple-container --image alpine -- ps aux` — full boot on the Apple
+      kernel. (The original phrasing `mvmctl up --hypervisor
+      apple-container` predates the CLI shape: `up` is not a subcommand —
+      `machine run` / `machine start` are the boot verbs.) PID 1 is
+      `/init` as uid 901, `ps aux` ran as uid 901 (privilege drop),
+      dm-verity kernel threads visible, and the operational RPC surface
+      (run-command + streamed output) worked over the authenticated
+      channel.
+- [x] Sealed-boot smoke (universal initramfs + dm-verity rootfs + runtime
+      overlay): the gated e2e
+      `start_boots_a_sealed_workload_on_the_apple_container_kernel`
+      passed in 4.27s against the digest-pinned kernel. Console proof:
+      `device-mapper: verity: sha256 using "sha256-lib"` ×2, `EXT4-fs
+      (dm-0)` and `(dm-1)` mounted read-only (rootfs + runtime overlay
+      both dm-verity verified), `mvm-guest-agent: activation complete,
+      serving operational RPCs`.
+- [x] Claim-by-claim review of `security_profile()`: the claims array
+      stays a verbatim mirror of the HVF runner — the isolation story is
+      identical, only the kernel image differs — and claim 3 stays
+      DoesNotHold for the virtiofs-root path (owner decision: no flip).
+      The notes now record the digest-pin requirement and the live-proven
+      sealed boot.
+- [x] BDD under `features/suites/s25_apple_container/`: artifact
+      resolution fails closed with the hint-carrying error, the
+      digest-pin contract (matching sidecar resolves; missing, malformed,
+      and tampered sidecars fail closed — the tampered-kernel scenario
+      names both the pinned and actual digests), auto-select exclusion,
+      and the kernel-substitution mapping.
+
+Follow-up (pre-existing, not AC-specific): transient `machine run`
+teardown ends with `wait failed: No child process (os error 10)`;
+it reproduces identically with `--hypervisor hvf`, so it is a
+shared-runner issue for the HVF runner, not this backend.
 
 ## Constraints that do not change
 
@@ -111,8 +154,14 @@ bundled kernel.
   `NotActivated` gate, the egress endpoint, and the broker registration
   are shared verbatim — by construction, since the backend delegates to
   the same runner. No backend-specific fork of the guest agent.
-- Auto-select never returns this backend (opt-in only) until it carries a
-  production tier, same discipline as QEMU.
+- Auto-select never returns this backend; it is opt-in only via
+  `--hypervisor apple-container` (alias `container`). The availability
+  probe is fail-closed on attestation: a cached kernel without a matching
+  `vmlinux.blake3` sidecar never makes the backend `is_available`, so a
+  verified artifact is a hard precondition for any use, explicit or
+  probed. (This supersedes the earlier "opt-in only until it carries a
+  production tier" phrasing — the tier story did not change; the digest
+  pin is what landed.)
 - `BackendKind` exhaustiveness is load-bearing: the ripple across match
   sites is intentional and keeps every dispatch site honest.
 - `xtask check-no-vz` is the permanent guard: no Swift, no
