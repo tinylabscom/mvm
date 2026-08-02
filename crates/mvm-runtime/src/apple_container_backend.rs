@@ -52,7 +52,7 @@ pub enum AppleContainerError {
         hint: &'static str,
     },
     /// The cached kernel failed its digest attestation: the
-    /// `vmlinux.sha256` sidecar is missing, malformed, or names a digest
+    /// `vmlinux.blake3` sidecar is missing, malformed, or names a digest
     /// the kernel bytes do not hash to. `reason` says which (a mismatch
     /// names both the pinned and the actual digest); `hint` says how to
     /// stage a trusted kernel and record its digest. An unpinned or
@@ -196,7 +196,7 @@ impl VmBackend for AppleContainerBackend {
                  kernel: the same universal initramfs, guest agent, activation flow, egress \
                  gate, and isolation boundary as the HVF backend — only the kernel image differs.",
                 "The kernel is a fetched binary artifact (Apple's container kernel), not an \
-                 mvm-built image: it is trusted only with a matching vmlinux.sha256 digest \
+                 mvm-built image: it is trusted only with a matching vmlinux.blake3 digest \
                  sidecar in the artifact cache — resolution fails closed when the sidecar is \
                  absent, malformed, or disagrees with the kernel bytes, and an unverified \
                  kernel never makes this backend available.",
@@ -353,7 +353,7 @@ mod tests {
             "the notes must record the kernel provenance honestly"
         );
         assert!(
-            profile.notes.iter().any(|n| n.contains("vmlinux.sha256")),
+            profile.notes.iter().any(|n| n.contains("vmlinux.blake3")),
             "the notes must record the digest-sidecar attestation requirement"
         );
         assert!(
@@ -423,7 +423,7 @@ mod tests {
         };
         assert!(path.contains("apple-container"));
         assert!(reason.contains("no digest sidecar"));
-        assert!(hint.contains("sha256sum"));
+        assert!(hint.contains("b3sum"));
 
         let pinned = "0".repeat(64);
         stage_kernel(b"tampered-kernel", Some(&pinned));

@@ -7,10 +7,12 @@
 //! every runner backend uses. Resolution is pure path probing plus digest
 //! attestation: a missing kernel is a typed
 //! [`AppleContainerError::ArtifactMissing`] whose hint says where to fetch
-//! it, and a kernel without a matching `vmlinux.sha256` sidecar is a typed
+//! it, and a kernel without a matching `vmlinux.blake3` sidecar is a typed
 //! [`AppleContainerError::ArtifactUntrusted`] — the same hash-sidecar
 //! honesty contract the initramfs artifact already enforces, so a fetched
-//! kernel is trusted only when its pinned digest matches its bytes.
+//! kernel is trusted only when its pinned digest matches its bytes. The
+//! pin is BLAKE3: the fetched kernel is multi-hundred-MB, and BLAKE3
+//! hashes it an order of magnitude faster than SHA-256.
 
 use std::path::{Path, PathBuf};
 
@@ -21,9 +23,9 @@ pub const ARTIFACT_DIR_NAME: &str = "apple-container";
 /// File name of the container kernel image inside the artifact dir.
 pub const KERNEL_FILE_NAME: &str = "vmlinux";
 /// File name of the digest sidecar pinning the kernel bytes, beside the
-/// kernel: the lowercase-hex SHA-256 of the kernel, in either the bare
-/// `<hex>` form or `sha256sum`'s `<hex>  <name>` form.
-pub const KERNEL_DIGEST_FILE_NAME: &str = "vmlinux.sha256";
+/// kernel: the lowercase-hex BLAKE3 of the kernel, in either the bare
+/// `<hex>` form or `b3sum`'s `<hex>  <name>` form.
+pub const KERNEL_DIGEST_FILE_NAME: &str = "vmlinux.blake3";
 
 /// Hint for a missing kernel artifact.
 const KERNEL_HINT: &str = "copy an arm64 Linux Image with device-mapper + dm-verity built in \
@@ -33,10 +35,9 @@ const KERNEL_HINT: &str = "copy an arm64 Linux Image with device-mapper + dm-ver
 
 /// Hint for an untrusted kernel: how to record the pin after staging a
 /// kernel the operator trusts.
-const TRUST_HINT: &str = "after staging a trusted kernel, record its digest beside it — \
-     `sha256sum vmlinux > vmlinux.sha256` (Linux) or \
-     `shasum -a 256 vmlinux > vmlinux.sha256` (macOS) — the kernel is used \
-     only when the sidecar matches its bytes";
+const TRUST_HINT: &str = "after staging a trusted kernel, record its BLAKE3 digest beside it — \
+     `b3sum vmlinux > vmlinux.blake3` (install b3sum via `brew install b3sum` or \
+     `cargo install b3sum`) — the kernel is used only when the sidecar matches its bytes";
 
 /// The cache directory the kernel is resolved from.
 pub fn artifact_dir() -> PathBuf {
@@ -65,7 +66,7 @@ fn resolve_from(dir: &Path) -> Result<PathBuf, AppleContainerError> {
     Ok(kernel)
 }
 
-/// Verify the kernel against its `vmlinux.sha256` pin: the sidecar must
+/// Verify the kernel against its `vmlinux.blake3` pin: the sidecar must
 /// exist, parse, and name the digest the kernel bytes actually hash to.
 /// The kernel is streamed through the hasher, never read whole.
 fn verify_digest_pin(kernel: &Path) -> Result<(), AppleContainerError> {
@@ -87,7 +88,7 @@ fn verify_digest_pin(kernel: &Path) -> Result<(), AppleContainerError> {
             sidecar.display()
         ))
     })?;
-    let actual = mvm_core::crypto::image_verify::sha256_file(kernel)
+    let actual = blake3_file(kernel)
         .map_err(|e| untrusted(format!("kernel could not be read for hashing: {e}")))?;
     if actual != expected {
         return Err(untrusted(format!(
@@ -97,10 +98,27 @@ fn verify_digest_pin(kernel: &Path) -> Result<(), AppleContainerError> {
     Ok(())
 }
 
+/// Stream `path` through BLAKE3 with a 64 KiB buffer and return the
+/// lowercase hex digest; the file is never read whole.
+fn blake3_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 /// Parse the pinned digest out of a sidecar, accepting the bare `<hex>`
-/// form and `sha256sum`'s `<hex>  <name>` form. Returns the lowercase hex
+/// form and `b3sum`'s `<hex>  <name>` form. Returns the lowercase hex
 /// digest, or `None` when the sidecar does not start with a well-formed
-/// SHA-256 hex token.
+/// BLAKE3 hex token.
 fn parse_pinned_digest(contents: &str) -> Option<String> {
     let hex = contents.split_whitespace().next()?;
     if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -124,8 +142,7 @@ mod tests {
 
     /// The bare-hex pin for `bytes`.
     fn pin_for(bytes: &[u8]) -> String {
-        use sha2::Digest as _;
-        hex::encode(sha2::Sha256::digest(bytes))
+        blake3::hash(bytes).to_hex().to_string()
     }
 
     /// Assert `err` is the `ArtifactMissing` variant and return its fields.
@@ -166,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn sha256sum_form_sidecar_resolves() {
+    fn b3sum_form_sidecar_resolves() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pin = format!("{}  vmlinux\n", pin_for(b"kernel"));
         stage(dir.path(), b"kernel", &pin);
@@ -194,7 +211,7 @@ mod tests {
         );
         assert!(reason.contains(KERNEL_DIGEST_FILE_NAME));
         assert!(
-            hint.contains("sha256sum") && hint.contains("shasum -a 256"),
+            hint.contains("b3sum"),
             "the hint must say how to record the digest: {hint}"
         );
     }
@@ -209,7 +226,7 @@ mod tests {
             reason.contains("malformed"),
             "reason must say the sidecar is malformed: {reason}"
         );
-        assert!(hint.contains("sha256sum"));
+        assert!(hint.contains("b3sum"));
     }
 
     #[test]
@@ -252,7 +269,7 @@ mod tests {
         assert_eq!(
             parse_pinned_digest(&format!("{hex}  vmlinux\n")).as_deref(),
             Some(hex.as_str()),
-            "sha256sum form"
+            "b3sum form"
         );
         assert_eq!(parse_pinned_digest(""), None);
         assert_eq!(parse_pinned_digest("zzzz"), None);

@@ -7,8 +7,8 @@ Feature: Apple Container backend contract
   "apple-container", so resolution fails closed with a typed error that
   says what is missing, where it belongs, and how to fetch it. Because the
   kernel is fetched rather than built by mvm, it is trusted only with a
-  matching digest sidecar — a "vmlinux.sha256" beside the kernel naming
-  the lowercase-hex SHA-256 of its bytes, the same attestation honesty the
+  matching digest sidecar — a "vmlinux.blake3" beside the kernel naming
+  the lowercase-hex BLAKE3 of its bytes, the same attestation honesty the
   initramfs sidecars already enforce. A kernel whose sidecar is missing,
   malformed, or disagrees with its bytes is refused with a typed
   untrusted-artifact error and never makes the backend available.

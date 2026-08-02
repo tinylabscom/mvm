@@ -76,6 +76,9 @@ serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 sha2.workspace = true
+# The Apple Container kernel's digest pin is BLAKE3 (the fetched kernel is
+# multi-hundred-MB; SHA-256 stays where it is contractually locked).
+blake3.workspace = true
 uuid.workspace = true
 # `libc` for `kill(pid, 0)` liveness probes + SIGTERM/SIGKILL signaling
 # in `LibkrunBackend::{stop, status, list}`. `which` for the

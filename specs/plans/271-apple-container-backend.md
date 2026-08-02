@@ -60,7 +60,7 @@ Apple Container:                           Apple's prebuilt container kernel + t
   `<mvm-cache>/apple-container/vmlinux`, probed at `start`; a missing
   kernel is a typed `ArtifactMissing { what, path, hint }` whose hint
   names the fetch source. The kernel is trusted only with a matching
-  `vmlinux.sha256` digest sidecar beside it (bare `<hex>` or `sha256sum`
+  `vmlinux.blake3` digest sidecar beside it (bare `<hex>` or `b3sum`
   `<hex>  <name>` form): a missing, malformed, or mismatching sidecar is
   a typed `ArtifactUntrusted { path, reason, hint }`, and an unverified
   kernel never makes the backend `is_available`. Pure `resolve_from(dir)`
@@ -106,9 +106,13 @@ bundled kernel.
 ### Stage 2 — Live e2e validation (complete, 2026-08-01)
 
 - [x] Kernel attestation landed first: the cached kernel boots only with
-      a matching `vmlinux.sha256` digest sidecar; missing, malformed, or
+      a matching `vmlinux.blake3` digest sidecar; missing, malformed, or
       mismatching sidecars fail closed with the typed `ArtifactUntrusted`
-      error (same hash-sidecar honesty as the initramfs artifact).
+      error (same hash-sidecar honesty as the initramfs artifact). The pin
+      is BLAKE3, not SHA-256: it hashes a multi-hundred-MB kernel an order
+      of magnitude faster on every supported host, and SHA-256 stays where
+      it is contractually locked (OCI digests, dm-verity, snapshot
+      signing, the shipped `initramfs.hash` contract).
 - [x] Live CLI smoke on macOS HVF: `mvmctl machine run --hypervisor
       apple-container --image alpine -- ps aux` — full boot on the Apple
       kernel. (The original phrasing `mvmctl up --hypervisor
@@ -153,7 +157,7 @@ shared-runner issue for the HVF runner, not this backend.
 - Auto-select never returns this backend; it is opt-in only via
   `--hypervisor apple-container` (alias `container`). The availability
   probe is fail-closed on attestation: a cached kernel without a matching
-  `vmlinux.sha256` sidecar never makes the backend `is_available`, so a
+  `vmlinux.blake3` sidecar never makes the backend `is_available`, so a
   verified artifact is a hard precondition for any use, explicit or
   probed. (This supersedes the earlier "opt-in only until it carries a
   production tier" phrasing — the tier story did not change; the digest

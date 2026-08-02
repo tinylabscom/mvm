@@ -90,7 +90,7 @@ fn not_apple_container(world: &mut CliWorld) {
 }
 
 /// Write `bytes` as the cached kernel, plus `sidecar` as its
-/// `vmlinux.sha256` pin when given, into the isolated home's artifact dir.
+/// `vmlinux.blake3` pin when given, into the isolated home's artifact dir.
 fn stage_kernel(world: &CliWorld, bytes: &[u8], sidecar: Option<&str>) {
     let home = world
         .isolated_home
@@ -115,11 +115,10 @@ fn stage_kernel(world: &CliWorld, bytes: &[u8], sidecar: Option<&str>) {
     }
 }
 
-/// Lowercase-hex SHA-256 of `bytes`, for a sidecar that honestly pins the
+/// Lowercase-hex BLAKE3 of `bytes`, for a sidecar that honestly pins the
 /// fake kernel it sits beside.
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    hex::encode(sha2::Sha256::digest(bytes))
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
 }
 
 #[given("an apple-container kernel is cached in the isolated home")]
@@ -127,7 +126,7 @@ fn cache_kernel(world: &mut CliWorld) {
     // The fake kernel is staged with the digest sidecar a real operator
     // would record: without the matching pin the artifact is untrusted.
     let bytes = b"fake-kernel-bytes";
-    let sidecar = sha256_hex(bytes);
+    let sidecar = blake3_hex(bytes);
     stage_kernel(world, bytes, Some(&sidecar));
 }
 
@@ -135,7 +134,7 @@ fn cache_kernel(world: &mut CliWorld) {
 fn cache_kernel_tampered(world: &mut CliWorld) {
     // A well-formed pin for different bytes — the attestation must reject
     // the kernel even though the sidecar parses.
-    let wrong = sha256_hex(b"different-kernel-bytes");
+    let wrong = blake3_hex(b"different-kernel-bytes");
     stage_kernel(world, b"fake-kernel-bytes", Some(&wrong));
 }
 
@@ -168,7 +167,7 @@ fn failure_is_untrusted(world: &mut CliWorld) {
         "the error must name the cached kernel path: {path}"
     );
     assert!(
-        hint.contains("sha256sum"),
+        hint.contains("b3sum"),
         "the hint must say how to record the digest: {hint}"
     );
 }
@@ -179,8 +178,8 @@ fn failure_names_digests(world: &mut CliWorld) {
         .apple_container_untrusted
         .as_ref()
         .expect("a prior step must capture the attestation failure");
-    let pinned = sha256_hex(b"different-kernel-bytes");
-    let actual = sha256_hex(b"fake-kernel-bytes");
+    let pinned = blake3_hex(b"different-kernel-bytes");
+    let actual = blake3_hex(b"fake-kernel-bytes");
     assert!(
         reason.contains(&pinned),
         "the error must name the pinned digest {pinned}: {reason}"
