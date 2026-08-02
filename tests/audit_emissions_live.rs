@@ -1873,6 +1873,8 @@ fn volume_create_emits_volume_create_audit_entry() {
             "managed",
             "--root",
             root.to_str().expect("utf-8 path"),
+            "--size",
+            "16M",
         ])
         .output()
         .expect("spawn mvmctl volume create");
@@ -1909,6 +1911,8 @@ fn volume_unlock_and_lock_emit_audit_entries() {
             "managed",
             "--root",
             root.to_str().expect("utf-8 path"),
+            "--size",
+            "16M",
         ])
         .output()
         .expect("spawn mvmctl volume create");

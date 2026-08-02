@@ -81,16 +81,16 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-persistent-volume --hypervisor firecracker"
     Then the command exits with code 0
-    When I execute shell command "printf volume-persisted > /data/marker" in machine "bdd-persistent-volume"
+    When I execute shell command "printf volume-persisted > /data/marker && sync" in machine "bdd-persistent-volume"
     Then the command exits with code 0
-    When I run mvmctl in the isolated mvm home with "machine stop bdd-persistent-volume"
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-persistent-volume --yes"
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-persistent-volume --hypervisor firecracker"
     Then the command exits with code 0
     When I execute shell command "cat /data/marker" in machine "bdd-persistent-volume"
     Then the command exits with code 0
     And the output contains "volume-persisted"
-    When I run mvmctl in the isolated mvm home with "machine stop bdd-persistent-volume"
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-persistent-volume --yes"
     Then the command exits with code 0
 
   @live @firecracker
@@ -110,5 +110,5 @@ Feature: Encrypted block volume lifecycle and attachment
     When I execute shell command "touch /data/refused" in machine "bdd-readonly-volume"
     Then the command exits with code 1
     And the error output contains "Read-only file system"
-    When I run mvmctl in the isolated mvm home with "machine stop bdd-readonly-volume"
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-readonly-volume --yes"
     Then the command exits with code 0

@@ -22,11 +22,6 @@ use mvm_agentd::vsock::ActivateEnvironment;
 
 use crate::state::{ActivationState, AgentBootState};
 
-/// Fixed workload UID/GID the agent drops to after activation.
-/// Matches the existing `agentUid` used by `nix/lib/mk-guest.nix`.
-pub(crate) const WORKLOAD_UID: u32 = 901;
-pub(crate) const WORKLOAD_GID: u32 = 901;
-
 /// True when this process is PID 1 in the initramfs.
 pub(crate) fn is_pid1() -> bool {
     std::process::id() == 1
@@ -117,7 +112,7 @@ pub(crate) fn apply_activation(
     // It has to land after the pivot (it writes into the workload's root) and
     // before the privilege drop (mounts and interface changes need root).
     bootstrap_guest_environment()?;
-    guest_mount::drop_privilege(WORKLOAD_UID, WORKLOAD_GID)?;
+    guest_mount::drop_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
     eprintln!("mvm-guest-agent: activation complete, serving operational RPCs");

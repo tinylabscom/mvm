@@ -265,6 +265,8 @@ const VOLUME_SUB: &[(&str, AuditPosture)] = &[
     ("snapshot", AuditPosture::Emits("VolumeSnapshot")),
     ("restore", AuditPosture::Emits("VolumeRestore")),
     ("catalog", AuditPosture::ReadOnly),
+    ("snapshot", AuditPosture::Emits("VolumeSnapshot")),
+    ("restore", AuditPosture::Emits("VolumeRestore")),
     ("mount", AuditPosture::Emits("VmVolumeAdd")),
     ("ls", AuditPosture::ReadOnly),
     ("unmount", AuditPosture::Emits("VmVolumeRemove")),
