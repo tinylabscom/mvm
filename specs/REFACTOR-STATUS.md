@@ -128,10 +128,13 @@ for detailed scope and acceptance criteria.
         registers share no key; the real gap was that a claim could be
         delisted from a whole kind of witness with every gate green
   - [x] WS2 — prose over-claim meta-gate, shipped as `xtask check-no-overclaim`
-  - [ ] WS3 — replay golden-vector corpus across every content-address surface,
-        recording σ and κ where a transform is in play (no corpus in tree;
-        `check-content-address-determinism` pins the `serde_json preserve_order`
-        drift mechanism, not an address)
+  - [~] WS3 — replay golden-vector corpus. `ir_hash`, `leaf_hash`,
+        `interior_hash`, `merkle_root`, `compute_plan_id` and `bundle_sha256`
+        now carry frozen addresses. The existing `ir_hash` tests were all
+        *relational*, so a canonicalization change moving every address
+        consistently passed all four — planted and confirmed. Remaining: the
+        audit `prev_hash` spine, which needs a fixed keypair fixture and
+        belongs with WS4
   - [ ] WS4 — ≥2 independent verifiers over the WS3 corpus
   - [ ] WS5 — bind each witness to its recorded red-proof
   - [~] WS6 — **lead item**: content-address the caches, verify on read. The

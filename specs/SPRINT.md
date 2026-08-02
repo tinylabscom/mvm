@@ -159,6 +159,16 @@
       directions are enforced by tests that parse the specific named nix list;
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
+- [~] Content-address replay vectors — **plan 276 WS3**. Frozen
+      input→address vectors for `ir_hash`, the RFC-6962 leaf/interior/root
+      helpers, `compute_plan_id` and `bundle_sha256`. The tests that covered
+      these were relational only: hashing the canonical form with a trailing
+      newline moved every address and all four `ir_hash` unit tests stayed
+      green. `compute_plan_id` matters most — it does not use JCS, relying on
+      serde_json's default key ordering, so the gate pinned the feature flag
+      while nothing pinned the address it protects. Remaining: the audit
+      `prev_hash` spine, which needs a fixed keypair and belongs with WS4.
+
 - [x] Claim evidence pinned — **plan 276 WS1**. Each claim in
       `model/claims.toml` now declares the `witness_kinds` it rests on, and
       `check-claim-catalog` fails if a declared kind has no live witness, or if

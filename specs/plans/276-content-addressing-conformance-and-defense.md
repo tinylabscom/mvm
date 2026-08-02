@@ -120,13 +120,18 @@ No residual work. WS1's cross-field check is what makes this gate trustworthy �
 
 ### WS3 — Replay golden-vector lane (U4)
 
-The remaining high-value item, and untouched. `xtask check-content-address-determinism` is **not** this lane — it only asserts the non-build `serde_json` unit reachable from `mvm-core`/`mvm-protocol` does not carry `preserve_order`. That pins one drift mechanism; it pins no address. There is no vector corpus in the tree.
+Premise verified before building, and this time it held: five of seven surfaces had no frozen address at all. `SemanticAddress` (13 literals, incl. 12 published UOR-ADDR fixtures) and the plan-280 transcript root were the exceptions. `bundle_sha256`'s single literal was `sha256("abc")` — a textbook vector pinning lowercase-hex output, not a bundle address.
 
-- [ ] Create a frozen `(input → expected address)` corpus for **every** surface: `SemanticAddress`, `ir_hash`, `plan_id`, `bundle_sha256`/manifest, the audit `prev_hash` spine, the RFC-6962 Merkle root, and the plan-280 transcript manifest root (new since the first draft — it is a content address on the signed chain and must not drift either).
-- [ ] A test recomputes each and asserts byte-equality; fails on any canonicalization drift (`serde_jcs` bump, field reorder, NFC change).
-- [ ] Seed with current shipped behavior (freezes S5's NFC status quo). Include astral-plane-key + Unicode-normalization edge vectors.
-- [ ] Where a transform is in play, record **both σ and κ** — only the pair pins the encoding (WS7 / recon §7.8). Every surface in mvm is `Identity` today, so today the two are equal; the vector must still carry both so the day one of them stops being `Identity` is a vector diff and not a silent re-address.
-- [ ] Run in nextest (workspace); `VERIFICATION.md` row (planted: reorder a JCS key emitter → vector mismatch fires).
+The sharpest finding is what the existing `ir_hash` tests are: **all four are relational** — stable for identical input, key-order independent, different values differ, 64 hex long. A canonicalization change that moves every address consistently satisfies all of them. Demonstrated by planting exactly that (hash the canonical form with a trailing newline): the four unit tests stayed green and only the new vectors fired.
+
+- [x] `crates/mvm-protocol/tests/address_vectors.rs` — 14 vectors over `ir_hash`, `leaf_hash`, `interior_hash`, `merkle_root`. Includes the RFC-6962 odd-tail case (promote, never duplicate — the property that avoids the duplicate-leaf forgery) and astral-plane keys, where JCS's UTF-16 sort order diverges from UTF-8.
+- [x] NFC and NFD forms pinned as *different* addresses, recording in a test that `ir_hash` does not normalize (S5's status quo) rather than leaving it as tribal knowledge.
+- [x] `compute_plan_id` vectors in `plan/content_id.rs`. Worth pinning specifically because this surface does **not** use JCS — it relies on serde_json's default key ordering, which holds only while `preserve_order` is off. `check-content-address-determinism` pins that feature flag; nothing pinned the address the flag protects.
+- [x] `bundle_sha256` vectors in `plan/bundle.rs`, including a raw-byte case (NUL, 0xff, 0x80) that a digest passing through any string conversion would fail.
+- [x] Seeded from shipped behaviour, so they freeze what ships rather than asserting what it ought to be. `MVM_PRINT_ADDRESS_VECTORS=1` prints instead of asserting, making a reseed a deliberate act with a diff that has to be justified.
+- [x] Falsifiability rows for both crates, each with the planted defect recorded.
+- [ ] **Remaining: the audit `prev_hash` spine.** The chain link is `sha256(serde_json(entry) || prev_hash)` computed inside `verify_audit_chain_bytes`, with no separate public function, so a vector needs signed envelopes and therefore a fixed keypair fixture. That fixture is also what WS4 needs to feed one corpus to the host, wasm and riscv32 verifiers, so it belongs there rather than here.
+- [ ] Fold `SemanticAddress`'s existing 13 goldens into the same corpus shape, so WS4 has one vector set rather than two conventions.
 
 ### WS4 — Two-verifier oracle bar (U5)
 - [ ] Make the WS3 replay corpus the shared vector set the existing host↔no_std audit-verifiers both consume (`mvm_verify_matches_supervisor_chain` pins the equivalence today over ad-hoc input, not a frozen corpus).
