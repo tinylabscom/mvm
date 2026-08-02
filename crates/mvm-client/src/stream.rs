@@ -34,11 +34,11 @@
 //! `mvm-client` and never name the lower crate.
 
 pub use mvm_core::stream_client::{
-    FramedStreamReader, KindFilter, MAX_BATCH_PAYLOAD_BYTES, MAX_BATCH_RECORDS, MAX_FRAME_BYTES,
-    MAX_RECORD_PAYLOAD_BYTES, OutputLocator, OutputRecord, OutputRequest, RecordOrigin,
-    StreamAvailability, StreamBatch, StreamError, StreamOpts, StreamOptsBuilder, StreamReader,
-    Truncation, VmOutputStream, connect_stream, connect_stream_at, open_vm_output,
-    open_vm_output_at, read_batch, write_batch,
+    ConsoleUnsupported, EmptyHistory, FramedStreamReader, KindFilter, MAX_BATCH_PAYLOAD_BYTES,
+    MAX_BATCH_RECORDS, MAX_FRAME_BYTES, MAX_RECORD_PAYLOAD_BYTES, OutputLocator, OutputRecord,
+    OutputRequest, RecordOrigin, SpliceGap, StreamAvailability, StreamBatch, StreamError,
+    StreamOpts, StreamOptsBuilder, StreamReader, Truncation, VmOutputStream, connect_stream,
+    connect_stream_at, open_vm_output, open_vm_output_at, read_batch, write_batch,
 };
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ use mvm_protocol::stream::{ChainError, StreamRecord, verify_chain_from};
 use crate::config;
 use crate::transcript::{Direction, GapMarker, TranscriptError};
 
+use super::console::ConsoleUnsupported;
 use super::opts::StreamOpts;
 use super::wire::{MAX_FRAME_BYTES, StreamBatch, read_batch};
 
@@ -70,6 +71,28 @@ pub enum StreamError {
         /// Why the capture could not be read.
         #[source]
         source: TranscriptError,
+    },
+    /// The console capture is the only source this microVM has, and the
+    /// request asks it for something a console log cannot supply.
+    ///
+    /// Refused rather than quietly ignored. Applying the filter would return
+    /// nothing and hide the only output the VM has; ignoring it would return
+    /// the whole merged console under a flag that says it was narrowed, and
+    /// the note explaining that goes to stderr where a script reading stdout
+    /// never sees it. Refusing is the only answer that cannot mislead.
+    #[error(
+        "microVM `{vm}` has no output capture; its console log at {} is one unlabelled stream \
+         merging stdout and stderr, so {unsupported} cannot be honoured — drop it to read the \
+         whole console",
+        console.display()
+    )]
+    ConsoleCannotFilter {
+        /// The microVM the consumer asked for.
+        vm: String,
+        /// The console capture that is the only source.
+        console: PathBuf,
+        /// What the console cannot supply.
+        unsupported: ConsoleUnsupported,
     },
     /// The transcript at this location captures network frames, not workload
     /// output — an operator-armed forensic capture pointed at by mistake.

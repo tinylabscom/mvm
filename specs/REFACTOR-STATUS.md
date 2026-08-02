@@ -19,6 +19,12 @@ for detailed scope and acceptance criteria.
   - [x] T9 — `mvmctl logs` over the broker, the durable transcript, and the
         console capture (history splice + exited-VM path), `machine run`
         attaches unless `--detach`, and the builder-VM `tail -f` path is gone
+  - [x] T9 fix round 1 — a capture the filter emptied reports as present rather
+        than absent (`EmptyHistory`); a console-only read refuses a channel
+        selection or resume point it cannot supply instead of ignoring it under
+        a contradicting warning; and the hole between the sealed history and
+        the live head is reported (`SpliceGap`) rather than rendering a partial
+        log as a complete one
   - [ ] T10 — signed stream-retention mode, ADR-035, and the Phase 1 guide
   - [ ] T11–T16 — the input plane (Phase 2)
   - [ ] Not yet wired: nothing in a boot path builds a `StreamBroker` or binds

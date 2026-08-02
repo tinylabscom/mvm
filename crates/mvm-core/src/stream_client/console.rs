@@ -24,6 +24,10 @@
 //!   broker.
 //! - **No record boundaries.** Chunking is by read, so a record is "whatever
 //!   had arrived at that tick", not a line and not a write.
+//!
+//! Neither is papered over by guessing. A request this source cannot answer
+//! is named through [`ConsoleUnsupported`] and refused by the resolver, rather
+//! than answered with everything under a flag that says it was narrowed.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -32,7 +36,49 @@ use std::time::Duration;
 
 use mvm_protocol::stream::StreamKind;
 
+use super::opts::{KindFilter, StreamOpts};
 use super::output::{OutputRecord, RecordOrigin};
+
+/// What a console-only read was asked for that a console log cannot supply.
+///
+/// A console log is one interleaved byte stream with no channel labels and a
+/// sequence space of its own, so a request that narrows by channel or resumes
+/// at a sequence has no honest answer here. Both of the tempting answers are
+/// wrong in the same way: returning everything hands back bytes the caller
+/// excluded, and returning nothing hides the only output the VM has. Naming
+/// what cannot be supplied lets the caller decide, and — unlike a warning on
+/// stderr — cannot be missed by a script reading stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleUnsupported {
+    /// A channel narrower than every kind. The guest writes stdout and stderr
+    /// to one console with nothing left to tell them apart.
+    ChannelSelection,
+    /// A resume point. Console sequence numbers count read chunks and share
+    /// nothing with the broker's or the transcript's numbering, so honouring
+    /// one would drop console output for an unrelated reason.
+    ResumePoint,
+}
+
+impl ConsoleUnsupported {
+    /// What `opts` asks a console log for that it cannot give, if anything.
+    ///
+    /// Channel first: it is the one a person types.
+    pub fn of(opts: &StreamOpts) -> Option<Self> {
+        if opts.kinds != KindFilter::all() {
+            return Some(Self::ChannelSelection);
+        }
+        opts.from_seq.map(|_| Self::ResumePoint)
+    }
+}
+
+impl std::fmt::Display for ConsoleUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ChannelSelection => "a channel selection",
+            Self::ResumePoint => "a resume point",
+        })
+    }
+}
 
 /// Largest read per tick. Bounds one tick's allocation even when the file grew
 /// a lot between polls; the remainder is picked up by the next tick, which

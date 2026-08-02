@@ -33,6 +33,22 @@
 //! started has nothing here to splice. This reader takes whatever manifest
 //! exists; keeping one current is the writing side's job.
 //!
+//! **Where the two halves meet is checked for a hole.** A durable half that
+//! stops at the last seal and a live half that starts where the follower
+//! attached can leave a run of sequence numbers in neither source, and
+//! rendering them adjacently would present a partial log as a complete one —
+//! the exact failure the splice exists to avoid.
+//! [`VmOutputStream::splice_gap`] reports it. Only an unnarrowed request can
+//! tell a hole from its own filter, so a channel selection or a resume point
+//! disables the check rather than reporting distances the caller created.
+//!
+//! **A source that answered is not the same as a source that matched.** A
+//! transcript that verifies clean and holds nothing the request asked for is
+//! *present*; treating it as absent would discard it, fall through to the
+//! console, and report "no output capture" over a healthy capture. Presence
+//! decides [`StreamAvailability`]; why a present capture replayed nothing is
+//! reported separately through [`EmptyHistory`].
+//!
 //! **An integrity mechanism per source, and no claim beyond it.** Live records
 //! are hash-chained and verified against their anchor by the reader that
 //! produced them. Durable records are covered by the transcript's sealed
@@ -53,8 +69,8 @@ use crate::transcript::{
     self, Direction, GapMarker, MANIFEST_FILENAME, TranscriptError, TranscriptManifest,
 };
 
-use super::console::ConsoleTail;
-use super::opts::StreamOpts;
+use super::console::{ConsoleTail, ConsoleUnsupported};
+use super::opts::{KindFilter, StreamOpts};
 use super::reader::{StreamError, StreamReader, connect_stream_at};
 
 /// Where an [`OutputRecord`] came from, and what that source is able to say
@@ -138,6 +154,47 @@ impl Truncation {
             evicted_bytes: manifest.evicted_bytes,
         })
     }
+}
+
+/// A hole between the newest record the durable half supplied and the oldest
+/// one the live half did.
+///
+/// The manifest is written when a capture seals, so the durable half stops at
+/// the last seal while the live half starts wherever the follower attached.
+/// Everything between the two is in neither source. A consumer shown the two
+/// halves adjacently reads a partial log as a complete one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpliceGap {
+    /// The newest sequence the durable half supplied.
+    pub after_seq: u64,
+    /// The oldest sequence the live half supplied.
+    pub before_seq: u64,
+}
+
+impl SpliceGap {
+    /// How many sequence numbers fall in the hole.
+    pub fn missing(self) -> u64 {
+        self.before_seq
+            .saturating_sub(self.after_seq)
+            .saturating_sub(1)
+    }
+}
+
+/// Why the durable half handed over no records, when it handed over none.
+///
+/// All three shapes render as an empty replay and they mean different things:
+/// a capture with nothing in it, a capture the request filtered out entirely,
+/// and a request that asked for no replay. Only the last is something the
+/// operator chose, so a consumer that cannot tell them apart either stays
+/// silent about a capture it threw away or nags about one it was told to skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyHistory {
+    /// The transcript sealed with no chunks in it.
+    CaptureEmpty,
+    /// The transcript holds records and the request's filter matched none.
+    FilteredOut,
+    /// The request asked for zero replayed records.
+    NotRequested,
 }
 
 /// Which sources answered for a VM.
@@ -230,8 +287,18 @@ pub struct VmOutputStream {
     tail: Option<Tail>,
     availability: StreamAvailability,
     truncation: Option<Truncation>,
+    /// Why a transcript that answered replayed nothing, when one did and it
+    /// did not.
+    empty_history: Option<EmptyHistory>,
     /// Highest history sequence handed out, for live de-duplication.
     history_high_water: Option<u64>,
+    /// Whether a distance between the two halves would be attributable to the
+    /// splice rather than to the request's own filter.
+    splice_detectable: bool,
+    /// Whether a live record has been handed out, so the hole is measured
+    /// against the first one and not re-measured after.
+    saw_live: bool,
+    splice_gap: Option<SpliceGap>,
 }
 
 impl VmOutputStream {
@@ -248,6 +315,26 @@ impl VmOutputStream {
     /// History records still staged, before any live record is read.
     pub fn history_len(&self) -> usize {
         self.history.len()
+    }
+
+    /// Why the durable half replayed nothing, or `None` when it replayed
+    /// something or no transcript answered at all.
+    ///
+    /// The difference between "this VM captured nothing" and "this VM
+    /// captured plenty, none of it on the channel you asked for". Both show
+    /// zero records; only one of them is about the capture.
+    pub fn empty_history(&self) -> Option<EmptyHistory> {
+        self.empty_history
+    }
+
+    /// The hole where the durable half meets the live one, if the splice left
+    /// one.
+    ///
+    /// Poll it as records are read, like [`Self::gap`]: it cannot be known
+    /// until the first live record arrives, which is after `availability()`
+    /// and the whole staged history have already been reported.
+    pub fn splice_gap(&self) -> Option<SpliceGap> {
+        self.splice_gap
     }
 
     /// What the live follower has lost to the broker's retention ring.
@@ -277,6 +364,10 @@ impl VmOutputStream {
     ///
     /// Suppression does not apply to a console tail, whose sequence numbers
     /// count read chunks and share nothing with either of the others.
+    ///
+    /// The first live record that survives suppression is also where the two
+    /// halves are measured against each other: if it does not follow the last
+    /// history record, [`Self::splice_gap`] records the hole.
     pub fn next_output(&mut self) -> Result<Option<OutputRecord>, StreamError> {
         if let Some(record) = self.history.pop_front() {
             self.history_high_water = Some(record.seq);
@@ -294,11 +385,46 @@ impl VmOutputStream {
                     if high_water.is_some_and(|high| record.seq <= high) {
                         continue;
                     }
+                    if !self.saw_live {
+                        self.saw_live = true;
+                        self.splice_gap =
+                            detect_splice_gap(self.splice_detectable, high_water, record.seq);
+                    }
                     return Ok(Some(OutputRecord::from_live(record)));
                 }
             }
         }
     }
+}
+
+/// The hole between the two halves, or `None` when they meet, when there is
+/// no durable half to meet, or when the request itself explains the distance.
+fn detect_splice_gap(
+    detectable: bool,
+    after_seq: Option<u64>,
+    first_live_seq: u64,
+) -> Option<SpliceGap> {
+    if !detectable {
+        return None;
+    }
+    let after_seq = after_seq?;
+    (first_live_seq > after_seq.saturating_add(1)).then_some(SpliceGap {
+        after_seq,
+        before_seq: first_live_seq,
+    })
+}
+
+/// Whether a distance between the durable and live halves could be attributed
+/// to the splice at all.
+///
+/// Both sources number densely across channels, so under an unnarrowed
+/// request a missing sequence number is a missing record. Under a channel
+/// filter or a resume point it is not: the reader drops non-matching records
+/// before a consumer sees them, so `…, 4, 9, …` is the ordinary shape of a
+/// stderr-only read over a mostly-stdout run. Claiming a hole there would cry
+/// wolf on every narrowed read, which is worse than the silence it replaces.
+fn splice_detectable(opts: &StreamOpts) -> bool {
+    opts.kinds == KindFilter::all() && opts.from_seq.is_none()
 }
 
 /// Open a VM's output stream through the shared path helpers.
@@ -321,11 +447,38 @@ pub fn open_vm_output_at(
     let live = connect_broker(locator, request.opts)?;
     let history = read_history(locator, request)?;
 
-    let (records, truncation) = history.map_or_else(
-        || (VecDeque::new(), None),
-        |history| (history.records, history.truncation),
+    // Presence, never the surviving record count. A capture that verifies
+    // clean and matched nothing is still a capture: counting it absent would
+    // throw it away, fall through to the console, and announce "no output
+    // capture" over a transcript sitting right there.
+    let present = history.is_some();
+    let (records, truncation, empty_history) = history.map_or_else(
+        || (VecDeque::new(), None, None),
+        |history| (history.records, history.truncation, history.empty),
     );
-    let (tail, availability) = match (live, truncation.is_some() || !records.is_empty()) {
+    let (tail, availability) = resolve_tail(locator, request, live, present)?;
+    Ok(VmOutputStream {
+        history: records,
+        tail,
+        availability,
+        truncation,
+        empty_history,
+        history_high_water: None,
+        splice_detectable: splice_detectable(&request.opts),
+        saw_live: false,
+        splice_gap: None,
+    })
+}
+
+/// Which source continues the read once staged history is spent, and which
+/// sources answered at all.
+fn resolve_tail(
+    locator: &OutputLocator,
+    request: OutputRequest,
+    live: Option<Box<dyn StreamReader>>,
+    history_present: bool,
+) -> Result<(Option<Tail>, StreamAvailability), StreamError> {
+    Ok(match (live, history_present) {
         (Some(live), true) => (Some(Tail::Broker(live)), StreamAvailability::LiveAndHistory),
         (Some(live), false) => (Some(Tail::Broker(live)), StreamAvailability::LiveOnly),
         (None, true) => (None, StreamAvailability::HistoryOnly),
@@ -333,13 +486,6 @@ pub fn open_vm_output_at(
             Some(Tail::Console(open_console(locator, request)?)),
             StreamAvailability::ConsoleOnly,
         ),
-    };
-    Ok(VmOutputStream {
-        history: records,
-        tail,
-        availability,
-        truncation,
-        history_high_water: None,
     })
 }
 
@@ -368,7 +514,11 @@ fn connect_broker(
 }
 
 /// Fall back to the console capture, or report that the VM has no output at
-/// all.
+/// all — or that the console cannot answer what was asked.
+///
+/// "Nothing anywhere" outranks "the fallback cannot filter", so the existence
+/// check comes first: a user whose VM has no capture at all needs to hear
+/// that, not advice about a flag.
 fn open_console(
     locator: &OutputLocator,
     request: OutputRequest,
@@ -392,6 +542,13 @@ fn open_console(
             console: locator.console_log.clone(),
         });
     }
+    if let Some(unsupported) = ConsoleUnsupported::of(&request.opts) {
+        return Err(StreamError::ConsoleCannotFilter {
+            vm: locator.vm.clone(),
+            console: locator.console_log.clone(),
+            unsupported,
+        });
+    }
     let mut console = ConsoleTail::open(&locator.console_log, request.opts.follow);
     if let Some(tail) = request.console_tail_bytes {
         // Best effort: a stat that fails leaves the reader at the start, which
@@ -405,10 +562,17 @@ fn open_console(
 struct History {
     records: VecDeque<OutputRecord>,
     truncation: Option<Truncation>,
+    /// Why `records` is empty, when it is.
+    empty: Option<EmptyHistory>,
 }
 
 /// Read, verify, and decrypt the VM's transcript, or `Ok(None)` when it has
 /// none.
+///
+/// `Ok(None)` means **no transcript**, and nothing else. A capture that
+/// exists and yields no matching record still returns `Some`, with
+/// [`History::empty`] saying why — the distinction the caller keys
+/// availability off.
 ///
 /// An *absent* capture is not an error; an unreadable one is. A manifest that
 /// exists but does not parse, does not verify, or cannot be decrypted is
@@ -439,6 +603,7 @@ fn read_history(
     let chunks = transcript::export_chunks(&manifest, &locator.transcript_dir, &key)
         .map_err(|source| transcript_error(locator, source))?;
 
+    let total_chunks = chunks.len();
     let mut records = VecDeque::new();
     for chunk in chunks {
         let kind =
@@ -457,7 +622,10 @@ fn read_history(
             payload: chunk.plaintext,
         });
     }
+    let empty = classify_empty(total_chunks, records.len(), request.history_tail);
     if let Some(tail) = request.history_tail {
+        // From the front, so the newest record always survives and the live
+        // half still splices onto the record immediately before it.
         while records.len() > tail {
             records.pop_front();
         }
@@ -465,7 +633,27 @@ fn read_history(
     Ok(Some(History {
         truncation: Truncation::of(&manifest),
         records,
+        empty,
     }))
+}
+
+/// Why a present capture will replay nothing, or `None` when it will replay
+/// something.
+///
+/// Decided **before** the tail trim: "the filter matched none" and "the
+/// request asked for none" are only distinguishable there.
+fn classify_empty(
+    total_chunks: usize,
+    matched: usize,
+    tail: Option<usize>,
+) -> Option<EmptyHistory> {
+    if total_chunks == 0 {
+        return Some(EmptyHistory::CaptureEmpty);
+    }
+    if matched == 0 {
+        return Some(EmptyHistory::FilteredOut);
+    }
+    (tail == Some(0)).then_some(EmptyHistory::NotRequested)
 }
 
 fn load_manifest(locator: &OutputLocator, path: &Path) -> Result<TranscriptManifest, StreamError> {
@@ -1072,5 +1260,273 @@ mod tests {
         let stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
         assert!(!stream.availability().is_live());
         assert_eq!(stream.history_len(), 1);
+    }
+
+    /// `request` narrowed to one channel, and nothing else.
+    fn only(kind: StreamKind) -> OutputRequest {
+        OutputRequest {
+            opts: StreamOpts::builder().kinds(KindFilter::only(kind)).build(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_capture_that_matched_nothing_is_present_not_missing() {
+        // Keying availability off surviving records rather than the
+        // transcript's existence turns a stdout-only run read as stderr into
+        // "this VM has no output capture" — over a capture that verified
+        // clean two lines earlier.
+        let root = tempfile::tempdir().expect("tempdir");
+        let locator = stdout_capture(root.path(), &["one", "two"]);
+
+        let mut stream =
+            open_vm_output_at(&locator, only(StreamKind::Stderr)).expect("a capture is present");
+        assert_eq!(stream.availability(), StreamAvailability::HistoryOnly);
+        assert_eq!(stream.empty_history(), Some(EmptyHistory::FilteredOut));
+        assert!(drain(&mut stream).is_empty());
+    }
+
+    #[test]
+    fn a_capture_that_matched_nothing_does_not_fall_through_to_the_console() {
+        // The console holds the whole merged run. Discarding a filtered
+        // transcript and dumping that instead answers a narrowed question
+        // with everything, under a note claiming there was no capture.
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut locator = stdout_capture(root.path(), &["one"]);
+        locator.console_log = root.path().join("console.log");
+        std::fs::write(&locator.console_log, b"WHOLE MERGED CONSOLE").expect("console capture");
+
+        let mut stream = open_vm_output_at(&locator, only(StreamKind::Stderr)).expect("open");
+        assert_eq!(stream.availability(), StreamAvailability::HistoryOnly);
+        assert!(
+            drain(&mut stream).is_empty(),
+            "the console must not stand in for a filtered transcript"
+        );
+    }
+
+    #[test]
+    fn an_empty_capture_says_it_is_empty_rather_than_absent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let locator = seal_capture(root.path(), &[], RetentionPolicy::Ring, bounds());
+        let stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
+        assert_eq!(stream.availability(), StreamAvailability::HistoryOnly);
+        assert_eq!(stream.empty_history(), Some(EmptyHistory::CaptureEmpty));
+    }
+
+    #[test]
+    fn asking_for_no_replay_is_not_mistaken_for_an_unmatched_filter() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let locator = stdout_capture(root.path(), &["one", "two"]);
+        let request = OutputRequest {
+            history_tail: Some(0),
+            ..Default::default()
+        };
+        let mut stream = open_vm_output_at(&locator, request).expect("open");
+        assert_eq!(stream.empty_history(), Some(EmptyHistory::NotRequested));
+        assert!(drain(&mut stream).is_empty());
+    }
+
+    #[test]
+    fn a_capture_that_replayed_something_reports_no_emptiness() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let locator = stdout_capture(root.path(), &["one"]);
+        let stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
+        assert_eq!(stream.empty_history(), None);
+    }
+
+    #[test]
+    fn emptiness_is_classified_before_the_tail_trim() {
+        assert_eq!(classify_empty(0, 0, None), Some(EmptyHistory::CaptureEmpty));
+        assert_eq!(classify_empty(4, 0, None), Some(EmptyHistory::FilteredOut));
+        assert_eq!(
+            classify_empty(4, 2, Some(0)),
+            Some(EmptyHistory::NotRequested)
+        );
+        assert_eq!(classify_empty(4, 2, Some(1)), None);
+        assert_eq!(classify_empty(4, 4, None), None);
+        assert_eq!(
+            classify_empty(0, 0, Some(0)),
+            Some(EmptyHistory::CaptureEmpty),
+            "an empty capture is the truer statement than an unasked-for replay"
+        );
+    }
+
+    #[test]
+    fn a_console_only_read_refuses_a_channel_it_cannot_separate() {
+        // The console interleaves both channels with no labels. Answering
+        // `stderr` with the whole merged log is a lie a script reading stdout
+        // cannot detect, and answering it with nothing hides the only output
+        // the VM has. Neither is acceptable, so neither is what happens.
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut locator = empty_locator(root.path());
+        locator.console_log = root.path().join("console.log");
+        std::fs::write(&locator.console_log, b"out and err, interleaved").expect("capture");
+
+        let Err(err) = open_vm_output_at(&locator, only(StreamKind::Stderr)) else {
+            panic!("a console log cannot honour a channel selection");
+        };
+        assert!(
+            matches!(
+                err,
+                StreamError::ConsoleCannotFilter {
+                    unsupported: ConsoleUnsupported::ChannelSelection,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let rendered = err.to_string();
+        assert!(rendered.contains("console.log"), "{rendered}");
+        assert!(rendered.contains("merging stdout and stderr"), "{rendered}");
+    }
+
+    #[test]
+    fn a_console_only_read_refuses_a_resume_point_from_another_sequence_space() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut locator = empty_locator(root.path());
+        locator.console_log = root.path().join("console.log");
+        std::fs::write(&locator.console_log, b"chunked by read, not by record").expect("capture");
+
+        let request = OutputRequest {
+            opts: StreamOpts::builder().from_seq(5).build(),
+            ..Default::default()
+        };
+        let Err(err) = open_vm_output_at(&locator, request) else {
+            panic!("console sequence numbers share nothing with a broker's");
+        };
+        assert!(
+            matches!(
+                err,
+                StreamError::ConsoleCannotFilter {
+                    unsupported: ConsoleUnsupported::ResumePoint,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn no_source_at_all_outranks_a_filter_the_console_could_not_have_honoured() {
+        // "Nothing anywhere" is the more actionable of the two, so it wins.
+        let root = tempfile::tempdir().expect("tempdir");
+        let Err(err) = open_vm_output_at(&empty_locator(root.path()), only(StreamKind::Trace))
+        else {
+            panic!("a VM with no capture at all must not open");
+        };
+        assert!(matches!(err, StreamError::NoCapture { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_hole_between_the_sealed_history_and_the_live_head_is_reported() {
+        // The manifest is written at seal, so a running VM's recorded half
+        // stops well before a follower attaches. Rendering seq 0..2 straight
+        // into seq 7 shows a partial log as the whole run.
+        let root = tempfile::tempdir().expect("tempdir");
+        let capture = stdout_capture(root.path(), &["h-0", "h-1", "h-2"]);
+        let (locator, _broker) = live_locator(root.path(), capture, framed_live(7, 2));
+
+        let mut stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
+        assert_eq!(
+            payloads(&drain(&mut stream)),
+            vec!["h-0", "h-1", "h-2", "live-7", "live-8"]
+        );
+        let splice = stream.splice_gap().expect("the two halves do not meet");
+        assert_eq!(splice.after_seq, 2);
+        assert_eq!(splice.before_seq, 7);
+        assert_eq!(splice.missing(), 4);
+    }
+
+    #[test]
+    fn halves_that_meet_report_no_hole() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let capture = stdout_capture(root.path(), &["h-0", "h-1", "h-2"]);
+        let (locator, _broker) = live_locator(root.path(), capture, framed_live(3, 2));
+
+        let mut stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
+        assert_eq!(
+            payloads(&drain(&mut stream)),
+            vec!["h-0", "h-1", "h-2", "live-3", "live-4"]
+        );
+        assert_eq!(stream.splice_gap(), None, "seq 3 follows seq 2");
+    }
+
+    #[test]
+    fn an_overlap_the_dedup_suppressed_is_not_a_hole() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let capture = stdout_capture(root.path(), &["live-0", "live-1", "live-2"]);
+        let (locator, _broker) = live_locator(root.path(), capture, framed_live(0, 5));
+
+        let mut stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
+        let _ = drain(&mut stream);
+        assert_eq!(stream.splice_gap(), None);
+    }
+
+    #[test]
+    fn a_narrowed_read_does_not_claim_a_hole_its_own_filter_created() {
+        // Under a channel filter the reader drops records before the consumer
+        // sees them, so a jump in sequence numbers is the ordinary shape of
+        // the request. Reporting one would warn on every narrowed read.
+        let root = tempfile::tempdir().expect("tempdir");
+        let capture = seal_capture(
+            root.path(),
+            &[
+                (Direction::Stdout, b"h-0"),
+                (Direction::Stderr, b"h-1"),
+                (Direction::Stdout, b"h-2"),
+            ],
+            RetentionPolicy::Ring,
+            bounds(),
+        );
+        let (locator, _broker) = live_locator(root.path(), capture, framed_live(5, 2));
+
+        let mut stream =
+            open_vm_output_at(&locator, only(StreamKind::Stdout)).expect("open narrowed");
+        assert_eq!(
+            payloads(&drain(&mut stream)),
+            vec!["h-0", "h-2", "live-5", "live-6"]
+        );
+        assert_eq!(
+            stream.splice_gap(),
+            None,
+            "the distance is the filter's, not the splice's"
+        );
+    }
+
+    #[test]
+    fn a_hole_is_measured_only_against_the_first_live_record() {
+        assert_eq!(detect_splice_gap(true, Some(4), 5), None, "adjacent");
+        assert_eq!(
+            detect_splice_gap(true, Some(4), 6),
+            Some(SpliceGap {
+                after_seq: 4,
+                before_seq: 6
+            }),
+            "one missing"
+        );
+        assert_eq!(detect_splice_gap(true, None, 900), None, "no durable half");
+        assert_eq!(detect_splice_gap(false, Some(4), 900), None, "narrowed");
+        assert_eq!(
+            detect_splice_gap(true, Some(0), 0),
+            None,
+            "a suppressed overlap never reaches this check, and would not be a hole"
+        );
+    }
+
+    #[test]
+    fn only_an_unnarrowed_request_can_attribute_a_hole_to_the_splice() {
+        assert!(splice_detectable(&StreamOpts::default()));
+        assert!(!splice_detectable(
+            &StreamOpts::builder()
+                .kinds(KindFilter::only(StreamKind::Stdout))
+                .build()
+        ));
+        assert!(!splice_detectable(
+            &StreamOpts::builder().from_seq(1).build()
+        ));
+        assert!(
+            splice_detectable(&StreamOpts::builder().follow(true).build()),
+            "following changes nothing about how densely records are numbered"
+        );
     }
 }

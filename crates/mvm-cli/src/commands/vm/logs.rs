@@ -27,8 +27,8 @@ use clap::{Args as ClapArgs, ValueEnum};
 use mvm_core::config;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::stream_client::{
-    KindFilter, OutputRecord, OutputRequest, StreamAvailability, StreamOpts, Truncation,
-    VmOutputStream, open_vm_output,
+    EmptyHistory, KindFilter, OutputRecord, OutputRequest, SpliceGap, StreamAvailability,
+    StreamOpts, Truncation, VmOutputStream, open_vm_output,
 };
 use mvm_core::transcript::GapMarker;
 use mvm_core::user_config::MvmConfig;
@@ -59,6 +59,16 @@ impl StreamSelector {
             Self::Stdout => KindFilter::only(StreamKind::Stdout),
             Self::Stderr => KindFilter::only(StreamKind::Stderr),
             Self::Trace => KindFilter::only(StreamKind::Trace),
+        }
+    }
+
+    /// What to call this selection back to the person who typed it.
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::Trace => "trace",
         }
     }
 }
@@ -172,9 +182,14 @@ fn attach_args(name: &str) -> Args {
 
 /// Announce what was found, then drain it.
 fn show(args: &Args, mut stream: VmOutputStream) -> Result<()> {
-    announce(args, &stream);
-    pump(&mut stream, &mut Sinks::inherited())
-        .with_context(|| format!("Reading output for microVM {:?}", args.name))
+    show_into(args, &mut stream, &mut Sinks::inherited())
+}
+
+/// [`show`] against explicit sinks, so a test reads exactly what an operator
+/// would rather than asserting on the pieces separately.
+fn show_into(args: &Args, stream: &mut VmOutputStream, sinks: &mut Sinks<'_>) -> Result<()> {
+    announce(args, stream, sinks);
+    pump(stream, sinks).with_context(|| format!("Reading output for microVM {:?}", args.name))
 }
 
 /// Where each channel's bytes go.
@@ -200,19 +215,24 @@ impl Sinks<'static> {
 /// Drain the stream into the sinks until it ends or a verification error stops
 /// it.
 ///
-/// The gap is polled **inside** the loop, not once at the end. A marker
-/// arrives with the batch that reports it, and the normal way out of `logs -f`
-/// is the user interrupting — so a report deferred to the end is a report the
-/// follow case never makes.
+/// Both kinds of loss are polled **inside** the loop, before the record they
+/// precede is rendered. A ring marker arrives with the batch that reports it
+/// and a splice hole is measured on the first live record, so a notice
+/// deferred to the end is a notice `logs -f` never prints — the normal way out
+/// of a follow is the user interrupting. Printing before the record also puts
+/// the notice on the side of the hole it describes.
 fn pump(stream: &mut VmOutputStream, sinks: &mut Sinks<'_>) -> Result<()> {
     let mut reported_gap: Option<GapMarker> = None;
+    let mut reported_splice = false;
     while let Some(record) = stream.next_output()? {
+        report_new_gap(stream.gap(), &mut reported_gap, sinks);
+        report_splice_gap(stream.splice_gap(), &mut reported_splice, sinks);
         if render(&record, sinks)? == Rendered::ConsumerGone {
             return Ok(());
         }
-        report_new_gap(stream.gap(), &mut reported_gap, sinks);
     }
     report_new_gap(stream.gap(), &mut reported_gap, sinks);
+    report_splice_gap(stream.splice_gap(), &mut reported_splice, sinks);
     let _ = sinks.out.flush();
     let _ = sinks.err.flush();
     Ok(())
@@ -268,41 +288,87 @@ fn write_out(sink: &mut Box<dyn Write + '_>, bytes: &[u8]) -> std::io::Result<()
 ///
 /// Silence here is what turns a partial capture into a log that reads as
 /// complete, so every degraded shape gets a line: a follow with nothing left
-/// to follow, and a transcript that lost either end.
-fn announce(args: &Args, stream: &VmOutputStream) {
+/// to follow, a transcript that lost either end, and a replay that came back
+/// empty for a reason the operator did not choose.
+fn announce(args: &Args, stream: &VmOutputStream, sinks: &mut Sinks<'_>) {
     match stream.availability() {
         StreamAvailability::LiveAndHistory => {}
-        StreamAvailability::LiveOnly => eprintln!(
-            "note: microVM {:?} has no recorded output yet; showing live output only",
-            args.name
+        StreamAvailability::LiveOnly => notice(
+            sinks,
+            &format!(
+                "note: microVM {:?} has no recorded output yet; showing live output only",
+                args.name
+            ),
         ),
-        StreamAvailability::HistoryOnly if args.follow => eprintln!(
-            "note: microVM {:?} has no live output stream; showing its recorded output and exiting",
-            args.name
+        StreamAvailability::HistoryOnly if args.follow => notice(
+            sinks,
+            &format!(
+                "note: microVM {:?} has no live output stream; showing its recorded output and \
+                 exiting",
+                args.name
+            ),
         ),
         StreamAvailability::HistoryOnly => {}
-        StreamAvailability::ConsoleOnly => announce_console_only(args),
+        StreamAvailability::ConsoleOnly => announce_console_only(args, sinks),
+    }
+    if let Some(line) = stream.empty_history().and_then(|e| describe_empty(e, args)) {
+        notice(sinks, &line);
     }
     if let Some(truncation) = stream.truncation() {
-        eprintln!("warning: {}", describe_truncation(truncation));
+        notice(
+            sinks,
+            &format!("warning: {}", describe_truncation(truncation)),
+        );
     }
 }
 
-/// The console fallback cannot do two things the broker can, and a user who is
-/// not told will read its output as if it could.
-fn announce_console_only(args: &Args) {
-    eprintln!(
-        "note: microVM {:?} has no output capture; showing its console log, which merges \
-         stdout and stderr and is not hash-chained",
-        args.name
-    );
-    if args.stream != StreamSelector::All && args.stream != StreamSelector::Stdout {
-        eprintln!(
-            "warning: --stream {:?} cannot be honoured on a console log — it carries no channel \
-             labels, so nothing will match",
-            args.stream
-        );
+/// Why a replay came back empty, or `None` when the operator asked for that.
+///
+/// A capture that matched nothing is the case worth naming: it looks exactly
+/// like a workload that printed nothing, and the transcript proving otherwise
+/// is right there.
+fn describe_empty(empty: EmptyHistory, args: &Args) -> Option<String> {
+    match empty {
+        EmptyHistory::CaptureEmpty => Some(format!(
+            "note: microVM {:?} has an output capture and it is empty",
+            args.name
+        )),
+        EmptyHistory::FilteredOut => Some(format!(
+            "note: microVM {:?} has recorded output, but none of it is on the {} channel",
+            args.name,
+            args.stream.label()
+        )),
+        EmptyHistory::NotRequested => None,
     }
+}
+
+/// The console fallback cannot do three things the broker can, and a user who
+/// is not told will read its output as if it could.
+///
+/// A channel selection is not among them: the resolver refuses that outright
+/// rather than leaving this note to carry a warning about a filter nothing
+/// applied.
+fn announce_console_only(args: &Args, sinks: &mut Sinks<'_>) {
+    notice(
+        sinks,
+        &format!(
+            "note: microVM {:?} has no output capture; showing its console log, which merges \
+             stdout and stderr, is not hash-chained, and has no record boundaries — so -n is \
+             approximated in bytes",
+            args.name
+        ),
+    );
+}
+
+/// Write one operator notice on stderr, degrading rather than raising.
+///
+/// `eprintln!` panics when the write fails, and `mvmctl logs vm 2>&-` is an
+/// ordinary thing for a script to do — a diagnostic must not be the thing that
+/// kills the command it is diagnosing. Routed through the sinks so a test
+/// reads what an operator would.
+fn notice(sinks: &mut Sinks<'_>, line: &str) {
+    let _ = writeln!(sinks.err, "{line}");
+    let _ = sinks.err.flush();
 }
 
 /// One line naming what the capture lost and from which end.
@@ -340,13 +406,40 @@ fn report_new_gap(gap: Option<GapMarker>, reported: &mut Option<GapMarker>, sink
         return;
     }
     *reported = Some(gap);
-    let _ = writeln!(
-        sinks.err,
-        "warning: {} live record(s) ({} bytes) after seq {} were dropped before this reader \
-         could take them",
-        gap.dropped_chunks, gap.dropped_bytes, gap.after_seq
+    notice(
+        sinks,
+        &format!(
+            "warning: {} live record(s) ({} bytes) after seq {} were dropped before this reader \
+             could take them",
+            gap.dropped_chunks, gap.dropped_bytes, gap.after_seq
+        ),
     );
-    let _ = sinks.err.flush();
+}
+
+/// Report a hole where the recorded half meets the live one, once.
+///
+/// Not a failure and not tampering: a manifest is only written when a capture
+/// seals, so a long-running VM's recorded half can stop well before the point
+/// a follower attaches, leaving a run of records in neither source. Silence
+/// there is the worst outcome available — the two halves render adjacently and
+/// a partial log reads as the whole run.
+fn report_splice_gap(gap: Option<SpliceGap>, reported: &mut bool, sinks: &mut Sinks<'_>) {
+    let Some(gap) = gap else {
+        return;
+    };
+    if std::mem::replace(reported, true) {
+        return;
+    }
+    notice(
+        sinks,
+        &format!(
+            "warning: {} record(s) between recorded seq {} and live seq {} are in neither the \
+             recorded capture nor the live stream — what follows resumes after a hole",
+            gap.missing(),
+            gap.after_seq,
+            gap.before_seq
+        ),
+    );
 }
 
 /// Print the VMM's own diagnostic log.
@@ -738,5 +831,339 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         env.set("MVM_HOME", tmp.path());
         (env, tmp)
+    }
+
+    mod operator_view {
+        //! What the command actually prints, driven end to end over a real
+        //! sealed transcript and a real broker socket.
+        //!
+        //! The notices are the product here: every one of them exists because
+        //! its absence renders a partial log as a complete one. Asserting on
+        //! the pieces separately would let the wiring rot — a notice computed
+        //! and never written reads exactly like a notice that had nothing to
+        //! say.
+
+        use super::*;
+        use mvm_core::crypto::aead;
+        use mvm_core::stream_client::{
+            OutputLocator, SpliceGap, StreamBatch, open_vm_output_at, write_batch,
+        };
+        use mvm_core::transcript::{
+            self, CaptureBinding, CaptureBounds, Direction, MANIFEST_FILENAME, RetentionPolicy,
+            TranscriptWriter, TranscriptWriterConfig,
+        };
+        use mvm_protocol::stream::{StreamRecord, StreamSource};
+        use std::path::Path;
+
+        /// A real sealed transcript, written the way the broker will: chunks
+        /// encrypted through the real writer under a real KEK and sealed to a
+        /// manifest on disk. Nothing here is a stand-in, so a verification
+        /// regression in the read path fails these tests too.
+        fn seal_history(root: &Path, lines: &[&str]) -> OutputLocator {
+            let keys_dir = root.join("keys");
+            let dir = root.join("stream");
+            std::fs::create_dir_all(&keys_dir).expect("keys dir");
+            std::fs::create_dir_all(&dir).expect("capture dir");
+
+            let kek = transcript::load_or_init_kek(&keys_dir).expect("kek");
+            let data_key = aead::Key::from_bytes([0x33; 32]);
+            let wrapped = transcript::wrap_data_key(&kek, &data_key);
+            let mut writer = TranscriptWriter::new(
+                &dir,
+                data_key,
+                TranscriptWriterConfig {
+                    capture_id: "capture-vm".to_string(),
+                    binding: CaptureBinding {
+                        tenant_id: "local".to_string(),
+                        vm_name: "vm".to_string(),
+                        session_id: None,
+                    },
+                    bounds: CaptureBounds {
+                        max_duration_secs: u64::MAX,
+                        max_bytes: 8 << 20,
+                        max_chunks: 4096,
+                    },
+                    retention: RetentionPolicy::Ring,
+                    created_unix_secs: 0,
+                    recipient: "transcript-kek".to_string(),
+                    wrapped_data_key_b64: wrapped,
+                },
+            );
+            for line in lines {
+                writer
+                    .push(Direction::Stdout, line.as_bytes())
+                    .expect("push");
+            }
+            let manifest = writer.seal();
+            std::fs::write(
+                dir.join(MANIFEST_FILENAME),
+                serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+            )
+            .expect("write manifest");
+
+            OutputLocator {
+                vm: "vm".to_string(),
+                socket: root.join("absent.sock"),
+                transcript_dir: dir,
+                console_log: root.join("absent-console.log"),
+                keys_dir,
+            }
+        }
+
+        /// A real listening socket that hands one follower `frames` and hangs
+        /// up, so the live half is resolved through the production dial.
+        struct FakeBroker {
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl FakeBroker {
+            fn serve(path: &Path, frames: Vec<u8>) -> Self {
+                let listener = std::os::unix::net::UnixListener::bind(path).expect("bind");
+                let thread = std::thread::spawn(move || {
+                    if let Ok((mut socket, _)) = listener.accept() {
+                        let _ = socket.write_all(&frames);
+                        let _ = socket.flush();
+                    }
+                });
+                Self {
+                    thread: Some(thread),
+                }
+            }
+        }
+
+        impl Drop for FakeBroker {
+            fn drop(&mut self) {
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+
+        /// A live chain of `count` records starting at `from`, framed the way
+        /// a broker sends them.
+        fn framed_live(from: u64, count: u64) -> Vec<u8> {
+            let mut prev = [0u8; 32];
+            let mut records = Vec::new();
+            for seq in 0..from + count {
+                let record = StreamRecord {
+                    seq,
+                    source: StreamSource::Entrypoint,
+                    kind: StreamKind::Stdout,
+                    host_unix_nanos: 1_000 + seq,
+                    prev_hash: prev,
+                    payload: format!("live-{seq}").into_bytes(),
+                };
+                prev = record.hash();
+                records.push(record);
+            }
+            let anchor = if from == 0 {
+                [0u8; 32]
+            } else {
+                records[(from - 1) as usize].hash()
+            };
+            let mut buf = Vec::new();
+            write_batch(
+                &mut buf,
+                &StreamBatch {
+                    anchor,
+                    records: records.split_off(from as usize),
+                    gap: None,
+                    caught_up: true,
+                },
+            )
+            .expect("frame");
+            buf
+        }
+
+        /// Serve `frames` at a socket the locator then points at.
+        fn with_broker(root: &Path, locator: &mut OutputLocator, frames: Vec<u8>) -> FakeBroker {
+            let socket = root.join("s.sock");
+            let broker = FakeBroker::serve(&socket, frames);
+            locator.socket = socket;
+            broker
+        }
+
+        /// Run one whole read: notices to stderr, workload bytes to stdout.
+        fn read_all(args: &Args, locator: &OutputLocator) -> Captured {
+            let mut stream =
+                open_vm_output_at(locator, args.request()).expect("the fixture must open");
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            {
+                let mut sinks = Sinks {
+                    out: Box::new(&mut out),
+                    err: Box::new(&mut err),
+                };
+                show_into(args, &mut stream, &mut sinks).expect("read");
+            }
+            Captured { out, err }
+        }
+
+        fn notices(captured: Captured) -> String {
+            String::from_utf8(captured.err).expect("notices are utf8")
+        }
+
+        #[test]
+        fn a_hole_between_the_recorded_and_live_halves_is_reported() {
+            // The manifest is only written at seal, so a running VM's
+            // recorded half stops well before a follower attaches. Printing
+            // seq 0..2 straight into seq 7 shows a partial log as the whole
+            // run — the failure this command exists to prevent.
+            let root = tempfile::tempdir().expect("tempdir");
+            let mut locator = seal_history(root.path(), &["h-0", "h-1", "h-2"]);
+            let _broker = with_broker(root.path(), &mut locator, framed_live(7, 2));
+
+            let captured = read_all(&parse(&["vm"]).expect("parse"), &locator);
+            assert_eq!(captured.out, b"h-0h-1h-2live-7live-8");
+            let rendered = notices(captured);
+            assert!(
+                rendered.contains("in neither the recorded capture nor the live stream"),
+                "{rendered}"
+            );
+            assert!(rendered.contains("4 record(s)"), "{rendered}");
+            assert!(rendered.contains("recorded seq 2"), "{rendered}");
+            assert!(rendered.contains("live seq 7"), "{rendered}");
+        }
+
+        #[test]
+        fn two_halves_that_meet_are_reported_as_nothing_at_all() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let mut locator = seal_history(root.path(), &["h-0", "h-1", "h-2"]);
+            let _broker = with_broker(root.path(), &mut locator, framed_live(3, 2));
+
+            let captured = read_all(&parse(&["vm"]).expect("parse"), &locator);
+            assert_eq!(captured.out, b"h-0h-1h-2live-3live-4");
+            assert_eq!(notices(captured), "", "an unbroken splice says nothing");
+        }
+
+        #[test]
+        fn a_capture_that_matched_no_channel_says_so_rather_than_claiming_none_exists() {
+            // A stdout-only run read as stderr has a healthy, verified
+            // transcript and nothing to show from it. "No output capture" is
+            // the one thing that is not true.
+            let root = tempfile::tempdir().expect("tempdir");
+            let locator = seal_history(root.path(), &["only-stdout"]);
+
+            let captured = read_all(
+                &parse(&["vm", "--stream", "stderr"]).expect("parse"),
+                &locator,
+            );
+            assert!(captured.out.is_empty());
+            let rendered = notices(captured);
+            assert!(
+                rendered.contains("has recorded output, but none of it is on the stderr channel"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("no output capture"), "{rendered}");
+        }
+
+        #[test]
+        fn an_empty_capture_is_announced_as_empty() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let locator = seal_history(root.path(), &[]);
+
+            let captured = read_all(&parse(&["vm"]).expect("parse"), &locator);
+            assert!(captured.out.is_empty());
+            assert!(
+                notices(captured).contains("has an output capture and it is empty"),
+                "an empty capture is not the same as an absent one"
+            );
+        }
+
+        #[test]
+        fn asking_for_no_replay_is_announced_as_nothing() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let locator = seal_history(root.path(), &["one", "two"]);
+
+            let captured = read_all(&parse(&["vm", "-n", "0"]).expect("parse"), &locator);
+            assert!(captured.out.is_empty());
+            assert_eq!(
+                notices(captured),
+                "",
+                "an operator who asked for no replay does not need telling"
+            );
+        }
+
+        #[test]
+        fn a_console_only_read_states_what_that_source_cannot_do() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let mut locator = seal_history(root.path(), &[]);
+            // Point past the capture entirely: console is the only source.
+            locator.transcript_dir = root.path().join("no-capture");
+            locator.console_log = root.path().join("console.log");
+            std::fs::write(&locator.console_log, b"merged out and err\n").expect("capture");
+
+            let captured = read_all(&parse(&["vm"]).expect("parse"), &locator);
+            assert_eq!(captured.out, b"merged out and err\n");
+            let rendered = notices(captured);
+            assert!(rendered.contains("merges stdout and stderr"), "{rendered}");
+            assert!(rendered.contains("not hash-chained"), "{rendered}");
+            assert!(
+                rendered.contains("-n is approximated in bytes"),
+                "{rendered}"
+            );
+            assert!(
+                !rendered.contains("nothing will match"),
+                "no warning about a filter that is never applied: {rendered}"
+            );
+        }
+
+        #[test]
+        fn a_channel_selection_on_a_console_only_vm_is_refused_not_quietly_ignored() {
+            // Showing the whole merged console under `--stream stderr` puts
+            // the correction on stderr, where a script reading stdout never
+            // sees it. Refusing is the only answer that cannot mislead.
+            let _home = isolated_home();
+            let state = mvm_core::config::vm_state_dir("console-vm");
+            std::fs::create_dir_all(&state).expect("state dir");
+            std::fs::write(state.join("console.log"), b"merged out and err\n").expect("capture");
+
+            let err = execute(parse(&["console-vm", "--stream", "stderr"]).expect("parse"))
+                .expect_err("a console log cannot separate channels");
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains("merging stdout and stderr"), "{rendered}");
+            assert!(rendered.contains("a channel selection"), "{rendered}");
+        }
+
+        fn splice(after_seq: u64, before_seq: u64) -> SpliceGap {
+            SpliceGap {
+                after_seq,
+                before_seq,
+            }
+        }
+
+        #[test]
+        fn a_splice_hole_is_reported_once_however_many_records_follow_it() {
+            let mut err = Vec::new();
+            let mut reported = false;
+            {
+                let mut out = Vec::new();
+                let mut sinks = Sinks {
+                    out: Box::new(&mut out),
+                    err: Box::new(&mut err),
+                };
+                report_splice_gap(Some(splice(2, 7)), &mut reported, &mut sinks);
+                report_splice_gap(Some(splice(2, 7)), &mut reported, &mut sinks);
+                report_splice_gap(None, &mut reported, &mut sinks);
+            }
+            let rendered = String::from_utf8(err).expect("utf8");
+            assert_eq!(rendered.lines().count(), 1, "{rendered}");
+        }
+
+        #[test]
+        fn a_notice_to_a_closed_stderr_degrades_rather_than_raising() {
+            // `eprintln!` panics on a failed write, and `mvmctl logs vm 2>&-`
+            // is an ordinary thing for a script to do. A diagnostic must not
+            // be what kills the command it is diagnosing.
+            let mut out = Vec::new();
+            let mut sinks = Sinks {
+                out: Box::new(&mut out),
+                err: Box::new(ClosedPipe),
+            };
+            let mut reported = false;
+            notice(&mut sinks, "note: nobody is listening");
+            report_splice_gap(Some(splice(1, 9)), &mut reported, &mut sinks);
+            assert!(reported, "a swallowed write still counts as reported");
+        }
     }
 }

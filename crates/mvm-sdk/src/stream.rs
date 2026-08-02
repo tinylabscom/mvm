@@ -40,9 +40,10 @@
 //! live stream and reports what, if anything, either source is missing.
 
 pub use mvm_core::stream_client::{
-    FramedStreamReader, KindFilter, OutputLocator, OutputRecord, OutputRequest, RecordOrigin,
-    StreamAvailability, StreamError, StreamOpts, StreamOptsBuilder, StreamReader, Truncation,
-    VmOutputStream, connect_stream, connect_stream_at, open_vm_output, open_vm_output_at,
+    ConsoleUnsupported, EmptyHistory, FramedStreamReader, KindFilter, OutputLocator, OutputRecord,
+    OutputRequest, RecordOrigin, SpliceGap, StreamAvailability, StreamError, StreamOpts,
+    StreamOptsBuilder, StreamReader, Truncation, VmOutputStream, connect_stream, connect_stream_at,
+    open_vm_output, open_vm_output_at,
 };
 pub use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
 

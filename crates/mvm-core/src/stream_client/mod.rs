@@ -41,11 +41,11 @@ mod output;
 mod reader;
 mod wire;
 
-pub use console::ConsoleTail;
+pub use console::{ConsoleTail, ConsoleUnsupported};
 pub use opts::{KindFilter, StreamOpts, StreamOptsBuilder};
 pub use output::{
-    OutputLocator, OutputRecord, OutputRequest, RecordOrigin, StreamAvailability, Truncation,
-    VmOutputStream, open_vm_output, open_vm_output_at,
+    EmptyHistory, OutputLocator, OutputRecord, OutputRequest, RecordOrigin, SpliceGap,
+    StreamAvailability, Truncation, VmOutputStream, open_vm_output, open_vm_output_at,
 };
 pub use reader::{
     FramedStreamReader, StreamError, StreamReader, connect_stream, connect_stream_at,

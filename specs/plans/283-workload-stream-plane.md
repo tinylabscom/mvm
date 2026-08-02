@@ -1441,7 +1441,8 @@ the read loop because a following read has no end at which to check.
   batch DTO, which belongs with the broker rather than the reader.
 - The transcript manifest is written at `seal()`, so durable history is only as
   current as the last seal. A live VM has none to splice, and a VM that was
-  killed never seals. Keeping a manifest current is the writing side's job.
+  killed never seals. Keeping a manifest current is the writing side's job —
+  but the *reader* no longer hides the consequence; see fix round 1 below.
 - Neither source has a producer yet: nothing binds `serve_stream` or writes
   `vm_stream_transcript_dir`. The console fallback is what makes the command
   useful in the meantime.
@@ -1464,6 +1465,55 @@ Result: PASS.
 ```sh
 git commit -am "feat(cli): stream logs from the broker and attach on run"
 ```
+
+- [x] **Fix round 1: three defects on the paths T9b makes hot**
+
+Nothing constructs a broker yet, so the console path is the only path a real VM
+takes today — which turned two of these from corner cases into live behaviour.
+
+1. **A filtered-empty history read as "no capture".** Availability keyed off
+   surviving *filtered* records rather than the transcript's existence, so
+   `machine logs vm --stream stderr` on an exited stdout-only run discarded a
+   healthy, verified capture, fell into the `ConsoleOnly` arm, and dumped the
+   whole merged console under a note claiming the VM had no output capture.
+   `read_history` now reports presence (`Ok(Some(..))`) separately from what
+   matched, and `EmptyHistory` says *why* a present capture replayed nothing —
+   empty, filtered out, or not asked for. Only the first two are announced.
+2. **The console tail ignored `opts` while the warning said otherwise.** The
+   `Tail::Console` arm applied neither the kind filter nor `from_seq`, stamped
+   everything `Stdout`, and `logs.rs` warned that "nothing will match". Both
+   available answers to a channel selection are wrong — showing everything
+   returns bytes the caller excluded, showing nothing hides the only output the
+   VM has — and a stderr note correcting either is invisible to a script
+   reading stdout. So a console-only read now **refuses** what it cannot
+   supply: `StreamError::ConsoleCannotFilter` naming a `ConsoleUnsupported`
+   (`ChannelSelection` or `ResumePoint`). `--stream all` is unaffected, so
+   `machine run`'s attach and a bare `logs` keep working; "no capture anywhere"
+   still outranks the refusal. The console-only note now also states that `-n`
+   is approximated in bytes, the third thing that source cannot do exactly.
+3. **The history-to-live hole was silent.** Live records at or below the
+   history high-water mark were suppressed, but nothing checked whether the
+   first live record *followed* the last durable one. Since a manifest is only
+   written at seal, a running VM shows history to seq N then live from seq M ≫
+   N with everything between rendered as though it never existed.
+   `VmOutputStream::splice_gap` reports it, and `pump` prints it before the
+   record on the far side of the hole. Detection is gated on an unnarrowed
+   request (`splice_detectable`): under a channel filter the reader drops
+   records before the consumer sees them, so a jump in sequence numbers is the
+   ordinary shape of the request and claiming a hole would cry wolf on every
+   narrowed read. `-n` does not interfere — the tail trim pops from the front,
+   so the newest history record always survives.
+
+Also folded in: `announce` writes through the `Sinks` seam rather than
+`eprintln!`, which both makes every notice assertable end to end and stops a
+diagnostic panicking on a closed stderr (`mvmctl logs vm 2>&-`).
+
+Each fix has a test proven to go red against the pre-fix code, and the
+end-to-end ones drive `show_into` over a real sealed transcript and a real
+listening socket, so deleting the `pump` wiring or reverting `announce` to
+`eprintln!` fails them.
+
+Run: `cargo nextest run -p mvm-cli` / `cargo nextest run -p mvm-core stream_client` — PASS.
 
 ---
 
