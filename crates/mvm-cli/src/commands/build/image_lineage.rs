@@ -420,6 +420,8 @@ pub(in crate::commands) fn build_event_plan(
     image_sha256: &str,
 ) -> Result<ExecutionPlan> {
     let input = SynthesisInput {
+        network_mode: Default::default(),
+        l3_network: None,
         vm_name: workload,
         tenant: None,
         backend_name: workload,

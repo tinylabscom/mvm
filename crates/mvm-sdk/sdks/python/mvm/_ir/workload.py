@@ -499,6 +499,7 @@ class Network:
     egress: Optional[NetworkEgress] = None
     peers: Optional[List[str]] = None
     ports: Optional[List[PortForward]] = field(default_factory=lambda: [])
+    raw_ip_stack: Optional[bool] = None
 
 
 @dataclass

@@ -419,6 +419,10 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
             });
         }
     };
+    // Declares that the workload needs a real in-guest IP stack. This is
+    // what selects the L3 tunnel; leaving it off keeps the socket-aware
+    // transport, which is the stronger posture.
+    let raw_ip_stack = pop_bool_kwarg(&mut kwargs, "raw_ip_stack", path, line, "mvm.network")?;
     let ports = match kwargs.remove("ports") {
         Some(Value::List(items)) => items
             .into_iter()
@@ -488,6 +492,7 @@ fn helper_to_network(v: Value, path: &Path, line: usize) -> Result<Network, Pars
     let _ = kwargs;
     Ok(Network {
         mode,
+        raw_ip_stack,
         ports,
         egress: None::<NetworkEgress>,
         peers: vec![],
@@ -780,6 +785,29 @@ fn list_of_strings(
             }),
         })
         .collect()
+}
+
+/// Pop a boolean kwarg. Absent yields `false`; a non-boolean value is a
+/// parse error rather than a silent default, because the kwargs this is used
+/// for change what a workload is admitted for.
+fn pop_bool_kwarg(
+    map: &mut BTreeMap<String, Value>,
+    key: &str,
+    path: &Path,
+    line: usize,
+    helper: &str,
+) -> Result<bool, ParseError> {
+    match map.remove(key) {
+        None | Some(Value::None) => Ok(false),
+        Some(Value::Bool(b)) => Ok(b),
+        Some(other) => Err(ParseError::HelperBadKwarg {
+            path: path.to_path_buf(),
+            line,
+            helper: helper.to_string(),
+            kwarg: key.to_string(),
+            detail: format!("expected True/False, got {other:?}"),
+        }),
+    }
 }
 
 fn pop_string_kwarg(map: &mut BTreeMap<String, Value>, key: &str) -> Option<String> {

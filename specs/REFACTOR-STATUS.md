@@ -126,6 +126,24 @@ for detailed scope and acceptance criteria.
         chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
         (recon §7.7 → #2019)
 
+- [~] Plan 279 — L3 TUN-over-vsock network mode
+  (`specs/plans/279-l3-tun-over-vsock.md`, ADR-035)
+  - [x] W1–W8 — canonical `NetworkMode::L3Vsock`, the shared fuzzable wire
+        protocol, the pure policy core, the guest `mvm-net-agent`, the
+        machine-scoped host gateway, audit kinds, docs, and the unprivileged
+        end-to-end suite
+  - [x] W9 — backend-neutral `GuestChannelProvider` + typed `GuestService`,
+        host-owned `VmInstanceIdentity` per boot, the signed `NetworkLease`
+        with a local standalone authority, capability-gated forwarding
+        backends, and the launch-specification no-guest-NIC guard
+  - [x] Privileged Linux lane executed on a Linux/KVM host: real host TUN,
+        real nftables, live forwarding witness, verified-clean teardown
+  - [x] BDD suite `s25_l3_vsock` (23 hermetic scenarios)
+  - [ ] macOS forwarding backend — capability-declared and refusing; the
+        userspace socket gateway is not implemented
+  - [ ] WSL2 validation on a real runner; node-to-node transport; mvmd
+        node-control RPC surface
+
 - [~] Plan 265 — Fast-start SLO, backend sequencing & competitive positioning
   (`specs/plans/265-fast-start-slo-sequencing-positioning.md`)
   - [x] WS1 — Finish the FC warm-restore story (no-NIC guard, real

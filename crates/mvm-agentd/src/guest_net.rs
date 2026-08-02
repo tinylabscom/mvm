@@ -52,19 +52,19 @@ const SHARED_GATEWAY_ADDR: &str = "192.168.127.1";
 #[cfg(target_os = "linux")]
 const SHARED_GATEWAY_NETMASK: &str = "255.255.255.0";
 #[cfg(target_os = "linux")]
-const SIOCSIFADDR_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFADDR);
+pub(crate) const SIOCSIFADDR_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFADDR);
 #[cfg(target_os = "linux")]
 const SIOCSIFNETMASK_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFNETMASK);
 #[cfg(target_os = "linux")]
-const SIOCGIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCGIFFLAGS);
+pub(crate) const SIOCGIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCGIFFLAGS);
 #[cfg(target_os = "linux")]
-const SIOCSIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFFLAGS);
+pub(crate) const SIOCSIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFFLAGS);
 #[cfg(target_os = "linux")]
-const SIOCADDRT_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCADDRT);
+pub(crate) const SIOCADDRT_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCADDRT);
 const RESOLVER_CMDLINE_PREFIX: &str = "mvm.resolver=";
 
 #[cfg(target_os = "linux")]
-const fn target_ioctl_request(request: u64) -> libc::Ioctl {
+pub(crate) const fn target_ioctl_request(request: u64) -> libc::Ioctl {
     assert!(request <= target_ioctl_request_max());
     request as libc::Ioctl
 }
@@ -256,7 +256,7 @@ fn apply_ioctls(
 /// Build an `ifreq` with the interface name pre-filled and all other fields
 /// zeroed.
 #[cfg(target_os = "linux")]
-fn ifreq_for(iface: &str) -> libc::ifreq {
+pub(crate) fn ifreq_for(iface: &str) -> libc::ifreq {
     // SAFETY: ifreq is a plain C struct; zeroed is a valid empty request.
     let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
     for (i, b) in iface.bytes().enumerate().take(libc::IFNAMSIZ - 1) {
@@ -267,7 +267,7 @@ fn ifreq_for(iface: &str) -> libc::ifreq {
 
 /// Write an IPv4 `sockaddr_in` into a `sockaddr`-typed ioctl field in-place.
 #[cfg(target_os = "linux")]
-fn set_sockaddr_in(dst: *mut libc::sockaddr, addr: [u8; 4]) {
+pub(crate) fn set_sockaddr_in(dst: *mut libc::sockaddr, addr: [u8; 4]) {
     let sin = libc::sockaddr_in {
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: 0,

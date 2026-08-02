@@ -415,6 +415,14 @@ mode: NetworkMode
  */
 peers?: string[]
 ports?: PortForward[]
+/**
+ * The workload needs a real in-guest IP stack: raw sockets, ICMP, non-TCP/UDP protocols, or its own resolver.
+ * 
+ * A statement about the *workload*, not about a transport. It is what selects the L3 tunnel, and it is declared here rather than chosen at run time so the same workload resolves the same way on every host.
+ * 
+ * Leave it off unless the workload genuinely needs it: the tunnel cannot carry host-side secret substitution or cleartext redaction, because the guest originates its own connections.
+ */
+raw_ip_stack?: boolean
 }
 export interface NetworkEgress {
 /**

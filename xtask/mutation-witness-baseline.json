@@ -8,6 +8,13 @@
       ]
     },
     {
+      "path": "crates/mvm-agentd/src/l3/privdrop.rs",
+      "package": "mvm-agentd",
+      "claims": [
+        2
+      ]
+    },
+    {
       "path": "crates/mvm-agentd/src/substitution_client.rs",
       "package": "mvm-agentd",
       "claims": [
@@ -202,15 +209,15 @@
   "uncovered_claims": [
     {
       "number": 4,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 5,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
@@ -617,6 +624,11 @@
       "file": "crates/mvm-sdk/src/compile/deps_audit.rs",
       "mutant": "replace * with + in hash_file_raw",
       "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
+    },
+    {
+      "file": "crates/mvm-protocol/src/policy/network_policy.rs",
+      "mutant": "replace NetworkPolicy::trusted_build_egress -> Self with Default::default()",
+      "reason": "Observed 2026-07-29. No mvm-protocol test asserts the shape of the trusted-build egress policy. The mutant substitutes the deny-all default, so it makes the policy stricter, not weaker — a functional coverage gap rather than a security hole. Untriaged."
     }
   ]
 }

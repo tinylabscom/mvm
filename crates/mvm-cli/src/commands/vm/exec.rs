@@ -95,6 +95,11 @@ pub(in crate::commands) struct Args {
     /// `RunArgs::host_service` via `into_exec_args`.
     #[arg(skip)]
     pub host_service: Vec<String>,
+    /// The transport derived for this run, carried through so the admitted
+    /// plan records the mode the workload actually got. Not a flag: the
+    /// derivation is the only thing that sets it.
+    #[arg(skip)]
+    pub network_mode: mvm_protocol::plan::NetworkMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -111,6 +116,12 @@ pub(in crate::commands) enum RunProfile {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct RunArgs {
+    /// The admitted networking transport. Carried here rather than
+    /// re-derived downstream so exactly one value reaches the signed plan.
+    /// Not a flag of its own and not operator-selectable: the machine
+    /// surface derives it from what the workload declares it needs.
+    #[arg(skip)]
+    pub network_mode: mvm_protocol::plan::NetworkMode,
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
     /// legacy slot name). If omitted, the bundled default microVM image is used.
     #[arg(short = 'm', long, conflicts_with = "image")]
@@ -308,6 +319,7 @@ impl RunArgs {
             healthcheck: self.healthcheck,
             hypervisor: self.hypervisor,
             host_service: self.host_service,
+            network_mode: self.network_mode,
         }
     }
 }
@@ -814,6 +826,7 @@ fn build_exec_request(
                     args.cpus,
                     u64::from(memory_mib),
                     args.timeout.unwrap_or(60),
+                    args.network_mode,
                 )
                 .context("admitting OCI image provenance for mvmctl run --image")?;
                 if cached.pulled {
@@ -913,6 +926,7 @@ fn emit_oci_run_admission(
     cpus: u32,
     mem_mib: u64,
     timeout_secs: u64,
+    network_mode: mvm_protocol::plan::NetworkMode,
 ) -> Result<()> {
     let image_sha256 = mvm_core::crypto::image_verify::sha256_file(&image.rootfs_path)
         .with_context(|| {
@@ -923,6 +937,8 @@ fn emit_oci_run_admission(
         })?;
     let exec_timeout_secs = u32::try_from(timeout_secs).unwrap_or(u32::MAX);
     let input = SynthesisInput {
+        network_mode,
+        l3_network: None,
         vm_name: "run-oci",
         tenant: None,
         backend_name: "transient-run",
@@ -1037,225 +1053,10 @@ struct RunReceiptSignature {
     signature_base64: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RunJsonSummary {
-    schema_version: u32,
-    invocation: ReceiptInput,
-    outcome: ReceiptOutcome,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    receipt_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RunPreflightSummary {
-    schema_version: u32,
-    dry_run: bool,
-    will_execute: bool,
-    invocation: RunPreflightInvocation,
-    resources: RunPreflightResources,
-    image: RunPreflightImage,
-    receipt: RunPreflightReceipt,
-    notes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RunPreflightReceipt {
-    requested: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path_sha256: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RunPreflightInvocation {
-    profile: String,
-    /// Requested egress posture the run would boot with.
-    network_posture: String,
-    /// Honest per-backend enforcement fidelity for that posture (see
-    /// `ReceiptInput::egress_enforcement`).
-    egress_enforcement: String,
-    command: ReceiptCommand,
-    env_keys: Vec<String>,
-    add_dirs: Vec<ReceiptAddDir>,
-    timeout_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RunPreflightResources {
-    cpus: u32,
-    memory: String,
-    memory_mib: u32,
-    timeout_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum RunPreflightImage {
-    DefaultMicrovm,
-    Manifest { argument_sha256: String },
-    Oci { reference_sha256: String },
-    RuntimePack,
-}
-
-impl RunJsonSummary {
-    fn from_parts(
-        invocation: ReceiptInput,
-        output: &crate::exec::ExecOutput,
-        receipt_path: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            schema_version: 1,
-            invocation,
-            outcome: ReceiptOutcome::from_exec_output(output),
-            receipt_path,
-        }
-    }
-}
-
-impl RunPreflightSummary {
-    fn from_args(args: &RunArgs) -> Result<Self> {
-        Self::from_args_with_backend_override(args, None)
-    }
-
-    fn from_args_with_backend_override(
-        args: &RunArgs,
-        backend_override: Option<&str>,
-    ) -> Result<Self> {
-        let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
-        for kv in &args.env {
-            parse_env_pair(kv)?;
-        }
-        // Force mount parsing now so dry-run rejects the same malformed or
-        // disallowed host-share specs as an actual run, without resolving an
-        // image or touching the VM runtime.
-        for spec in &args.add_dir {
-            crate::exec::AddDir::parse(spec)?;
-        }
-        let image = match args.manifest.as_ref() {
-            _ if args.runtime_pack => RunPreflightImage::RuntimePack,
-            Some(manifest) if args.image.is_none() => RunPreflightImage::Manifest {
-                argument_sha256: sha256_hex(manifest.as_bytes()),
-            },
-            None if args.image.is_some() => RunPreflightImage::Oci {
-                reference_sha256: sha256_hex(
-                    args.image
-                        .as_deref()
-                        .expect("matched image presence")
-                        .as_bytes(),
-                ),
-            },
-            None => RunPreflightImage::DefaultMicrovm,
-            Some(_) => unreachable!("clap conflicts_with prevents --manifest + --image"),
-        };
-        let mut notes = vec![
-            "preflight only; no image was resolved, built, booted, or executed".to_string(),
-            "raw argv, env values, and host paths are intentionally omitted".to_string(),
-        ];
-        if args.receipt.is_some() {
-            notes.push(
-                "receipt path is hashed, but no receipt is written during dry-run".to_string(),
-            );
-        }
-
-        // Report the backend the real run would auto-select, so the dry-run's
-        // enforcement tier matches what an actual boot would record.
-        let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
-        let backend = match backend_override {
-            Some(backend) => backend.to_string(),
-            None => crate::exec::select_exec_backend(
-                args.image.is_some(),
-                &policy,
-                args.hypervisor.as_deref(),
-            )?
-            .name()
-            .to_string(),
-        };
-        let receipt_input = ReceiptInput::from_run_args(args, &backend)?;
-
-        Ok(Self {
-            schema_version: 1,
-            dry_run: true,
-            will_execute: false,
-            invocation: RunPreflightInvocation {
-                profile: receipt_input.profile,
-                network_posture: receipt_input.network_posture,
-                egress_enforcement: receipt_input.egress_enforcement,
-                command: receipt_input.command,
-                env_keys: receipt_input.env_keys,
-                add_dirs: receipt_input.add_dirs,
-                timeout_secs: receipt_input.timeout_secs,
-            },
-            resources: RunPreflightResources {
-                cpus: args.cpus,
-                memory: args.memory.clone(),
-                memory_mib,
-                timeout_secs: args.timeout.unwrap_or(60),
-            },
-            image,
-            receipt: RunPreflightReceipt {
-                requested: args.receipt.is_some(),
-                path_sha256: args
-                    .receipt
-                    .as_ref()
-                    .map(|path| sha256_hex(path.to_string_lossy().as_bytes())),
-            },
-            notes,
-        })
-    }
-}
-
-fn print_run_preflight_human(summary: &RunPreflightSummary) {
-    println!("mvmctl run dry-run: no VM will be booted");
-    match &summary.image {
-        RunPreflightImage::DefaultMicrovm => {
-            println!("image: bundled default microVM (not resolved)");
-        }
-        RunPreflightImage::Manifest { argument_sha256 } => {
-            println!("image: manifest/template argument sha256={argument_sha256} (not resolved)");
-        }
-        RunPreflightImage::Oci { reference_sha256 } => {
-            println!("image: OCI reference sha256={reference_sha256} (not resolved)");
-        }
-        RunPreflightImage::RuntimePack => {
-            println!("image: verified attested runtime pack (not resolved)");
-        }
-    }
-    println!(
-        "resources: cpus={} memory={} ({} MiB) timeout={}s",
-        summary.resources.cpus,
-        summary.resources.memory,
-        summary.resources.memory_mib,
-        summary.resources.timeout_secs
-    );
-    println!("profile: {}", summary.invocation.profile);
-    println!("network: {}", summary.invocation.network_posture);
-    println!("enforced: {}", summary.invocation.egress_enforcement);
-    println!("command: {}", summary.invocation.command.describe());
-    if summary.invocation.env_keys.is_empty() {
-        println!("env: none");
-    } else {
-        println!("env keys: {}", summary.invocation.env_keys.join(","));
-    }
-    if summary.invocation.add_dirs.is_empty() {
-        println!("host shares: none");
-    } else {
-        println!("host shares:");
-        for dir in &summary.invocation.add_dirs {
-            println!(
-                "  host_sha256={} -> {} ({})",
-                dir.host_path_sha256,
-                dir.guest_path,
-                if dir.read_only { "ro" } else { "rw" }
-            );
-        }
-    }
-    if summary.receipt.requested {
-        if let Some(path_sha256) = &summary.receipt.path_sha256 {
-            println!("receipt: requested path_sha256={path_sha256} (not written in dry-run)");
-        } else {
-            println!("receipt: requested (not written in dry-run)");
-        }
-    }
-}
+mod preflight;
+#[cfg(test)]
+use preflight::RunPreflightImage;
+use preflight::{RunJsonSummary, RunPreflightSummary, print_run_preflight_human};
 
 impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
@@ -1796,6 +1597,7 @@ mod tests {
 
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
+            network_mode: Default::default(),
             warm_pool_size: 0,
             pty: false,
             vm_name: None,

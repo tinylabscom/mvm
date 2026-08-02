@@ -5,6 +5,7 @@ use crate::ir::{HostPort, Network, NetworkDns, NetworkEgress, NetworkMode, PortF
 pub fn network(mode: NetworkMode) -> Network {
     Network {
         mode,
+        raw_ip_stack: false,
         ports: Vec::new(),
         egress: None,
         peers: Vec::new(),
