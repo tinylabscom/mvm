@@ -488,6 +488,13 @@ pub enum AgentRequest {
         workspace_id: Option<String>,
         volumes: Vec<crate::instance::BlockVolumeAttach>,
     },
+    /// Refresh the same fenced leases before their UTC expiry.
+    RenewBlockVolumeLeases {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        volumes: Vec<crate::instance::BlockVolumeAttach>,
+    },
     /// Forward a sandbox operation (filesystem, exec, logs) to the guest agent.
     SandboxAction {
         tenant_id: String,
@@ -2110,6 +2117,23 @@ mod tests {
                     read_only: false,
                     encrypted: true,
                     fencing_token: 1,
+                    lease_expires_at: "2026-08-02T12:00:00Z".to_string(),
+                    data_key_version: 1,
+                }],
+            },
+            AgentRequest::RenewBlockVolumeLeases {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                volumes: vec![crate::instance::BlockVolumeAttach {
+                    org_id: "org1".to_string(),
+                    workspace_id: "ws1".to_string(),
+                    volume_id: "vol1".to_string(),
+                    guest_path: "/data".to_string(),
+                    read_only: false,
+                    encrypted: true,
+                    fencing_token: 1,
+                    lease_expires_at: "2026-08-02T12:01:00Z".to_string(),
                     data_key_version: 1,
                 }],
             },

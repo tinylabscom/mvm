@@ -60,6 +60,9 @@ pub struct BlockVolumeAttach {
     pub encrypted: bool,
     /// Exclusive-writer epoch admitted by the fleet control plane.
     pub fencing_token: u64,
+    /// UTC expiry for the writer lease. The worker must stop the workload
+    /// before allowing this lease to lapse.
+    pub lease_expires_at: String,
     /// Version of the resource data-key derivation used by this image.
     pub data_key_version: u32,
 }
@@ -85,6 +88,11 @@ impl BlockVolumeAttach {
             .map_err(|error| anyhow::anyhow!(error))?;
         if self.fencing_token == 0 {
             bail!("fencing_token must be non-zero");
+        }
+        let lease_expiry = chrono::DateTime::parse_from_rfc3339(&self.lease_expires_at)
+            .map_err(|_| anyhow::anyhow!("lease_expires_at must be RFC 3339 UTC time"))?;
+        if lease_expiry.offset().local_minus_utc() != 0 {
+            bail!("lease_expires_at must use UTC");
         }
         if self.data_key_version == 0 {
             bail!("data_key_version must be non-zero");
@@ -888,6 +896,7 @@ mod tests {
             read_only: false,
             encrypted: true,
             fencing_token: 4,
+            lease_expires_at: "2026-08-02T12:00:00Z".into(),
             data_key_version: 1,
         };
         attach.validate().unwrap();
@@ -911,6 +920,7 @@ mod tests {
             read_only: true,
             encrypted: true,
             fencing_token: 1,
+            lease_expires_at: "2026-08-02T12:00:00Z".into(),
             data_key_version: 1,
         };
         assert!(attach.validate().is_err());
@@ -919,6 +929,9 @@ mod tests {
         assert!(attach.validate().is_err());
         attach.guest_path = "/data".into();
         attach.fencing_token = 0;
+        assert!(attach.validate().is_err());
+        attach.fencing_token = 1;
+        attach.lease_expires_at = "not-a-time".into();
         assert!(attach.validate().is_err());
     }
 
