@@ -86,7 +86,10 @@ fn an_accepted_uds_connection_exposes_its_pollable_descriptor() {
 }
 ```
 
-- [x] **Step 2: Run it and confirm it fails**
+- [~] **Step 2 (not observed): Run it and confirm it fails**
+
+Not observed — implementation preceded the test run; the field's absence was
+verified by inspection, not by a captured red (task-1-report.md:38-39).
 
 Run: `cargo nextest run -p mvm-hostd an_accepted_uds_connection_exposes`
 Expected: FAIL — no field `pollable_fd` on `GuestConnection`.
