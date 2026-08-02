@@ -1210,11 +1210,33 @@ already write `<state_dir>/console.log`.
 
 - [ ] **Step 4: Run to verify it passes** — PASS.
 
-- [ ] **Step 5: Wire the source into workload start**
+- [ ] **Step 5: Wire the source into workload start, by inversion**
 
-Modify `crates/mvm-runtime/src/workload_runner/runner.rs` where `console_log` is
-set (`:252`) so starting a workload also starts a `ConsoleSource`. Verify no net
-device is introduced:
+**Corrected during execution.** This step originally said to modify
+`crates/mvm-runtime/src/workload_runner/runner.rs` to call `ConsoleSource::follow`
+directly. That is architecturally impossible: `ConsoleSource` needs
+`StreamBroker`, which lives in `mvm-hostd`, and the dependency edge runs
+`mvm-hostd → mvm-runtime` only. `mvm-runtime` cannot name anything in
+`mvm-hostd`.
+
+Invert it instead, the way this file already solves the same problem twice.
+`EndpointSpawner` and `BrokerRegistrar` are both existing cases of "mvm-runtime
+needs the per-tenant daemon to act": a trait declared in `mvm-runtime` with a
+default no-op, implemented in `mvm-hostd`. Add a third of the same shape — new
+trait, optional field, builder method on `WorkloadRunner`, no generic-parameter
+churn across its call sites.
+
+The hook must be **unconditional**, not admission-gated. `BrokerRegistrar` is a
+different, same-named host-services broker that no-ops for unadmitted VMs;
+reusing its gating would silently drop console capture on local and unadmitted
+dev runs — exactly the runs where a boot failure is most likely and the operator
+has the fewest other ways to see what happened. That would defeat the always-on
+property this task exists to provide.
+
+Teardown must stop the follower without discarding already-read bytes, and the
+wired path — not only the direct call — must exercise that.
+
+Verify no net device is introduced:
 
 Run: `cargo run -p xtask check-vsock-only-egress && cargo run -p xtask check-uniform-vsock-egress`
 Expected: both clean.
