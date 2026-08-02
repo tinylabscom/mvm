@@ -10,6 +10,19 @@
 
 ## Current issue delivery
 
+- [x] Zero-open-issue reconciliation tranche: the original 19-issue queue is fully
+      classified, with completed, superseded, duplicate, and intentionally
+      unplanned items closed with evidence. Queued fixes for #2007, #2028, and
+      #2029 have merged. The remaining delivery updates Wasmtime to the patched
+      46.0.2 family, synchronizes and actually builds both Linux 6.12.100
+      kernel consumers, hardens the installer HTTP fixture, and removes the
+      Linux-only 128-second initramfs build from the cold-cache unit test.
+      Full-suite validation also made the plan-mode integration test override
+      the worktree's `MVM_HOME`, preventing it from reusing another test's
+      mutable host-signing key.
+      Newly filed #2039, #2040, and #2042 remain explicit follow-up work.
+      Tracked in plan 284.
+
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout
       of untrusted code, and structural security tests. The label counter now
