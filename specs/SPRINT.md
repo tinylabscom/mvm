@@ -45,6 +45,12 @@
         optional-feature check, host all-target clippy, format, model gates,
         audit, and deny are green. The one failure among 8,516 nextest cases was
         an installer-script flake that passed on its focused rerun.
+    - The contract, conformance fixture, and local implementation now live in
+      the dependency-light `mvm-volume-contract` leaf and are re-exported by
+      core and runtime. This lets mvmd depend on the exact mvm-owned type without
+      linking either repository's unrelated crypto/VMM dependency graph; the
+      leaf's four contract, symlink-refusal, listing, and serde tests pass, and
+      its default closure remains async-runtime-free.
   - [ ] WS2–WS7: live attachment, mvmd migration, durable checkpoint/restore,
         remote operations, live provider/KVM proof, and closeout remain open.
     - WS2 live attachment core is implemented: portable encrypted ext4 images,

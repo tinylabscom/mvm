@@ -13,6 +13,7 @@ autobins = false
 substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + backend-local vsock listeners)"
 
 [dependencies]
+mvm-volume-contract = { workspace = true, features = ["local"] }
 # `egress-ca`: `substitution_spawn::build_egress_tls_delivery`
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.

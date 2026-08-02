@@ -2850,6 +2850,7 @@ dependencies = [
  "ipnet",
  "keyring",
  "mvm-protocol",
+ "mvm-volume-contract",
  "rand 0.8.6",
  "rcgen",
  "regex",
@@ -3010,6 +3011,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-protocol",
+ "mvm-volume-contract",
  "nix 0.29.0",
  "object_store",
  "rand 0.8.6",
@@ -3058,6 +3060,20 @@ dependencies = [
  "tree-sitter-nix",
  "tree-sitter-python",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "mvm-volume-contract"
+version = "0.18.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

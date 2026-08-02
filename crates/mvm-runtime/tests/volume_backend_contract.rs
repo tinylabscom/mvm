@@ -1,47 +1,45 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
-use mvm_core::volume::{VolumeEntry, VolumeError, VolumePath};
-use mvm_runtime::storage::volume::{LocalBackend, VolumeBackend, contract};
+use mvm_core::volume::{VolumeEntry, VolumePath};
+use mvm_runtime::storage::volume::{LocalBackend, VolumeBackend, VolumeFuture, contract};
 
 struct ExternalBackend {
     inner: LocalBackend,
 }
 
-#[async_trait]
 impl VolumeBackend for ExternalBackend {
     fn kind(&self) -> &'static str {
         "external-contract-test"
     }
 
-    async fn put(&self, key: &VolumePath, data: Bytes) -> Result<(), VolumeError> {
-        self.inner.put(key, data).await
+    fn put<'a>(&'a self, key: &'a VolumePath, data: Bytes) -> VolumeFuture<'a, ()> {
+        self.inner.put(key, data)
     }
 
-    async fn get(&self, key: &VolumePath) -> Result<Bytes, VolumeError> {
-        self.inner.get(key).await
+    fn get<'a>(&'a self, key: &'a VolumePath) -> VolumeFuture<'a, Bytes> {
+        self.inner.get(key)
     }
 
-    async fn list(&self, prefix: &VolumePath) -> Result<Vec<VolumeEntry>, VolumeError> {
-        self.inner.list(prefix).await
+    fn list<'a>(&'a self, prefix: &'a VolumePath) -> VolumeFuture<'a, Vec<VolumeEntry>> {
+        self.inner.list(prefix)
     }
 
-    async fn delete(&self, key: &VolumePath) -> Result<(), VolumeError> {
-        self.inner.delete(key).await
+    fn delete<'a>(&'a self, key: &'a VolumePath) -> VolumeFuture<'a, ()> {
+        self.inner.delete(key)
     }
 
-    async fn stat(&self, key: &VolumePath) -> Result<VolumeEntry, VolumeError> {
-        self.inner.stat(key).await
+    fn stat<'a>(&'a self, key: &'a VolumePath) -> VolumeFuture<'a, VolumeEntry> {
+        self.inner.stat(key)
     }
 
-    async fn rename(&self, from: &VolumePath, to: &VolumePath) -> Result<(), VolumeError> {
-        self.inner.rename(from, to).await
+    fn rename<'a>(&'a self, from: &'a VolumePath, to: &'a VolumePath) -> VolumeFuture<'a, ()> {
+        self.inner.rename(from, to)
     }
 
-    async fn health_check(&self) -> Result<(), VolumeError> {
-        self.inner.health_check().await
+    fn health_check(&self) -> VolumeFuture<'_, ()> {
+        self.inner.health_check()
     }
 
     fn local_export_path(&self) -> Option<&Path> {

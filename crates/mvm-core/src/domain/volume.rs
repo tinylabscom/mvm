@@ -19,8 +19,8 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
+pub use mvm_volume_contract::{VolumeEntry, VolumeError, VolumePath};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 // ============================================================================
 // Identifiers
@@ -136,50 +136,6 @@ impl VolumeName {
 }
 
 impl std::fmt::Display for VolumeName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Path within a volume's namespace. Validated to reject `..`, embedded
-/// NULs, leading slashes (paths are always volume-relative), and
-/// excessive length.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct VolumePath(String);
-
-impl VolumePath {
-    pub fn new(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        if value.is_empty() {
-            bail!("volume path must not be empty");
-        }
-        if value.len() > MAX_VOLUME_PATH_LEN {
-            bail!(
-                "volume path must be 1-{MAX_VOLUME_PATH_LEN} bytes, got {}",
-                value.len()
-            );
-        }
-        if value.contains('\0') {
-            bail!("volume path must not contain NUL");
-        }
-        if value.starts_with('/') {
-            bail!("volume path must be relative (no leading '/'): {value:?}");
-        }
-        for segment in value.split('/') {
-            if segment == ".." {
-                bail!("volume path must not contain '..' segment: {value:?}");
-            }
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for VolumePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -371,19 +327,6 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
-/// Filesystem-style entry returned by `list`/`stat`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VolumeEntry {
-    pub path: VolumePath,
-    pub size: u64,
-    pub is_dir: bool,
-    /// Backend-supplied content hash / version tag (provider ETag for
-    /// object stores; modification timestamp hash for local).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub etag: Option<String>,
-}
-
 // ============================================================================
 // Encryption-at-rest key wrapping (used by mvmd-side EncryptedBackend)
 // ============================================================================
@@ -536,39 +479,6 @@ pub struct MasterKeyRef {
 // ============================================================================
 // Errors
 // ============================================================================
-
-/// Errors returned by the `VolumeBackend` trait (defined in
-/// `mvm_runtime::storage::volume`). Lives in `mvm-core` so trait callers
-/// and impls can share a single error type without a circular dep.
-#[derive(Debug, Error)]
-pub enum VolumeError {
-    #[error("volume entry not found: {0}")]
-    NotFound(VolumePath),
-
-    #[error("volume entry already exists: {0}")]
-    AlreadyExists(VolumePath),
-
-    #[error("size cap exceeded ({attempted} > {limit} bytes)")]
-    SizeCapExceeded { attempted: u64, limit: u64 },
-
-    #[error("read-only volume rejects mutation")]
-    ReadOnly,
-
-    #[error("backend kind {kind} not supported in this context: {reason}")]
-    UnsupportedBackend {
-        kind: &'static str,
-        reason: &'static str,
-    },
-
-    #[error("invalid path: {0}")]
-    InvalidPath(String),
-
-    #[error("backend I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("backend error: {0}")]
-    Other(String),
-}
 
 // ============================================================================
 // Tests

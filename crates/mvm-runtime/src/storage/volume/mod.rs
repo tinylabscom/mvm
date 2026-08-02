@@ -37,7 +37,7 @@ pub mod encrypted;
 #[path = "encrypted_linux.rs"]
 pub mod encrypted;
 
-pub use backend::VolumeBackend;
+pub use backend::{VolumeBackend, VolumeFuture};
 pub use content_addressed::{ContentAddressedStore, ContentDigest};
 pub use local::LocalBackend;
 pub use mount_provider::{

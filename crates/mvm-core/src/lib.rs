@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 // mvm-core: Pure types, IDs, config, utilities
-// No internal mvm dependencies — this is the foundation crate.
+// Depends only on the smaller canonical volume-contract leaf plus the
+// no_std protocol foundation; it does not depend on a runtime or provider.
 // `deny` (not `forbid`) so `util::test_env` can carry the one narrow
 // unsafe carve-out for process-wide env mutation in tests.
 
