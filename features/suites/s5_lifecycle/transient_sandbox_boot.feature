@@ -16,12 +16,33 @@ Feature: Transient sandbox boot
     When I run mvmctl in an isolated live home with "machine run --name bdd-nix-boot --flake examples/exit_code --timeout 120"
     Then the command exits with code 7
 
-  # This scenario does not pass today and is not expected to: a NIC-less guest
-  # has no raw socket, so busybox `ping` fails at `socket()` before a packet
-  # exists, and `--allow-host` admits TCP to :443 rather than ICMP. Host-mediated
-  # echo over vsock is what will make it true. Two details have to line up when
-  # it does: the invocation is `/bin/ping` by absolute path, so a PATH-order shim
-  # will not satisfy it, and `-c 1` must produce busybox's "1 received" wording.
+  # The universal initramfs made the agent PID 1 and, for a while, carried over
+  # only the mounting half of the older init. A workload booted with `lo` down
+  # and nothing listening on the loopback proxy port, so every egress attempt
+  # failed as `Network unreachable` — while the proxy environment variables were
+  # still exported, which made it read as a broken network rather than as a
+  # policy denial. This is that regression, as a scenario.
+  @live
+  Scenario: a workload reaches an admitted host over the mediated egress path
+    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https --image alpine --allow-host example.com --timeout 180 -- wget -q -O- https://example.com"
+    Then the command exits with code 0
+    And the output contains "Example Domain"
+
+  # Unqualified, so the mediated stand-in on PATH satisfies it. A NIC-less guest
+  # has no raw socket, so the image's own ping fails at `socket()`; the host
+  # performs the echo over vsock on the guest's behalf.
+  @live
+  Scenario: machine run reaches an admitted host with an unqualified ping
+    When I run mvmctl in an isolated live home with "machine run --name bdd-egress-ping-path --image alpine --allow-host google.com --timeout 180 -- ping -c 1 google.com"
+    Then the command exits with code 0
+    And the output contains "1 received"
+
+  # Still open, and for one specific reason: `/bin/ping` by absolute path is not
+  # satisfied by a PATH-order stand-in, and the bind mount that would satisfy it
+  # cannot apply here. `/bin/ping` on a busybox image is a symlink to the
+  # multi-call binary, replacing that link needs a write, and the rootfs is
+  # read-only under verity. The unqualified scenario above is the same egress
+  # path within reach today.
   @live @wip
   Scenario: machine run reaches an admitted host with ping
     When I run mvmctl in an isolated live home with "machine run --name bdd-egress-ping --image alpine --allow-host google.com --timeout 120 -- /bin/ping -c 1 google.com"
