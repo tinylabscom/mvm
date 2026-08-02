@@ -616,10 +616,11 @@ mod tests {
                 "a hostile machine id added {syntax:?} to the ruleset: {hostile_rules}"
             );
         }
-        // The characters a shell or nft would act on cannot appear at all,
-        // because the only interpolated values are the two slugs above and
-        // an address.
-        for bad in ['`', '$', '\'', '\\', '"'] {
+        // Shell metacharacters cannot appear at all, because the only
+        // interpolated values are the two slugs above and an address. Double
+        // quotes are part of the nft template around interface names and are
+        // therefore expected in an otherwise safe ruleset.
+        for bad in ['`', '$', '\'', '\\'] {
             assert!(
                 !hostile_rules.contains(bad),
                 "ruleset contains {bad:?}: {hostile_rules}"
