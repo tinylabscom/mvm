@@ -122,7 +122,7 @@ to the PR CI matrix and the WS2/WS6 builder-VM lanes.
       metadata and enforce rootfs → runtime overlay → user-volume ordering.
 - [x] Make detach and failed-start cleanup RAII/idempotent so no mapper, mount,
       virtiofs process, device, or registry state leaks after failure.
-- [ ] Implement mvmctl local create/list/mount/unmount/snapshot/restore behavior
+- [x] Implement mvmctl local create/list/mount/unmount/snapshot/restore behavior
       against the live lifecycle and delete the “follow-up” warning once true.
 - [ ] Add positive and negative BDD scenarios for persistence across restart,
       read-only refusal, locked volume, traversal/deny-prefix, unadmitted share,
@@ -138,11 +138,16 @@ same admitted `Disk` set for backend and activation metadata, and refuses
 unsupported directory/disk shapes before boot. Transitional unlock/seal state
 is crash-recovered under an RAII catalog lock. Durable attachment leases roll
 back on failed launch, persist after detached start, block concurrent attach or
-lock, and release idempotently on stop. Focused evidence: 21 runtime registry
-tests, 14 CLI lifecycle tests, four persistent-image tests, activation/guest
-mount/QEMU tests, touched-crate check, all-target Clippy, formatting, and the
-production file-size gate are green. Local snapshot/restore commands, BDD, and
-builder-VM/KVM proof remain open, so WS2 is not complete.
+lock, and release idempotently on stop. Local immutable snapshots copy only
+locked authenticated ciphertext, bind a strict canonical manifest to
+identity/kind/size/digest/wrapped key, publish via private staging and atomic
+rename, and restore through a crash-recoverable `Restoring` state. Tampered
+payloads are refused without replacing current ciphertext; an interrupted
+prepared restore converges and recovers the prior bytes. Focused evidence: 21
+runtime registry tests, 19 CLI lifecycle tests, four persistent-image tests,
+activation/guest mount/QEMU tests, touched-crate check, all-target Clippy,
+formatting, and the production file-size gate are green. BDD and builder-VM/KVM
+proof remain open, so WS2 is not complete.
 
 ## WS3 — mvmd migration from OpenDAL to `object_store`
 

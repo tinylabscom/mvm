@@ -8,10 +8,10 @@
 //! admitted volume set handed to the VMM and guest activation payload, and
 //! rejected before boot when their encrypted state or local artifact changes.
 //!
-//! Managed local volumes fail closed unless their host directory is
-//! backed by encrypted storage (macOS encrypted APFS/FileVault volume
-//! or Linux dm-crypt/LUKS chain). Ad-hoc `--host` mounts are still
-//! accepted only when the exact directory also passes that check.
+//! MVM-managed block volumes are authenticated ciphertext while locked and are
+//! materialized only for their explicit lifecycle. Host-backed and ad-hoc
+//! directory mounts remain accepted only when the exact host path is itself on
+//! encrypted storage (macOS encrypted APFS/FileVault or Linux dm-crypt/LUKS).
 //!
 //! ## `--remote` mode (mvmd proxy)
 //!
@@ -48,6 +48,8 @@ use sha2::{Digest, Sha256};
 use super::Cli;
 use super::shared::clap_vm_name;
 
+mod snapshot;
+
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
     #[command(subcommand)]
@@ -82,6 +84,10 @@ pub(in crate::commands) enum VolumeCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Create an immutable encrypted snapshot of a locked managed volume.
+    Snapshot { volume: String, snapshot: String },
+    /// Restore a locked managed volume from an immutable local snapshot.
+    Restore { volume: String, snapshot: String },
     /// Mount a virtio-fs volume into a VM.
     ///
     /// Operations against provider-backed (S3 / Hetzner / R2 / GCS /
@@ -149,6 +155,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         VolumeCmd::Unlock { volume } => unlock(&volume),
         VolumeCmd::Lock { volume } => lock(&volume),
         VolumeCmd::Catalog { json } => catalog(json),
+        VolumeCmd::Snapshot { volume, snapshot } => snapshot::create(&volume, &snapshot),
+        VolumeCmd::Restore { volume, snapshot } => snapshot::restore(&volume, &snapshot),
         VolumeCmd::Mount {
             name,
             volume,
@@ -251,8 +259,20 @@ impl LocalVolumeLeaseCatalog {
 }
 
 fn local_volume_lease_key(host_path: &Path) -> Result<String> {
-    let canonical = fs::canonicalize(host_path)
-        .with_context(|| format!("canonicalizing leased volume {}", host_path.display()))?;
+    let canonical = if host_path.exists() {
+        fs::canonicalize(host_path)
+            .with_context(|| format!("canonicalizing leased volume {}", host_path.display()))?
+    } else {
+        let parent = host_path
+            .parent()
+            .with_context(|| format!("leased volume has no parent: {}", host_path.display()))?;
+        let file_name = host_path
+            .file_name()
+            .with_context(|| format!("leased volume has no file name: {}", host_path.display()))?;
+        fs::canonicalize(parent)
+            .with_context(|| format!("canonicalizing leased volume parent {}", parent.display()))?
+            .join(file_name)
+    };
     let mut hash = Sha256::new();
     hash.update(canonical.as_os_str().as_encoded_bytes());
     Ok(hex::encode(hash.finalize()))
@@ -507,6 +527,27 @@ fn recover_local_volume_catalog() -> Result<LocalVolumeCatalog> {
                 }
                 set_local_volume_state(&mut catalog, &name, LocalVolumeState::Locked)?;
                 remove_materialized_volume(&entry)?;
+                changed = true;
+            }
+            LocalVolumeState::Restoring => {
+                let ciphertext = PathBuf::from(&encryption.ciphertext_path);
+                let staging = ciphertext.with_extension("restoring");
+                if staging.exists() {
+                    fs::rename(&staging, &ciphertext).with_context(|| {
+                        format!(
+                            "publishing recovered restored volume {} -> {}",
+                            staging.display(),
+                            ciphertext.display()
+                        )
+                    })?;
+                }
+                let actual = ciphertext_content_hash(&ciphertext)?;
+                if !encryption.wrapped_key.binding_matches_content(&actual) {
+                    bail!(
+                        "recovering volume {name:?} refused: restored ciphertext binding mismatch"
+                    );
+                }
+                set_local_volume_state(&mut catalog, &name, LocalVolumeState::Locked)?;
                 changed = true;
             }
         }
@@ -1160,6 +1201,7 @@ fn catalog(json: bool) -> Result<()> {
                 LocalVolumeState::Unlocked => "unlocked",
                 LocalVolumeState::Locking => "locking",
                 LocalVolumeState::Publishing => "publishing",
+                LocalVolumeState::Restoring => "restoring",
             },
         };
         let kind = match &e.kind {
@@ -1683,6 +1725,18 @@ mod tests {
     }
 
     #[test]
+    fn lease_key_is_stable_when_managed_plaintext_is_absent() {
+        let guard = DataDirGuard::new();
+        let parent = guard.path().join("materialized");
+        fs::create_dir(&parent).unwrap();
+        let host_path = parent.join("work.ext4");
+        let absent_key = local_volume_lease_key(&host_path).unwrap();
+        fs::write(&host_path, b"volume").unwrap();
+        let present_key = local_volume_lease_key(&host_path).unwrap();
+        assert_eq!(absent_key, present_key);
+    }
+
+    #[test]
     fn recovery_rolls_back_an_interrupted_seal_without_losing_plaintext() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
@@ -1766,5 +1820,66 @@ mod tests {
             )
             .is_file()
         );
+    }
+
+    #[test]
+    fn recovery_finishes_a_prepared_restore_and_recovers_prior_bytes() {
+        let guard = DataDirGuard::new();
+        let root = guard.path().join("vol-root");
+        create("work", Some(root.to_str().unwrap()), false, "16M").unwrap();
+
+        let original = LocalVolumeCatalog::load().unwrap();
+        let original_entry = original.get("work").unwrap();
+        let (ciphertext, original_wrapped_key) = match &original_entry.encryption {
+            LocalVolumeEncryption::MvmManaged(encryption) => (
+                PathBuf::from(&encryption.ciphertext_path),
+                encryption.wrapped_key.clone(),
+            ),
+            LocalVolumeEncryption::HostBacked => panic!("expected mvm-managed volume"),
+        };
+        let staging = ciphertext.with_extension("restoring");
+        fs::copy(&ciphertext, &staging).unwrap();
+
+        unlock("work").unwrap();
+        let unlocked = LocalVolumeCatalog::load().unwrap();
+        let host_path = PathBuf::from(&unlocked.get("work").unwrap().host_path);
+        let mut image = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&host_path)
+            .unwrap();
+        image.seek(SeekFrom::End(-1)).unwrap();
+        let mut original_marker = [0u8; 1];
+        image.read_exact(&mut original_marker).unwrap();
+        image.seek(SeekFrom::End(-1)).unwrap();
+        image.write_all(&[original_marker[0] ^ 0xff]).unwrap();
+        image.sync_all().unwrap();
+        lock("work").unwrap();
+
+        let mut restoring = LocalVolumeCatalog::load().unwrap();
+        let restoring_entry = restoring.get_mut("work").unwrap();
+        let LocalVolumeEncryption::MvmManaged(encryption) = &mut restoring_entry.encryption else {
+            panic!("expected mvm-managed volume")
+        };
+        encryption.wrapped_key = original_wrapped_key;
+        encryption.state = LocalVolumeState::Restoring;
+        restoring.save().unwrap();
+
+        let recovered = recover_local_volume_catalog().unwrap();
+        assert!(!staging.exists());
+        assert!(matches!(
+            &recovered.get("work").unwrap().encryption,
+            LocalVolumeEncryption::MvmManaged(MvmManagedVolumeEncryption {
+                state: LocalVolumeState::Locked,
+                ..
+            })
+        ));
+        unlock("work").unwrap();
+        let unlocked = LocalVolumeCatalog::load().unwrap();
+        let mut image = File::open(&unlocked.get("work").unwrap().host_path).unwrap();
+        image.seek(SeekFrom::End(-1)).unwrap();
+        let mut recovered_marker = [0u8; 1];
+        image.read_exact(&mut recovered_marker).unwrap();
+        assert_eq!(recovered_marker, original_marker);
     }
 }

@@ -49,9 +49,11 @@
         remote operations, live provider/KVM proof, and closeout remain open.
     - WS2 live attachment core is implemented: portable encrypted ext4 images,
       launch-time typed resolution, admitted VMM/guest handoff, crash recovery,
-      and durable exclusive attachment leases are covered by focused tests.
-      Local snapshot/restore commands, BDD, and builder-VM/KVM proof still gate
-      WS2 completion.
+      durable exclusive attachment leases, and canonical immutable local
+      snapshot/restore with tamper refusal and interrupted-restore convergence
+      are covered by focused tests. The local CLI lifecycle and runtime registry
+      suites pass 19 and 21 tests respectively; BDD and builder-VM/KVM proof
+      still gate WS2 completion.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout

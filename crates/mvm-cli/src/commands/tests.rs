@@ -409,6 +409,50 @@ fn volume_catalog_json_parses() {
 }
 
 #[test]
+fn volume_snapshot_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "volume",
+        "snapshot",
+        "work",
+        "before-upgrade",
+    ])
+    .unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    assert!(matches!(
+        mg.action,
+        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command: volume::VolumeCmd::Snapshot { volume, snapshot },
+        })) if volume == "work" && snapshot == "before-upgrade"
+    ));
+}
+
+#[test]
+fn volume_restore_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "volume",
+        "restore",
+        "work",
+        "before-upgrade",
+    ])
+    .unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected machine group")
+    };
+    assert!(matches!(
+        mg.action,
+        machine::MachineAction::Vm(group::VmCmd::Volume(volume::Args {
+            command: volume::VolumeCmd::Restore { volume, snapshot },
+        })) if volume == "work" && snapshot == "before-upgrade"
+    ));
+}
+
+#[test]
 fn volume_mount_managed_omits_host() {
     let cli = Cli::try_parse_from([
         "mvmctl",

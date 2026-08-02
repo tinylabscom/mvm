@@ -92,6 +92,7 @@ pub enum LocalVolumeState {
     Unlocked,
     Locking,
     Publishing,
+    Restoring,
 }
 
 impl LocalVolumeCatalog {
