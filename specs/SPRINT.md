@@ -642,6 +642,20 @@
       completion follows the authoritative child exit after draining available
       stderr even if a detached descendant still holds a writer.
 
+- [ ] Plan 287 (`specs/plans/287-userspace-socket-datapath.md`, ADR-037) —
+      userspace socket datapath. Phase A (WS0) is landed: it fixed two
+      platform-neutral defects in the shipped `mvm-netd` gateway daemon that
+      also affected the Linux path in production — a per-frame counter passed
+      to `now_millis` APIs, so idle TCP flows needed 300,000 guest frames to
+      expire instead of five minutes; and a drive loop that blocked on the
+      guest data channel and only drained the datapath afterwards, so
+      host-to-guest traffic stalled whenever the guest was quiet. The fix
+      adds `GuestConnection::pollable_fd`, `DatapathHandle::readiness_fd`, a
+      `mio` poll loop with a timer tick, an injectable clock, and a bounded
+      read drain. Phase B (WS1) — the smoltcp-backed `UserspaceSocketDatapath`
+      that makes `l3-vsock` work on hosts with no privileges — remains
+      outstanding.
+
 ---
 
 ## 1. Why

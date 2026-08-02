@@ -69,7 +69,7 @@ Must land before Phase B. Independently valuable: it fixes two real defects on t
 **Interfaces:**
 - Produces: `GuestConnection::pollable_fd: Option<std::os::fd::RawFd>`, and `GuestConnection::with_pollable_fd(self, fd: RawFd) -> Self`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/mvm-hostd/src/netd/uds_channel.rs`, in the existing `mod tests`:
 
@@ -86,12 +86,12 @@ fn an_accepted_uds_connection_exposes_its_pollable_descriptor() {
 }
 ```
 
-- [ ] **Step 2: Run it and confirm it fails**
+- [x] **Step 2: Run it and confirm it fails**
 
 Run: `cargo nextest run -p mvm-hostd an_accepted_uds_connection_exposes`
 Expected: FAIL — no field `pollable_fd` on `GuestConnection`.
 
-- [ ] **Step 3: Add the field and builder**
+- [x] **Step 3: Add the field and builder**
 
 In `crates/mvm-net/src/channel.rs`:
 
@@ -119,7 +119,7 @@ impl<S> GuestConnection<S> {
 }
 ```
 
-- [ ] **Step 4: Populate it in the UDS listener**
+- [x] **Step 4: Populate it in the UDS listener**
 
 In `uds_channel.rs`'s `accept`, capture the descriptor before boxing the stream:
 
@@ -135,12 +135,12 @@ Ok(GuestConnection::new(
 .with_pollable_fd(fd))
 ```
 
-- [ ] **Step 5: Run tests and confirm they pass**
+- [x] **Step 5: Run tests and confirm they pass**
 
 Run: `cargo nextest run -p mvm-hostd -p mvm-net`
 Expected: PASS, including every pre-existing channel test.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git add crates/mvm-net/src/channel.rs crates/mvm-hostd/src/netd/uds_channel.rs
@@ -159,7 +159,7 @@ git commit -m "feat(netd): carry a pollable descriptor out of the guest channel"
 - Consumes: nothing from Task 1.
 - Produces: `DatapathHandle::readiness_fd(&self) -> Option<std::os::fd::RawFd>`, defaulting to `None`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `datapath.rs`'s `mod tests`:
 
@@ -175,12 +175,12 @@ fn a_loopback_handle_has_no_readiness_descriptor() {
 }
 ```
 
-- [ ] **Step 2: Run it and confirm it fails**
+- [x] **Step 2: Run it and confirm it fails**
 
 Run: `cargo nextest run -p mvm-hostd a_loopback_handle_has_no_readiness`
 Expected: FAIL — no method `readiness_fd`.
 
-- [ ] **Step 3: Add the defaulted trait method**
+- [x] **Step 3: Add the defaulted trait method**
 
 In `datapath.rs`, inside `pub trait DatapathHandle`:
 
@@ -196,7 +196,7 @@ In `datapath.rs`, inside `pub trait DatapathHandle`:
 
 The default is deliberate: `LoopbackHandle` and the refusing handles inherit it unchanged, so only backends with something to poll implement it.
 
-- [ ] **Step 4: Implement it for the Linux TUN handle**
+- [x] **Step 4: Implement it for the Linux TUN handle**
 
 In `linux.rs`, on the handle struct holding the TUN descriptor:
 
@@ -206,12 +206,12 @@ In `linux.rs`, on the handle struct holding the TUN descriptor:
     }
 ```
 
-- [ ] **Step 5: Run tests and confirm they pass**
+- [x] **Step 5: Run tests and confirm they pass**
 
 Run: `cargo nextest run -p mvm-hostd` and `just check-linux`
 Expected: PASS on both. `check-linux` matters because `linux.rs` does not compile on macOS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/netd/datapath.rs crates/mvm-hostd/src/netd/linux.rs
@@ -230,7 +230,7 @@ git commit -m "feat(netd): expose a readiness descriptor on datapath handles"
 **Interfaces:**
 - Produces: `fn monotonic_millis(start: std::time::Instant) -> u64`, used by Task 4.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/mvm-hostd/tests/netd_bin.rs`:
 
@@ -251,14 +251,14 @@ fn flows_expire_on_wall_clock_time_not_frame_count() {
 }
 ```
 
-- [ ] **Step 2: Run it — it is expected to PASS, and that is the point**
+- [x] **Step 2: Run it — it is expected to PASS, and that is the point**
 
 Run: `cargo nextest run -p mvm-hostd flows_expire_on_wall_clock`
 Expected: **PASS.**
 
 This is deliberately not a red-green step, so do not "fix" it into failing. `FlowTracker` is already correct — expiry is a pure function of the `now_millis` it is handed. The defect is entirely in `mvm-netd`, which hands it a frame counter. This test pins the library contract that Step 3 makes the binary honour; the red-green proof for the actual defect is Task 4's `host_to_guest_data_flows_while_the_guest_is_silent` and the end-to-end check in Task 5.
 
-- [ ] **Step 3: Thread a real clock through `serve`**
+- [x] **Step 3: Thread a real clock through `serve`**
 
 In `mvm-netd.rs`, delete `let mut now: u64 = 0;` and every `now += 1;`. Add:
 
@@ -275,12 +275,12 @@ fn monotonic_millis(start: std::time::Instant) -> u64 {
 
 and in `serve`, take `let start = std::time::Instant::now();` once, then replace each `now` use with `monotonic_millis(start)`.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Run: `cargo nextest run -p mvm-hostd`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/bin/mvm-netd.rs crates/mvm-hostd/tests/netd_bin.rs
@@ -300,7 +300,7 @@ The steady-state loop blocks on `data.read()` and polls the datapath only after 
 **Interfaces:**
 - Consumes: `GuestConnection::pollable_fd` (Task 1), `DatapathHandle::readiness_fd` (Task 2), `monotonic_millis` (Task 3).
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 In `crates/mvm-hostd/Cargo.toml` under `[dependencies]`:
 
@@ -310,7 +310,7 @@ mio = { workspace = true }
 
 `mio` is already a workspace dependency, so this adds an edge rather than a new third-party crate. Confirm with `cargo tree -p mvm-hostd -e no-dev | grep mio`.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 In `crates/mvm-hostd/tests/netd_bin.rs`:
 
@@ -330,12 +330,12 @@ fn host_to_guest_data_flows_while_the_guest_is_silent() {
 }
 ```
 
-- [ ] **Step 3: Run it and confirm it fails**
+- [x] **Step 3: Run it and confirm it fails**
 
 Run: `cargo nextest run -p mvm-hostd host_to_guest_data_flows_while`
 Expected: FAIL — times out, because nothing drains the datapath until the guest transmits.
 
-- [ ] **Step 4: Replace the blocking loop**
+- [x] **Step 4: Replace the blocking loop**
 
 Register the guest data descriptor and the datapath readiness descriptor with one `mio::Poll`, and use a timer tick as the floor so a datapath reporting `None` still makes progress:
 
@@ -398,7 +398,13 @@ loop {
 
 Set the guest data descriptor non-blocking before the loop, since a readiness-driven read must not block.
 
-- [ ] **Step 5: Expose the datapath descriptor through the gateway**
+- [~] **Step 5 (superseded): Expose the datapath descriptor through the gateway**
+
+Superseded: `Gateway::datapath()` is already `pub` and returns `&dyn
+DatapathHandle`, and `readiness_fd(&self)` takes `&self`, so
+`gateway.datapath().readiness_fd()` already works — a wrapper method would
+duplicate an existing path under a new name, and `mvm-netd.rs` calls the
+existing path directly.
 
 `Gateway` owns the handle, so add a thin accessor beside its existing ones. Keep it to the two lines the borrow allows — `gateway.rs` has 14 lines of headroom:
 
@@ -411,12 +417,12 @@ Set the guest data descriptor non-blocking before the loop, since a readiness-dr
 
 If this pushes `gateway.rs` past 1500 lines, stop and split the file first as its own commit, then return here.
 
-- [ ] **Step 6: Run the suite and the gates**
+- [x] **Step 6: Run the suite and the gates**
 
 Run: `cargo nextest run -p mvm-hostd && cargo run -p xtask -- check-file-size`
 Expected: PASS, and `gateway.rs` still under 1500 lines.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/bin/mvm-netd.rs crates/mvm-hostd/src/netd/gateway.rs crates/mvm-hostd/Cargo.toml Cargo.lock
@@ -427,16 +433,16 @@ git commit -m "fix(netd): poll the guest channel and the datapath independently"
 
 ### Task 5: Close out Phase A
 
-- [ ] **Step 1: Run the full gate list**
+- [x] **Step 1: Run the full gate list**
 
 Run every command in the Gate list section above.
 Expected: all green.
 
-- [ ] **Step 2: Tick the ledgers**
+- [x] **Step 2: Tick the ledgers**
 
 Mark WS0 complete in `specs/plans/287-userspace-socket-datapath.md`, and update `specs/REFACTOR-STATUS.md` (bump its "Last updated" date) and `specs/SPRINT.md` in the same commit.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```sh
 git add specs/

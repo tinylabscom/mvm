@@ -6,6 +6,19 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] Plan 287 — Userspace socket datapath
+      (`specs/plans/287-userspace-socket-datapath.md`, ADR-037)
+  - [x] Phase A (WS0) — fix the two platform-neutral defects in the shipped
+        `mvm-netd` drive loop that blocked this work and affected Linux
+        today: a pollable descriptor out of `GuestConnection`, a
+        `DatapathHandle::readiness_fd` accessor, a real monotonic clock
+        replacing the per-frame counter that made a 5-minute idle timeout
+        mean 300,000 guest frames, and a `mio` poll loop that drains the
+        guest channel and the datapath independently so host-to-guest
+        traffic no longer stalls while the guest is quiet
+  - [ ] Phase B (WS1) — the smoltcp-backed `UserspaceSocketDatapath` itself,
+        making `l3-vsock` work on hosts with no privileges
+
 - [x] Plan 285 — HVF virtio-rng
       (`specs/plans/285-hvf-virtio-rng.md`, issue #2060)
   - [x] Portable bounded virtio-mmio entropy device and negative tests
