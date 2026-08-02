@@ -251,10 +251,12 @@ fn flows_expire_on_wall_clock_time_not_frame_count() {
 }
 ```
 
-- [ ] **Step 2: Run it and confirm it passes already**
+- [ ] **Step 2: Run it — it is expected to PASS, and that is the point**
 
 Run: `cargo nextest run -p mvm-hostd flows_expire_on_wall_clock`
-Expected: PASS. This test pins the *library's* correct behaviour — it is the contract Task 3 makes `mvm-netd` actually honour. The defect is in the binary, which the next step fixes and Task 5 proves end-to-end.
+Expected: **PASS.**
+
+This is deliberately not a red-green step, so do not "fix" it into failing. `FlowTracker` is already correct — expiry is a pure function of the `now_millis` it is handed. The defect is entirely in `mvm-netd`, which hands it a frame counter. This test pins the library contract that Step 3 makes the binary honour; the red-green proof for the actual defect is Task 4's `host_to_guest_data_flows_while_the_guest_is_silent` and the end-to-end check in Task 5.
 
 - [ ] **Step 3: Thread a real clock through `serve`**
 
@@ -977,8 +979,10 @@ git commit -m "feat(netd): translate guest datagrams onto host sockets"
 ### Task 14: Selection and the honest fallback diagnostic
 
 **Files:**
-- Modify: `crates/mvm-hostd/src/netd/mod.rs:54-72`
-- Delete: `MacosUserspaceGateway` from `crates/mvm-hostd/src/netd/datapath.rs:383-435`
+- Modify: `crates/mvm-hostd/src/netd/mod.rs:54-72` (selection) **and `:46`** (drop it from the `pub use` list)
+- Delete: `MacosUserspaceGateway` from `crates/mvm-hostd/src/netd/datapath.rs:383-435`, **and its two test-module uses at `:527` and `:541`** — those tests assert the placeholder's refusal, so they are deleted with it rather than retargeted.
+
+Every reference, so the deletion compiles: `datapath.rs:405,407,419,527,541` and `mod.rs:46,68`.
 
 **Interfaces:**
 - Consumes: `UserspaceSocketDatapath` (Task 8).
@@ -1114,10 +1118,10 @@ Test helpers (`open_userspace_handle`, `open_userspace_handle_with_budget`,
 `mvm_net::l3`'s admitter — the type cannot be built any other way, which
 is the point of the seam.
 
-- [ ] **Step 2: Run and confirm they fail, then pass**
+- [ ] **Step 2: Run them**
 
 Run: `cargo nextest run -p mvm-hostd --test userspace_datapath`
-Expected: FAIL first, PASS once Tasks 6–14 are in.
+Expected: **PASS.** Tasks 6–14 all precede this one, so the datapath already exists — this task is the end-to-end suite over finished parts, not a red-green cycle. If any test here fails, the bug is in Tasks 6–14 and belongs in that task's fix loop, not patched here.
 
 - [ ] **Step 3: Commit**
 
