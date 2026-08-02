@@ -140,17 +140,25 @@ Narrower than first written: the mutation surface, the freshness gate and the 36
 - [ ] Backfill red-proof references; note the CI-only witnesses that mutation testing structurally cannot reach (mirror plan 274 WS3).
 - [ ] `VERIFICATION.md` row (planted: strip a witness's red-proof → gate fires).
 
-### WS6 — Content-address the kernel + build cache, verify on read (lead item)
+### WS6 — Content-address the caches, verify on read (lead item; dev-build half shipped)
 
-**Why this is first.** Per the revised recon §7.1, integrity-on-read is the one attestation property no surveyed system enforces — not a coverage nicety. **Downstream dependency: plan 279 WS1 (`ActionDigest`) is blocked on this landing** — plan 279 states the closure explicitly ("`~/.mvm/dev/builds/<rev>/` is served on a hit if `rootfs.ext4` merely exists as a file … Closing this is plan 276 WS6, not this plan"). `specs/SPRINT.md` already carries the same note.
+**Why this is first.** Per the revised recon §7.1, integrity-on-read is the one attestation property no surveyed system enforces — not a coverage nicety. **Downstream dependency: plan 279 WS1 (`ActionDigest`) was blocked on this** — plan 279 states the closure explicitly ("`~/.mvm/dev/builds/<rev>/` is served on a hit if `rootfs.ext4` merely exists as a file … Closing this is plan 276 WS6, not this plan").
 
-- [ ] Identify the workload/builder kernel cache read path (the one with no staleness check) and the `mvm-build` artifact cache read paths, including `~/.mvm/dev/builds/<rev>/`.
-- [ ] Add a content-address (SHA-256) to each cached artifact's key and verify **on read** on every hit (recompute, compare, fail closed per S3; evict on mismatch). `mvm_core::pack_cache` already implements exactly this discipline for packs — reuse it rather than writing a second cache.
-- [ ] Verify on read *as well as* on write. Recon §7.1 measured `kappa-registry` at 4 of 13 write paths verified and **no** read path; a write-only check is the failure mode to avoid, not the target.
-- [ ] Size the check to the object (recon §7.9): rehash small artifacts before serving; carry a running hash across frames for streamed artifacts and deliver the verdict in a trailer; add a background scrub over the reachability walk for cold artifacts — on-access verification never visits the blocks that are quietly rotting, and the measured corruption pattern has high spatial and temporal locality.
-- [ ] Cover the **identity-discrepancy** class explicitly, not just bit-rot: an intact artifact that is the *wrong* artifact. This is the workload-kernel cache-skew that currently mimics real bugs, and a path-trusting cache cannot see it at all.
-- [ ] Keep caching within the per-tenant/trust boundary (S2); dm-verity roothash chain unchanged (S4).
-- [ ] Tests: cache-hit-verifies, tampered-cache-entry-rejected, skewed-kernel-detected, wrong-but-intact-artifact-detected. `VERIFICATION.md` row (planted: flip a byte in a cached kernel → verify-on-read rejects; swap two intact cached kernels → identity discrepancy fires).
+There are two read paths and they fail differently. The dev-build artifact cache is closed; the kernel cache is not.
+
+**Shipped in #2053 — the dev-build artifact cache (`~/.mvm/dev/builds/<rev>/`):**
+
+- [x] `mvm_core::action` carries the canonical action/artifact types and `verify_artifacts_on_disk`; the build-cache record content-addresses the artifacts rather than naming a directory.
+- [x] Verify on read on every hit, failing closed per S3: an absent record, an unparseable record, or one that fails verification is a **cold miss**, so a hit that cannot be re-verified is never served.
+- [x] Eviction removes **both the record and the build directory**. Evicting only the record leaves the poisoned tree in place under a name a later build can re-adopt — trust-by-name through the back door. (This is the sharper half of the fix and the reason a record-only eviction is not sufficient.)
+- [x] Also closed a mid-build leak: a failure between materialisation and completion left `dev_builds_dir()` populated, because cleanup was only reached on the success path.
+- [x] Keeps caching within the per-tenant/trust boundary (S2 — the dev build cache is already per-`MVM_HOME`); dm-verity roothash chain untouched (S4). Per S1 this gates *cache trust*, never workload admission.
+
+**Still open — the workload/builder kernel cache (`~/.mvm/cache/builder-vm/<arch>/kernels/<label>/vmlinux`):**
+
+- [ ] It remains path-trusting: `mvm_build::kernel_fetch::resolve_kernel` returns `Cached(path)` on `path.exists()`, and `resolve_pinned_kernel_with` maps that arm straight to a path with no check. Worse than the plan first assumed — `verify_fetched_kernel`, which hashes against `KernelArtifactId::artifact_hash` and deletes on mismatch, **has no production caller at all**: not on the fetch path, not on the read path, despite its own doc saying installed builds should verify against the pin before boot. Wiring it needs the published per-arch expected hash threaded to both sites (the release checksum manifest, as `download_dev_image` already does).
+- [ ] Cover the **identity-discrepancy** class here too: an intact kernel that is the *wrong* kernel is exactly the cache skew that mimics real bugs, and an existence check cannot see it.
+- [ ] Size the check to the object (recon §7.9). Full rehash on every hit is correct and bounded where a hit replaces a builder-VM boot, but the cold tier is unaddressed: a background scrub over the reachability walk is the only tier that catches the measured corruption locality, since on-access verification never visits the blocks that are quietly rotting.
 
 ### WS7 — σ/κ separation and the transform descriptor (recon §7.8)
 

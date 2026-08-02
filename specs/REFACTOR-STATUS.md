@@ -105,11 +105,19 @@ for detailed scope and acceptance criteria.
         drift mechanism, not an address)
   - [ ] WS4 — ≥2 independent verifiers over the WS3 corpus
   - [ ] WS5 — bind each witness to its recorded red-proof
-  - [ ] WS6 — **lead item**: content-address the kernel + build cache, verify on
-        read as well as on write (**blocks plan 279 WS1**; scheduled in
-        `specs/SPRINT.md`). The 2026-08-01 recon revision reverses finding 2 —
-        integrity-on-read is the one attestation property no surveyed system
-        enforces, mvm included — which promotes this from tail to lead
+  - [~] WS6 — **lead item**: content-address the caches, verify on read. The
+        2026-08-01 recon revision reverses finding 2 — integrity-on-read is the
+        one attestation property no surveyed system enforces, mvm included —
+        which promoted this from tail to lead
+    - [x] Dev-build artifact cache, shipped in #2053: `mvm_core::action` +
+          `verify_artifacts_on_disk`, verify on read, fail closed to a cold
+          miss, and eviction of **both** the record and the build directory —
+          a record-only eviction would leave the poisoned tree under a name a
+          later build re-adopts. Unblocks plan 279 WS1
+    - [ ] Workload/builder kernel cache: still path-trusting.
+          `verify_fetched_kernel` exists with **no production caller** —
+          neither the fetch nor the read path checks a kernel against its pin
+    - [ ] Cold-tier background scrub (recon §7.9)
   - [ ] WS7 — σ/κ separation and the transform descriptor: the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint
         types, σ as a set, descriptor as an open enumeration. Free while every
