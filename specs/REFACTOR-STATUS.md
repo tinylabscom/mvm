@@ -25,12 +25,17 @@ for detailed scope and acceptance criteria.
         a contradicting warning; and the hole between the sealed history and
         the live head is reported (`SpliceGap`) rather than rendering a partial
         log as a complete one
+  - [x] T9b — the plane is constructed in production: `StreamPlane` stands a
+        broker, its socket, its ring-retained transcript, and its console
+        follower up on VM start and seals them on stop; `mvmctl` registers it
+        at startup through the runtime's `ConsoleStreamer` hook, unconditional
+        and never admission-gated
   - [ ] T10 — signed stream-retention mode, ADR-035, and the Phase 1 guide
   - [ ] T11–T16 — the input plane (Phase 2)
-  - [ ] Not yet wired: nothing in a boot path builds a `StreamBroker` or binds
-        `serve_stream`/`vm_stream_transcript_dir`, so the broker and transcript
-        sources are reachable but empty on a real VM; `logs` falls back to the
-        console capture until that lands
+  - [ ] Residual after T9b: the plane lives in the host process that owns the
+        VM's lifecycle, so a detached `machine run -d` takes its broker with it
+        when the CLI exits — the VM keeps running and `logs` falls back to the
+        sealed transcript or the console until a resident host process owns it
   - [ ] Deferred to the broker task: state a follower's start sequence in the
         first batch, so the reader can close the accept-window gap between the
         transcript snapshot and the live subscription

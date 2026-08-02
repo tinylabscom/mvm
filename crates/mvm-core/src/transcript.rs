@@ -27,6 +27,13 @@ pub use segment::{SEGMENT_MAX_CHUNKS, SEGMENT_MAX_CIPHERTEXT_BYTES};
 /// Filename of the host transcript key-encryption key, under the keys dir.
 pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 
+/// Manifest `recipient` for a capture whose data key is wrapped under the host
+/// KEK — the only wrapping scheme there is today. Named rather than spelled
+/// out at each writer because a reader decides where to look for the
+/// unwrapping key from this string, so a writer that drifts from it produces a
+/// capture nothing can open.
+pub const TRANSCRIPT_KEK_RECIPIENT: &str = "transcript-kek";
+
 /// Filename of the sealed manifest inside a capture directory. Shared by every
 /// side that names it — the operator CLI, the supervisor's capture sink, and
 /// the stream reader — so a capture written by one is found by the others.

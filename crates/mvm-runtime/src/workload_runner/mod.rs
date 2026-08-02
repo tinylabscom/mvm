@@ -7,15 +7,19 @@
 mod child_grant;
 pub mod claim;
 pub(crate) mod cmdline;
+pub mod console_stream;
 pub mod runner;
 pub mod spec_map;
 pub mod standby_boot;
 
 pub use child_grant::ChildGrantIssuer;
+pub use console_stream::{
+    active_console_streamer, console_streamer_installed, install_console_streamer,
+};
 pub use runner::{
-    BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, ClaimContext, EndpointSpawnRequest,
-    EndpointSpawner, RealBrokerRegistrar, RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs,
-    WorkloadRunner,
+    BrokerGuard, BrokerRegisterRequest, BrokerRegistrar, ClaimContext, ConsoleStreamer,
+    EndpointSpawnRequest, EndpointSpawner, NoopConsoleStreamer, RealBrokerRegistrar,
+    RealEndpointSpawner, SpawnContext, WorkloadLaunchInputs, WorkloadRunner,
 };
 pub use spec_map::{
     WorkloadSockets, WorkloadSpecInputs, ensure_no_dir_share_volumes, workload_blocks,

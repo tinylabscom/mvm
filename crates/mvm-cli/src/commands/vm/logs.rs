@@ -824,6 +824,54 @@ mod tests {
         execute(parse(&["console-vm"]).expect("parse")).expect("a console capture is readable");
     }
 
+    #[test]
+    fn a_running_capture_is_read_from_the_broker_and_not_the_console_beside_it() {
+        // The degraded path has to be the exception, not the default. A VM
+        // whose stream plane is up must resolve to the broker even though its
+        // console log sits right there and would have answered — and the
+        // notices must not describe a console-only read, because that is what
+        // tells an operator the bytes are unchained and channel-merged.
+        let (_env, _tmp) = isolated_home();
+        let state = mvm_core::config::vm_state_dir("planed-vm");
+        std::fs::create_dir_all(&state).expect("state dir");
+        let console = state.join("console.log");
+        std::fs::write(&console, b"merged out and err\n").expect("console capture");
+
+        let plane = mvm_hostd::stream::StreamPlane::new();
+        plane.attach("planed-vm", &console).expect("attach a plane");
+
+        let args = parse(&["planed-vm"]).expect("parse");
+        let stream = open_vm_output("planed-vm", args.request()).expect("the stream opens");
+        assert_eq!(
+            stream.availability(),
+            StreamAvailability::LiveOnly,
+            "a running plane must serve this read, not the console fallback"
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut sinks = Sinks {
+                out: Box::new(&mut out),
+                err: Box::new(&mut err),
+            };
+            announce(&args, &stream, &mut sinks);
+        }
+        let notices = String::from_utf8(err).expect("utf8");
+        assert!(
+            !notices.contains("no output capture"),
+            "a VM with a live broker has a capture: {notices}"
+        );
+        assert!(
+            !notices.contains("merges stdout and stderr"),
+            "the console-only warning must not fire on a broker read: {notices}"
+        );
+        assert!(notices.contains("no recorded output yet"), "{notices}");
+
+        drop(stream);
+        plane.release("planed-vm");
+    }
+
     /// An `MVM_HOME` of its own, so a stray real capture on the developer's
     /// machine cannot make these pass for the wrong reason.
     fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {

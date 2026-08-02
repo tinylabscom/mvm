@@ -1,0 +1,568 @@
+//! [`StreamPlane`] — the thing that actually stands a broker up for a running
+//! VM, and takes it down again when the VM ends.
+//!
+//! Everything else in this module is a part; this is the assembly. On
+//! [`attach`](StreamPlane::attach) one VM gets a [`StreamBroker`] over the
+//! curated redaction seam, an encrypted transcript under
+//! [`config::vm_stream_transcript_dir`], a follower socket at
+//! [`config::vm_stream_socket`], and a [`ConsoleSource`] pointed at the
+//! write-only capture the backend is already writing. On
+//! [`release`](StreamPlane::release) the follower stops, the socket goes, and
+//! the transcript seals to a manifest a reader can verify after the VM is
+//! gone.
+//!
+//! **A map entry, not a process.** The broker's life is bounded by the VM's
+//! registration in this plane — one entry per running VM, resident in whatever
+//! host process owns that VM's lifecycle, in the same spirit as the per-tenant
+//! host-agent daemon holding many VMs as registrations rather than spawning a
+//! process each.
+//!
+//! **The socket bind is the registration token.** Two host processes must
+//! never write one VM's transcript at once: the second would interleave
+//! segment files under the first's manifest and leave a capture that verifies
+//! as tampered. [`serve_stream`] refuses a socket something is already
+//! answering on, so a failed bind means someone else owns this VM's stream and
+//! the attach gives up rather than racing them for the transcript.
+//!
+//! **Read-only towards the guest, always.** The plane adds a *reader* of the
+//! console capture. Nothing here opens that file for writing, and no path
+//! through it reaches the guest — the sealed production console has no host
+//! input fd, and that absence is a security property, not an oversight.
+//!
+//! **A fresh capture per boot, discarded only once this process owns it.** A
+//! restarted VM reuses its state dir, and a new writer appending beside a
+//! previous run's segments would produce a manifest whose chunks do not match
+//! what is on disk — a capture that reads as tampered when nothing tampered
+//! with it. So attach clears the directory; it clears it *after* the bind,
+//! because a refused bind means someone else's live capture is in there.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use mvm_core::config;
+use mvm_core::crypto::aead;
+use mvm_core::plan::DEFAULT_TENANT;
+use mvm_core::transcript::{
+    self, CaptureBinding, MANIFEST_FILENAME, TRANSCRIPT_KEK_RECIPIENT, TranscriptManifest,
+    TranscriptWriter,
+};
+use mvm_runtime::workload_runner::ConsoleStreamer;
+
+use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
+use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
+use crate::stream::redact::StreamRedaction;
+use crate::stream::serve::{StreamServerHandle, serve_stream};
+
+/// One running VM's live capture: the broker, the socket serving it, and the
+/// console follower feeding it.
+///
+/// Field order is drop order, and it is the teardown order
+/// [`StreamPlane::release`] performs explicitly — kept the same here so a
+/// plane dropped without a release (a host process exiting under a signal)
+/// unwinds the same way rather than a different one.
+struct VmStream {
+    console: Option<ConsoleSourceHandle>,
+    server: StreamServerHandle,
+    broker: SharedBroker,
+    transcript_dir: PathBuf,
+}
+
+/// The per-process registry of live per-VM stream captures.
+pub struct StreamPlane {
+    vms: Mutex<HashMap<String, VmStream>>,
+}
+
+impl Default for StreamPlane {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamPlane {
+    pub fn new() -> Self {
+        Self {
+            vms: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether this plane currently holds a capture for `vm`.
+    pub fn is_attached(&self, vm: &str) -> bool {
+        self.registry().contains_key(vm)
+    }
+
+    /// VMs this plane is capturing, for a caller reporting host state.
+    pub fn attached_vms(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.registry().keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Stand up `vm`'s capture and start following `console_log`.
+    ///
+    /// Idempotent: a VM already attached here keeps the capture it has, rather
+    /// than getting a second broker that would split its output across two
+    /// hash chains.
+    pub fn attach(&self, vm: &str, console_log: &Path) -> Result<()> {
+        let mut registry = self.registry();
+        if registry.contains_key(vm) {
+            return Ok(());
+        }
+        let transcript_dir = config::vm_stream_transcript_dir(vm);
+        let broker: SharedBroker = Arc::new(Mutex::new(build_broker(vm, &transcript_dir)?));
+
+        // Bind before anything destructive and before following: the bind is
+        // what claims this VM. A follower started ahead of it would have to be
+        // unwound on a refusal, and the discard below would have already
+        // deleted the capture whoever holds the socket is still writing.
+        let server = serve_stream(&config::vm_stream_socket(vm), Arc::clone(&broker))
+            .with_context(|| format!("serve the output stream for microVM {vm:?}"))?;
+
+        // Owning the socket is what licenses throwing the previous boot's
+        // segments away. Fail the attach if they cannot go: the new writer
+        // would otherwise lay chunks over files its manifest does not
+        // describe. `server` unbinds on the way out.
+        discard_previous_capture(&transcript_dir)?;
+
+        registry.insert(
+            vm.to_string(),
+            VmStream {
+                console: follow_console(vm, console_log, &broker),
+                server,
+                broker,
+                transcript_dir,
+            },
+        );
+        Ok(())
+    }
+
+    /// Tear `vm`'s capture down and seal its transcript.
+    ///
+    /// A no-op for a VM this plane never attached — the ordinary case for a
+    /// `stop` running in a different process invocation from the `start`, and
+    /// for every VM booted before a streamer was registered.
+    pub fn release(&self, vm: &str) {
+        let Some(stream) = self.registry().remove(vm) else {
+            return;
+        };
+        seal_capture(vm, stream);
+    }
+
+    fn registry(&self) -> MutexGuard<'_, HashMap<String, VmStream>> {
+        // A panic under the lock leaves a `HashMap` of handles, not a
+        // half-written invariant, and refusing to capture output for the rest
+        // of the process would be a far worse outcome than reusing it.
+        self.vms.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The console hook the workload runner calls. Best-effort by contract: a
+/// capture that cannot be stood up is logged and the workload boots anyway,
+/// because refusing to launch over an observability feature trades a missing
+/// log for a missing workload.
+impl ConsoleStreamer for StreamPlane {
+    fn start(&self, vm_name: &str, console_log: &Path) {
+        if let Err(error) = self.attach(vm_name, console_log) {
+            tracing::warn!(
+                vm = %vm_name,
+                error = %format!("{error:#}"),
+                "output stream could not be started; this workload's output will not be \
+                 captured or followable"
+            );
+        }
+    }
+
+    fn stop(&self, vm_name: &str) {
+        self.release(vm_name);
+    }
+}
+
+/// Build the VM's broker over a fresh encrypted transcript.
+fn build_broker(vm: &str, transcript_dir: &Path) -> Result<StreamBroker> {
+    let writer = build_writer(vm, transcript_dir)?;
+    Ok(StreamBroker::new(vm, writer, StreamRedaction::curated()))
+}
+
+/// Provision the durable half: a fresh capture directory, a per-capture data
+/// key wrapped under the host KEK, and the ring-retention policy every stream
+/// capture runs under.
+fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
+    let keys_dir = config::mvm_keys_dir();
+    let kek = transcript::load_or_init_kek(&keys_dir)
+        .with_context(|| format!("open the transcript key in {}", keys_dir.display()))?;
+    let data_key = aead::Key::random();
+    let wrapped_data_key_b64 = transcript::wrap_data_key(&kek, &data_key);
+
+    // The writer's directory has to exist before it does. Creating it is not
+    // destructive, so unlike the discard it can run before the socket claim.
+    std::fs::create_dir_all(transcript_dir)
+        .with_context(|| format!("create the capture dir {}", transcript_dir.display()))?;
+
+    // Through `stream_capture_config` and nowhere else: it is the one door
+    // that installs ring retention, and a config assembled by hand would
+    // silently get the fail-closed default — a workload that stops being
+    // observable because it talked too much.
+    let config = stream_capture_config(StreamCaptureIdentity {
+        capture_id: format!("stream-{vm}"),
+        binding: CaptureBinding {
+            tenant_id: DEFAULT_TENANT.to_string(),
+            vm_name: vm.to_string(),
+            session_id: None,
+        },
+        created_unix_secs: now_unix_secs(),
+        recipient: TRANSCRIPT_KEK_RECIPIENT.to_string(),
+        wrapped_data_key_b64,
+    });
+    Ok(TranscriptWriter::new(transcript_dir, data_key, config))
+}
+
+/// Throw away whatever a previous boot left in the capture directory, keeping
+/// the directory itself so the writer already pointed at it stays valid. See
+/// the module docs on why a boot starts from an empty one, and why this runs
+/// only after the socket claim.
+fn discard_previous_capture(dir: &Path) -> Result<()> {
+    let entries = std::fs::read_dir(dir)
+        .with_context(|| format!("read the capture dir {}", dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("read the capture dir {}", dir.display()))?
+            .path();
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        removed.with_context(|| format!("discard the previous capture at {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Start the console follower, or report that this VM has no console source.
+///
+/// A follower that cannot be spawned costs this workload its pre-agent output
+/// and nothing else, so the capture stands up without one rather than failing
+/// the attach — `ConsoleSource::follow` has already logged the reason.
+fn follow_console(
+    vm: &str,
+    console_log: &Path,
+    broker: &SharedBroker,
+) -> Option<ConsoleSourceHandle> {
+    ConsoleSource::follow(console_log, Arc::clone(broker))
+        .inspect_err(|error| {
+            tracing::warn!(
+                vm = %vm,
+                error = %error,
+                "console capture will not be streamed for this workload"
+            );
+        })
+        .ok()
+}
+
+/// Wind one VM's capture down in the order that neither loses bytes nor
+/// wedges.
+///
+/// The follower goes first, because its stop drains what the console
+/// accumulated since the last poll and every byte it takes still has a live
+/// broker to land in. The socket goes second: it joins its follower threads,
+/// each of which writes under a send timeout, so a consumer that stopped
+/// reading without hanging up cannot hold this call open. Sealing is last
+/// because it consumes the broker, and it can only do that once both of those
+/// threads have dropped their handles on it.
+fn seal_capture(vm: &str, stream: VmStream) {
+    let VmStream {
+        console,
+        server,
+        broker,
+        transcript_dir,
+    } = stream;
+    if let Some(console) = console {
+        console.stop();
+    }
+    server.stop();
+
+    let Some(broker) = Arc::into_inner(broker) else {
+        // Unreachable while the two joins above are the only other holders,
+        // and worth saying rather than asserting: the live output was served
+        // either way, and the cost is a capture with no manifest.
+        tracing::warn!(
+            vm = %vm,
+            "output stream still had a live producer at teardown; its transcript is unsealed"
+        );
+        return;
+    };
+    let manifest = broker
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .seal();
+    if let Err(error) = write_manifest(&transcript_dir, &manifest) {
+        tracing::warn!(
+            vm = %vm,
+            error = %format!("{error:#}"),
+            "output transcript could not be sealed; recorded output for this run is unreadable"
+        );
+    }
+}
+
+fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
+    let path = dir.join(MANIFEST_FILENAME);
+    let body = serde_json::to_vec_pretty(manifest).context("serialize the capture manifest")?;
+    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::stream_client::{
+        OutputRecord, OutputRequest, RecordOrigin, StreamAvailability, StreamOpts, open_vm_output,
+    };
+    use mvm_core::util::test_env::TestEnv;
+    use std::sync::mpsc::{Receiver, channel};
+    use std::time::Duration;
+
+    /// How long a test waits for a record that has to cross the console
+    /// follower's poll interval and then the socket server's. Generous: a
+    /// missed record fails on the deadline either way, and a tight bound
+    /// would only turn scheduler jitter under full-suite parallelism into a
+    /// failure.
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    /// Long enough for the accept loop to take a queued connection and
+    /// subscribe its reader before the test produces the bytes it expects
+    /// that reader to see. `connect` returns as soon as the connection is
+    /// queued, not when it is accepted.
+    const ACCEPT_SETTLE: Duration = Duration::from_millis(250);
+
+    /// An `MVM_HOME` of its own so the plane writes sockets, transcripts, and
+    /// the host KEK under a tempdir rather than the developer's real tree.
+    fn isolated_home() -> (TestEnv, tempfile::TempDir) {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(tmp.path());
+        (env, tmp)
+    }
+
+    /// The console capture path a backend would write, under the VM's own
+    /// state dir the way a real one is.
+    fn console_log_for(vm: &str) -> PathBuf {
+        let state = config::vm_state_dir(vm);
+        std::fs::create_dir_all(&state).expect("state dir");
+        state.join("console.log")
+    }
+
+    /// A follower attached on its own thread.
+    ///
+    /// `next_output` blocks on the socket while following, so reading it
+    /// inline would hang the suite on a wiring regression instead of failing
+    /// it. The thread ends when the server does.
+    struct Follower {
+        availability: StreamAvailability,
+        records: Receiver<OutputRecord>,
+    }
+
+    impl Follower {
+        /// Attach to `vm` through the same resolver `mvmctl logs -f` uses,
+        /// and report what that resolution found.
+        fn attach(vm: &str) -> Self {
+            let (ready_tx, ready_rx) = channel();
+            let (record_tx, record_rx) = channel();
+            let vm = vm.to_string();
+            std::thread::spawn(move || {
+                let request = OutputRequest {
+                    opts: StreamOpts::builder().follow(true).build(),
+                    history_tail: Some(0),
+                    console_tail_bytes: None,
+                };
+                let mut stream = open_vm_output(&vm, request).expect("open the output stream");
+                if ready_tx.send(stream.availability()).is_err() {
+                    return;
+                }
+                while let Ok(Some(record)) = stream.next_output() {
+                    if record_tx.send(record).is_err() {
+                        return;
+                    }
+                }
+            });
+            let availability = ready_rx
+                .recv_timeout(DEADLINE)
+                .expect("the follower must resolve a source");
+            std::thread::sleep(ACCEPT_SETTLE);
+            Self {
+                availability,
+                records: record_rx,
+            }
+        }
+
+        fn next(&self) -> OutputRecord {
+            self.records
+                .recv_timeout(DEADLINE)
+                .expect("a record must reach the follower")
+        }
+    }
+
+    /// Every record a sealed capture holds, oldest first.
+    fn sealed_payloads(vm: &str) -> Vec<Vec<u8>> {
+        let mut stream =
+            open_vm_output(vm, OutputRequest::default()).expect("the sealed transcript must open");
+        assert_eq!(
+            stream.availability(),
+            StreamAvailability::HistoryOnly,
+            "a released VM has no live broker left"
+        );
+        let mut out = Vec::new();
+        while let Some(record) = stream.next_output().expect("read the sealed capture") {
+            assert_eq!(record.origin, RecordOrigin::Durable);
+            out.push(record.payload);
+        }
+        out
+    }
+
+    #[test]
+    fn attach_serves_the_console_over_the_broker_socket() {
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-vm");
+        let plane = StreamPlane::new();
+
+        plane.attach("plane-vm", &console).expect("attach");
+        assert!(plane.is_attached("plane-vm"));
+        assert_eq!(plane.attached_vms(), ["plane-vm"]);
+        assert!(config::vm_stream_socket("plane-vm").exists());
+
+        let follower = Follower::attach("plane-vm");
+        assert_eq!(follower.availability, StreamAvailability::LiveOnly);
+
+        std::fs::write(&console, b"from the console\n").expect("write the console capture");
+        let record = follower.next();
+        assert!(
+            matches!(record.origin, RecordOrigin::Live { .. }),
+            "the broker served the read, not the console fallback: {:?}",
+            record.origin
+        );
+        assert_eq!(record.payload, b"from the console\n");
+
+        plane.release("plane-vm");
+    }
+
+    #[test]
+    fn attach_is_idempotent_and_keeps_the_first_capture() {
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-twice");
+        let plane = StreamPlane::new();
+
+        plane.attach("plane-twice", &console).expect("first attach");
+        plane
+            .attach("plane-twice", &console)
+            .expect("a second attach must not fail");
+        assert_eq!(plane.attached_vms(), ["plane-twice"]);
+
+        plane.release("plane-twice");
+    }
+
+    #[test]
+    fn a_second_plane_will_not_take_a_vm_another_one_is_already_serving() {
+        // Two host processes writing one transcript interleave segment files
+        // under one manifest, which reads as tampering afterwards.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-contested");
+        let first = StreamPlane::new();
+        first.attach("plane-contested", &console).expect("attach");
+
+        let follower = Follower::attach("plane-contested");
+        std::fs::write(&console, b"the incumbent's output\n").expect("write");
+        assert_eq!(follower.next().payload, b"the incumbent's output\n");
+
+        let second = StreamPlane::new();
+        let err = second
+            .attach("plane-contested", &console)
+            .expect_err("a live socket must not be stolen");
+        assert!(format!("{err:#}").contains("already serving"), "{err:#}");
+        assert!(!second.is_attached("plane-contested"));
+
+        // And it must not have taken anything on its way out: the refused
+        // attach runs before the capture discard, so the incumbent's segments
+        // are still there to seal.
+        first.release("plane-contested");
+        assert_eq!(
+            sealed_payloads("plane-contested"),
+            [b"the incumbent's output\n"]
+        );
+    }
+
+    #[test]
+    fn release_seals_a_readable_transcript_and_frees_the_socket() {
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-sealed");
+        let plane = StreamPlane::new();
+        plane.attach("plane-sealed", &console).expect("attach");
+
+        let follower = Follower::attach("plane-sealed");
+        std::fs::write(&console, b"before the end\n").expect("write the console capture");
+        assert_eq!(follower.next().payload, b"before the end\n");
+
+        plane.release("plane-sealed");
+        assert!(!plane.is_attached("plane-sealed"));
+        assert!(
+            !config::vm_stream_socket("plane-sealed").exists(),
+            "release must unlink the socket so a restart can rebind it"
+        );
+
+        // The point of sealing: the run stays readable after the VM ends, off
+        // the durable half rather than the console fallback.
+        assert_eq!(sealed_payloads("plane-sealed"), [b"before the end\n"]);
+    }
+
+    #[test]
+    fn release_keeps_the_last_bytes_a_dying_workload_wrote() {
+        // The final drain is what makes a panic printed a few milliseconds
+        // before teardown part of the record instead of a file nobody reads.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-last-words");
+        let plane = StreamPlane::new();
+        plane.attach("plane-last-words", &console).expect("attach");
+
+        std::fs::write(&console, b"kernel panic\n").expect("write the console capture");
+        plane.release("plane-last-words");
+
+        assert_eq!(sealed_payloads("plane-last-words"), [b"kernel panic\n"]);
+    }
+
+    #[test]
+    fn releasing_a_vm_that_was_never_attached_is_a_no_op() {
+        // The ordinary shape when `stop` runs in a different process
+        // invocation from the `start` that opened the capture.
+        let (_env, _tmp) = isolated_home();
+        StreamPlane::new().release("never-attached");
+    }
+
+    #[test]
+    fn a_restart_replaces_the_previous_runs_capture_instead_of_appending_to_it() {
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-restarted");
+        let plane = StreamPlane::new();
+
+        plane.attach("plane-restarted", &console).expect("attach");
+        std::fs::write(&console, b"first run\n").expect("write the console capture");
+        plane.release("plane-restarted");
+        assert_eq!(sealed_payloads("plane-restarted"), [b"first run\n"]);
+
+        // Second boot, same name and the same state dir. The backend
+        // truncates the console capture on boot, so the follower starts over.
+        std::fs::write(&console, b"").expect("truncate the console capture");
+        plane.attach("plane-restarted", &console).expect("reattach");
+        std::fs::write(&console, b"second run\n").expect("write the console capture");
+        plane.release("plane-restarted");
+
+        assert_eq!(
+            sealed_payloads("plane-restarted"),
+            [b"second run\n"],
+            "the second boot's capture must not carry the first boot's chunks"
+        );
+    }
+}

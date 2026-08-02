@@ -58,6 +58,21 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// progress, so a backlog drains in bounded chunks rather than one huge read.
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
+/// How many further chunks the follower reads after it is told to stop.
+///
+/// Stop arrives when a VM ends, and the last thing a workload wrote is the
+/// part an operator is most likely to be looking for — a panic, a stack
+/// trace, an exit message. Returning the instant the flag is seen would leave
+/// whatever the final poll interval accumulated unread forever, because
+/// nothing reopens a stopped VM's follower.
+///
+/// Bounded rather than drain-to-end: the file is only guaranteed to stop
+/// growing once the VMM is gone, and teardown joins this thread, so an
+/// unbounded final drain against a still-writing console would hold the whole
+/// host's shutdown open. This many chunks is far more than a console emits in
+/// one poll interval and still a hard ceiling on how long stopping can take.
+const FINAL_DRAIN_CHUNKS: usize = 64;
+
 /// Follows `path`, ingesting whatever is appended to it into `broker`.
 pub struct ConsoleSource;
 
@@ -126,7 +141,9 @@ pub struct ConsoleSourceHandle {
 impl ConsoleSourceHandle {
     /// Stop the follower and wait for it to exit. Every byte the follower
     /// read was ingested synchronously, on the same tick, before the next
-    /// read — so nothing already read is discarded by stopping.
+    /// read — so nothing already read is discarded by stopping, and the
+    /// bounded final drain in [`run`] means bytes written during the last
+    /// poll interval are not either.
     pub fn stop(mut self) {
         self.join();
     }
@@ -149,19 +166,47 @@ impl Drop for ConsoleSourceHandle {
 
 /// The follower loop: drain whatever is available, checking `stop` between
 /// chunks so a stop signal is honored within one chunk read even under a
-/// heavy backlog, then idle-poll once caught up.
+/// heavy backlog, then idle-poll once caught up. A stop request takes the
+/// bounded final drain on the way out rather than returning on the spot.
 fn run(path: &Path, broker: &SharedBroker, stop: &AtomicBool) {
     let mut state = FollowState::default();
     loop {
         while poll_once(path, &mut state, broker) {
             if stop.load(Ordering::Relaxed) {
-                return;
+                return final_drain(path, &mut state, broker);
             }
         }
         if stop.load(Ordering::Relaxed) {
-            return;
+            // Drains here too, not just out of the loop above. A caught-up
+            // tick followed by a write and a stop — the exact shape of a
+            // workload's last line before teardown — would otherwise exit on
+            // a stop flag set after the poll that missed those bytes.
+            return final_drain(path, &mut state, broker);
         }
         std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Read out what the console accumulated since the last tick, up to
+/// [`FINAL_DRAIN_CHUNKS`]. See that constant for why the last bytes matter
+/// most and why the drain is capped rather than run to the end of the file.
+fn final_drain(path: &Path, state: &mut FollowState, broker: &SharedBroker) {
+    final_drain_with(path, state, broker, FINAL_DRAIN_CHUNKS);
+}
+
+/// Same as [`final_drain`], parameterized on the cap — the seam a test uses
+/// to exercise the ceiling without writing [`FINAL_DRAIN_CHUNKS`] chunks of
+/// real bytes through the redaction seam and the encrypted transcript.
+fn final_drain_with(
+    path: &Path,
+    state: &mut FollowState,
+    broker: &SharedBroker,
+    max_chunks: usize,
+) {
+    for _ in 0..max_chunks {
+        if !poll_once(path, state, broker) {
+            return;
+        }
     }
 }
 
@@ -375,6 +420,41 @@ mod tests {
         std::fs::write(&path, b"line two\n").expect("append after stop");
         std::thread::sleep(POLL_INTERVAL * 3);
         assert_eq!(fx.broker.lock().unwrap().counters().ingested, 1);
+    }
+
+    // --- the last thing the workload said ---------------------------------
+
+    #[test]
+    fn the_final_drain_takes_a_multi_chunk_backlog_the_stop_check_would_have_cut_short() {
+        // A VM ending is exactly when its last words matter: returning on the
+        // stop flag mid-backlog would leave a panic and its stack trace on
+        // disk and out of the stream forever.
+        let fx = broker_fixture("vm-final-drain");
+        let path = fx.console_path();
+        std::fs::write(&path, vec![b'x'; READ_CHUNK_BYTES * 3]).expect("write a 3-chunk backlog");
+
+        let mut state = FollowState::default();
+        final_drain(&path, &mut state, &fx.broker);
+
+        assert_eq!(fx.broker.lock().unwrap().counters().ingested, 3);
+        assert_eq!(
+            state.open.as_ref().unwrap().offset,
+            (READ_CHUNK_BYTES * 3) as u64
+        );
+    }
+
+    #[test]
+    fn the_final_drain_stops_at_its_cap_rather_than_following_a_still_writing_console() {
+        // Teardown joins this thread, so an unbounded drain against a console
+        // still being written to would hold the whole host's shutdown open.
+        let fx = broker_fixture("vm-final-drain-cap");
+        let path = fx.console_path();
+        std::fs::write(&path, vec![b'x'; READ_CHUNK_BYTES * 3]).expect("write a 3-chunk backlog");
+
+        let mut state = FollowState::default();
+        final_drain_with(&path, &mut state, &fx.broker, 2);
+
+        assert_eq!(fx.broker.lock().unwrap().counters().ingested, 2);
     }
 
     // --- spawn failure ------------------------------------------------------

@@ -27,13 +27,19 @@
 //!   the consumer is meant to check.
 //!
 //! One broker per VM, resident in the per-tenant daemon — not a process per
-//! VM.
+//! VM. [`plane`] is what assembles the pieces above into that per-VM
+//! registration and takes it down again, and
+//! [`install_host_console_streamer`] is where the host process wires it to
+//! the workload runner's console hook.
 
 pub mod broker;
 pub mod console_source;
 pub mod fanout;
+pub mod plane;
 pub mod redact;
 pub mod serve;
+
+use std::sync::Arc;
 
 pub use broker::{DEFAULT_CAPTURE_BOUNDS, StreamAudit, StreamBroker, StreamCounters};
 pub use console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
@@ -41,7 +47,24 @@ pub use fanout::{
     DEFAULT_READER_BOUNDS, DEFAULT_READER_MAX_BYTES, DEFAULT_READER_MAX_RECORDS, DrainedWindow,
     ReaderHandle, ReaderStart,
 };
+pub use plane::StreamPlane;
 pub use redact::{
     REDACTION_FAILED_EVENT, Redacted, RedactionFailed, StreamRedaction, StreamRedactor,
 };
 pub use serve::{StreamServerHandle, serve_stream};
+
+/// Give this process a real output-stream plane: every workload the runtime
+/// boots from here on gets a broker, a follower socket, and a durable
+/// transcript, and every workload it stops gets them sealed and released.
+///
+/// Called once, early, by a host binary that starts workloads. It is a
+/// registration rather than a direct call because the runtime crate sits
+/// below this one and cannot name [`StreamPlane`] — see
+/// `mvm_runtime::workload_runner::console_stream`.
+///
+/// Returns whether this call is the one that installed it; a second call is a
+/// no-op. Idempotent so a binary that starts workloads from more than one
+/// entry point can register defensively at each.
+pub fn install_host_console_streamer() -> bool {
+    mvm_runtime::workload_runner::install_console_streamer(Arc::new(StreamPlane::new()))
+}

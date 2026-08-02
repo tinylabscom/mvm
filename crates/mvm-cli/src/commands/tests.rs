@@ -4471,3 +4471,20 @@ fn sdk_live_mode_shelled_commands_keep_parsing() {
             .unwrap_or_else(|e| panic!("SDK command {:?} failed to parse: {e}", argv));
     }
 }
+
+/// The CLI's startup registration is what makes `mvmctl logs -f` read a
+/// broker instead of an unchained console tail — for every command, not just
+/// the ones that obviously boot a VM. A registration that stopped happening
+/// would leave the whole capture path silently degraded with nothing else
+/// failing.
+#[test]
+fn startup_registers_the_output_stream_plane() {
+    register_stream_plane();
+    assert!(
+        mvm_runtime::workload_runner::console_streamer_installed(),
+        "mvmctl must hand the workload runner a real console streamer at startup"
+    );
+    // Idempotent: a second call must not panic or unregister the first.
+    register_stream_plane();
+    assert!(mvm_runtime::workload_runner::console_streamer_installed());
+}

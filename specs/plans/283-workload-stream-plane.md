@@ -1539,38 +1539,73 @@ every time.
   `config::vm_stream_socket`, and the console source attached — created on VM
   start, torn down on stop.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 An integration test that starts a workload through the normal path and asserts
 a stream socket exists and serves records, without the test constructing a
 broker itself. It must fail today.
 
-- [ ] **Step 2: Run to verify it fails** — FAIL, no socket.
+- [x] **Step 2: Run to verify it fails** — FAIL, no socket.
 
-- [ ] **Step 3: Implement the lifetime.** The broker is resident per tenant
+- [x] **Step 3: Implement the lifetime.** The broker is resident per tenant
   (`broker/daemon.rs:3` — "one daemon per tenant, not one process per VM"), so
   a per-VM broker's life is bounded by VM registration, not by a process.
   Construct through `stream_capture_config`: it is the single door for ring and
   bounds and still has no production caller, so nothing yet forces the ring
   semantics the durable path depends on.
 
-- [ ] **Step 4: Attach the console source** through the real `ConsoleStreamer`
+- [x] **Step 4: Attach the console source** through the real `ConsoleStreamer`
   impl that Task 7's trait inversion exists for — unconditionally, never
   admission-gated.
 
-- [ ] **Step 5: Tear down cleanly.** A stopped VM releases its broker, seals its
+- [x] **Step 5: Tear down cleanly.** A stopped VM releases its broker, seals its
   transcript, and stops its follower without losing buffered bytes or wedging
   on a follower that stopped reading.
 
-- [ ] **Step 6: Verify the degraded fallback is now the exception.** With a real
+- [x] **Step 6: Verify the degraded fallback is now the exception.** With a real
   producer, `logs -f` must read the broker rather than the host-local console
   tail. Assert which source served the read.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```sh
 git commit -am "feat(hostd): construct the stream plane on VM start"
 ```
+
+**Landed.** `StreamPlane` (`crates/mvm-hostd/src/stream/plane.rs`) is the
+assembly: one map entry per running VM holding its broker, the socket serving
+it, and the console follower feeding it. `attach` clears the VM's capture dir,
+mints a data key wrapped under the host KEK, builds the writer through
+`stream_capture_config` (its first production caller, so the durable path now
+really runs ring retention), binds `config::vm_stream_socket`, and follows the
+console. `release` stops the follower, stops the socket, then seals the
+manifest — in that order, so nothing already read is dropped and a consumer
+that stopped reading cannot hold teardown open.
+
+The lifetime is a **map entry in the host process that owns the VM's
+lifecycle**, not a process and not a tenant registration. It could not be
+bounded by the per-tenant host-agent daemon's registration as the step
+suggested: that daemon only registers *admitted* VMs, and the console hook is
+required to be unconditional — an unadmitted local run is the case with the
+fewest other ways to see a boot failure. The socket bind is the registration
+token, so a second host process refuses rather than racing the first for the
+transcript. Residual: a detached `machine run -d` exits after boot, and the
+broker goes with it — the VM keeps running and `logs` falls back to the sealed
+transcript or the console until a resident host process owns the plane.
+
+The `ConsoleStreamer` impl reaches `WorkloadRunner` through a process
+registration (`mvm_runtime::workload_runner::console_stream`), installed by
+`mvmctl` at startup beside `register_inhouse_builder` — the runtime crate sits
+below `mvm-hostd` and the runner's constructors take no arguments, so a
+registration is the only wiring that reaches all four backends at once.
+
+Also: the console follower now takes a bounded final drain when it is told to
+stop, so the last thing a dying workload wrote is in the record rather than in
+a file nobody reads; and `transcript::TRANSCRIPT_KEK_RECIPIENT` names the
+wrapping scheme both writers now share.
+
+Run: `cargo nextest run -p mvm-hostd -p mvm-runtime -p mvm-cli` — PASS
+(1280 / 1237 / 1482).
 
 ---
 

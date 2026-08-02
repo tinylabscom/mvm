@@ -203,6 +203,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     apply_startup_env(&cli);
     register_inhouse_builder();
+    register_stream_plane();
     configure_runtime_logging(&cli);
 
     if let Some(result) = cli.command.try_run_early() {
@@ -289,6 +290,19 @@ fn register_inhouse_builder() {
                 .with_closure_nar(closure_nar),
         ) as Box<dyn mvm_build::builder_vm::BuilderVm>)
     }));
+}
+
+/// Give the workload runner a real per-VM output-stream plane.
+///
+/// Unconditional and before any command runs, because the hook it registers
+/// is what makes a workload's output followable at all: registering it per
+/// command, or only for the commands that obviously start VMs, would leave
+/// whichever path was missed silently falling back to an unchained console
+/// tail. `mvm-runtime` cannot reach `mvm-hostd` (dependency direction), so the
+/// CLI bridges the gap here — the same shape as
+/// [`register_inhouse_builder`] above.
+fn register_stream_plane() {
+    mvm_hostd::stream::install_host_console_streamer();
 }
 
 fn configure_runtime_logging(cli: &Cli) {

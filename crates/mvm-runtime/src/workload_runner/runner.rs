@@ -227,10 +227,10 @@ pub trait ConsoleStreamer: Send + Sync {
     fn stop(&self, vm_name: &str);
 }
 
-/// The default hook: nothing constructs a per-VM broker to follow into yet
-/// (a resident daemon that does is a later step), so this compiles to
-/// nothing at either call site rather than silently discarding console bytes
-/// that had nowhere real to go.
+/// The hook a process that registered no real streamer gets: console bytes
+/// keep going to the write-only capture file on disk and nothing republishes
+/// them. An embedder driving this crate as a library, and every unit test
+/// that does not care about output capture, land here.
 pub struct NoopConsoleStreamer;
 
 impl ConsoleStreamer for NoopConsoleStreamer {
@@ -357,19 +357,25 @@ pub struct WorkloadRunner<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> 
 }
 
 impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
+    /// Build a runner over the process's registered console-streaming hook.
+    ///
+    /// Every production construction site goes through here and none of them
+    /// passes a streamer, so picking the hook up from the process registration
+    /// is what makes console capture reach all four backends at once — see
+    /// [`console_stream`](super::console_stream) for why the wiring is a
+    /// registration rather than an argument.
     pub fn new(driver: D, spawner: S, broker: B) -> Self {
         Self {
             driver,
             spawner,
             broker,
-            console_streamer: Arc::new(NoopConsoleStreamer),
+            console_streamer: super::console_stream::active_console_streamer(),
         }
     }
 
-    /// Override the console-streaming hook — the seam a resident daemon that
-    /// owns a real per-VM broker wires a live [`ConsoleStreamer`] through.
-    /// Optional: a runner that never calls this keeps the no-op default, so
-    /// every existing construction site is unaffected.
+    /// Override the console-streaming hook for this runner alone, ignoring
+    /// whatever the process registered. The seam a test drives its own double
+    /// through; production wires the real streamer once at startup instead.
     #[must_use]
     pub fn with_console_streamer(mut self, streamer: Arc<dyn ConsoleStreamer>) -> Self {
         self.console_streamer = streamer;

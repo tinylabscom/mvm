@@ -19,8 +19,9 @@ use mvm_core::config;
 use mvm_core::crypto::aead;
 use mvm_core::policy::audit::{LocalAuditBuilder, LocalAuditKind, event};
 use mvm_core::transcript::{
-    self, CaptureBinding, CaptureBounds, MANIFEST_FILENAME, RetentionPolicy, TranscriptManifest,
-    TranscriptWriter, TranscriptWriterConfig,
+    self, CaptureBinding, CaptureBounds, MANIFEST_FILENAME, RetentionPolicy,
+    TRANSCRIPT_KEK_RECIPIENT as KEK_RECIPIENT, TranscriptManifest, TranscriptWriter,
+    TranscriptWriterConfig,
 };
 use mvm_hostd::supervisor::audit::{
     LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
@@ -30,7 +31,6 @@ use mvm_hostd::supervisor::verify_audit_chain_entries;
 
 use super::super::vm::host_signer::PUBLIC_FILENAME;
 
-const KEK_RECIPIENT: &str = "transcript-kek";
 const DEFAULT_TENANT: &str = "local";
 const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_MAX_CHUNKS: u64 = 100_000;
