@@ -103,6 +103,18 @@ Read ADR-036 first; this plan is the sequencing and the checkbox ledger.
       field the admission path reads, so a workload cannot be admitted for
       one transport and booted on another; unreadable IR fails closed
       rather than guessing
+- [x] live derivation witness on a Linux/KVM host, through the real
+      `machine run` boot path — same binary, same command, same host, the
+      workload's declaration the only difference:
+
+      ```text
+      raw_ip_stack=true  -> derived machine networking network_mode=L3Vsock
+      (not declared)     -> derived machine networking network_mode=HostVsockProxy
+      ```
+
+      Both then stop on the supplied manifest, which confirms the
+      transport is settled before any build or boot work. Against the
+      previous hardcoded `false` both lines read `HostVsockProxy`.
 
 ## W6 — Audit + metrics
 
