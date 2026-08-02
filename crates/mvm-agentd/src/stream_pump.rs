@@ -128,17 +128,40 @@ impl CapturedStream {
     }
 }
 
-/// A [`RingState`] bounding one stream's retention by bytes alone.
+/// Bytes of a stream's byte bound that buy one retained chunk.
 ///
-/// A chunk count follows from the read size rather than from anything the
-/// caller asked for, so bounding on it too would evict on a dimension nobody
-/// chose.
+/// A byte bound cannot see what a chunk costs beyond its payload. Every
+/// retained chunk is an event slot plus its own allocation — call it a hundred
+/// bytes — so a workload writing one byte per `write` fits a million chunks
+/// inside a 1 MiB byte bound and pays tens of megabytes of overhead for a
+/// megabyte of output, on top of leaving a queue long enough that touching it
+/// stops being free. Charging a page per chunk holds that overhead near a
+/// fiftieth of the byte bound whatever the write size, and never binds for
+/// chunks a page or larger — which is every chunk a pipe read of a chatty
+/// workload produces.
+pub(crate) const RETENTION_BYTES_PER_CHUNK: u64 = 4096;
+
+/// Chunks a stream may retain however small its byte bound is.
+///
+/// Below this the overhead being bounded is a couple of kilobytes in absolute
+/// terms, so there is nothing to amplify and the byte bound alone should decide
+/// what a small capture keeps.
+pub(crate) const MIN_RETENTION_CHUNKS: u64 = 32;
+
+/// A [`RingState`] bounding one stream's retention by bytes and by chunk count.
+///
+/// The chunk bound is derived from the byte bound rather than asked for
+/// separately: it exists to bound per-chunk overhead the caller's byte figure
+/// silently excludes, not to express a second policy. Reaching it prunes the
+/// oldest chunks exactly as the byte bound does — [`RingState`] has no refusing
+/// variant, so a cap here can never silence a workload.
 pub fn stream_retention_ring(max_bytes: usize) -> RingState {
+    let max_bytes = max_bytes as u64;
     RingState::new(CaptureBounds {
         // `RingState` reads only the byte and chunk bounds.
         max_duration_secs: 0,
-        max_bytes: max_bytes as u64,
-        max_chunks: u64::MAX,
+        max_bytes,
+        max_chunks: (max_bytes / RETENTION_BYTES_PER_CHUNK).max(MIN_RETENTION_CHUNKS),
     })
 }
 
@@ -1400,6 +1423,38 @@ mod tests {
                     dropped_bytes: 4,
                 },
             }]
+        );
+    }
+
+    #[test]
+    fn a_stream_of_one_byte_writes_is_bounded_in_chunks_as_well_as_bytes() {
+        // `RetainedStream` holds one `Vec<u8>` per chunk, and a byte bound
+        // counts only what those vectors contain. 64 Ki single-byte chunks sit
+        // inside a 64 KiB byte bound while costing megabytes of slots and
+        // allocations to hold — the byte figure would be off by a factor of a
+        // hundred. The chunk bound is what keeps it honest.
+        let caps = caps_with_stdout_max(64 * 1024);
+        let chunk_bound =
+            (caps.stdout_max as u64 / RETENTION_BYTES_PER_CHUNK).max(MIN_RETENTION_CHUNKS);
+
+        let mut sink = RetainingSink::new(&caps);
+        for _ in 0..100_000 {
+            sink.accept(EntrypointEvent::Stdout { chunk: vec![b'x'] });
+        }
+        let output = sink.finish();
+
+        // One byte per chunk, so the retained byte count *is* the chunk count.
+        assert!(
+            output.stdout.len() as u64 <= chunk_bound,
+            "retained {} one-byte chunks against a {chunk_bound} chunk bound",
+            output.stdout.len()
+        );
+        assert!(!output.stdout.is_empty(), "the newest writes must survive");
+        assert_eq!(
+            output.gaps.len(),
+            1,
+            "the loss must be reported, got {:?}",
+            output.gaps
         );
     }
 

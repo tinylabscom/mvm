@@ -374,9 +374,13 @@ use crate::vsock::EntrypointEvent;
 
 /// Per-call resource caps. v1: 1 MiB on each stream.
 ///
-/// `stdout_max` / `stderr_max` bound *retention*, not emission: the pump hands
-/// every byte to its sink as it is read, and a stream past its bound evicts its
-/// oldest retained chunks rather than stopping the workload.
+/// `stdout_max` / `stderr_max` bound how much of a stream may sit in guest
+/// memory at once. Past that bound the oldest held chunks are evicted and the
+/// loss is reported as a gap record; the workload is never stopped and a write
+/// is never refused. On the streaming path the held chunks are events on their
+/// way to the consumer, so an eviction there is output the consumer never
+/// receives — these caps decide what is dropped from emission, not only how
+/// long a tail is kept.
 #[derive(Debug, Clone, Copy)]
 pub struct CallCaps {
     /// Maximum bytes accepted for the wrapper's stdin. The one cap that still

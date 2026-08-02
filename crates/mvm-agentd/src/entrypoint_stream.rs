@@ -242,15 +242,32 @@ impl BoundedStream {
 
 /// Drop the `count` oldest queued events belonging to `stream`, leaving every
 /// other stream's events where they are.
+///
+/// Walks the front and stops the moment `count` of them are gone, rather than
+/// filtering the whole queue. The queue is oldest-first, so what has to go is
+/// already at the front — and eviction happens once per event of a stream that
+/// is over its bound, which for a chatty workload is every event it writes. A
+/// pass over the whole queue there costs the queue's length per event, and the
+/// drain loop stops keeping up with the reader threads feeding it.
 fn evict_oldest(events: &mut VecDeque<EntrypointEvent>, stream: CapturedStream, count: usize) {
     let mut left = count;
-    events.retain(|event| {
-        let evict = left > 0 && CapturedStream::of(event) == Some(stream);
-        if evict {
+    // What the walk passed over to reach its targets — the other byte stream's
+    // events, and control records, which are never evicted. All older than
+    // everything dropped, so they go back at the front in the order they came.
+    let mut stepped_over = Vec::new();
+    while left > 0 {
+        let Some(event) = events.pop_front() else {
+            break;
+        };
+        if CapturedStream::of(&event) == Some(stream) {
             left -= 1;
+        } else {
+            stepped_over.push(event);
         }
-        !evict
-    });
+    }
+    for event in stepped_over.into_iter().rev() {
+        events.push_front(event);
+    }
 }
 
 /// Bytes an event holds. Zero for anything that is not a byte-stream chunk —
@@ -290,8 +307,9 @@ fn terminal_event(outcome: RunOutcome, timeout: Duration) -> EntrypointEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream_pump::GAP_RECORD_KIND;
+    use crate::stream_pump::{GAP_RECORD_KIND, MIN_RETENTION_CHUNKS, RETENTION_BYTES_PER_CHUNK};
     use std::sync::mpsc::Receiver;
+    use std::time::Instant;
 
     #[test]
     fn every_run_outcome_maps_to_exactly_one_terminal_event() {
@@ -431,6 +449,74 @@ mod tests {
     }
 
     #[test]
+    fn a_flood_of_one_byte_writes_is_bounded_in_events_as_well_as_bytes() {
+        // A byte bound alone prices a one-byte write the same as a 48 KiB one,
+        // so a workload doing unbuffered single-byte writes queues one event
+        // per byte — 64 Ki of them here. Each is an event slot plus its own
+        // allocation, which is most of a hundred bytes the cap never named, and
+        // a queue that long is no longer free to walk. Both dimensions have to
+        // be bounded or the figure the caller chose means nothing.
+        const BOUND: usize = 64 * 1024;
+        let event_bound =
+            (BOUND as u64 / RETENTION_BYTES_PER_CHUNK).max(MIN_RETENTION_CHUNKS) as usize;
+
+        let (mut handoff, _rx) = stopped_consumer(BOUND);
+        for _ in 0..100_000 {
+            handoff.offer(stdout(b"x"));
+        }
+
+        let queued_bytes: usize = handoff.pending.events.iter().map(chunk_len).sum();
+        assert!(
+            queued_bytes <= BOUND,
+            "queue held {queued_bytes} bytes against a {BOUND} byte bound"
+        );
+        let queued_events = handoff.pending.events.len();
+        assert!(
+            queued_events <= event_bound,
+            "queue held {queued_events} events against a {event_bound} event bound"
+        );
+    }
+
+    /// Hold a queue at `queued` events and time `evictions` single-event
+    /// evictions against it, pushing one back after each so the length the
+    /// eviction sees never changes.
+    fn time_evictions(queued: usize, evictions: usize) -> Duration {
+        let mut events: VecDeque<EntrypointEvent> = std::iter::repeat_with(|| stdout(b"x"))
+            .take(queued)
+            .collect();
+        let started = Instant::now();
+        for _ in 0..evictions {
+            evict_oldest(&mut events, CapturedStream::Stdout, 1);
+            events.push_back(stdout(b"x"));
+        }
+        started.elapsed()
+    }
+
+    #[test]
+    fn evicting_one_event_costs_the_same_on_a_long_queue_as_on_a_short_one() {
+        // Complexity, asserted as a ratio so the answer does not depend on how
+        // fast the machine is: fifty times the queue must not cost fifty times
+        // the eviction. Anything that filters the whole queue does exactly
+        // that, and the drain loop is what pays — a stream over its bound
+        // evicts once per event it writes, so the cost lands between the
+        // reader threads and the consumer at the producer's own rate.
+        const EVICTIONS: usize = 50_000;
+        let short = time_evictions(1_000, EVICTIONS);
+        let long = time_evictions(50_000, EVICTIONS);
+
+        // Eight times the shorter run, plus a floor so jitter between two runs
+        // that are both a couple of milliseconds cannot decide the outcome. A
+        // per-eviction full pass overshoots this by more than an order of
+        // magnitude; a walk that stops at the evicted event lands near parity.
+        let budget = short * 8 + Duration::from_millis(50);
+        assert!(
+            long <= budget,
+            "eviction cost scaled with queue length: {long:?} on a 50k-event queue against \
+             {short:?} on a 1k-event one"
+        );
+    }
+
+    #[test]
     fn the_newest_output_survives_and_one_gap_names_the_loss() {
         // Which end of a burst is dropped matters: a crash loop's last words
         // are the reason the ring evicts the oldest rather than refusing the
@@ -470,6 +556,32 @@ mod tests {
             }
             other => panic!("expected a control record, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stepping_over_another_stream_leaves_it_in_place_and_in_order() {
+        // The walk has to pop events it is not evicting to reach the ones it
+        // is. Putting them back in the wrong order, or behind the survivors,
+        // would reorder a stream against itself — the one thing the FIFO is
+        // there to guarantee.
+        let stderr = |bytes: &[u8]| EntrypointEvent::Stderr {
+            chunk: bytes.to_vec(),
+        };
+        let mut events: VecDeque<EntrypointEvent> = [
+            stderr(b"e1"),
+            stdout(b"o1"),
+            stderr(b"e2"),
+            stdout(b"o2"),
+            stdout(b"o3"),
+        ]
+        .into();
+
+        evict_oldest(&mut events, CapturedStream::Stdout, 2);
+
+        assert_eq!(
+            events.into_iter().collect::<Vec<_>>(),
+            vec![stderr(b"e1"), stderr(b"e2"), stdout(b"o3")]
+        );
     }
 
     #[test]
