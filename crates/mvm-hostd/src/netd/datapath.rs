@@ -213,6 +213,15 @@ pub trait DatapathHandle: Send {
     ///
     /// `None` means the datapath makes progress only when called, so the
     /// driver polls it on its timer tick rather than on readiness.
+    ///
+    /// **The descriptor is valid only while this handle is open, and a
+    /// registered one must be deregistered before the handle is closed.**
+    /// Closing releases the number, and the next `open` anywhere in the
+    /// process may be handed it — a poll set still holding the registration
+    /// would then be reacting to an unrelated resource. A caller must read
+    /// this once while the handle is open and register exactly that value;
+    /// it must never re-read it around a close, and after a close this
+    /// returns `None` rather than a number that no longer means anything.
     fn readiness_fd(&self) -> Option<std::os::fd::RawFd> {
         None
     }

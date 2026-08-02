@@ -2935,6 +2935,7 @@ dependencies = [
  "landlock",
  "libc",
  "libkrun-sys",
+ "mio",
  "mvm-agentd",
  "mvm-build",
  "mvm-core",

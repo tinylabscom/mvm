@@ -117,6 +117,9 @@ ed25519-dalek = { workspace = true, features = ["rand_core"] }
 etherparse = { workspace = true }
 sysinfo = { version = "0.30", default-features = false }
 ipnet.workspace = true
+# Readiness polling for the per-VM L3 gateway's drive loop: the guest data
+# channel and the datapath are independent sources of work.
+mio = { workspace = true }
 # custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
 # carries no hickory and stays on the workspace 1.85 floor.
 hickory-resolver = { workspace = true, features = ["tokio"], optional = true }

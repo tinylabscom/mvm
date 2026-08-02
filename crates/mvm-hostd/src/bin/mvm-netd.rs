@@ -11,6 +11,8 @@
 //! takes networking down — fail-closed — and nothing else.
 
 use std::io::{BufWriter, Read, Write};
+use std::os::fd::RawFd;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use mvm_hostd::netd::config::{NETD_READY_MARKER, NetdConfig, NetdUdsLayout};
@@ -104,10 +106,21 @@ fn run() -> Result<()> {
         .accept()
         .context("accepting the guest's data connection")?;
 
+    // Fail closed rather than fall back to a blocking read: a transport
+    // whose data channel cannot be polled cannot carry inbound traffic to a
+    // quiet guest, and a tunnel that only works while the guest talks is
+    // worse than one that refuses.
+    let data_fd = data_conn.pollable_fd.ok_or_else(|| {
+        anyhow!("the guest data channel exposes no descriptor the drive loop can poll")
+    })?;
+
+    let start = std::time::Instant::now();
     let result = serve(
         &mut gateway,
-        &mut control_conn.stream,
-        &mut data_conn.stream,
+        &mut *control_conn.stream,
+        &mut *data_conn.stream,
+        data_fd,
+        &|| monotonic_millis(start),
     );
 
     // Deterministic teardown on every exit path, including a protocol
@@ -121,25 +134,78 @@ fn run() -> Result<()> {
     result
 }
 
+/// How long a poll waits before servicing the tunnel anyway.
+///
+/// The floor on progress, not a latency budget: a datapath with nothing to
+/// poll advances only on this tick, and idle flows, DNS bindings, and
+/// transport timers must age on elapsed time rather than on the guest
+/// happening to transmit.
+const TICK_MILLIS: libc::c_int = 50;
+const TICK: Duration = Duration::from_millis(TICK_MILLIS as u64);
+
+const GUEST_DATA: mio::Token = mio::Token(0);
+const DATAPATH: mio::Token = mio::Token(1);
+
+/// Reads of the guest data channel per readiness pass.
+///
+/// A guest that streams without pause must not be able to hold the loop
+/// inside the drain and starve the datapath and the expiry tick — that is
+/// the same starvation this loop exists to remove, pointed the other way.
+const MAX_GUEST_READS_PER_PASS: usize = 32;
+
+/// Whether the tunnel is still carrying traffic.
+#[derive(Debug, PartialEq, Eq)]
+enum Session {
+    Live,
+    Ended,
+}
+
+/// What a drain of the guest data channel concluded.
+#[derive(Debug, PartialEq, Eq)]
+enum GuestChannel {
+    /// Nothing further to read right now.
+    Idle,
+    /// The read budget ran out with bytes still waiting.
+    Backlogged,
+    /// End of stream, or a protocol violation.
+    Ended,
+}
+
 /// Drive the tunnel until either side finishes.
+///
+/// `clock` supplies milliseconds. It is a parameter rather than a read of
+/// `Instant` inside the loop so that everything time-driven here is a
+/// function of the caller's inputs, and a test can advance time without
+/// waiting for it.
 fn serve(
     gateway: &mut Gateway,
-    control: &mut Box<dyn mvm_net::channel::GuestStream>,
-    data: &mut Box<dyn mvm_net::channel::GuestStream>,
+    control: &mut dyn mvm_net::channel::GuestStream,
+    data: &mut dyn mvm_net::channel::GuestStream,
+    data_fd: RawFd,
+    clock: &dyn Fn() -> u64,
 ) -> Result<()> {
-    let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
-    let start = std::time::Instant::now();
+    if handshake(gateway, control, clock)? == Session::Ended {
+        return Ok(());
+    }
+    pump(gateway, data, data_fd, clock)
+}
 
-    // Handshake: HELLO on control, CONFIG back, then READY.
+/// HELLO on control, CONFIG back, then READY.
+fn handshake(
+    gateway: &mut Gateway,
+    control: &mut dyn mvm_net::channel::GuestStream,
+    clock: &dyn Fn() -> u64,
+) -> Result<Session> {
+    let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
     loop {
         let n = control
             .read(&mut buf)
             .context("reading the control channel")?;
         if n == 0 {
-            return Ok(());
+            return Ok(Session::Ended);
         }
         let (reply, events) = gateway
-            .handle_control_frame(&buf[..n], monotonic_millis(start))
+            .handle_control_frame(&buf[..n], clock())
             .context("handling a guest control frame")?;
         for event in &events {
             log_event(event);
@@ -150,25 +216,136 @@ fn serve(
                 .context("writing the control reply")?;
             control.flush().ok();
         }
-        if gateway.state() == GatewayState::Ready {
-            break;
-        }
-        if gateway.state() == GatewayState::Closed {
-            return Ok(());
+        match gateway.state() {
+            GatewayState::Ready => return Ok(Session::Live),
+            GatewayState::Closed => return Ok(Session::Ended),
+            _ => {}
         }
     }
+}
 
-    // Steady state. Reads are blocking and alternate between the data
-    // channel and whatever the datapath has for the guest; a production
-    // deployment would poll both, which is the obvious next refinement.
+/// Steady state: wait until the guest channel or the datapath has work, or
+/// the tick expires, then service both.
+fn pump(
+    gateway: &mut Gateway,
+    data: &mut dyn mvm_net::channel::GuestStream,
+    data_fd: RawFd,
+    clock: &dyn Fn() -> u64,
+) -> Result<()> {
+    // A readiness-driven read must not block: the whole point is that the
+    // loop stays free to service the datapath.
+    set_nonblocking(data_fd).context("setting the guest data channel non-blocking")?;
+
+    let mut poll = mio::Poll::new().context("creating the poll set")?;
+    let mut events = mio::Events::with_capacity(8);
+    poll.registry()
+        .register(
+            &mut mio::unix::SourceFd(&data_fd),
+            GUEST_DATA,
+            mio::Interest::READABLE,
+        )
+        .context("registering the guest data channel")?;
+
+    // Read once, here, while the handle is certainly open. The loop never
+    // re-reads it, so it cannot register a descriptor that a close has
+    // already released, and it hands back exactly what it registered.
+    let datapath_fd = gateway.datapath().readiness_fd();
+    if let Some(fd) = datapath_fd {
+        poll.registry()
+            .register(
+                &mut mio::unix::SourceFd(&fd),
+                DATAPATH,
+                mio::Interest::READABLE,
+            )
+            .context("registering the datapath")?;
+    }
+
+    let outcome = drive(gateway, data, data_fd, &mut poll, &mut events, clock);
+
+    // Deregister before the caller closes the gateway, which closes the
+    // datapath handle. A registered descriptor that is then closed is a
+    // hazard: the number is free for any later open in this process to
+    // reuse, and the loop would start reacting to an unrelated resource.
+    if let Some(fd) = datapath_fd {
+        let _ = poll.registry().deregister(&mut mio::unix::SourceFd(&fd));
+    }
+    let _ = poll
+        .registry()
+        .deregister(&mut mio::unix::SourceFd(&data_fd));
+    outcome
+}
+
+fn drive(
+    gateway: &mut Gateway,
+    data: &mut dyn mvm_net::channel::GuestStream,
+    data_fd: RawFd,
+    poll: &mut mio::Poll,
+    events: &mut mio::Events,
+    clock: &dyn Fn() -> u64,
+) -> Result<()> {
+    let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
+    // Set when the guest still has bytes waiting after its read budget ran
+    // out, so the next pass does not wait on readiness that has already
+    // been reported and will not be reported again.
+    let mut backlogged = false;
     loop {
-        let n = match data.read(&mut buf) {
-            Ok(0) => return Ok(()),
+        let wait = if backlogged { Duration::ZERO } else { TICK };
+        match poll.poll(events, Some(wait)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                return Err(err).context("polling the guest channel and the datapath");
+            }
+        }
+        let now = clock();
+
+        if backlogged || events.iter().any(|event| event.token() == GUEST_DATA) {
+            match drain_guest_data(gateway, data, &mut buf, now)? {
+                GuestChannel::Ended => return Ok(()),
+                GuestChannel::Backlogged => backlogged = true,
+                GuestChannel::Idle => backlogged = false,
+            }
+        }
+
+        // Unconditional, and deliberately not gated on a DATAPATH event: a
+        // datapath that reports no descriptor makes progress only here, and
+        // a transport's own timers have to be serviced whether or not
+        // either side sent anything.
+        for event in gateway.poll_inbound(now) {
+            log_event(&event);
+        }
+        for frame in gateway.take_guest_frames() {
+            write_frame(data, data_fd, &frame).context("writing to the guest")?;
+        }
+        data.flush().ok();
+        gateway.tick(now);
+    }
+}
+
+/// Read what the guest has queued, up to the per-pass budget.
+///
+/// Readiness here is edge-triggered, so stopping at the first short read
+/// would leave bytes sitting until an event that may never come. The budget
+/// is reported back rather than silently dropped, so the caller comes
+/// straight back instead of waiting on a readiness edge already spent.
+fn drain_guest_data(
+    gateway: &mut Gateway,
+    data: &mut dyn mvm_net::channel::GuestStream,
+    buf: &mut [u8],
+    now: u64,
+) -> Result<GuestChannel> {
+    let mut reads = 0;
+    while reads < MAX_GUEST_READS_PER_PASS {
+        let n = match data.read(buf) {
+            Ok(0) => return Ok(GuestChannel::Ended),
             Ok(n) => n,
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(GuestChannel::Idle);
+            }
             Err(err) => return Err(err).context("reading the data channel"),
         };
-        let now = monotonic_millis(start);
+        reads += 1;
         match gateway.ingest_data_bytes(&buf[..n], now) {
             Ok(events) => {
                 for event in &events {
@@ -179,18 +356,67 @@ fn serve(
                 // A protocol violation ends the session; it does not take
                 // the host down.
                 eprintln!("mvm-netd: dropping the tunnel: {err}");
-                return Ok(());
+                return Ok(GuestChannel::Ended);
             }
         }
-        for event in gateway.poll_inbound(now) {
-            log_event(&event);
-        }
-        for frame in gateway.take_guest_frames() {
-            data.write_all(&frame).context("writing to the guest")?;
-        }
-        data.flush().ok();
-        gateway.tick(now);
     }
+    Ok(GuestChannel::Backlogged)
+}
+
+/// Write one frame to the guest, waiting for room if it is slow to drain.
+///
+/// The descriptor is non-blocking for the sake of the read side, so
+/// back-pressure surfaces here as `WouldBlock`. Waiting is the only correct
+/// answer: dropping a frame mid-write would desynchronize the framing, and
+/// re-sending one already partly written would duplicate bytes.
+fn write_frame(
+    data: &mut dyn mvm_net::channel::GuestStream,
+    data_fd: RawFd,
+    frame: &[u8],
+) -> Result<()> {
+    let mut sent = 0;
+    while sent < frame.len() {
+        match data.write(&frame[sent..]) {
+            Ok(0) => return Err(anyhow!("the guest data channel accepted no bytes")),
+            Ok(n) => sent += n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => wait_writable(data_fd)?,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Wait for room on the guest data channel, bounded by the tick.
+fn wait_writable(fd: RawFd) -> Result<()> {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: `pollfd` is a live, correctly-sized array of one entry we own,
+    // naming a descriptor the caller holds open.
+    let rc = unsafe { libc::poll(&mut pollfd, 1, TICK_MILLIS) };
+    if rc < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err).context("waiting for room on the guest data channel");
+        }
+    }
+    Ok(())
+}
+
+fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+    // SAFETY: `fd` is owned by a live stream in the caller.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: same descriptor; F_SETFL takes an int.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Milliseconds since the process's reference instant.
@@ -247,4 +473,372 @@ fn mint_session_id(instance: &mvm_net::channel::VmInstanceIdentity) -> u64 {
     let id = u64::from_be_bytes(bytes);
     // Zero is reserved on the wire for "no session yet".
     if id == 0 { 1 } else { id }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use mvm_agentd::l3::{
+        AgentState, MemoryTun, NetAgent, RecordingConfigurator, RecordingPrivilegeDropper,
+    };
+    use mvm_hostd::netd::config::{NetdEgress, NetdRule};
+    use mvm_hostd::netd::{
+        DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
+    };
+    use mvm_net::channel::GuestStream;
+    use mvm_net::l3::{AdmittedPacket, FlowKey};
+    use mvm_protocol::l3::proto;
+
+    use super::*;
+
+    /// The remote a guest opened a flow to before going quiet.
+    const SERVER: &str = "93.184.216.34";
+    const SERVER_PORT: u16 = 443;
+    const GUEST_PORT: u16 = 50000;
+    /// When the guest's flow was last seen, in the injected clock's units.
+    const OPENED_AT_MILLIS: u64 = 1_000;
+
+    /// A datapath whose inbound queue the test owns.
+    ///
+    /// `LoopbackDatapath` only produces a reply to something the guest sent,
+    /// and `Gateway::open` keeps the handle it opens, so neither can stand in
+    /// for a server that pushes to a guest which has sent nothing.
+    #[derive(Clone, Default)]
+    struct QueuedNetwork {
+        inbound: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    }
+
+    impl QueuedNetwork {
+        /// Queue a packet as though it arrived from the host network.
+        fn deliver(&self, packet: Vec<u8>) {
+            self.inbound
+                .lock()
+                .expect("inbound queue")
+                .push_back(packet);
+        }
+    }
+
+    impl L3Datapath for QueuedNetwork {
+        fn open(&self, _req: &DatapathRequest) -> Result<Box<dyn DatapathHandle>, DatapathError> {
+            Ok(Box::new(self.clone()))
+        }
+
+        fn is_available(&self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn capabilities(&self) -> ForwardingCapabilities {
+            ForwardingCapabilities::FULL_L3_V4
+        }
+    }
+
+    impl DatapathHandle for QueuedNetwork {
+        fn send_to_network(&mut self, _packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
+            match self.inbound.lock().expect("inbound queue").pop_front() {
+                Some(packet) => {
+                    let n = packet.len().min(buf.len());
+                    buf[..n].copy_from_slice(&packet[..n]);
+                    Ok(n)
+                }
+                None => Err(DatapathError::Io(std::io::Error::from(
+                    std::io::ErrorKind::WouldBlock,
+                ))),
+            }
+        }
+
+        fn close(&mut self) -> Result<(), DatapathError> {
+            Ok(())
+        }
+
+        fn description(&self) -> String {
+            "test-owned host network queue".to_string()
+        }
+    }
+
+    fn test_config(vm_id: &str) -> NetdConfig {
+        NetdConfig {
+            node_id: "node-1".into(),
+            vm_id: vm_id.into(),
+            boot_id: "boot-1".into(),
+            plan_digest: "sha256:plan".into(),
+            uds_layout: NetdUdsLayout::PerVmDir,
+            gateway_ipv4: "10.201.0.5".parse().expect("gateway address"),
+            guest_ipv4: "10.201.0.6".parse().expect("guest address"),
+            mtu: 1500,
+            egress: NetdEgress::Rules(vec![NetdRule {
+                proto: "tcp".into(),
+                cidr: format!("{SERVER}/32"),
+                port_lo: SERVER_PORT,
+                port_hi: SERVER_PORT,
+            }]),
+            admitted_private_cidrs: Vec::new(),
+            icmp: Default::default(),
+            policy_epoch: 1,
+            max_flows: 4096,
+            queue_depth: 256,
+            dns_qps: 50,
+            ingress: Vec::new(),
+        }
+    }
+
+    fn open_gateway(config: &NetdConfig, network: &QueuedNetwork) -> Gateway {
+        let instance = config.instance();
+        let mut gateway_config = GatewayConfig::new(
+            config.vm_id.clone(),
+            config.plan_digest.clone(),
+            config.lease(),
+            config.to_policy().expect("policy"),
+        );
+        gateway_config.instance = instance.clone();
+        gateway_config.ingress = config.to_ingress_table().expect("ingress");
+        gateway_config.queue_depth = config.queue_depth;
+        gateway_config.dns_qps = config.dns_qps;
+        Gateway::open(
+            gateway_config,
+            mvm_net::l3::SessionId(mint_session_id(&instance)),
+            network,
+            Arc::new(StaticResolver::new()),
+        )
+        .expect("opening the gateway")
+    }
+
+    /// The flow the guest opened before it went quiet.
+    fn quiet_flow() -> FlowKey {
+        FlowKey {
+            protocol: proto::TCP,
+            guest_port: GUEST_PORT,
+            remote: SERVER.parse().expect("server address"),
+            remote_port: SERVER_PORT,
+        }
+    }
+
+    /// The server's reply on that flow: return traffic the guest never asked
+    /// for a second time.
+    fn server_reply(config: &NetdConfig) -> Vec<u8> {
+        let mut tcp = vec![0u8; 20];
+        tcp[0..2].copy_from_slice(&SERVER_PORT.to_be_bytes());
+        tcp[2..4].copy_from_slice(&GUEST_PORT.to_be_bytes());
+        tcp[12] = 0x50;
+        tcp[13] = mvm_protocol::l3::ip::TCP_ACK;
+        let total = 20 + tcp.len();
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = proto::TCP;
+        let src: std::net::Ipv4Addr = SERVER.parse().expect("server address");
+        packet[12..16].copy_from_slice(&src.octets());
+        packet[16..20].copy_from_slice(&config.guest_ipv4.octets());
+        packet.extend_from_slice(&tcp);
+        packet
+    }
+
+    fn guest_agent() -> NetAgent<MemoryTun, RecordingConfigurator> {
+        NetAgent::new(MemoryTun::new("mvm0"), RecordingConfigurator::default())
+            .with_privilege_dropper(Box::new(RecordingPrivilegeDropper::default()))
+    }
+
+    /// A guest that dribbles bytes and never stops. Announces a legal frame
+    /// length and then never completes it, so nothing is ever malformed and
+    /// nothing is ever finished.
+    struct EndlessGuest {
+        announced: bool,
+    }
+
+    impl std::io::Read for EndlessGuest {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.announced {
+                self.announced = true;
+                let len = u32::try_from(mvm_protocol::l3::limits::MAX_FRAME_LEN).expect("len");
+                buf[..4].copy_from_slice(&len.to_be_bytes());
+                return Ok(4);
+            }
+            buf[0] = 0;
+            Ok(1)
+        }
+    }
+
+    impl std::io::Write for EndlessGuest {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The mirror of the defect above: a guest that never pauses must not be
+    /// able to hold the loop in the drain and starve the datapath and the
+    /// expiry tick.
+    #[test]
+    fn a_guest_that_never_stops_sending_hands_the_loop_back() {
+        let config = test_config("netd-backlog");
+        let network = QueuedNetwork::default();
+        let mut gateway = open_gateway(&config, &network);
+        let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
+
+        let drained = drain_guest_data(
+            &mut gateway,
+            &mut EndlessGuest { announced: false },
+            &mut buf,
+            0,
+        )
+        .expect("a guest that keeps sending is not an error");
+
+        assert_eq!(
+            drained,
+            GuestChannel::Backlogged,
+            "the drain must yield on its read budget rather than run forever"
+        );
+    }
+
+    /// The defect this pins: the old loop blocked on the guest data channel
+    /// and only drained the datapath afterwards, so a server pushing to a
+    /// silent guest stalled indefinitely. The guest sends nothing here.
+    #[test]
+    fn host_to_guest_data_flows_while_the_guest_is_silent() {
+        let config = test_config("netd-silent-guest");
+        let network = QueuedNetwork::default();
+        let mut gateway = open_gateway(&config, &network);
+        // The guest opened this flow earlier and then went quiet.
+        gateway
+            .admitter_mut()
+            .flows_mut()
+            .observe_outbound(quiet_flow(), 40, OPENED_AT_MILLIS);
+
+        let (host_control, mut guest_control) = UnixStream::pair().expect("control pair");
+        let (host_data, mut guest_data) = UnixStream::pair().expect("data pair");
+        guest_data
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let data_fd = host_data.as_raw_fd();
+        let mut host_control: Box<dyn GuestStream> = Box::new(host_control);
+        let mut host_data: Box<dyn GuestStream> = Box::new(host_data);
+
+        let start = std::time::Instant::now();
+        let clock = move || monotonic_millis(start);
+        let expected = server_reply(&config);
+
+        let (read, served) = std::thread::scope(|scope| {
+            let served = scope.spawn(|| {
+                serve(
+                    &mut gateway,
+                    &mut *host_control,
+                    &mut *host_data,
+                    data_fd,
+                    &clock,
+                )
+            });
+
+            let mut agent = guest_agent();
+            agent
+                .handshake(&mut guest_control)
+                .expect("the guest completes the handshake");
+            assert_eq!(agent.state(), AgentState::Ready);
+
+            network.deliver(expected.clone());
+
+            let mut frame = vec![0u8; 4096];
+            let read = std::io::Read::read(&mut guest_data, &mut frame).map(|n| {
+                frame.truncate(n);
+                frame
+            });
+
+            drop(guest_data);
+            drop(guest_control);
+            (read, served.join().expect("the serve thread"))
+        });
+
+        served.expect("serve must end cleanly");
+        let frame = read.expect("a frame must reach the guest without the guest sending first");
+        assert!(!frame.is_empty());
+        assert!(
+            frame.windows(expected.len()).any(|w| w == expected),
+            "the frame the guest received must carry the packet the network delivered"
+        );
+    }
+
+    /// Time in the drive loop must come from the injected clock, not from a
+    /// count of anything the guest did. A per-frame counter would make a
+    /// five-minute idle timeout mean 300,000 frames, and with a silent guest
+    /// it would never advance at all — so nothing here would ever expire.
+    #[test]
+    fn idle_flows_expire_on_the_injected_clock_while_the_guest_is_silent() {
+        let config = test_config("netd-injected-clock");
+        let network = QueuedNetwork::default();
+        let mut gateway = open_gateway(&config, &network);
+        gateway
+            .admitter_mut()
+            .flows_mut()
+            .observe_outbound(quiet_flow(), 40, OPENED_AT_MILLIS);
+
+        let (host_control, mut guest_control) = UnixStream::pair().expect("control pair");
+        let (host_data, guest_data) = UnixStream::pair().expect("data pair");
+        let data_fd = host_data.as_raw_fd();
+        let mut host_control: Box<dyn GuestStream> = Box::new(host_control);
+        let mut host_data: Box<dyn GuestStream> = Box::new(host_data);
+
+        // A clock the test owns, parked past the flow's idle timeout. Every
+        // read of it is counted so the test can tell when the loop has run
+        // without sleeping for a guess.
+        let reads = Arc::new(AtomicU64::new(0));
+        let clock = {
+            let reads = Arc::clone(&reads);
+            move || {
+                reads.fetch_add(1, Ordering::SeqCst);
+                OPENED_AT_MILLIS + mvm_net::l3::flow::DEFAULT_TCP_IDLE_MILLIS
+            }
+        };
+
+        let served = std::thread::scope(|scope| {
+            let served = scope.spawn(|| {
+                serve(
+                    &mut gateway,
+                    &mut *host_control,
+                    &mut *host_data,
+                    data_fd,
+                    &clock,
+                )
+            });
+
+            let mut agent = guest_agent();
+            agent
+                .handshake(&mut guest_control)
+                .expect("the guest completes the handshake");
+
+            // Three further reads of the clock mean at least one full pass of
+            // the steady-state loop finished after the handshake.
+            let after_handshake = reads.load(Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while reads.load(Ordering::SeqCst) < after_handshake + 3 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the drive loop must keep running with the guest silent"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            drop(guest_data);
+            drop(guest_control);
+            served.join().expect("the serve thread")
+        });
+
+        served.expect("serve must end cleanly");
+        assert_eq!(
+            gateway.metrics().flows_expired,
+            1,
+            "the loop must expire the idle flow from the clock it was handed, \
+             with no guest frame to count"
+        );
+    }
 }
