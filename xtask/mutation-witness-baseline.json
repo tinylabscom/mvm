@@ -8,6 +8,13 @@
       ]
     },
     {
+      "path": "crates/mvm-agentd/src/l3/privdrop.rs",
+      "package": "mvm-agentd",
+      "claims": [
+        2
+      ]
+    },
+    {
       "path": "crates/mvm-agentd/src/substitution_client.rs",
       "package": "mvm-agentd",
       "claims": [
@@ -202,15 +209,15 @@
   "uncovered_claims": [
     {
       "number": 4,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 5,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 7,
-      "why": "no fn: witness \u2014 witnessed by CI lanes only, nothing to mutate"
+      "why": "no fn: witness — witnessed by CI lanes only, nothing to mutate"
     },
     {
       "number": 16,
