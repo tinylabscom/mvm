@@ -66,6 +66,10 @@ impl TranscriptCaptureSink {
                 capture_id: manifest.capture_id.clone(),
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
+                // Carried from the armed manifest, not re-decided here: the
+                // operator's retention choice is what the sealed root commits
+                // to, and re-opening must not quietly change it.
+                retention: manifest.retention,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
@@ -131,7 +135,7 @@ fn io_err(file: &str, e: &impl std::fmt::Display) -> TranscriptError {
 mod tests {
     use super::*;
     use mvm_core::crypto::aead;
-    use mvm_core::transcript::{CaptureBinding, CaptureBounds};
+    use mvm_core::transcript::{CaptureBinding, CaptureBounds, RetentionPolicy};
     use std::path::Path;
 
     /// Arrange an armed capture exactly the way `mvmctl audit transcript arm`
@@ -153,6 +157,7 @@ mod tests {
                 max_bytes: 1 << 20,
                 max_chunks: 64,
             },
+            retention: RetentionPolicy::FailClosed,
             created_unix_secs: 1_700_000_000,
             recipient: "transcript-kek".into(),
             wrapped_data_key_b64: transcript::wrap_data_key(&kek, &data_key),

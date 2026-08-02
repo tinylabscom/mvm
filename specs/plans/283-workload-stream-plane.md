@@ -1113,30 +1113,55 @@ batching cannot be deferred past the first real caller.
   logical chunks, with `ChunkRecord` still addressing individual chunks so
   `verify_chunks` and the sealed root keep their current meaning.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Cover: 100k one-byte chunks produce a bounded number of files, not 100k; a
 sealed manifest over batched segments still passes `verify_sealed_root` and
 `verify_chunks`; `export` reproduces the original byte stream in order across
 segment boundaries; a torn final segment fails closed rather than silently
-truncating.
+truncating. Added beyond the brief: a tampered byte *inside* a shared segment
+is still attributed to its own chunk, and the sealed root still breaks when
+one chunk's digest or offset is edited on its own.
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-core transcript` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-core transcript` — FAIL.
 
-- [ ] **Step 3: Implement.** Preserve the chunk-level `prev_hash` linkage and
+- [x] **Step 3: Implement.** Preserve the chunk-level `prev_hash` linkage and
   the ciphertext-digest semantics; batching changes the file layout, not what
   the root commits to.
 
-- [ ] **Step 4: Raise the broker's chunk bound** now that files no longer scale
+`crates/mvm-core/src/transcript/segment.rs` holds the layout: a segment is an
+append-only run of chunk ciphertexts in one file, rolling on ciphertext size
+(1 MiB) or chunk count (1024) — both content-derived, never wall-clock, since
+`file` and `offset` are inside the sealed root and a time-based roll would give
+two captures of the same byte stream two different roots. `ChunkRecord` gained
+`offset` and still carries its own ciphertext digest and its own `prev_hash`.
+Verification checks each segment's length *before* hashing anything, so a torn
+capture reads as short rather than as tampered, and requires the records to
+tile their segment exactly — no gap, no overlap, no trailing byte nothing
+accounts for. Manifest format version 4 → 5.
+
+- [x] **Step 4: Raise the broker's chunk bound** now that files no longer scale
   with chunk count, and make the durable path ring rather than fail closed, so
   D3 holds of the persisted copy and not only of the reader queues.
 
-- [ ] **Step 5: Run to verify it passes**
+`DEFAULT_CAPTURE_BOUNDS.max_chunks` 4 096 → 65 536; the binding constraint is
+now the sealed manifest's own size (one ~250-byte record per chunk), not the
+inode count. `RetentionPolicy` (already in `transcript::ring`, previously
+unused) is now a `TranscriptWriterConfig` field sealed into the root, and
+`stream_capture_config` is the one door that pairs the shipped budget with
+`RetentionPolicy::Ring`. Ring eviction unlinks whole sealed segments oldest
+first — the only granularity an append-only file can free — never the active
+one, so the newest write always lands. The manifest gained `evicted_chunks` /
+`evicted_bytes` beside `refused_chunks` / `refused_bytes`: a ring window is a
+*suffix* of the capture, a refused one is a *prefix*, and a consumer needs to
+know which end is missing.
+
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo nextest run -p mvm-core transcript && cargo nextest run -p mvm-hostd stream::`
-Expected: PASS.
+Result: PASS — 76 transcript tests, 37 stream tests; 8 691 workspace tests green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git commit -am "feat(transcript): batch stream chunks into segments"

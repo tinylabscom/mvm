@@ -19,13 +19,12 @@
 //! Neither can *refuse* a chunk and neither can block on a consumer, so no
 //! reader and no full disk can ever silence or wedge a workload.
 //!
-//! What ingest is **not** is free. Step 3 is a synchronous write, hash, and
-//! `fsync`-less re-read per record on the caller's thread — around 200 µs,
-//! against roughly 2 µs for the other three steps combined. A workload
-//! producing chunks faster than about 5,000/sec is therefore paced by the
-//! durable store, not merely observed by it. That is a real throughput
-//! ceiling, not a caveat: chunk batching is what lifts it, and until it
-//! lands `persist_failures` is what makes the shortfall visible.
+//! What ingest is **not** is free. Step 3 is a synchronous append and hash per
+//! record on the caller's thread, against roughly 2 µs for the other three
+//! steps combined, so a chatty workload is paced by the durable store rather
+//! than merely observed by it. Chunk batching removed the two extra file
+//! opens and the read-back that used to dominate that cost;
+//! `persist_failures` is what makes any remaining shortfall visible.
 //!
 //! One broker per VM, resident in the per-tenant daemon rather than spawned
 //! per VM.
@@ -35,7 +34,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::transcript::{
-    CaptureBounds, Direction, TranscriptError, TranscriptManifest, TranscriptWriter,
+    CaptureBinding, CaptureBounds, Direction, RetentionPolicy, TranscriptError, TranscriptManifest,
+    TranscriptWriter, TranscriptWriterConfig,
 };
 use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
 
@@ -47,22 +47,66 @@ use crate::stream::redact::{StreamRedaction, StreamRedactor, redaction_failure_m
 
 /// Default budget for the durable transcript one broker writes into.
 ///
-/// The chunk cap is deliberately modest and it is usually not the binding
-/// one: at realistic chunk sizes the byte cap hits first, and the chunk cap
-/// only matters for a workload writing a few bytes at a time. It exists
-/// because a chunk is a file today, so an unbounded chunk count is an
-/// unbounded inode count in one directory.
+/// The chunk cap used to be an inode cap in disguise — one chunk was one file,
+/// so it had to sit low enough that under a second of log output exhausted it.
+/// Chunks now share segments, so file count tracks bytes rather than pushes
+/// and the cap is free to sit where it actually belongs: at the point where
+/// the sealed manifest's own size starts to matter. One `ChunkRecord`
+/// serialises to roughly 250 bytes, so 64 Ki records is a manifest in the tens
+/// of megabytes — big, bounded, and written once at seal.
 ///
-/// Outrunning this budget does not silence anything. Followers are
-/// unaffected — only the durable copy stops growing — and the shortfall is
-/// visible as [`StreamCounters::persist_failures`] rather than as an absence
-/// nobody can distinguish from a quiet workload.
+/// Reaching either bound does not silence anything and no longer stops the
+/// durable copy growing: with [`DEFAULT_STREAM_RETENTION`] the transcript
+/// drops its oldest chunks to make room for the newest, so the persisted copy
+/// holds the most recent window instead of the first few seconds.
+/// [`StreamCounters::persist_failures`] is left to mean what it should — the
+/// store failed, not the budget filled.
 pub const DEFAULT_CAPTURE_BOUNDS: CaptureBounds = CaptureBounds {
     // The transcript is bounded by size and count, not by age.
     max_duration_secs: u64::MAX,
     max_bytes: 8 << 20,
-    max_chunks: 4_096,
+    max_chunks: 64 * 1024,
 };
+
+/// Retention the durable transcript runs under for a live stream.
+///
+/// A forensic egress capture of discrete frames is right to refuse at its
+/// bound. A workload's output is the opposite case: the moment it stops being
+/// observed — a crash loop, a runaway process — is the moment it matters most,
+/// and the newest bytes are the ones worth keeping. Ring retention applies to
+/// the persisted copy the same decision the reader queues already make.
+pub const DEFAULT_STREAM_RETENTION: RetentionPolicy = RetentionPolicy::Ring;
+
+/// Who a stream capture belongs to and how its data key was wrapped —
+/// everything a [`TranscriptWriter`] needs that is *not* a policy choice.
+///
+/// Grouped so [`stream_capture_config`] can own the policy half (bounds plus
+/// retention) and leave callers no way to supply their own by accident.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamCaptureIdentity {
+    pub capture_id: String,
+    pub binding: CaptureBinding,
+    pub created_unix_secs: u64,
+    pub recipient: String,
+    pub wrapped_data_key_b64: String,
+}
+
+/// Configure the transcript writer a [`StreamBroker`] persists into: the
+/// shipped budget and ring retention, over the caller's capture identity.
+///
+/// One door, so a stream transcript cannot be built fail-closed by omission —
+/// which would put back the silent stop this whole path exists to remove.
+pub fn stream_capture_config(identity: StreamCaptureIdentity) -> TranscriptWriterConfig {
+    TranscriptWriterConfig {
+        capture_id: identity.capture_id,
+        binding: identity.binding,
+        bounds: DEFAULT_CAPTURE_BOUNDS,
+        retention: DEFAULT_STREAM_RETENTION,
+        created_unix_secs: identity.created_unix_secs,
+        recipient: identity.recipient,
+        wrapped_data_key_b64: identity.wrapped_data_key_b64,
+    }
+}
 
 /// What a broker has done since it started. Counters only — nothing here
 /// holds a payload byte.
@@ -76,8 +120,9 @@ pub struct StreamCounters {
     pub redacted: u64,
     /// Chunks the seam refused to vouch for, replaced by a `Trace` marker.
     pub redaction_failures: u64,
-    /// Records the durable transcript refused or failed to take. Each one is
-    /// a hole on disk that the live stream does not have.
+    /// Records the durable transcript failed to take — a store error, since
+    /// under ring retention a full budget prunes rather than refuses. Each one
+    /// is a hole on disk that the live stream does not have.
     pub persist_failures: u64,
     /// How many times persistence went from working to failing. One long
     /// outage counts once; a flapping disk counts every time. This is what
@@ -235,12 +280,13 @@ impl StreamBroker {
 
     /// Seal the transcript and hand back its manifest.
     ///
-    /// The sealed Merkle root covers every chunk that reached disk **and**
-    /// the count of those that did not, so a consumer can tell a complete
-    /// transcript from one that stopped at its bound. Without that count the
-    /// truncated artifact passes every verification with nothing saying it is
-    /// incomplete — worse than a loud refusal, because it looks trustworthy.
-    /// `manifest.refused_chunks` equals this broker's `persist_failures`.
+    /// The sealed Merkle root covers every chunk still on disk **and** the
+    /// counts of those that are not: `refused_chunks` for records the store
+    /// failed to take (equal to this broker's `persist_failures`), and
+    /// `evicted_chunks` for the older records ring retention dropped to keep
+    /// the newest. Without those counts an incomplete artifact passes every
+    /// verification with nothing saying so — worse than a loud refusal,
+    /// because it looks trustworthy.
     pub fn seal(self) -> TranscriptManifest {
         self.writer.seal()
     }
@@ -321,10 +367,11 @@ impl StreamBroker {
 
     /// Append to the durable transcript, best-effort.
     ///
-    /// The transcript's own budget fails closed, which is right for a
-    /// forensic capture and wrong for a live stream: refusing here would
-    /// silence followers to protect a disk bound. A failed append is counted
-    /// instead, so an absent chunk on disk is distinguishable from one that
+    /// Under [`DEFAULT_STREAM_RETENTION`] a full budget prunes rather than
+    /// refusing, so what remains here is a store that failed: a full disk, a
+    /// capture dir pulled out from under the writer. Refusing at this point
+    /// would silence followers to protect a disk, so the failure is counted
+    /// instead — an absent chunk on disk stays distinguishable from one that
     /// was never produced, and the sealed manifest carries the same shortfall
     /// as `refused_chunks`.
     fn persist(&mut self, record: &StreamRecord) {
@@ -344,11 +391,10 @@ impl StreamBroker {
 
     /// Log the *transition* into a persistence outage, never the records.
     ///
-    /// Once the budget is exhausted every subsequent record fails, so a
-    /// warning per record would emit thousands of lines a second for the
-    /// life of the workload — trading a bounded disk problem for an
-    /// unbounded log one. The count keeps climbing in `persist_failures`; the
-    /// log says it started.
+    /// A store that has failed usually keeps failing, so a warning per record
+    /// would emit thousands of lines a second for the life of the workload —
+    /// trading a bounded disk problem for an unbounded log one. The count
+    /// keeps climbing in `persist_failures`; the log says it started.
     fn note_persist_failed(&mut self, seq: u64, err: &TranscriptError) {
         if self.persist_degraded {
             return;
@@ -419,9 +465,7 @@ mod tests {
     use crate::supervisor::verify_audit_chain;
     use ed25519_dalek::SigningKey;
     use mvm_core::crypto::aead;
-    use mvm_core::transcript::{
-        CaptureBinding, TranscriptWriterConfig, export, verify_chunks, verify_sealed_root,
-    };
+    use mvm_core::transcript::{SEGMENT_MAX_CHUNKS, export, verify_chunks, verify_sealed_root};
     use mvm_protocol::stream::{verify_chain, verify_chain_from};
     use std::ops::{Deref, DerefMut};
     use std::path::Path;
@@ -449,8 +493,8 @@ mod tests {
         }
     }
 
-    /// Roomy enough that the transcript's own fail-closed budget never binds,
-    /// for the tests that assert every record reached disk.
+    /// Roomy enough that no bound binds, for the tests that assert every
+    /// record reached disk.
     fn unbounded_capture_bounds() -> CaptureBounds {
         CaptureBounds {
             max_duration_secs: u64::MAX,
@@ -465,23 +509,35 @@ mod tests {
         aead::Key::from_bytes([0x5a; 32])
     }
 
-    fn writer_at(dir: &Path, vm: &str, bounds: CaptureBounds) -> TranscriptWriter {
-        TranscriptWriter::new(
-            dir,
-            test_key(),
-            TranscriptWriterConfig {
-                capture_id: format!("capture-{vm}"),
-                binding: CaptureBinding {
-                    tenant_id: "local".to_string(),
-                    vm_name: vm.to_string(),
-                    session_id: None,
-                },
-                bounds,
-                created_unix_secs: 0,
-                recipient: "host:test".to_string(),
-                wrapped_data_key_b64: String::new(),
+    fn identity(vm: &str) -> StreamCaptureIdentity {
+        StreamCaptureIdentity {
+            capture_id: format!("capture-{vm}"),
+            binding: CaptureBinding {
+                tenant_id: "local".to_string(),
+                vm_name: vm.to_string(),
+                session_id: None,
             },
-        )
+            created_unix_secs: 0,
+            recipient: "host:test".to_string(),
+            wrapped_data_key_b64: String::new(),
+        }
+    }
+
+    /// A writer the way a stream broker gets one: ring retention, with the
+    /// budget overridden so a test can reach it in a handful of records.
+    fn writer_at(dir: &Path, vm: &str, bounds: CaptureBounds) -> TranscriptWriter {
+        let mut config = stream_capture_config(identity(vm));
+        config.bounds = bounds;
+        TranscriptWriter::new(dir, test_key(), config)
+    }
+
+    /// A writer that refuses at its bound — the forensic-capture policy, kept
+    /// for the one test that wants persistence to short-circuit before any I/O.
+    fn fail_closed_writer_at(dir: &Path, vm: &str, bounds: CaptureBounds) -> TranscriptWriter {
+        let mut config = stream_capture_config(identity(vm));
+        config.bounds = bounds;
+        config.retention = RetentionPolicy::FailClosed;
+        TranscriptWriter::new(dir, test_key(), config)
     }
 
     /// A broker configured the way production configures one: the shipped
@@ -619,9 +675,10 @@ mod tests {
         // must cost O(evicted), not O(queue). A full scan per drop turns one
         // stalled follower into quadratic work on the producer.
         let dir = tempfile::tempdir().expect("tempdir");
-        // A capture budget of zero: every append short-circuits before any
-        // I/O, so what is timed is redact -> chain -> fan out.
-        let writer = writer_at(
+        // A fail-closed budget of zero: every append short-circuits before
+        // any I/O, so what is timed is redact -> chain -> fan out. (The
+        // shipped ring would happily write all 20k chunks and time the disk.)
+        let writer = fail_closed_writer_at(
             dir.path(),
             "vm-a",
             CaptureBounds {
@@ -872,24 +929,17 @@ mod tests {
     #[test]
     fn a_persist_failure_never_silences_a_reader() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // A budget of one chunk: the second append fails closed.
-        let writer = writer_at(
-            dir.path(),
-            "vm-a",
-            CaptureBounds {
-                max_duration_secs: u64::MAX,
-                max_bytes: 1 << 20,
-                max_chunks: 1,
-            },
-        );
+        let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
         let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
         let mut r = b.subscribe();
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"one");
+        // Take the store away: the second append has nowhere to land.
+        std::fs::remove_dir_all(dir.path()).expect("remove capture dir");
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"two");
 
         assert_eq!(b.counters().persist_failures, 1);
         let records: Vec<_> = std::iter::from_fn(|| r.recv()).take(2).collect();
-        assert_eq!(records.len(), 2, "the live stream outlives the disk bound");
+        assert_eq!(records.len(), 2, "the live stream outlives the store");
         verify_chain(&records).expect("the chain does not skip an unpersisted record");
     }
 
@@ -899,7 +949,7 @@ mod tests {
         // than a loud refusal: it verifies clean and reads as the whole of a
         // quiet workload's output. The manifest must say it is a prefix.
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = writer_at(
+        let writer = fail_closed_writer_at(
             dir.path(),
             "vm-a",
             CaptureBounds {
@@ -947,7 +997,7 @@ mod tests {
         // emit 5k warnings a second forever, trading a bounded-disk problem
         // for an unbounded-log one.
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = writer_at(
+        let writer = fail_closed_writer_at(
             dir.path(),
             "vm-a",
             CaptureBounds {
@@ -988,6 +1038,80 @@ mod tests {
 
         assert_eq!(b.counters().persist_failures, 2);
         assert_eq!(b.counters().persist_lapses, 2);
+    }
+
+    #[test]
+    fn the_shipped_stream_capture_rings_rather_than_refusing() {
+        // The two halves of the same decision: chunks no longer cost a file
+        // each, so the cap can sit where the manifest's own size puts it, and
+        // reaching it prunes rather than stopping the durable copy dead.
+        let config = stream_capture_config(identity("vm-a"));
+        assert_eq!(config.retention, RetentionPolicy::Ring);
+        assert_eq!(config.bounds, DEFAULT_CAPTURE_BOUNDS);
+        const { assert!(DEFAULT_CAPTURE_BOUNDS.max_chunks >= 64 * 1024) };
+    }
+
+    #[test]
+    fn a_saturated_durable_store_keeps_the_newest_window_and_reports_no_failure() {
+        // The behaviour the raised cap rests on: past the bound the transcript
+        // drops its oldest chunks instead of going quiet, so the persisted
+        // copy still shows what the workload was doing when it mattered.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = writer_at(
+            dir.path(),
+            "vm-a",
+            CaptureBounds {
+                max_duration_secs: u64::MAX,
+                max_bytes: u64::MAX,
+                max_chunks: 2 * SEGMENT_MAX_CHUNKS,
+            },
+        );
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let total = SEGMENT_MAX_CHUNKS * 6;
+        for i in 0..total {
+            b.ingest(
+                StreamSource::Entrypoint,
+                StreamKind::Stdout,
+                format!("{i}\n").as_bytes(),
+            );
+        }
+        assert_eq!(
+            b.counters().persist_failures,
+            0,
+            "a full budget prunes; it is not a store failure"
+        );
+
+        let manifest = b.seal();
+        assert!(manifest.evicted_chunks > 0);
+        assert!(manifest.is_truncated(), "a window declares itself a window");
+        assert_eq!(manifest.retention, RetentionPolicy::Ring);
+        verify_sealed_root(&manifest).expect("the window seals a valid root");
+        verify_chunks(&manifest, dir.path()).expect("the surviving segments verify");
+        let out = export(&manifest, dir.path(), &test_key()).expect("export");
+        assert!(
+            out.ends_with(format!("{}\n", total - 1).as_bytes()),
+            "the newest record survives"
+        );
+    }
+
+    #[test]
+    fn a_chatty_workload_does_not_cost_a_file_per_chunk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
+        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        for _ in 0..20_000 {
+            b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"x");
+        }
+        let files = std::fs::read_dir(dir.path())
+            .expect("read capture dir")
+            .filter_map(Result::ok)
+            .count();
+        let ceiling = 20_000usize.div_ceil(SEGMENT_MAX_CHUNKS as usize) + 1;
+        assert!(
+            files <= ceiling,
+            "20k chunks left {files} files, expected at most {ceiling}"
+        );
+        assert_eq!(b.seal().chunks.len(), 20_000);
     }
 
     #[test]

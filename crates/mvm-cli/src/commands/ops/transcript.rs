@@ -19,7 +19,7 @@ use mvm_core::config;
 use mvm_core::crypto::aead;
 use mvm_core::policy::audit::{LocalAuditBuilder, LocalAuditKind, event};
 use mvm_core::transcript::{
-    self, CaptureBinding, CaptureBounds, TranscriptManifest, TranscriptWriter,
+    self, CaptureBinding, CaptureBounds, RetentionPolicy, TranscriptManifest, TranscriptWriter,
     TranscriptWriterConfig,
 };
 use mvm_hostd::supervisor::audit::{
@@ -227,6 +227,9 @@ impl TranscriptCtx {
                 session_id: session.map(str::to_string),
             },
             bounds,
+            // A forensic capture of discrete frames is right to stop at its
+            // bound rather than quietly drop the start of what it recorded.
+            retention: RetentionPolicy::FailClosed,
             created_unix_secs: now_unix_secs(),
             recipient: KEK_RECIPIENT.to_string(),
             wrapped_data_key_b64: wrapped,
@@ -515,6 +518,7 @@ mod tests {
                 capture_id: manifest.capture_id.clone(),
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
+                retention: manifest.retention,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
@@ -546,6 +550,7 @@ mod tests {
                 capture_id: manifest.capture_id.clone(),
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
+                retention: manifest.retention,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
@@ -556,9 +561,9 @@ mod tests {
         write_manifest(&dir, &sealed).unwrap();
         anchor_manifest(&c, &sealed);
         // Same-length byte flip → hash mismatch on export.
-        let mut ct = std::fs::read(dir.join("0.chunk")).unwrap();
+        let mut ct = std::fs::read(dir.join("0.seg")).unwrap();
         ct[0] ^= 0xff;
-        std::fs::write(dir.join("0.chunk"), &ct).unwrap();
+        std::fs::write(dir.join("0.seg"), &ct).unwrap();
 
         assert!(c.export("t1", &id).is_err());
         assert!(audit_contains(&c, "transcript_refused"));

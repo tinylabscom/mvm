@@ -13,12 +13,22 @@
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 use super::CaptureBounds;
 
 /// Which admission policy backs a capture: `CaptureBudget`'s fail-closed
 /// refusal, or this module's prune-oldest ring.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Recorded in the sealed manifest, so a consumer holding an artifact whose
+/// oldest chunks are gone can tell a retention decision from a deletion. The
+/// default is the stricter one: a capture that never said which policy it ran
+/// under is read as one that would have refused rather than one that may
+/// silently have dropped its head.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RetentionPolicy {
+    #[default]
     FailClosed,
     Ring,
 }
