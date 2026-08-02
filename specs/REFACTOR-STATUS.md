@@ -85,7 +85,7 @@ for detailed scope and acceptance criteria.
   - [x] Remove branch-local multi-gigabyte Cargo target caches
   - [x] Share nested `mvm-cli` builds across feature fingerprints
   - [x] Move man-page tests onto Test's warm compile graph
-  - [x] Reuse Test's runner for the merge-queue MCP roundtrip
+  - [x] Keep the removed MCP server and smoke lane out of CI
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
 

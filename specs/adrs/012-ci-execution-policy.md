@@ -21,7 +21,7 @@ day-to-day development for no proportional benefit.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | three runner jobs on PR (`lint`, `test`, and the short MCP aggregate gate); four in merge queue / manual dispatch (the same jobs plus Nix, with MCP executed inside Test) |
+| `ci.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | two runner jobs on PR (`lint` and `test`); three in merge queue / manual dispatch (the same jobs plus Nix) |
 | `architecture.yml` | `pull_request` + `merge_group` + `workflow_dispatch` | structural/architectural invariants; skips the actual work on docs-only PRs, always runs in merge queue |
 | `ci-full.yml` | `workflow_dispatch` only | the full platform + live-VM + OCI-ratification matrix; operator-triggered, never automatic |
 | `security.yml` | `push: tags: v*` + nightly cron + `workflow_dispatch` | dependency audit / advisory scan; release-time backstop plus nightly catch for new advisories |
@@ -33,12 +33,9 @@ day-to-day development for no proportional benefit.
 `lint` (fmt, clippy, and the full battery of `xtask` architectural
 checks — see ADR-010) and `test` (the workspace nextest run, doctests,
 hermetic BDD, no-std target checks, man-page feature tests, and real-kernel
-ext4 checks) run on every pull request. The MCP stdio roundtrip runs inside
-the already-warm Test runner in the merge queue and on manual
-`workflow_dispatch`; its historical required-check job is an always-running
-aggregate gate that fails unless Test succeeds. `nix-flake-check` also runs only in the merge queue and on
-manual dispatch, so ordinary PR updates pay for the lighter compile/test signal
-and the heavier smoke/eval work runs once before merge. The SDK publication
+ext4 checks) run on every pull request. `nix-flake-check` runs only in the merge
+queue and on manual dispatch, so ordinary PR updates pay for the lighter
+compile/test signal and the heavier eval work runs once before merge. The SDK publication
 dry-run is part of the manual full matrix rather than the development lane.
 Nothing platform-specific
 (macOS, live KVM, Windows) or slow (OCI ratification, dependency audit,
@@ -94,11 +91,10 @@ evaluation on the hosted Linux runner.
 
 A pull-request update gets fast, complete feedback from the checks that
 matter for almost every change — two Linux-only jobs (`lint` and `test`)
-plus the architecture-invariant lane, with the heavier MCP smoke and
-`nix-flake-check` work deferred to the merge queue. The merge queue runs the
-full set of five required check names against the final merge group using four
-allocated runners: lint, Test with MCP, Nix, and the architecture invariant.
-The MCP compatibility check is skipped without allocating a runner.
+plus the architecture-invariant lane, with the heavier `nix-flake-check` work
+deferred to the merge queue. The merge queue runs the full set of four required
+check names against the final merge group using four allocated runners: lint,
+Test, Nix, and the architecture invariant.
 Development branches without a pull request consume no hosted runners
 unless an operator dispatches CI manually. Landing that already-checked
 commit on `main` does not run them a third time. An operator opts into the expensive platform, live-VM,

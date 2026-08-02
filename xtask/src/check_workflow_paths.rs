@@ -328,22 +328,19 @@ mod tests {
     }
 
     #[test]
-    fn mcp_smoke_reuses_the_test_runner_without_dropping_the_required_check_name() {
+    fn removed_mcp_server_stays_out_of_ci() {
         let workflow = ci_workflow();
-        let test = ci_job_block(&workflow, "test");
-        assert!(test.contains("sudo apt-get install -y attr cryptsetup-bin libcap-ng-dev lld"));
-        assert!(test.contains("- name: Install MCP smoke dependency"));
-        assert!(test.contains("run: sudo apt-get install -y jq"));
-        assert!(test.contains("run: ./scripts/test-mcp-roundtrip.sh"));
-
-        let gate = ci_job_block(&workflow, "mcp-server-smoke");
-        assert!(gate.contains("name: MCP server stdio roundtrip"));
-        assert!(gate.contains("needs: test"));
-        assert!(gate.contains("if: ${{ always() }}"));
-        assert!(gate.contains("TEST_RESULT: ${{ needs.test.result }}"));
-        assert!(gate.contains("if [ \"$TEST_RESULT\" != \"success\" ]"));
-        assert!(!gate.contains("mcp-check-compatibility-shim"));
-        assert!(!gate.contains("./scripts/test-mcp-roundtrip.sh"));
+        for removed in [
+            "MCP server stdio roundtrip",
+            "mcp-server-smoke",
+            "test-mcp-roundtrip.sh",
+            "Install MCP smoke dependency",
+        ] {
+            assert!(
+                !workflow.contains(removed),
+                "removed MCP server CI surface returned: {removed}"
+            );
+        }
     }
 
     #[test]
@@ -373,7 +370,6 @@ mod tests {
         for required_name in [
             "name: Lint (fmt + clippy + policy)",
             "name: Test",
-            "name: MCP server stdio roundtrip",
             "name: Nix flake check (Linux eval)",
         ] {
             assert!(ci.contains(required_name), "required check name drifted");

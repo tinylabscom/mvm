@@ -25,10 +25,11 @@ jobs, and one failed run's logs.
 - Required CI workflow duration, including runner admission, was 52m07s p50
   and 1h19m05s p95 across 19 completed merge-group CI runs. At the time of the
   measurement, the ruleset's status-check timeout was 60 minutes.
-- The required contexts were `Lint (fmt + clippy + policy)`, `Test`,
-  `MCP server stdio roundtrip`, `Nix flake check (Linux eval)`, and `Invariant`.
-  A successful merge-group commit emitted all five under the GitHub Actions app.
-  No third-party check or deployment was required.
+- At measurement time the required contexts were `Lint (fmt + clippy + policy)`,
+  `Test`, `MCP server stdio roundtrip`, `Nix flake check (Linux eval)`, and
+  `Invariant`. The MCP server and its check were subsequently removed; the
+  current queue requires the remaining four contexts. No third-party check or
+  deployment was required.
 
 ## Work
 
@@ -49,10 +50,11 @@ jobs, and one failed run's logs.
 
 ## Applied GitHub settings
 
-The repository ruleset now keeps squash merging, `ALLGREEN`, minimum group
-size 1, maximum group size 5, all five required checks, no bypass actors, and
-no required deployments. On 2026-08-01 it changed speculative build
-concurrency from 5 to 3, minimum-group wait from 5 minutes to 0, and the check
+The repository ruleset keeps squash merging, `ALLGREEN`, minimum group size 1,
+maximum group size 5, no bypass actors, and no required deployments. The MCP
+context was removed when its server was deleted, leaving four required checks.
+On 2026-08-01 the ruleset changed speculative build concurrency from 5 to 3,
+minimum-group wait from 5 minutes to 0, and the check
 response timeout from 60 to 90 minutes. Three speculative entries create at
 most 15 required jobs with the measured five-check shape, leaving capacity for
 ordinary pull-request feedback. The 90-minute timeout is the smallest round

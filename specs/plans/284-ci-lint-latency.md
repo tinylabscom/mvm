@@ -5,7 +5,7 @@
 ## Goal
 
 Reduce pull-request and merge-queue latency without weakening the required
-Rust, policy, feature-gated, MCP, or Nix coverage.
+Rust, policy, feature-gated, or Nix coverage.
 
 The baseline is GitHub Actions run `30664687885`: `Lint (fmt + clippy +
 policy)` occupied a runner for 36 minutes. Clippy and policy finished after
@@ -32,10 +32,8 @@ binaries for clippy, `test-support`, and example feature fingerprints.
       Cargo target lock.
 - [x] Move the `xtask` man-page feature tests from Lint to the required Test
       job, where the test-profile `mvm-cli` graph is already warm.
-- [x] Run the MCP stdio roundtrip inside the already-warm Test job for merge-
-      queue and manual runs. Retain the historical required-check name as an
-      always-running aggregate gate that fails unless Test succeeds, so no
-      required result is ever satisfied by a skipped job.
+- [x] Keep the removed MCP server and its smoke lane out of CI while optimizing
+      the remaining required jobs.
 - [x] Measure the targeted feature lane locally: 2,718 tests plus the required
       example check completed in 7m27s, versus 13m38s and 8,610 tests for the
       sampled workspace-wide command.
@@ -51,8 +49,7 @@ Pull-request run `30682895396` passed on the exact branch commit. Test waited
 for 37m36s; its targeted `test-support` step took 23m23s. The reduced test set
 removed duplicate work, but the cold-run critical path did not improve over the
 36-minute baseline because a small number of `mvm-cli` and live audit tests
-still dominate that lane. The stable MCP aggregate appeared after Test and
-passed in two seconds.
+still dominate that lane.
 
 Do not add a cross-branch compiler cache without a trusted write boundary.
 Faster or additional hosted-runner capacity is justified by the observed
@@ -70,16 +67,14 @@ change that organization-level allocation.
   nested target, so later feature variants reuse the embedded-binary graph.
 - Man-page feature coverage remains required but does not rebuild the
   test-profile CLI graph on Lint's critical path.
-- MCP still executes before a merge. Its historical required check always
-  concludes and uses only a short aggregate runner after Test completes.
+- The removed MCP server and its former required-check lane remain absent.
 - `cargo test --workspace`, `cargo check --workspace`, and Linux
   `cargo clippy --workspace --all-targets -- -D warnings` pass.
 
 ## Security posture
 
-No required behavioral gate is removed. The mock backend remains test-only,
-MCP continues to exercise its real JSON-RPC subprocess boundary, and Nix
-closure checks remain required in the merge queue. Removing branch-local build
-archives also reduces the cache-poisoning and stale-artifact surface; a future
-shared compiler cache must be written only from a trusted default-branch or
-external cache boundary.
+No active required behavioral gate is removed. The mock backend remains
+test-only, and Nix closure checks remain required in the merge queue. Removing
+branch-local build archives also reduces the cache-poisoning and stale-artifact
+surface; a future shared compiler cache must be written only from a trusted
+default-branch or external cache boundary.

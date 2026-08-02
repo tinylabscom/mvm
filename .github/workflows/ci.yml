@@ -2,10 +2,9 @@ name: CI
 
 on:
   # Keep pull-request validation cheap and predictable. On a pull request this
-  # workflow runs two jobs: lint and test. The merge queue also runs Nix eval;
-  # MCP smoke reuses the already-warm test runner there. Expensive platform,
-  # live-VM, OCI ratification, security, Windows, and release artifact jobs live
-  # in release/manual workflows.
+  # workflow runs two jobs: lint and test. The merge queue also runs Nix eval.
+  # Expensive platform, live-VM, OCI ratification, security, Windows, and
+  # release artifact jobs live in release/manual workflows.
   pull_request:
   # Required for the merge queue: all checks must run against the merge_group event.
   merge_group:
@@ -340,14 +339,6 @@ jobs:
         # test-profile graph instead of rebuilding that graph in Lint.
         run: cargo nextest run -p xtask --features man
 
-      - name: Install MCP smoke dependency
-        if: github.event_name != 'pull_request'
-        run: sudo apt-get install -y jq
-
-      - name: MCP server stdio roundtrip
-        if: github.event_name != 'pull_request'
-        run: ./scripts/test-mcp-roundtrip.sh
-
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
 
@@ -471,29 +462,6 @@ jobs:
       - name: Hermetic BDD scenarios
         run: just bdd
 
-  mcp-server-smoke:
-    name: MCP server stdio roundtrip
-    # The real smoke runs inside Test, whose compile graph is already warm.
-    # This always-running gate preserves the required check name and reports a
-    # failure instead of being skipped when Test fails or is cancelled.
-    needs: test
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Report MCP smoke result
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          TEST_RESULT: ${{ needs.test.result }}
-        run: |
-          if [ "$TEST_RESULT" != "success" ]; then
-            echo "::error::Test did not succeed; inspect its MCP smoke step and remaining logs"
-            exit 1
-          fi
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            echo "MCP smoke is deferred to exact-commit merge-queue validation"
-          else
-            echo "MCP smoke completed successfully inside Test"
-          fi
   nix-flake-check:
     name: Nix flake check (Linux eval)
     # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
