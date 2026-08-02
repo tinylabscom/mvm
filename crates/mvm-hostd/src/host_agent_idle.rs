@@ -89,7 +89,13 @@ pub async fn run_idle_watcher(daemon: Arc<Mutex<HostAgentDaemon>>, timeout: Opti
     const PROBE: Duration = Duration::from_millis(500);
     let mut zero_since: Option<Instant> = None;
     loop {
-        let count = daemon.lock().await.registration_count();
+        let count = {
+            let mut daemon = daemon.lock().await;
+            if let Err(error) = daemon.reap_dead_registrations() {
+                tracing::warn!(%error, "dead host-agent registration reap failed");
+            }
+            daemon.registration_count()
+        };
         if count > 0 {
             zero_since = None;
         } else if zero_since.is_none() {

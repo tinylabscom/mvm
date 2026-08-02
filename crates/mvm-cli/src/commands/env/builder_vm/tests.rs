@@ -610,6 +610,75 @@ mod reap_orphans_tests {
         );
         assert!(!vm.exists(), "ephemeral builder dir should be gone");
     }
+
+    #[test]
+    fn startup_reaps_builder_egress_supervisor_from_another_worktree() {
+        let pid = std::process::id() as i32;
+        let command = concat!(
+            "/tmp/other-worktree/target/debug/mvmctl ",
+            "__builder-egress-supervisor --endpoint ",
+            "/tmp/other-worktree/target/debug/mvm-substitution-endpoint"
+        );
+        let snapshot = ProcSnapshot::from_parts(
+            [(pid, 1)].into_iter().collect(),
+            vec![(pid, command.to_string())],
+        );
+
+        assert_eq!(
+            reap_orphaned_builder_egress_supervisors(true, &snapshot),
+            1,
+            "a launchd-parented builder egress wrapper is orphaned regardless of worktree"
+        );
+    }
+
+    #[test]
+    fn startup_spares_owned_or_unrelated_mvmctl_processes() {
+        let pid = std::process::id() as i32;
+        let wrapper = concat!(
+            "/tmp/worktree/target/debug/mvmctl ",
+            "__builder-egress-supervisor --endpoint /tmp/endpoint"
+        );
+        let owned = ProcSnapshot::from_parts(
+            [(pid, 42)].into_iter().collect(),
+            vec![(pid, wrapper.to_string())],
+        );
+        let unrelated = ProcSnapshot::from_parts(
+            [(pid, 1)].into_iter().collect(),
+            vec![(
+                pid,
+                "/tmp/worktree/target/debug/mvmctl machine ls".to_string(),
+            )],
+        );
+        let spoofed_executable = ProcSnapshot::from_parts(
+            [(pid, 1)].into_iter().collect(),
+            vec![(
+                pid,
+                "/tmp/worktree/target/debug/not-mvmctl __builder-egress-supervisor".to_string(),
+            )],
+        );
+        let later_argument = ProcSnapshot::from_parts(
+            [(pid, 1)].into_iter().collect(),
+            vec![(
+                pid,
+                "/tmp/worktree/target/debug/mvmctl machine run __builder-egress-supervisor"
+                    .to_string(),
+            )],
+        );
+
+        assert_eq!(reap_orphaned_builder_egress_supervisors(true, &owned), 0);
+        assert_eq!(
+            reap_orphaned_builder_egress_supervisors(true, &unrelated),
+            0
+        );
+        assert_eq!(
+            reap_orphaned_builder_egress_supervisors(true, &spoofed_executable),
+            0
+        );
+        assert_eq!(
+            reap_orphaned_builder_egress_supervisors(true, &later_argument),
+            0
+        );
+    }
 }
 
 #[cfg(all(test, feature = "builder-vm"))]

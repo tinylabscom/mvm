@@ -30,6 +30,12 @@ pub(in crate::commands) struct ReapOutcome {
 /// leftover-Vz-dir case: a future refactor that narrows the traversal or
 /// renames the sidecar must update that test.
 ///
+/// The persistent builder egress wrapper is the one exception to root-scoped
+/// discovery. Its exact argv identifies an internal process whose owner is
+/// always a live `BuilderVsockEgressEndpoint` guard. A wrapper reparented to
+/// init/launchd is therefore unambiguously orphaned, so the same snapshot also
+/// finds and reaps those wrappers across worktree-specific `MVM_HOME` roots.
+///
 /// A microVM is several processes: the supervisor (the VMM-host that
 /// owns the guest) plus dependent helpers (for example a
 /// `tail -F console.log` reader). The supervisor is the authoritative
@@ -134,7 +140,48 @@ fn reap_orphaned_vm_helpers_both_roots(
     out.killed += workload.killed;
     out.removed_dirs += workload.removed_dirs;
     out.freed_bytes += workload.freed_bytes;
+    out.killed += reap_orphaned_builder_egress_supervisors(dry_run, &snapshot);
     Ok(out)
+}
+
+const BUILDER_EGRESS_SUPERVISOR_SUBCOMMAND: &str = "__builder-egress-supervisor";
+
+fn is_builder_egress_supervisor(command: &str) -> bool {
+    let mut fields = command.split_whitespace();
+    let Some(executable) = fields.next() else {
+        return false;
+    };
+    std::path::Path::new(executable)
+        .file_name()
+        .is_some_and(|name| name == "mvmctl")
+        && fields.next() == Some(BUILDER_EGRESS_SUPERVISOR_SUBCOMMAND)
+}
+
+pub(super) fn reap_orphaned_builder_egress_supervisors(
+    dry_run: bool,
+    snapshot: &ProcSnapshot,
+) -> u64 {
+    let victims: Vec<i32> = snapshot
+        .cmds
+        .iter()
+        .filter(|(pid, command)| {
+            snapshot.parent(*pid) == Some(1) && is_builder_egress_supervisor(command)
+        })
+        .map(|(pid, _)| *pid)
+        .collect();
+
+    if !dry_run {
+        for pid in &victims {
+            // SAFETY: the fresh process snapshot proves this is the exact
+            // init-parented internal wrapper. SIGTERM is the wrapper's normal
+            // shutdown path and lets its endpoint child observe parent death.
+            unsafe {
+                libc::kill(*pid, libc::SIGTERM);
+            }
+        }
+    }
+
+    u64::try_from(victims.len()).expect("process count fits in u64")
 }
 
 #[cfg(test)]

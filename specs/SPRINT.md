@@ -20,7 +20,10 @@
       Full-suite validation also made the plan-mode integration test override
       the worktree's `MVM_HOME`, preventing it from reusing another test's
       mutable host-signing key.
-      Newly filed #2039, #2040, and #2042 remain explicit follow-up work.
+      The remaining delivery merged in #2045, closing #1937, #1972, #1983,
+      and #2035; #2039 merged separately in #2041. The #2042 helper-lifecycle
+      repair is implemented and validated; #2040 and #2048 remain explicit
+      follow-up work.
       Tracked in plan 284.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull

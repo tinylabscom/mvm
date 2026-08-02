@@ -56,6 +56,14 @@ pub(in crate::commands) fn run_builder_egress_supervisor(
     args: BuilderEgressSupervisorArgs,
     _cfg: &MvmConfig,
 ) -> Result<()> {
+    run_builder_egress_supervisor_inner(&args, mvm_hostd::parent_death::exit_when_orphaned)
+}
+
+fn run_builder_egress_supervisor_inner(
+    args: &BuilderEgressSupervisorArgs,
+    arm_parent_death: impl FnOnce(),
+) -> Result<()> {
+    arm_parent_death();
     let status = Command::new(&args.endpoint)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -77,4 +85,30 @@ pub(in crate::commands) fn run_builder_egress_supervisor(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn builder_egress_supervisor_arms_parent_watchdog_before_spawn() {
+        let watchdog_armed = Cell::new(false);
+        let args = BuilderEgressSupervisorArgs {
+            endpoint: PathBuf::from("/definitely/missing/mvm-substitution-endpoint"),
+        };
+
+        let error = run_builder_egress_supervisor_inner(&args, || watchdog_armed.set(true))
+            .expect_err("missing endpoint must fail");
+
+        assert!(watchdog_armed.get(), "parent watchdog must arm first");
+        assert!(
+            error
+                .to_string()
+                .contains("running builder egress endpoint"),
+            "spawn failure should retain endpoint context: {error:#}"
+        );
+    }
 }
