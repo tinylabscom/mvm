@@ -172,6 +172,10 @@ pub struct GuestConnection<S> {
     pub instance: VmInstanceIdentity,
     pub service: GuestService,
     pub stream: S,
+    /// The descriptor a poll loop can register, when the transport has
+    /// one. `None` for in-memory streams, which are only ever driven
+    /// synchronously.
+    pub pollable_fd: Option<std::os::fd::RawFd>,
 }
 
 impl<S> GuestConnection<S> {
@@ -180,7 +184,14 @@ impl<S> GuestConnection<S> {
             instance,
             service,
             stream,
+            pollable_fd: None,
         }
+    }
+
+    /// Record the descriptor this connection can be polled on.
+    pub fn with_pollable_fd(mut self, fd: std::os::fd::RawFd) -> Self {
+        self.pollable_fd = Some(fd);
+        self
     }
 }
 
