@@ -806,11 +806,15 @@ fn shared_kernel_base_enforces_audited_subsystem_removals() {
         "KALLSYMS",
         "NLS_UTF8",
         "NETLABEL",
+        "NET_SCHED",
+        "MQ_IOSCHED_BFQ",
         "MQ_IOSCHED_KYBER",
         "TASKSTATS",
         "HUGETLB_PAGE",
         "ACPI_PROCESSOR",
         "X86_PLATFORM_DEVICES",
+        "ARM_SCMI_PROTOCOL",
+        "SERIAL_8250",
     ] {
         assert!(
             required.contains(&format!("\"{symbol}\"")),

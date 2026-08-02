@@ -250,8 +250,14 @@ let
     "NVRAM"
     "SYNC_FILE"
     "DMA_SHARED_BUFFER"
+    "MQ_IOSCHED_BFQ"
     "MQ_IOSCHED_DEADLINE"
     "MQ_IOSCHED_KYBER"
+
+    # Traffic-control classifiers, actions and qdiscs are not part of the
+    # guest networking contract. The opt-in TUN path needs only the network
+    # device and IP stack; policy and relay enforcement live on the host.
+    "NET_SCHED"
 
     # No guest agent consumes process accounting, file-handle syscalls, the
     # obsolete sysfs syscall, or cross-process comparison. Keep core process,
@@ -399,6 +405,13 @@ let
     # AF_ALG userspace crypto families. Their selectors otherwise restore the
     # workload's required CGROUPS and CRYPTO_USER_API cuts.
     "SCHED_AUTOGROUP"
+    # ARM guests use PL011 early/legacy console or virtio-console. They expose
+    # no legacy 8250 UART, VGA device, error-reporting controller, or SCMI
+    # firmware transport.
+    "SERIAL_8250"
+    "VGA_ARB"
+    "EDAC"
+    "ARM_SCMI_PROTOCOL"
     "CRYPTO_USER_API_HASH"
     "CRYPTO_USER_API_SKCIPHER"
     "CRYPTO_USER_API_RNG"
@@ -575,9 +588,9 @@ let
     "PWM" # no PWM controllers
 
     # Shrink batch 5 — subsystems the proven-minimal libkrun guest also drops.
-    # Console stays: 8250 + AMBA PL011 + virtio-console are kept; only the SoC
-    # vendor UARTs go. IOMMU is safe to drop — virtio rides MMIO with direct
-    # DMA, no translation unit.
+    # Console stays: x86 keeps 8250; ARM keeps PL011; both keep virtio-console.
+    # Only the SoC vendor UARTs go here. IOMMU is safe to drop — virtio rides
+    # MMIO with direct DMA, no translation unit.
     "CORESIGHT" # ARM hardware trace/debug — never wired in a guest
     "VIRTUALIZATION" # a guest doesn't host nested VMs (drops KVM)
     "REMOTEPROC" # no remote-processor/RPMSG coprocessors
