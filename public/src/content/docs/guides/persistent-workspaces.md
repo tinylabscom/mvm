@@ -66,6 +66,47 @@ Security rules:
 - do not mount the same writable volume into unrelated sandboxes unless sharing
   state is the intent.
 
+## Durable tenant volumes through mvmd
+
+Use remote mode when mvmd owns the tenant, storage provider, encryption keys,
+quota, and attachment policy. Configure the authenticated client without
+putting the bearer token on the command line:
+
+```sh
+export MVM_GATEWAY_URL=https://mvmd.example.com
+export MVM_TENANT_ID=tenant-acme
+read -rsp "mvmd bearer token: " MVM_GATEWAY_TOKEN
+export MVM_GATEWAY_TOKEN
+```
+
+The client refuses cleartext HTTP except for a loopback sidecar. Provider
+credentials never enter `mvmctl`; mvmd resolves them from the registered
+`StorageBucket`.
+
+Create and list durable volumes:
+
+```sh
+mvmctl volume create database --size 20G --remote --bucket bucket-primary
+mvmctl volume catalog --remote --json
+```
+
+The API allocates whole GiB, so smaller human-readable sizes round up to one
+GiB. Use the returned volume ID for attachment and checkpoint operations:
+
+```sh
+mvmctl volume mount worker-1 --volume vol-123 --guest /data --rw --remote
+mvmctl volume checkpoint vol-123 before-upgrade --remote
+mvmctl volume restore vol-123 snap-456 --target database-recovered --remote
+mvmctl volume unmount worker-1 /data --remote
+mvmctl volume delete vol-123 --remote
+```
+
+Remote restore always creates a new volume from a pinned, ready checkpoint; it
+does not overwrite the source volume. Delete is refused while a volume remains
+attached or retains checkpoints. Attachment conflicts, quota failures,
+authorization failures, provider outages, and integrity refusals are returned
+as errors rather than falling back to the local registry.
+
 ## Host-backed mounts
 
 Ad-hoc host-backed mounts are useful when an existing encrypted host directory

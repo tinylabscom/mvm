@@ -97,6 +97,24 @@ impl GatewayBackend {
         Ok(url)
     }
 
+    /// Build an API endpoint from path components so tenant and resource IDs
+    /// are percent-encoded rather than interpolated into a URL string.
+    fn endpoint_components(&self, components: &[&str]) -> Result<Url> {
+        let mut url = self.base.clone();
+        url.set_path("/");
+        url.set_query(None);
+        url.set_fragment(None);
+        {
+            let mut segments = url.path_segments_mut().map_err(|()| MvmError::Backend {
+                reason: "gateway base URL cannot carry API path segments".into(),
+            })?;
+            segments.pop_if_empty();
+            segments.extend(components);
+        }
+        endpoint_guard(&url)?;
+        Ok(url)
+    }
+
     /// Attach the bearer credential. Endpoint-bound: only ever sent to `base`.
     fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req.bearer_auth(&self.token)
@@ -113,6 +131,15 @@ fn status_error(status: StatusCode, id: &str) -> Option<MvmError> {
             reason: format!("gateway rejected credential ({status})"),
         },
         StatusCode::NOT_FOUND => MvmError::NotFound { id: id.to_string() },
+        StatusCode::CONFLICT => MvmError::Conflict {
+            reason: format!("gateway rejected conflicting state for {id}"),
+        },
+        StatusCode::UNPROCESSABLE_ENTITY | StatusCode::BAD_REQUEST => MvmError::Rejected {
+            reason: format!("gateway rejected the request for {id} ({status})"),
+        },
+        StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => MvmError::Unavailable {
+            reason: format!("gateway could not serve {id} ({status})"),
+        },
         other => MvmError::Backend {
             reason: format!("gateway returned {other}"),
         },
@@ -163,6 +190,394 @@ struct ReconfigureBody {
     cpus: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_mib: Option<u32>,
+}
+
+/// A tenant block volume returned by mvmd.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RemoteVolume {
+    pub volume_id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub size_gib: u32,
+    #[serde(default)]
+    pub storage_class: String,
+    #[serde(default)]
+    pub from_snapshot_id: Option<String>,
+    #[serde(default)]
+    pub bucket_id: Option<String>,
+    #[serde(default)]
+    pub current_checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub attached_instance_id: Option<String>,
+}
+
+/// One immutable remote volume checkpoint returned by mvmd.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RemoteVolumeSnapshot {
+    pub snapshot_id: String,
+    pub volume_id: String,
+    pub name: String,
+    pub size_gib: u32,
+    pub status: String,
+    #[serde(default)]
+    pub bucket_id: Option<String>,
+    #[serde(default)]
+    pub checkpoint_id: String,
+}
+
+/// One exclusive remote volume attachment returned by mvmd.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RemoteVolumeAttachment {
+    pub volume_id: String,
+    pub tenant_id: String,
+    pub instance_id: String,
+    #[serde(default)]
+    pub device_path: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub fencing_token: u64,
+}
+
+/// Validated request for creating or restoring a remote volume.
+pub struct RemoteVolumeCreate {
+    name: String,
+    size_gib: u32,
+    storage_class: Option<String>,
+    from_snapshot_id: Option<String>,
+    bucket_id: Option<String>,
+}
+
+impl RemoteVolumeCreate {
+    /// Begin constructing a remote volume request.
+    #[must_use]
+    pub fn builder(name: impl Into<String>, size_gib: u32) -> RemoteVolumeCreateBuilder {
+        RemoteVolumeCreateBuilder {
+            name: name.into(),
+            size_gib,
+            storage_class: None,
+            from_snapshot_id: None,
+            bucket_id: None,
+        }
+    }
+}
+
+/// Builder for [`RemoteVolumeCreate`].
+pub struct RemoteVolumeCreateBuilder {
+    name: String,
+    size_gib: u32,
+    storage_class: Option<String>,
+    from_snapshot_id: Option<String>,
+    bucket_id: Option<String>,
+}
+
+/// Request for attaching a remote volume to one instance.
+pub struct RemoteVolumeMount {
+    volume_id: String,
+    instance_id: String,
+    device_path: String,
+    read_only: bool,
+}
+
+impl RemoteVolumeMount {
+    /// Construct a mount request; callers may opt into writable access.
+    #[must_use]
+    pub fn new(
+        volume_id: impl Into<String>,
+        instance_id: impl Into<String>,
+        device_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            volume_id: volume_id.into(),
+            instance_id: instance_id.into(),
+            device_path: device_path.into(),
+            read_only: true,
+        }
+    }
+
+    #[must_use]
+    pub fn writable(mut self, writable: bool) -> Self {
+        self.read_only = !writable;
+        self
+    }
+}
+
+impl RemoteVolumeCreateBuilder {
+    #[must_use]
+    pub fn storage_class(mut self, value: impl Into<String>) -> Self {
+        self.storage_class = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn from_snapshot(mut self, value: impl Into<String>) -> Self {
+        self.from_snapshot_id = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn bucket(mut self, value: impl Into<String>) -> Self {
+        self.bucket_id = Some(value.into());
+        self
+    }
+
+    pub fn build(self) -> Result<RemoteVolumeCreate> {
+        if self.name.trim().is_empty() {
+            return Err(MvmError::InvalidSpec {
+                reason: "remote volume name must not be empty".into(),
+            });
+        }
+        if self.size_gib == 0 {
+            return Err(MvmError::InvalidSpec {
+                reason: "remote volume size must be at least 1 GiB".into(),
+            });
+        }
+        Ok(RemoteVolumeCreate {
+            name: self.name,
+            size_gib: self.size_gib,
+            storage_class: self.storage_class,
+            from_snapshot_id: self.from_snapshot_id,
+            bucket_id: self.bucket_id,
+        })
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CreateRemoteVolumeBody<'a> {
+    name: &'a str,
+    size_gib: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage_class: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_snapshot_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bucket_id: Option<&'a str>,
+}
+
+#[derive(serde::Serialize)]
+struct CreateRemoteSnapshotBody<'a> {
+    name: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct AttachRemoteVolumeBody<'a> {
+    instance_id: &'a str,
+    device_path: &'a str,
+    read_only: bool,
+}
+
+impl GatewayBackend {
+    async fn decode_json<T: serde::de::DeserializeOwned>(
+        response: reqwest::Response,
+        id: &str,
+        operation: &str,
+    ) -> Result<T> {
+        if let Some(error) = status_error(response.status(), id) {
+            return Err(error);
+        }
+        response.json().await.map_err(|error| MvmError::Backend {
+            reason: format!("parsing {operation} response: {error}"),
+        })
+    }
+
+    /// Create a remote tenant volume.
+    pub async fn create_remote_volume(
+        &self,
+        tenant_id: &str,
+        request: &RemoteVolumeCreate,
+    ) -> Result<RemoteVolume> {
+        let url = self.endpoint_components(&["api", "v1", "tenants", tenant_id, "volumes"])?;
+        let body = CreateRemoteVolumeBody {
+            name: &request.name,
+            size_gib: request.size_gib,
+            storage_class: request.storage_class.as_deref(),
+            from_snapshot_id: request.from_snapshot_id.as_deref(),
+            bucket_id: request.bucket_id.as_deref(),
+        };
+        let response = self
+            .authed(self.http.post(url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| MvmError::Unavailable {
+                reason: format!("remote volume create failed: {error}"),
+            })?;
+        Self::decode_json(response, &request.name, "remote volume create").await
+    }
+
+    /// List all remote volumes visible in a tenant.
+    pub async fn list_remote_volumes(&self, tenant_id: &str) -> Result<Vec<RemoteVolume>> {
+        let url = self.endpoint_components(&["api", "v1", "tenants", tenant_id, "volumes"])?;
+        let response = self
+            .authed(self.http.get(url))
+            .send()
+            .await
+            .map_err(|error| MvmError::Unavailable {
+                reason: format!("remote volume list failed: {error}"),
+            })?;
+        Self::decode_json(response, tenant_id, "remote volume list").await
+    }
+
+    /// Delete a detached remote volume.
+    pub async fn delete_remote_volume(&self, tenant_id: &str, volume_id: &str) -> Result<()> {
+        let url =
+            self.endpoint_components(&["api", "v1", "tenants", tenant_id, "volumes", volume_id])?;
+        let response = self
+            .authed(self.http.delete(url))
+            .send()
+            .await
+            .map_err(|error| MvmError::Unavailable {
+                reason: format!("remote volume delete failed: {error}"),
+            })?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        match status_error(response.status(), volume_id) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Attach a remote volume through mvmd's exclusive-writer boundary.
+    pub async fn attach_remote_volume(
+        &self,
+        tenant_id: &str,
+        request: &RemoteVolumeMount,
+    ) -> Result<RemoteVolumeAttachment> {
+        let url = self.endpoint_components(&[
+            "api",
+            "v1",
+            "tenants",
+            tenant_id,
+            "volumes",
+            &request.volume_id,
+            "attach",
+        ])?;
+        let body = AttachRemoteVolumeBody {
+            instance_id: &request.instance_id,
+            device_path: &request.device_path,
+            read_only: request.read_only,
+        };
+        let response = self
+            .authed(self.http.post(url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| MvmError::Unavailable {
+                reason: format!("remote volume attach failed: {error}"),
+            })?;
+        Self::decode_json(response, &request.volume_id, "remote volume attach").await
+    }
+
+    /// Return one remote volume's current attachment.
+    pub async fn remote_volume_attachment(
+        &self,
+        tenant_id: &str,
+        volume_id: &str,
+    ) -> Result<RemoteVolumeAttachment> {
+        let url = self.endpoint_components(&[
+            "api", "v1", "tenants", tenant_id, "volumes", volume_id, "attach",
+        ])?;
+        let response = self
+            .authed(self.http.get(url))
+            .send()
+            .await
+            .map_err(|error| MvmError::Unavailable {
+                reason: format!("remote attachment read failed: {error}"),
+            })?;
+        Self::decode_json(response, volume_id, "remote attachment read").await
+    }
+
+    /// Detach one remote volume idempotently.
+    pub async fn detach_remote_volume(&self, tenant_id: &str, volume_id: &str) -> Result<()> {
+        let url = self.endpoint_components(&[
+            "api", "v1", "tenants", tenant_id, "volumes", volume_id, "attach",
+        ])?;
+        let response = self
+            .authed(self.http.delete(url))
+            .send()
+            .await
+            .map_err(|error| MvmError::Unavailable {
+                reason: format!("remote volume detach failed: {error}"),
+            })?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        match status_error(response.status(), volume_id) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Create an immutable checkpoint for a remote volume.
+    pub async fn create_remote_volume_snapshot(
+        &self,
+        tenant_id: &str,
+        volume_id: &str,
+        snapshot_name: &str,
+    ) -> Result<RemoteVolumeSnapshot> {
+        let url = self.endpoint_components(&[
+            "api",
+            "v1",
+            "tenants",
+            tenant_id,
+            "volumes",
+            volume_id,
+            "snapshots",
+        ])?;
+        let response = self
+            .authed(self.http.post(url))
+            .json(&CreateRemoteSnapshotBody {
+                name: snapshot_name,
+            })
+            .send()
+            .await
+            .map_err(|error| MvmError::Unavailable {
+                reason: format!("remote checkpoint failed: {error}"),
+            })?;
+        Self::decode_json(response, volume_id, "remote checkpoint").await
+    }
+
+    /// Restore a pinned checkpoint into a new remote volume.
+    pub async fn restore_remote_volume(
+        &self,
+        tenant_id: &str,
+        source_volume_id: &str,
+        snapshot_id: &str,
+        target_name: &str,
+    ) -> Result<RemoteVolume> {
+        let url = self.endpoint_components(&[
+            "api",
+            "v1",
+            "tenants",
+            tenant_id,
+            "volumes",
+            source_volume_id,
+            "snapshots",
+            snapshot_id,
+        ])?;
+        let response = self
+            .authed(self.http.get(url))
+            .send()
+            .await
+            .map_err(|error| MvmError::Unavailable {
+                reason: format!("remote checkpoint lookup failed: {error}"),
+            })?;
+        let snapshot: RemoteVolumeSnapshot =
+            Self::decode_json(response, snapshot_id, "remote checkpoint lookup").await?;
+        if snapshot.status != "ready" || snapshot.checkpoint_id.is_empty() {
+            return Err(MvmError::Conflict {
+                reason: "remote checkpoint is not ready for restore".into(),
+            });
+        }
+        let mut builder = RemoteVolumeCreate::builder(target_name, snapshot.size_gib)
+            .from_snapshot(snapshot.snapshot_id);
+        if let Some(bucket_id) = snapshot.bucket_id {
+            builder = builder.bucket(bucket_id);
+        }
+        self.create_remote_volume(tenant_id, &builder.build()?)
+            .await
+    }
 }
 
 /// Map the gateway's status string onto the facade status. Unknown values fail
@@ -405,7 +820,10 @@ impl MvmClient for GatewayBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Once;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Once, mpsc};
+    use std::time::Duration;
 
     fn install_rustls_provider() {
         static INSTALL: Once = Once::new();
@@ -447,6 +865,54 @@ mod tests {
             base_url: base.into(),
             token: "mvmd_org_deadbeef".into(),
         }
+    }
+
+    fn serve_one_json(
+        response_body: &'static str,
+    ) -> (String, mpsc::Receiver<String>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap_or_default();
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            sender.send(String::from_utf8(request).unwrap()).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+        });
+        (format!("http://{address}"), receiver, handle)
     }
 
     #[test]
@@ -564,6 +1030,18 @@ mod tests {
             Some(MvmError::NotFound { id }) if id == "m1"
         ));
         assert!(matches!(
+            status_error(StatusCode::CONFLICT, "m1"),
+            Some(MvmError::Conflict { .. })
+        ));
+        assert!(matches!(
+            status_error(StatusCode::UNPROCESSABLE_ENTITY, "m1"),
+            Some(MvmError::Rejected { .. })
+        ));
+        assert!(matches!(
+            status_error(StatusCode::SERVICE_UNAVAILABLE, "m1"),
+            Some(MvmError::Unavailable { .. })
+        ));
+        assert!(matches!(
             status_error(StatusCode::INTERNAL_SERVER_ERROR, "m1"),
             Some(MvmError::Backend { .. })
         ));
@@ -610,5 +1088,75 @@ mod tests {
         };
         let json = serde_json::to_string(&body).unwrap();
         assert_eq!(json, r#"{"net":true,"cpus":2}"#);
+    }
+
+    #[test]
+    fn remote_volume_path_components_are_encoded() {
+        install_rustls_provider();
+        let backend = GatewayBackend::new(cfg("https://fleet.example.com")).unwrap();
+        let url = backend
+            .endpoint_components(&["api", "v1", "tenants", "tenant/escape", "volumes"])
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://fleet.example.com/api/v1/tenants/tenant%2Fescape/volumes"
+        );
+    }
+
+    #[test]
+    fn remote_volume_create_builder_validates_and_omits_absent_fields() {
+        assert!(RemoteVolumeCreate::builder("data", 0).build().is_err());
+        let request = RemoteVolumeCreate::builder("data", 4).build().unwrap();
+        let body = CreateRemoteVolumeBody {
+            name: &request.name,
+            size_gib: request.size_gib,
+            storage_class: request.storage_class.as_deref(),
+            from_snapshot_id: request.from_snapshot_id.as_deref(),
+            bucket_id: request.bucket_id.as_deref(),
+        };
+        assert_eq!(
+            serde_json::to_string(&body).unwrap(),
+            r#"{"name":"data","size_gib":4}"#
+        );
+    }
+
+    #[test]
+    fn remote_volume_response_is_backward_compatible() {
+        let volume: RemoteVolume = serde_json::from_str(
+            r#"{"volume_id":"vol-1","tenant_id":"tenant-1","name":"data","size_gib":8}"#,
+        )
+        .unwrap();
+        assert_eq!(volume.volume_id, "vol-1");
+        assert!(volume.bucket_id.is_none());
+        assert!(volume.attached_instance_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_volume_create_sends_authenticated_tenant_request() {
+        install_rustls_provider();
+        let response = r#"{"volume_id":"vol-1","tenant_id":"tenant-a","name":"data","size_gib":8,"bucket_id":"bucket-1"}"#;
+        let (base_url, request_receiver, server) = serve_one_json(response);
+        let backend = GatewayBackend::new(GatewayConfig {
+            base_url,
+            token: "secret-bearer".into(),
+        })
+        .unwrap();
+        let request = RemoteVolumeCreate::builder("data", 8)
+            .bucket("bucket-1")
+            .build()
+            .unwrap();
+
+        let volume = backend
+            .create_remote_volume("tenant-a", &request)
+            .await
+            .unwrap();
+        assert_eq!(volume.volume_id, "vol-1");
+        let raw_request = request_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert!(raw_request.starts_with("POST /api/v1/tenants/tenant-a/volumes HTTP/1.1"));
+        assert!(raw_request.contains("authorization: Bearer secret-bearer"));
+        assert!(raw_request.contains(r#""bucket_id":"bucket-1""#));
+        server.join().unwrap();
     }
 }

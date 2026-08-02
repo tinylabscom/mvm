@@ -15,11 +15,10 @@
 //!
 //! ## `--remote` mode (mvmd proxy)
 //!
-//! `--remote` routes operations through mvmd's REST API rather than
-//! executing locally. v1 stub only — the actual `mvmctl::mvmd_client`
-//! module ships in a follow-up once the mvmd-side bucket
-//! reconciliation lands. Today `--remote` returns a clear "not yet
-//! implemented" error.
+//! `--remote` routes operations through mvmd's authenticated REST API rather
+//! than executing locally. Configuration is read from `MVM_GATEWAY_URL`,
+//! `MVM_GATEWAY_TOKEN`, and `MVM_TENANT_ID`; the bearer token is retained only
+//! in memory and is redacted from debug output.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -29,6 +28,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 
+use mvm_core::client::gateway::{
+    GatewayBackend, GatewayConfig, RemoteVolume, RemoteVolumeCreate, RemoteVolumeMount,
+};
 use mvm_core::crypto::key_rotation;
 use mvm_core::crypto::policy::validate_mount_path;
 use mvm_core::crypto::rotation_policy;
@@ -74,6 +76,15 @@ pub(in crate::commands) enum VolumeCmd {
         /// Capacity of a new portable ext4 block volume.
         #[arg(long, default_value = "1G")]
         size: String,
+        /// Create through the authenticated mvmd tenant API.
+        #[arg(long)]
+        remote: bool,
+        /// Durable StorageBucket ID used for encrypted checkpoints.
+        #[arg(long, requires = "remote")]
+        bucket: Option<String>,
+        /// Remote storage-class policy name.
+        #[arg(long, requires = "remote")]
+        storage_class: Option<String>,
     },
     /// Decrypt a managed volume into its private local attachment artifact.
     Unlock { volume: String },
@@ -83,11 +94,34 @@ pub(in crate::commands) enum VolumeCmd {
     Catalog {
         #[arg(long)]
         json: bool,
+        /// List volumes through the authenticated mvmd tenant API.
+        #[arg(long)]
+        remote: bool,
     },
     /// Create an immutable encrypted snapshot of a locked managed volume.
-    Snapshot { volume: String, snapshot: String },
+    #[command(visible_alias = "checkpoint")]
+    Snapshot {
+        volume: String,
+        snapshot: String,
+        #[arg(long)]
+        remote: bool,
+    },
     /// Restore a locked managed volume from an immutable local snapshot.
-    Restore { volume: String, snapshot: String },
+    Restore {
+        volume: String,
+        snapshot: String,
+        /// Name of the new remote volume created from the checkpoint.
+        #[arg(long, requires = "remote")]
+        target: Option<String>,
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Delete a detached remote volume.
+    Delete {
+        volume: String,
+        #[arg(long)]
+        remote: bool,
+    },
     /// Mount a virtio-fs volume into a VM.
     ///
     /// Operations against provider-backed (S3 / Hetzner / R2 / GCS /
@@ -116,7 +150,7 @@ pub(in crate::commands) enum VolumeCmd {
         #[arg(long)]
         rw: bool,
         /// Route through mvmd REST instead of writing the local
-        /// registry. Stub in v1.
+        /// registry.
         #[arg(long)]
         remote: bool,
     },
@@ -127,7 +161,7 @@ pub(in crate::commands) enum VolumeCmd {
         #[arg(long)]
         json: bool,
         /// Route through mvmd REST instead of reading the local
-        /// registry. Stub in v1.
+        /// registry.
         #[arg(long)]
         remote: bool,
     },
@@ -138,7 +172,7 @@ pub(in crate::commands) enum VolumeCmd {
         /// Guest mount path to detach.
         guest_path: String,
         /// Route through mvmd REST instead of editing the local
-        /// registry. Stub in v1.
+        /// registry.
         #[arg(long)]
         remote: bool,
     },
@@ -151,12 +185,57 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             root,
             host_backed,
             size,
-        } => create(&volume, root.as_deref(), host_backed, &size),
+            remote,
+            bucket,
+            storage_class,
+        } => {
+            if remote {
+                if root.is_some() || host_backed {
+                    bail!("--root and --host-backed are local-only volume options");
+                }
+                return remote_create(&volume, &size, bucket.as_deref(), storage_class.as_deref());
+            }
+            create(&volume, root.as_deref(), host_backed, &size)
+        }
         VolumeCmd::Unlock { volume } => unlock(&volume),
         VolumeCmd::Lock { volume } => lock(&volume),
-        VolumeCmd::Catalog { json } => catalog(json),
-        VolumeCmd::Snapshot { volume, snapshot } => snapshot::create(&volume, &snapshot),
-        VolumeCmd::Restore { volume, snapshot } => snapshot::restore(&volume, &snapshot),
+        VolumeCmd::Catalog { json, remote } => {
+            if remote {
+                return remote_catalog(json);
+            }
+            catalog(json)
+        }
+        VolumeCmd::Snapshot {
+            volume,
+            snapshot,
+            remote,
+        } => {
+            if remote {
+                return remote_snapshot(&volume, &snapshot);
+            }
+            snapshot::create(&volume, &snapshot)
+        }
+        VolumeCmd::Restore {
+            volume,
+            snapshot,
+            target,
+            remote,
+        } => {
+            if remote {
+                let target = target.unwrap_or_else(|| format!("{volume}-restored"));
+                return remote_restore(&volume, &snapshot, &target);
+            }
+            if target.is_some() {
+                bail!("--target is only valid with --remote");
+            }
+            snapshot::restore(&volume, &snapshot)
+        }
+        VolumeCmd::Delete { volume, remote } => {
+            if !remote {
+                bail!("local volume deletion is not implicit; use --remote for tenant volumes");
+            }
+            remote_delete(&volume)
+        }
         VolumeCmd::Mount {
             name,
             volume,
@@ -166,13 +245,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             remote,
         } => {
             if remote {
-                return remote_stub("volume mount");
+                if host.is_some() {
+                    bail!("--host is a local-only volume option");
+                }
+                return remote_mount(&name, &volume, &guest, rw);
             }
             mount(&name, &volume, host.as_deref(), &guest, rw)
         }
         VolumeCmd::Ls { name, json, remote } => {
             if remote {
-                return remote_stub("volume ls");
+                return remote_ls(&name, json);
             }
             ls(&name, json)
         }
@@ -182,7 +264,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             remote,
         } => {
             if remote {
-                return remote_stub("volume unmount");
+                return remote_unmount(&name, &guest_path);
             }
             unmount(&name, &guest_path)
         }
@@ -565,8 +647,227 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remote_stub(op: &str) -> Result<()> {
-    bail!("{op} --remote not yet implemented. Use the local volume registry for now.")
+struct RemoteContext {
+    client: GatewayBackend,
+    tenant_id: String,
+}
+
+fn required_remote_env(name: &str) -> Result<String> {
+    let value = std::env::var(name)
+        .with_context(|| format!("{name} is required for --remote volume operations"))?;
+    if value.trim().is_empty() {
+        bail!("{name} must not be empty for --remote volume operations");
+    }
+    Ok(value)
+}
+
+fn remote_context() -> Result<RemoteContext> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let base_url = required_remote_env("MVM_GATEWAY_URL")?;
+    let token = required_remote_env("MVM_GATEWAY_TOKEN")?;
+    let tenant_id = required_remote_env("MVM_TENANT_ID")?;
+    let client =
+        GatewayBackend::new(GatewayConfig { base_url, token }).map_err(anyhow::Error::from)?;
+    Ok(RemoteContext { client, tenant_id })
+}
+
+fn remote_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building remote volume client runtime")
+}
+
+fn remote_size_gib(size: &str) -> Result<u32> {
+    let size_mib = mvm_core::util::parse_human_size(size)
+        .with_context(|| format!("invalid remote volume size {size:?}"))?;
+    if size_mib == 0 {
+        bail!("remote volume size must be at least 1 MiB");
+    }
+    Ok(size_mib.div_ceil(1024))
+}
+
+fn remote_create(
+    volume_name: &str,
+    size: &str,
+    bucket: Option<&str>,
+    storage_class: Option<&str>,
+) -> Result<()> {
+    let context = remote_context()?;
+    let mut builder = RemoteVolumeCreate::builder(volume_name, remote_size_gib(size)?);
+    if let Some(bucket) = bucket {
+        builder = builder.bucket(bucket);
+    }
+    if let Some(storage_class) = storage_class {
+        builder = builder.storage_class(storage_class);
+    }
+    let request = builder.build().map_err(anyhow::Error::from)?;
+    let volume = remote_runtime()?
+        .block_on(
+            context
+                .client
+                .create_remote_volume(&context.tenant_id, &request),
+        )
+        .map_err(anyhow::Error::from)?;
+    println!("{}", serde_json::to_string_pretty(&volume)?);
+    Ok(())
+}
+
+fn remote_catalog(json: bool) -> Result<()> {
+    let context = remote_context()?;
+    let volumes = remote_runtime()?
+        .block_on(context.client.list_remote_volumes(&context.tenant_id))
+        .map_err(anyhow::Error::from)?;
+    print_remote_volumes(&volumes, json)
+}
+
+fn print_remote_volumes(volumes: &[RemoteVolume], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(volumes)?);
+        return Ok(());
+    }
+    for volume in volumes {
+        let attached = volume.attached_instance_id.as_deref().unwrap_or("-");
+        println!(
+            "{}\t{}\t{} GiB\tattached={attached}",
+            volume.volume_id, volume.name, volume.size_gib
+        );
+    }
+    Ok(())
+}
+
+fn remote_snapshot(volume_id: &str, snapshot_name: &str) -> Result<()> {
+    let context = remote_context()?;
+    let snapshot = remote_runtime()?
+        .block_on(context.client.create_remote_volume_snapshot(
+            &context.tenant_id,
+            volume_id,
+            snapshot_name,
+        ))
+        .map_err(anyhow::Error::from)?;
+    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    Ok(())
+}
+
+fn remote_restore(source_volume_id: &str, snapshot_id: &str, target_name: &str) -> Result<()> {
+    let context = remote_context()?;
+    let volume = remote_runtime()?
+        .block_on(context.client.restore_remote_volume(
+            &context.tenant_id,
+            source_volume_id,
+            snapshot_id,
+            target_name,
+        ))
+        .map_err(anyhow::Error::from)?;
+    println!("{}", serde_json::to_string_pretty(&volume)?);
+    Ok(())
+}
+
+fn remote_delete(volume_id: &str) -> Result<()> {
+    let context = remote_context()?;
+    remote_runtime()?
+        .block_on(
+            context
+                .client
+                .delete_remote_volume(&context.tenant_id, volume_id),
+        )
+        .map_err(anyhow::Error::from)?;
+    println!("Deleted remote volume {volume_id}");
+    Ok(())
+}
+
+fn remote_mount(
+    instance_id: &str,
+    volume_id: &str,
+    guest_path: &str,
+    writable: bool,
+) -> Result<()> {
+    validate_mount_path(guest_path).context("invalid remote guest mount path")?;
+    let context = remote_context()?;
+    let request = RemoteVolumeMount::new(volume_id, instance_id, guest_path).writable(writable);
+    let attachment = remote_runtime()?
+        .block_on(
+            context
+                .client
+                .attach_remote_volume(&context.tenant_id, &request),
+        )
+        .map_err(anyhow::Error::from)?;
+    println!("{}", serde_json::to_string_pretty(&attachment)?);
+    Ok(())
+}
+
+fn remote_ls(instance_id: &str, json: bool) -> Result<()> {
+    let context = remote_context()?;
+    let runtime = remote_runtime()?;
+    let attachments = runtime.block_on(async {
+        let volumes = context
+            .client
+            .list_remote_volumes(&context.tenant_id)
+            .await?;
+        let mut attachments = Vec::new();
+        for volume in volumes
+            .into_iter()
+            .filter(|volume| volume.attached_instance_id.as_deref() == Some(instance_id))
+        {
+            attachments.push(
+                context
+                    .client
+                    .remote_volume_attachment(&context.tenant_id, &volume.volume_id)
+                    .await?,
+            );
+        }
+        Ok::<_, mvm_core::client::MvmError>(attachments)
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&attachments)?);
+    } else {
+        for attachment in attachments {
+            println!(
+                "{}\t{}\tread_only={}\tfencing_token={}",
+                attachment.volume_id,
+                attachment.device_path,
+                attachment.read_only,
+                attachment.fencing_token
+            );
+        }
+    }
+    Ok(())
+}
+
+fn remote_unmount(instance_id: &str, guest_path: &str) -> Result<()> {
+    let context = remote_context()?;
+    let runtime = remote_runtime()?;
+    let volume_id = runtime.block_on(async {
+        let volumes = context
+            .client
+            .list_remote_volumes(&context.tenant_id)
+            .await?;
+        for volume in volumes
+            .into_iter()
+            .filter(|volume| volume.attached_instance_id.as_deref() == Some(instance_id))
+        {
+            let attachment = context
+                .client
+                .remote_volume_attachment(&context.tenant_id, &volume.volume_id)
+                .await?;
+            if attachment.device_path == guest_path {
+                return Ok::<_, mvm_core::client::MvmError>(Some(volume.volume_id));
+            }
+        }
+        Ok(None)
+    })?;
+    let volume_id = volume_id.with_context(|| {
+        format!("no remote volume is mounted at {guest_path:?} on instance {instance_id:?}")
+    })?;
+    runtime
+        .block_on(
+            context
+                .client
+                .detach_remote_volume(&context.tenant_id, &volume_id),
+        )
+        .map_err(anyhow::Error::from)?;
+    println!("Detached remote volume {volume_id}");
+    Ok(())
 }
 
 fn validate_volume_name(name: &str) -> Result<()> {

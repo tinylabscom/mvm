@@ -9,7 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-mvm-core.workspace = true
+mvm-core = { workspace = true, features = ["client-remote"] }
 mvm-agentd.workspace = true
 mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }

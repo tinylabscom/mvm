@@ -243,9 +243,9 @@ repository's documented transitive exceptions, and cargo-deny.
 
 ## WS5 — Remote CLI, API, policy, and observability
 
-- [ ] Replace mvmctl's `--remote` volume stub with the authenticated mvmd client
+- [x] Replace mvmctl's `--remote` volume stub with the authenticated mvmd client
       for create/list/mount/unmount/checkpoint/snapshot/restore/delete.
-- [ ] Keep CLI business logic in the library/client seam, return typed errors,
+- [x] Keep CLI business logic in the library/client seam, return typed errors,
       and preserve local-mode behavior without provider credentials on the dev
       machine.
 - [ ] Enforce tenant/workspace scope, RBAC, quotas, mount policy, attachment
@@ -260,6 +260,19 @@ repository's documented transitive exceptions, and cargo-deny.
 - [ ] Add API/CLI BDD coverage for success, authorization refusal, quota refusal,
       conflict, retry, provider outage, integrity refusal, and backward-compatible
       payloads.
+
+WS5 client evidence (2026-08-02): `GatewayBackend` now owns the authenticated
+tenant-volume request/response seam, percent-encodes authority/resource path
+components, refuses cleartext non-loopback endpoints, maps authorization,
+conflict, validation, and availability failures to typed facade errors, and
+redacts the bearer token. `mvmctl volume --remote` covers create, catalog,
+mount, list, unmount, checkpoint/snapshot, restore-to-new-volume, and delete
+using `MVM_GATEWAY_URL`, `MVM_GATEWAY_TOKEN`, and `MVM_TENANT_ID`; provider
+credentials remain fleet-only. Twenty-one gateway client tests, including the authenticated
+loopback HTTP round trip, nine local/remote CLI parse tests, touched-crate
+checks, all-target Clippy with warnings denied, and the complete 115-scenario /
+523-step BDD suite pass. The remaining WS5 boxes are mvmd boundary
+policy/audit/metrics plus the full remote API refusal matrix.
 
 ## WS6 — Live provider and microVM proof
 

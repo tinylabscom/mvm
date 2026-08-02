@@ -16,6 +16,12 @@ pub enum MvmError {
     Backend { reason: String },
     #[error("unauthorized: {reason}")]
     Unauthorized { reason: String },
+    #[error("conflict: {reason}")]
+    Conflict { reason: String },
+    #[error("request rejected: {reason}")]
+    Rejected { reason: String },
+    #[error("service unavailable: {reason}")]
+    Unavailable { reason: String },
 }
 
 #[cfg(test)]
