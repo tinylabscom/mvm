@@ -505,6 +505,22 @@ fn finish_firecracker_kill(
     }
 }
 
+/// Resolve the externally visible state from a captured Firecracker PID and
+/// an ownership-independent liveness probe. Keeping the probe injectable makes
+/// the root-owned-process behavior deterministic on hosts without Firecracker.
+fn firecracker_status_with(
+    pid: Option<u32>,
+    is_running: impl FnOnce(u32) -> Result<bool>,
+) -> Result<VmStatus> {
+    if let Some(pid) = pid
+        && is_running(pid)?
+    {
+        Ok(VmStatus::Running)
+    } else {
+        Ok(VmStatus::Stopped)
+    }
+}
+
 impl VmmDriver for FcDriver {
     fn name(&self) -> &str {
         self.backend.name()
@@ -909,13 +925,7 @@ impl RunningVm for FcRunningVm {
         // running-VM's `libc::kill(pid, 0)` probe returns EPERM from a non-root
         // mvmctl and would misreport a live VM as Stopped. Probe ownership-
         // independently via /proc/<pid>/comm, reusing FC's own liveness helper.
-        if let Some(pid) = self.pid
-            && crate::firecracker::is_firecracker_pid_running(pid)?
-        {
-            Ok(VmStatus::Running)
-        } else {
-            Ok(VmStatus::Stopped)
-        }
+        firecracker_status_with(self.pid, crate::firecracker::is_firecracker_pid_running)
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -1370,30 +1380,31 @@ mod tests {
         assert_eq!(vm.status().unwrap(), VmStatus::Stopped);
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[test]
     fn status_uses_the_ownership_independent_probe_not_libc_kill() {
         // A sudo-launched Firecracker runs as root, so libc::kill(pid, 0) from a
         // non-root mvmctl returns EPERM and would misreport a live VM as Stopped.
         // status must instead honour the /proc/<pid>/comm probe: "yes" ⇒ Running.
-        let vm = FcRunningVm {
-            id: VmId("root-vm".into()),
-            state_dir: PathBuf::from("/state/root-vm"),
-            pid_file: PathBuf::from("/state/root-vm/fc.pid"),
-            pid: Some(4242),
-            vsock_uds: "/state/root-vm/runtime/v.sock".into(),
-        };
-        let running = crate::base::shell_mock::install_handler(|_| {
-            crate::base::shell_mock::MockResponse::ok("yes")
-        });
-        assert_eq!(vm.status().unwrap(), VmStatus::Running);
-        drop(running);
+        assert_eq!(
+            firecracker_status_with(Some(4242), |pid| {
+                assert_eq!(pid, 4242);
+                Ok(true)
+            })
+            .unwrap(),
+            VmStatus::Running
+        );
+        assert_eq!(
+            firecracker_status_with(Some(4242), |_| Ok(false)).unwrap(),
+            VmStatus::Stopped
+        );
+        assert_eq!(
+            firecracker_status_with(None, |_| unreachable!("no PID must skip the probe")).unwrap(),
+            VmStatus::Stopped
+        );
 
-        let stopped = crate::base::shell_mock::install_handler(|_| {
-            crate::base::shell_mock::MockResponse::ok("no")
-        });
-        assert_eq!(vm.status().unwrap(), VmStatus::Stopped);
-        drop(stopped);
+        let err = firecracker_status_with(Some(4242), |_| anyhow::bail!("probe failed"))
+            .expect_err("probe failures must remain visible");
+        assert!(err.to_string().contains("probe failed"));
     }
 
     #[test]
@@ -1421,37 +1432,40 @@ mod tests {
         assert!(!pid_file.exists(), "pid marker must be removed on kill");
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn termination_tracks_the_captured_pid_after_the_marker_disappears() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    fn kill_tracks_the_captured_pid_after_the_marker_disappears() {
+        use std::cell::{Cell, RefCell};
 
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("fc.pid");
         std::fs::write(&pid_file, "4242").unwrap();
-        let probes = Arc::new(AtomicUsize::new(0));
-        let handler_probes = Arc::clone(&probes);
-        let marker = pid_file.clone();
-        let _guard = crate::base::shell_mock::install_handler(move |script| {
-            if script.starts_with("cat ") {
-                return crate::base::shell_mock::MockResponse::ok("4242");
-            }
-            if script.contains("sudo kill") {
-                std::fs::remove_file(&marker).unwrap();
-                assert!(script.contains("sudo kill 4242"));
-                assert!(!script.contains("fc.pid"));
-                return crate::base::shell_mock::MockResponse::ok("");
-            }
-            assert!(script.contains("/proc/4242/comm"));
-            let probe = handler_probes.fetch_add(1, Ordering::SeqCst);
-            crate::base::shell_mock::MockResponse::ok(if probe == 0 { "yes" } else { "no" })
-        });
-
-        terminate_firecracker_pid("marker-race-vm", 4242, &pid_file)
+        let captured_pid = 4242;
+        let probes = Cell::new(0usize);
+        let signals = RefCell::new(Vec::new());
+        let base = Instant::now();
+        let outcome = escalate_kill(
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+            || {
+                assert_eq!(captured_pid, 4242);
+                let probe = probes.get();
+                probes.set(probe + 1);
+                Ok(probe == 0)
+            },
+            |signal| {
+                assert_eq!(captured_pid, 4242);
+                std::fs::remove_file(&pid_file).unwrap();
+                signals.borrow_mut().push(signal);
+            },
+            || base,
+            |_| {},
+        )
+        .unwrap();
+        finish_firecracker_kill("marker-race-vm", captured_pid, &pid_file, outcome)
             .expect("marker loss must not lose the captured process identity");
 
-        assert_eq!(probes.load(Ordering::SeqCst), 2);
+        assert_eq!(probes.get(), 2);
+        assert_eq!(*signals.borrow(), vec![FcStopSignal::Terminate]);
         assert!(!pid_file.exists());
     }
 
