@@ -392,8 +392,9 @@ with the opposite default: denied unless the signed plan grants it.
 **Tech stack:** Rust, `mvm-protocol` (`no_std` + alloc), `mvm-core::transcript`
 (AEAD + RFC-6962 Merkle), `mvm-hostd` broker daemon, vsock, `cargo nextest`.
 
-**Phase boundary:** Phase 1 (T1–T10) ships standalone — live output on every
-backend. Phase 2 (T11–T16) adds the input plane. Two PRs is a legitimate split.
+**Phase boundary:** Phase 1 (T1–T5, T5b, T6–T10) ships standalone — live output
+on every backend. Phase 2 (T11–T16) adds the input plane. Two PRs is a
+legitimate split.
 
 ## Global constraints
 
@@ -871,6 +872,84 @@ git commit -am "feat(agent): decode and emit fd-3 control records"
 
 ---
 
+### Task 5b: stream the entrypoint RPC response
+
+Added during execution. Task 4 proved the plan was wrong to assume this was
+free: the pump streams to its sink, but `execute()`'s sink accumulates into
+`CapturedOutput` and `handle_run_entrypoint` replays the buffers after
+`execute()` returns. So the producer is unbuffered and the transport is not —
+no user sees live output until this lands.
+
+**Files:**
+- Modify: `crates/mvm-agentd/src/bin/mvm-guest-agent/handlers.rs`
+  (`handle_run_entrypoint_request`)
+- Modify: `crates/mvm-agentd/src/entrypoint.rs` (`execute` sink seam)
+- Test: `crates/mvm-agentd/src/vsock/rpc.rs` trailing tests
+
+**Interfaces:**
+- Consumes: `pump_child`, `PumpOutcome` (T4); `EntrypointEvent` (existing).
+- Produces: `execute_streaming(req, sink: &mut dyn FnMut(EntrypointEvent))` —
+  the streaming form. The retaining form stays for callers that genuinely want
+  a buffered outcome (warm-pool prewarm, probes); it becomes a thin wrapper
+  that passes a collecting sink, so there is one execution path, not two.
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+#[test]
+fn entrypoint_rpc_frames_reach_the_host_before_the_child_exits() {
+    // Same shape as the pump's regression guard, one layer up: the transport
+    // must not re-buffer what the pump took care to stream.
+    let (mut host, guest) = loopback_pair();
+    std::thread::spawn(move || {
+        serve_one_run_entrypoint(guest, "printf early; sleep 3")
+    });
+    let first = host
+        .read_frame_timeout(Duration::from_millis(1500))
+        .expect("a frame must arrive well before the child exits");
+    match first {
+        GuestResponse::EntrypointEvent(EntrypointEvent::Stdout { chunk }) => {
+            assert_eq!(chunk, b"early")
+        }
+        other => panic!("expected a stdout frame, got {other:?}"),
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo nextest run -p mvm-agentd rpc::entrypoint -j 6`
+Expected: FAIL — the frame arrives only after the child exits, so the read
+times out.
+
+- [ ] **Step 3: Implement**
+
+Thread the response writer into the sink so each `EntrypointEvent` is framed
+and written as it arrives. Preserve the two contracts the wire already has:
+ordering within a stream is exact, and exactly one terminal `Exit` or `Error`
+event ends the response per call. Interleaving between stdout and stderr now
+reflects arrival order rather than replay order — that is the intended change,
+not a regression.
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cargo nextest run -p mvm-agentd -j 6`
+Expected: PASS across the crate, including the warm-pool and probe callers that
+still want a buffered outcome.
+
+- [ ] **Step 5: Confirm a slow host does not stall the workload**
+
+The host reading slowly must not block the guest's child. Add a test with a
+deliberately slow frame reader asserting the child still exits on time.
+
+- [ ] **Step 6: Commit**
+
+```sh
+git commit -am "feat(agent): stream entrypoint events over the RPC as they arrive"
+```
+
+---
+
 ### Task 6: host broker ingests, redacts, chains, and fans out
 
 **Files:**
@@ -1108,10 +1187,11 @@ the bug reappears.
 
 - [ ] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-cli` — PASS.
 
-- [ ] **Step 5: Confirm `invoke` now streams**
+- [ ] **Step 5: Confirm `invoke` streams end to end**
 
-T4 unbuffered the producer and `invoke.rs:619` already writes chunks on arrival,
-so this needs no new code — only a test proving output appears before exit.
+Task 5b wired the RPC response; this step only proves the CLI end is honest.
+Add a test that output appears before the child exits, not merely that it
+appears.
 
 Run: `cargo nextest run -p mvm-cli invoke`
 Expected: PASS.
