@@ -22,8 +22,11 @@
       mutable host-signing key.
       The remaining delivery merged in #2045, closing #1937, #1972, #1983,
       and #2035; #2039 merged separately in #2041. The #2042 helper-lifecycle
-      repair is implemented and validated; #2040 and #2048 remain explicit
-      follow-up work.
+      repair merged in #2051. #2050 also resolved the BusyBox-mediated-tool
+      defect reported as #2052, and the exact Apple-container E2E now passes on
+      current main, closing #2054. #2048 now caches confirmed default-release
+      404s per version and architecture for 24 hours while mirrors and transient
+      failures remain retryable. #2040 remains the final open epic.
       Tracked in plan 284.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
