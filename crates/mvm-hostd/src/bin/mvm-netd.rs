@@ -153,11 +153,40 @@ const DATAPATH: mio::Token = mio::Token(1);
 /// the same starvation this loop exists to remove, pointed the other way.
 const MAX_GUEST_READS_PER_PASS: usize = 32;
 
+/// How long the guest may leave the data channel with no room before the
+/// tunnel is dropped.
+///
+/// Measured from the last byte the guest actually accepted, so a slow guest
+/// that keeps draining is never penalised; only one that has stopped
+/// entirely trips it. Generous against the agent, which polls its own data
+/// socket on a one-second timeout and always drains what it finds.
+const WRITE_STALL_DEADLINE: Duration = Duration::from_secs(10);
+
 /// Whether the tunnel is still carrying traffic.
 #[derive(Debug, PartialEq, Eq)]
 enum Session {
     Live,
     Ended,
+}
+
+/// What a wait for room on the guest data channel observed.
+#[derive(Debug, PartialEq, Eq)]
+enum Writability {
+    /// There is room now.
+    Ready,
+    /// The tick expired with no room. Says nothing about the guest's health.
+    TimedOut,
+    /// The guest end is closed or errored.
+    PeerGone,
+}
+
+/// What became of a frame handed to the guest.
+#[derive(Debug, PartialEq, Eq)]
+enum Delivery {
+    Sent,
+    /// The guest is gone, or has stopped reading for long enough to count as
+    /// gone. Either way the session is over.
+    GuestGone,
 }
 
 /// What a drain of the guest data channel concluded.
@@ -315,7 +344,11 @@ fn drive(
             log_event(&event);
         }
         for frame in gateway.take_guest_frames() {
-            write_frame(data, data_fd, &frame).context("writing to the guest")?;
+            let delivered = write_frame(data, data_fd, &frame, WRITE_STALL_DEADLINE)
+                .context("writing to the guest")?;
+            if delivered == Delivery::GuestGone {
+                return Ok(());
+            }
         }
         data.flush().ok();
         gateway.tick(now);
@@ -336,6 +369,9 @@ fn drain_guest_data(
 ) -> Result<GuestChannel> {
     let mut reads = 0;
     while reads < MAX_GUEST_READS_PER_PASS {
+        // Charged before the read, so a signal storm spends the budget the
+        // same way traffic does and cannot spin here forever.
+        reads += 1;
         let n = match data.read(buf) {
             Ok(0) => return Ok(GuestChannel::Ended),
             Ok(n) => n,
@@ -345,7 +381,6 @@ fn drain_guest_data(
             }
             Err(err) => return Err(err).context("reading the data channel"),
         };
-        reads += 1;
         match gateway.ingest_data_bytes(&buf[..n], now) {
             Ok(events) => {
                 for event in &events {
@@ -367,28 +402,52 @@ fn drain_guest_data(
 ///
 /// The descriptor is non-blocking for the sake of the read side, so
 /// back-pressure surfaces here as `WouldBlock`. Waiting is the only correct
-/// answer: dropping a frame mid-write would desynchronize the framing, and
-/// re-sending one already partly written would duplicate bytes.
+/// answer for a frame already part-written: dropping it would desynchronize
+/// the framing, and re-sending it would duplicate bytes.
+///
+/// `stall_deadline` bounds that wait. A guest that simply stops reading its
+/// data socket would otherwise park this loop forever — no inbound service,
+/// no expiry tick, and a flow table that fills and then denies every new
+/// flow even after the guest recovers. A guest must not be able to choose
+/// that, so past the deadline the tunnel is dropped. Progress or teardown,
+/// never a wedge.
 fn write_frame(
     data: &mut dyn mvm_net::channel::GuestStream,
     data_fd: RawFd,
     frame: &[u8],
-) -> Result<()> {
+    stall_deadline: Duration,
+) -> Result<Delivery> {
     let mut sent = 0;
+    let mut last_progress = std::time::Instant::now();
     while sent < frame.len() {
         match data.write(&frame[sent..]) {
             Ok(0) => return Err(anyhow!("the guest data channel accepted no bytes")),
-            Ok(n) => sent += n,
+            Ok(n) => {
+                sent += n;
+                last_progress = std::time::Instant::now();
+            }
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => wait_writable(data_fd)?,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                match wait_writable(data_fd)? {
+                    Writability::Ready => {}
+                    Writability::PeerGone => return Ok(Delivery::GuestGone),
+                    Writability::TimedOut if last_progress.elapsed() >= stall_deadline => {
+                        eprintln!(
+                            "mvm-netd: dropping the tunnel: the guest stopped reading its data channel"
+                        );
+                        return Ok(Delivery::GuestGone);
+                    }
+                    Writability::TimedOut => {}
+                }
+            }
             Err(err) => return Err(err.into()),
         }
     }
-    Ok(())
+    Ok(Delivery::Sent)
 }
 
 /// Wait for room on the guest data channel, bounded by the tick.
-fn wait_writable(fd: RawFd) -> Result<()> {
+fn wait_writable(fd: RawFd) -> Result<Writability> {
     let mut pollfd = libc::pollfd {
         fd,
         events: libc::POLLOUT,
@@ -399,11 +458,20 @@ fn wait_writable(fd: RawFd) -> Result<()> {
     let rc = unsafe { libc::poll(&mut pollfd, 1, TICK_MILLIS) };
     if rc < 0 {
         let err = std::io::Error::last_os_error();
-        if err.kind() != std::io::ErrorKind::Interrupted {
-            return Err(err).context("waiting for room on the guest data channel");
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(Writability::TimedOut);
         }
+        return Err(err).context("waiting for room on the guest data channel");
     }
-    Ok(())
+    if rc == 0 {
+        return Ok(Writability::TimedOut);
+    }
+    // Checked before writability: a closed or errored peer can report both,
+    // and treating that as room would spin until the write returns EPIPE.
+    if pollfd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return Ok(Writability::PeerGone);
+    }
+    Ok(Writability::Ready)
 }
 
 fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
@@ -647,17 +715,27 @@ mod tests {
             .with_privilege_dropper(Box::new(RecordingPrivilegeDropper::default()))
     }
 
-    /// A guest that dribbles bytes and never stops. Announces a legal frame
-    /// length and then never completes it, so nothing is ever malformed and
-    /// nothing is ever finished.
-    struct EndlessGuest {
-        announced: bool,
+    /// Reads a `StreamingGuest` serves before going quiet. Comfortably past
+    /// the drain's budget, so `Backlogged` can only mean the budget cut the
+    /// drain off first — and removing the budget produces a failed assertion
+    /// rather than a test that never returns.
+    const STREAMING_GUEST_READS: usize = 64;
+
+    /// A guest that dribbles bytes far faster than the loop wants to read
+    /// them. Announces a legal frame length and then never completes it, so
+    /// nothing is ever malformed and nothing is ever finished.
+    #[derive(Default)]
+    struct StreamingGuest {
+        reads: usize,
     }
 
-    impl std::io::Read for EndlessGuest {
+    impl std::io::Read for StreamingGuest {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if !self.announced {
-                self.announced = true;
+            if self.reads >= STREAMING_GUEST_READS {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            self.reads += 1;
+            if self.reads == 1 {
                 let len = u32::try_from(mvm_protocol::l3::limits::MAX_FRAME_LEN).expect("len");
                 buf[..4].copy_from_slice(&len.to_be_bytes());
                 return Ok(4);
@@ -667,7 +745,36 @@ mod tests {
         }
     }
 
-    impl std::io::Write for EndlessGuest {
+    impl std::io::Write for StreamingGuest {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A channel that reports an interrupted syscall far more often than the
+    /// drain's budget allows, then goes quiet. Bounded for the same reason
+    /// `StreamingGuest` is: an unbounded storm would make the regression
+    /// hang instead of fail.
+    #[derive(Default)]
+    struct SignalStorm {
+        reads: usize,
+    }
+
+    impl std::io::Read for SignalStorm {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.reads >= STREAMING_GUEST_READS {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            self.reads += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        }
+    }
+
+    impl std::io::Write for SignalStorm {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             Ok(buf.len())
         }
@@ -687,19 +794,107 @@ mod tests {
         let mut gateway = open_gateway(&config, &network);
         let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
 
-        let drained = drain_guest_data(
-            &mut gateway,
-            &mut EndlessGuest { announced: false },
-            &mut buf,
-            0,
-        )
-        .expect("a guest that keeps sending is not an error");
+        let drained = drain_guest_data(&mut gateway, &mut StreamingGuest::default(), &mut buf, 0)
+            .expect("a guest that keeps sending is not an error");
 
         assert_eq!(
             drained,
             GuestChannel::Backlogged,
-            "the drain must yield on its read budget rather than run forever"
+            "the drain must yield on its read budget rather than keep reading \
+             until the guest happens to pause"
         );
+    }
+
+    /// An interrupted syscall must cost the same budget a real read does.
+    /// Uncharged, a signal storm spins in the drain forever and the loop
+    /// never reaches the datapath or the tick.
+    #[test]
+    fn a_signal_storm_cannot_spin_the_drain_forever() {
+        let config = test_config("netd-eintr");
+        let network = QueuedNetwork::default();
+        let mut gateway = open_gateway(&config, &network);
+        let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
+
+        let drained = drain_guest_data(&mut gateway, &mut SignalStorm::default(), &mut buf, 0)
+            .expect("an interrupted read is not an error");
+
+        assert_eq!(
+            drained,
+            GuestChannel::Backlogged,
+            "an interrupted read must be charged against the read budget"
+        );
+    }
+
+    /// Fill a socket's send buffer so the next write reports `WouldBlock`.
+    fn fill_send_buffer(stream: &mut UnixStream) {
+        set_nonblocking(stream.as_raw_fd()).expect("non-blocking");
+        let junk = vec![0u8; 64 * 1024];
+        loop {
+            match std::io::Write::write(stream, &junk) {
+                Ok(0) => return,
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(err) => panic!("filling the send buffer: {err}"),
+            }
+        }
+    }
+
+    /// A guest that stops reading its data channel must not be able to park
+    /// the loop in a write. Everything time-driven — inbound service, flow
+    /// expiry — lives after this call, so an unbounded wait here lets a
+    /// guest fill the flow table and then deny itself every new flow.
+    #[test]
+    fn a_guest_that_stops_reading_is_dropped_rather_than_parking_the_loop() {
+        let (mut host, guest) = UnixStream::pair().expect("data pair");
+        let host_fd = host.as_raw_fd();
+        fill_send_buffer(&mut host);
+
+        // Off-thread with a bound, so losing the deadline is a failed
+        // assertion rather than a test that never returns.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The guest end is alive and healthy — it simply never reads.
+            let _guest = guest;
+            let _ = tx.send(write_frame(&mut host, host_fd, b"a frame", Duration::ZERO));
+        });
+
+        let delivered = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the write must give up on its deadline instead of waiting forever")
+            .expect("a stalled guest is a dropped tunnel, not a host error");
+
+        assert_eq!(delivered, Delivery::GuestGone);
+    }
+
+    /// A half-closed peer must be distinguishable from a slow one: it
+    /// reports `POLLHUP` alongside writability, and treating that as room
+    /// would spin until the write finally returned `EPIPE`.
+    #[test]
+    fn a_closed_guest_end_is_reported_as_gone_not_as_room() {
+        let (host, guest) = UnixStream::pair().expect("data pair");
+        let host_fd = host.as_raw_fd();
+        drop(guest);
+
+        assert_eq!(
+            wait_writable(host_fd).expect("polling a closed peer is not an error"),
+            Writability::PeerGone
+        );
+    }
+
+    /// A guest that is simply slow, and still reading, is not dropped.
+    #[test]
+    fn a_guest_with_room_is_written_to_without_waiting() {
+        let (mut host, mut guest) = UnixStream::pair().expect("data pair");
+        let host_fd = host.as_raw_fd();
+        set_nonblocking(host_fd).expect("non-blocking");
+
+        let delivered = write_frame(&mut host, host_fd, b"a frame", Duration::ZERO)
+            .expect("writing to a healthy guest");
+
+        assert_eq!(delivered, Delivery::Sent);
+        let mut got = [0u8; 7];
+        std::io::Read::read_exact(&mut guest, &mut got).expect("the guest receives it");
+        assert_eq!(&got, b"a frame");
     }
 
     /// The defect this pins: the old loop blocked on the guest data channel
