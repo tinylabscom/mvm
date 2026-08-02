@@ -70,6 +70,7 @@ Feature: Encrypted block volume lifecycle and attachment
   @live @firecracker
   Scenario: a writable block volume persists guest bytes across restart
     Given an isolated mvm home
+    And a cached live workload kernel
     When I run mvmctl in the isolated mvm home with "machine create --name bdd-persistent-volume --image alpine"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"
@@ -95,6 +96,7 @@ Feature: Encrypted block volume lifecycle and attachment
   @live @firecracker
   Scenario: a read-only block attachment refuses a guest write
     Given an isolated mvm home
+    And a cached live workload kernel
     When I run mvmctl in the isolated mvm home with "machine create --name bdd-readonly-volume --image alpine"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"

@@ -35,6 +35,34 @@ fn managed_volume_path(world: &CliWorld, volume_name: &str) -> PathBuf {
     )
 }
 
+#[given("a cached live workload kernel")]
+fn cached_live_workload_kernel(world: &mut CliWorld) {
+    let source = PathBuf::from(
+        std::env::var_os("MVM_BDD_WORKLOAD_KERNEL")
+            .expect("MVM_BDD_WORKLOAD_KERNEL must name the live workload kernel"),
+    );
+    assert!(
+        source.is_file(),
+        "MVM_BDD_WORKLOAD_KERNEL does not name a file: {source:?}"
+    );
+    let destination = isolated_home(world)
+        .join("cache")
+        .join("builder-vm")
+        .join(std::env::consts::ARCH)
+        .join("kernels")
+        .join("workload")
+        .join("vmlinux");
+    fs::create_dir_all(
+        destination
+            .parent()
+            .expect("workload kernel cache path has a parent"),
+    )
+    .expect("create isolated workload kernel cache");
+    fs::copy(&source, &destination).unwrap_or_else(|error| {
+        panic!("copy live workload kernel {source:?} to {destination:?}: {error}")
+    });
+}
+
 #[when(expr = "I write byte {int} to the end of managed volume {string}")]
 fn write_managed_volume_marker(world: &mut CliWorld, value: i64, volume_name: String) {
     let value = u8::try_from(value).expect("volume marker must fit in one byte");
