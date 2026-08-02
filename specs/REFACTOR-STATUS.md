@@ -6,14 +6,14 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
-- [ ] Plan 285 — HVF virtio-rng
+- [x] Plan 285 — HVF virtio-rng
       (`specs/plans/285-hvf-virtio-rng.md`, issue #2060)
   - [x] Portable bounded virtio-mmio entropy device and negative tests
   - [x] HVF FDT/run-loop wiring while retaining the early boot seed
   - [x] Live HVF guest binds `virtio_rng.0` and serves distinct entropy reads
-  - [ ] Full gates, merge, and issue closeout
+  - [x] Full gates, merge, and issue closeout
 
-- [ ] Plan 284 — Zero-open-issue reconciliation
+- [x] Plan 284 — Zero-open-issue reconciliation
       (`specs/plans/284-zero-open-issue-reconciliation.md`)
   - [x] Classify and reconcile the original 19 open issues
   - [x] Land the queued fixes for #2007, #2028, and #2029
@@ -24,16 +24,18 @@ for detailed scope and acceptance criteria.
   - [x] Repair newly filed #2048
   - [x] Resolve newly filed #2052 through the merged shared guest-bootstrap fix
   - [x] Revalidate and close newly filed #2054 on current main
-  - [ ] Execute the refiled volume epic #2040
+  - [x] Execute the refiled volume epic #2040
+  - [x] Verify the repository has zero open GitHub issues
 
-- [ ] Plan 283 — Production object-store volumes
+- [x] Plan 283 — Production object-store volumes
       (`specs/plans/283-production-object-store-volumes.md`, issue #2040)
   - [x] Canonical mvm contract and dead S3-path removal
   - [x] Live local/block attachment through the admitted VM launch path
   - [x] mvmd OpenDAL → `object_store` migration with mandatory encryption
   - [x] Authenticated remote volume CLI/client lifecycle with typed failures
-  - [ ] Durable encrypted checkpoint/API policy and cross-worker restore closeout
-  - [ ] MinIO integration plus Linux/KVM persistence and restore proof
+  - [x] Durable encrypted checkpoint/API policy and cross-worker restore closeout
+  - [x] MinIO integration plus Linux/KVM persistence and restore proof
+  - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 
 - [x] Plan 282 — Merge queue auto-requeue
       (`specs/plans/282-merge-queue-auto-requeue.md`)

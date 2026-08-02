@@ -1,6 +1,6 @@
 # HVF virtio-rng
 
-**Status:** In progress.
+**Status:** Complete (2026-08-02).
 
 **Issue:** [#2060](https://github.com/tinylabscom/mvm/issues/2060)
 
@@ -34,9 +34,9 @@ that covers the window before the guest driver probes.
       retain the early boot seed.
 - [x] Boot the current branch on macOS HVF and prove Linux binds `virtio_rng`,
       exposes `/dev/hwrng`, and serves repeated entropy reads after startup.
-- [ ] Run formatting, focused tests, workspace tests/check, all-target Clippy,
+- [x] Run formatting, focused tests, workspace tests/check, all-target Clippy,
       entropy/source gates, and the normal pull-request CI matrix.
-- [ ] Queue and merge the pull request, synchronize `main`, close #2060, and
+- [x] Queue and merge the pull request, synchronize `main`, close #2060, and
       record the final evidence here and in the sprint/status rollups.
 
 Live evidence (2026-08-02): an Alpine 3.20 workload booted through the signed
@@ -44,3 +44,9 @@ HVF supervisor on macOS 26.5.2. The guest reported `virtio_rng.0` in
 `rng_available`, `/dev/hwrng` was a character device, and two successive
 2,048-byte reads completed with distinct SHA-256 digests. The one-shot VM then
 exited and was torn down normally.
+
+PR [#2065](https://github.com/tinylabscom/mvm/pull/2065) merged through the
+queue at `12debbfcb`. Its pull-request and merge-group runs passed formatting,
+all-target Clippy and policy gates, workspace tests, the complete hermetic BDD
+suite, Nix evaluation/build checks, and architecture invariants. GitHub closed
+#2060 from the merge, and synchronized `main` contains the merge commit.
