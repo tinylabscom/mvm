@@ -17,6 +17,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 
 use crate::crypto::aead;
 
+mod ring;
+pub use ring::*;
+
 /// Filename of the host transcript key-encryption key, under the keys dir.
 pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
 
