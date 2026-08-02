@@ -1609,6 +1609,103 @@ Run: `cargo nextest run -p mvm-hostd -p mvm-runtime -p mvm-cli` — PASS
 
 ---
 
+### Task 9c: feed the entrypoint source into the broker
+
+Added during execution. The design's whole premise is two sources feeding one
+stream. Only one is wired. `console_source` is the only production caller of
+`StreamBroker::ingest`, and it tags every record `StreamKind::Stdout`, so
+**nothing ever feeds `StreamSource::Entrypoint`**. The guest's actual stdout and
+stderr — the thing this plan is named for — reach `mvmctl invoke` directly over
+the RPC and never touch the plane.
+
+Two visible consequences today: `mvmctl logs --stream stderr` returns empty
+forever while a plane is up, and the "the console merges stdout and stderr"
+notice that would have explained it is suppressed, because the read resolves
+`LiveOnly` rather than `ConsoleOnly`.
+
+**Files:**
+- Modify: `crates/mvm-hostd/src/stream/plane.rs`, and the host side that
+  consumes `EntrypointEvent` frames from the guest RPC
+- Modify: `crates/mvm-cli/src/commands/vm/logs.rs` (the now-false suppressed notice)
+
+**Interfaces:**
+- Consumes: `EntrypointEvent::{Stdout, Stderr, Control}` from the guest;
+  `StreamBroker::ingest`.
+- Produces: entrypoint frames ingested as `StreamSource::Entrypoint` with their
+  true `StreamKind`, so stdout and stderr stay separable.
+
+- [ ] **Step 1: Write the failing test** — with a plane up, a workload writing
+  to stderr is readable via `--stream stderr`, and stdout and stderr are
+  distinguishable. Must fail today (returns empty).
+
+- [ ] **Step 2: Run to verify it fails.**
+
+- [ ] **Step 3: Implement the ingest.** Do not duplicate the guest's bytes: a
+  record must not arrive twice because it went to both the RPC consumer and the
+  broker. Decide whether the broker becomes the single consumer that `invoke`
+  reads through, or whether the RPC consumer tees — and justify it. Teeing is
+  simpler; routing through the broker is what makes `invoke` and `logs` show the
+  same, redacted, chained bytes.
+
+- [ ] **Step 4: Redaction and chaining still apply.** Entrypoint bytes are
+  workload output and must pass the same single redaction seam as console bytes.
+
+- [ ] **Step 5: Correct the suppressed notice** so it reflects what the read
+  can actually deliver.
+
+- [ ] **Step 6: Commit**
+
+```sh
+git commit -am "feat(hostd): ingest entrypoint output into the stream plane"
+```
+
+---
+
+### Task 9d: seal the transcript for every workload shape
+
+Added during execution. `plane.rs:299` is the only sealer, and `release`
+no-ops for a VM the current process never attached, so a transcript is written
+**only when one process both starts and stops the VM**. `machine run -d`,
+`--json`, `up`, a later `machine stop`, and foreground `machine run` after the
+documented Ctrl-C detach all write no manifest. `read_history` then returns
+`None` and `logs` resolves `ConsoleOnly`, so the verifiable durable half is dead
+weight for every workload shape except a foreground transient run — and
+"capturable when it exits" is met by the unchained console file rather than by
+the chained transcript.
+
+**Files:**
+- Modify: `crates/mvm-hostd/src/stream/plane.rs`
+- Modify: the VM stop path, and whatever owns per-VM state across processes
+
+- [ ] **Step 1: Write the failing tests** — `machine run -d` then `machine stop`
+  leaves a sealed, verifying transcript; the same for `up`; and a foreground run
+  detached with Ctrl-C still seals when the VM later stops. All must fail today.
+
+- [ ] **Step 2: Run to verify they fail.**
+
+- [ ] **Step 3: Give the plane a lifetime that outlives one CLI process.** The
+  broker is per-VM state, not per-invocation state. A process that stops a VM it
+  did not start must be able to seal that VM's capture.
+
+- [ ] **Step 4: Keep the console hook unconditional.** Whatever owns the new
+  lifetime must not be admission-gated, or console capture vanishes on exactly
+  the unadmitted dev runs where a boot failure is most likely.
+
+- [ ] **Step 5: Fold in the teardown defects found reviewing the prior task.**
+  The follower is stopped before `kill()`, so shutdown-time guest writes land in
+  `console.log` and never in the chain — reorder so both hold. The manifest is
+  written with `fs::write` while the sibling sink uses `atomic_write`, and
+  `load_manifest` propagates rather than degrades, so a crash mid-write makes
+  `mvmctl logs` hard-error instead of falling back.
+
+- [ ] **Step 6: Commit**
+
+```sh
+git commit -am "feat(hostd): seal the stream transcript for detached workloads"
+```
+
+---
+
 ### Task 10: retention mode in the signed plan, plus Phase 1 documentation
 
 **Files:**
