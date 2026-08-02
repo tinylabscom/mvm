@@ -327,13 +327,16 @@ application TCP, UDP, and host-terminated DNS. It does not cover raw
 sockets, arbitrary IP protocols, arbitrary ICMP, or multicast, and it does
 not claim to.
 
-**Status: not implemented.** What ships is `MacosUserspaceGateway`: the
-capability declaration (`tcp`, `udp`, `controlled_dns`, `declared_ingress`,
-`userspace_socket_translation`; **not** `full_packet_forwarding`, `icmp`,
-`arbitrary_ipv4`, or `raw_ip_protocols`) plus a refusal at
-`is_available()`. So on macOS today `l3-vsock` is refused at admission with
-a stated reason. It is never degraded, and it is never routed through
-`gvproxy` or any other proxy runtime as an interim.
+**Status: superseded in part by [ADR-037](037-userspace-socket-datapath.md),
+which designs the translator and widens it from a macOS-only backend to a
+platform-neutral unprivileged one.** What shipped with this ADR is
+`MacosUserspaceGateway`: the capability declaration (`tcp`, `udp`,
+`controlled_dns`, `declared_ingress`, `userspace_socket_translation`;
+**not** `full_packet_forwarding`, `icmp`, `arbitrary_ipv4`, or
+`raw_ip_protocols`) plus a refusal at `is_available()`. Until ADR-037
+lands, `l3-vsock` on macOS is refused at admission with a stated reason.
+It is never degraded, and it is never routed through `gvproxy` or any
+other proxy runtime as an interim.
 
 The later full-packet backend needs privileged operations mvm has no helper
 for:
