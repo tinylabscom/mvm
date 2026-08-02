@@ -269,6 +269,34 @@ fn the_netd_process_refuses_a_config_whose_rules_do_not_parse() {
     );
 }
 
+fn test_flow_key() -> mvm_net::l3::FlowKey {
+    mvm_net::l3::FlowKey {
+        protocol: proto::TCP,
+        guest_port: 50000,
+        remote: "93.184.216.34".parse().unwrap(),
+        remote_port: 443,
+    }
+}
+
+/// A flow must expire on wall-clock time, not on how many frames the
+/// guest happened to send. The counter this replaced made a 5-minute
+/// idle timeout mean 300,000 frames.
+#[test]
+fn flows_expire_on_wall_clock_time_not_frame_count() {
+    let mut table = mvm_net::l3::FlowTable::new(mvm_net::l3::FlowLimits::default());
+    let key = test_flow_key();
+    table.observe_outbound(key, 100, 1_000);
+
+    // Two frames later in counter terms, but five minutes later in real
+    // time: the flow must be gone.
+    let expired = table.expire_idle(1_000 + mvm_net::l3::flow::DEFAULT_TCP_IDLE_MILLIS);
+    assert_eq!(
+        expired.len(),
+        1,
+        "an idle TCP flow must expire on elapsed milliseconds"
+    );
+}
+
 fn wait_for_exit(child: &mut Child, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

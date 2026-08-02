@@ -128,7 +128,7 @@ fn serve(
     data: &mut Box<dyn mvm_net::channel::GuestStream>,
 ) -> Result<()> {
     let mut buf = vec![0u8; mvm_protocol::l3::MAX_WIRE_LEN];
-    let mut now: u64 = 0;
+    let start = std::time::Instant::now();
 
     // Handshake: HELLO on control, CONFIG back, then READY.
     loop {
@@ -138,9 +138,8 @@ fn serve(
         if n == 0 {
             return Ok(());
         }
-        now += 1;
         let (reply, events) = gateway
-            .handle_control_frame(&buf[..n], now)
+            .handle_control_frame(&buf[..n], monotonic_millis(start))
             .context("handling a guest control frame")?;
         for event in &events {
             log_event(event);
@@ -169,7 +168,7 @@ fn serve(
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err).context("reading the data channel"),
         };
-        now += 1;
+        let now = monotonic_millis(start);
         match gateway.ingest_data_bytes(&buf[..n], now) {
             Ok(events) => {
                 for event in &events {
@@ -192,6 +191,15 @@ fn serve(
         data.flush().ok();
         gateway.tick(now);
     }
+}
+
+/// Milliseconds since the process's reference instant.
+///
+/// A monotonic source: it cannot jump backwards when the host's wall
+/// clock is corrected, which would otherwise make an idle flow look
+/// arbitrarily young and defer its expiry.
+fn monotonic_millis(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Per-*decision-class* logging. Never a line per packet: the gateway's
