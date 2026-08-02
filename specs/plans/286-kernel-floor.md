@@ -40,9 +40,10 @@ x86_64 built-ins in a 7,656,448-byte `bzImage`, and 1,314 aarch64 built-ins in a
       sandbox/network/filesystem features remain present and boot it to PID 1
       under Firecracker.
 - [x] Build the native aarch64 workload artifact and boot the ARM image through
-      the supported HVF path. The checksum-verified PR artifact contains 938
-      built-ins in an 8,216,584-byte `Image`; the raw-HVF block-root harness
-      reached `Run /init as init process` at 26.7 ms.
+      the supported HVF path. The checksum-verified PR artifact contains 936
+      built-ins in an 8,216,584-byte `Image` (3,339,345 bytes gzip-compressed);
+      the raw-HVF block-root harness reached `Run /init as init process` at
+      36.6 ms.
 - [x] Run format, workspace tests/check, Linux all-target clippy and Nix checks;
       record the final byte and symbol deltas in the sprint and refactor rollup.
 

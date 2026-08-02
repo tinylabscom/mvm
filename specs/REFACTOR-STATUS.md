@@ -12,7 +12,7 @@ for detailed scope and acceptance criteria.
   - [x] Ratchet workload configs to 902 x86_64 / 936 aarch64 built-ins
   - [x] Shrink the x86_64 workload image by 46.8% and boot it on Firecracker
   - [x] Preserve, build and boot the 955-symbol builder-kernel contract
-  - [x] Native 938-symbol aarch64 artifact built and booted to PID 1 on HVF
+  - [x] Native 936-symbol aarch64 artifact built and booted to PID 1 on HVF
   - [ ] Full CI, merge-queue landing and rollup closeout
 
 - [x] Plan 285 — HVF virtio-rng

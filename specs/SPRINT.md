@@ -22,8 +22,9 @@
       netfilter, FUSE and virtio-fs, and its 4,977,664-byte kernel also boots to
       PID 1. Config generation now fails if Kconfig silently restores an
       audited cut. The checksum-verified native aarch64 PR artifact contains
-      exactly 938 built-ins in an 8,216,584-byte `Image`; the raw-HVF
-      block-root harness reached `Run /init as init process` at 26.7 ms.
+      exactly 936 built-ins in an 8,216,584-byte `Image` (3,339,345 bytes
+      gzip-compressed); the raw-HVF block-root harness reached
+      `Run /init as init process` at 36.6 ms.
 
 - [x] Continuous guest entropy — **plan 285 / issue #2060**. A portable
       virtio-rng device now fills bounded, validated guest split-queue buffers
