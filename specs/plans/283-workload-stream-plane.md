@@ -964,7 +964,7 @@ git commit -am "feat(agent): stream entrypoint events over the RPC as they arriv
   `StreamBroker::subscribe(&mut self) -> ReaderHandle`;
   `ReaderHandle::recv(&mut self) -> Option<StreamRecord>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -1026,9 +1026,9 @@ fn a_slow_reader_does_not_stall_ingest() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-hostd stream::broker` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-hostd stream::broker` — FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `ingest` redacts, admits through `RingState`, assigns `seq` and
 `host_unix_nanos`, sets `prev_hash` from the last record, appends via
@@ -1036,9 +1036,11 @@ fn a_slow_reader_does_not_stall_ingest() {
 queue drops that reader's oldest and marks its gap — never blocks ingest. This
 is the one place redaction runs.
 
-- [ ] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-hostd stream::` — PASS, 5 tests.
+- [x] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-hostd stream::` — PASS, 26 tests
+  (the 5 required plus fan-out ring bounds, gap anchoring, transcript
+  round-trip, persist-failure isolation, and the payload-free subscribe audit).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add crates/mvm-hostd/src/stream crates/mvm-hostd/src/lib.rs

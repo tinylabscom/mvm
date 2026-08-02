@@ -124,6 +124,26 @@ pub mod image_audit {
     pub const GENESIS_PARENT: &str = "genesis";
 }
 
+/// Wire-stable event name and label keys for the workload output-stream audit
+/// entries. Shared so the emitter (writer) and any reader cannot drift on a
+/// string.
+///
+/// One entry per *attach*, never per record. Signing every chunk would cost a
+/// signature per write and — worse — turn the audit chain into a second copy
+/// of the workload's output. Who started reading, and from where in the
+/// chain, is the decision worth signing; the bytes stay in the transcript.
+pub mod stream_audit {
+    /// Emitted when a follower attaches to a VM's output stream.
+    pub const SUBSCRIBED_EVENT: &str = "stream.subscribed";
+    /// Label: the VM whose stream was attached to.
+    pub const LABEL_VM_NAME: &str = "vm_name";
+    /// Label: the broker-assigned reader id, unique within one broker.
+    pub const LABEL_READER_ID: &str = "stream_reader_id";
+    /// Label: the stream sequence number the reader starts at. Records
+    /// before it were produced before the attach and are not delivered.
+    pub const LABEL_FROM_SEQ: &str = "stream_from_seq";
+}
+
 /// Extract the `image.created` label set from a node's provenance attributes.
 /// The parent hash-link is recorded as provenance; nothing here is a trust
 /// grant (lineage is provenance, never authorization).
@@ -406,6 +426,31 @@ impl AuditEmitter {
         labels: Vec<(String, String)>,
     ) -> Result<()> {
         self.emit(plan, "plan.oci_provenance", labels)
+    }
+
+    /// Emit `stream.subscribed` — a follower attached to `vm_name`'s output
+    /// stream at `from_seq`.
+    ///
+    /// Payload-free by construction: the labels are the VM name, the reader
+    /// id, and a sequence number, so no captured byte can reach the chain
+    /// through this path however chatty the workload is.
+    pub fn emit_stream_subscribed(
+        &self,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        reader_id: u64,
+        from_seq: u64,
+    ) -> Result<()> {
+        use stream_audit as k;
+        self.emit(
+            plan,
+            k::SUBSCRIBED_EVENT,
+            [
+                (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+                (k::LABEL_READER_ID.to_string(), reader_id.to_string()),
+                (k::LABEL_FROM_SEQ.to_string(), from_seq.to_string()),
+            ],
+        )
     }
 
     /// Record that a VM's filesystem state was frozen into an fs_quick
