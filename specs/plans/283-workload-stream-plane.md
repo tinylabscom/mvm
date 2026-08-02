@@ -439,14 +439,27 @@ Every task inherits these. They are repo-wide gates, not suggestions.
 - `mvm-agentd` tests flake under full parallelism — run that crate with
   `-j 6` and re-run in isolation before blaming a change.
 
+- **`--workspace --all-targets` DOES NOT COMPILE EVERYTHING.** Targets behind
+  `required-features` are silently skipped, `mvm-conformance`'s BDD test target
+  among them (`required-features = ["bdd"]`). CI compiles it in a separate lane,
+  so a green local run can still merge red. Task 6b broke exactly this way: a
+  new struct field made the conformance target fail `E0063` while every gate the
+  implementer ran reported clean. Any change to a shared type must compile the
+  feature-gated lane too.
+
 Per-task gate command, run before every commit:
 
 ```sh
 cargo fmt --all -- --check && \
 cargo clippy --workspace --all-targets -- -D warnings && \
+cargo clippy -p mvm-conformance --tests --features bdd -- -D warnings && \
 cargo nextest run -p <crate> && \
 cargo run -p xtask check-no-spec-refs-in-comments
 ```
+
+The conformance line is not optional padding — it is the only one of these that
+compiles a `required-features` target, and it is where a shared-type change
+surfaces.
 
 Full gate before any push: `just ci` plus `cargo run -p xtask check-file-size`,
 `check-claim-catalog`, `check-core-runtime-free`, `check-guest-agent-runtime-free`,
