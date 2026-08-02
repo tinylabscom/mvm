@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mvm_agentd::entrypoint::{CallCaps, CallOutcome, PayloadCapStream, execute};
+use mvm_agentd::entrypoint::{CallCaps, CallOutcome, execute};
+use mvm_agentd::stream_pump::{CapturedOutput, StreamGap};
 use mvm_agentd::vsock::{
     ComponentState, EntrypointEvent, FsChange, FsChangeKind, GuestResponse, RunEntrypointError,
 };
@@ -106,9 +107,17 @@ fn emit_entrypoint_bytes(file: &mut dyn Write, bytes: &[u8], stdout: bool) {
     }
 }
 
-fn emit_entrypoint_output(file: &mut dyn Write, stdout: &[u8], stderr: &[u8]) {
-    emit_entrypoint_bytes(file, stdout, true);
-    emit_entrypoint_bytes(file, stderr, false);
+/// Replay one call's captured output onto the response stream: stdout, then
+/// stderr, then every control record. A retention gap is appended to the
+/// control records rather than written inline, so the host learns output was
+/// dropped without the notice landing in the middle of the workload's own
+/// bytes.
+fn emit_captured_output(file: &mut dyn Write, output: CapturedOutput) {
+    emit_entrypoint_bytes(file, &output.stdout, true);
+    emit_entrypoint_bytes(file, &output.stderr, false);
+    let mut records = output.controls;
+    records.extend(output.gaps.iter().map(StreamGap::control_record));
+    emit_controls(file, records);
 }
 
 /// Handle a `RunEntrypoint` request. Writes streaming events directly via
@@ -186,58 +195,27 @@ fn handle_run_entrypoint(
     // tmpdir drops at end of scope (or on early-return below) and runs
     // its `Drop` cleanup.
     match outcome {
-        CallOutcome::Exited {
-            code,
-            stdout,
-            stderr,
-            controls,
-        } => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
+        CallOutcome::Exited { code, output } => {
+            emit_captured_output(file, output);
             evt(EntrypointEvent::Exit { code })
         }
-        CallOutcome::Timeout {
-            stdout,
-            stderr,
-            controls,
-        } => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
+        CallOutcome::Timeout { output } => {
+            emit_captured_output(file, output);
             evt(EntrypointEvent::Error {
                 kind: RunEntrypointError::Timeout,
                 message: format!("wrapper exceeded {timeout_secs}s timeout"),
             })
         }
-        CallOutcome::PayloadCap {
-            stream,
-            stdout,
-            stderr,
-            controls,
-        } => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
-            let stream_name = match stream {
-                PayloadCapStream::Stdin => "stdin",
-                PayloadCapStream::Stdout => "stdout",
-                PayloadCapStream::Stderr => "stderr",
-            };
-            evt(EntrypointEvent::Error {
-                kind: RunEntrypointError::PayloadCap,
-                message: format!("{stream_name} exceeded its cap"),
-            })
-        }
+        CallOutcome::StdinCap => evt(EntrypointEvent::Error {
+            kind: RunEntrypointError::PayloadCap,
+            message: "stdin exceeded its cap".to_string(),
+        }),
         CallOutcome::SpawnFailed { message } => evt(EntrypointEvent::Error {
             kind: RunEntrypointError::InternalError,
             message,
         }),
-        CallOutcome::WrapperCrashed {
-            signal,
-            stdout,
-            stderr,
-            controls,
-        } => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
+        CallOutcome::WrapperCrashed { signal, output } => {
+            emit_captured_output(file, output);
             evt(EntrypointEvent::Error {
                 kind: RunEntrypointError::WrapperCrashed,
                 message: format!("wrapper exited via signal {signal}"),
@@ -292,8 +270,17 @@ fn dispatch_via_warm_pool(
             controls,
             outcome,
         }) => {
-            emit_entrypoint_output(file, &stdout, &stderr);
-            emit_controls(file, controls);
+            // The pool answers with buffers rather than a pump, so it can
+            // never report a gap — but it goes out the one emission path.
+            emit_captured_output(
+                file,
+                CapturedOutput {
+                    stdout,
+                    stderr,
+                    controls,
+                    gaps: Vec::new(),
+                },
+            );
             match outcome {
                 WorkerOutcome::Exit { code } => evt(EntrypointEvent::Exit { code }),
                 WorkerOutcome::Error { kind, message } => evt(EntrypointEvent::Error {

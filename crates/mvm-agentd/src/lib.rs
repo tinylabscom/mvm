@@ -73,6 +73,10 @@ pub mod restore_clock;
 /// these testable units. Folded in from the former `mvm-runner` crate.
 pub mod runner;
 pub mod runtime_config;
+/// Streaming pump for a spawned workload's stdout / stderr / fd-3 control
+/// channel. Emits an `EntrypointEvent` per read while the child is still
+/// running, so a long-lived workload is observable long before it exits.
+pub mod stream_pump;
 /// In-guest substitution client: relays a secret-bearing request to the host
 /// substitution endpoint over vsock (the relay half of the guest-local forward
 /// proxy).

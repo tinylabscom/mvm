@@ -367,21 +367,23 @@ impl std::error::Error for ValidationError {}
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::stream_pump::{CapturedOutput, Pump, PumpOutcome, RetainingSink};
+
 /// Per-call resource caps. v1: 1 MiB on each stream.
+///
+/// `stdout_max` / `stderr_max` bound *retention*, not emission: the pump hands
+/// every byte to its sink as it is read, and a stream past its bound evicts its
+/// oldest retained chunks rather than stopping the workload.
 #[derive(Debug, Clone, Copy)]
 pub struct CallCaps {
-    /// Maximum bytes accepted for the wrapper's stdin.
+    /// Maximum bytes accepted for the wrapper's stdin. The one cap that still
+    /// refuses: an over-sized request payload is rejected before spawn.
     pub stdin_max: usize,
-    /// Maximum bytes captured from the wrapper's stdout.
+    /// Maximum bytes retained from the wrapper's stdout.
     pub stdout_max: usize,
-    /// Maximum bytes captured from the wrapper's stderr.
+    /// Maximum bytes retained from the wrapper's stderr.
     pub stderr_max: usize,
     /// Maximum bytes captured from the wrapper's fd-3 control channel.
     /// Excess bytes are silently dropped
@@ -409,6 +411,12 @@ impl CallCaps {
     }
 }
 
+impl Default for CallCaps {
+    fn default() -> Self {
+        Self::v1()
+    }
+}
+
 /// One control-channel record parsed from the wrapper's fd-3 stream.
 /// Wire format (length-prefixed JSON header + length-prefixed payload)
 /// is documented at `mvm_agentd::vsock::EntrypointEvent::Control`.
@@ -420,51 +428,33 @@ pub struct ControlRecord {
 
 /// Outcome of running the wrapper. The caller maps this to the
 /// `EntrypointEvent` stream sent back over vsock.
+///
+/// There is no output-cap variant: a stream past its bound prunes and reports
+/// a gap in [`CapturedOutput::gaps`], so how much a workload said is never a
+/// way for its call to end.
 #[derive(Debug)]
 pub enum CallOutcome {
     /// Wrapper exited normally with the given code.
-    Exited {
-        code: i32,
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        controls: Vec<ControlRecord>,
-    },
+    Exited { code: i32, output: CapturedOutput },
     /// Wrapper exceeded the wall-clock timeout. Killed.
-    Timeout {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        controls: Vec<ControlRecord>,
-    },
-    /// One of the streams exceeded its cap. Killed.
-    PayloadCap {
-        stream: PayloadCapStream,
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        controls: Vec<ControlRecord>,
-    },
+    Timeout { output: CapturedOutput },
+    /// The request payload exceeded `stdin_max`; the wrapper was never
+    /// spawned, so there is nothing captured to report.
+    StdinCap,
     /// `Command::spawn` itself failed.
     SpawnFailed { message: String },
     /// Wrapper exited via signal (segfault, OOM kill, etc.).
-    WrapperCrashed {
-        signal: i32,
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        controls: Vec<ControlRecord>,
-    },
-}
-
-/// Which stream's cap was breached. `Stdin` means the request payload
-/// itself exceeded `stdin_max`; the wrapper was never spawned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PayloadCapStream {
-    Stdin,
-    Stdout,
-    Stderr,
+    WrapperCrashed { signal: i32, output: CapturedOutput },
 }
 
 /// Run the validated wrapper with the given stdin, timeout, and caps.
-/// Drains stdout and stderr concurrently into capped buffers; kills the
-/// wrapper on timeout or cap breach. Always reaps the child before
+///
+/// Output moves through [`crate::stream_pump`], which emits stdout, stderr,
+/// and fd-3 control records as the kernel produces them. This entry point
+/// answers a per-call RPC, so it collects that stream back into the bounded
+/// buffers of a [`CallOutcome`]; a caller that wants the bytes live drives
+/// [`Pump`] with its own sink instead. Kills the wrapper on timeout only —
+/// never for producing too much output. Always reaps the child before
 /// returning.
 pub fn execute(
     entrypoint: &ValidatedEntrypoint,
@@ -475,12 +465,7 @@ pub fn execute(
     env: Vec<(String, String)>,
 ) -> CallOutcome {
     if stdin_data.len() > caps.stdin_max {
-        return CallOutcome::PayloadCap {
-            stream: PayloadCapStream::Stdin,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            controls: Vec::new(),
-        };
+        return CallOutcome::StdinCap;
     }
 
     // On Linux `spawn_path` references the validation fd by number via
@@ -593,64 +578,20 @@ pub fn execute(
         // block forever on read.
     }
 
-    let breach_flag = Arc::new(AtomicBool::new(false));
-    let stdout_handle = drain_capped(
-        child.stdout.take().expect("piped"),
-        caps.stdout_max,
-        Arc::clone(&breach_flag),
-        PayloadCapStream::Stdout,
-    );
-    let stderr_handle = drain_capped(
-        child.stderr.take().expect("piped"),
-        caps.stderr_max,
-        Arc::clone(&breach_flag),
-        PayloadCapStream::Stderr,
-    );
-    let fd3_handle = drain_fd3(fd3_read, caps.fd3_max);
-
-    let deadline = Instant::now() + timeout;
-    let outcome = poll_for_exit(&mut child, deadline, &caps, &breach_flag);
-
-    let (stdout, stdout_breach) = stdout_handle.join().unwrap_or_else(|_| (Vec::new(), None));
-    let (stderr, stderr_breach) = stderr_handle.join().unwrap_or_else(|_| (Vec::new(), None));
-    let controls = fd3_handle.join().unwrap_or_default();
-    // Stream attribution: prefer whichever drain reported the breach.
-    // If both did (rare), surface stdout — picked because runaway
-    // stdout is the more common shape. The flag the poll loop watched
-    // is a coarse Boolean; this attribution is only used by the
-    // CallOutcome::PayloadCap arm below.
-    let breached_stream = stdout_breach.or(stderr_breach);
+    // The pump emits every byte as it is read; `RetainingSink` keeps the
+    // bounded tail this per-call RPC answers with. Nothing here waits for the
+    // child to die before output moves.
+    let mut retained = RetainingSink::new(&caps);
+    let outcome = Pump::new(&caps)
+        .control_channel(fd3_read)
+        .deadline(Instant::now() + timeout)
+        .run(&mut child, &mut |event| retained.accept(event));
+    let output = retained.finish();
 
     match outcome {
-        ChildOutcome::Exited(status) => {
-            if let Some(code) = status.code() {
-                CallOutcome::Exited {
-                    code,
-                    stdout,
-                    stderr,
-                    controls,
-                }
-            } else {
-                let signal = signal_of(&status);
-                CallOutcome::WrapperCrashed {
-                    signal,
-                    stdout,
-                    stderr,
-                    controls,
-                }
-            }
-        }
-        ChildOutcome::Timeout => CallOutcome::Timeout {
-            stdout,
-            stderr,
-            controls,
-        },
-        ChildOutcome::PayloadCap => CallOutcome::PayloadCap {
-            stream: breached_stream.unwrap_or(PayloadCapStream::Stdout),
-            stdout,
-            stderr,
-            controls,
-        },
+        PumpOutcome::Exited(code) => CallOutcome::Exited { code, output },
+        PumpOutcome::Crashed { signal } => CallOutcome::WrapperCrashed { signal, output },
+        PumpOutcome::Timeout => CallOutcome::Timeout { output },
     }
 }
 
@@ -812,44 +753,6 @@ pub(crate) fn spawn_path(entrypoint: &ValidatedEntrypoint) -> PathBuf {
     }
 }
 
-enum ChildOutcome {
-    Exited(std::process::ExitStatus),
-    Timeout,
-    PayloadCap,
-}
-
-fn poll_for_exit(
-    child: &mut Child,
-    deadline: Instant,
-    caps: &CallCaps,
-    breach_flag: &Arc<AtomicBool>,
-) -> ChildOutcome {
-    loop {
-        // Highest priority: cap breach takes precedence over timeout
-        // (a breach is a corrupt-input signal, timeout is just slow).
-        if breach_flag.load(Ordering::SeqCst) {
-            kill_and_reap(child, caps.kill_grace_period);
-            return ChildOutcome::PayloadCap;
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => return ChildOutcome::Exited(status),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    kill_and_reap(child, caps.kill_grace_period);
-                    return ChildOutcome::Timeout;
-                }
-                std::thread::sleep(caps.poll_interval);
-            }
-            Err(_) => {
-                // try_wait returned an error — the child is in some
-                // bad state. Best effort: kill and report timeout.
-                kill_and_reap(child, caps.kill_grace_period);
-                return ChildOutcome::Timeout;
-            }
-        }
-    }
-}
-
 pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
     // Negate the pid to address the entire process group — the child
     // is its own process group leader (see `.process_group(0)` above),
@@ -876,133 +779,14 @@ pub(crate) fn kill_and_reap(child: &mut Child, grace: Duration) {
 }
 
 #[cfg(unix)]
-fn signal_of(status: &std::process::ExitStatus) -> i32 {
+pub(crate) fn signal_of(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status.signal().unwrap_or(0)
 }
 
 #[cfg(not(unix))]
-fn signal_of(_status: &std::process::ExitStatus) -> i32 {
+pub(crate) fn signal_of(_status: &std::process::ExitStatus) -> i32 {
     0
-}
-
-/// Drain the parent end of the fd-3 pipe and parse framed control
-/// records. Frame layout:
-///
-/// ```text
-///   header_len:  u32 LE   (4 bytes; max 64 KiB)
-///   header_json: bytes    (header_len bytes; UTF-8 JSON)
-///   payload_len: u32 LE   (4 bytes)
-///   payload:     bytes    (payload_len bytes)
-/// ```
-///
-/// Reads until EOF (child closes its fd 3) or `total_max` bytes have
-/// been consumed — whichever comes first. Once the cap is hit we
-/// stop reading and return whatever records we've fully parsed; the
-/// channel is for structured records the host correlates by kind, so
-/// dropping further records on overflow is preferable to killing the
-/// wrapper. Header sizes >64 KiB are refused (frame-corruption signal).
-///
-/// Records that are partially received at EOF / cap are silently
-/// dropped — the host already accepts a streaming response that can
-/// terminate at any point.
-fn drain_fd3(read_fd: std::os::fd::OwnedFd, total_max: usize) -> JoinHandle<Vec<ControlRecord>> {
-    /// Per-frame header limit (defense in depth — the wrapper writes
-    /// short envelope JSON, not arbitrary blobs in the header).
-    const HEADER_MAX: usize = 64 * 1024;
-
-    std::thread::spawn(move || {
-        let file = std::fs::File::from(read_fd);
-        let mut reader = std::io::BufReader::new(file);
-        let mut records: Vec<ControlRecord> = Vec::new();
-        let mut consumed: usize = 0;
-
-        // Parse loop: each frame is `header_len:u32 LE` + header bytes
-        // + `payload_len:u32 LE` + payload bytes. Any read that returns
-        // EOF (Ok(0)) on the first read of a frame ends the loop
-        // cleanly; an EOF mid-frame discards the partial frame.
-        loop {
-            // header length
-            let mut len_buf = [0u8; 4];
-            match reader.read_exact(&mut len_buf) {
-                Ok(()) => {}
-                Err(_) => break, // EOF or transient I/O error
-            }
-            let header_len = u32::from_le_bytes(len_buf) as usize;
-            if header_len > HEADER_MAX {
-                break; // refuse oversized header — likely corrupt
-            }
-            consumed = consumed.saturating_add(4 + header_len);
-            if consumed > total_max {
-                break;
-            }
-
-            let mut header_bytes = vec![0u8; header_len];
-            if reader.read_exact(&mut header_bytes).is_err() {
-                break; // partial header → drop this and any later
-            }
-            let header_json = match String::from_utf8(header_bytes) {
-                Ok(s) => s,
-                Err(_) => break, // non-UTF-8 header → corrupt; stop
-            };
-
-            // payload length
-            if reader.read_exact(&mut len_buf).is_err() {
-                break;
-            }
-            let payload_len = u32::from_le_bytes(len_buf) as usize;
-            consumed = consumed.saturating_add(4 + payload_len);
-            if consumed > total_max {
-                break;
-            }
-
-            let mut payload = vec![0u8; payload_len];
-            if reader.read_exact(&mut payload).is_err() {
-                break;
-            }
-
-            records.push(ControlRecord {
-                header_json,
-                payload,
-            });
-        }
-
-        records
-    })
-}
-
-fn drain_capped<R: Read + Send + 'static>(
-    reader: R,
-    cap: usize,
-    breach_flag: Arc<AtomicBool>,
-    stream: PayloadCapStream,
-) -> JoinHandle<(Vec<u8>, Option<PayloadCapStream>)> {
-    std::thread::spawn(move || {
-        let mut buf: Vec<u8> = Vec::with_capacity(cap.min(64 * 1024));
-        let mut reader = std::io::BufReader::new(reader);
-        let mut chunk = [0u8; 4096];
-        let mut breached: Option<PayloadCapStream> = None;
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let space = cap.saturating_sub(buf.len());
-                    if space == 0 || space < n {
-                        let take = space;
-                        if take > 0 {
-                            buf.extend_from_slice(&chunk[..take]);
-                        }
-                        breached = Some(stream);
-                        breach_flag.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                Err(_) => break,
-            }
-        }
-        (buf, breached)
-    })
 }
 
 #[cfg(test)]
