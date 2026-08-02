@@ -1,6 +1,6 @@
 # Plan 286 — Drive the guest kernel toward its hardware floor
 
-**Status:** IMPLEMENTATION COMPLETE — CI AND LANDING IN PROGRESS
+**Status:** COMPLETE
 **Opened:** 2026-08-02
 
 ## Goal

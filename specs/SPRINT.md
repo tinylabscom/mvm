@@ -10,7 +10,7 @@
 
 ## Current issue delivery
 
-- [ ] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
+- [x] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
       6.12.100 configs and remove unsupported physical hardware, radio/input,
       filesystem, power-management, tracing/debug, keyring, task-accounting,
       NetLabel, swap/huge-page and legacy crypto/ABI plumbing while preserving
