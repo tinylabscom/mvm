@@ -13,6 +13,7 @@
 //! signature the broker's fail-closed path is written and tested now, rather
 //! than bolted on the day such a detector lands.
 
+use mvm_core::policy::RedactionPolicy;
 use mvm_protocol::stream::{StreamKind, StreamSource};
 use serde::Serialize;
 
@@ -73,10 +74,28 @@ pub trait StreamRedactor: Send + Sync {
 pub struct StreamRedaction(Box<dyn StreamRedactor>);
 
 impl StreamRedaction {
-    /// The shipped ruleset. The only way to obtain a `StreamRedaction`
-    /// outside this crate's own tests.
-    pub fn curated() -> Self {
-        Self(Box::new(PiiRedactor::with_default_rules()))
+    /// The shipped ruleset, read through the workload's own redaction policy.
+    /// The only way to obtain a `StreamRedaction` outside this crate's own
+    /// tests.
+    ///
+    /// The policy is the same one the launch already hands the substitution
+    /// endpoint, so a workload that narrows PII categories gets one answer on
+    /// egress and the same answer in its transcript. Only `default` applies:
+    /// the per-host profiles select by destination, and recorded output has no
+    /// destination to select on.
+    ///
+    /// **It can only ever install curated rules.** A policy naming categories
+    /// picks among them; a policy that would leave nothing scanning —
+    /// `pii.mode = "disabled"`, or a category name that does not resolve —
+    /// falls back to the full set rather than to an empty one. The transcript
+    /// is the operator's copy of what a workload said, and a workload does not
+    /// get to opt its own record out of the seam.
+    pub fn curated(policy: &RedactionPolicy) -> Self {
+        let scanner = PiiRedactor::from_policy(&policy.default.pii)
+            .ok()
+            .flatten()
+            .unwrap_or_else(PiiRedactor::with_default_rules);
+        Self(Box::new(scanner))
     }
 
     /// A seam that is not the curated ruleset — a stricter detector, or one
@@ -117,8 +136,13 @@ pub(crate) struct ClearedChunk {
 }
 
 /// What the seam decided about one chunk.
+///
+/// Public because it is also the broker's answer to whoever handed it the
+/// bytes: [`StreamBroker::ingest`](crate::stream::StreamBroker::ingest)
+/// returns it so a producer that is *also* showing those bytes to somebody can
+/// say how the copy it recorded differs from the copy it showed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ClearOutcome {
+pub enum ClearOutcome {
     /// Nothing matched; the bytes are the workload's own, unchanged.
     Clean,
     /// At least one rule fired. Names only — a value that fired a rule is
@@ -136,11 +160,11 @@ pub(crate) enum ClearOutcome {
 /// Run one chunk through the seam, substituting a marker for anything it will
 /// not vouch for.
 ///
-/// The one implementation of that policy. Both ingest paths — the broker's and
-/// the entrypoint sink's unrecorded arm — call this rather than each spelling
-/// out "redact, and on failure emit a `Trace` marker": a second copy of the
-/// fail-closed substitution is a second chance to ship a byte nobody checked,
-/// and the two would drift the first time either changed.
+/// The one implementation of that policy, kept out of the broker so it is
+/// stated and tested in one place rather than spelled out at each ingest as
+/// "redact, and on failure emit a `Trace` marker". A second copy of the
+/// fail-closed substitution would be a second chance to ship a byte nobody
+/// checked, and the two would drift the first time either changed.
 pub(crate) fn clear_for_display(
     seam: &StreamRedaction,
     source: StreamSource,
@@ -249,7 +273,7 @@ mod tests {
     fn the_curated_seam_is_the_full_ruleset_not_an_empty_one() {
         // The hole this type closes: an empty ruleset satisfies the trait just
         // as well as the real one, so `curated` must demonstrably redact.
-        let seam = StreamRedaction::curated();
+        let seam = StreamRedaction::curated(&RedactionPolicy::default());
         let out = seam
             .redact(b"card 4111111111111111 end")
             .expect("the curated pass cannot fail");
@@ -257,10 +281,62 @@ mod tests {
         assert!(out.rules_fired.contains(&"credit_card"));
     }
 
+    /// The policy shape a workload uses to say "scan only these categories".
+    fn pii_policy(mode: Option<&str>, categories: &[&str]) -> RedactionPolicy {
+        RedactionPolicy {
+            default: mvm_core::policy::RedactionAction {
+                pii: mvm_core::policy::PiiPolicy {
+                    mode: mode.map(str::to_string),
+                    categories: categories.iter().map(|c| (*c).to_string()).collect(),
+                },
+                ..Default::default()
+            },
+            profiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_policy_that_names_categories_scans_those_and_leaves_the_rest() {
+        // The point of reading the policy at all: an operator who narrowed
+        // egress scanning to one category gets the same answer in the
+        // transcript instead of two different ones.
+        let seam = StreamRedaction::curated(&pii_policy(None, &["email"]));
+        let out = seam
+            .redact(b"a@b.com card 4111111111111111")
+            .expect("the curated pass cannot fail");
+        assert_eq!(out.rules_fired, ["email"]);
+        assert!(
+            out.body.windows(TEST_CARD.len()).any(|w| w == TEST_CARD),
+            "a category the policy left out must not be scanned"
+        );
+    }
+
+    #[test]
+    fn a_policy_that_would_disable_scanning_still_gets_the_full_ruleset() {
+        // `pii.mode = "disabled"` skips the inspector on egress. Here there is
+        // no inspector to skip — every byte must cross the seam — so the
+        // fallback is the curated set, never an empty one.
+        for policy in [
+            pii_policy(Some("disabled"), &[]),
+            pii_policy(None, &["no-such-category"]),
+            pii_policy(Some("no-such-mode"), &[]),
+        ] {
+            let seam = StreamRedaction::curated(&policy);
+            let out = seam
+                .redact(b"card 4111111111111111 end")
+                .expect("the curated pass cannot fail");
+            assert!(
+                !out.body.windows(TEST_CARD.len()).any(|w| w == TEST_CARD),
+                "a workload must not be able to opt its own transcript out of the seam"
+            );
+            assert!(out.rules_fired.contains(&"credit_card"));
+        }
+    }
+
     #[test]
     fn a_clean_chunk_keeps_its_channel_and_reports_nothing_fired() {
         let cleared = clear_for_display(
-            &StreamRedaction::curated(),
+            &StreamRedaction::curated(&RedactionPolicy::default()),
             StreamSource::Entrypoint,
             StreamKind::Stderr,
             b"nothing to see here",
@@ -273,7 +349,7 @@ mod tests {
     #[test]
     fn a_match_is_masked_in_place_and_names_the_rule_without_quoting_the_value() {
         let cleared = clear_for_display(
-            &StreamRedaction::curated(),
+            &StreamRedaction::curated(&RedactionPolicy::default()),
             StreamSource::Entrypoint,
             StreamKind::Stdout,
             b"card 4111111111111111 end",

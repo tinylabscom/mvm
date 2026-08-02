@@ -1669,6 +1669,72 @@ notice that would have explained it is suppressed, because the read resolves
 git commit -am "feat(hostd): ingest entrypoint output into the stream plane"
 ```
 
+#### Task 9c fix round 1
+
+Review found step 3 had gone one step too far, plus two smaller defects.
+
+- [x] **Fix 1: `invoke` returns the caller's own bytes.** Routing the frame
+  *through* the capture is right; handing the caller back the masked copy was
+  not. Whoever ran the call has code execution inside the workload that produced
+  the bytes, so masking their own return value protects nothing and breaks the
+  contract — `{"email":"a@b.com","id":4111111111111111}` came back as
+  `{"email":"XXX","id":XXX}`, which no JSON parser accepts. The persisted and
+  fanned-out copy stays masked; `ShownChunk` now carries `RecordedCopy`, and
+  `invoke` reports on stderr, under a fixed `[mvmctl-stream]` prefix, that the
+  recorded copy differs and which rules fired. `EntrypointSink::unrecorded`
+  redacts nothing, because with no second copy there is nobody to redact for.
+
+- [x] **Fix 1b: the plane honours the launch's `RedactionPolicy`.** `attach`
+  hardcoded `StreamRedaction::curated()`, ignoring the policy the same launch
+  hands the substitution endpoint. `ConsoleStreamer::start` now takes a
+  `ConsoleCapture` carrying it. `curated` reads `default.pii` and falls back to
+  the full ruleset when the policy would leave nothing scanning — a workload
+  does not get to opt its own transcript out of the seam.
+
+- [x] **Fix 2: the durable append is off the RPC read thread.** Measured on an
+  M-series host, release build, per frame: the inline append cost 20 µs at 64 B,
+  78 µs at 4 KiB and 212 µs at 64 KiB, against 1.2–7.6 µs for the bare
+  write+flush it replaced — 15–28×, of which over 95% is the segment store's
+  per-chunk stat, open, write and close. The guest's pump never back-pressures
+  its child, so a slower host reader raises *guest*-side eviction instead of
+  coalescing frames. `StreamBroker` now hands the append to a per-broker writer
+  thread over a 256-deep queue, matched to the guest's own per-stream retention
+  ring. Burst cost on the read thread is back to bare-write parity (1.07 µs at
+  64 B, 4.9 µs at 4 KiB). Sustained throughput past the queue is unchanged
+  (~23 µs/frame) — the writer does the same syscalls.
+  - [ ] **Deferred:** `SegmentStore::append` opens and closes the active segment
+    per chunk, and that is the remaining lever on the sustained figure. Out of
+    scope here: the store is shared with the forensic egress capture, whose
+    disturbance detection depends on the path-based `stat` that would have to
+    stay, so holding the handle open is a change to that contract rather than a
+    local optimisation.
+
+- [x] **Fix 2b: the hand-off sheds, it does not block.** The first cut of Fix 2
+  used a `sync_channel` whose `send` waits when the queue fills, which put a
+  slow disk back in front of ingest by a different door — the same stall a slow
+  reader used to cause, and the failure
+  `a_slow_reader_does_not_stall_ingest` and
+  `a_follower_that_stopped_reading_does_not_slow_the_ingest_down` caught under a
+  loaded host. `push` now `try_send`s and drops the record when the writer is a
+  full queue behind. Nothing dropped is silent: `TranscriptWriter::note_unwritten`
+  folds the shed chunk and byte totals into the manifest's
+  `refused_chunks`/`refused_bytes` before the sealed root is computed, so
+  `is_truncated()` reports a transcript that lost records instead of one that
+  verifies clean while being incomplete. `StreamCounters::persist_shed` separates
+  a slow disk from a full one. The durable half moved to
+  `crates/mvm-hostd/src/stream/durable.rs`; only the durable copy sheds, live
+  followers and `invoke`'s return value are untouched.
+
+- [x] **Fix 3: the console-merge notice is per channel.** It fired with
+  stderr-shaped wording for every non-`All` selector, so `--stream stdout` was
+  told output was hidden from it when the merge *adds* console output to that
+  channel. Stdout gets its own wording; stderr and trace keep theirs.
+
+- [x] **Fix 4 (minors):** `is_recorded()` has a production caller — `invoke`
+  tells the operator when a call's output reached no capture. The sink holds the
+  broker `Weak` and upgrades per frame, so a `release` racing a dispatch still
+  seals. `invoke.rs`'s module docs describe the seam.
+
 ---
 
 ### Task 9d: seal the transcript for every workload shape

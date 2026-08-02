@@ -45,11 +45,12 @@ use anyhow::{Context, Result};
 use mvm_core::config;
 use mvm_core::crypto::aead;
 use mvm_core::plan::DEFAULT_TENANT;
+use mvm_core::policy::RedactionPolicy;
 use mvm_core::transcript::{
     self, CaptureBinding, MANIFEST_FILENAME, TRANSCRIPT_KEK_RECIPIENT, TranscriptManifest,
     TranscriptWriter,
 };
-use mvm_runtime::workload_runner::ConsoleStreamer;
+use mvm_runtime::workload_runner::{ConsoleCapture, ConsoleStreamer};
 
 use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
 use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
@@ -101,18 +102,24 @@ impl StreamPlane {
         names
     }
 
-    /// Stand up `vm`'s capture and start following `console_log`.
+    /// Stand up `vm`'s capture under `redaction` and start following its
+    /// console.
     ///
     /// Idempotent: a VM already attached here keeps the capture it has, rather
     /// than getting a second broker that would split its output across two
     /// hash chains.
-    pub fn attach(&self, vm: &str, console_log: &Path) -> Result<()> {
+    pub fn attach(&self, capture: &ConsoleCapture<'_>) -> Result<()> {
+        let vm = capture.vm_name;
         let mut registry = self.registry();
         if registry.contains_key(vm) {
             return Ok(());
         }
         let transcript_dir = config::vm_stream_transcript_dir(vm);
-        let broker: SharedBroker = Arc::new(Mutex::new(build_broker(vm, &transcript_dir)?));
+        let broker: SharedBroker = Arc::new(Mutex::new(build_broker(
+            vm,
+            &transcript_dir,
+            capture.redaction,
+        )?));
 
         // Bind before anything destructive and before following: the bind is
         // what claims this VM. A follower started ahead of it would have to be
@@ -130,7 +137,7 @@ impl StreamPlane {
         registry.insert(
             vm.to_string(),
             VmStream {
-                console: follow_console(vm, console_log, &broker),
+                console: follow_console(vm, capture.console_log, &broker),
                 server,
                 broker,
                 transcript_dir,
@@ -140,16 +147,17 @@ impl StreamPlane {
     }
 
     /// The entrypoint-side ingest for `vm`: a sink over its broker when this
-    /// plane holds one, and a redact-only sink when it does not.
+    /// plane holds one, and a record-nothing sink when it does not.
     ///
-    /// One per call. The sink keeps the broker alive, and [`release`](Self::release)
-    /// seals a transcript by taking sole ownership of that broker — so a sink
-    /// held past its dispatch turns a sealed capture into an unsealed one.
+    /// The sink holds the broker weakly, so a [`release`](Self::release) that
+    /// lands while a call is still streaming still takes sole ownership and
+    /// seals — the frames after it are unrecorded rather than the transcript
+    /// being left without a manifest.
     pub fn entrypoint_sink(&self, vm: &str) -> EntrypointSink {
         self.registry()
             .get(vm)
             .map_or_else(EntrypointSink::unrecorded, |stream| {
-                EntrypointSink::recorded(Arc::clone(&stream.broker))
+                EntrypointSink::recorded(&stream.broker)
             })
     }
 
@@ -178,10 +186,10 @@ impl StreamPlane {
 /// because refusing to launch over an observability feature trades a missing
 /// log for a missing workload.
 impl ConsoleStreamer for StreamPlane {
-    fn start(&self, vm_name: &str, console_log: &Path) {
-        if let Err(error) = self.attach(vm_name, console_log) {
+    fn start(&self, capture: &ConsoleCapture<'_>) {
+        if let Err(error) = self.attach(capture) {
             tracing::warn!(
-                vm = %vm_name,
+                vm = %capture.vm_name,
                 error = %format!("{error:#}"),
                 "output stream could not be started; this workload's output will not be \
                  captured or followable"
@@ -194,10 +202,19 @@ impl ConsoleStreamer for StreamPlane {
     }
 }
 
-/// Build the VM's broker over a fresh encrypted transcript.
-fn build_broker(vm: &str, transcript_dir: &Path) -> Result<StreamBroker> {
+/// Build the VM's broker over a fresh encrypted transcript, under the same
+/// redaction policy the launch handed the substitution endpoint.
+fn build_broker(
+    vm: &str,
+    transcript_dir: &Path,
+    redaction: &RedactionPolicy,
+) -> Result<StreamBroker> {
     let writer = build_writer(vm, transcript_dir)?;
-    Ok(StreamBroker::new(vm, writer, StreamRedaction::curated()))
+    Ok(StreamBroker::new(
+        vm,
+        writer,
+        StreamRedaction::curated(redaction),
+    ))
 }
 
 /// Provision the durable half: a fresh capture directory, a per-capture data
@@ -365,6 +382,20 @@ mod tests {
         (env, tmp)
     }
 
+    /// One workload's capture, the way the runner hands it over.
+    fn capture<'a>(vm: &'a str, console_log: &'a Path) -> ConsoleCapture<'a> {
+        ConsoleCapture {
+            vm_name: vm,
+            console_log,
+            redaction: &DEFAULT_REDACTION,
+        }
+    }
+
+    /// The launch policy every test here runs under: the shipped default, so a
+    /// test asserting on redaction is asserting on the shipped ruleset.
+    static DEFAULT_REDACTION: std::sync::LazyLock<RedactionPolicy> =
+        std::sync::LazyLock::new(RedactionPolicy::default);
+
     /// The console capture path a backend would write, under the VM's own
     /// state dir the way a real one is.
     fn console_log_for(vm: &str) -> PathBuf {
@@ -455,7 +486,9 @@ mod tests {
         let console = console_log_for("plane-vm");
         let plane = StreamPlane::new();
 
-        plane.attach("plane-vm", &console).expect("attach");
+        plane
+            .attach(&capture("plane-vm", &console))
+            .expect("attach");
         assert!(plane.is_attached("plane-vm"));
         assert_eq!(plane.attached_vms(), ["plane-vm"]);
         assert!(config::vm_stream_socket("plane-vm").exists());
@@ -481,9 +514,11 @@ mod tests {
         let console = console_log_for("plane-twice");
         let plane = StreamPlane::new();
 
-        plane.attach("plane-twice", &console).expect("first attach");
         plane
-            .attach("plane-twice", &console)
+            .attach(&capture("plane-twice", &console))
+            .expect("first attach");
+        plane
+            .attach(&capture("plane-twice", &console))
             .expect("a second attach must not fail");
         assert_eq!(plane.attached_vms(), ["plane-twice"]);
 
@@ -497,7 +532,9 @@ mod tests {
         let (_env, _tmp) = isolated_home();
         let console = console_log_for("plane-contested");
         let first = StreamPlane::new();
-        first.attach("plane-contested", &console).expect("attach");
+        first
+            .attach(&capture("plane-contested", &console))
+            .expect("attach");
 
         let follower = Follower::attach("plane-contested");
         std::fs::write(&console, b"the incumbent's output\n").expect("write");
@@ -505,7 +542,7 @@ mod tests {
 
         let second = StreamPlane::new();
         let err = second
-            .attach("plane-contested", &console)
+            .attach(&capture("plane-contested", &console))
             .expect_err("a live socket must not be stolen");
         assert!(format!("{err:#}").contains("already serving"), "{err:#}");
         assert!(!second.is_attached("plane-contested"));
@@ -525,7 +562,9 @@ mod tests {
         let (_env, _tmp) = isolated_home();
         let console = console_log_for("plane-sealed");
         let plane = StreamPlane::new();
-        plane.attach("plane-sealed", &console).expect("attach");
+        plane
+            .attach(&capture("plane-sealed", &console))
+            .expect("attach");
 
         let follower = Follower::attach("plane-sealed");
         std::fs::write(&console, b"before the end\n").expect("write the console capture");
@@ -550,7 +589,9 @@ mod tests {
         let (_env, _tmp) = isolated_home();
         let console = console_log_for("plane-last-words");
         let plane = StreamPlane::new();
-        plane.attach("plane-last-words", &console).expect("attach");
+        plane
+            .attach(&capture("plane-last-words", &console))
+            .expect("attach");
 
         std::fs::write(&console, b"kernel panic\n").expect("write the console capture");
         plane.release("plane-last-words");
@@ -567,7 +608,9 @@ mod tests {
         let (_env, _tmp) = isolated_home();
         let console = console_log_for("plane-two-sources");
         let plane = StreamPlane::new();
-        plane.attach("plane-two-sources", &console).expect("attach");
+        plane
+            .attach(&capture("plane-two-sources", &console))
+            .expect("attach");
 
         // Wait for the console record before producing the entrypoint ones:
         // between sources the order is host arrival order and nothing
@@ -598,6 +641,48 @@ mod tests {
     }
 
     #[test]
+    fn the_capture_is_redacted_under_the_policy_the_launch_threaded() {
+        // The launch already resolves a redaction policy and hands it to the
+        // substitution endpoint. A capture that picked its own would give one
+        // answer on egress and a different one in the transcript.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-policy");
+        let narrowed = RedactionPolicy {
+            default: mvm_core::policy::RedactionAction {
+                pii: mvm_core::policy::PiiPolicy {
+                    mode: None,
+                    categories: vec!["email".to_string()],
+                },
+                ..Default::default()
+            },
+            profiles: Vec::new(),
+        };
+        let plane = StreamPlane::new();
+        plane
+            .attach(&ConsoleCapture {
+                vm_name: "plane-policy",
+                console_log: &console,
+                redaction: &narrowed,
+            })
+            .expect("attach");
+
+        let mut sink = plane.entrypoint_sink("plane-policy");
+        sink.ingest(StreamKind::Stdout, b"a@b.com and 4111111111111111");
+        drop(sink);
+        plane.release("plane-policy");
+
+        let recorded = sealed_payloads("plane-policy").concat();
+        assert!(
+            !recorded.windows(7).any(|w| w == b"a@b.com"),
+            "the category the policy named must be masked in the transcript"
+        );
+        assert!(
+            recorded.windows(16).any(|w| w == b"4111111111111111"),
+            "and the categories it left out must not be, or the policy was ignored"
+        );
+    }
+
+    #[test]
     fn a_vm_this_plane_never_attached_gets_an_unrecorded_sink_rather_than_a_refusal() {
         // The `--attach`-into-someone-else's-machine case. The call still has
         // to run and still has to print; what it loses is the capture.
@@ -623,7 +708,9 @@ mod tests {
         let console = console_log_for("plane-restarted");
         let plane = StreamPlane::new();
 
-        plane.attach("plane-restarted", &console).expect("attach");
+        plane
+            .attach(&capture("plane-restarted", &console))
+            .expect("attach");
         std::fs::write(&console, b"first run\n").expect("write the console capture");
         plane.release("plane-restarted");
         assert_eq!(sealed_payloads("plane-restarted"), [b"first run\n"]);
@@ -631,7 +718,9 @@ mod tests {
         // Second boot, same name and the same state dir. The backend
         // truncates the console capture on boot, so the follower starts over.
         std::fs::write(&console, b"").expect("truncate the console capture");
-        plane.attach("plane-restarted", &console).expect("reattach");
+        plane
+            .attach(&capture("plane-restarted", &console))
+            .expect("reattach");
         std::fs::write(&console, b"second run\n").expect("write the console capture");
         plane.release("plane-restarted");
 

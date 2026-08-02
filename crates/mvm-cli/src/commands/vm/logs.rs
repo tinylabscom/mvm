@@ -345,30 +345,43 @@ fn describe_empty(empty: EmptyHistory, args: &Args) -> Option<String> {
     }
 }
 
-/// What a channel selection *cannot* reach, even on a healthy capture.
+/// What the console merge does to a channel selection — which is not the same
+/// thing on every channel.
 ///
 /// A capture has two sources and only one of them can name a channel. The
 /// entrypoint frames arrive tagged `Stdout` or `Stderr` the way the guest sent
 /// them; the console capture is one merged byte stream, so every record it
 /// contributes is recorded as `Stdout` whichever fd wrote it. That covers
 /// everything outside the entrypoint call — boot, and whatever the guest says
-/// after the agent is gone — which is exactly the output an operator narrowing
-/// to `--stream stderr` is often hunting for.
+/// after the agent is gone.
+///
+/// So the merge *withholds* that output from a `stderr` or `trace` read and
+/// *adds* it to a `stdout` one. Telling a `stdout` reader that something is
+/// hidden from them would be a plain contradiction — nothing is.
 ///
 /// Only said when a channel was selected: on an unnarrowed read every record
-/// is shown regardless of its tag, so there is nothing the merge hides. A
-/// console-only VM needs no exclusion here — the resolver refuses a channel
+/// is shown regardless of its tag, so the merge changes nothing. A
+/// console-only VM needs no note here — the resolver refuses a channel
 /// selection outright rather than reaching this point.
 fn describe_console_merge(args: &Args) -> Option<String> {
-    if args.stream == StreamSelector::All {
-        return None;
-    }
+    let effect = match args.stream {
+        StreamSelector::All => return None,
+        StreamSelector::Stdout => format!(
+            "so a {} read carries the console's output as well as the entrypoint's — boot \
+             output, and anything written once the guest agent is gone, shows up here whichever \
+             fd produced it",
+            args.stream.label()
+        ),
+        StreamSelector::Stderr | StreamSelector::Trace => format!(
+            "so a {} read shows only what the entrypoint call separated — boot output, and \
+             anything written once the guest agent is gone, is on the stdout channel whichever \
+             fd produced it",
+            args.stream.label()
+        ),
+    };
     Some(format!(
-        "note: microVM {:?} records console output as stdout, so a {} read shows only what the \
-         entrypoint call separated — boot output, and anything written once the guest agent is \
-         gone, is on the stdout channel whichever fd produced it",
-        args.name,
-        args.stream.label()
+        "note: microVM {:?} records console output as stdout, {effect}",
+        args.name
     ))
 }
 
@@ -868,7 +881,14 @@ mod tests {
         std::fs::write(&console, b"merged out and err\n").expect("console capture");
 
         let plane = mvm_hostd::stream::StreamPlane::new();
-        plane.attach("planed-vm", &console).expect("attach a plane");
+        let redaction = mvm_core::policy::RedactionPolicy::default();
+        plane
+            .attach(&mvm_runtime::workload_runner::ConsoleCapture {
+                vm_name: "planed-vm",
+                console_log: &console,
+                redaction: &redaction,
+            })
+            .expect("attach a plane");
 
         let args = parse(&["planed-vm"]).expect("parse");
         let stream = open_vm_output("planed-vm", args.request()).expect("the stream opens");
@@ -1134,6 +1154,38 @@ mod tests {
                 "{rendered}"
             );
             assert!(rendered.contains("a stderr read"), "{rendered}");
+            assert!(
+                rendered.contains("shows only what the entrypoint call separated"),
+                "{rendered}"
+            );
+        }
+
+        #[test]
+        fn a_stdout_read_is_told_what_the_merge_adds_rather_than_what_it_hides() {
+            // The merge withholds console output from a stderr read and *adds*
+            // it to a stdout one. Telling a stdout reader that something is
+            // hidden from them is a plain contradiction — nothing is, and a
+            // notice that contradicts what the operator can see teaches them
+            // to ignore the next one.
+            let root = tempfile::tempdir().expect("tempdir");
+            let locator = seal_history(root.path(), &["only-stdout"]);
+
+            let rendered = notices(read_all(
+                &parse(&["vm", "--stream", "stdout"]).expect("parse"),
+                &locator,
+            ));
+            assert!(
+                rendered.contains("records console output as stdout"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("a stdout read carries the console's output"),
+                "{rendered}"
+            );
+            assert!(
+                !rendered.contains("shows only what the entrypoint call separated"),
+                "nothing is withheld from a stdout read: {rendered}"
+            );
         }
 
         #[test]

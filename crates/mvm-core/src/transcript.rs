@@ -481,6 +481,21 @@ impl TranscriptWriter {
         self.refused_bytes
     }
 
+    /// Count chunks that never reached this writer at all, so the sealed
+    /// manifest owns the whole shortfall rather than only the part the writer
+    /// saw.
+    ///
+    /// A capture whose appends run on a background thread can lose a record
+    /// before it is ever offered here: the hand-off is bounded, and a bound
+    /// that waited would put the producer behind the disk. Those records are
+    /// holes in exactly the way a refused push is, so they belong in the same
+    /// counters — otherwise [`seal`](Self::seal) hands back an artifact that
+    /// verifies clean while being silently incomplete.
+    pub fn note_unwritten(&mut self, chunks: u64, bytes: u64) {
+        self.refused_chunks = self.refused_chunks.saturating_add(chunks);
+        self.refused_bytes = self.refused_bytes.saturating_add(bytes);
+    }
+
     /// Chunks that landed and were later dropped by ring retention. Nonzero
     /// means the capture lost its head.
     pub fn evicted_chunks(&self) -> u64 {
@@ -601,16 +616,27 @@ impl TranscriptWriter {
     /// many were refused off the tail and evicted off the head so the artifact
     /// declares its own completeness.
     pub fn seal(self) -> TranscriptManifest {
+        self.sealed_manifest()
+    }
+
+    /// The manifest [`seal`](Self::seal) produces, for a caller that cannot
+    /// consume the writer.
+    ///
+    /// A writer whose pushes run on a background thread lives behind a lock,
+    /// and a lock cannot be moved out of. Borrowing costs a clone of the chunk
+    /// records, paid once at teardown, and removes the alternative: an
+    /// ownership handover whose failure arm has no manifest to hand back.
+    pub fn sealed_manifest(&self) -> TranscriptManifest {
         let mut manifest = TranscriptManifest {
             format_version: TRANSCRIPT_MANIFEST_FORMAT_VERSION,
-            capture_id: self.capture_id,
-            binding: self.binding,
+            capture_id: self.capture_id.clone(),
+            binding: self.binding.clone(),
             bounds: self.bounds,
             created_unix_secs: self.created_unix_secs,
-            wrapped_data_key_b64: self.wrapped_data_key_b64,
-            recipient: self.recipient,
+            wrapped_data_key_b64: self.wrapped_data_key_b64.clone(),
+            recipient: self.recipient.clone(),
             retention: self.retention,
-            chunks: self.chunks.into(),
+            chunks: self.chunks.iter().cloned().collect(),
             refused_chunks: self.refused_chunks,
             refused_bytes: self.refused_bytes,
             evicted_chunks: self.evicted_chunks,
@@ -1278,6 +1304,48 @@ mod tests {
         assert_eq!(manifest.refused_bytes, 12);
         verify_sealed_root(&manifest).expect("a truncated capture still seals a valid root");
         verify_chunks(&manifest, dir.path()).expect("the chunks that did land verify");
+    }
+
+    #[test]
+    fn chunks_that_never_reached_the_writer_still_truncate_the_manifest() {
+        // The background-writer case: a bounded hand-off that sheds rather
+        // than pacing its producer loses records the writer never sees, and a
+        // manifest that only counted the writer's own refusals would call that
+        // capture complete.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), writer_config());
+        w.push(Direction::Stdout, b"landed").expect("push");
+        assert!(!w.sealed_manifest().is_truncated());
+
+        w.note_unwritten(4, 96);
+        assert_eq!(w.refused_chunks(), 4);
+        assert_eq!(w.refused_bytes(), 96);
+
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 1);
+        assert!(manifest.is_truncated());
+        assert_eq!(manifest.refused_chunks, 4);
+        assert_eq!(manifest.refused_bytes, 96);
+        verify_sealed_root(&manifest).expect("the shortfall is inside the root");
+        verify_chunks(&manifest, dir.path()).expect("the chunk that did land verifies");
+    }
+
+    #[test]
+    fn unwritten_counts_add_to_what_the_writer_already_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = writer_config();
+        cfg.bounds = CaptureBounds {
+            max_duration_secs: 60,
+            max_bytes: 1 << 20,
+            max_chunks: 1,
+        };
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        w.push(Direction::Stdout, b"first").expect("first fits");
+        assert!(w.push(Direction::Stdout, b"second").is_err());
+        w.note_unwritten(2, 10);
+
+        assert_eq!(w.refused_chunks(), 3);
+        assert_eq!(w.refused_bytes(), 16);
     }
 
     #[test]

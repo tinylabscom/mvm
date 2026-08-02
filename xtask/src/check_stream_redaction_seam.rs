@@ -16,9 +16,10 @@
 //! Three assertions:
 //!
 //! - **A — the seam is unforgeable.** `redact.rs` keeps `StreamRedaction` a
-//!   newtype over a private `Box<dyn StreamRedactor>`; `curated()` is built
-//!   from `PiiRedactor::with_default_rules()` (never an empty ruleset); and
-//!   every *other* fn returning `Self` or `StreamRedaction` — in any impl
+//!   newtype over a private `Box<dyn StreamRedactor>`; `curated` still names
+//!   `PiiRedactor::with_default_rules` (it reads the workload's redaction
+//!   policy, and that is the floor it falls back to — never an empty ruleset);
+//!   and every *other* fn returning `Self` or `StreamRedaction` — in any impl
 //!   block for the type, or as a free function in the module — is
 //!   `#[cfg(test)]`-gated.
 //! - **B — the broker has one door.** `StreamBroker::new` takes a
@@ -26,7 +27,7 @@
 //!   `Box<dyn StreamRedactor>` or a raw `PiiRedactor`.
 //! - **C — every construction site uses the curated seam.** Outside the
 //!   `stream` module that owns the type, a `StreamBroker::new(...)` must pass
-//!   `StreamRedaction::curated()`, and `from_seam` must not appear at all.
+//!   `StreamRedaction::curated(...)`, and `from_seam` must not appear at all.
 //!
 //! Scope — assertion C has nothing to scan until the console source and the
 //! log follower attach their brokers; it reports the count so a zero is
@@ -50,12 +51,15 @@ const SEAM_MODULE: &str = "crates/mvm-hostd/src/stream";
 /// no `pub` is what makes the type unforgeable from outside the module.
 const SEAM_DECL: &str = "pub struct StreamRedaction(Box<dyn StreamRedactor>);";
 
-/// The one production constructor.
-const CURATED_FN: &str = "pub fn curated() -> Self";
+/// The one production constructor, in prose for the failure message. Its
+/// signature carries the workload's redaction policy; what the gate matches is
+/// [`curated_fn`].
+const CURATED_FN: &str = "pub fn curated(…) -> Self";
 
-/// What `curated()` must install. An empty ruleset satisfies the trait exactly
-/// as well, which is the whole reason this gate exists.
-const CURATED_RULESET: &str = "PiiRedactor::with_default_rules()";
+/// What `curated()` must install — as the ruleset outright, or as the fallback
+/// when a policy resolves to nothing. An empty ruleset satisfies the trait
+/// exactly as well, which is the whole reason this gate exists.
+const CURATED_RULESET: &str = "PiiRedactor::with_default_rules";
 
 /// Constructor shapes on the broker that would reopen the bypass.
 const FORBIDDEN_BROKER_PARAMS: &[&str] = &["Box<dyn StreamRedactor>", "redactor: PiiRedactor"];
@@ -71,7 +75,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     eprintln!(
         "check-stream-redaction-seam: clean (StreamRedaction is newtype-sealed over the curated \
          ruleset, StreamBroker takes no bare redactor, {sites} construction site(s) outside the \
-         stream module use StreamRedaction::curated())"
+         stream module use StreamRedaction::curated(...))"
     );
     Ok(())
 }
@@ -91,7 +95,7 @@ fn check_seam_is_unforgeable(workspace: &Path) -> Result<()> {
     let Some(body) = impl_block(&text, "impl StreamRedaction {") else {
         bail!("check-stream-redaction-seam: {REDACT_RS} has no `impl StreamRedaction` block");
     };
-    if !body.contains(CURATED_FN) {
+    if !curated_fn().is_match(body) {
         bail!(
             "check-stream-redaction-seam: `{CURATED_FN}` is gone from {REDACT_RS}. It is the one \
              production constructor; without it every caller needs a different door."
@@ -167,9 +171,9 @@ fn check_call_sites_use_curated(workspace: &Path) -> Result<usize> {
             }
             sites += 1;
             let window = lines[n - 1..lines.len().min(n - 1 + CALL_WINDOW_LINES)].join("\n");
-            if !window.contains("StreamRedaction::curated()") {
+            if !window.contains("StreamRedaction::curated(") {
                 hits.push(format!(
-                    "{}:{n}: builds a StreamBroker without `StreamRedaction::curated()`",
+                    "{}:{n}: builds a StreamBroker without `StreamRedaction::curated(...)`",
                     rel(workspace, &file)
                 ));
             }
@@ -302,6 +306,15 @@ fn new_takes_seam() -> Regex {
     Regex::new(r"pub\s+fn\s+new\s*\([^)]*:\s*StreamRedaction").expect("static regex")
 }
 
+/// The production constructor's signature, whatever it takes. Matching the
+/// shape rather than one literal string keeps the gate from breaking every
+/// time the seam learns about another input, while still failing if `curated`
+/// stops returning the sealed type — or disappears.
+fn curated_fn() -> Regex {
+    Regex::new(r"pub\s+fn\s+curated\s*\([^)]*\)\s*->\s*(?:Self|StreamRedaction)")
+        .expect("static regex")
+}
+
 /// Non-comment code lines as (1-based line number, line). Prose explaining the
 /// invariant legitimately names the shapes the gate forbids.
 fn code_lines(text: &str) -> Vec<(usize, &str)> {
@@ -383,8 +396,9 @@ mod tests {
 pub struct StreamRedaction(Box<dyn StreamRedactor>);
 
 impl StreamRedaction {
-    pub fn curated() -> Self {
-        Self(Box::new(PiiRedactor::with_default_rules()))
+    pub fn curated(policy: &RedactionPolicy) -> Self {
+        Self(Box::new(PiiRedactor::from_policy(&policy.default.pii).ok().flatten()
+            .unwrap_or_else(PiiRedactor::with_default_rules)))
     }
 
     #[cfg(test)]
@@ -471,8 +485,9 @@ impl StreamBroker {
 pub struct StreamRedaction(Box<dyn StreamRedactor>);
 
 impl StreamRedaction {
-    pub fn curated() -> Self {
-        Self(Box::new(PiiRedactor::with_default_rules()))
+    pub fn curated(policy: &RedactionPolicy) -> Self {
+        Self(Box::new(PiiRedactor::from_policy(&policy.default.pii).ok().flatten()
+            .unwrap_or_else(PiiRedactor::with_default_rules)))
     }
 
     pub fn with_redactor(
@@ -557,7 +572,7 @@ impl StreamRedaction {
         let err = check_call_sites_use_curated(root.path())
             .expect_err("a broker built off the curated seam must fail the gate");
         assert!(
-            err.to_string().contains("StreamRedaction::curated()"),
+            err.to_string().contains("StreamRedaction::curated("),
             "got {err}"
         );
     }
@@ -571,7 +586,7 @@ impl StreamRedaction {
             root.path(),
             "crates/mvm-hostd/src/daemon.rs",
             "fn attach(w: TranscriptWriter) -> StreamBroker {\n    StreamBroker::new(\n        \
-             vm_name,\n        w,\n        StreamRedaction::curated(),\n    )\n}\n",
+             vm_name,\n        w,\n        StreamRedaction::curated(&redaction),\n    )\n}\n",
         );
         assert_eq!(
             check_call_sites_use_curated(root.path()).expect("the curated seam passes"),

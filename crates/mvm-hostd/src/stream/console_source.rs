@@ -301,6 +301,7 @@ pub(in crate::stream) fn lock_broker(broker: &SharedBroker) -> MutexGuard<'_, St
 mod tests {
     use super::*;
     use crate::stream::redact::StreamRedaction;
+    use mvm_core::policy::RedactionPolicy;
     use mvm_core::transcript::{CaptureBinding, TranscriptWriter};
     use std::path::PathBuf;
     use std::time::Instant;
@@ -340,7 +341,11 @@ mod tests {
             mvm_core::crypto::aead::Key::from_bytes([0x5a; 32]),
             config,
         );
-        let broker = StreamBroker::new(vm, writer, StreamRedaction::curated());
+        let broker = StreamBroker::new(
+            vm,
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
         Fixture {
             broker: Arc::new(Mutex::new(broker)),
             _capture_dir: capture_dir,

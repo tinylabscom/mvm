@@ -41,6 +41,7 @@
 
 pub mod broker;
 pub mod console_source;
+pub mod durable;
 pub mod entrypoint_source;
 pub mod fanout;
 pub mod plane;
@@ -51,14 +52,15 @@ use std::sync::{Arc, OnceLock};
 
 pub use broker::{DEFAULT_CAPTURE_BOUNDS, StreamAudit, StreamBroker, StreamCounters};
 pub use console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
-pub use entrypoint_source::{EntrypointSink, ShownChunk};
+pub use entrypoint_source::{EntrypointSink, RecordedCopy, ShownChunk};
 pub use fanout::{
     DEFAULT_READER_BOUNDS, DEFAULT_READER_MAX_BYTES, DEFAULT_READER_MAX_RECORDS, DrainedWindow,
     ReaderHandle, ReaderStart,
 };
 pub use plane::StreamPlane;
 pub use redact::{
-    REDACTION_FAILED_EVENT, Redacted, RedactionFailed, StreamRedaction, StreamRedactor,
+    ClearOutcome, REDACTION_FAILED_EVENT, Redacted, RedactionFailed, StreamRedaction,
+    StreamRedactor,
 };
 pub use serve::{StreamServerHandle, serve_stream};
 

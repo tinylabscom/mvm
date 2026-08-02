@@ -19,12 +19,14 @@
 //! Neither can *refuse* a chunk and neither can block on a consumer, so no
 //! reader and no full disk can ever silence or wedge a workload.
 //!
-//! What ingest is **not** is free. Step 3 is a synchronous append and hash per
-//! record on the caller's thread, against roughly 2 µs for the other three
-//! steps combined, so a chatty workload is paced by the durable store rather
-//! than merely observed by it. Chunk batching removed the two extra file
-//! opens and the read-back that used to dominate that cost;
-//! `persist_failures` is what makes any remaining shortfall visible.
+//! **Step 3 does not run on the caller's thread, and does not wait.** Steps 1,
+//! 2 and 4 are a regex pass and some hashing — single-digit microseconds. Step
+//! 3 is filesystem syscalls against whatever the host's disk is doing at that
+//! moment. For the entrypoint source the caller *is* the RPC read thread, so
+//! paying that inline makes the guest's pace a function of the host's disk. It
+//! runs on a per-broker writer thread instead, behind a bounded hand-off that
+//! **sheds** when the writer falls behind rather than blocking the producer —
+//! see [`super::durable`], which also explains why nothing shed is silent.
 //!
 //! One broker per VM, resident in the per-tenant daemon rather than spawned
 //! per VM.
@@ -34,12 +36,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::transcript::{
-    CaptureBinding, CaptureBounds, Direction, RetentionPolicy, TranscriptError, TranscriptManifest,
-    TranscriptWriter, TranscriptWriterConfig,
+    CaptureBinding, CaptureBounds, RetentionPolicy, TranscriptManifest, TranscriptWriter,
+    TranscriptWriterConfig,
 };
 use mvm_protocol::stream::{StreamKind, StreamRecord, StreamSource};
 
 use crate::audit::emitter::AuditEmitter;
+use crate::stream::durable::DurableSink;
 use crate::stream::fanout::{
     DEFAULT_READER_BOUNDS, ReaderHandle, ReaderQueue, ReaderStart, lock_queue,
 };
@@ -60,7 +63,7 @@ use crate::stream::redact::{self, ClearOutcome, ClearedChunk, StreamRedaction};
 /// drops its oldest chunks to make room for the newest, so the persisted copy
 /// holds the most recent window instead of the first few seconds.
 /// [`StreamCounters::persist_failures`] is left to mean what it should — the
-/// store failed, not the budget filled.
+/// record never landed, not the budget filled.
 pub const DEFAULT_CAPTURE_BOUNDS: CaptureBounds = CaptureBounds {
     // The transcript is bounded by size and count, not by age.
     max_duration_secs: u64::MAX,
@@ -120,15 +123,21 @@ pub struct StreamCounters {
     pub redacted: u64,
     /// Chunks the seam refused to vouch for, replaced by a `Trace` marker.
     pub redaction_failures: u64,
-    /// Records the durable transcript failed to take — a store error, since
-    /// under ring retention a full budget prunes rather than refuses. Each one
-    /// is a hole on disk that the live stream does not have.
+    /// Records that never reached the durable transcript: the store refused
+    /// them, or the hand-off to the writer thread shed them. Each one is a hole
+    /// on disk that the live stream does not have, and the sealed manifest
+    /// carries the same total as `refused_chunks`.
     pub persist_failures: u64,
     /// How many times persistence went from working to failing. One long
     /// outage counts once; a flapping disk counts every time. This is what
     /// the broker logs, because a per-record warning turns a bounded-disk
     /// problem into an unbounded-log one at a few thousand chunks a second.
     pub persist_lapses: u64,
+    /// The part of `persist_failures` the writer thread never saw, because the
+    /// hand-off dropped it rather than pace the workload behind the disk. A
+    /// full disk and a slow one are different operator problems, so they are
+    /// separable here.
+    pub persist_shed: u64,
     /// Followers that have attached over this broker's lifetime.
     pub subscribers: u64,
     /// Subscribe events that could not be written to the chain-signed log.
@@ -160,7 +169,7 @@ impl StreamAudit {
 /// The host-side stream broker for one VM.
 pub struct StreamBroker {
     vm: String,
-    writer: TranscriptWriter,
+    durable: DurableSink,
     redaction: StreamRedaction,
     audit: Option<StreamAudit>,
     reader_bounds: CaptureBounds,
@@ -169,7 +178,6 @@ pub struct StreamBroker {
     next_seq: u64,
     prev_hash: [u8; 32],
     last_stamp_nanos: u64,
-    persist_degraded: bool,
     counters: StreamCounters,
 }
 
@@ -182,7 +190,7 @@ impl StreamBroker {
     pub fn new(vm: &str, writer: TranscriptWriter, redaction: StreamRedaction) -> Self {
         Self {
             vm: vm.to_string(),
-            writer,
+            durable: DurableSink::new(vm, writer),
             redaction,
             audit: None,
             reader_bounds: DEFAULT_READER_BOUNDS,
@@ -191,7 +199,6 @@ impl StreamBroker {
             next_seq: 0,
             prev_hash: [0u8; 32],
             last_stamp_nanos: 0,
-            persist_degraded: false,
             counters: StreamCounters::default(),
         }
     }
@@ -220,7 +227,28 @@ impl StreamBroker {
 
     /// Counters for everything this broker has done.
     pub fn counters(&self) -> StreamCounters {
-        self.counters
+        let durable = self.durable.counts();
+        StreamCounters {
+            persist_failures: durable.missing(),
+            persist_lapses: durable.lapses,
+            persist_shed: durable.shed_chunks,
+            ..self.counters
+        }
+    }
+
+    /// Block until every record ingested so far has reached the durable
+    /// writer. Test-only: nothing in production waits on the store, which is
+    /// the whole point of it being on another thread.
+    #[cfg(test)]
+    pub(in crate::stream) fn drain_transcript(&self) {
+        self.durable.drain();
+    }
+
+    /// The lock the durable writer takes for every append. Test-only: holding
+    /// it is how a test stands in for a disk that stopped answering.
+    #[cfg(test)]
+    pub(in crate::stream) fn transcript_lock(&self) -> Arc<Mutex<TranscriptWriter>> {
+        self.durable.writer_lock()
     }
 
     /// Chunks accepted so far. Never decreases and never stalls — ingest has
@@ -271,38 +299,37 @@ impl StreamBroker {
     /// this end — a workload silenced or slowed at a cap is unobservable
     /// exactly when it matters most.
     ///
-    /// Hands back the record it sealed, which is what lets a producer that is
-    /// *also* a consumer — `mvmctl invoke`, writing the entrypoint's output to
-    /// the caller's own fds — show the same redacted, chained bytes every
-    /// follower gets without subscribing to its own output. Reading them back
-    /// off a follower queue instead would put the answer to a synchronous call
-    /// behind a ring that evicts. Ignoring the return is fine and ordinary:
-    /// the console follower does.
-    pub fn ingest(
-        &mut self,
-        source: StreamSource,
-        kind: StreamKind,
-        bytes: &[u8],
-    ) -> Arc<StreamRecord> {
+    /// Hands back what the seam decided, which is what lets a producer that is
+    /// *also* showing those bytes to somebody — `mvmctl invoke`, writing the
+    /// entrypoint's output to the caller's own fds — say how the copy it
+    /// recorded differs from the copy it showed. The recorded bytes themselves
+    /// are deliberately not handed back: the fan-out and the transcript get the
+    /// masked copy, and a caller printing its own function's return value is
+    /// not a third party to mask it from. Ignoring the return is fine and
+    /// ordinary: the console follower does.
+    pub fn ingest(&mut self, source: StreamSource, kind: StreamKind, bytes: &[u8]) -> ClearOutcome {
         self.counters.ingested = self.counters.ingested.saturating_add(1);
         let cleared = self.clear_for_display(source, kind, bytes);
         let record = Arc::new(self.seal_record(source, cleared.kind, cleared.body));
-        self.persist(&record);
-        self.fan_out(Arc::clone(&record));
-        record
+        self.durable.push(&record);
+        self.fan_out(record);
+        cleared.outcome
     }
 
     /// Seal the transcript and hand back its manifest.
     ///
     /// The sealed Merkle root covers every chunk still on disk **and** the
-    /// counts of those that are not: `refused_chunks` for records the store
-    /// failed to take (equal to this broker's `persist_failures`), and
-    /// `evicted_chunks` for the older records ring retention dropped to keep
-    /// the newest. Without those counts an incomplete artifact passes every
-    /// verification with nothing saying so — worse than a loud refusal,
-    /// because it looks trustworthy.
+    /// counts of those that are not: `refused_chunks` for records that never
+    /// landed, whether the store refused them or the hand-off shed them (equal
+    /// to this broker's `persist_failures`), and `evicted_chunks` for the older
+    /// records ring retention dropped to keep the newest. Without those counts
+    /// an incomplete artifact passes every verification with nothing saying so
+    /// — worse than a loud refusal, because it looks trustworthy.
+    ///
+    /// Waits for the writer thread to finish what is queued, so a record it
+    /// accepted before the seal is a record the manifest accounts for.
     pub fn seal(self) -> TranscriptManifest {
-        self.writer.seal()
+        self.durable.seal()
     }
 
     /// Run the chunk through the seam and count what it decided.
@@ -380,62 +407,6 @@ impl StreamBroker {
         self.last_stamp_nanos
     }
 
-    /// Append to the durable transcript, best-effort.
-    ///
-    /// Under [`DEFAULT_STREAM_RETENTION`] a full budget prunes rather than
-    /// refusing, so what remains here is a store that failed: a full disk, a
-    /// capture dir pulled out from under the writer. Refusing at this point
-    /// would silence followers to protect a disk, so the failure is counted
-    /// instead — an absent chunk on disk stays distinguishable from one that
-    /// was never produced, and the sealed manifest carries the same shortfall
-    /// as `refused_chunks`.
-    fn persist(&mut self, record: &StreamRecord) {
-        let direction = match record.kind {
-            StreamKind::Stdout => Direction::Stdout,
-            StreamKind::Stderr => Direction::Stderr,
-            StreamKind::Trace => Direction::Trace,
-        };
-        match self.writer.push(direction, &record.payload) {
-            Ok(()) => self.note_persist_recovered(),
-            Err(err) => {
-                self.counters.persist_failures = self.counters.persist_failures.saturating_add(1);
-                self.note_persist_failed(record.seq, &err);
-            }
-        }
-    }
-
-    /// Log the *transition* into a persistence outage, never the records.
-    ///
-    /// A store that has failed usually keeps failing, so a warning per record
-    /// would emit thousands of lines a second for the life of the workload —
-    /// trading a bounded disk problem for an unbounded log one. The count
-    /// keeps climbing in `persist_failures`; the log says it started.
-    fn note_persist_failed(&mut self, seq: u64, err: &TranscriptError) {
-        if self.persist_degraded {
-            return;
-        }
-        self.persist_degraded = true;
-        self.counters.persist_lapses = self.counters.persist_lapses.saturating_add(1);
-        tracing::warn!(
-            vm = %self.vm,
-            from_seq = seq,
-            error = %err,
-            "stream chunks no longer reaching the transcript; live readers unaffected"
-        );
-    }
-
-    fn note_persist_recovered(&mut self) {
-        if !self.persist_degraded {
-            return;
-        }
-        self.persist_degraded = false;
-        tracing::info!(
-            vm = %self.vm,
-            missed = self.counters.persist_failures,
-            "stream chunks reaching the transcript again"
-        );
-    }
-
     /// Hand the record to every live follower.
     ///
     /// `retain` doubles as the reaper: a dropped handle frees its queue, and
@@ -475,12 +446,16 @@ impl StreamBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream::durable::DURABLE_QUEUE_DEPTH;
     use crate::stream::fanout::DEFAULT_READER_MAX_RECORDS;
     use crate::stream::redact::{Redacted, RedactionFailed, StreamRedactor};
     use crate::supervisor::verify_audit_chain;
     use ed25519_dalek::SigningKey;
     use mvm_core::crypto::aead;
-    use mvm_core::transcript::{SEGMENT_MAX_CHUNKS, export, verify_chunks, verify_sealed_root};
+    use mvm_core::policy::RedactionPolicy;
+    use mvm_core::transcript::{
+        Direction, SEGMENT_MAX_CHUNKS, export, verify_chunks, verify_sealed_root,
+    };
     use mvm_protocol::stream::{verify_chain, verify_chain_from};
     use std::ops::{Deref, DerefMut};
     use std::path::Path;
@@ -505,6 +480,20 @@ mod tests {
     impl DerefMut for TestBroker {
         fn deref_mut(&mut self) -> &mut StreamBroker {
             &mut self.broker
+        }
+    }
+
+    /// Let the durable writer catch up every so often, for the tests whose
+    /// subject is what reached disk rather than how fast ingest returned.
+    ///
+    /// The hand-off sheds once the writer is a full queue behind, and a
+    /// synthetic loop outruns a real disk by orders of magnitude — so a test
+    /// that wants all of its records on disk has to stay inside that bound.
+    /// Production never does this: the whole point is that ingest does not
+    /// wait.
+    fn keep_the_writer_close(broker: &StreamBroker, ingested: u64) {
+        if ingested.is_multiple_of(DURABLE_QUEUE_DEPTH as u64 / 4) {
+            broker.drain_transcript();
         }
     }
 
@@ -562,7 +551,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), vm, DEFAULT_CAPTURE_BOUNDS);
         TestBroker {
-            broker: StreamBroker::new(vm, writer, StreamRedaction::curated()),
+            broker: StreamBroker::new(
+                vm,
+                writer,
+                StreamRedaction::curated(&RedactionPolicy::default()),
+            ),
             dir,
         }
     }
@@ -702,7 +695,11 @@ mod tests {
                 max_chunks: 0,
             },
         );
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
         let slow = b.subscribe();
 
         for i in 0..10_000u32 {
@@ -735,6 +732,7 @@ mod tests {
             "eviction must not scale with queue depth (took {saturated:?})"
         );
         assert_eq!(slow.pending() as u64, DEFAULT_READER_MAX_RECORDS);
+        b.drain_transcript();
         assert_eq!(b.counters().persist_failures, 20_000);
     }
 
@@ -762,7 +760,11 @@ mod tests {
     fn the_transcript_holds_every_redacted_record_and_verifies() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"out");
         b.ingest(StreamSource::Entrypoint, StreamKind::Stderr, b"err");
         b.ingest(
@@ -945,13 +947,22 @@ mod tests {
     fn a_persist_failure_never_silences_a_reader() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
         let mut r = b.subscribe();
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"one");
+        // Let the first one land before the store goes: the writer is on its
+        // own thread, so an undrained ingest would be racing the removal that
+        // is meant to break only the *second* append.
+        b.drain_transcript();
         // Take the store away: the second append has nowhere to land.
         std::fs::remove_dir_all(dir.path()).expect("remove capture dir");
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"two");
 
+        b.drain_transcript();
         assert_eq!(b.counters().persist_failures, 1);
         let records: Vec<_> = std::iter::from_fn(|| r.recv()).take(2).collect();
         assert_eq!(records.len(), 2, "the live stream outlives the store");
@@ -973,10 +984,15 @@ mod tests {
                 max_chunks: 2,
             },
         );
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
         for i in 0..7u8 {
             b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, &[i, i, i]);
         }
+        b.drain_transcript();
         assert_eq!(b.counters().persist_failures, 5);
 
         let manifest = b.seal();
@@ -998,8 +1014,13 @@ mod tests {
     fn a_complete_capture_seals_without_a_truncation_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"all of it");
+        b.drain_transcript();
         assert_eq!(b.counters().persist_failures, 0);
         let manifest = b.seal();
         assert!(!manifest.is_truncated());
@@ -1021,10 +1042,15 @@ mod tests {
                 max_chunks: 1,
             },
         );
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
         for _ in 0..5_000 {
             b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"x");
         }
+        b.drain_transcript();
         assert_eq!(b.counters().persist_failures, 4_999);
         assert_eq!(
             b.counters().persist_lapses,
@@ -1040,16 +1066,27 @@ mod tests {
         // going quiet forever.
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
+        // Each step has to land before the next one changes the disk under
+        // it: the writer runs on its own thread, so an undrained ingest would
+        // be racing the `remove_dir_all` that is supposed to break it.
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"ok");
+        b.drain_transcript();
 
         // Remove the directory out from under the writer, then put it back.
         std::fs::remove_dir_all(dir.path()).expect("remove capture dir");
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"lost");
+        b.drain_transcript();
         std::fs::create_dir_all(dir.path()).expect("restore capture dir");
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"ok again");
+        b.drain_transcript();
         std::fs::remove_dir_all(dir.path()).expect("remove capture dir again");
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"lost again");
+        b.drain_transcript();
 
         assert_eq!(b.counters().persist_failures, 2);
         assert_eq!(b.counters().persist_lapses, 2);
@@ -1081,7 +1118,11 @@ mod tests {
                 max_chunks: 2 * SEGMENT_MAX_CHUNKS,
             },
         );
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
         let total = SEGMENT_MAX_CHUNKS * 6;
         for i in 0..total {
             b.ingest(
@@ -1089,7 +1130,12 @@ mod tests {
                 StreamKind::Stdout,
                 format!("{i}\n").as_bytes(),
             );
+            // Keep the writer within a queue's reach. What this test is about
+            // is the *budget* pruning, and a record shed at the hand-off would
+            // be a second, unrelated reason for one to be missing.
+            keep_the_writer_close(&b, i);
         }
+        b.drain_transcript();
         assert_eq!(
             b.counters().persist_failures,
             0,
@@ -1110,13 +1156,128 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_far_past_the_durable_queue_is_accounted_for_not_silently_lost() {
+        // The hand-off is a queue, and a queue is where records go missing.
+        // Sixteen times its depth, with nothing pacing the producer: whatever
+        // the queue could not take is missing from the transcript, and the
+        // sealed artifact has to own every one of them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
+        let total = DURABLE_QUEUE_DEPTH * 16;
+        for i in 0..total {
+            b.ingest(
+                StreamSource::Entrypoint,
+                StreamKind::Stdout,
+                format!("{i}\n").as_bytes(),
+            );
+        }
+
+        // No drain: `seal` is the production teardown, and it has to be the
+        // thing that waits — a manifest missing whatever was still queued
+        // would be a hole nothing declares.
+        let manifest = b.seal();
+        assert_eq!(
+            manifest.chunks.len() as u64 + manifest.refused_chunks,
+            total as u64,
+            "every ingested record is either in the transcript or counted as absent from it"
+        );
+        assert_eq!(
+            manifest.is_truncated(),
+            manifest.refused_chunks > 0,
+            "a transcript declares itself incomplete exactly when it is"
+        );
+        verify_sealed_root(&manifest).expect("what survived seals a valid root");
+        verify_chunks(&manifest, dir.path()).expect("and every surviving chunk verifies");
+    }
+
+    #[test]
+    fn a_wedged_durable_writer_sheds_rather_than_pacing_the_workload() {
+        // The failure a bounded hand-off invites: a queue that waits when it
+        // fills is a slow disk stalling ingest, which is the stalled-reader
+        // failure with a different door. The producer must come back at its
+        // own speed and the shortfall must show up in the sealed manifest.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let writer = writer_at(dir.path(), "vm-wedged", unbounded_capture_bounds());
+        let mut b = StreamBroker::new(
+            "vm-wedged",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
+        let mut follower = b.subscribe();
+        let transcript = b.transcript_lock();
+        // The disk, stopped: the writer thread parks on its first append, so
+        // the queue behind it fills and stays full.
+        let wedged = transcript.lock().expect("the writer lock");
+
+        let total = DURABLE_QUEUE_DEPTH * 8;
+        let (finished, ingesting) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            for i in 0..total {
+                b.ingest(
+                    StreamSource::Entrypoint,
+                    StreamKind::Stdout,
+                    format!("{i}\n").as_bytes(),
+                );
+            }
+            let _ = finished.send(());
+            b
+        });
+        // Unwedging only after the verdict: a producer still blocked here is
+        // one the queue held, and it has to be released to join cleanly.
+        let returned = ingesting.recv_timeout(Duration::from_secs(5)).is_ok();
+        drop(wedged);
+        let b = producer.join().expect("the producer thread");
+
+        assert!(returned, "ingest must never wait on the durable writer");
+        assert_eq!(
+            b.ingested_count(),
+            total as u64,
+            "every chunk still accepted"
+        );
+        assert!(
+            follower.recv().is_some(),
+            "shedding is the durable copy's problem; the live stream is untouched"
+        );
+        let shed = b.counters().persist_shed;
+        assert!(shed > 0, "a wedged writer must actually shed");
+        assert_eq!(b.counters().persist_failures, shed);
+
+        let manifest = b.seal();
+        assert!(
+            manifest.is_truncated(),
+            "a transcript that lost records must not seal as complete"
+        );
+        assert_eq!(manifest.refused_chunks, shed);
+        assert!(manifest.refused_bytes > 0, "the lost bytes are counted too");
+        assert_eq!(
+            manifest.chunks.len() as u64 + manifest.refused_chunks,
+            total as u64
+        );
+        verify_sealed_root(&manifest).expect("the shortfall is inside the sealed root");
+    }
+
+    #[test]
     fn a_chatty_workload_does_not_cost_a_file_per_chunk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), "vm-a", unbounded_capture_bounds());
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated());
-        for _ in 0..20_000 {
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
+        for i in 0..20_000u64 {
             b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"x");
+            // What is under test is how many *files* 20k landed chunks cost,
+            // so all 20k have to land: keep the writer inside the hand-off's
+            // bound instead of letting it shed.
+            keep_the_writer_close(&b, i);
         }
+        b.drain_transcript();
         let files = std::fs::read_dir(dir.path())
             .expect("read capture dir")
             .filter_map(Result::ok)
@@ -1142,8 +1303,12 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = writer_at(dir.path(), "vm-a", DEFAULT_CAPTURE_BOUNDS);
-        let mut b = StreamBroker::new("vm-a", writer, StreamRedaction::curated())
-            .with_audit(StreamAudit::new(emitter, plan));
+        let mut b = StreamBroker::new(
+            "vm-a",
+            writer,
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        )
+        .with_audit(StreamAudit::new(emitter, plan));
 
         let _reader = b.subscribe();
         let secret = b"card 4111111111111111 end";

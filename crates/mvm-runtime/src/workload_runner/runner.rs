@@ -215,16 +215,30 @@ impl BrokerRegistrar for RealBrokerRegistrar {
 /// with the fewest other ways to see a boot failure, so it must not lose
 /// console capture either.
 pub trait ConsoleStreamer: Send + Sync {
-    /// Start following `console_log` for `vm_name`. Best-effort: a real
+    /// Start capturing one workload's output. Best-effort: a real
     /// implementation logs and continues on failure rather than failing a
     /// workload boot over an observability feature.
-    fn start(&self, vm_name: &str, console_log: &Path);
+    fn start(&self, capture: &ConsoleCapture<'_>);
 
     /// Stop following `vm_name`'s console, if anything started one.
     /// Idempotent — a no-op for a VM whose console was never followed,
     /// matching every other per-VM reaper `WorkloadRunner::stop` already
     /// calls unconditionally.
     fn stop(&self, vm_name: &str);
+}
+
+/// One workload's console capture: which VM, which file, and the redaction
+/// policy its recorded output is cleared under.
+///
+/// The policy rides along rather than being resolved on the far side because
+/// it is the *launch's* policy — the same value this call's caller already
+/// handed the substitution endpoint. A capture that picked its own would give
+/// one answer on egress and a different one in the transcript.
+pub struct ConsoleCapture<'a> {
+    pub vm_name: &'a str,
+    /// The write-only capture file the backend is already writing.
+    pub console_log: &'a Path,
+    pub redaction: &'a RedactionPolicy,
 }
 
 /// The hook a process that registered no real streamer gets: console bytes
@@ -234,7 +248,7 @@ pub trait ConsoleStreamer: Send + Sync {
 pub struct NoopConsoleStreamer;
 
 impl ConsoleStreamer for NoopConsoleStreamer {
-    fn start(&self, _vm_name: &str, _console_log: &Path) {}
+    fn start(&self, _capture: &ConsoleCapture<'_>) {}
     fn stop(&self, _vm_name: &str) {}
 }
 
@@ -426,8 +440,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // handshake below rather than after it: the console is the only
         // channel that still carries output if boot never reaches the guest
         // agent, which includes a failure in that very handshake.
-        self.console_streamer
-            .start(&inputs.config.name, &socks.console_log);
+        self.console_streamer.start(&ConsoleCapture {
+            vm_name: &inputs.config.name,
+            console_log: &socks.console_log,
+            redaction: inputs.redaction,
+        });
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
         // ActivateEnvironment before exposing operational RPCs. Send it now,
@@ -599,7 +616,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
         // running the instant the fork resumes it — so the handshake window
         // this call precedes is the one place a restore can wedge or panic
         // with nothing else to show why.
-        self.console_streamer.start(&child.0, &socks.console_log);
+        self.console_streamer.start(&ConsoleCapture {
+            vm_name: &child.0,
+            console_log: &socks.console_log,
+            redaction: &redaction,
+        });
 
         // (7) Close that window before the claim commits: deliver the token to
         // the now-reachable guest and make it prove, on its own report, that it
@@ -1293,11 +1314,11 @@ mod tests {
     }
 
     impl ConsoleStreamer for RecordingConsoleStreamer {
-        fn start(&self, vm_name: &str, console_log: &Path) {
-            self.started
-                .lock()
-                .unwrap()
-                .push((vm_name.to_string(), console_log.to_path_buf()));
+        fn start(&self, capture: &ConsoleCapture<'_>) {
+            self.started.lock().unwrap().push((
+                capture.vm_name.to_string(),
+                capture.console_log.to_path_buf(),
+            ));
         }
 
         fn stop(&self, vm_name: &str) {

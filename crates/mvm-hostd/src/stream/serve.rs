@@ -363,6 +363,7 @@ mod tests {
     use std::time::Instant;
 
     use mvm_core::crypto::aead;
+    use mvm_core::policy::RedactionPolicy;
     use mvm_core::stream_client::{
         FramedStreamReader, KindFilter, StreamOpts, StreamReader, connect_stream_at,
     };
@@ -397,8 +398,12 @@ mod tests {
             stream_capture_config(identity),
         );
         Arc::new(Mutex::new(
-            StreamBroker::new("vm", writer, StreamRedaction::curated())
-                .with_reader_bounds(reader_bounds),
+            StreamBroker::new(
+                "vm",
+                writer,
+                StreamRedaction::curated(&RedactionPolicy::default()),
+            )
+            .with_reader_bounds(reader_bounds),
         ))
     }
 

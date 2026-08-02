@@ -10,68 +10,114 @@
 //! separate. Without it `--stream stderr` matches nothing a workload ever
 //! wrote.
 //!
-//! **The broker is the seam, not a second consumer.** The host process that
-//! dispatches the entrypoint call is also the one that prints its output, and
-//! that is exactly why the bytes are routed *through* here rather than teed
-//! alongside: [`EntrypointSink::ingest`] hands back the bytes the broker
-//! cleared, and the caller writes those. `mvmctl invoke` and `mvmctl logs`
-//! therefore show the same redacted, hash-chained bytes, and there is no
-//! second path by which raw output reaches a terminal.
+//! **The broker is the seam for the recorded copy, not for the caller's.**
+//! Everything that leaves this host — the transcript on disk, every follower
+//! queue, `mvmctl logs` — gets the masked copy, and there is no second path to
+//! any of them. What comes back out of [`EntrypointSink::ingest`] is the
+//! workload's own bytes, unchanged, because the caller of an entrypoint call
+//! is not a third party: they invoked the function and they have code
+//! execution inside the workload that produced it. Masking their own return
+//! value protects nothing and breaks the function contract — a JSON body comes
+//! back as `{"id":XXX}`, which no parser accepts.
 //!
-//! **The record comes back from the ingest, never from a follower queue.**
-//! Subscribing the caller to its own output would be the other way to keep the
-//! two views identical, and it would put the answer to a synchronous call
-//! behind a bounded ring that evicts under back-pressure — losing exactly the
-//! bytes an SDK is waiting on. One `ingest` per frame produces one record;
-//! nothing is delivered twice and nothing waits on a reader.
+//! **The divergence is reported, never silent.** Every chunk comes back
+//! carrying [`RecordedCopy`] — identical, masked by these named rules, or
+//! withheld — so the caller can say on its own stderr that what an operator
+//! reads back differs from what it printed, and why.
 //!
-//! **A VM with no capture still gets its output cleared.** A call dispatched
-//! into a machine some *other* process booted (`machine run -d --name X`, then
-//! an attach) finds no broker here. The bytes are still workload output, so
-//! they still cross the seam; what they do not get is a sequence number, a
-//! chain link, or a durable copy, because there is no capture to put them in.
+//! **Nothing here waits on a follower queue.** Subscribing the caller to its
+//! own output would be the other way to reach the recorded bytes, and it would
+//! put the answer to a synchronous call behind a bounded ring that evicts under
+//! back-pressure. One `ingest` per frame produces one record; nothing is
+//! delivered twice and nothing waits on a reader.
 //!
-//! **Hold a sink for one call, not for a VM.** It keeps the broker alive, and
-//! the plane seals a transcript by taking sole ownership of that broker at
-//! teardown. A sink cached past its dispatch turns a sealed capture into an
-//! unsealed one.
+//! **A VM with no capture is not a VM with no output.** A call dispatched into
+//! a machine some *other* process booted (`machine run -d --name X`, then an
+//! attach) finds no broker here. The bytes still reach the caller; what they do
+//! not get is a sequence number, a chain link, or a durable copy — and, with no
+//! second copy to diverge from, nothing to redact for either.
+//!
+//! **Hold a sink for one call, not for a VM.** The plane seals a transcript by
+//! taking sole ownership of the broker at teardown, so the sink holds only a
+//! [`Weak`] reference and upgrades it per frame: a release that lands mid-call
+//! seals normally and the frames after it are simply unrecorded.
+
+use std::sync::{Arc, Mutex, Weak};
 
 use mvm_protocol::stream::{StreamKind, StreamSource};
 
+use crate::stream::broker::StreamBroker;
 use crate::stream::console_source::{SharedBroker, lock_broker};
-use crate::stream::redact::{self, StreamRedaction};
+use crate::stream::redact::ClearOutcome;
 
-/// Bytes cleared for display, and the channel they belong on.
-///
-/// `kind` is not always the one that went in: a chunk the seam refused to
-/// vouch for comes back as a [`StreamKind::Trace`] marker, and a caller that
-/// wrote it to the channel it asked for would put a diagnostic where a parser
-/// expects the workload's own bytes.
+/// One frame's two copies: what the caller was handed, and how the copy that
+/// was recorded differs from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShownChunk {
-    /// The channel these bytes go out on.
+    /// The channel these bytes go out on — the one the guest sent them on.
     pub kind: StreamKind,
-    /// What may be shown, in place of what arrived.
+    /// The workload's own bytes, byte for byte.
     pub body: Vec<u8>,
+    /// What an operator reading this call back will see instead.
+    pub recorded: RecordedCopy,
+}
+
+/// How the copy in the transcript and the follower queues differs from the copy
+/// the caller was handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedCopy {
+    /// Nothing is capturing this VM in this process, so there is no second
+    /// copy — and nothing an operator can read back afterwards.
+    NotRecorded,
+    /// Recorded as handed over: nothing fired.
+    Identical,
+    /// Recorded masked, by these rules. Names only — a value that fired a rule
+    /// is exactly the value that must not travel.
+    Masked { rules_fired: Vec<&'static str> },
+    /// The seam would not vouch for the chunk, so a marker was recorded in
+    /// place of the bytes.
+    Withheld {
+        /// Why the detector gave up. Describes the detector, never the bytes.
+        reason: String,
+    },
+}
+
+impl RecordedCopy {
+    /// Whether an operator reading this back would see something other than
+    /// what the caller was handed.
+    pub fn differs(&self) -> bool {
+        matches!(self, Self::Masked { .. } | Self::Withheld { .. })
+    }
+}
+
+impl From<ClearOutcome> for RecordedCopy {
+    fn from(outcome: ClearOutcome) -> Self {
+        match outcome {
+            ClearOutcome::Clean => Self::Identical,
+            ClearOutcome::Redacted { rules_fired } => Self::Masked { rules_fired },
+            ClearOutcome::Withheld { reason, .. } => Self::Withheld { reason },
+        }
+    }
 }
 
 /// One entrypoint call's ingest into the host's capture of a VM.
 ///
 /// Obtained per call from [`StreamPlane::entrypoint_sink`](crate::stream::StreamPlane::entrypoint_sink)
 /// (or [`EntrypointSink::for_vm`] against the process's registered plane) and
-/// dropped when the call ends — see the module docs on why it must not outlive
-/// one dispatch.
+/// dropped when the call ends — see the module docs on why it belongs to one
+/// dispatch.
 pub struct EntrypointSink(Ingest);
 
-/// Where a cleared chunk goes after the seam. Private: the two arms are a
-/// property of the VM, not a choice a caller makes.
+/// Where a chunk goes after the caller has been handed it. Private: the two
+/// arms are a property of the VM, not a choice a caller makes.
 enum Ingest {
     /// Into the VM's broker — redacted, stamped, chained, persisted, fanned
-    /// out to every follower.
-    Recorded(SharedBroker),
-    /// Through the seam and no further. No broker is capturing this VM in this
-    /// process, so there is nothing to chain the record onto.
-    Unrecorded(StreamRedaction),
+    /// out to every follower. Weak so a teardown that lands mid-call can still
+    /// take sole ownership and seal.
+    Recorded(Weak<Mutex<StreamBroker>>),
+    /// Nowhere. No broker is capturing this VM in this process, so there is
+    /// nothing to chain a record onto and no second copy to mask.
+    Unrecorded,
 }
 
 impl EntrypointSink {
@@ -86,46 +132,57 @@ impl EntrypointSink {
         super::host_stream_plane().map_or_else(Self::unrecorded, |plane| plane.entrypoint_sink(vm))
     }
 
-    /// A sink over a live broker.
-    pub(in crate::stream) fn recorded(broker: SharedBroker) -> Self {
-        Self(Ingest::Recorded(broker))
+    /// A sink over a live broker, held weakly.
+    pub(in crate::stream) fn recorded(broker: &SharedBroker) -> Self {
+        Self(Ingest::Recorded(Arc::downgrade(broker)))
     }
 
-    /// A sink that clears bytes for display and records nothing.
+    /// A sink that records nothing.
     pub fn unrecorded() -> Self {
-        Self(Ingest::Unrecorded(StreamRedaction::curated()))
+        Self(Ingest::Unrecorded)
     }
 
     /// Whether these bytes are reaching a capture, for a caller reporting what
     /// an operator will be able to read back afterwards.
     pub fn is_recorded(&self) -> bool {
-        matches!(self.0, Ingest::Recorded(_))
+        match &self.0 {
+            Ingest::Recorded(broker) => broker.strong_count() > 0,
+            Ingest::Unrecorded => false,
+        }
     }
 
-    /// Take one frame of entrypoint output and hand back what may be shown.
+    /// Take one frame of entrypoint output, record it, and hand the caller
+    /// back its own bytes plus what the recorded copy became.
     ///
     /// Never blocks on a consumer and never refuses: a broker's fan-out rings
-    /// rather than waiting, so a follower that stopped reading loses its own
-    /// oldest records and this call returns at the same speed it would have
-    /// otherwise. Nothing here can reach back and stall the guest's child.
+    /// rather than waiting, and its durable append runs on another thread whose
+    /// hand-off sheds rather than waiting too — so a follower that stopped
+    /// reading and a disk that stopped answering both leave this call at the
+    /// speed it would have returned anyway. Nothing downstream can reach back
+    /// and stall the guest's child.
     pub fn ingest(&mut self, kind: StreamKind, bytes: &[u8]) -> ShownChunk {
-        match &self.0 {
-            Ingest::Recorded(broker) => {
-                let record = lock_broker(broker).ingest(StreamSource::Entrypoint, kind, bytes);
-                ShownChunk {
-                    kind: record.kind,
-                    body: record.payload.clone(),
-                }
-            }
-            Ingest::Unrecorded(seam) => {
-                let cleared =
-                    redact::clear_for_display(seam, StreamSource::Entrypoint, kind, bytes);
-                ShownChunk {
-                    kind: cleared.kind,
-                    body: cleared.body,
-                }
-            }
+        ShownChunk {
+            kind,
+            body: bytes.to_vec(),
+            recorded: self.record(kind, bytes),
         }
+    }
+
+    fn record(&self, kind: StreamKind, bytes: &[u8]) -> RecordedCopy {
+        let Ingest::Recorded(broker) = &self.0 else {
+            return RecordedCopy::NotRecorded;
+        };
+        // Upgraded per frame, not held: the plane seals by taking sole
+        // ownership, and a sink that kept a strong reference for the whole
+        // dispatch would turn any teardown racing the call into an unsealed
+        // transcript.
+        broker
+            .upgrade()
+            .map_or(RecordedCopy::NotRecorded, |broker| {
+                lock_broker(&broker)
+                    .ingest(StreamSource::Entrypoint, kind, bytes)
+                    .into()
+            })
     }
 }
 
@@ -133,11 +190,11 @@ impl EntrypointSink {
 mod tests {
     use super::*;
     use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
-    use crate::stream::redact::{Redacted, RedactionFailed, StreamRedactor};
+    use crate::stream::redact::{Redacted, RedactionFailed, StreamRedaction, StreamRedactor};
     use mvm_core::crypto::aead;
+    use mvm_core::policy::RedactionPolicy;
     use mvm_core::transcript::{CaptureBinding, TranscriptWriter};
     use mvm_protocol::stream::verify_chain;
-    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
@@ -148,7 +205,7 @@ mod tests {
         _dir: TempDir,
     }
 
-    fn fixture(vm: &str) -> Fixture {
+    fn fixture_with(vm: &str, seam: StreamRedaction) -> Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = stream_capture_config(StreamCaptureIdentity {
             capture_id: format!("capture-{vm}"),
@@ -163,13 +220,13 @@ mod tests {
         });
         let writer = TranscriptWriter::new(dir.path(), aead::Key::from_bytes([0x5a; 32]), config);
         Fixture {
-            broker: Arc::new(Mutex::new(StreamBroker::new(
-                vm,
-                writer,
-                StreamRedaction::curated(),
-            ))),
+            broker: Arc::new(Mutex::new(StreamBroker::new(vm, writer, seam))),
             _dir: dir,
         }
+    }
+
+    fn fixture(vm: &str) -> Fixture {
+        fixture_with(vm, StreamRedaction::curated(&RedactionPolicy::default()))
     }
 
     /// A Luhn-valid test card number the curated ruleset masks.
@@ -181,7 +238,7 @@ mod tests {
         // the two channels a byte came out of, and this one can.
         let fx = fixture("vm-a");
         let mut reader = lock_broker(&fx.broker).subscribe();
-        let mut sink = EntrypointSink::recorded(Arc::clone(&fx.broker));
+        let mut sink = EntrypointSink::recorded(&fx.broker);
 
         sink.ingest(StreamKind::Stdout, b"out");
         sink.ingest(StreamKind::Stderr, b"err");
@@ -205,47 +262,61 @@ mod tests {
         // path shows the operator the same line twice.
         let fx = fixture("vm-once");
         let mut reader = lock_broker(&fx.broker).subscribe();
-        let mut sink = EntrypointSink::recorded(Arc::clone(&fx.broker));
+        let mut sink = EntrypointSink::recorded(&fx.broker);
 
         let shown = sink.ingest(StreamKind::Stdout, b"said once");
 
         assert_eq!(shown.body, b"said once");
+        assert_eq!(shown.recorded, RecordedCopy::Identical);
         assert_eq!(lock_broker(&fx.broker).ingested_count(), 1);
         assert_eq!(reader.recv().expect("the record").payload, b"said once");
         assert!(reader.recv().is_none(), "the frame must not arrive twice");
     }
 
     #[test]
-    fn the_bytes_handed_back_are_the_bytes_the_followers_get() {
-        // The property that makes routing through the broker worth doing: the
-        // caller printing to its own fds cannot become a path around the seam,
-        // because it prints what the seam returned.
+    fn the_caller_gets_its_own_bytes_and_the_followers_get_the_masked_ones() {
+        // The correction this shape exists for: masking a caller's own return
+        // value protects nothing — they ran the function — while breaking it
+        // for anything that parses the result. The copy that leaves the host
+        // is still masked.
         let fx = fixture("vm-same");
         let mut reader = lock_broker(&fx.broker).subscribe();
-        let mut sink = EntrypointSink::recorded(Arc::clone(&fx.broker));
+        let mut sink = EntrypointSink::recorded(&fx.broker);
 
         let shown = sink.ingest(StreamKind::Stdout, b"card 4111111111111111 end");
 
-        assert!(
-            !shown.body.windows(TEST_CARD.len()).any(|w| w == TEST_CARD),
-            "the caller must not be handed the raw match"
+        assert_eq!(
+            shown.body, b"card 4111111111111111 end",
+            "the caller asked for its own output and must get it byte for byte"
         );
-        assert_eq!(reader.recv().expect("the record").payload, shown.body);
+        assert_eq!(
+            shown.recorded,
+            RecordedCopy::Masked {
+                rules_fired: vec!["credit_card"]
+            },
+            "and must be told the recorded copy is not the same bytes"
+        );
+        let recorded = reader.recv().expect("the record").payload.clone();
+        assert!(
+            !recorded.windows(TEST_CARD.len()).any(|w| w == TEST_CARD),
+            "the copy every follower gets must still be masked"
+        );
+        assert_ne!(recorded, shown.body);
     }
 
     #[test]
-    fn an_unrecorded_vm_still_crosses_the_seam() {
+    fn an_unrecorded_vm_hands_its_bytes_straight_back() {
         // A call dispatched into a machine another process booted has no
-        // broker here. Printing raw would make "no capture" mean "no
-        // redaction", which is the one place the two must not be the same
-        // switch.
+        // broker here. With no second copy there is nothing to diverge from
+        // and nobody to mask for — the caller is the only consumer.
         let mut sink = EntrypointSink::unrecorded();
         assert!(!sink.is_recorded());
 
         let shown = sink.ingest(StreamKind::Stderr, b"card 4111111111111111 end");
 
         assert_eq!(shown.kind, StreamKind::Stderr);
-        assert!(!shown.body.windows(TEST_CARD.len()).any(|w| w == TEST_CARD));
+        assert_eq!(shown.body, b"card 4111111111111111 end");
+        assert_eq!(shown.recorded, RecordedCopy::NotRecorded);
     }
 
     /// A seam that refuses to vouch for anything — the shape a detector with a
@@ -259,18 +330,72 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_the_seam_will_not_vouch_for_comes_back_as_a_trace_marker() {
-        // Fail closed on both arms, and retagged: a caller that wrote the
-        // marker to stdout would hand a parser a diagnostic where the
-        // workload's own bytes belong.
-        let mut sink = EntrypointSink(Ingest::Unrecorded(StreamRedaction::from_seam(Box::new(
-            FailingRedactor,
-        ))));
+    fn a_chunk_the_seam_will_not_vouch_for_is_withheld_from_the_record_only() {
+        // Fail closed where it matters: the transcript gets a marker instead
+        // of bytes nobody checked. The caller still gets its own output, and
+        // is told the record is a marker.
+        let fx = fixture_with(
+            "vm-unscannable",
+            StreamRedaction::from_seam(Box::new(FailingRedactor)),
+        );
+        let mut reader = lock_broker(&fx.broker).subscribe();
+        let mut sink = EntrypointSink::recorded(&fx.broker);
 
         let shown = sink.ingest(StreamKind::Stdout, b"unscannable");
 
-        assert_eq!(shown.kind, StreamKind::Trace);
-        assert!(!shown.body.windows(11).any(|w| w == b"unscannable"));
+        assert_eq!(shown.kind, StreamKind::Stdout);
+        assert_eq!(shown.body, b"unscannable");
+        assert_eq!(
+            shown.recorded,
+            RecordedCopy::Withheld {
+                reason: "detector unavailable".to_string()
+            }
+        );
+        let record = reader.recv().expect("a marker still lands");
+        assert_eq!(record.kind, StreamKind::Trace);
+        assert!(!record.payload.windows(11).any(|w| w == b"unscannable"));
+    }
+
+    #[test]
+    fn every_divergent_outcome_reports_itself_as_divergent() {
+        assert!(!RecordedCopy::NotRecorded.differs());
+        assert!(!RecordedCopy::Identical.differs());
+        assert!(
+            RecordedCopy::Masked {
+                rules_fired: vec!["credit_card"]
+            }
+            .differs()
+        );
+        assert!(
+            RecordedCopy::Withheld {
+                reason: "gone".to_string()
+            }
+            .differs()
+        );
+    }
+
+    #[test]
+    fn a_capture_released_mid_call_seals_and_the_rest_of_the_call_is_unrecorded() {
+        // The sink holds the broker weakly on purpose: a teardown racing a
+        // dispatch has to be able to take sole ownership and seal, and the
+        // frames after it must still reach the caller.
+        let fx = fixture("vm-released");
+        let mut sink = EntrypointSink::recorded(&fx.broker);
+        assert!(sink.is_recorded());
+        sink.ingest(StreamKind::Stdout, b"before");
+
+        let Fixture { broker, _dir } = fx;
+        let broker = Arc::into_inner(broker).expect("the sink must not hold the broker open");
+        let manifest = broker
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .seal();
+        assert_eq!(manifest.chunks.len(), 1, "the released capture still seals");
+
+        assert!(!sink.is_recorded());
+        let shown = sink.ingest(StreamKind::Stdout, b"after");
+        assert_eq!(shown.body, b"after");
+        assert_eq!(shown.recorded, RecordedCopy::NotRecorded);
     }
 
     #[test]
@@ -281,7 +406,7 @@ mod tests {
         // fan-out rings.
         let fx = fixture("vm-slow");
         let stalled = lock_broker(&fx.broker).subscribe();
-        let mut sink = EntrypointSink::recorded(Arc::clone(&fx.broker));
+        let mut sink = EntrypointSink::recorded(&fx.broker);
 
         let started = Instant::now();
         for i in 0..10_000u32 {

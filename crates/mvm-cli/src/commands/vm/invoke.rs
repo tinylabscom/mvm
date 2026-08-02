@@ -16,8 +16,12 @@
 //!   - waits for the guest agent,
 //!   - reads stdin from a file (`-` = mvmctl's own stdin, default empty),
 //!   - sends `GuestRequest::RunEntrypoint`,
-//!   - streams `EntrypointEvent::Stdout` / `Stderr` events back to
-//!     mvmctl's own stdout / stderr as they arrive,
+//!   - streams `EntrypointEvent::Stdout` / `Stderr` events back to mvmctl's
+//!     own stdout / stderr as they arrive, byte for byte, while handing the
+//!     same frames to the VM's output capture — which redacts, chains, and
+//!     persists a copy of its own. The caller gets the workload's bytes;
+//!     `mvmctl logs` gets the masked ones; any divergence between the two is
+//!     named on stderr rather than left for the caller to discover,
 //!   - tears the VM down (unless `keep_alive`),
 //!   - exits with the wrapper's exit code (or non-zero on error).
 //!
@@ -608,11 +612,10 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on '{vm_name}'"))?;
 
-    let mut sinks = EventSinks::inherited();
-    // The entrypoint half of the VM's output capture. Held for this call only:
-    // it keeps the broker alive, and the plane seals the transcript at teardown
-    // by taking sole ownership of that broker.
+    // The entrypoint half of the VM's output capture, for this call only.
     let mut capture = mvm_hostd::stream::EntrypointSink::for_vm(vm_name);
+    let recorded = capture.is_recorded();
+    let mut out = CallOutput::inherited();
     let terminal = mvm_agentd::vsock::send_run_entrypoint(
         &mut stream,
         stdin,
@@ -620,13 +623,15 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         // Secret-bearing workloads route through the in-guest forward proxy;
         // plain vsock-egress workloads route through the loopback SOCKS5 client.
         workload_egress_env(vm_name),
-        |event| write_entrypoint_event(event, &mut capture, &mut sinks),
+        |event| write_entrypoint_event(event, &mut capture, &mut out),
     )
     .context("Streaming RunEntrypoint response")?;
-    // Explicit rather than left to scope exit: the teardown that follows this
-    // call seals the transcript by taking sole ownership of the broker, and a
-    // sink still holding a reference then costs the run its manifest.
     drop(capture);
+
+    // After the output, before the exit: the caller has just been handed the
+    // workload's own bytes, and this is where it learns whether the copy an
+    // operator can read back is the same one.
+    out.report(vm_name, recorded);
 
     // Flush before potentially exiting.
     let _ = std::io::stdout().flush();
@@ -652,17 +657,134 @@ impl EventSinks<'static> {
     }
 }
 
+/// One call's output: the caller's two fds, and a running tally of how the
+/// recorded copy diverged from what they were handed.
+struct CallOutput<'a> {
+    sinks: EventSinks<'a>,
+    divergence: RecordedDivergence,
+}
+
+impl CallOutput<'static> {
+    fn inherited() -> Self {
+        Self {
+            sinks: EventSinks::inherited(),
+            divergence: RecordedDivergence::default(),
+        }
+    }
+}
+
+impl CallOutput<'_> {
+    /// Tell the caller, on stderr, how what an operator can read back differs
+    /// from what this call printed.
+    ///
+    /// Silent when the two agree, which is the ordinary case — a notice that
+    /// fires on every call stops being read. Prefixed so a script can detect
+    /// it without parsing prose, and on stderr so it never lands in the bytes
+    /// an SDK is parsing.
+    fn report(&mut self, vm_name: &str, recorded: bool) {
+        if !recorded {
+            notice(
+                &mut self.sinks,
+                &format!(
+                    "this call's output was not recorded: no output capture for microVM \
+                     {vm_name:?} in this process, so `mvmctl logs {vm_name}` will not show it"
+                ),
+            );
+            return;
+        }
+        if let Some(line) = self.divergence.describe(vm_name) {
+            notice(&mut self.sinks, &line);
+        }
+    }
+}
+
+/// Prefix on the operator notices this command writes. Fixed and greppable:
+/// the divergence line is the caller's only signal that the recorded copy is
+/// not what it printed, and a script has to be able to detect it.
+const NOTICE_PREFIX: &str = "[mvmctl-stream]";
+
+fn notice(sinks: &mut EventSinks<'_>, line: &str) {
+    // `eprintln!` panics when the write fails, and `mvmctl … 2>&-` is an
+    // ordinary thing for a script to do — a diagnostic must not kill the
+    // command it is diagnosing.
+    let _ = writeln!(sinks.err, "{NOTICE_PREFIX} {line}");
+    let _ = sinks.err.flush();
+}
+
+/// How the copy of this call's output that was recorded differs from the copy
+/// the caller was handed.
+///
+/// Counts and rule *names* only. A value that fired a rule is exactly the
+/// value that must not travel, so naming it here would reopen the leak the
+/// seam closes — and the caller already has the bytes.
+#[derive(Default)]
+struct RecordedDivergence {
+    masked_chunks: u64,
+    withheld_chunks: u64,
+    /// Sorted and deduplicated, so the line reads the same across runs.
+    rules_fired: std::collections::BTreeSet<&'static str>,
+}
+
+impl RecordedDivergence {
+    fn note(&mut self, recorded: &mvm_hostd::stream::RecordedCopy) {
+        use mvm_hostd::stream::RecordedCopy;
+        match recorded {
+            RecordedCopy::NotRecorded | RecordedCopy::Identical => {}
+            RecordedCopy::Masked { rules_fired } => {
+                self.masked_chunks = self.masked_chunks.saturating_add(1);
+                self.rules_fired.extend(rules_fired.iter().copied());
+            }
+            RecordedCopy::Withheld { .. } => {
+                self.withheld_chunks = self.withheld_chunks.saturating_add(1);
+            }
+        }
+    }
+
+    /// One line naming the divergence, or `None` when the two copies agree.
+    fn describe(&self, vm_name: &str) -> Option<String> {
+        if self.masked_chunks == 0 && self.withheld_chunks == 0 {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if self.masked_chunks > 0 {
+            parts.push(format!(
+                "{} chunk(s) masked by: {}",
+                self.masked_chunks,
+                self.rules_fired
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if self.withheld_chunks > 0 {
+            parts.push(format!(
+                "{} chunk(s) withheld because the redaction seam could not check them",
+                self.withheld_chunks
+            ));
+        }
+        Some(format!(
+            "recorded output differs from what this call printed — {}; \
+             the bytes above are the workload's own, `mvmctl logs {vm_name}` shows the \
+             redacted copy",
+            parts.join("; ")
+        ))
+    }
+}
+
 /// Write one streamed entrypoint event, as it arrives.
 ///
-/// **Through the capture, not alongside it.** Every frame is handed to
-/// `capture` first and what gets written is what comes back. That is what
-/// makes `mvmctl invoke` and `mvmctl logs` show the same bytes: routing around
-/// the capture to print the frame verbatim would make this hop the one place
-/// unredacted workload output reaches a terminal, which is precisely the
-/// property the single redaction seam exists to hold. The capture is also the
-/// only fan-out point — one frame in, one record recorded, one copy written —
-/// so nothing arrives twice, and its ingest never waits on a follower, so a
-/// consumer that stopped reading cannot pace the guest through this loop.
+/// **Through the capture, and the caller still gets its own bytes.** Every
+/// frame is handed to `capture`, which redacts, chains, persists and fans out
+/// a copy of its own — that copy is the one an operator reads back, and it is
+/// the only copy that leaves this host. What is written to the caller's fds is
+/// the workload's own bytes, unchanged: whoever ran this call has code
+/// execution inside the workload that produced them, so masking their own
+/// return value protects nothing and turns a JSON body into something no
+/// parser accepts. The capture is still the only fan-out point — one frame in,
+/// one record recorded, one copy written — and its ingest waits on neither a
+/// follower nor the disk, so nothing downstream can pace the guest through
+/// this loop.
 ///
 /// **Flushed per event, deliberately.** Rust's stdout is block-buffered
 /// whenever it is not a terminal, so without this the agent could stream
@@ -672,15 +794,15 @@ impl EventSinks<'static> {
 fn write_entrypoint_event(
     event: &mvm_agentd::vsock::EntrypointEvent,
     capture: &mut mvm_hostd::stream::EntrypointSink,
-    sinks: &mut EventSinks<'_>,
+    out: &mut CallOutput<'_>,
 ) {
     use mvm_protocol::stream::StreamKind;
     match event {
         mvm_agentd::vsock::EntrypointEvent::Stdout { chunk } => {
-            show(capture.ingest(StreamKind::Stdout, chunk), sinks);
+            show(capture.ingest(StreamKind::Stdout, chunk), out);
         }
         mvm_agentd::vsock::EntrypointEvent::Stderr { chunk } => {
-            show(capture.ingest(StreamKind::Stderr, chunk), sinks);
+            show(capture.ingest(StreamKind::Stderr, chunk), out);
         }
         mvm_agentd::vsock::EntrypointEvent::Control {
             header_json,
@@ -694,20 +816,20 @@ fn write_entrypoint_event(
             // human-readable form is the default.
             //
             // The header is the record; the fd-3 payload rides along and
-            // neither consumer renders it, so what the capture holds is what
-            // both of them show.
+            // neither consumer renders it.
             let shown = capture.ingest(StreamKind::Trace, header_json.as_bytes());
+            out.divergence.note(&shown.recorded);
             let header = String::from_utf8_lossy(&shown.body);
             if payload.is_empty() {
-                let _ = writeln!(sinks.err, "[mvmctl-control] {header}");
+                let _ = writeln!(out.sinks.err, "[mvmctl-control] {header}");
             } else {
                 let _ = writeln!(
-                    sinks.err,
+                    out.sinks.err,
                     "[mvmctl-control] {header} (+{} payload bytes)",
                     payload.len()
                 );
             }
-            let _ = sinks.err.flush();
+            let _ = out.sinks.err.flush();
         }
         // Terminal events (Exit / Error) are returned by
         // send_run_entrypoint; the handler is only invoked for
@@ -716,17 +838,20 @@ fn write_entrypoint_event(
     }
 }
 
-/// Put one cleared chunk on the fd its channel belongs to.
+/// Put one chunk on the fd its channel belongs to, and remember how the
+/// recorded copy of it differed.
 ///
-/// Routed by the *returned* kind rather than the one that went in: a chunk the
-/// redaction seam refused to vouch for comes back as a `Trace` marker, and
-/// writing that to stdout would hand a caller parsing the workload's output a
-/// diagnostic instead.
-fn show(chunk: mvm_hostd::stream::ShownChunk, sinks: &mut EventSinks<'_>) {
+/// Routed by the channel the guest sent the frame on. The recorded copy may
+/// have been retagged `Trace` — a chunk the seam would not vouch for is
+/// recorded as a marker — but that is a property of the record, not of the
+/// bytes the caller asked for, and moving the caller's stdout onto stderr over
+/// it would break the very parser this exists to keep whole.
+fn show(chunk: mvm_hostd::stream::ShownChunk, out: &mut CallOutput<'_>) {
     use mvm_protocol::stream::StreamKind;
+    out.divergence.note(&chunk.recorded);
     let sink = match chunk.kind {
-        StreamKind::Stdout => &mut sinks.out,
-        StreamKind::Stderr | StreamKind::Trace => &mut sinks.err,
+        StreamKind::Stdout => &mut out.sinks.out,
+        StreamKind::Stderr | StreamKind::Trace => &mut out.sinks.err,
     };
     let _ = sink.write_all(&chunk.body);
     let _ = sink.flush();
@@ -870,19 +995,21 @@ fn exit_code_for(event: &mvm_agentd::vsock::EntrypointEvent) -> i32 {
         }
     }
 }
-
 #[cfg(test)]
 mod streaming_tests {
-    use super::{EventSinks, write_entrypoint_event};
+    use super::{CallOutput, EventSinks, RecordedDivergence, write_entrypoint_event};
     use mvm_agentd::vsock::EntrypointEvent;
     use mvm_hostd::stream::EntrypointSink;
 
     /// Sinks over borrowed buffers, so a test reads back exactly what the
     /// handler wrote.
-    fn buffers<'a>(out: &'a mut Vec<u8>, err: &'a mut Vec<u8>) -> EventSinks<'a> {
-        EventSinks {
-            out: Box::new(out),
-            err: Box::new(err),
+    fn buffers<'a>(out: &'a mut Vec<u8>, err: &'a mut Vec<u8>) -> CallOutput<'a> {
+        CallOutput {
+            sinks: EventSinks {
+                out: Box::new(out),
+                err: Box::new(err),
+            },
+            divergence: RecordedDivergence::default(),
         }
     }
 
@@ -940,34 +1067,22 @@ mod streaming_tests {
     }
 
     #[test]
-    fn a_workloads_output_is_redacted_before_it_reaches_the_caller() {
-        // `invoke` prints what the capture cleared. Printing the frame
-        // verbatim would make this hop the one place raw workload output
-        // reaches a terminal, while `mvmctl logs` on the same VM showed the
-        // masked copy — a leak path around the seam, and two answers to one
-        // question.
+    fn an_uncaptured_call_hands_the_workloads_bytes_straight_through() {
+        // Nothing is recording this VM here, so there is no second copy to
+        // protect and nobody to protect it from — the caller ran the function.
         let (mut out, mut err) = (Vec::new(), Vec::new());
         {
             let mut capture = uncaptured();
             let mut sinks = buffers(&mut out, &mut err);
             write_entrypoint_event(
                 &EntrypointEvent::Stdout {
-                    chunk: b"card 4111111111111111 end".to_vec(),
+                    chunk: br#"{"card":"4111111111111111"}"#.to_vec(),
                 },
                 &mut capture,
                 &mut sinks,
             );
         }
-        assert!(
-            !out.windows(16).any(|w| w == b"4111111111111111"),
-            "the raw match reached the caller's stdout: {}",
-            String::from_utf8_lossy(&out)
-        );
-        assert!(
-            out.starts_with(b"card "),
-            "{}",
-            String::from_utf8_lossy(&out)
-        );
+        assert_eq!(out, br#"{"card":"4111111111111111"}"#);
     }
 
     /// A sink that records *when* it was pushed, not just what it holds.
@@ -1014,9 +1129,12 @@ mod streaming_tests {
         let mut err = RecordingSink::default();
         {
             let mut capture = uncaptured();
-            let mut sinks = EventSinks {
-                out: Box::new(&mut out),
-                err: Box::new(&mut err),
+            let mut sinks = CallOutput {
+                sinks: EventSinks {
+                    out: Box::new(&mut out),
+                    err: Box::new(&mut err),
+                },
+                divergence: RecordedDivergence::default(),
             };
             for chunk in [&b"first"[..], &b"second"[..]] {
                 write_entrypoint_event(
@@ -1048,15 +1166,54 @@ mod streaming_tests {
         let mut out = RecordingSink::default();
         let mut err = RecordingSink::default();
         {
-            let mut sinks = EventSinks {
-                out: Box::new(&mut out),
-                err: Box::new(&mut err),
+            let mut sinks = CallOutput {
+                sinks: EventSinks {
+                    out: Box::new(&mut out),
+                    err: Box::new(&mut err),
+                },
+                divergence: RecordedDivergence::default(),
             };
             let mut capture = uncaptured();
             write_entrypoint_event(&EntrypointEvent::Exit { code: 0 }, &mut capture, &mut sinks);
         }
         assert!(out.ops.is_empty(), "{:?}", out.ops);
         assert!(err.ops.is_empty(), "{:?}", err.ops);
+    }
+
+    #[test]
+    fn an_uncaptured_call_says_so_rather_than_leaving_the_operator_to_find_out() {
+        // The residual from a `--attach` into a machine some other process
+        // booted: the call runs, but `mvmctl logs` will not show it.
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        {
+            let mut sinks = buffers(&mut out, &mut err);
+            sinks.report("detached-vm", false);
+        }
+        let rendered = String::from_utf8(err).expect("utf8");
+        assert!(rendered.starts_with("[mvmctl-stream] "), "{rendered}");
+        assert!(rendered.contains("was not recorded"), "{rendered}");
+        assert!(rendered.contains("detached-vm"), "{rendered}");
+        assert!(out.is_empty(), "a diagnostic never lands on stdout");
+    }
+
+    #[test]
+    fn a_call_whose_copies_agree_says_nothing() {
+        // A notice that fires on every call stops being read.
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        {
+            let mut capture = uncaptured();
+            let mut sinks = buffers(&mut out, &mut err);
+            write_entrypoint_event(
+                &EntrypointEvent::Stdout {
+                    chunk: b"nothing to see here".to_vec(),
+                },
+                &mut capture,
+                &mut sinks,
+            );
+            sinks.report("quiet-vm", true);
+        }
+        assert_eq!(out, b"nothing to see here");
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
     }
 }
 
@@ -1069,14 +1226,16 @@ mod captured_tests {
     //! one channel and get it, and only an end-to-end read proves the tags
     //! survive the broker, the transcript, and the manifest.
 
-    use super::{EventSinks, write_entrypoint_event};
+    use super::{CallOutput, EventSinks, RecordedDivergence, write_entrypoint_event};
     use mvm_agentd::vsock::EntrypointEvent;
+    use mvm_core::policy::RedactionPolicy;
     use mvm_core::stream_client::{
         KindFilter, OutputRequest, StreamAvailability, StreamOpts, open_vm_output,
     };
     use mvm_core::util::test_env::TestEnv;
     use mvm_hostd::stream::StreamPlane;
     use mvm_protocol::stream::StreamKind;
+    use mvm_runtime::workload_runner::ConsoleCapture;
 
     /// A plane holding one VM whose console never appears, so every record in
     /// the capture came from the entrypoint frames this test wrote.
@@ -1091,7 +1250,8 @@ mod captured_tests {
 
     impl Captured {
         /// Attach a plane for `vm`, then run `events` through the same handler
-        /// `dispatch` gives `send_run_entrypoint`.
+        /// `dispatch` gives `send_run_entrypoint`, closing with the same
+        /// end-of-call report `dispatch` writes.
         fn of(vm: &'static str, events: &[EntrypointEvent]) -> Self {
             let mut env = TestEnv::new();
             let home = tempfile::tempdir().expect("tempdir");
@@ -1100,20 +1260,30 @@ mod captured_tests {
             let state = mvm_core::config::vm_state_dir(vm);
             std::fs::create_dir_all(&state).expect("state dir");
             let plane = StreamPlane::new();
+            let redaction = RedactionPolicy::default();
             plane
-                .attach(vm, &state.join("console.log"))
+                .attach(&ConsoleCapture {
+                    vm_name: vm,
+                    console_log: &state.join("console.log"),
+                    redaction: &redaction,
+                })
                 .expect("attach a plane");
 
             let (mut out, mut err) = (Vec::new(), Vec::new());
             {
                 let mut capture = plane.entrypoint_sink(vm);
-                let mut sinks = EventSinks {
-                    out: Box::new(&mut out),
-                    err: Box::new(&mut err),
+                let recorded = capture.is_recorded();
+                let mut sinks = CallOutput {
+                    sinks: EventSinks {
+                        out: Box::new(&mut out),
+                        err: Box::new(&mut err),
+                    },
+                    divergence: RecordedDivergence::default(),
                 };
                 for event in events {
                     write_entrypoint_event(event, &mut capture, &mut sinks);
                 }
+                sinks.report(vm, recorded);
             }
             Self {
                 plane,
@@ -1207,26 +1377,57 @@ mod captured_tests {
         );
     }
 
+    /// A JSON body carrying a Luhn-valid number — the shape an SDK parses off
+    /// `MachineResult.stdout`, and the shape the curated ruleset matches.
+    const JSON_RETURN: &[u8] = br#"{"email":"a@b.com","id":4111111111111111}"#;
+
     #[test]
-    fn what_the_caller_sees_is_what_the_capture_holds() {
-        // One seam or two answers. A caller printing the frame verbatim while
-        // the capture held the masked copy would make `invoke` a way around
-        // the redaction `logs` applies to the same bytes.
-        let captured = Captured::of(
-            "invoke-redacted-vm",
-            &[stdout(b"card 4111111111111111 end")],
-        );
+    fn a_return_value_reaches_the_caller_whole_while_the_transcript_holds_the_masked_copy() {
+        // The correction: whoever ran this call has code execution inside the
+        // workload that produced these bytes, so masking their own return
+        // value protects nothing — and `{"id":XXX}` is not JSON, so it breaks
+        // every SDK that parses the result. The copy that leaves the host is
+        // still masked.
+        let captured = Captured::of("invoke-json-vm", &[stdout(JSON_RETURN)]);
         let shown = captured.out.clone();
 
-        assert!(
-            !shown.windows(16).any(|w| w == b"4111111111111111"),
-            "the caller saw the raw match: {}",
-            String::from_utf8_lossy(&shown)
-        );
         assert_eq!(
-            captured.recorded(KindFilter::all()),
-            vec![(StreamKind::Stdout, shown)],
-            "the recorded bytes and the shown bytes are the same bytes"
+            shown, JSON_RETURN,
+            "the caller's own return value must round-trip byte for byte"
+        );
+        serde_json::from_slice::<serde_json::Value>(&shown)
+            .expect("what the caller was handed must still parse as JSON");
+
+        let recorded = captured.recorded(KindFilter::all());
+        let (kind, body) = recorded.first().expect("one record").clone();
+        assert_eq!(kind, StreamKind::Stdout);
+        assert!(
+            !body.windows(16).any(|w| w == b"4111111111111111"),
+            "the recorded copy must still be masked: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_ne!(body, shown);
+    }
+
+    #[test]
+    fn the_caller_is_told_the_recorded_copy_diverged_and_which_rules_fired() {
+        // Divergence the caller cannot detect is the worst of both: their
+        // bytes are whole, and they have no way to know an operator reading
+        // the same call back sees something else.
+        let captured = Captured::of("invoke-divergence-vm", &[stdout(JSON_RETURN)]);
+
+        let rendered = String::from_utf8(captured.err.clone()).expect("utf8");
+        assert!(
+            rendered.starts_with("[mvmctl-stream] "),
+            "a script has to be able to detect this without parsing prose: {rendered}"
+        );
+        assert!(rendered.contains("recorded output differs"), "{rendered}");
+        assert!(rendered.contains("credit_card"), "{rendered}");
+        assert!(rendered.contains("email"), "{rendered}");
+        assert!(rendered.contains("1 chunk(s) masked"), "{rendered}");
+        assert!(
+            !rendered.contains("4111111111111111"),
+            "naming the rule must not mean quoting the value: {rendered}"
         );
     }
 

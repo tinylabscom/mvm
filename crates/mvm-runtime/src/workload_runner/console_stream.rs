@@ -52,6 +52,7 @@ pub fn active_console_streamer() -> Arc<dyn ConsoleStreamer> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::runner::ConsoleCapture;
     use super::*;
     use std::path::Path;
     use std::sync::Mutex;
@@ -62,11 +63,26 @@ mod tests {
     }
 
     impl ConsoleStreamer for Recording {
-        fn start(&self, vm_name: &str, _console_log: &Path) {
-            self.started.lock().unwrap().push(vm_name.to_string());
+        fn start(&self, capture: &ConsoleCapture<'_>) {
+            self.started
+                .lock()
+                .unwrap()
+                .push(capture.vm_name.to_string());
         }
         fn stop(&self, _vm_name: &str) {}
     }
+
+    /// One capture, the shape the runner hands over.
+    fn capture(vm: &str) -> ConsoleCapture<'_> {
+        ConsoleCapture {
+            vm_name: vm,
+            console_log: Path::new("/dev/null"),
+            redaction: &REDACTION,
+        }
+    }
+
+    static REDACTION: std::sync::LazyLock<mvm_core::policy::RedactionPolicy> =
+        std::sync::LazyLock::new(mvm_core::policy::RedactionPolicy::default);
 
     /// One test, because the registration is process-global and once-only:
     /// splitting the before/after halves into separate `#[test]`s would make
@@ -79,7 +95,7 @@ mod tests {
         );
         // The default is inert, not absent: a runner built before any
         // registration still has something to call.
-        active_console_streamer().start("vm-before", Path::new("/dev/null"));
+        active_console_streamer().start(&capture("vm-before"));
 
         let first = Arc::new(Recording::default());
         assert!(install_console_streamer(
@@ -93,7 +109,7 @@ mod tests {
             "a second registration must be refused, not silently swapped in"
         );
 
-        active_console_streamer().start("vm-after", Path::new("/dev/null"));
+        active_console_streamer().start(&capture("vm-after"));
         assert_eq!(first.started.lock().unwrap().as_slice(), ["vm-after"]);
         assert!(second.started.lock().unwrap().is_empty());
     }
