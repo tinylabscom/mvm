@@ -15,11 +15,11 @@
       filesystem, power-management, tracing/debug, keyring, task-accounting,
       NetLabel, swap/huge-page and legacy crypto/ABI plumbing while preserving
       every supported virtual-device and security contract. The workload
-      configs are ratcheted from 1,189 to 909 x86_64 built-ins and from 1,314
-      to 960 aarch64 built-ins. The x86_64 workload `bzImage` falls from
-      7,656,448 to 4,142,080 bytes (45.9%) and reaches PID 1 under Firecracker
-      1.14.1; the 962-symbol builder config retains cgroups, namespaces,
-      netfilter, FUSE and virtio-fs, and its 5,051,392-byte kernel also boots to
+      configs are ratcheted from 1,189 to 902 x86_64 built-ins and from 1,314
+      to 938 aarch64 built-ins. The x86_64 workload `bzImage` falls from
+      7,656,448 to 4,072,448 bytes (46.8%) and reaches PID 1 under Firecracker
+      1.14.1; the 955-symbol builder config retains cgroups, namespaces,
+      netfilter, FUSE and virtio-fs, and its 4,977,664-byte kernel also boots to
       PID 1. Config generation now fails if Kconfig silently restores an
       audited cut. Native aarch64 build and HVF/VZ boot validation remain in
       the PR architecture lane before merge.

@@ -9,9 +9,9 @@ for detailed scope and acceptance criteria.
 - [ ] Plan 286 — Guest-kernel hardware floor
       (`specs/plans/286-kernel-floor.md`)
   - [x] Audit resolved x86_64/aarch64 configs and enforce required cuts
-  - [x] Ratchet workload configs to 909 x86_64 / 960 aarch64 built-ins
-  - [x] Shrink the x86_64 workload image by 45.9% and boot it on Firecracker
-  - [x] Preserve, build and boot the 962-symbol builder-kernel contract
+  - [x] Ratchet workload configs to 902 x86_64 / 938 aarch64 built-ins
+  - [x] Shrink the x86_64 workload image by 46.8% and boot it on Firecracker
+  - [x] Preserve, build and boot the 955-symbol builder-kernel contract
   - [ ] Native aarch64 artifact build and HVF/VZ boot validation
   - [ ] Full CI, merge-queue landing and rollup closeout
 

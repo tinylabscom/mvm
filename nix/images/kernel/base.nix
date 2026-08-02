@@ -145,7 +145,6 @@ let
     # net core
     "NET"
     "INET"
-    "PACKET"
     "UNIX"
     "TCP_CONG_CUBIC"
 
@@ -250,7 +249,7 @@ let
     "NVRAM"
     "SYNC_FILE"
     "DMA_SHARED_BUFFER"
-    "MQ_IOSCHED_BFQ"
+    "IOSCHED_BFQ"
     "MQ_IOSCHED_DEADLINE"
     "MQ_IOSCHED_KYBER"
 
@@ -258,6 +257,17 @@ let
     # guest networking contract. The opt-in TUN path needs only the network
     # device and IP stack; policy and relay enforcement live on the host.
     "NET_SCHED"
+
+    # Every supported VMM exposes one uniform guest-memory node and direct
+    # virtio DMA. There is no physical contiguous-memory consumer, Qualcomm
+    # IPC transport, SCSI-generic block endpoint, UDP-Lite contract, or raw
+    # link-layer device behind the host-mediated network boundary.
+    "NUMA"
+    "CMA"
+    "QRTR"
+    "BLK_DEV_BSG"
+    "IP_UDP_LITE"
+    "PACKET"
 
     # No guest agent consumes process accounting, file-handle syscalls, the
     # obsolete sysfs syscall, or cross-process comparison. Keep core process,
