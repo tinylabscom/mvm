@@ -80,37 +80,6 @@ fn main() {
         );
     }
 
-    // Guest runtime binaries for OCI rootfs injection (guest arch = host arch).
-    // Embedded alongside the host bins so an end-user mvmctl with no source
-    // checkout can inject the full OCI runtime set into a `run --image` rootfs.
-    // Built in one cargo invocation; they ride the same `EMBEDDED` array and are
-    // looked up by name.
-    run_guest_zigbuild(
-        &workspace_root,
-        &host_target_dir,
-        &pin.target,
-        &pin.zig,
-        &bins_out,
-    );
-    for name in [
-        "mvm-guest-agent",
-        "mvm-guest-netinit",
-        "mvm-egress-client",
-        "mvm-verity-init",
-    ] {
-        let out_file = bins_out.join(name);
-        let sha = sha256_hex(&out_file);
-        entries.push((name.to_string(), out_file, sha));
-    }
-    // Watch the guest source trees file-by-file, not as a directory. Cargo's
-    // directory-level `rerun-if-changed` does not reliably fire on a content
-    // edit to an existing file (only on add/remove), so a change to e.g. the
-    // guest agent's request handler would otherwise leave the *embedded* agent
-    // stale on an incremental build — `machine run --image` would then inject an
-    // out-of-date agent. Emitting one `rerun-if-changed` per file guarantees the
-    // cross-compile re-runs on any edit.
-    emit_rerun_for_tree(&workspace_root.join("crates/mvm-agentd/src"));
-
     build_native_aux_helpers(&workspace_root, &nested_target_dir);
 
     let embedded_rs = render_embedded_rs(&entries);
@@ -360,76 +329,6 @@ fn run_cargo_zigbuild(
         .join(pkg);
     std::fs::copy(&built, out)
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
-}
-
-/// Cross-compile the guest runtime binaries in one invocation and copy them
-/// into the embedding directory. The same pinned toolchain and isolated
-/// caches as the host-binary build keep the output reproducible.
-fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
-    eprintln!(
-        "[build.rs] cargo zigbuild --release --target {target} -p mvm-agentd \
-         --bin mvm-guest-agent --bin mvm-guest-netinit \
-         --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-verity-init \
-         --bin mvm-egress-client --features mvm-agentd/interactive \
-         --features mvm-agentd/addons"
-    );
-    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
-    let mut cmd = Command::new(&cargo);
-    cmd.args([
-        "zigbuild",
-        "--release",
-        "--target",
-        target,
-        "-p",
-        "mvm-agentd",
-        "--bin",
-        "mvm-guest-agent",
-        "--bin",
-        "mvm-guest-netinit",
-        "--bin",
-        "mvm-oci-init",
-        "--bin",
-        "mvm-oci-entrypoint",
-        "--bin",
-        "mvm-verity-init",
-        "--bin",
-        "mvm-egress-client",
-        "--features",
-        "mvm-agentd/interactive",
-        "--features",
-        "mvm-agentd/addons",
-    ])
-    .env("RUSTC", &rustc)
-    .env("CARGO_TARGET_DIR", target_dir)
-    .env_remove("RUSTUP_TOOLCHAIN")
-    .env_remove("RUSTC_WRAPPER")
-    .env_remove("RUSTC_WORKSPACE_WRAPPER")
-    .current_dir(root);
-    apply_zigbuild_env(&mut cmd, target_dir);
-    if let Some(zig) = pinned_zig_path_or_fail(zig_pin) {
-        cmd.env("CARGO_ZIGBUILD_ZIG_PATH", zig);
-    }
-    let status = cmd
-        .status()
-        .expect("spawn `cargo zigbuild` for the guest agent");
-    assert!(
-        status.success(),
-        "cargo zigbuild failed for the guest agent"
-    );
-    let rel = target_dir.join(strip_glibc(target)).join("release");
-    for name in [
-        "mvm-guest-agent",
-        "mvm-guest-netinit",
-        "mvm-oci-init",
-        "mvm-oci-entrypoint",
-        "mvm-egress-client",
-        "mvm-verity-init",
-    ] {
-        let built = rel.join(name);
-        let dest = out_dir.join(name);
-        std::fs::copy(&built, &dest)
-            .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), dest.display()));
-    }
 }
 
 fn apply_zigbuild_env(cmd: &mut Command, target_dir: &Path) {
