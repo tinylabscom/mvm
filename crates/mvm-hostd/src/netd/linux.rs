@@ -601,10 +601,29 @@ mod tests {
                 "{name} carries characters that are not [a-z0-9_]"
             );
         }
-        // And the generated ruleset therefore carries nothing but the slug.
-        let rules = nft_ruleset(&table, &device, Ipv4Addr::new(10, 201, 0, 6));
-        for bad in [';', '`', '$', '\'', '\\'] {
-            assert!(!rules.contains(bad), "ruleset contains {bad:?}: {rules}");
+        // The ruleset is then structurally identical to a benign one. A
+        // blanket "contains no `;`" check would test the template rather
+        // than the sanitizer — nft terminates every statement with one —
+        // and injection is what would *add* statements, so compare the
+        // counts against a benign id instead.
+        let guest = Ipv4Addr::new(10, 201, 0, 6);
+        let hostile_rules = nft_ruleset(&table, &device, guest);
+        let benign_rules = nft_ruleset(&table_name("vm-a"), &device_name("vm-a"), guest);
+        for syntax in [';', '{', '}', '\n'] {
+            assert_eq!(
+                hostile_rules.matches(syntax).count(),
+                benign_rules.matches(syntax).count(),
+                "a hostile machine id added {syntax:?} to the ruleset: {hostile_rules}"
+            );
+        }
+        // The characters a shell or nft would act on cannot appear at all,
+        // because the only interpolated values are the two slugs above and
+        // an address.
+        for bad in ['`', '$', '\'', '\\', '"'] {
+            assert!(
+                !hostile_rules.contains(bad),
+                "ruleset contains {bad:?}: {hostile_rules}"
+            );
         }
     }
 
