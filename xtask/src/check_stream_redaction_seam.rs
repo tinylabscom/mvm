@@ -18,7 +18,9 @@
 //! - **A — the seam is unforgeable.** `redact.rs` keeps `StreamRedaction` a
 //!   newtype over a private `Box<dyn StreamRedactor>`; `curated()` is built
 //!   from `PiiRedactor::with_default_rules()` (never an empty ruleset); and
-//!   every *other* constructor returning `Self` is `#[cfg(test)]`.
+//!   every *other* fn returning `Self` or `StreamRedaction` — in any impl
+//!   block for the type, or as a free function in the module — is
+//!   `#[cfg(test)]`-gated.
 //! - **B — the broker has one door.** `StreamBroker::new` takes a
 //!   `StreamRedaction`, and `broker.rs` grows no constructor accepting a bare
 //!   `Box<dyn StreamRedactor>` or a raw `PiiRedactor`.
@@ -103,7 +105,7 @@ fn check_seam_is_unforgeable(workspace: &Path) -> Result<()> {
         );
     }
 
-    let ungated = ungated_constructors(body);
+    let ungated = ungated_constructors(&text);
     if !ungated.is_empty() {
         bail!(
             "check-stream-redaction-seam: `{}` return a StreamRedaction without a \
@@ -188,6 +190,13 @@ fn check_call_sites_use_curated(workspace: &Path) -> Result<usize> {
 /// end it early.
 fn impl_block<'a>(text: &'a str, header: &str) -> Option<&'a str> {
     let start = text.find(header)? + header.len();
+    block_end(text, start).map(|end| &text[start..end])
+}
+
+/// Byte offset of the `}` that closes the block whose body starts at
+/// `start` — the position right after its opening `{` — brace-matched so a
+/// nested block does not end it early.
+fn block_end(text: &str, start: usize) -> Option<usize> {
     let mut depth = 1usize;
     for (offset, ch) in text[start..].char_indices() {
         match ch {
@@ -195,7 +204,7 @@ fn impl_block<'a>(text: &'a str, header: &str) -> Option<&'a str> {
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(&text[start..start + offset]);
+                    return Some(start + offset);
                 }
             }
             _ => {}
@@ -204,21 +213,69 @@ fn impl_block<'a>(text: &'a str, header: &str) -> Option<&'a str> {
     None
 }
 
-/// Constructors in an impl body that return `Self` without a `#[cfg(test)]`
-/// above them, `curated` excepted.
-fn ungated_constructors(body: &str) -> Vec<String> {
-    let signature = Regex::new(r"fn\s+(\w+)\s*\([^)]*\)\s*->\s*Self").expect("static regex");
+/// Byte spans of the body of every impl block whose header names
+/// `StreamRedaction` — the inherent impl and every trait impl (`Default`,
+/// `StreamRedactor`, or any future one). [`impl_block`] only ever finds the
+/// one literal header text it is handed, so a constructor hidden behind
+/// `impl Default for StreamRedaction` — a different header entirely — would
+/// never reach the ungated-constructor scan without this.
+fn stream_redaction_impl_spans(text: &str) -> Vec<(usize, usize)> {
+    let header = Regex::new(r"impl\b[^{]*\{").expect("static regex");
+    header
+        .find_iter(text)
+        .filter(|m| m.as_str().contains("StreamRedaction"))
+        .filter_map(|m| {
+            let start = m.end();
+            block_end(text, start).map(|end| (start, end))
+        })
+        .collect()
+}
+
+/// Depth of unmatched `{` at byte offset `pos`, by the same naive brace
+/// count [`block_end`] uses. Zero means `pos` sits at module scope — not
+/// inside any impl, fn body, or other block — which is what tells a free
+/// function apart from a method.
+fn brace_depth_before(text: &str, pos: usize) -> i32 {
+    text[..pos].chars().fold(0i32, |depth, ch| match ch {
+        '{' => depth + 1,
+        '}' => depth - 1,
+        _ => depth,
+    })
+}
+
+/// Constructors the compiler would accept as producing a `StreamRedaction`:
+/// every `fn` inside a `StreamRedaction`-named impl block (inherent or
+/// trait) that returns `Self` or `StreamRedaction`, plus every free function
+/// at module scope that returns `StreamRedaction` outright — the field is
+/// only private *outside* this module, so a free function declared right
+/// here can still build one with the tuple-struct literal. Matched against
+/// the whole file rather than line by line, so a rustfmt-wrapped signature
+/// cannot dodge the scan by splitting `-> Self` onto its own line. Anything
+/// found this way other than `curated` must be `#[cfg(test)]`-gated.
+fn ungated_constructors(text: &str) -> Vec<String> {
+    let signature = Regex::new(r"fn\s+(\w+)\s*\([^)]*\)\s*->\s*(?:Self|StreamRedaction)")
+        .expect("static regex");
+    let impl_spans = stream_redaction_impl_spans(text);
+    let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
-    let lines: Vec<&str> = body.lines().collect();
-    for (index, line) in lines.iter().enumerate() {
-        let Some(caps) = signature.captures(line) else {
+    for caps in signature.captures_iter(text) {
+        let Some(whole) = caps.get(0) else {
             continue;
         };
+        let in_seam_impl = impl_spans
+            .iter()
+            .any(|&(start, end)| whole.start() >= start && whole.start() < end);
+        let is_free_fn = brace_depth_before(text, whole.start()) == 0;
+        if !in_seam_impl && !is_free_fn {
+            // A method on some other type — not a StreamRedaction constructor.
+            continue;
+        }
         let name = &caps[1];
         if name == "curated" {
             continue;
         }
-        if !preceded_by_cfg_test(&lines, index) {
+        let line_index = text[..whole.start()].matches('\n').count();
+        if !preceded_by_cfg_test(&lines, line_index) {
             out.push(name.to_string());
         }
     }
@@ -393,6 +450,80 @@ impl StreamBroker {
         let err = check_seam_is_unforgeable(root.path())
             .expect_err("a public seam field must fail the gate");
         assert!(err.to_string().contains("sealed seam"), "got {err}");
+    }
+
+    #[test]
+    fn a_default_impl_constructor_fails() {
+        // A trait impl is a different header than `impl StreamRedaction {`
+        // entirely — the exact bypass the scan was widened to cover.
+        let root = tempfile::tempdir().expect("tempdir");
+        let text = format!(
+            "{GOOD_REDACT}\nimpl Default for StreamRedaction {{\n    fn default() -> Self {{ \
+             todo!() }}\n}}\n"
+        );
+        write(root.path(), REDACT_RS, &text);
+        let err = check_seam_is_unforgeable(root.path())
+            .expect_err("a constructor hidden behind `impl Default` must fail the gate");
+        assert!(err.to_string().contains("default"), "got {err}");
+    }
+
+    const WRAPPED_SIGNATURE_REDACT: &str = "\
+pub struct StreamRedaction(Box<dyn StreamRedactor>);
+
+impl StreamRedaction {
+    pub fn curated() -> Self {
+        Self(Box::new(PiiRedactor::with_default_rules()))
+    }
+
+    pub fn with_redactor(
+        seam: Box<dyn StreamRedactor>,
+    ) -> Self {
+        Self(seam)
+    }
+
+    #[cfg(test)]
+    pub(in crate::stream) fn from_seam(seam: Box<dyn StreamRedactor>) -> Self {
+        Self(seam)
+    }
+}
+";
+
+    #[test]
+    fn a_rustfmt_wrapped_constructor_without_cfg_test_fails() {
+        // Per-line matching would miss this: no single line contains the
+        // whole `fn ... -> Self`. The gate must read the joined body.
+        let root = tempfile::tempdir().expect("tempdir");
+        write(root.path(), REDACT_RS, WRAPPED_SIGNATURE_REDACT);
+        let err = check_seam_is_unforgeable(root.path())
+            .expect_err("a rustfmt-wrapped constructor must not dodge the scan");
+        assert!(err.to_string().contains("with_redactor"), "got {err}");
+    }
+
+    #[test]
+    fn a_constructor_returning_the_bare_type_name_fails() {
+        // `-> StreamRedaction` builds the type exactly as well as `-> Self`.
+        let root = tempfile::tempdir().expect("tempdir");
+        let text = GOOD_REDACT.replace(
+            "impl StreamRedaction {",
+            "impl StreamRedaction {\n    pub fn insecure() -> StreamRedaction { todo!() }\n",
+        );
+        write(root.path(), REDACT_RS, &text);
+        let err = check_seam_is_unforgeable(root.path())
+            .expect_err("a constructor spelled `-> StreamRedaction` must still be caught");
+        assert!(err.to_string().contains("insecure"), "got {err}");
+    }
+
+    #[test]
+    fn a_free_function_constructor_fails() {
+        // The field is only private outside this module — a free function
+        // declared right here can still build one with the tuple literal.
+        let root = tempfile::tempdir().expect("tempdir");
+        let text =
+            format!("{GOOD_REDACT}\npub fn insecure_seam() -> StreamRedaction {{ todo!() }}\n");
+        write(root.path(), REDACT_RS, &text);
+        let err = check_seam_is_unforgeable(root.path())
+            .expect_err("a free-function constructor outside any impl block must fail the gate");
+        assert!(err.to_string().contains("insecure_seam"), "got {err}");
     }
 
     #[test]
