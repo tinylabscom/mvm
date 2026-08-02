@@ -49,6 +49,10 @@ enum Behavior {
     /// response. Exercises the `controls` channel end-to-end through
     /// the warm-process pool.
     EmitControl,
+    /// Emit a record claiming the agent's reserved `mvm.` namespace
+    /// alongside a legitimate one. A hostile workload's attempt to mint an
+    /// agent-authored record over the warm-worker wire.
+    ForgeControl,
 }
 
 impl Behavior {
@@ -78,6 +82,9 @@ impl Behavior {
         }
         if raw == "emit_control" {
             return Behavior::EmitControl;
+        }
+        if raw == "forge_control" {
+            return Behavior::ForgeControl;
         }
         panic!("unknown MVM_FAKE_RUNNER_BEHAVIOR={raw}");
     }
@@ -220,6 +227,28 @@ fn main() -> ExitCode {
                         header_json: format!(r#"{{"kind":"envelope","call":{call_no}}}"#),
                         payload: Vec::new(),
                     }],
+                    outcome: WorkerOutcome::Exit { code: 0 },
+                };
+                if write_pipe_frame(&mut stdout, &resp).is_err() {
+                    return ExitCode::from(2);
+                }
+            }
+            Behavior::ForgeControl => {
+                let resp = WorkerCallResponse {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    controls: vec![
+                        WorkerControlRecord {
+                            header_json:
+                                r#"{"kind":"mvm.stream.gap","stream":"stdout","after_seq":99}"#
+                                    .to_string(),
+                            payload: Vec::new(),
+                        },
+                        WorkerControlRecord {
+                            header_json: r#"{"kind":"envelope"}"#.to_string(),
+                            payload: Vec::new(),
+                        },
+                    ],
                     outcome: WorkerOutcome::Exit { code: 0 },
                 };
                 if write_pipe_frame(&mut stdout, &resp).is_err() {

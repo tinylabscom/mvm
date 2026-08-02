@@ -738,8 +738,12 @@ fn read_len_prefix(
     Some(len)
 }
 
-/// Whether an fd-3 header claims a `kind` inside the agent's reserved
-/// namespace.
+/// Whether a control-record header claims a `kind` inside the agent's
+/// reserved namespace.
+///
+/// Public because fd 3 is not the only channel a workload's control records
+/// arrive on — a warm worker sends its own over the worker protocol — and the
+/// rule has to hold wherever they enter, not just here.
 ///
 /// A header that is not a JSON object with a string `kind` claims nothing: no
 /// consumer can read a kind out of it either, so it passes through as the
@@ -747,7 +751,7 @@ fn read_len_prefix(
 /// the raw text is deliberate — `mvm.` and a duplicate `kind` key both
 /// decode to the same string a consumer would see, and a textual check would
 /// miss both.
-fn claims_reserved_kind(header_json: &str) -> bool {
+pub fn claims_reserved_kind(header_json: &str) -> bool {
     let Ok(header) = serde_json::from_str::<serde_json::Value>(header_json) else {
         return false;
     };

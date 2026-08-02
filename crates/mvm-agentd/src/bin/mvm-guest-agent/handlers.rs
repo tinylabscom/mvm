@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mvm_agentd::entrypoint::{CallCaps, CallOutcome, execute};
+use mvm_agentd::entrypoint::{CallCaps, EntrypointCall};
+use mvm_agentd::entrypoint_stream::stream_call;
 use mvm_agentd::stream_pump::{CapturedOutput, StreamGap};
 use mvm_agentd::vsock::{
     ComponentState, EntrypointEvent, FsChange, FsChangeKind, GuestResponse, RunEntrypointError,
@@ -112,6 +113,10 @@ fn emit_entrypoint_bytes(file: &mut dyn Write, bytes: &[u8], stdout: bool) {
 /// control records rather than written inline, so the host learns output was
 /// dropped without the notice landing in the middle of the workload's own
 /// bytes.
+///
+/// The warm path only. A warm worker answers with one buffered frame, so
+/// replay is all there is to do with it; the cold path streams each event as
+/// the pump produces it and never assembles a buffer to replay.
 fn emit_captured_output(file: &mut dyn Write, output: CapturedOutput) {
     emit_entrypoint_bytes(file, &output.stdout, true);
     emit_entrypoint_bytes(file, &output.stderr, false);
@@ -183,52 +188,38 @@ fn handle_run_entrypoint(
         }
     };
 
-    let outcome = execute(
+    let call = EntrypointCall {
         entrypoint,
-        tmpdir.path(),
-        &stdin,
-        Duration::from_secs(timeout_secs),
-        CallCaps::v1(),
+        cwd: tmpdir.path(),
+        stdin: &stdin,
+        timeout: Duration::from_secs(timeout_secs),
+        caps: CallCaps::v1(),
         env,
-    );
+    };
 
-    // tmpdir drops at end of scope (or on early-return below) and runs
-    // its `Drop` cleanup.
-    match outcome {
-        CallOutcome::Exited { code, output } => {
-            emit_captured_output(file, output);
-            evt(EntrypointEvent::Exit { code })
-        }
-        CallOutcome::Timeout { output } => {
-            emit_captured_output(file, output);
-            evt(EntrypointEvent::Error {
-                kind: RunEntrypointError::Timeout,
-                message: format!("wrapper exceeded {timeout_secs}s timeout"),
-            })
-        }
-        CallOutcome::StdinCap => evt(EntrypointEvent::Error {
-            kind: RunEntrypointError::PayloadCap,
-            message: "stdin exceeded its cap".to_string(),
-        }),
-        CallOutcome::SpawnFailed { message } => evt(EntrypointEvent::Error {
-            kind: RunEntrypointError::InternalError,
-            message,
-        }),
-        CallOutcome::WrapperCrashed { signal, output } => {
-            emit_captured_output(file, output);
-            evt(EntrypointEvent::Error {
-                kind: RunEntrypointError::WrapperCrashed,
-                message: format!("wrapper exited via signal {signal}"),
-            })
-        }
-    }
+    // Each event is framed the moment it arrives, so the host sees a
+    // long-running workload's output while it is still running. Nothing is
+    // held back to be replayed after the child exits — that replay is what
+    // made a streaming pump look silent from the outside. Every `Control`
+    // here came off fd 3 through the pump's reserved-kind gate, so a workload
+    // still cannot mint an agent-authored record.
+    //
+    // tmpdir drops at end of scope and runs its `Drop` cleanup.
+    let terminal = stream_call(call, &mut |event| {
+        write_response(&mut *file, &evt(event));
+    });
+    evt(terminal)
 }
 
-/// Emit each fd-3 control record as one `EntrypointEvent::Control`
-/// frame on the response stream. The cold-path counterpart to the
-/// wrapper's own control emission. v1 emits all records after stdout
-/// and stderr; the host already accepts non-terminal events in any
+/// Emit each control record a warm worker returned as one
+/// `EntrypointEvent::Control` frame on the response stream. Records go out
+/// after stdout and stderr, which the worker's single buffered response frame
+/// leaves no way to improve on; the host accepts non-terminal events in any
 /// order before the terminal `Exit` / `Error`.
+///
+/// Every record here has already passed the reserved-kind gate at the pool's
+/// ingest, so this writes agent-authored records and workload records that do
+/// not claim to be one.
 fn emit_controls(file: &mut dyn Write, records: Vec<mvm_agentd::entrypoint::ControlRecord>) {
     for r in records {
         write_response(

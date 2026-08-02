@@ -184,6 +184,25 @@ fn warm_process_emits_control_records_through_pool() {
 }
 
 #[test]
+fn a_warm_worker_cannot_claim_the_agent_namespace() {
+    // A warm worker *is* the workload, so its control records carry the same
+    // authorship fd 3's do, and the same refusal has to apply. Were it to
+    // pass, a workload could mint a gap marker and a verifier downstream
+    // would bless a chain skipping output it never saw.
+    let pool = start_pool_with_behavior(cfg(1, 100, 1024), Some("forge_control"));
+
+    let out = dispatch(&pool, b"payload");
+    assert!(matches!(out.outcome, WorkerOutcome::Exit { code: 0 }));
+    assert_eq!(
+        out.controls.len(),
+        1,
+        "only the worker's own record survives, got {:?}",
+        out.controls
+    );
+    assert_eq!(out.controls[0].header_json, r#"{"kind":"envelope"}"#);
+}
+
+#[test]
 fn set_idle_timeout_returns_previous_value() {
     let pool = start_pool(cfg(1, 100, 1024));
     // Initial value is 0 (disabled). First swap: previous=0, new=60.

@@ -317,14 +317,14 @@ pub enum EntrypointEvent {
     /// beyond the framing. The host (`mvmctl invoke` and downstream
     /// SDKs) decides what to do with each record kind.
     ///
-    /// **Wiring status:** the variant ships ahead of any
-    /// emitter. Agents at this version do not yet open fd-3 in the
-    /// child or emit `Control` events; later work lands fd-3 wiring in
-    /// the cold path (`execute()`), then the warm-process
-    /// pool, and the wrapper templates flip from stderr-envelope to
-    /// fd-3-envelope at the same time. Hosts that see a `Control`
-    /// event must already know how to consume it, so this variant is
-    /// added eagerly to keep host/guest deserializers in lockstep.
+    /// **Wiring status:** the cold path opens fd 3 in the child and frames
+    /// each record onto the response as it arrives; the warm-process pool
+    /// forwards the ones its worker returns. Both drop a record claiming the
+    /// agent's reserved `mvm.` namespace, so a `Control` a host receives is
+    /// either agent-authored or plainly the workload's — never a workload
+    /// pretending to be the agent. The in-tree wrapper templates have not yet
+    /// flipped from the stderr-envelope convention to emitting here, so most
+    /// real calls still carry none.
     Control {
         /// JSON-encoded record header (deserialized by the host into a
         /// kind-specific struct). Agent does not parse beyond UTF-8

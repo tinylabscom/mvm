@@ -30,6 +30,10 @@ pub mod console;
 #[cfg(feature = "addons")]
 pub mod egress_client;
 pub mod entrypoint;
+/// Runs one entrypoint call with its pump and its consumer on separate
+/// threads, so a consumer that blocks — a host that stopped reading — cannot
+/// defer the child's deadline or grow the pump's queue without bound.
+pub mod entrypoint_stream;
 /// In-guest forward-proxy front: parses a workload's proxied request into a
 /// `WireRequest` for the substitution client.
 pub mod forward_proxy;
