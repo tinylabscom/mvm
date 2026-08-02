@@ -103,6 +103,39 @@ pub enum HostdRequest {
         instance_id: String,
         volumes: Vec<crate::instance::BlockVolumeAttach>,
     },
+    /// Read one bounded ciphertext chunk from a fenced local volume.
+    ReadBlockVolumeChunk {
+        tenant_id: String,
+        pool_id: String,
+        volume: crate::instance::BlockVolumeTransfer,
+        offset: u64,
+        max_bytes: u32,
+    },
+    /// Begin a private encrypted-image restore.
+    BeginBlockVolumeRestore {
+        tenant_id: String,
+        pool_id: String,
+        restore: crate::instance::BlockVolumeRestore,
+    },
+    /// Append one verified restore chunk.
+    WriteBlockVolumeRestoreChunk {
+        tenant_id: String,
+        pool_id: String,
+        transfer_id: String,
+        chunk: crate::instance::BlockVolumeChunk,
+    },
+    /// Atomically publish a completely verified restore.
+    CommitBlockVolumeRestore {
+        tenant_id: String,
+        pool_id: String,
+        transfer_id: String,
+    },
+    /// Remove restore staging if it exists.
+    AbortBlockVolumeRestore {
+        tenant_id: String,
+        pool_id: String,
+        transfer_id: String,
+    },
     /// Stop a running instance (kill FC, teardown cgroup, TAP).
     StopInstance {
         tenant_id: String,
@@ -198,6 +231,15 @@ pub enum HostdResponse {
     Error { message: String },
     /// Pong response to Ping.
     Pong,
+    /// A bounded encrypted-image chunk.
+    BlockVolumeChunk(crate::instance::BlockVolumeChunk),
+    /// Worker-side restore progress.
+    BlockVolumeTransferResult {
+        success: bool,
+        next_offset: u64,
+        complete: bool,
+        error: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -399,6 +441,8 @@ mod tests {
                 guest_path: "/data".into(),
                 read_only: false,
                 encrypted: true,
+                size_mib: 1024,
+                initialize_if_missing: false,
                 fencing_token: 8,
                 lease_expires_at: "2026-08-02T12:00:00Z".into(),
                 data_key_version: 1,
@@ -429,6 +473,8 @@ mod tests {
                 guest_path: "/data".into(),
                 read_only: false,
                 encrypted: true,
+                size_mib: 1024,
+                initialize_if_missing: false,
                 fencing_token: 8,
                 lease_expires_at: "2026-08-02T12:01:00Z".into(),
                 data_key_version: 1,
@@ -442,6 +488,35 @@ mod tests {
             serde_json::from_str::<HostdRequest>(&json).unwrap(),
             HostdRequest::RenewBlockVolumeLeases { volumes, .. }
                 if volumes[0].lease_expires_at.ends_with('Z')
+        ));
+    }
+
+    #[test]
+    fn hostd_block_volume_restore_roundtrip_is_bounded_and_has_no_secrets() {
+        let request = HostdRequest::BeginBlockVolumeRestore {
+            tenant_id: "tenant-1".into(),
+            pool_id: "pool-1".into(),
+            restore: crate::instance::BlockVolumeRestore {
+                transfer_id: "restore-1".into(),
+                volume: crate::instance::BlockVolumeTransfer {
+                    org_id: "org-1".into(),
+                    workspace_id: "ws-1".into(),
+                    volume_id: "vol-1".into(),
+                    fencing_token: 9,
+                    data_key_version: 2,
+                },
+                expected_size: 4096,
+                expected_sha256: "ab".repeat(32),
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        for forbidden in ["credential", "encryption_key", "host_path", "object_key"] {
+            assert!(!json.contains(forbidden));
+        }
+        assert!(matches!(
+            serde_json::from_str::<HostdRequest>(&json).unwrap(),
+            HostdRequest::BeginBlockVolumeRestore { restore, .. }
+                if restore.volume.fencing_token == 9
         ));
     }
 
