@@ -53,18 +53,18 @@
       its default closure remains async-runtime-free. The isolated full `cargo
       test --workspace --no-fail-fast` gate passes with zero failures after the
       audit posture and process-global test-isolation fixes.
-  - [ ] WS2 and WS4–WS7: live attachment, durable checkpoint/restore, remote
-        operations, live provider/KVM proof, and closeout remain open.
-    - WS2 live attachment core is implemented: portable encrypted ext4 images,
+  - [x] WS2: live attachment is complete. Portable encrypted ext4 images,
       launch-time typed resolution, admitted VMM/guest handoff, crash recovery,
       durable exclusive attachment leases, and canonical immutable local
       snapshot/restore with tamper refusal and interrupted-restore convergence
       are covered by focused tests. The local CLI lifecycle and runtime registry
       suites pass 19 and 21 tests respectively. Five new hermetic volume BDD
-      scenarios pass in the 88-scenario/442-step suite; three compiled live
-      scenarios for failed-start cleanup, restart persistence, and guest
-      read-only refusal still require builder-VM/KVM execution before WS2 can
-      complete.
+      scenarios pass in the 88-scenario/442-step suite. Live KVM proves
+      failed-start lease cleanup, writable restart persistence (23/23 steps),
+      and guest read-only refusal (17/17 steps). On the final integrated Linux
+      tree, 24 guest-mount tests, 9 OCI-init tests, and workspace all-target
+      clippy pass with warnings denied; the host all-target commit gate is also
+      green.
   - [x] WS3: mvmd now consumes the canonical mvm leaf contract and implements
         it over Apache Arrow `object_store` 0.14.1 for S3-compatible, GCS,
         Azure, and R2 providers. Remote data and names remain mandatorily
@@ -76,6 +76,8 @@
         mvmd PR #198 carries the implementation; 1,497 gateway library tests,
         1,632 integration tests, the remaining workspace tests/doctests, check,
         all-target clippy, formatting, focused docs, audit, and deny pass.
+  - [ ] WS4–WS7: durable checkpoint/restore, remote operations, live provider
+        and cross-worker KVM proof, documentation, and closeout remain open.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout

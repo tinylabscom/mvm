@@ -138,10 +138,10 @@ the audit posture table for snapshot/restore, the isolated full `cargo test
       virtiofs process, device, or registry state leaks after failure.
 - [x] Implement mvmctl local create/list/mount/unmount/snapshot/restore behavior
       against the live lifecycle and delete the “follow-up” warning once true.
-- [ ] Add positive and negative BDD scenarios for persistence across restart,
+- [x] Add positive and negative BDD scenarios for persistence across restart,
       read-only refusal, locked volume, traversal/deny-prefix, unadmitted share,
       unsupported backend, and cleanup after failed start.
-- [ ] Run host gates plus builder-VM Linux and KVM E2E tests before marking WS2
+- [x] Run host gates plus builder-VM Linux and KVM E2E tests before marking WS2
       complete.
 
 WS2 implementation evidence (2026-08-01): new managed volumes are encrypted
@@ -164,9 +164,13 @@ formatting, and the production file-size gate are green. Eight volume BDD
 scenarios now cover immutable restore, locked/path-policy refusal, signed-plan
 refusal, typed backend refusal, failed-start lease cleanup, persistence across
 restart, and guest read-only enforcement. The five hermetic scenarios pass in
-the full 88-scenario/442-step suite; the three live scenarios compile but still
-require their builder-VM/KVM run before the BDD checkbox can close. Builder-VM
-and KVM proof remain open, so WS2 is not complete.
+the full 88-scenario/442-step suite. The live failed-start cleanup scenario
+passes on KVM; writable restart persistence passes all 23 steps after an
+explicit guest `sync`, and guest read-only refusal passes all 17 steps with the
+write rejected by the mounted filesystem. On the final integrated Linux tree,
+all 24 guest-mount tests, all 9 Linux OCI-init tests, and workspace all-target
+Clippy with warnings denied pass. The host all-target gate passes as part of the
+commit hook. WS2 is complete.
 
 ## WS3 — mvmd migration from OpenDAL to `object_store`
 
