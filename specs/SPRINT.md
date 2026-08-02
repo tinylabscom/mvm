@@ -44,10 +44,15 @@
       A scheduled run on an older commit subsequently filed #2067: the no-SSH
       scanner had not classified a protected-credential-path refusal test as
       deny-only, and the `mvm-cli` mutation shard lacked the pinned Zig
-      toolchain required by its build script. The follow-up audits that exact
-      deny test, installs Zig only for the affected shard, and adds a PR-time
-      structural regression test; its merge closes #2067 and restores the
-      zero-open-issue state.
+      toolchain required by its build script. The exact rerun also exposed
+      missing mutation witnesses for the new L3 privilege-drop path and an
+      unclassified, semantically equivalent deletion of libkrun's explicit
+      `l3_vsock: false` capability (whose derived default is also `false`). The
+      follow-up audits that deny test, installs Zig only for the affected shard,
+      adds a PR-time structural regression test, proves in an isolated
+      privileged child that `NoNewPrivs` and every capability set are actually
+      cleared, and pins the libkrun L3 declaration; its merge closes #2067 and
+      restores the zero-open-issue state.
       Tracked in plan 284.
 
 - [x] Production object-store volumes — **plan 283 / issue #2040**. Standardize

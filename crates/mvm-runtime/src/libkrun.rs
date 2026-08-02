@@ -1545,6 +1545,7 @@ mod tests {
         assert!(!caps.snapshots);
         assert!(!caps.pause_resume);
         assert!(!caps.tap_networking);
+        assert!(!caps.l3_vsock);
     }
 
     #[test]
@@ -2340,6 +2341,10 @@ mod tests {
         );
         assert!(caps.vsock, "vsock is the only transport into the guest");
         assert!(caps.host_vsock_proxy);
+        assert!(
+            !caps.l3_vsock,
+            "libkrun's virtio-net device violates the L3 tunnel precondition"
+        );
 
         // The rest of the table, each pinned so its deletion is visible.
         assert!(

@@ -196,6 +196,9 @@ mod linux {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    const PRIVILEGED_CHILD: &str = "MVM_PRIVDROP_TEST_CHILD";
+
     #[test]
     fn a_complete_report_has_no_shortfall() {
         let report = DropReport {
@@ -218,10 +221,93 @@ mod tests {
         assert_eq!(report.shortfall(), vec!["no_new_privs", "bounding_set"]);
     }
 
-    /// Running the real drop inside the test process would disarm the test
-    /// runner, so this only asserts the non-Linux shape. The Linux path is
-    /// covered by the privileged integration lane, which runs it in a child
-    /// process and then checks `/proc/self/status`.
+    #[test]
+    fn a_report_is_complete_only_when_every_step_succeeded() {
+        for no_new_privs in [false, true] {
+            for capabilities_cleared in [false, true] {
+                for bounding_set_cleared in [false, true] {
+                    let report = DropReport {
+                        no_new_privs,
+                        capabilities_cleared,
+                        bounding_set_cleared,
+                    };
+                    assert_eq!(
+                        report.is_complete(),
+                        no_new_privs && capabilities_cleared && bounding_set_cleared
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recording_dropper_counts_each_request() {
+        let mut dropper = RecordingPrivilegeDropper::default();
+
+        assert!(dropper.drop_privileges().is_complete());
+        assert_eq!(dropper.calls, 1);
+        assert!(dropper.drop_privileges().is_complete());
+        assert_eq!(dropper.calls, 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_privilege_drop_matches_kernel_state() {
+        if std::env::var_os(PRIVILEGED_CHILD).is_some() {
+            let report = drop_privileges();
+            assert!(
+                report.is_complete(),
+                "kernel privilege drop was incomplete: {:?}",
+                report.shortfall()
+            );
+
+            let status = std::fs::read_to_string("/proc/thread-self/status")
+                .expect("read the privileged test child's process status");
+            assert_eq!(
+                status_field(&status, "NoNewPrivs"),
+                "1",
+                "NoNewPrivs was not set after privilege drop"
+            );
+            for field in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
+                let value = u64::from_str_radix(status_field(&status, field), 16)
+                    .expect("capability status fields must contain hexadecimal integers");
+                assert_eq!(value, 0, "{field} remained set after privilege drop");
+            }
+            return;
+        }
+
+        let test_binary = std::env::current_exe().expect("resolve the current test binary");
+        let output = std::process::Command::new("sudo")
+            .args(["-n", "/usr/bin/env"])
+            .arg(format!("{PRIVILEGED_CHILD}=1"))
+            .arg(test_binary)
+            .args(["real_privilege_drop_matches_kernel_state", "--nocapture"])
+            .output()
+            .expect("run the privilege-drop witness in an isolated root child");
+
+        assert!(
+            output.status.success(),
+            "privilege-drop child failed: status={:?}\nstdout={}\nstderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn status_field<'a>(status: &'a str, name: &str) -> &'a str {
+        status
+            .lines()
+            .find_map(|line| {
+                line.split_once(':')
+                    .filter(|(field, _)| *field == name)
+                    .map(|(_, value)| value.trim())
+            })
+            .expect("required field must exist in /proc/thread-self/status")
+    }
+
+    /// Linux runs the real drop in an isolated privileged child above. This
+    /// test locks the shared caller's no-op contract on other platforms.
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn non_linux_builds_report_a_complete_drop() {
