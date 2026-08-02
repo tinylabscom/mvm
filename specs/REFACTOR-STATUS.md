@@ -6,6 +6,15 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [ ] Plan 286 — Guest-kernel hardware floor
+      (`specs/plans/286-kernel-floor.md`)
+  - [x] Audit resolved x86_64/aarch64 configs and enforce required cuts
+  - [x] Ratchet workload configs to 917 x86_64 / 1,007 aarch64 built-ins
+  - [x] Shrink the x86_64 workload image by 45.4% and boot it on Firecracker
+  - [x] Preserve, build and boot the 970-symbol builder-kernel contract
+  - [ ] Native aarch64 artifact build and HVF/VZ boot validation
+  - [ ] Full CI, merge-queue landing and rollup closeout
+
 - [x] Plan 285 — HVF virtio-rng
       (`specs/plans/285-hvf-virtio-rng.md`, issue #2060)
   - [x] Portable bounded virtio-mmio entropy device and negative tests

@@ -10,6 +10,20 @@
 
 ## Current issue delivery
 
+- [ ] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
+      6.12.100 configs and remove unsupported physical hardware, radio/input,
+      filesystem, power-management, tracing/debug, keyring, task-accounting,
+      NetLabel, swap/huge-page and legacy crypto/ABI plumbing while preserving
+      every supported virtual-device and security contract. The workload
+      configs are ratcheted from 1,189 to 917 x86_64 built-ins and from 1,314
+      to 1,007 aarch64 built-ins. The x86_64 workload `bzImage` falls from
+      7,656,448 to 4,183,040 bytes (45.4%) and reaches PID 1 under Firecracker
+      1.14.1; the 970-symbol builder config retains cgroups, namespaces,
+      netfilter, FUSE and virtio-fs, and its 5,096,448-byte kernel also boots to
+      PID 1. Config generation now fails if Kconfig silently restores an
+      audited cut. Native aarch64 build and HVF/VZ boot validation remain in
+      the PR architecture lane before merge.
+
 - [x] Continuous guest entropy — **plan 285 / issue #2060**. A portable
       virtio-rng device now fills bounded, validated guest split-queue buffers
       directly from the host CSPRNG, fails closed without consuming a request

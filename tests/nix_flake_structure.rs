@@ -781,6 +781,70 @@ fn shared_kernel_base_forces_hvc0_console_support() {
 }
 
 #[test]
+fn shared_kernel_base_enforces_audited_subsystem_removals() {
+    let path = nix_dir().join("images").join("kernel").join("base.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/kernel/base.nix must be present: {e}"));
+    let required_start = content
+        .find("requiredDisables =")
+        .expect("required kernel-disable set starts");
+    let base_start = content[required_start..]
+        .find("baseDisables =")
+        .map(|offset| required_start + offset)
+        .expect("base kernel-disable set follows required cuts");
+    let required = &content[required_start..base_start];
+
+    for symbol in [
+        "SOUNDWIRE",
+        "NFC",
+        "RFKILL",
+        "VIRTIO_INPUT",
+        "VT",
+        "SQUASHFS",
+        "KEXEC",
+        "DEBUG_FS",
+        "KALLSYMS",
+        "NLS_UTF8",
+        "NETLABEL",
+        "MQ_IOSCHED_KYBER",
+        "TASKSTATS",
+        "HUGETLB_PAGE",
+        "ACPI_PROCESSOR",
+        "X86_PLATFORM_DEVICES",
+    ] {
+        assert!(
+            required.contains(&format!("\"{symbol}\"")),
+            "the audited kernel cut must retain CONFIG_{symbol} in requiredDisables"
+        );
+    }
+    assert!(
+        content.contains("requiredDisableList =")
+            && content.contains("required kernel disables were reverted by olddefconfig"),
+        "the resolved config must fail if Kconfig selectors silently restore an audited cut"
+    );
+}
+
+#[test]
+fn workload_kernel_optimizes_for_size_by_default() {
+    let path = nix_dir().join("images").join("kernel").join("workload.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/kernel/workload.nix must be present: {e}"));
+    let required_extra = content
+        .split_once("requiredExtraDisables =")
+        .map(|(_, tail)| tail)
+        .expect("workload-specific required kernel cuts are present");
+
+    assert!(
+        content.contains("optimizeForSize ? true")
+            && content.contains("\"CC_OPTIMIZE_FOR_SIZE\"")
+            && content.contains("\"CC_OPTIMIZE_FOR_PERFORMANCE\"")
+            && required_extra.contains("\"NAMESPACES\"")
+            && required_extra.contains("\"CGROUPS\""),
+        "the default workload kernel must select size optimization and enforce workload-only namespace and cgroup cuts"
+    );
+}
+
+#[test]
 fn mk_guest_deindents_pid1_script_before_writing_init() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
     let content = fs::read_to_string(&path)
