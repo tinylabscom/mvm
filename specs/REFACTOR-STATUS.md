@@ -6,6 +6,13 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [ ] Plan 285 — HVF virtio-rng
+      (`specs/plans/285-hvf-virtio-rng.md`, issue #2060)
+  - [x] Portable bounded virtio-mmio entropy device and negative tests
+  - [x] HVF FDT/run-loop wiring while retaining the early boot seed
+  - [x] Live HVF guest binds `virtio_rng.0` and serves distinct entropy reads
+  - [ ] Full gates, merge, and issue closeout
+
 - [ ] Plan 284 — Zero-open-issue reconciliation
       (`specs/plans/284-zero-open-issue-reconciliation.md`)
   - [x] Classify and reconcile the original 19 open issues

@@ -243,6 +243,21 @@ impl RunDevice for super::virtio::VirtioFs {
     }
 }
 
+impl RunDevice for super::virtio_rng::VirtioRng {
+    fn contains(&self, addr: u64) -> bool {
+        self.contains(addr)
+    }
+    fn base(&self) -> u64 {
+        self.base()
+    }
+    fn read(&mut self, offset: u64, _size: u8) -> u64 {
+        (*self).read(offset)
+    }
+    fn write(&mut self, offset: u64, value: u64, _size: u8) -> Option<u32> {
+        self.write(offset, value).then(|| self.irq())
+    }
+}
+
 impl RunDevice for super::vsock::VirtioVsock {
     fn contains(&self, addr: u64) -> bool {
         self.contains(addr)
