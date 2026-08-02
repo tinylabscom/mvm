@@ -1928,12 +1928,6 @@ fn volume_unlock_and_lock_emit_audit_entries() {
         "mvmctl volume unlock failed: stderr={}",
         String::from_utf8_lossy(&unlock.stderr)
     );
-    std::fs::write(
-        root.join("unlocked").join("managed").join("proof.txt"),
-        b"ok",
-    )
-    .expect("write unlocked volume proof");
-
     let lock = sandbox
         .mvmctl()
         .args(["machine", "volume", "lock", "managed"])
