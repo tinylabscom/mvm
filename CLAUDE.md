@@ -463,40 +463,13 @@ Never write scratch, temporary, or intermediate files anywhere inside the repo w
 
 ```bash
 cargo build
-cargo run -- --help
-
-# Bootstrap the builder VM (optional; builds auto-bootstrap it on first use)
-cargo run -- bootstrap
-
-# Build from Nix flake (Plan 178: build-time verbs live under `build`)
-cargo run -- build image --flake . --profile minimal --role worker
-cargo run -- run --flake . --profile minimal --cpus 2 --memory 1024
-
-# Templates
-cargo run -- template create base --flake . --profile minimal --role worker --cpus 2 --mem 1024
-cargo run -- template build base
-cargo run -- template list
-
-# Image catalog
-cargo run -- image list              # browse bundled catalog
-cargo run -- image search http       # search by name/tag
-cargo run -- image fetch minimal     # build from catalog entry
-
-# Networks
-cargo run -- network create isolated # create named network
-cargo run -- network list            # list all networks
-cargo run -- network remove isolated # remove a network
-
-# Console (interactive PTY, dev-mode only)
-cargo run -- console myvm            # interactive shell
-cargo run -- console myvm --command "uname -a"  # one-shot exec
-
-# Setup & diagnostics
-cargo run -- init                    # first-time setup wizard
-cargo run -- security status         # security posture evaluation
-cargo run -- cache info              # cache directory info
-cargo run -- cache prune             # clean stale temp files
+cargo run -- --help   # full verb surface: build/run/template/image/network/console/init/cache/doctor/…
 ```
+
+Every subcommand is self-documenting via `--help`; the complete reference is
+`public/src/content/docs/reference/cli-commands.md`. Build-time verbs
+(`image`/`run`/`template`) live under `build`; `console` is an interactive PTY,
+dev-mode only.
 
 ## Dev Network Layout
 
