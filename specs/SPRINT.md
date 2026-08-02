@@ -189,6 +189,8 @@
   - [ ] Kernel cache still open: `resolve_kernel` returns `Cached` on
         `path.exists()`, and `verify_fetched_kernel` has no production caller,
         so neither the fetch nor the read path checks a kernel against its pin.
+        Scoped as **plan 288** (`specs/plans/288-kernel-cache-verify-on-read.md`);
+        Proposed, not yet scheduled.
 
 - [ ] Build action identity + artifact manifest — **plan 279**
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).
