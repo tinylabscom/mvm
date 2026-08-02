@@ -37,6 +37,9 @@ pub mod packet;
 /// the backend-neutral abstraction for every VMM whose host-facing endpoint
 /// is a per-VM socket.
 pub mod uds_channel;
+/// The userspace socket datapath: terminates guest TCP/UDP and
+/// re-originates each admitted flow on a host socket.
+pub mod userspace;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
