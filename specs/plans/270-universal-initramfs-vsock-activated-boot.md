@@ -502,6 +502,17 @@ because it alone blocked boot loudly.
   guest wrapper prepends that to `PATH`. The two routes are complementary: the
   mount still wins for an absolute `/bin/ping` where it can apply, the link
   covers the sealed case.
+
+- [x] **Step 7: Substitute by absolute path on a sealed rootfs**
+  A `PATH` stand-in does not satisfy a caller that runs `/bin/ping` outright,
+  and the bind mount cannot replace a symlink the read-only rootfs will not let
+  us write. The init now stacks a tmpfs over the tool's directory alone —
+  verified image as the lower, substitution in the upper — so the absolute path
+  resolves to the stand-in while dm-verity still covers the lower blocks and
+  every other applet resolves to the image as shipped. Live: `machine run
+  --image alpine -- /bin/ping -c 1 google.com` reports `1 received` on a `ro`
+  dm-verity root, with `/bin` showing 82 applets and `/bin/sh` still the
+  image's busybox symlink.
 - [x] **Step 6: Regression witness**
   `xtask check-guest-init-parity`, gated in CI's Lint job. A live scenario was
   the obvious shape and the wrong one: this regression was a missing call site,
