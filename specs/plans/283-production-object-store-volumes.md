@@ -110,7 +110,11 @@ the original core/runtime paths. The object-safe trait and wire types remain
 async-runtime-free by default, while the canonical local implementation is
 feature-gated. This preserves mvm ownership while allowing mvmd to implement the
 contract without a local mirror or VMM/provider dependency leakage. The leaf's
-four focused tests and the core runtime-free gate pass.
+four focused tests and the core runtime-free gate pass. After serializing the
+mock guest-agent tests against process-global `MVM_HOME` mutation and extending
+the audit posture table for snapshot/restore, the isolated full `cargo test
+--workspace --no-fail-fast` gate also passes with zero failures, including the
+48-case live audit binary.
 
 ## WS2 — Live mvm local/block attachment
 

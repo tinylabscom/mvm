@@ -50,7 +50,9 @@
       core and runtime. This lets mvmd depend on the exact mvm-owned type without
       linking either repository's unrelated crypto/VMM dependency graph; the
       leaf's four contract, symlink-refusal, listing, and serde tests pass, and
-      its default closure remains async-runtime-free.
+      its default closure remains async-runtime-free. The isolated full `cargo
+      test --workspace --no-fail-fast` gate passes with zero failures after the
+      audit posture and process-global test-isolation fixes.
   - [ ] WS2–WS7: live attachment, mvmd migration, durable checkpoint/restore,
         remote operations, live provider/KVM proof, and closeout remain open.
     - WS2 live attachment core is implemented: portable encrypted ext4 images,
