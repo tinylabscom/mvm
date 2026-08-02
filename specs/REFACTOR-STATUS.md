@@ -143,7 +143,9 @@ for detailed scope and acceptance criteria.
           later build re-adopts. Unblocks plan 279 WS1
     - [ ] Workload/builder kernel cache: still path-trusting.
           `verify_fetched_kernel` exists with **no production caller** —
-          neither the fetch nor the read path checks a kernel against its pin
+          neither the fetch nor the read path checks a kernel against its pin.
+          Scoped as plan 288
+          (`specs/plans/288-kernel-cache-verify-on-read.md`)
     - [ ] Cold-tier background scrub (recon §7.9)
   - [ ] WS7 — σ/κ separation and the transform descriptor: the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint
@@ -153,8 +155,8 @@ for detailed scope and acceptance criteria.
         chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
         (recon §7.7 → #2019)
 
-- [~] Plan 279 — L3 TUN-over-vsock network mode
-  (`specs/plans/279-l3-tun-over-vsock.md`, ADR-035)
+- [~] Plan 285 — L3 TUN-over-vsock network mode
+  (`specs/plans/285-l3-tun-over-vsock.md`, ADR-036)
   - [x] W1–W8 — canonical `NetworkMode::L3Vsock`, the shared fuzzable wire
         protocol, the pure policy core, the guest `mvm-net-agent`, the
         machine-scoped host gateway, audit kinds, docs, and the unprivileged
