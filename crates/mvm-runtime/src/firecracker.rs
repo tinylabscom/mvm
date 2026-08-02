@@ -292,7 +292,7 @@ pub fn is_vm_running(pid_file: &str) -> Result<bool> {
 pub fn is_firecracker_pid_running(pid: u32) -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
-        return comm_path_is_firecracker(&std::path::PathBuf::from(format!("/proc/{pid}/comm")));
+        comm_path_is_firecracker(&std::path::PathBuf::from(format!("/proc/{pid}/comm")))
     }
 
     #[cfg(not(target_os = "linux"))]

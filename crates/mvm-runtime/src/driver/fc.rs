@@ -360,7 +360,6 @@ fn fc_sudo_signal(pid: u32, signal: FcStopSignal) {
                  (the process may have already exited)"
             ),
         }
-        return;
     }
 
     #[cfg(not(target_os = "linux"))]
