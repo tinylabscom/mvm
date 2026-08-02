@@ -26,6 +26,12 @@ for detailed scope and acceptance criteria.
   - [x] Revalidate and close newly filed #2054 on current main
   - [x] Execute the refiled volume epic #2040
   - [x] Verify the repository has zero open GitHub issues
+  - [x] Repair the subsequent scheduled-security alert #2067 and retain a
+        PR-time regression witness for its mutation-shard toolchain
+  - [x] Add executable Linux mutation witnesses for the L3 privilege-drop path
+        exposed by #2067's exact security rerun
+  - [x] Pin libkrun's L3 refusal and classify its default-equivalent mutation
+        exposed by #2067's exact security rerun
 
 - [x] Plan 283 — Production object-store volumes
       (`specs/plans/283-production-object-store-volumes.md`, issue #2040)

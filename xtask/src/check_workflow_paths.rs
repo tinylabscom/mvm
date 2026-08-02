@@ -220,11 +220,11 @@ mod tests {
         .unwrap_or_else(|error| panic!("{name} must be readable: {error}"))
     }
 
-    fn ci_job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
+    fn job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
         let marker = format!("  {job}:\n");
         let start = workflow
             .find(&marker)
-            .unwrap_or_else(|| panic!("CI workflow is missing the {job} job"));
+            .unwrap_or_else(|| panic!("workflow is missing the {job} job"));
         let rest_start = start + marker.len();
         let rest = &workflow[rest_start..];
         let end = rest
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn pull_request_ci_does_not_repeat_the_workspace_or_upload_target_caches() {
         let workflow = ci_workflow();
-        let lint = ci_job_block(&workflow, "lint");
+        let lint = job_block(&workflow, "lint");
         for unexpected in [
             "cargo nextest run --workspace --features test-support",
             "cargo nextest run -p xtask --features man",
@@ -322,9 +322,28 @@ mod tests {
             );
         }
 
-        let test = ci_job_block(&workflow, "test");
+        let test = job_block(&workflow, "test");
         assert!(!test.contains("uses: actions/cache@v5"));
         assert!(test.contains("cargo nextest run -p xtask --features man"));
+    }
+
+    #[test]
+    fn mutation_cli_shard_installs_its_embedded_host_toolchain() {
+        let workflow = workflow("security.yml");
+        let mutation = job_block(&workflow, "mutation-witnesses");
+        let install = concat!(
+            "      - name: Install mvm-cli embedded-host toolchain\n",
+            "        if: matrix.package == 'mvm-cli'\n",
+            "        uses: ./.github/actions/install-zigbuild",
+        );
+        assert!(
+            mutation.contains(install),
+            "the mvm-cli mutation shard must install the pinned Zig toolchain"
+        );
+        assert!(
+            mutation.find(install) < mutation.find("Mutate this package's claim surface"),
+            "the embedded-host toolchain must be installed before cargo-mutants builds mvm-cli"
+        );
     }
 
     #[test]

@@ -41,6 +41,18 @@
       failures remain retryable. The production-volume epic #2040 and the
       subsequently filed entropy issue #2060 are also closed with merged
       evidence. The final GitHub open-issue query returned zero results.
+      A scheduled run on an older commit subsequently filed #2067: the no-SSH
+      scanner had not classified a protected-credential-path refusal test as
+      deny-only, and the `mvm-cli` mutation shard lacked the pinned Zig
+      toolchain required by its build script. The exact rerun also exposed
+      missing mutation witnesses for the new L3 privilege-drop path and an
+      unclassified, semantically equivalent deletion of libkrun's explicit
+      `l3_vsock: false` capability (whose derived default is also `false`). The
+      follow-up audits that deny test, installs Zig only for the affected shard,
+      adds a PR-time structural regression test, proves in an isolated
+      privileged child that `NoNewPrivs` and every capability set are actually
+      cleared, and pins the libkrun L3 declaration; its merge closes #2067 and
+      restores the zero-open-issue state.
       Tracked in plan 284.
 
 - [x] Production object-store volumes — **plan 283 / issue #2040**. Standardize

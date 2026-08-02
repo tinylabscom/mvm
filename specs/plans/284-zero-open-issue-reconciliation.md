@@ -2,8 +2,8 @@
 
 Issues: #1819, #1821, #1822, #1823, #1825, #1826, #1849, #1851, #1937,
 #1972, #1973, #1977, #1983, #2006, #2007, #2021, #2028, #2029, #2033,
-#2035, #2036, #2039, #2040, #2042, #2048, #2052, #2054, plus #2060 filed
-during execution
+#2035, #2036, #2039, #2040, #2042, #2048, #2052, #2054, plus #2060 and
+#2067 filed during execution
 
 Status: COMPLETE (2026-08-02)
 
@@ -62,13 +62,32 @@ open GitHub issues.
 - [x] Publish the implementation, enter the merge queue, and verify that all
       closing pull requests merge.
 - [x] Confirm the GitHub open-issue count is zero.
+- [x] Repair #2067 after the scheduled security workflow reported two real CI
+      wiring defects: audit the protected-credential-path test as deny-only in
+      the no-SSH scanner, install the pinned embedded-host Zig toolchain only in
+      the `mvm-cli` mutation shard, and add PR-time regression coverage for that
+      toolchain dependency.
+- [x] Repair the additional `mvm-agentd` mutation-witness gap exposed by the
+      exact security rerun: cover every `DropReport` state, prove recording
+      calls cannot disappear, and run the real Linux privilege drop in an
+      isolated root child that checks
+      `/proc/thread-self/status` for `NoNewPrivs=1` and zero capability sets.
+- [x] Classify the rerun's `mvm-runtime` survivor as equivalent: deleting
+      libkrun's explicit `l3_vsock: false` falls back to the same derived
+      `VmCapabilities` default. Pin the declared L3 refusal in the capability
+      tests and the exact equivalent mutation in the ratchet.
 
 Closeout evidence (2026-08-02): the production-volume implementation merged
 across mvm PRs #2044 and #2064 and mvmd PRs #198 through #202. The independent
 HVF entropy issue #2060 merged through mvm PR #2065 after appearing during the
 reconciliation. Issue #2040 was closed with an explicit shipped-versus-rejected
 scope ledger, #2060 closed from its merge, and `gh issue list --state open`
-returned an empty JSON array.
+returned an empty JSON array. A later scheduled-run alert opened #2067 from an
+older main commit; its two reproducible workflow failures are repaired by the
+follow-up above. Its exact branch rerun additionally exposed the L3
+privilege-drop mutation gap and the equivalent libkrun capability deletion,
+which the same closing PR repairs and classifies before restoring the zero-issue
+state.
 
 ## Verified upstream inputs
 

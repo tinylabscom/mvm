@@ -32,6 +32,9 @@ ALLOWED_FILES=(
   # `.ssh/id_rsa` access and `ssh-keygen` invocation as guest threats.
   "crates/mvm-core/src/crypto/command_gate.rs"
   "crates/mvm-core/src/crypto/threat_classifier.rs"
+  # Host-share parser test: proves the user's SSH credential directory and a
+  # private-key-shaped child path are refused as guest mount sources.
+  "crates/mvm-cli/src/commands/shared/parse.rs"
   # Secrets scanner: a one-line comment naming "OpenSSH" as one of the PEM
   # private-key formats its generic BEGIN-block regex redacts.
   "crates/mvm-hostd/src/supervisor/secrets_scanner.rs"
