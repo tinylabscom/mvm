@@ -79,8 +79,18 @@
         mvmd PR #198 carries the implementation; 1,497 gateway library tests,
         1,632 integration tests, the remaining workspace tests/doctests, check,
         all-target clippy, formatting, focused docs, audit, and deny pass.
-  - [ ] WS4–WS7: durable checkpoint/restore, remote operations, live provider
-        and cross-worker KVM proof, documentation, and closeout remain open.
+  - [x] WS5 client increment: the remote stub is gone. The authenticated,
+        HTTPS-or-loopback `GatewayBackend` now carries tenant volume create,
+        list, attach, detach, checkpoint, restore, and delete operations with
+        typed failures and percent-encoded resource IDs. `mvmctl volume
+        --remote` reads its URL, in-memory-only bearer token, and tenant from
+        dedicated environment variables while local behavior stays unchanged.
+        Twenty-one gateway client tests, including one real loopback HTTP request, nine CLI
+        lifecycle parser tests, touched-crate checks, all-target Clippy, and the
+        complete 115-scenario / 523-step BDD suite pass.
+  - [ ] WS4/WS5 policy/WS6/WS7: durable checkpoint closeout, the full API
+        refusal matrix, live provider and cross-worker KVM proof, remaining
+        documentation, and closeout remain open.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout

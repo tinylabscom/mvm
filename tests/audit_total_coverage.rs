@@ -264,6 +264,9 @@ const VOLUME_SUB: &[(&str, AuditPosture)] = &[
     ("lock", AuditPosture::Emits("VolumeLock")),
     ("snapshot", AuditPosture::Emits("VolumeSnapshot")),
     ("restore", AuditPosture::Emits("VolumeRestore")),
+    // Remote-only control-plane mutation. The authenticated gateway records
+    // the signed deletion audit after enforcing tenant authority.
+    ("delete", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),
     ("mount", AuditPosture::Emits("VmVolumeAdd")),
     ("ls", AuditPosture::ReadOnly),

@@ -52,6 +52,11 @@ Feature: Encrypted block volume lifecycle and attachment
     When I ask the Docker backend to attach a block volume
     Then the backend refuses the unsupported block volume before boot
 
+  Scenario: remote volume operations require explicit authenticated configuration
+    When I run remote volume catalog without gateway configuration
+    Then the command exits with code 1
+    And the error output contains "MVM_GATEWAY_URL is required"
+
   @live
   Scenario: a failed persistent start releases its volume attachment lease
     Given an isolated mvm home

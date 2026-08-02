@@ -228,6 +228,19 @@ fn unsupported_block_volume_is_refused(world: &mut CliWorld) {
     );
 }
 
+#[when("I run remote volume catalog without gateway configuration")]
+fn remote_volume_catalog_without_configuration(world: &mut CliWorld) {
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(["machine", "volume", "catalog", "--remote"])
+        .env_remove("MVM_GATEWAY_URL")
+        .env_remove("MVM_GATEWAY_TOKEN")
+        .env_remove("MVM_TENANT_ID")
+        .output()
+        .expect("run remote volume catalog without gateway configuration");
+    world.last_run = Some(output);
+}
+
 #[when(expr = "I execute shell command {string} in machine {string}")]
 fn execute_machine_shell(world: &mut CliWorld, script: String, machine: String) {
     let home = isolated_home(world);

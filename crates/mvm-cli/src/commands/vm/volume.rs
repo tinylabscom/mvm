@@ -15,11 +15,10 @@
 //!
 //! ## `--remote` mode (mvmd proxy)
 //!
-//! `--remote` routes operations through mvmd's REST API rather than
-//! executing locally. v1 stub only — the actual `mvmctl::mvmd_client`
-//! module ships in a follow-up once the mvmd-side bucket
-//! reconciliation lands. Today `--remote` returns a clear "not yet
-//! implemented" error.
+//! `--remote` routes operations through mvmd's authenticated REST API rather
+//! than executing locally. Configuration is read from `MVM_GATEWAY_URL`,
+//! `MVM_GATEWAY_TOKEN`, and `MVM_TENANT_ID`; the bearer token is retained only
+//! in memory and is redacted from debug output.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -48,6 +47,7 @@ use sha2::{Digest, Sha256};
 use super::Cli;
 use super::shared::clap_vm_name;
 
+mod remote;
 mod snapshot;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -74,6 +74,15 @@ pub(in crate::commands) enum VolumeCmd {
         /// Capacity of a new portable ext4 block volume.
         #[arg(long, default_value = "1G")]
         size: String,
+        /// Create through the authenticated mvmd tenant API.
+        #[arg(long)]
+        remote: bool,
+        /// Durable StorageBucket ID used for encrypted checkpoints.
+        #[arg(long, requires = "remote")]
+        bucket: Option<String>,
+        /// Remote storage-class policy name.
+        #[arg(long, requires = "remote")]
+        storage_class: Option<String>,
     },
     /// Decrypt a managed volume into its private local attachment artifact.
     Unlock { volume: String },
@@ -83,11 +92,34 @@ pub(in crate::commands) enum VolumeCmd {
     Catalog {
         #[arg(long)]
         json: bool,
+        /// List volumes through the authenticated mvmd tenant API.
+        #[arg(long)]
+        remote: bool,
     },
     /// Create an immutable encrypted snapshot of a locked managed volume.
-    Snapshot { volume: String, snapshot: String },
+    #[command(visible_alias = "checkpoint")]
+    Snapshot {
+        volume: String,
+        snapshot: String,
+        #[arg(long)]
+        remote: bool,
+    },
     /// Restore a locked managed volume from an immutable local snapshot.
-    Restore { volume: String, snapshot: String },
+    Restore {
+        volume: String,
+        snapshot: String,
+        /// Name of the new remote volume created from the checkpoint.
+        #[arg(long, requires = "remote")]
+        target: Option<String>,
+        #[arg(long)]
+        remote: bool,
+    },
+    /// Delete a detached remote volume.
+    Delete {
+        volume: String,
+        #[arg(long)]
+        remote: bool,
+    },
     /// Mount a virtio-fs volume into a VM.
     ///
     /// Operations against provider-backed (S3 / Hetzner / R2 / GCS /
@@ -116,7 +148,7 @@ pub(in crate::commands) enum VolumeCmd {
         #[arg(long)]
         rw: bool,
         /// Route through mvmd REST instead of writing the local
-        /// registry. Stub in v1.
+        /// registry.
         #[arg(long)]
         remote: bool,
     },
@@ -127,7 +159,7 @@ pub(in crate::commands) enum VolumeCmd {
         #[arg(long)]
         json: bool,
         /// Route through mvmd REST instead of reading the local
-        /// registry. Stub in v1.
+        /// registry.
         #[arg(long)]
         remote: bool,
     },
@@ -138,7 +170,7 @@ pub(in crate::commands) enum VolumeCmd {
         /// Guest mount path to detach.
         guest_path: String,
         /// Route through mvmd REST instead of editing the local
-        /// registry. Stub in v1.
+        /// registry.
         #[arg(long)]
         remote: bool,
     },
@@ -151,12 +183,57 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             root,
             host_backed,
             size,
-        } => create(&volume, root.as_deref(), host_backed, &size),
+            remote,
+            bucket,
+            storage_class,
+        } => {
+            if remote {
+                if root.is_some() || host_backed {
+                    bail!("--root and --host-backed are local-only volume options");
+                }
+                return remote::create(&volume, &size, bucket.as_deref(), storage_class.as_deref());
+            }
+            create(&volume, root.as_deref(), host_backed, &size)
+        }
         VolumeCmd::Unlock { volume } => unlock(&volume),
         VolumeCmd::Lock { volume } => lock(&volume),
-        VolumeCmd::Catalog { json } => catalog(json),
-        VolumeCmd::Snapshot { volume, snapshot } => snapshot::create(&volume, &snapshot),
-        VolumeCmd::Restore { volume, snapshot } => snapshot::restore(&volume, &snapshot),
+        VolumeCmd::Catalog { json, remote } => {
+            if remote {
+                return remote::catalog(json);
+            }
+            catalog(json)
+        }
+        VolumeCmd::Snapshot {
+            volume,
+            snapshot,
+            remote,
+        } => {
+            if remote {
+                return remote::snapshot(&volume, &snapshot);
+            }
+            snapshot::create(&volume, &snapshot)
+        }
+        VolumeCmd::Restore {
+            volume,
+            snapshot,
+            target,
+            remote,
+        } => {
+            if remote {
+                let target = target.unwrap_or_else(|| format!("{volume}-restored"));
+                return remote::restore(&volume, &snapshot, &target);
+            }
+            if target.is_some() {
+                bail!("--target is only valid with --remote");
+            }
+            snapshot::restore(&volume, &snapshot)
+        }
+        VolumeCmd::Delete { volume, remote } => {
+            if !remote {
+                bail!("local volume deletion is not implicit; use --remote for tenant volumes");
+            }
+            remote::delete(&volume)
+        }
         VolumeCmd::Mount {
             name,
             volume,
@@ -166,13 +243,16 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             remote,
         } => {
             if remote {
-                return remote_stub("volume mount");
+                if host.is_some() {
+                    bail!("--host is a local-only volume option");
+                }
+                return remote::mount(&name, &volume, &guest, rw);
             }
             mount(&name, &volume, host.as_deref(), &guest, rw)
         }
         VolumeCmd::Ls { name, json, remote } => {
             if remote {
-                return remote_stub("volume ls");
+                return remote::ls(&name, json);
             }
             ls(&name, json)
         }
@@ -182,7 +262,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             remote,
         } => {
             if remote {
-                return remote_stub("volume unmount");
+                return remote::unmount(&name, &guest_path);
             }
             unmount(&name, &guest_path)
         }
@@ -563,10 +643,6 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("chmod 0700 {}", path.display()))?;
     Ok(())
-}
-
-fn remote_stub(op: &str) -> Result<()> {
-    bail!("{op} --remote not yet implemented. Use the local volume registry for now.")
 }
 
 fn validate_volume_name(name: &str) -> Result<()> {

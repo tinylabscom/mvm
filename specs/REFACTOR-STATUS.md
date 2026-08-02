@@ -24,7 +24,8 @@ for detailed scope and acceptance criteria.
   - [x] Canonical mvm contract and dead S3-path removal
   - [x] Live local/block attachment through the admitted VM launch path
   - [x] mvmd OpenDAL → `object_store` migration with mandatory encryption
-  - [ ] Durable encrypted checkpoints, cross-worker restore, and remote CLI
+  - [x] Authenticated remote volume CLI/client lifecycle with typed failures
+  - [ ] Durable encrypted checkpoint/API policy and cross-worker restore closeout
   - [ ] MinIO integration plus Linux/KVM persistence and restore proof
 
 - [x] Plan 282 — Merge queue auto-requeue
