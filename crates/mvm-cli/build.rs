@@ -362,6 +362,76 @@ fn run_cargo_zigbuild(
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
 }
 
+/// Cross-compile the guest runtime binaries in one invocation and copy them
+/// into the embedding directory. The same pinned toolchain and isolated
+/// caches as the host-binary build keep the output reproducible.
+fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
+    eprintln!(
+        "[build.rs] cargo zigbuild --release --target {target} -p mvm-agentd \
+         --bin mvm-guest-agent --bin mvm-guest-netinit \
+         --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-verity-init \
+         --bin mvm-egress-client --features mvm-agentd/interactive \
+         --features mvm-agentd/addons"
+    );
+    let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
+    let mut cmd = Command::new(&cargo);
+    cmd.args([
+        "zigbuild",
+        "--release",
+        "--target",
+        target,
+        "-p",
+        "mvm-agentd",
+        "--bin",
+        "mvm-guest-agent",
+        "--bin",
+        "mvm-guest-netinit",
+        "--bin",
+        "mvm-oci-init",
+        "--bin",
+        "mvm-oci-entrypoint",
+        "--bin",
+        "mvm-verity-init",
+        "--bin",
+        "mvm-egress-client",
+        "--features",
+        "mvm-agentd/interactive",
+        "--features",
+        "mvm-agentd/addons",
+    ])
+    .env("RUSTC", &rustc)
+    .env("CARGO_TARGET_DIR", target_dir)
+    .env_remove("RUSTUP_TOOLCHAIN")
+    .env_remove("RUSTC_WRAPPER")
+    .env_remove("RUSTC_WORKSPACE_WRAPPER")
+    .current_dir(root);
+    apply_zigbuild_env(&mut cmd, target_dir);
+    if let Some(zig) = pinned_zig_path_or_fail(zig_pin) {
+        cmd.env("CARGO_ZIGBUILD_ZIG_PATH", zig);
+    }
+    let status = cmd
+        .status()
+        .expect("spawn `cargo zigbuild` for the guest agent");
+    assert!(
+        status.success(),
+        "cargo zigbuild failed for the guest agent"
+    );
+    let rel = target_dir.join(strip_glibc(target)).join("release");
+    for name in [
+        "mvm-guest-agent",
+        "mvm-guest-netinit",
+        "mvm-oci-init",
+        "mvm-oci-entrypoint",
+        "mvm-egress-client",
+        "mvm-verity-init",
+    ] {
+        let built = rel.join(name);
+        let dest = out_dir.join(name);
+        std::fs::copy(&built, &dest)
+            .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), dest.display()));
+    }
+}
+
 fn apply_zigbuild_env(cmd: &mut Command, target_dir: &Path) {
     // Keep cargo-zigbuild and Zig caches scoped under the dedicated nested
     // target root instead of platform-global defaults like
