@@ -14,7 +14,9 @@ for detailed scope and acceptance criteria.
         fixes for #1983, #1937, #1972, and #2035
   - [x] Repair newly filed #2039
   - [x] Repair newly filed #2042
-  - [ ] Repair newly filed #2048
+  - [x] Repair newly filed #2048
+  - [x] Resolve newly filed #2052 through the merged shared guest-bootstrap fix
+  - [x] Revalidate and close newly filed #2054 on current main
   - [ ] Execute the refiled volume epic #2040
 
 - [x] Plan 282 — Merge queue auto-requeue

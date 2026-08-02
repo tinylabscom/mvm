@@ -2,7 +2,7 @@
 
 Issues: #1819, #1821, #1822, #1823, #1825, #1826, #1849, #1851, #1937,
 #1972, #1973, #1977, #1983, #2006, #2007, #2021, #2028, #2029, #2033,
-#2035, #2036, #2039, #2040, #2042, #2048
+#2035, #2036, #2039, #2040, #2042, #2048, #2052, #2054
 
 Status: IN PROGRESS
 
@@ -35,9 +35,15 @@ open GitHub issues.
       dedicated production-object-store plan.
 - [x] Repair #2042 so per-VM helper processes exit with their owning run and
       stale helpers remain discoverable across worktree boundaries.
-- [ ] Repair #2048 by negative-caching confirmed missing default-origin
+- [x] Repair #2048 by negative-caching confirmed missing default-origin
       initramfs release artifacts without caching transient failures or
       suppressing configured mirrors.
+- [x] Close #2052 after #2050 moved mediated-tool setup into the shared guest
+      bootstrap and replaced BusyBox applet symlinks before bind mounting, with
+      regression coverage proving `/bin/busybox` remains untouched.
+- [x] Close #2054 after the exact sealed Apple-container E2E passed on current
+      main, covering guest-agent readiness, status, inventory, logs, stop, and
+      stopped status.
 - [x] Repair #1983 by updating the vulnerable Wasmtime 46.0.1 lock to 46.0.2
       and confirming the queued mutation-baseline fix clears the other failing
       security job.
