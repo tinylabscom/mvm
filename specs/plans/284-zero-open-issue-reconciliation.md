@@ -2,7 +2,7 @@
 
 Issues: #1819, #1821, #1822, #1823, #1825, #1826, #1849, #1851, #1937,
 #1972, #1973, #1977, #1983, #2006, #2007, #2021, #2028, #2029, #2033,
-#2035, #2036, #2039, #2040, #2042
+#2035, #2036, #2039, #2040, #2042, #2048
 
 Status: IN PROGRESS
 
@@ -28,13 +28,16 @@ open GitHub issues.
 - [x] Transfer #2036 to `tinylabscom/mvmd#196`, whose fleet-orchestrator
       ownership covers the epic's production object-store, encryption,
       reconciliation, quota, RBAC, and durability acceptance gates.
-- [ ] Repair #2039 by replacing the PID-1 `SIGCHLD` handler race with one
+- [x] Repair #2039 by replacing the PID-1 `SIGCHLD` handler race with one
       ownership-aware child waiter and proving reaper-first exit-status
-      delivery.
+      delivery; merged in #2041.
 - [ ] Execute the refiled cross-repository volume epic #2040 through its
       dedicated production-object-store plan.
-- [ ] Repair #2042 so per-VM helper processes exit with their owning run and
+- [x] Repair #2042 so per-VM helper processes exit with their owning run and
       stale helpers remain discoverable across worktree boundaries.
+- [ ] Repair #2048 by negative-caching confirmed missing default-origin
+      initramfs release artifacts without caching transient failures or
+      suppressing configured mirrors.
 - [x] Repair #1983 by updating the vulnerable Wasmtime 46.0.1 lock to 46.0.2
       and confirming the queued mutation-baseline fix clears the other failing
       security job.
