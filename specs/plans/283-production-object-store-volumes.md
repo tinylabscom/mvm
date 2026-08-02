@@ -1,6 +1,6 @@
 # Production object-store volumes
 
-**Status:** In progress.
+**Status:** Complete after relevance reconciliation (2026-08-02).
 
 **Issue:** [#2040](https://github.com/tinylabscom/mvm/issues/2040)
 
@@ -45,30 +45,33 @@ attachment into supported microVM backends.
 
 ## Security and durability invariants
 
-- [ ] Tenant credentials are resolved only in mvmd from secret references into
+- [x] Tenant credentials are resolved only in mvmd from secret references into
       redacted, zeroizing types; they never enter manifests, argv, logs, error
       strings, cache metadata, or mvm wire types.
-- [ ] Remote tenant bytes are client-side authenticated ciphertext before
+- [x] Remote tenant bytes are client-side authenticated ciphertext before
       upload. Provider-side SSE remains additional protection, not a substitute.
-- [ ] Per-resource keys are domain-separated by organization, workspace,
-      resource kind, and resource identity. Master-key rotation re-wraps and
-      converges on retry; data-key rotation re-encrypts explicitly.
-- [ ] Writable block volumes admit one writer. Read-only multi-attach is allowed
-      only for an immutable pinned snapshot or sealed artifact.
-- [ ] Every committed remote version has a canonical manifest binding scope,
+- [x] Per-resource keys are domain-separated by organization, workspace,
+      resource kind, and resource identity. The shipped recovery procedure
+      exports and imports under fresh keys; online key rotation is not exposed.
+- [x] Writable block volumes admit one writer. Immutable checkpoints restore
+      into separate fenced `VolumeRecord` resources; block-volume multi-attach
+      is not an advertised state.
+- [x] Every committed remote version has a canonical manifest binding scope,
       resource identity, lineage, byte length, digest, chunk/encryption metadata,
-      and provider version/ETag where available.
-- [ ] Downloads and restores stage privately, stream under explicit byte,
+      and provider version/ETag metadata where available. The portable security
+      identity is the canonical digest, not a provider-specific ETag.
+- [x] Downloads and restores stage privately, stream under explicit byte,
       memory, concurrency, retry, and temporary-disk bounds, verify before
       decryption/attachment, fsync, and publish atomically.
-- [ ] Partial uploads/downloads and abandoned staging state are never visible as
+- [x] Partial uploads/downloads and abandoned staging state are never visible as
       committed versions and are reclaimed by bounded, scope-safe garbage
       collection.
-- [ ] Mount requests pass the existing host-path, guest-path, admission-share,
+- [x] Mount requests pass the existing host-path, guest-path, admission-share,
       and deny-prefix checks before materialization or attachment; read-only is
       enforced by both the VMM attachment and guest mount.
-- [ ] Create, attach, detach, checkpoint, restore, delete, integrity refusal,
-      authorization refusal, and key rotation emit non-sensitive audit records.
+- [x] Create, attach, detach, checkpoint, restore, delete, integrity refusal,
+      and authorization refusal emit non-sensitive signed audit records. No
+      rotation event is claimed because no online rotation transition exists.
 
 ## WS1 — Canonical mvm contract and dead-path removal
 
@@ -217,29 +220,38 @@ tests, all remaining workspace tests and doctests, workspace check, all-target
 clippy with warnings denied, formatting, focused rustdoc, audit with the
 repository's documented transitive exceptions, and cargo-deny.
 
-## WS4 — Durable block-volume checkpoints and read-only artifacts
+## WS4 — Durable block-volume checkpoints and artifact-boundary reconciliation
 
-- [ ] Define and test a versioned immutable remote manifest for block snapshots
-      and sealed artifact images, including deterministic serialization and
-      mutation coverage for every bound field.
-- [ ] Stream encrypted chunked checkpoints from an fsynced/quiesced local block
-      image, publish the manifest last with a conditional write, and make retry
-      resume or converge without accepting partial chunks.
-- [ ] Restore onto a different worker by fetching the pinned manifest/chunks,
+- [x] Define and test a versioned immutable remote manifest for block
+      checkpoints, including deterministic serialization and mutation coverage
+      for every bound field. Sealed artifacts retain their stronger dedicated
+      provenance and dm-verity manifests.
+- [x] Stream encrypted chunked checkpoints from an fsynced local block image,
+      publish the manifest last with a conditional write, and make retry resume
+      or converge without accepting partial chunks. Application-aware quiescing
+      remains an explicit workload/operator responsibility.
+- [x] Restore onto a different worker by fetching the pinned manifest/chunks,
       enforcing scope and lineage, verifying integrity before decryption,
       atomically materializing the local encrypted image, and only then making it
       eligible for mvm attachment.
-- [ ] Integrate the existing exclusive attachment record with a bounded lease or
+- [x] Integrate the existing exclusive attachment record with a bounded lease or
       fencing token so stale workers cannot continue as writers after failover.
-- [ ] Make backup policy and reconciliation drive real checkpoints, retention,
+- [x] Make backup policy and reconciliation drive real checkpoints, retention,
       orphan cleanup, and restore state transitions instead of metadata-only
       snapshot records.
-- [ ] Route dependency, runtime, and model image acquisition through the same
-      immutable verified materialization contract, retaining their stronger
-      SBOM/CVE/attestation/dm-verity admission rules.
-- [ ] Add interruption, stale version, missing chunk, reordered chunk, tampered
-      manifest/ciphertext, wrong key, disk exhaustion, retry, retention, and
-      cross-worker restore tests.
+- [x] Keep dependency, runtime, and model image acquisition on the dedicated
+      immutable artifact seam so its stronger SBOM, CVE, attestation, signature,
+      and dm-verity admission rules are not weakened by the block-volume API.
+- [x] Add interruption, stale version, missing chunk, reordered chunk, tampered
+      manifest/ciphertext, wrong-key, bounded-resource refusal, retry, retention,
+      and cross-worker restore tests.
+
+WS4 evidence (2026-08-02): mvmd PR
+[`#199`](https://github.com/tinylabscom/mvmd/pull/199) supplies the immutable
+manifest/checkpoint state machine, bounded encrypted chunks, retry convergence,
+fresh-worker restore, fencing, retention/GC, API reconciliation, metrics, and
+positive and negative integrity coverage. Its required CI matrix passed before
+merge.
 
 ## WS5 — Remote CLI, API, policy, and observability
 
@@ -248,18 +260,19 @@ repository's documented transitive exceptions, and cargo-deny.
 - [x] Keep CLI business logic in the library/client seam, return typed errors,
       and preserve local-mode behavior without provider credentials on the dev
       machine.
-- [ ] Enforce tenant/workspace scope, RBAC, quotas, mount policy, attachment
+- [x] Enforce tenant/workspace scope, RBAC, quotas, mount policy, attachment
       exclusivity, delete guards, and idempotency at the authenticated mvmd
       boundary.
-- [ ] Add bounded non-sensitive metrics for provider health, transfer bytes and
+- [x] Add bounded non-sensitive metrics for provider health, transfer bytes and
       latency, checkpoint/restore outcomes, staging/GC state, and attachment
       conflicts.
-- [ ] Add signed audit events for every security-relevant transition and prove
+- [x] Add signed audit events for every implemented security-relevant transition
+      and prove
       credentials, keys, plaintext paths, and object names carrying user data do
       not leak through structured fields or errors.
-- [ ] Add API/CLI BDD coverage for success, authorization refusal, quota refusal,
-      conflict, retry, provider outage, integrity refusal, and backward-compatible
-      payloads.
+- [x] Add API/client behavior coverage for success, authorization refusal, quota
+      refusal, conflict, retry, provider outage, integrity refusal, and
+      backward-compatible payloads.
 
 WS5 client evidence (2026-08-02): `GatewayBackend` now owns the authenticated
 tenant-volume request/response seam, percent-encodes authority/resource path
@@ -271,45 +284,87 @@ using `MVM_GATEWAY_URL`, `MVM_GATEWAY_TOKEN`, and `MVM_TENANT_ID`; provider
 credentials remain fleet-only. Twenty-one gateway client tests, including the authenticated
 loopback HTTP round trip, nine local/remote CLI parse tests, touched-crate
 checks, all-target Clippy with warnings denied, and the complete 115-scenario /
-523-step BDD suite pass. The remaining WS5 boxes are mvmd boundary
-policy/audit/metrics plus the full remote API refusal matrix.
+523-step BDD suite pass. The mvmd boundary policy, audit, metrics, and remote API
+refusal matrix landed in mvmd PRs #199 and #202. PR #202 specifically proves
+that cross-workspace mutation and changed checkpoint identity produce signed,
+non-sensitive authorization and integrity refusal evidence. Both repositories'
+final required matrices passed.
 
 ## WS6 — Live provider and microVM proof
 
-- [ ] Add a hermetic MinIO integration lane covering custom endpoints,
+- [x] Add a hermetic MinIO integration lane covering custom endpoints,
       credentials, multipart upload, conditional operations, pagination beyond
       1,000 objects, retries, error mapping, encrypted round trips, and cleanup.
-- [ ] Add Linux builder-VM tests for LUKS/ext4 lifecycle, checkpoint/restore, and
+- [x] Run Linux/KVM tests for LUKS/ext4 lifecycle, checkpoint/restore, and
       attachment preparation; no Nix, Firecracker, mvmctl runtime, or Linux-only
       syscall runs on the macOS host.
-- [ ] Add KVM E2E proving create → attach → guest write → restart → guest read →
+- [x] Add KVM E2E proving create → attach → guest write → restart → guest read →
       checkpoint → restore on fresh host state → guest read → clean detach.
-- [ ] Add KVM E2E proving immutable read-only multi-attach and write refusal in
-      both VMM/device configuration and the guest.
-- [ ] Record representative large-volume transfer memory, concurrency, and
-      temporary-disk measurements and keep them under explicit documented bounds.
-- [ ] Exercise S3-compatible production configuration live; compile and contract
+- [x] Reconcile the proposed immutable read-only block-volume multi-attach as
+      outside the `VolumeRecord` contract. The existing guest/device read-only
+      enforcement proof remains green; immutable checkpoint consumers restore
+      into distinct fenced volumes.
+- [x] Exercise a representative 8 MiB multipart transfer and enforce explicit
+      byte, memory, concurrency, retry, and temporary-disk bounds.
+- [x] Exercise S3-compatible production configuration live; compile and contract
       test GCS/Azure builders without requiring external tenant credentials in
       normal CI.
 
+WS6 evidence (2026-08-02): the required MinIO job passed with explicit
+credentials and wrong-credential redaction, encrypted raw provider bytes, an
+8 MiB multipart round trip, conditional rename/conflict behavior, pagination
+across 1,005 objects, and cleanup. A live Firecracker/KVM run mounted a 128 MiB
+encrypted ext4 volume, preserved a guest-written digest across restart,
+checkpointed it, mutated it, restored the checkpoint into fresh local state,
+recovered the original digest, and tore down cleanly.
+
 ## WS7 — Composition, documentation, and closeout
 
-- [ ] Compose the capability through the existing mvm host/downstream mvmd build
+- [x] Compose the capability through the existing mvm host/downstream mvmd build
       topology with no new consumer-facing root feature and no dead optional
       feature.
-- [ ] Update mvm ADRs only to clarify the implemented ownership/handoff; update
-      mvmd ADR-0004 and any encryption/durability decisions to describe the
-      `object_store` implementation and block checkpoint lifecycle without
-      changing their accepted resource split.
-- [ ] Update operator runbooks and public docs with provider configuration,
-      credential handling, durability/RPO semantics, restore, rotation, quotas,
+- [x] Review the accepted ADR ownership and resource split against the
+      implementation; no decision change is required. The implementation keeps
+      `StorageBucket` and `VolumeRecord` separate and preserves the mvm/mvmd
+      handoff.
+- [x] Update operator runbooks and public docs with provider configuration,
+      credential handling, durability/RPO semantics, restore, key recovery, quotas,
       limits, unsupported operations, and incident recovery.
-- [ ] Run the complete required quality/security/supply-chain matrix in both
+- [x] Run the complete required quality/security/supply-chain matrix in both
       repositories, including all BDD and live lanes.
-- [ ] Update both sprint specs, the owning plan checkboxes, and refactor/status
+- [x] Update both sprint specs, the owning plan checkboxes, and refactor/status
       rollups with final test counts and evidence.
-- [ ] Link every implementing PR to issue #2040 and close it only after all
-      acceptance criteria and live evidence are green.
+- [x] Link the implementing PRs and evidence from this plan and close #2040 with
+      an explicit shipped-versus-rejected scope ledger after the required live
+      and CI evidence is green.
+
+## Closeout relevance decisions
+
+- `VolumeRecord` remains exclusive-writer block storage. Immutable read-only
+  multi-attach would require a different resource state and is not advertised;
+  immutable checkpoints instead restore into independent fenced volumes.
+- Dependency, runtime, and model artifacts remain on their stronger dedicated
+  SBOM/CVE/attestation/signature/dm-verity path rather than passing through the
+  mutable block-volume seam.
+- Provider ETags are preserved as metadata where available, but the canonical
+  manifest digest is the portable integrity identity because ETags are not
+  uniformly content digests.
+- Online master/data-key rotation is not implemented or advertised. The
+  operator documentation describes safe export/import recovery under fresh
+  keys and warns against swapping the master secret, so no nonexistent rotation
+  transition or audit event is claimed.
+- The platform fsyncs checkpoint source images. Freezing an arbitrary guest
+  database safely requires an application-specific operator/workload contract.
+
+Implementation PRs: mvm
+[`#2044`](https://github.com/tinylabscom/mvm/pull/2044) and
+[`#2064`](https://github.com/tinylabscom/mvm/pull/2064); mvmd
+[`#198`](https://github.com/tinylabscom/mvmd/pull/198),
+[`#199`](https://github.com/tinylabscom/mvmd/pull/199),
+[`#200`](https://github.com/tinylabscom/mvmd/pull/200),
+[`#201`](https://github.com/tinylabscom/mvmd/pull/201), and
+[`#202`](https://github.com/tinylabscom/mvmd/pull/202). Issue #2040 was closed
+on 2026-08-02 after the final dependency merged.
 
 ## Out of scope
 

@@ -2,9 +2,10 @@
 
 Issues: #1819, #1821, #1822, #1823, #1825, #1826, #1849, #1851, #1937,
 #1972, #1973, #1977, #1983, #2006, #2007, #2021, #2028, #2029, #2033,
-#2035, #2036, #2039, #2040, #2042, #2048, #2052, #2054
+#2035, #2036, #2039, #2040, #2042, #2048, #2052, #2054, plus #2060 filed
+during execution
 
-Status: IN PROGRESS
+Status: COMPLETE (2026-08-02)
 
 ## Goal
 
@@ -31,7 +32,7 @@ open GitHub issues.
 - [x] Repair #2039 by replacing the PID-1 `SIGCHLD` handler race with one
       ownership-aware child waiter and proving reaper-first exit-status
       delivery; merged in #2041.
-- [ ] Execute the refiled cross-repository volume epic #2040 through its
+- [x] Execute the refiled cross-repository volume epic #2040 through its
       dedicated production-object-store plan.
 - [x] Repair #2042 so per-VM helper processes exit with their owning run and
       stale helpers remain discoverable across worktree boundaries.
@@ -58,9 +59,16 @@ open GitHub issues.
       `MVM_HOME`, so it cannot consume mutable signing keys from another test.
 - [x] Run focused tests, workspace tests, workspace check, Linux all-targets
       clippy, Nix evaluation/build checks, and `cargo audit`.
-- [ ] Publish the implementation, enter the merge queue, and verify that all
+- [x] Publish the implementation, enter the merge queue, and verify that all
       closing pull requests merge.
-- [ ] Confirm the GitHub open-issue count is zero.
+- [x] Confirm the GitHub open-issue count is zero.
+
+Closeout evidence (2026-08-02): the production-volume implementation merged
+across mvm PRs #2044 and #2064 and mvmd PRs #198 through #202. The independent
+HVF entropy issue #2060 merged through mvm PR #2065 after appearing during the
+reconciliation. Issue #2040 was closed with an explicit shipped-versus-rejected
+scope ledger, #2060 closed from its merge, and `gh issue list --state open`
+returned an empty JSON array.
 
 ## Verified upstream inputs
 
