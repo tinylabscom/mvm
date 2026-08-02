@@ -45,13 +45,23 @@
       directions are enforced by tests that parse the specific named nix list;
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
-- [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
-      <rev>/` is served on a hit if `rootfs.ext4` merely exists as a file: no
-      digest, no signature, so content substitution is undetected, and the
-      provenance recorder then signs whatever bytes are on disk. The audit log
-      faithfully records a substituted image as legitimate. Plan 276 is written
-      and Proposed; this moves WS6 into the sprint. Prerequisite for plan 279
-      WS1 so the new cache key and the new verification do not land together.
+- [~] Build cache verify-on-read — **plan 276 WS6**. `~/.mvm/dev/builds/<rev>/`
+      was served on a hit if `rootfs.ext4` merely existed as a file: no digest,
+      no signature, so content substitution went undetected and the provenance
+      recorder then signed whatever bytes were on disk — the audit log
+      faithfully recording a substituted image as legitimate.
+  - [x] Closed for the dev-build artifact cache: `mvm_core::cache_verify` is the
+        shared record-and-re-read discipline, the build-cache record carries the
+        artifact digests, a hit is verified on read, and a failure fails closed
+        and evicts. An unverifiable record is refused at write and missed at
+        read, so the previous bare-revision format is never served on trust.
+        Detects bit-rot, truncation, deletion, and the intact-but-wrong-artifact
+        case that an existence check structurally cannot see. This unblocks
+        plan 279 WS1.
+  - [ ] Still open: the workload/builder kernel cache is path-trusting, and
+        `verify_fetched_kernel` has no production caller — neither the fetch nor
+        the read path checks a kernel against its pin. Needs the published
+        per-arch expected hash threaded to both sites.
 
 - [ ] Build action identity + artifact manifest — **plan 279**
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).

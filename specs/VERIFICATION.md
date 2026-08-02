@@ -31,6 +31,10 @@ row below records a defect that was planted to prove the gate fires.
 | `check-workflow-paths` | Point a fuzz step's `working-directory` at `crates/mvm-oci` (the pre-consolidation path that made the fuzz lane dead for ten nightlies) | yes |
 | `check-mvm-host-binaries-sync` | Drop `--bin mvm-builderd` from the builder-VM cross-compile step, reproducing the "path does not exist" image-build failure | yes |
 | `check-mutation-witnesses` (shard matrix) | Remove the `mvm-cli` shard from `security.yml`'s mutation matrix, so that package would never be mutated while every shard stayed green | yes — `package mvm-cli is on the mutation surface but has no shard` |
+| `verify_does_not_consult_the_size_mtime_sidecar` | Point `ArtifactDigests::verify` at `sha256_file_cached` instead of `sha256_file`, so a rewrite that preserves size and mtime reads as unchanged | yes |
+| `tampered_cached_rootfs_is_rejected_and_evicted` | Serve a build-cache hit on `rootfs.ext4` existing rather than on its recorded digest | yes |
+| `intact_but_skewed_kernel_is_detected` | Replace a cached `vmlinux` with another build's intact kernel — detected only because the digest is recorded, never by an existence check | yes |
+| `cache_record_write_refuses_an_unverifiable_record` | Allow a build-cache record with no artifact digests, which could only ever be served on trust | yes |
 | `check-claim-witness-freshness` | Change `security.yml`'s cron to hourly so its real last-run age exceeds the allowance; reported `security.yml last ran 14h ago (schedule allows 3h)` naming all 8 claims it backs | yes |
 | `cargo-fuzz crates still compile` | None planted — run against main it independently rediscovered both real defects (`fuzz_authed_path` E0308, `fuzz_build_image` unclosed delimiter) that the nightly took eleven days to surface | yes |
 | `included_top_level_is_a_superset_of_the_nix_filter_allowlist` | Remove `"nix"` from `INCLUDED_TOP_LEVEL` while `workspace-filter.nix` still admits it, so a `nix/` change would go unhashed and boot a stale image | yes |

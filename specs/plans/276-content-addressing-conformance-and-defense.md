@@ -144,13 +144,24 @@ Narrower than first written: the mutation surface, the freshness gate and the 36
 
 **Why this is first.** Per the revised recon §7.1, integrity-on-read is the one attestation property no surveyed system enforces — not a coverage nicety. **Downstream dependency: plan 279 WS1 (`ActionDigest`) is blocked on this landing** — plan 279 states the closure explicitly ("`~/.mvm/dev/builds/<rev>/` is served on a hit if `rootfs.ext4` merely exists as a file … Closing this is plan 276 WS6, not this plan"). `specs/SPRINT.md` already carries the same note.
 
-- [ ] Identify the workload/builder kernel cache read path (the one with no staleness check) and the `mvm-build` artifact cache read paths, including `~/.mvm/dev/builds/<rev>/`.
-- [ ] Add a content-address (SHA-256) to each cached artifact's key and verify **on read** on every hit (recompute, compare, fail closed per S3; evict on mismatch). `mvm_core::pack_cache` already implements exactly this discipline for packs — reuse it rather than writing a second cache.
-- [ ] Verify on read *as well as* on write. Recon §7.1 measured `kappa-registry` at 4 of 13 write paths verified and **no** read path; a write-only check is the failure mode to avoid, not the target.
-- [ ] Size the check to the object (recon §7.9): rehash small artifacts before serving; carry a running hash across frames for streamed artifacts and deliver the verdict in a trailer; add a background scrub over the reachability walk for cold artifacts — on-access verification never visits the blocks that are quietly rotting, and the measured corruption pattern has high spatial and temporal locality.
-- [ ] Cover the **identity-discrepancy** class explicitly, not just bit-rot: an intact artifact that is the *wrong* artifact. This is the workload-kernel cache-skew that currently mimics real bugs, and a path-trusting cache cannot see it at all.
-- [ ] Keep caching within the per-tenant/trust boundary (S2); dm-verity roothash chain unchanged (S4).
-- [ ] Tests: cache-hit-verifies, tampered-cache-entry-rejected, skewed-kernel-detected, wrong-but-intact-artifact-detected. `VERIFICATION.md` row (planted: flip a byte in a cached kernel → verify-on-read rejects; swap two intact cached kernels → identity discrepancy fires).
+**Read paths, and their status.** There are two, and they fail differently.
+
+- [x] **The dev-build artifact cache (`~/.mvm/dev/builds/<rev>/`)** — the one plan 279 WS1 waits on. Served a hit whenever `rootfs.ext4` existed as a file; now content-addressed and verified on read.
+- [ ] **The workload/builder kernel cache (`~/.mvm/cache/builder-vm/<arch>/kernels/<label>/vmlinux`)** — still path-trusting. See "The kernel cache" below; it needs the published pin threaded to the read site and is deliberately not bundled into the same change.
+
+Landed:
+
+- [x] `mvm_core::cache_verify` — the shared discipline: `ArtifactDigests` records artifact→SHA-256, `verify` re-reads and compares, `CacheVerdict` separates *serve* from *miss* from *evict*. Streams via `crypto::image_verify::sha256_file`, deliberately **not** `sha256_file_cached`, whose size+mtime sidecar by construction cannot observe a change that leaves both unchanged.
+- [x] The build-cache record carries the digests, not just the revision. A record with no digests is refused at write (it could only ever be served on trust) and is a miss at read — including the previous bare-revision record format, which is unverifiable and so is not honoured.
+- [x] Verify on read on every hit; fail closed per S3 and evict the record on mismatch, so damage is re-derived rather than re-examined on every subsequent build.
+- [x] Covers the **identity-discrepancy** class, not just bit-rot: an intact artifact that is the *wrong* artifact. `intact_but_skewed_kernel_is_detected` swaps one build's `vmlinux` for another's — both complete and readable, which is exactly what a path-trusting cache cannot see, and exactly the kernel cache skew that mimics real bugs.
+- [x] Per-tenant/trust boundary unchanged (S2 — the dev build cache is already per-`MVM_HOME`); dm-verity roothash chain untouched (S4).
+- [x] Tests + four `specs/VERIFICATION.md` falsifiability rows, each with its planted defect recorded. The sidecar row was proved by pointing `verify` at `sha256_file_cached` and confirming only that test went red.
+
+Remaining in WS6:
+
+- [ ] **The kernel cache.** `mvm_build::kernel_fetch::resolve_kernel` returns `Cached(path)` on `path.exists()`, and `resolve_pinned_kernel_with` maps that arm straight to a path with no check. `verify_fetched_kernel` — which hashes against `KernelArtifactId::artifact_hash` and deletes on mismatch — **exists and has no production caller at all**: not on the fetch path, not on the read path. Its own doc comment says installed builds "should still verify it against the pin before boot", and nothing does. Wiring it needs the published per-arch/variant expected hash threaded to both sites (the release checksum manifest, as `download_dev_image` already does), which is why it is its own change rather than an appendix to this one.
+- [ ] **Size the check to the object** (recon §7.9). Today every recorded artifact is rehashed in full on each hit; that is correct and bounded (a cache hit replaces a builder-VM boot), but the cold tier is unaddressed. A background scrub over the reachability walk is the only tier that catches the measured corruption locality — on-access verification never visits the blocks that are quietly rotting.
 
 ### WS7 — σ/κ separation and the transform descriptor (recon §7.8)
 

@@ -6,6 +6,7 @@
 
 pub mod arch;
 pub mod build_env;
+pub mod cache_verify;
 pub mod catalog;
 pub mod checkpoint;
 // The `MvmClient` machine-driving facade (trait + DTOs + mock + remote gateway).

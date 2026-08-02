@@ -171,7 +171,7 @@ pub fn workload_build_fingerprint(
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Directory holding `fingerprint -> revision` cache records
+/// Directory holding `fingerprint -> record` cache entries
 /// (`~/.mvm/dev/build-cache/`).
 fn build_cache_dir() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_home())
@@ -179,45 +179,84 @@ fn build_cache_dir() -> PathBuf {
         .join("build-cache")
 }
 
-/// Look up the nix revision a previous build recorded for `fingerprint`,
-/// or `None` if there is no record (or it is unreadable / malformed).
-/// Never returns a value that can't be a safe build-dir component.
-pub fn read_cached_revision(fingerprint: &str) -> Option<String> {
-    read_cached_revision_in(&build_cache_dir(), fingerprint)
+/// One build-cache record: the nix revision a fingerprint resolved to, plus
+/// the digests of the artifacts that build produced.
+///
+/// The digests are what make a cache hit checkable. Without them the only
+/// question a hit could answer is "does a file exist at the expected path",
+/// which cannot distinguish the artifacts of this build from a corrupted,
+/// truncated, or simply different build's.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachedBuild {
+    /// Nix store hash, used as the `~/.mvm/dev/builds/<rev>/` component.
+    pub revision: String,
+    /// Artifact name → SHA-256, verified on every read.
+    #[serde(default)]
+    pub digests: mvm_core::cache_verify::ArtifactDigests,
 }
 
-/// Record `fingerprint -> revision` so the next build with the same
-/// inputs can skip the builder VM. Best-effort and atomic (temp +
-/// rename) so a concurrent reader never sees a torn record.
-pub fn write_cached_revision(fingerprint: &str, revision: &str) -> Result<()> {
-    write_cached_revision_in(&build_cache_dir(), fingerprint, revision)
+/// Look up the record a previous build wrote for `fingerprint`, or `None` if
+/// there is none (or it is unreadable, malformed, or names an unsafe
+/// revision). Never returns a value that can't be a safe build-dir component.
+pub fn read_cached_build(fingerprint: &str) -> Option<CachedBuild> {
+    read_cached_build_in(&build_cache_dir(), fingerprint)
 }
 
-fn read_cached_revision_in(dir: &Path, fingerprint: &str) -> Option<String> {
+/// Record `fingerprint -> (revision, digests)` so the next build with the same
+/// inputs can skip the builder VM. Atomic (temp + rename) so a concurrent
+/// reader never sees a torn record.
+pub fn write_cached_build(fingerprint: &str, record: &CachedBuild) -> Result<()> {
+    write_cached_build_in(&build_cache_dir(), fingerprint, record)
+}
+
+/// Drop the record for `fingerprint`. Called when verify-on-read rejects an
+/// entry, so a damaged build is re-derived rather than re-examined on every
+/// subsequent build.
+pub fn evict_cached_build(fingerprint: &str) {
+    evict_cached_build_in(&build_cache_dir(), fingerprint);
+}
+
+fn read_cached_build_in(dir: &Path, fingerprint: &str) -> Option<CachedBuild> {
     if !is_safe_component(fingerprint) {
         return None;
     }
     let raw = std::fs::read_to_string(dir.join(fingerprint)).ok()?;
-    let rev = raw.trim();
+    // Records are JSON. A record that does not parse — including one written
+    // by a build that predates verify-on-read, which stored a bare revision
+    // string — is a miss, never a fallback to trusting the path.
+    let record: CachedBuild = serde_json::from_str(&raw).ok()?;
     // The revision becomes a `~/.mvm/dev/builds/<rev>/` path component;
     // reject anything that isn't a plain store-hash token.
-    is_safe_component(rev).then(|| rev.to_string())
+    is_safe_component(&record.revision).then_some(record)
 }
 
-fn write_cached_revision_in(dir: &Path, fingerprint: &str, revision: &str) -> Result<()> {
+fn write_cached_build_in(dir: &Path, fingerprint: &str, record: &CachedBuild) -> Result<()> {
     anyhow::ensure!(
-        is_safe_component(fingerprint) && is_safe_component(revision),
+        is_safe_component(fingerprint) && is_safe_component(&record.revision),
         "refusing to write build-cache record with unsafe key/value"
+    );
+    anyhow::ensure!(
+        !record.digests.is_empty(),
+        "refusing to write a build-cache record with no artifact digests — an \
+         unverifiable record would be served on trust"
     );
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating build-cache dir {}", dir.display()))?;
     let final_path = dir.join(fingerprint);
     let tmp = dir.join(format!(".{}.{}.tmp", fingerprint, std::process::id()));
-    std::fs::write(&tmp, format!("{revision}\n"))
+    let body = serde_json::to_string(record).context("serialising build-cache record")?;
+    std::fs::write(&tmp, body)
         .with_context(|| format!("writing build-cache temp {}", tmp.display()))?;
     std::fs::rename(&tmp, &final_path)
         .with_context(|| format!("renaming build-cache record into {}", final_path.display()))?;
     Ok(())
+}
+
+fn evict_cached_build_in(dir: &Path, fingerprint: &str) {
+    if is_safe_component(fingerprint) {
+        let _ = std::fs::remove_file(dir.join(fingerprint));
+    }
 }
 
 /// A token safe to use as a single path component: non-empty, no path
@@ -590,20 +629,30 @@ mod tests {
         );
     }
 
+    /// A record carrying one artifact digest, enough to satisfy the
+    /// "never write an unverifiable record" guard.
+    fn record_with_digest(revision: &str) -> (tempfile::TempDir, CachedBuild) {
+        let build = tempfile::tempdir().unwrap();
+        std::fs::write(build.path().join("rootfs.ext4"), b"root").unwrap();
+        let mut digests = mvm_core::cache_verify::ArtifactDigests::new();
+        digests.record(build.path(), "rootfs.ext4").unwrap();
+        (
+            build,
+            CachedBuild {
+                revision: revision.to_string(),
+                digests,
+            },
+        )
+    }
+
     #[test]
     fn cache_record_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let fp = "a".repeat(64);
-        assert_eq!(
-            read_cached_revision_in(dir.path(), &fp),
-            None,
-            "absent → None"
-        );
-        write_cached_revision_in(dir.path(), &fp, "l6fjg21gfazc98635yr2zjcfxm6ykilk").unwrap();
-        assert_eq!(
-            read_cached_revision_in(dir.path(), &fp).as_deref(),
-            Some("l6fjg21gfazc98635yr2zjcfxm6ykilk")
-        );
+        assert_eq!(read_cached_build_in(dir.path(), &fp), None, "absent → None");
+        let (_build, record) = record_with_digest("l6fjg21gfazc98635yr2zjcfxm6ykilk");
+        write_cached_build_in(dir.path(), &fp, &record).unwrap();
+        assert_eq!(read_cached_build_in(dir.path(), &fp), Some(record));
     }
 
     #[test]
@@ -611,13 +660,62 @@ mod tests {
         // A tampered record must never become a path component.
         let dir = tempfile::tempdir().unwrap();
         let fp = "b".repeat(64);
-        std::fs::write(dir.path().join(&fp), "../../etc/passwd\n").unwrap();
-        assert_eq!(read_cached_revision_in(dir.path(), &fp), None);
+        std::fs::write(
+            dir.path().join(&fp),
+            r#"{"revision":"../../etc/passwd","digests":{"artifacts":{}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_cached_build_in(dir.path(), &fp), None);
     }
 
     #[test]
     fn cache_record_write_refuses_unsafe_key() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(write_cached_revision_in(dir.path(), "../escape", "rev").is_err());
+        let (_build, mut record) = record_with_digest("rev");
+        assert!(write_cached_build_in(dir.path(), "../escape", &record).is_err());
+        record.revision = "../escape".to_string();
+        assert!(write_cached_build_in(dir.path(), &"c".repeat(64), &record).is_err());
+    }
+
+    #[test]
+    fn cache_record_write_refuses_an_unverifiable_record() {
+        // Fail-closed at the write end too: a record with no digests could only
+        // ever be served on trust, so it must not be writable at all.
+        let dir = tempfile::tempdir().unwrap();
+        let record = CachedBuild {
+            revision: "l6fjg21gfazc98635yr2zjcfxm6ykilk".to_string(),
+            digests: mvm_core::cache_verify::ArtifactDigests::new(),
+        };
+        let err = write_cached_build_in(dir.path(), &"d".repeat(64), &record).unwrap_err();
+        assert!(
+            err.to_string().contains("no artifact digests"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_bare_revision_record_is_a_miss_not_a_trusted_hit() {
+        // The pre-verify-on-read record format was a bare revision string. It
+        // carries no digests, so it cannot be checked; reading it must miss and
+        // force a rebuild rather than serving unverified artifacts.
+        let dir = tempfile::tempdir().unwrap();
+        let fp = "e".repeat(64);
+        std::fs::write(dir.path().join(&fp), "l6fjg21gfazc98635yr2zjcfxm6ykilk\n").unwrap();
+        assert_eq!(read_cached_build_in(dir.path(), &fp), None);
+    }
+
+    #[test]
+    fn evict_removes_the_record_and_tolerates_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = "f".repeat(64);
+        let (_build, record) = record_with_digest("l6fjg21gfazc98635yr2zjcfxm6ykilk");
+        write_cached_build_in(dir.path(), &fp, &record).unwrap();
+        assert!(read_cached_build_in(dir.path(), &fp).is_some());
+
+        evict_cached_build_in(dir.path(), &fp);
+        assert_eq!(read_cached_build_in(dir.path(), &fp), None);
+        // Second eviction is a no-op, not an error.
+        evict_cached_build_in(dir.path(), &fp);
+        evict_cached_build_in(dir.path(), "../escape");
     }
 }

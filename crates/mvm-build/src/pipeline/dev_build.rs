@@ -483,10 +483,10 @@ fn dev_build_via_builder_vm(
     // image would be byte-identical — see `build_cache`'s soundness note.
     let fingerprint = build_cache_fingerprint(flake_ref, profile, mode);
     if let Some(fp) = fingerprint.as_deref()
-        && let Some(hit) = cached_build_result(fp)
+        && let Some(hit) = cached_build_result(env, fp)
     {
         env.log_success(&format!(
-            "Build cache hit — reusing {} (skipped builder VM + nix eval)",
+            "Build cache hit — reusing {} (verified; skipped builder VM + nix eval)",
             hit.build_dir
         ));
         return Ok(hit);
@@ -494,14 +494,57 @@ fn dev_build_via_builder_vm(
 
     let result = dev_build_via_builder_vm_uncached(env, flake_ref, profile, mode)?;
 
-    // Record the fingerprint → revision mapping so the next identical
-    // build short-circuits. Best-effort: a read-only cache dir just means
-    // the next build re-evaluates.
+    // Record the fingerprint → (revision, artifact digests) mapping so the next
+    // identical build short-circuits — and so that short-circuit is checkable.
+    // Best-effort: a read-only cache dir just means the next build re-evaluates.
     if let Some(fp) = fingerprint.as_deref() {
-        let _ = crate::pipeline::build_cache::write_cached_revision(fp, &result.revision_hash);
+        record_build_in_cache(env, fp, &result);
     }
     Ok(result)
 }
+
+/// Hash the artifacts a build produced and store them alongside the revision.
+///
+/// A failure here costs a redundant rebuild next time and nothing else, so it
+/// warns rather than failing the build that just succeeded. What it must not do
+/// is write a record it could not hash: an unverifiable record would be served
+/// on trust, which is the property this whole path exists to remove.
+#[cfg(feature = "builder-vm")]
+fn record_build_in_cache(env: &dyn ShellEnvironment, fingerprint: &str, result: &DevBuildResult) {
+    let mut digests = mvm_core::cache_verify::ArtifactDigests::new();
+    let build_dir = std::path::Path::new(&result.build_dir);
+    match digests.record_all(build_dir, CACHED_BUILD_ARTIFACTS) {
+        Ok(0) => {
+            tracing::debug!(
+                build_dir = %result.build_dir,
+                "no cacheable artifacts to digest; not recording a build-cache entry"
+            );
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            env.log_warn(&format!(
+                "Could not digest build artifacts in {} ({e}); not caching this build",
+                result.build_dir
+            ));
+            return;
+        }
+    }
+    let record = crate::pipeline::build_cache::CachedBuild {
+        revision: result.revision_hash.clone(),
+        digests,
+    };
+    if let Err(e) = crate::pipeline::build_cache::write_cached_build(fingerprint, &record) {
+        tracing::debug!(error = %e, "build-cache record not written");
+    }
+}
+
+/// The artifacts a cache hit reuses, and therefore the ones a hit must verify.
+/// `rootfs.ext4` is the one universal output; `vmlinux` and `initrd` are absent
+/// for a kernel-less mkGuest image, and [`mvm_core::cache_verify::ArtifactDigests::record_all`]
+/// skips what a build did not produce.
+#[cfg(any(test, feature = "builder-vm"))]
+const CACHED_BUILD_ARTIFACTS: &[&str] = &["rootfs.ext4", "vmlinux", "initrd"];
 
 /// Compute the host-side build fingerprint for the cache, or `None` when
 /// the cache is disabled (`MVM_NO_BUILD_CACHE`) or the inputs can't be
@@ -531,19 +574,33 @@ fn build_cache_fingerprint(
     }
 }
 
-/// Reconstruct a cache-hit [`DevBuildResult`] from a recorded revision,
-/// or `None` when there is no record or its artifacts are incomplete.
-/// The completeness gate is `rootfs.ext4` — the one universal artifact;
-/// a kernel-less mkGuest image carries no `vmlinux` and relies on the
-/// cached-builder-kernel fallback resolved at boot.
+/// Reconstruct a cache-hit [`DevBuildResult`] from a recorded revision, or
+/// `None` when there is no record or the recorded artifacts do not verify.
+///
+/// Verification re-reads every recorded artifact and compares it to the digest
+/// the producing build stored. The previous completeness gate — "`rootfs.ext4`
+/// exists as a file" — answered a different question: it could not tell this
+/// build's rootfs from a corrupted one, a half-written one, or another build's.
+/// A rejected entry is evicted so the damage is re-derived rather than
+/// re-examined on every subsequent build.
 #[cfg(feature = "builder-vm")]
-fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
-    let revision_hash = crate::pipeline::build_cache::read_cached_revision(fingerprint)?;
+fn cached_build_result(env: &dyn ShellEnvironment, fingerprint: &str) -> Option<DevBuildResult> {
+    let record = crate::pipeline::build_cache::read_cached_build(fingerprint)?;
+    let revision_hash = record.revision;
     let build_dir = dev_build_dir(&revision_hash);
-    let rootfs_path = format!("{build_dir}/rootfs.ext4");
-    if !std::path::Path::new(&rootfs_path).is_file() {
+    let verdict = record.digests.verify(std::path::Path::new(&build_dir));
+    if !verdict.is_verified() {
+        if verdict.should_evict() {
+            env.log_warn(&format!(
+                "Build cache entry {revision_hash} did not verify ({}); discarding it and \
+                 rebuilding",
+                verdict.reason()
+            ));
+            crate::pipeline::build_cache::evict_cached_build(fingerprint);
+        }
         return None;
     }
+    let rootfs_path = format!("{build_dir}/rootfs.ext4");
     let initrd_path = detect_initrd(&build_dir);
     let runner_dir = detect_runner(&build_dir);
     let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
@@ -1279,6 +1336,144 @@ mod tests {
         fn log_success(&self, msg: &str) {
             self.logs.lock().unwrap().push(format!("SUCCESS: {}", msg));
         }
+
+        fn log_warn(&self, msg: &str) {
+            self.logs.lock().unwrap().push(format!("WARN: {}", msg));
+        }
+    }
+
+    impl TestEnv {
+        fn logged(&self) -> String {
+            self.logs.lock().unwrap().join("\n")
+        }
+    }
+
+    /// Stage a build directory plus its build-cache record inside an isolated
+    /// `MVM_HOME`, the way a successful build would leave them.
+    #[cfg(feature = "builder-vm")]
+    fn stage_cached_build(
+        env: &TestEnv,
+        fingerprint: &str,
+        revision: &str,
+        artifacts: &[(&str, &[u8])],
+    ) -> String {
+        let build_dir = dev_build_dir(revision);
+        std::fs::create_dir_all(&build_dir).unwrap();
+        for (name, bytes) in artifacts {
+            std::fs::write(format!("{build_dir}/{name}"), bytes).unwrap();
+        }
+        let result = DevBuildResult {
+            build_dir: build_dir.clone(),
+            vmlinux_path: format!("{build_dir}/vmlinux"),
+            initrd_path: None,
+            rootfs_path: format!("{build_dir}/rootfs.ext4"),
+            revision_hash: revision.to_string(),
+            cached: false,
+            runner_dir: None,
+            artifact_sizes: Default::default(),
+        };
+        record_build_in_cache(env, fingerprint, &result);
+        build_dir
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn verified_cache_entry_is_reused() {
+        let home = tempfile::tempdir().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.isolate_mvm_home(home.path());
+        let env = TestEnv::new();
+        let fp = "a".repeat(64);
+
+        stage_cached_build(
+            &env,
+            &fp,
+            "l6fjg21gfazc98635yr2zjcfxm6ykilk",
+            &[("rootfs.ext4", b"root bytes"), ("vmlinux", b"kernel bytes")],
+        );
+
+        let hit = cached_build_result(&env, &fp).expect("an untouched entry must verify and hit");
+        assert_eq!(hit.revision_hash, "l6fjg21gfazc98635yr2zjcfxm6ykilk");
+        assert!(hit.cached);
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn tampered_cached_rootfs_is_rejected_and_evicted() {
+        // Substituted content: the entry used to be served whenever
+        // `rootfs.ext4` existed, so a swap went undetected and the provenance
+        // recorder then signed whatever bytes were on disk.
+        let home = tempfile::tempdir().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.isolate_mvm_home(home.path());
+        let env = TestEnv::new();
+        let fp = "b".repeat(64);
+
+        let build_dir = stage_cached_build(
+            &env,
+            &fp,
+            "l6fjg21gfazc98635yr2zjcfxm6ykilk",
+            &[("rootfs.ext4", b"the real rootfs")],
+        );
+        // Same length — a size check would not notice.
+        std::fs::write(format!("{build_dir}/rootfs.ext4"), b"the fake rootfs").unwrap();
+
+        assert!(
+            cached_build_result(&env, &fp).is_none(),
+            "a substituted rootfs must not be served"
+        );
+        assert!(env.logged().contains("did not verify"), "{}", env.logged());
+        assert!(
+            crate::pipeline::build_cache::read_cached_build(&fp).is_none(),
+            "a rejected entry must be evicted, not re-examined every build"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn intact_but_skewed_kernel_is_detected() {
+        // Identity discrepancy: both kernels are complete and readable, they
+        // just belong to different builds. Existence checks see nothing wrong,
+        // which is why kernel cache skew currently mimics a real bug.
+        let home = tempfile::tempdir().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.isolate_mvm_home(home.path());
+        let env = TestEnv::new();
+        let fp = "c".repeat(64);
+
+        let build_dir = stage_cached_build(
+            &env,
+            &fp,
+            "l6fjg21gfazc98635yr2zjcfxm6ykilk",
+            &[("rootfs.ext4", b"root"), ("vmlinux", b"kernel for build C")],
+        );
+        std::fs::write(format!("{build_dir}/vmlinux"), b"kernel for build D").unwrap();
+
+        assert!(
+            cached_build_result(&env, &fp).is_none(),
+            "an intact kernel from another build must not be served"
+        );
+        assert!(env.logged().contains("vmlinux"), "{}", env.logged());
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn deleted_cached_artifact_is_a_miss() {
+        let home = tempfile::tempdir().unwrap();
+        let mut guard = EnvGuard::new();
+        guard.isolate_mvm_home(home.path());
+        let env = TestEnv::new();
+        let fp = "d".repeat(64);
+
+        let build_dir = stage_cached_build(
+            &env,
+            &fp,
+            "l6fjg21gfazc98635yr2zjcfxm6ykilk",
+            &[("rootfs.ext4", b"root")],
+        );
+        std::fs::remove_file(format!("{build_dir}/rootfs.ext4")).unwrap();
+
+        assert!(cached_build_result(&env, &fp).is_none());
     }
 
     #[cfg(feature = "builder-vm")]
