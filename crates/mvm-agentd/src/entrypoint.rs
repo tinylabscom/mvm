@@ -427,6 +427,16 @@ pub struct ControlRecord {
     pub payload: Vec<u8>,
 }
 
+impl From<ControlRecord> for EntrypointEvent {
+    /// Every route from a record to the wire runs through here, so the frame
+    /// budget applies to all of them: a record that cannot be framed is
+    /// replaced by a bounded notice instead of overflowing the writer, which
+    /// would end the call early and discard everything behind it.
+    fn from(record: ControlRecord) -> Self {
+        crate::stream_pump::control_within_frame_budget(record.header_json, record.payload)
+    }
+}
+
 /// One run of the validated wrapper, as a value.
 ///
 /// Grouped rather than passed positionally because the streaming form takes a

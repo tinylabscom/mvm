@@ -200,9 +200,10 @@ fn handle_run_entrypoint(
     // Each event is framed the moment it arrives, so the host sees a
     // long-running workload's output while it is still running. Nothing is
     // held back to be replayed after the child exits — that replay is what
-    // made a streaming pump look silent from the outside. Every `Control`
-    // here came off fd 3 through the pump's reserved-kind gate, so a workload
-    // still cannot mint an agent-authored record.
+    // made a streaming pump look silent from the outside. A `Control` here is
+    // either the agent's own (a retention gap, constructed in-process) or one
+    // that came off fd 3 through the reserved-kind gate, so a workload still
+    // cannot mint an agent-authored record.
     //
     // tmpdir drops at end of scope and runs its `Drop` cleanup.
     let terminal = stream_call(call, &mut |event| {
@@ -221,14 +222,11 @@ fn handle_run_entrypoint(
 /// ingest, so this writes agent-authored records and workload records that do
 /// not claim to be one.
 fn emit_controls(file: &mut dyn Write, records: Vec<mvm_agentd::entrypoint::ControlRecord>) {
-    for r in records {
-        write_response(
-            file,
-            &evt(EntrypointEvent::Control {
-                header_json: r.header_json,
-                payload: r.payload,
-            }),
-        );
+    for record in records {
+        // The conversion is also where the frame budget applies, so a record
+        // too wide to frame becomes a bounded notice instead of an oversized
+        // frame the writer would replace with a fatal error response.
+        write_response(file, &evt(record.into()));
     }
 }
 

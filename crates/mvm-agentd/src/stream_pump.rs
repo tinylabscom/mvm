@@ -31,10 +31,10 @@ use std::process::{Child, ExitStatus};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
 
-use mvm_core::transcript::{Admission, CaptureBounds, GapMarker, RingState};
+use mvm_core::transcript::{Admission, CaptureBounds, GapMarker, GapTally, RingState};
 
 use crate::entrypoint::{CallCaps, ControlRecord, signal_of, signal_process_group};
-use crate::vsock::{EntrypointEvent, MAX_DATA_CHUNK_SIZE};
+use crate::vsock::{EntrypointEvent, GuestResponse, MAX_DATA_CHUNK_SIZE, MAX_FRAME_SIZE};
 
 /// Bytes pulled from a pipe in one `read`. Larger than the frame budget on
 /// purpose: a chatty workload costs fewer syscalls, and the read is split into
@@ -70,6 +70,14 @@ pub const RESERVED_KIND_PREFIX: &str = "mvm.";
 /// Control-record `kind` the agent stamps on a retention gap.
 pub const GAP_RECORD_KIND: &str = "mvm.stream.gap";
 
+/// Control-record `kind` the agent stamps on a record it could not frame.
+pub const CONTROL_DROPPED_KIND: &str = "mvm.stream.control_dropped";
+
+/// Header bytes kept from a record too big to frame. Enough to carry the
+/// `kind` field a reader identifies the record by, and short enough that the
+/// replacement fits whatever escaping the original demanded.
+const DROPPED_HEADER_PREFIX_MAX: usize = 256;
+
 /// How a pumped child ended. Deliberately has no cap-breach variant: output
 /// volume is not a way for a call to end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +105,20 @@ impl CapturedStream {
         }
     }
 
+    /// Which byte stream an event belongs to, or `None` for one that belongs
+    /// to neither (a control record, a terminal). The inverse of [`event`].
+    ///
+    /// [`event`]: CapturedStream::event
+    pub fn of(event: &EntrypointEvent) -> Option<Self> {
+        match event {
+            EntrypointEvent::Stdout { .. } => Some(CapturedStream::Stdout),
+            EntrypointEvent::Stderr { .. } => Some(CapturedStream::Stderr),
+            EntrypointEvent::Control { .. }
+            | EntrypointEvent::Exit { .. }
+            | EntrypointEvent::Error { .. } => None,
+        }
+    }
+
     /// Wire name used in a gap record's header.
     pub fn name(self) -> &'static str {
         match self {
@@ -104,6 +126,99 @@ impl CapturedStream {
             CapturedStream::Stderr => "stderr",
         }
     }
+}
+
+/// A [`RingState`] bounding one stream's retention by bytes alone.
+///
+/// A chunk count follows from the read size rather than from anything the
+/// caller asked for, so bounding on it too would evict on a dimension nobody
+/// chose.
+pub fn stream_retention_ring(max_bytes: usize) -> RingState {
+    RingState::new(CaptureBounds {
+        // `RingState` reads only the byte and chunk bounds.
+        max_duration_secs: 0,
+        max_bytes: max_bytes as u64,
+        max_chunks: u64::MAX,
+    })
+}
+
+/// Clamp one control record to something that provably fits a single response
+/// frame, replacing it with an agent-authored notice when it does not.
+///
+/// A header only has to be valid UTF-8, and JSON escaping costs up to six
+/// characters per control byte — so a record well inside the fd-3 field caps
+/// can still encode past the frame cap. The writer's own overflow handling
+/// substitutes a generic error response for such a frame, which a host reading
+/// until terminal treats as the end of the call: one unframeable record would
+/// discard every event behind it. Replacing it here keeps the record count and
+/// the terminal intact, and tells the reader exactly what was lost.
+///
+/// The notice claims the agent's reserved namespace, which is legitimate
+/// precisely because this runs after the authorship gate — a workload's own
+/// record can never reach this function still claiming that prefix.
+pub fn control_within_frame_budget(header_json: String, payload: Vec<u8>) -> EntrypointEvent {
+    let candidate = EntrypointEvent::Control {
+        header_json,
+        payload,
+    };
+    if frames_within_cap(&candidate) {
+        return candidate;
+    }
+    // Take the fields back out to describe what was dropped. The other arm is
+    // unreachable — the value was built as a `Control` three lines up — and
+    // handing it back unchanged is the honest thing to do if that ever stops
+    // being true.
+    let (header_json, payload) = match candidate {
+        EntrypointEvent::Control {
+            header_json,
+            payload,
+        } => (header_json, payload),
+        other => return other,
+    };
+    let header = serde_json::json!({
+        "kind": CONTROL_DROPPED_KIND,
+        "header_bytes": header_json.len(),
+        "payload_bytes": payload.len(),
+        "header_prefix": char_bounded_prefix(&header_json, DROPPED_HEADER_PREFIX_MAX),
+    });
+    EntrypointEvent::Control {
+        header_json: header.to_string(),
+        payload: Vec::new(),
+    }
+}
+
+/// Whether the event encodes inside the response frame cap. Measured against
+/// the same envelope the writer frames, so the answer is the writer's answer
+/// rather than an estimate that can drift from it — worth one copy on a path
+/// that runs once per control record and never per output chunk.
+fn frames_within_cap(event: &EntrypointEvent) -> bool {
+    let framed = GuestResponse::EntrypointEvent(event.clone());
+    serde_json::to_vec(&framed).is_ok_and(|encoded| encoded.len() <= MAX_FRAME_SIZE)
+}
+
+/// Apply the frame budget to a decoded control record, leaving anything else
+/// untouched.
+fn bound_to_one_frame(event: EntrypointEvent) -> EntrypointEvent {
+    match event {
+        EntrypointEvent::Control {
+            header_json,
+            payload,
+        } => control_within_frame_budget(header_json, payload),
+        other => other,
+    }
+}
+
+/// The longest prefix of `text` that is at most `max_bytes` long and does not
+/// split a UTF-8 character.
+fn char_bounded_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Bytes one stream's retention ring evicted over the life of a call. Its
@@ -115,6 +230,18 @@ pub struct StreamGap {
 }
 
 impl StreamGap {
+    /// The at-most-one gap each stream reports, stdout first. Both `None` —
+    /// the normal case — gives an empty vec.
+    pub fn from_markers(stdout: Option<GapMarker>, stderr: Option<GapMarker>) -> Vec<StreamGap> {
+        [
+            (CapturedStream::Stdout, stdout),
+            (CapturedStream::Stderr, stderr),
+        ]
+        .into_iter()
+        .filter_map(|(stream, marker)| marker.map(|marker| StreamGap { stream, marker }))
+        .collect()
+    }
+
     /// Render the gap as a control record. It rides fd-3's channel rather than
     /// stdout or stderr because it is agent-authored metadata about the
     /// capture, not workload output, and injecting it inline would corrupt the
@@ -513,7 +640,7 @@ fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<Entrypoin
                         EntrypointEvent::Control { header_json, .. }
                             if claims_reserved_kind(header_json)
                     );
-                    if !is_reserved && tx.send(event).is_err() {
+                    if !is_reserved && tx.send(bound_to_one_frame(event)).is_err() {
                         return; // the pump is gone; nothing left to feed
                     }
                     continue; // `pending` may already hold the next frame
@@ -801,19 +928,7 @@ impl RetainingSink {
     }
 
     pub fn finish(self) -> CapturedOutput {
-        let mut gaps = Vec::new();
-        if let Some(marker) = self.stdout.gap {
-            gaps.push(StreamGap {
-                stream: CapturedStream::Stdout,
-                marker,
-            });
-        }
-        if let Some(marker) = self.stderr.gap {
-            gaps.push(StreamGap {
-                stream: CapturedStream::Stderr,
-                marker,
-            });
-        }
+        let gaps = StreamGap::from_markers(self.stdout.gap.marker(), self.stderr.gap.marker());
         CapturedOutput {
             stdout: self.stdout.into_bytes(),
             stderr: self.stderr.into_bytes(),
@@ -828,62 +943,29 @@ impl RetainingSink {
 struct RetainedStream {
     ring: RingState,
     chunks: VecDeque<Vec<u8>>,
-    gap: Option<GapMarker>,
+    gap: GapTally,
 }
 
 impl RetainedStream {
     fn new(max_bytes: usize) -> Self {
         Self {
-            ring: RingState::new(CaptureBounds {
-                // `RingState` reads only the byte and chunk bounds. Bounding
-                // by bytes alone is the whole intent here: a chunk count
-                // follows from the read size, so a second bound would evict on
-                // a dimension the caller never asked about.
-                max_duration_secs: 0,
-                max_bytes: max_bytes as u64,
-                max_chunks: u64::MAX,
-            }),
+            ring: stream_retention_ring(max_bytes),
             chunks: VecDeque::new(),
-            gap: None,
+            gap: GapTally::default(),
         }
     }
 
     fn push(&mut self, chunk: Vec<u8>) {
-        if let Admission::AcceptAfterPruning {
-            pruned_seqs,
-            dropped_bytes,
-        } = self.ring.admit(chunk.len() as u64)
-        {
+        let admission = self.ring.admit(chunk.len() as u64);
+        if let Admission::AcceptAfterPruning { pruned_seqs, .. } = &admission {
             // The ring hands back sequence numbers; this queue is pushed in
             // lockstep with it, so the evicted seqs are exactly its front.
             for _ in 0..pruned_seqs.len() {
                 self.chunks.pop_front();
             }
-            self.record_gap(&pruned_seqs, dropped_bytes);
         }
+        self.gap.record(&admission);
         self.chunks.push_back(chunk);
-    }
-
-    /// Fold one eviction into the running gap. A call reports at most one gap
-    /// per stream: a consumer needs to know output was lost and where the
-    /// surviving window starts, not the eviction history that got it there.
-    fn record_gap(&mut self, pruned_seqs: &[u64], dropped_bytes: u64) {
-        let Some(&after_seq) = pruned_seqs.last() else {
-            return;
-        };
-        let dropped_chunks = pruned_seqs.len() as u64;
-        self.gap = Some(match self.gap {
-            Some(prev) => GapMarker {
-                after_seq,
-                dropped_chunks: prev.dropped_chunks.saturating_add(dropped_chunks),
-                dropped_bytes: prev.dropped_bytes.saturating_add(dropped_bytes),
-            },
-            None => GapMarker {
-                after_seq,
-                dropped_chunks,
-                dropped_bytes,
-            },
-        });
     }
 
     fn into_bytes(self) -> Vec<u8> {
@@ -1504,6 +1586,109 @@ mod tests {
         // Drift here would silently reopen the forgery path: a gap kind
         // outside the refused prefix is a kind a child may write.
         assert!(GAP_RECORD_KIND.starts_with(RESERVED_KIND_PREFIX));
+        assert!(CONTROL_DROPPED_KIND.starts_with(RESERVED_KIND_PREFIX));
+    }
+
+    // -- frame budget: an unframeable record must not end the call ---------
+
+    /// The encoded size of the frame the response writer would emit for one
+    /// event.
+    fn framed_len(event: &EntrypointEvent) -> usize {
+        serde_json::to_vec(&GuestResponse::EntrypointEvent(event.clone()))
+            .expect("an event serializes")
+            .len()
+    }
+
+    #[test]
+    fn a_control_record_that_fits_is_framed_verbatim() {
+        let event =
+            control_within_frame_budget(r#"{"kind":"app.log"}"#.to_string(), b"payload".to_vec());
+        assert_eq!(
+            event,
+            EntrypointEvent::Control {
+                header_json: r#"{"kind":"app.log"}"#.to_string(),
+                payload: b"payload".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_header_within_the_fd3_cap_can_still_blow_the_frame_cap() {
+        // Headers only have to be valid UTF-8, and a control byte costs six
+        // characters escaped. A header the fd-3 decoder accepts is therefore
+        // no evidence the frame fits, which is the whole reason for the
+        // second bound.
+        let hostile = "\u{1}".repeat(FD3_HEADER_MAX);
+        assert_eq!(hostile.len(), FD3_HEADER_MAX, "one byte per character");
+        let verbatim = EntrypointEvent::Control {
+            header_json: hostile.clone(),
+            payload: Vec::new(),
+        };
+        assert!(
+            framed_len(&verbatim) > MAX_FRAME_SIZE,
+            "fixture no longer exceeds the frame cap; it proves nothing"
+        );
+
+        let bounded = control_within_frame_budget(hostile, Vec::new());
+        assert!(
+            framed_len(&bounded) <= MAX_FRAME_SIZE,
+            "the replacement must fit: {} bytes",
+            framed_len(&bounded)
+        );
+    }
+
+    #[test]
+    fn an_unframeable_record_becomes_an_agent_notice_naming_what_was_lost() {
+        let header = format!(
+            r#"{{"kind":"app.log","blob":"{}"}}"#,
+            "\u{1}".repeat(60_000)
+        );
+        let payload = vec![0xff_u8; 1024];
+        let bounded = control_within_frame_budget(header.clone(), payload.clone());
+        match bounded {
+            EntrypointEvent::Control {
+                header_json,
+                payload: notice_payload,
+            } => {
+                assert!(notice_payload.is_empty(), "the payload is not carried over");
+                let decoded: serde_json::Value =
+                    serde_json::from_str(&header_json).expect("the notice header is JSON");
+                assert_eq!(decoded["kind"], CONTROL_DROPPED_KIND);
+                assert_eq!(decoded["header_bytes"], header.len());
+                assert_eq!(decoded["payload_bytes"], payload.len());
+                // Enough of the original to identify it, never all of it.
+                let prefix = decoded["header_prefix"]
+                    .as_str()
+                    .expect("prefix is a string");
+                assert!(prefix.starts_with(r#"{"kind":"app.log""#), "{prefix:?}");
+                assert!(prefix.len() <= DROPPED_HEADER_PREFIX_MAX);
+            }
+            other => panic!("expected a control record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_prefix_never_splits_a_utf8_character() {
+        // A multi-byte character straddling the cut would make the notice
+        // itself unencodable — the failure it exists to prevent.
+        let text = "é".repeat(400);
+        let prefix = char_bounded_prefix(&text, DROPPED_HEADER_PREFIX_MAX);
+        assert!(prefix.len() <= DROPPED_HEADER_PREFIX_MAX);
+        assert!(prefix.len() > DROPPED_HEADER_PREFIX_MAX - 2);
+        assert!(text.starts_with(prefix));
+    }
+
+    #[test]
+    fn a_child_written_unframeable_record_reaches_the_sink_as_a_notice() {
+        // End to end through the fd-3 reader: the substitution has to happen
+        // after the authorship gate, or the agent's own notice would be
+        // refused as a forgery and the record would vanish silently.
+        let wire = control_frame(&"\u{1}".repeat(FD3_HEADER_MAX));
+        let records = read_control_frames_with_cap(&wire, 1024 * 1024);
+        assert_eq!(records.len(), 1, "one record in, one record out");
+        let header: serde_json::Value =
+            serde_json::from_str(&records[0].header_json).expect("the notice header is JSON");
+        assert_eq!(header["kind"], CONTROL_DROPPED_KIND);
     }
 
     #[test]

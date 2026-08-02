@@ -58,6 +58,52 @@ pub struct GapMarker {
     pub dropped_bytes: u64,
 }
 
+/// Running record of what one stream's ring evicted, folded into the single
+/// [`GapMarker`] that stream reports.
+///
+/// A consumer needs to know output was lost and where the surviving window
+/// starts, not the eviction history that got it there — so many admissions
+/// collapse into one marker rather than a list.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GapTally {
+    marker: Option<GapMarker>,
+}
+
+impl GapTally {
+    /// Fold one admission's evictions in. [`Admission::Accept`] is a no-op, so
+    /// every admission can be handed here without the caller branching.
+    pub fn record(&mut self, admission: &Admission) {
+        let Admission::AcceptAfterPruning {
+            pruned_seqs,
+            dropped_bytes,
+        } = admission
+        else {
+            return;
+        };
+        let Some(&after_seq) = pruned_seqs.last() else {
+            return;
+        };
+        let dropped_chunks = pruned_seqs.len() as u64;
+        self.marker = Some(match self.marker {
+            Some(prev) => GapMarker {
+                after_seq,
+                dropped_chunks: prev.dropped_chunks.saturating_add(dropped_chunks),
+                dropped_bytes: prev.dropped_bytes.saturating_add(*dropped_bytes),
+            },
+            None => GapMarker {
+                after_seq,
+                dropped_chunks,
+                dropped_bytes: *dropped_bytes,
+            },
+        });
+    }
+
+    /// The one marker for this stream, or `None` when nothing was evicted.
+    pub fn marker(&self) -> Option<GapMarker> {
+        self.marker
+    }
+}
+
 /// One chunk still counted against the ring's bounds. No payload, no hash —
 /// just enough to know what to evict and how much room it frees.
 struct LiveChunk {
@@ -113,6 +159,20 @@ impl RingState {
                 dropped_bytes,
             }
         }
+    }
+
+    /// Stop counting the oldest live chunk because the store handed it on
+    /// rather than evicting it. Returns its sequence number, or `None` when
+    /// nothing is live.
+    ///
+    /// The counterpart to eviction, for a store that drains from the front as
+    /// well as pruning from it: without it the ring keeps charging for chunks
+    /// the store no longer holds, and evicts live ones to make room that is
+    /// already free. A released chunk is not a gap — it was delivered.
+    pub fn release_oldest(&mut self) -> Option<u64> {
+        let oldest = self.live.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(oldest.size);
+        Some(oldest.seq)
     }
 
     /// Whether admitting one more `size`-byte chunk on top of the current
@@ -173,6 +233,54 @@ mod tests {
             }
         }
         assert_eq!(newest_accepted, 49, "the newest write must always win");
+    }
+
+    #[test]
+    fn releasing_the_oldest_frees_its_bytes_for_the_next_admission() {
+        // A delivered chunk must stop counting, or a queue that drains from
+        // the front would evict live chunks to make room that is already free.
+        let mut r = RingState::new(bounds(100, 8));
+        r.admit(60);
+        r.admit(30);
+        assert_eq!(r.release_oldest(), Some(0));
+        assert!(
+            matches!(r.admit(50), Admission::Accept),
+            "the released 60 bytes must be available again"
+        );
+    }
+
+    #[test]
+    fn releasing_an_empty_ring_reports_nothing() {
+        let mut r = RingState::new(bounds(100, 8));
+        assert_eq!(r.release_oldest(), None);
+    }
+
+    #[test]
+    fn a_tally_folds_many_evictions_into_one_marker() {
+        let mut r = RingState::new(bounds(10, 8));
+        let mut tally = GapTally::default();
+        for _ in 0..4 {
+            tally.record(&r.admit(4));
+        }
+        // 4-byte chunks against a 10-byte bound: two fit, then each new one
+        // evicts exactly one. Chunks 0 and 1 go as 2 and 3 arrive, and the
+        // two evictions collapse into a single marker.
+        assert_eq!(
+            tally.marker(),
+            Some(GapMarker {
+                after_seq: 1,
+                dropped_chunks: 2,
+                dropped_bytes: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn a_tally_that_never_evicted_reports_no_marker() {
+        let mut r = RingState::new(bounds(100, 8));
+        let mut tally = GapTally::default();
+        tally.record(&r.admit(10));
+        assert_eq!(tally.marker(), None);
     }
 
     #[test]

@@ -67,7 +67,13 @@ fn caps() -> CallCaps {
 
 /// Serve one `RunEntrypoint` call onto `guest`, framing each event as it
 /// arrives and the terminal last — the guest half of the agent's handler.
-fn serve_one_run_entrypoint(mut guest: UnixStream, script: &str, timeout: Duration) {
+fn serve_one_run_entrypoint(guest: UnixStream, script: &str, timeout: Duration) {
+    serve_with_caps(guest, script, timeout, caps());
+}
+
+/// As [`serve_one_run_entrypoint`], with the per-call caps spelled out — for
+/// the tests whose subject is a bound rather than the transport.
+fn serve_with_caps(mut guest: UnixStream, script: &str, timeout: Duration, caps: CallCaps) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let entrypoint = shell_entrypoint();
     let call = EntrypointCall {
@@ -75,7 +81,7 @@ fn serve_one_run_entrypoint(mut guest: UnixStream, script: &str, timeout: Durati
         cwd: tmp.path(),
         stdin: script.as_bytes(),
         timeout,
-        caps: caps(),
+        caps,
         env: vec![("PATH".to_string(), SCRIPT_PATH.to_string())],
     };
     let terminal = stream_call(call, &mut |event| {
@@ -124,6 +130,20 @@ fn concat_stderr(events: &[EntrypointEvent]) -> Vec<u8> {
         })
         .flatten()
         .copied()
+        .collect()
+}
+
+/// Every control record's header, decoded.
+fn control_headers(events: &[EntrypointEvent]) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EntrypointEvent::Control { header_json, .. } => Some(
+                serde_json::from_str(header_json)
+                    .unwrap_or_else(|_| serde_json::Value::String(header_json.clone())),
+            ),
+            _ => None,
+        })
         .collect()
 }
 
@@ -272,6 +292,181 @@ fn a_slow_host_does_not_stall_the_child() {
 
     let (_, terminal) = read_to_terminal(&mut host);
     assert_eq!(terminal, EntrypointEvent::Exit { code: 0 });
+    serving.join().expect("serving thread");
+}
+
+#[test]
+fn a_stopped_host_bounds_guest_memory_and_the_call_reports_the_gap() {
+    // The bound the streaming rewiring has to carry. Reader threads never stop
+    // reading the child's pipe — by design — and the wire is several times the
+    // width of that pipe, so a host that stops reading makes the guest's queue
+    // grow at the difference for the whole deadline. Here the host reads one
+    // frame and then waits for the child to write 8 MiB; what finally arrives
+    // must be bounded by the retention caps, not by what the child produced,
+    // and the loss must be reported rather than passed off as complete output.
+    const WRITTEN: usize = 8 * 1024 * 1024;
+    const RETENTION: usize = 128 * 1024;
+    // Retention plus the hand-off channel plus whatever the socket itself
+    // buffered. Every term is a fixed bound; the point is that none of them
+    // scale with `WRITTEN`.
+    const DELIVERED_MAX: usize = 2 * 1024 * 1024;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("child-finished");
+    let script = format!(
+        "printf early; head -c {WRITTEN} /dev/zero; : > {}",
+        marker.display()
+    );
+    let bounded_caps = CallCaps {
+        stdout_max: RETENTION,
+        stderr_max: RETENTION,
+        ..caps()
+    };
+
+    let (mut host, guest) = loopback_pair();
+    let serving =
+        std::thread::spawn(move || serve_with_caps(guest, &script, GENEROUS_TIMEOUT, bounded_caps));
+
+    next_frame(&mut host).expect("a first frame");
+    let wait_until = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < wait_until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        marker.exists(),
+        "the child must finish writing while the host has stopped reading"
+    );
+
+    let (events, terminal) = read_to_terminal(&mut host);
+    assert_eq!(terminal, EntrypointEvent::Exit { code: 0 });
+
+    let delivered = concat_stdout(&events).len();
+    assert!(
+        delivered < DELIVERED_MAX,
+        "the guest held {delivered} bytes for a stopped host; an unbounded hand-off would have \
+         grown to the {WRITTEN} the child wrote"
+    );
+    assert!(delivered > 0, "the newest output must still survive");
+
+    let headers = control_headers(&events);
+    assert_eq!(
+        headers.len(),
+        1,
+        "expected exactly one gap record, got {headers:?}"
+    );
+    assert_eq!(headers[0]["kind"], "mvm.stream.gap");
+    assert_eq!(headers[0]["stream"], "stdout");
+    assert!(
+        headers[0]["dropped_bytes"]
+            .as_u64()
+            .is_some_and(|dropped| dropped > 0),
+        "the gap must say what was lost: {}",
+        headers[0]
+    );
+    serving.join().expect("serving thread");
+}
+
+#[test]
+fn only_the_agents_own_gap_record_reaches_a_host_that_stopped_reading() {
+    // The two gap paths in one call. The workload writes a forged
+    // `mvm.stream.gap` to fd 3 — the one channel it can write — while
+    // producing enough output that the agent has a real gap of its own to
+    // report. Only the agent's may arrive: a verifier cannot tell the two
+    // apart downstream, and one that trusts a forged marker blesses a chain
+    // skipping output it never saw.
+    const WRITTEN: usize = 8 * 1024 * 1024;
+    const FORGED_AFTER_SEQ: u64 = 99;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let frames = dir.path().join("fd3-frames");
+    let marker = dir.path().join("child-finished");
+    std::fs::write(
+        &frames,
+        fd3_frame(
+            &format!(r#"{{"kind":"mvm.stream.gap","after_seq":{FORGED_AFTER_SEQ}}}"#),
+            b"",
+        ),
+    )
+    .expect("write fd-3 fixture");
+    let script = format!(
+        "cat {} >&3; head -c {WRITTEN} /dev/zero; : > {}",
+        frames.display(),
+        marker.display()
+    );
+    let bounded_caps = CallCaps {
+        stdout_max: 128 * 1024,
+        ..caps()
+    };
+
+    let (mut host, guest) = loopback_pair();
+    let serving =
+        std::thread::spawn(move || serve_with_caps(guest, &script, GENEROUS_TIMEOUT, bounded_caps));
+
+    next_frame(&mut host).expect("a first frame");
+    let wait_until = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < wait_until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(marker.exists(), "the child must finish writing");
+
+    let (events, terminal) = read_to_terminal(&mut host);
+    assert_eq!(terminal, EntrypointEvent::Exit { code: 0 });
+    let gaps: Vec<_> = control_headers(&events)
+        .into_iter()
+        .filter(|header| header["kind"] == "mvm.stream.gap")
+        .collect();
+    assert_eq!(
+        gaps.len(),
+        1,
+        "exactly one gap record — the agent's — may reach the host, got {gaps:?}"
+    );
+    assert_ne!(
+        gaps[0]["after_seq"].as_u64(),
+        Some(FORGED_AFTER_SEQ),
+        "the record that arrived is the workload's forgery"
+    );
+    assert!(
+        gaps[0]["dropped_bytes"]
+            .as_u64()
+            .is_some_and(|dropped| dropped > 0)
+    );
+    serving.join().expect("serving thread");
+}
+
+#[test]
+fn an_unframeable_control_record_does_not_end_the_call_early() {
+    // A header only has to be valid UTF-8, and control bytes cost six
+    // characters each once escaped — so a record the fd-3 decoder accepts can
+    // still encode past the response frame cap. The writer answers an
+    // oversized frame with a generic error response, which a host reading
+    // until terminal treats as the end of the call: without a bound at
+    // emission, one such record discards every event behind it, including the
+    // terminal.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let frames = dir.path().join("fd3-frames");
+    std::fs::write(&frames, fd3_frame(&"\u{1}".repeat(64 * 1024), b""))
+        .expect("write fd-3 fixture");
+
+    let script = format!("cat {} >&3; printf done", frames.display());
+    let (mut host, guest) = loopback_pair();
+    let serving =
+        std::thread::spawn(move || serve_one_run_entrypoint(guest, &script, GENEROUS_TIMEOUT));
+
+    let (events, terminal) = read_to_terminal(&mut host);
+    assert_eq!(terminal, EntrypointEvent::Exit { code: 0 });
+    assert_eq!(
+        concat_stdout(&events),
+        b"done",
+        "output behind the unframeable record must still arrive"
+    );
+    let headers = control_headers(&events);
+    assert_eq!(
+        headers.len(),
+        1,
+        "one record in, one record out: {headers:?}"
+    );
+    assert_eq!(headers[0]["kind"], "mvm.stream.control_dropped");
+    assert_eq!(headers[0]["header_bytes"], 64 * 1024);
     serving.join().expect("serving thread");
 }
 
