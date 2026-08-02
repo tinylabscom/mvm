@@ -21,7 +21,8 @@ use crate::crypto::aead;
 mod ring;
 mod segment;
 pub use ring::*;
-pub use segment::{SEGMENT_MAX_CHUNKS, SEGMENT_MAX_CIPHERTEXT_BYTES, SegmentBounds};
+use segment::SegmentBounds;
+pub use segment::{SEGMENT_MAX_CHUNKS, SEGMENT_MAX_CIPHERTEXT_BYTES};
 
 /// Filename of the host transcript key-encryption key, under the keys dir.
 pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
@@ -1507,6 +1508,36 @@ mod tests {
             "a torn capture must read as short, not as tampered: {err}"
         );
         assert!(export(&manifest, dir.path(), &fixed_key(11)).is_err());
+    }
+
+    #[test]
+    fn a_capture_that_survived_a_short_write_still_verifies_and_exports() {
+        // A full disk mid-append refuses the chunk but leaves the bytes that
+        // fit. Those bytes belong to no record, so `verify_chunks` would
+        // refuse the segment holding them — and it refuses the whole manifest,
+        // which under fail-closed retention never evicts away. One transient
+        // ENOSPC would cost every intact segment in the artifact.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut w = roomy_writer_at(dir.path(), RetentionPolicy::FailClosed);
+        w.push(Direction::Stdout, b"before ").expect("first chunk");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("0.seg"))
+            .and_then(|mut handle| std::io::Write::write_all(&mut handle, b"PARTIAL"))
+            .expect("leave a partial write on disk");
+
+        w.push(Direction::Stdout, b"after")
+            .expect("the capture carries on");
+        let manifest = w.seal();
+        assert_eq!(manifest.chunks.len(), 2);
+        assert_eq!(files_in(dir.path()), 1, "no segment was abandoned");
+
+        verify_sealed_root(&manifest).expect("the capture still seals a valid root");
+        verify_chunks(&manifest, dir.path()).expect("the capture still verifies");
+        assert_eq!(
+            export(&manifest, dir.path(), &fixed_key(11)).expect("export"),
+            b"before after"
+        );
     }
 
     // --- ring retention on the durable copy -----------------------------

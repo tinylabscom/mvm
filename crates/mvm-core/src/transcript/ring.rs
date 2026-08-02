@@ -8,8 +8,8 @@
 //! moment it matters most. `RingState` never refuses; it evicts the oldest
 //! admitted chunks to make room for the newest one. It tracks sequence
 //! numbers and byte sizes only — no payloads, no file I/O — so the store that
-//! actually owns the `{seq}.chunk` files is the one that unlinks what `admit`
-//! reports evicted and records a gap for it.
+//! actually owns the segment files is the one that frees what `admit` reports
+//! evicted and records a gap for it.
 
 use std::collections::VecDeque;
 
@@ -43,8 +43,8 @@ pub enum Admission {
     Accept,
     /// The chunk was admitted only after evicting the oldest live chunks.
     AcceptAfterPruning {
-        /// Evicted sequence numbers, oldest first — the caller's cue to
-        /// unlink each corresponding `{seq}.chunk` file.
+        /// Evicted sequence numbers, oldest first — the caller's cue to drop
+        /// each corresponding record and free the bytes behind it.
         pruned_seqs: Vec<u64>,
         /// Total bytes freed by the eviction.
         dropped_bytes: u64,
@@ -54,8 +54,9 @@ pub enum Admission {
 /// How much one admission evicted, without naming what.
 ///
 /// The counting answer to [`Admission`], for a store that evicts from its own
-/// front by count (a delivery queue holding the records themselves) rather
-/// than by unlinking `{seq}.chunk` files. [`Admission::AcceptAfterPruning`]
+/// front by count — a delivery queue holding the records themselves, or a
+/// segment store that frees whole files and reports only how many records went
+/// with them. [`Admission::AcceptAfterPruning`]
 /// heap-allocates its `pruned_seqs` on every pruning admission, which in a
 /// saturated steady state is one allocation per record on the producer's
 /// path — paid for a `Vec` such a caller only ever reads the length of.

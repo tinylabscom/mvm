@@ -22,6 +22,18 @@
 //! free — bytes in the middle of an append-only file cannot be reclaimed
 //! without rewriting it — and keeping the active segment means the newest
 //! write always lands.
+//!
+//! So a capture's durable window is only as fine-grained as the ratio of its
+//! own bounds to a segment. On the chunk side the shipped stream budget of
+//! 65 536 chunks against [`SEGMENT_MAX_CHUNKS`] is 64:1 — one eviction step
+//! costs a sixty-fourth of the window. **The byte side is much tighter**: 8 MiB
+//! of plaintext against a 1 MiB ciphertext segment is roughly 8:1, so a
+//! workload pushing chunks large enough to hit the size trigger loses about an
+//! eighth of its durable window per step. Below that the behaviour degenerates:
+//! a `max_bytes` under [`SEGMENT_MAX_CIPHERTEXT_BYTES`] cannot hold even one
+//! full segment plus the active one, so the live set oscillates between a
+//! single chunk and a single segment. A caller wanting a window that tight
+//! needs the segment size lowered with it, not just the bound.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -45,8 +57,14 @@ const HASH_SCRATCH_BYTES: usize = 64 * 1024;
 
 /// When a segment rolls. Both triggers are content-derived, so the same input
 /// stream always produces the same layout and therefore the same sealed root.
+///
+/// Deliberately not public. A record's `file` and `offset` are inside the
+/// sealed root, so these thresholds decide what the root commits to: exposing
+/// them as a caller knob would give two captures of the same byte stream two
+/// different roots depending on a config value. The layout is a property of
+/// the format, not of the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SegmentBounds {
+pub(crate) struct SegmentBounds {
     pub max_ciphertext_bytes: u64,
     pub max_chunks: u64,
 }
@@ -198,23 +216,51 @@ impl SegmentStore {
         }
     }
 
-    /// Close the active segment when it is no longer the length this store
-    /// left it — deleted out from under the capture, or written to by someone
-    /// else.
+    /// Handle an active segment that is no longer the length this store left
+    /// it — deleted out from under the capture, torn short, or carrying bytes
+    /// past the last record.
     ///
-    /// Appending regardless would place every later chunk at an offset that
-    /// does not describe its bytes, quietly corrupting records that verify
-    /// today. Refusing forever is the other wrong answer: a store that hiccups
-    /// once would silence the workload for the rest of its life, which is the
-    /// failure this whole path exists to remove. So the disturbed segment is
-    /// abandoned where it is — its records still point at it, and
-    /// [`verify_segments`] reports the discrepancy — and the capture carries
-    /// on in a fresh file.
+    /// *Short or missing* is unrecoverable: bytes the manifest already commits
+    /// to are gone, and appending regardless would place every later chunk at
+    /// an offset that does not describe its bytes, quietly corrupting records
+    /// that verify today. Refusing forever is the other wrong answer — a store
+    /// that hiccups once would silence the workload for the rest of its life,
+    /// which is the failure this whole path exists to remove. So the segment
+    /// is abandoned where it is, its records still point at it,
+    /// [`verify_segments`] reports the discrepancy, and the capture carries on
+    /// in a fresh file.
+    ///
+    /// *Long* is the repairable case, and the common one: an append that died
+    /// partway leaves the bytes that fit behind a chunk whose record was
+    /// refused. Nothing accounts for that tail, so the sealed root loses
+    /// nothing when it goes — whereas abandoning over it strands a span
+    /// `verify_chunks` refuses for the life of the capture, taking every
+    /// intact segment in the same manifest down with it. One full disk must
+    /// not cost the whole artifact.
     fn roll_if_disturbed(&mut self) {
         let Some(active) = self.active.as_ref() else {
             return;
         };
-        if self.on_disk_len(&active.file) != Some(active.ciphertext_bytes) {
+        let accounted = active.ciphertext_bytes;
+        match self.on_disk_len(&active.file) {
+            Some(len) if len == accounted => {}
+            Some(len) if len > accounted => self.drop_unaccounted_tail(accounted),
+            _ => self.close_active(),
+        }
+    }
+
+    /// Cut bytes no record accounts for off the end of the active segment,
+    /// abandoning it only if even that fails.
+    fn drop_unaccounted_tail(&mut self, accounted: u64) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let repaired = OpenOptions::new()
+            .write(true)
+            .open(self.dir.join(&active.file))
+            .and_then(|handle| handle.set_len(accounted))
+            .is_ok();
+        if !repaired {
             self.close_active();
         }
     }
@@ -231,7 +277,8 @@ impl SegmentStore {
         }
     }
 
-    /// Put the bytes on disk at exactly the offset the record will claim.
+    /// Put the bytes on disk at exactly the offset the record will claim, or
+    /// leave the segment exactly as it was.
     ///
     /// A segment's first chunk truncates: a stale file left behind by a
     /// crashed capture would otherwise shift every offset this manifest
@@ -251,14 +298,16 @@ impl SegmentStore {
         } else {
             options.append(true);
         }
-        let path = self.dir.join(&placement.file);
-        options
-            .open(&path)
-            .and_then(|mut handle| handle.write_all(ciphertext))
-            .map_err(|e| TranscriptError::Io {
-                file: placement.file.clone(),
-                msg: e.to_string(),
-            })
+        let io = |e: std::io::Error| TranscriptError::Io {
+            file: placement.file.clone(),
+            msg: e.to_string(),
+        };
+        let mut handle = options.open(self.dir.join(&placement.file)).map_err(io)?;
+        if let Err(e) = handle.write_all(ciphertext) {
+            roll_back_to(&handle, placement.offset);
+            return Err(io(e));
+        }
+        Ok(())
     }
 
     /// Charge a landed chunk to its segment, opening one if this was the first.
@@ -280,6 +329,20 @@ impl SegmentStore {
             }
         }
     }
+}
+
+/// Cut a failed append back off a segment, so the file is again the length
+/// the manifest accounts for.
+///
+/// A `write_all` that dies partway — a full disk is the realistic cause —
+/// still leaves the bytes that fit. The chunk's record is refused, so nothing
+/// accounts for those bytes, and a capture that seals right afterwards has no
+/// later append to notice. Undoing it here is what keeps such a capture
+/// verifiable. Best effort: if the rollback itself fails, the next append's
+/// [`SegmentStore::roll_if_disturbed`] finds the same overlong file and
+/// repairs it there instead.
+fn roll_back_to(handle: &File, offset: u64) {
+    let _ = handle.set_len(offset);
 }
 
 /// One segment's worth of consecutive chunk records, with the exact byte count
@@ -557,14 +620,26 @@ mod tests {
         );
     }
 
+    /// Reproduce exactly what a `write_all` killed partway leaves behind: the
+    /// bytes that fit, appended past the last record the store counted.
+    fn leave_short_write_residue(dir: &Path, file: &str, residue: &[u8]) {
+        OpenOptions::new()
+            .append(true)
+            .open(dir.join(file))
+            .and_then(|mut handle| handle.write_all(residue))
+            .expect("leave a partial write on disk");
+    }
+
     #[test]
-    fn a_disturbed_segment_is_abandoned_rather_than_appended_to() {
-        // Writing on at a now-wrong offset would corrupt records that verify
-        // today; refusing forever would silence the capture over one hiccup.
+    fn a_truncated_segment_is_abandoned_rather_than_appended_to() {
+        // Bytes the records already commit to are gone, so nothing can put
+        // them back; appending would land the next chunk at a position no
+        // record describes. Refusing forever would silence the capture over
+        // one hiccup, so it moves on instead.
         let dir = tempfile::tempdir().expect("tempdir");
         let mut store = SegmentStore::new(dir.path().to_path_buf(), SegmentBounds::default());
         let first = store.append(b"aaa", 3).expect("first");
-        std::fs::write(dir.path().join(&first.file), b"aaaXXXX").expect("interference");
+        std::fs::write(dir.path().join(&first.file), b"a").expect("interference");
 
         let next = store.append(b"bbb", 3).expect("the capture carries on");
         assert_ne!(next.file, first.file, "in a fresh segment");
@@ -580,6 +655,43 @@ mod tests {
             verify_segments(&stale, dir.path()),
             Err(TranscriptError::SegmentLengthMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn a_short_write_does_not_poison_the_rest_of_the_capture() {
+        // One ENOSPC must not cost the artifact. Abandoning over the leftover
+        // bytes would strand a span `verify_chunks` refuses forever — and it
+        // refuses the whole manifest, so every intact segment either side goes
+        // with it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = SegmentStore::new(dir.path().to_path_buf(), SegmentBounds::default());
+        let first = store.append(b"aaa", 3).expect("first");
+        leave_short_write_residue(dir.path(), &first.file, b"PARTIAL");
+
+        let next = store.append(b"bbb", 3).expect("the capture carries on");
+        assert_eq!(next.file, first.file, "in the same segment");
+        assert_eq!(next.offset, 3, "the unaccounted tail is gone");
+        assert_eq!(
+            std::fs::read(dir.path().join(&next.file)).expect("segment"),
+            b"aaabbb"
+        );
+        let chunks = vec![
+            record(0, &first.file, 0, b"aaa"),
+            record(1, &next.file, 3, b"bbb"),
+        ];
+        verify_segments(&chunks, dir.path()).expect("the capture still verifies");
+    }
+
+    #[test]
+    fn rolling_a_failed_append_back_leaves_only_the_accounted_bytes() {
+        // The immediate half of the repair: a capture that seals right after a
+        // failed write has no later append to fix the file for it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("0.seg");
+        std::fs::write(&path, b"aaaPARTIAL").expect("residue of a short write");
+        let handle = OpenOptions::new().append(true).open(&path).expect("open");
+        roll_back_to(&handle, 3);
+        assert_eq!(std::fs::read(&path).expect("segment"), b"aaa");
     }
 
     #[test]
@@ -601,7 +713,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut store = SegmentStore::new(dir.path().to_path_buf(), SegmentBounds::default());
         let first = store.append(b"aaa", 3).expect("first");
-        std::fs::write(dir.path().join(&first.file), b"aaaXXXX").expect("interference");
+        std::fs::write(dir.path().join(&first.file), b"a").expect("interference");
         store.append(b"bbb", 3).expect("second");
         assert_eq!(store.live_chunks(), 2);
 

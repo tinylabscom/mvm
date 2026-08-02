@@ -6,8 +6,8 @@ use cucumber::given;
 use mvm_core::crypto::aead;
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::transcript::{
-    self, CaptureBinding, CaptureBounds, Direction, TranscriptManifest, TranscriptWriter,
-    TranscriptWriterConfig,
+    self, CaptureBinding, CaptureBounds, Direction, RetentionPolicy, TranscriptManifest,
+    TranscriptWriter, TranscriptWriterConfig,
 };
 use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair;
@@ -58,6 +58,9 @@ async fn sealed_transcript_with_chain_anchor(world: &mut CliWorld) {
                     max_bytes: 4096,
                     max_chunks: 4,
                 },
+                // A forensic capture of discrete frames, not a log stream: it
+                // must refuse at its bound rather than quietly drop its head.
+                retention: RetentionPolicy::FailClosed,
                 created_unix_secs: 1_700_000_000,
                 recipient: "transcript-kek".to_string(),
                 wrapped_data_key_b64,
