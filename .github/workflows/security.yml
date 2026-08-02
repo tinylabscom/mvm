@@ -589,6 +589,10 @@ jobs:
       - name: Install cargo-mutants and nextest
         run: cargo install --locked cargo-mutants cargo-nextest
 
+      - name: Install mvm-cli embedded-host toolchain
+        if: matrix.package == 'mvm-cli'
+        uses: ./.github/actions/install-zigbuild
+
       - name: Mutate this package's claim surface and ratchet survivors
         # `--run` mutates the claim-enforcement surface and runs the suite
         # against each mutant — plan verification that no longer verifies, a

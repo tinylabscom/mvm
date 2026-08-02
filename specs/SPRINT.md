@@ -41,6 +41,13 @@
       failures remain retryable. The production-volume epic #2040 and the
       subsequently filed entropy issue #2060 are also closed with merged
       evidence. The final GitHub open-issue query returned zero results.
+      A scheduled run on an older commit subsequently filed #2067: the no-SSH
+      scanner had not classified a protected-credential-path refusal test as
+      deny-only, and the `mvm-cli` mutation shard lacked the pinned Zig
+      toolchain required by its build script. The follow-up audits that exact
+      deny test, installs Zig only for the affected shard, and adds a PR-time
+      structural regression test; its merge closes #2067 and restores the
+      zero-open-issue state.
       Tracked in plan 284.
 
 - [x] Production object-store volumes — **plan 283 / issue #2040**. Standardize
