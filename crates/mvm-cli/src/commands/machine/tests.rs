@@ -2370,3 +2370,125 @@ fn advance_does_not_collide_with_the_port_forward_verb() {
     let forward = parse(&["forward", "myvm", "8080:80"]).expect("parse forward");
     assert!(matches!(forward, MachineAction::Vm(VmCmd::Forward(_))));
 }
+
+// ---- networking -----------------------------------------------------
+
+/// There is one networking configuration and no way to ask for another.
+/// A transport selector could only ever let someone choose a weaker posture
+/// than the one they would otherwise have had.
+#[test]
+fn machine_run_exposes_no_network_mode_selector() {
+    let command = TestCli::command();
+    let run = command
+        .find_subcommand("run")
+        .expect("machine run must exist");
+    for arg in run.get_arguments() {
+        let id = arg.get_id().as_str();
+        assert!(
+            !id.contains("network_mode") && !id.contains("network-mode"),
+            "machine run must not expose a networking transport selector, found {id:?}"
+        );
+    }
+    // `argv` is a trailing var-arg, so a stray `--network-mode` is not
+    // rejected — it is collected as workload arguments. What matters is
+    // that it configures nothing: the transport is derived either way.
+    let args = parse_run(&["run", "--image", "alpine", "--network-mode", "l3-vsock"])
+        .expect("trailing args parse as workload argv");
+    assert!(
+        args.argv.iter().any(|a| a == "--network-mode"),
+        "a stray flag must land in the workload's argv, not configure mvm: {:?}",
+        args.argv
+    );
+}
+
+/// The default is the socket-aware transport — the stronger posture, and
+/// what almost every workload wants. The tunnel is a compatibility mode, not
+/// a default.
+#[test]
+fn an_ordinary_workload_derives_the_socket_aware_transport() {
+    use mvm_protocol::plan::NetworkMode;
+    assert_eq!(
+        super::derive_network_mode(false),
+        NetworkMode::HostVsockProxy
+    );
+}
+
+/// A workload that declares it needs a real in-guest IP stack gets the
+/// tunnel. The need is a property of the workload, so it is declared once
+/// and resolves identically everywhere.
+#[test]
+fn a_workload_declaring_a_raw_ip_stack_derives_the_tunnel() {
+    use mvm_protocol::plan::NetworkMode;
+    assert_eq!(super::derive_network_mode(true), NetworkMode::L3Vsock);
+}
+
+/// The derivation is host-independent: the same workload produces the same
+/// plan everywhere. A host that silently rewrote the transport would make
+/// one plan mean different things in different places.
+#[test]
+fn the_derivation_does_not_depend_on_the_host() {
+    // No host input exists to vary — the signature admits only the
+    // workload's declared need. This test pins that shape: if host
+    // capability is ever threaded back in, it fails to compile.
+    let f: fn(bool) -> mvm_protocol::plan::NetworkMode = super::derive_network_mode;
+    assert_eq!(f(false), mvm_protocol::plan::NetworkMode::HostVsockProxy);
+    assert_eq!(f(true), mvm_protocol::plan::NetworkMode::L3Vsock);
+}
+
+/// A host that cannot serve the tunnel refuses the workloads that need it,
+/// and only those. Everything else runs normally.
+#[test]
+fn the_host_check_refuses_only_what_it_cannot_serve() {
+    use mvm_protocol::plan::NetworkMode;
+    assert!(
+        super::check_host_can_serve(NetworkMode::HostVsockProxy).is_ok(),
+        "the socket-aware transport must be serviceable on every host"
+    );
+    assert!(super::check_host_can_serve(NetworkMode::None).is_ok());
+
+    match super::check_host_can_serve(NetworkMode::L3Vsock) {
+        Ok(()) => {}
+        Err(err) => {
+            let msg = err.to_string();
+            assert!(msg.contains("raw_ip_stack"), "{msg}");
+        }
+    }
+}
+
+/// The derivation never produces a combination the compatibility gate would
+/// reject — which is the point of deriving rather than asking.
+#[test]
+fn the_derivation_never_produces_an_incompatible_plan() {
+    for needs_raw_ip in [false, true] {
+        let mode = super::derive_network_mode(needs_raw_ip);
+        // A workload needing substitution never declares raw_ip_stack, so
+        // the pairing that the gate rejects cannot be constructed here.
+        let requirements = mvm_net::l3::SubstitutionRequirements {
+            binds_secrets: !needs_raw_ip,
+            ..Default::default()
+        };
+        assert!(
+            mvm_net::l3::check_mode_compatibility(mode, &requirements, mode.is_l3_vsock()).is_ok(),
+            "the derivation produced an inadmissible plan (needs_raw_ip={needs_raw_ip})"
+        );
+    }
+}
+
+/// An egress rule says *where* traffic may go, not *how* it travels, and
+/// there is no longer any way for it to influence the transport at all.
+#[test]
+fn an_allow_host_rule_does_not_influence_the_transport() {
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine",
+        "--allow-host",
+        "api.example.com:443",
+    ])
+    .unwrap();
+    assert_eq!(args.allow_host, vec!["api.example.com:443"]);
+    assert_eq!(
+        super::derive_network_mode(false),
+        mvm_protocol::plan::NetworkMode::HostVsockProxy
+    );
+}

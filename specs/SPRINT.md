@@ -113,12 +113,19 @@
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
 - [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
-      <rev>/` is served on a hit if `rootfs.ext4` merely exists as a file: no
-      digest, no signature, so content substitution is undetected, and the
-      provenance recorder then signs whatever bytes are on disk. The audit log
-      faithfully records a substituted image as legitimate. Plan 276 is written
-      and Proposed; this moves WS6 into the sprint. Prerequisite for plan 279
-      WS1 so the new cache key and the new verification do not land together.
+      <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
+      digest, no signature, so content substitution went undetected and the
+      provenance recorder then signed whatever bytes were on disk — the audit
+      log faithfully recording a substituted image as legitimate.
+  - [x] Dev-build artifact cache closed in #2053: `mvm_core::action` +
+        `verify_artifacts_on_disk`, verified on read, failing closed to a cold
+        miss, and evicting both the record and the build directory. Evicting
+        only the record would leave the poisoned tree under a name a later
+        build can re-adopt. Also closed a mid-build leak of `dev_builds_dir()`
+        on failure paths. This unblocks plan 279 WS1.
+  - [ ] Kernel cache still open: `resolve_kernel` returns `Cached` on
+        `path.exists()`, and `verify_fetched_kernel` has no production caller,
+        so neither the fetch nor the read path checks a kernel against its pin.
 
 - [ ] Build action identity + artifact manifest — **plan 279**
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).
@@ -140,6 +147,22 @@
       tamper-refusal scenarios; 8,403 workspace tests, doctests, clippy/model
       gates, and all 76 BDD scenarios pass. Tracked in
       `specs/plans/280-transcript-root-audit-binding.md`.
+- [x] L3 TUN-over-vsock network mode (plan 285 / ADR-036): a workload that
+      declares `raw_ip_stack` gets a real in-guest IP stack with no guest
+      NIC. There is no operator-facing mode selector — the transport is
+      derived from what the workload declares and recorded in the signed
+      plan. Shared no_std wire protocol, pure policy core (anti-spoof,
+      canonical-egress admission, bounded flows, controlled DNS, declared
+      ingress), guest `mvm-net-agent`, machine-scoped host gateway, Linux
+      host-TUN/nftables datapath, `CONFIG_TUN` in the workload kernel, and
+      the amendment's backend-neutral guest channel, per-boot VM identity,
+      signed network lease, and capability-gated forwarding. Wired through
+      the launch path: synthesis derives the L3 spec from the admitted mode,
+      the workload runner starts the gateway and waits for it to bind before
+      the guest boots, and every stop path reaps it. Privileged Linux lane
+      run on a KVM host (6/6, live forwarding witness, clean teardown); 23
+      hermetic BDD scenarios in `s25_l3_vsock`. macOS is capability-declared
+      and refuses; native Windows is not claimed.
 
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added

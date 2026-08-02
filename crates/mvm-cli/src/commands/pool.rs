@@ -244,6 +244,11 @@ fn admit_standby_parent_plan(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        // The parent reaches nothing, so it gets the closed transport and no
+        // L3 spec — the same "no workload authority" posture as the empty
+        // secrets, services, and shares above.
+        network_mode: mvm_protocol::plan::NetworkMode::None,
+        l3_network: None,
     };
     let ledger = InMemoryNonceLedger::new();
     admit_for_run(&input, &SystemClock, &ledger, None, None)

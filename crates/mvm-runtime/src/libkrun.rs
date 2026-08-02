@@ -413,6 +413,12 @@ fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    // The L3 tunnel and the socket-aware egress client are alternatives, not
+    // layers: the mode the plan admitted decides which one the guest starts.
+    if let Some(token) = crate::egress_shared::l3_cmdline_token(config) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     cmdline
 }
 
@@ -823,6 +829,12 @@ impl VmBackend for LibkrunBackend {
             // there is no net device in the guest's device tree to route.
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
+            // libkrun attaches a virtio-net device and drains it, which
+            // satisfies `no_routable_guest_nic` (no upstream route) but
+            // not the L3 tunnel's stricter precondition: that mode
+            // requires the guest to have no network device at all, so
+            // `mvm0` is the only interface its stack can route to.
+            l3_vsock: false,
             // libkrun's C API doesn't expose virtio-balloon control
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
@@ -878,6 +890,10 @@ impl VmBackend for LibkrunBackend {
 
         let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
         let cfg = build_supervisor_config(config, &state_dir)?;
+        // The L3 gateway is orthogonal to the substitution endpoint: a
+        // launch may need one, the other, or neither. It goes first because
+        // it must be listening before the guest boots and dials it.
+        crate::netd_spawn::spawn_netd_if_needed(config, &state_dir)?;
         let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(
             &config.name,
             &state_dir,
@@ -1046,6 +1062,7 @@ impl VmBackend for LibkrunBackend {
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        crate::netd_spawn::reap_netd(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer too (no-op when none spawned),
         // so they can't outlive the guest.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));

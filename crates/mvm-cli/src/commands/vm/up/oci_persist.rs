@@ -48,7 +48,7 @@ pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
     )
 }
 
-pub(in crate::commands::vm) fn load_workload_ir(
+pub(in crate::commands) fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
 ) -> Result<Option<mvm_protocol::ir::Workload>> {
     let Some(ir_path) = workload_ir_path else {

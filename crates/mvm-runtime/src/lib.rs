@@ -94,6 +94,10 @@ pub mod mock;
 /// Gated the same way — test-only, never in a production build.
 #[cfg(feature = "test-support")]
 pub mod mock_guest_agent;
+/// Starting and reaping the per-VM `mvm-netd` gateway. The gateway must be
+/// listening before the VM starts, so the spawn waits for it to report both
+/// guest channels bound.
+pub(crate) mod netd_spawn;
 pub mod netinit_audit;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;

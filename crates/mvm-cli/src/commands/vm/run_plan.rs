@@ -206,7 +206,13 @@ fn run_plan_mode(args: &RunArgs) -> Result<()> {
     let mut failed_count = 0usize;
 
     for app in &workload.apps {
-        let input = synthesis_input_for_app(&workload, app)?;
+        // The transport follows from what the app declared it needs, not
+        // from anything the operator passed: an app that needs a real
+        // in-guest IP stack gets the tunnel, everything else keeps the
+        // socket-aware path.
+        let needs_raw_ip = app.network.as_ref().is_some_and(|n| n.raw_ip_stack);
+        let network_mode = crate::commands::machine::preflight_network(needs_raw_ip)?;
+        let input = synthesis_input_for_app(&workload, app, network_mode)?;
         match admit_for_run(&input, &clock, &ledger, None, None) {
             Ok(admitted) => {
                 admitted_count += 1;
@@ -317,7 +323,11 @@ fn extract_script_arg(args: &RunArgs) -> Result<PathBuf> {
 /// app's identity (`workload_id::app_name`). This is intentional:
 /// plan-mode is a shape check; downstream consumers that want the
 /// real artifact hash run the live path.
-fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<SynthesisInput<'a>> {
+fn synthesis_input_for_app<'a>(
+    workload: &'a Workload,
+    app: &'a App,
+    network_mode: mvm_protocol::plan::NetworkMode,
+) -> Result<SynthesisInput<'a>> {
     let lowered_secrets = lower_app_secrets(app);
     // `SynthesisInput` borrows `image_sha256` as `&str`; we need a
     // 64-char hex string that lives long enough. Since we can't
@@ -337,6 +347,8 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
     let leaked: &'static str = Box::leak(placeholder.into_boxed_str());
 
     Ok(SynthesisInput {
+        network_mode,
+        l3_network: None,
         vm_name: &app.name,
         tenant: None,
         backend_name: "firecracker",
@@ -529,6 +541,7 @@ mod tests {
 
     fn base_run_args() -> RunArgs {
         RunArgs {
+            network_mode: Default::default(),
             manifest: None,
             warm_pool_size: 0,
             pty: false,

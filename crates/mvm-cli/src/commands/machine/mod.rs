@@ -186,6 +186,64 @@ impl MachineAction {
     }
 }
 
+/// How a machine reaches the network.
+///
+/// **Not an operator choice, and not a host-dependent one.** The transport
+/// follows from a single question: does this workload need a real in-guest
+/// IP stack?
+///
+/// - **No** (almost always) → the socket-aware transport. It is the
+///   stronger posture: the host originates every connection, so secret
+///   substitution, cleartext redaction, and L7 policy all apply.
+/// - **Yes** → the L3 tunnel, which is the compatibility mode for raw
+///   sockets, ICMP, non-TCP/UDP protocols, and in-guest resolvers.
+///
+/// The need is declared by the *workload*, so the same workload resolves
+/// the same way on every host and the plan is reproducible. Host capability
+/// is deliberately **not** an input here — it is an admission check
+/// ([`check_host_can_serve`]), because a host that silently rewrote the
+/// transport would make one plan mean different things in different places.
+pub(in crate::commands) fn derive_network_mode(
+    needs_raw_ip_stack: bool,
+) -> mvm_protocol::plan::NetworkMode {
+    if needs_raw_ip_stack {
+        mvm_protocol::plan::NetworkMode::L3Vsock
+    } else {
+        mvm_protocol::plan::NetworkMode::HostVsockProxy
+    }
+}
+
+/// Refuse a launch this host cannot serve.
+///
+/// Separate from the derivation on purpose: the mode is a property of the
+/// workload, and whether *this* machine can run it is a property of the
+/// host. Conflating them is how a plan starts meaning different things in
+/// different places.
+pub(in crate::commands) fn check_host_can_serve(
+    mode: mvm_protocol::plan::NetworkMode,
+) -> anyhow::Result<()> {
+    if !mode.is_l3_vsock() {
+        return Ok(());
+    }
+    if let Err(err) = mvm_hostd::netd::host_datapath().is_available() {
+        anyhow::bail!(
+            "this workload needs a real in-guest IP stack, which this host cannot \
+             provide: {err}\n\
+             Workloads that do not set `raw_ip_stack` run here normally."
+        );
+    }
+    Ok(())
+}
+
+/// Settle and validate the networking configuration before anything boots.
+pub(in crate::commands) fn preflight_network(
+    needs_raw_ip_stack: bool,
+) -> anyhow::Result<mvm_protocol::plan::NetworkMode> {
+    let mode = derive_network_mode(needs_raw_ip_stack);
+    check_host_can_serve(mode)?;
+    Ok(mode)
+}
+
 /// Ephemeral image-backed run. Mirrors the relevant subset of `mvmctl run`'s
 /// flags and translates into the same admitted execution path.
 #[derive(ClapArgs, Debug, Clone)]
@@ -334,6 +392,10 @@ impl MachineRunArgs {
 
     fn into_run_args(self) -> RunArgs {
         RunArgs {
+            // Derived, never selected: see `derive_network_mode`.
+            // Derived from the workload, never selected. A manifest that
+            // declares `raw_ip_stack` is what moves it onto the tunnel.
+            network_mode: derive_network_mode(false),
             manifest: self.manifest,
             // Default off; `run_dispatch` sets it for the warm-claim-eligible
             // transient mode.

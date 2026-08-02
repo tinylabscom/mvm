@@ -143,6 +143,8 @@ chain_signing = true
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                network_mode: Default::default(),
+                l3_network: None,
                 vm_name: "vm-live",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -247,6 +249,8 @@ stream_destinations = ["file://{}"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                network_mode: Default::default(),
+                l3_network: None,
                 vm_name: "vm-stream",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -350,6 +354,8 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                network_mode: Default::default(),
+                l3_network: None,
                 vm_name: "vm-unsigned-audit",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -428,6 +434,8 @@ chain_signing = false
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                network_mode: Default::default(),
+                l3_network: None,
                 vm_name: "vm-nope",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -526,6 +534,8 @@ disabled_inspectors = ["ssrf_guarrd"]
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                network_mode: Default::default(),
+                l3_network: None,
                 vm_name: "vm-typo",
                 tenant: Some("acme"),
                 backend_name: "firecracker",
@@ -630,6 +640,8 @@ port_hi  = 443
         let sha = mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap();
         let mut plan = admit_for_run(
             &SynthesisInput {
+                network_mode: Default::default(),
+                l3_network: None,
                 vm_name: "vm-bad",
                 tenant: Some("acme"),
                 backend_name: "firecracker",

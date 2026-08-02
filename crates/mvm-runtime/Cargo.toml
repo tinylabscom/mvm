@@ -18,6 +18,10 @@ mvm-volume-contract = { workspace = true, features = ["local"] }
 # mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
 mvm-core = { workspace = true, features = ["egress-ca"] }
+# The L3 policy core: the address allocator and the gateway's admitted
+# configuration shape. Acyclic HIGH->LOW — mvm-net deps only mvm-core and
+# mvm-protocol.
+mvm-net.workspace = true
 mvm-agentd.workspace = true
 # IR `HealthCheck` that `machine::persist` (de)serializes. Direct dep
 # on the no_std foundation crate now that the IR lives there.

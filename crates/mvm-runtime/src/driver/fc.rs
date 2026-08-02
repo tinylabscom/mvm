@@ -568,6 +568,10 @@ impl VmmDriver for FcDriver {
             tap_networking: false,
             no_routable_guest_nic: true,
             host_vsock_proxy: true,
+            // Firecracker workload VMs are configured with vsock and no
+            // network-interfaces entry at all, so the L3 tunnel's
+            // no-NIC precondition holds structurally.
+            l3_vsock: true,
             balloon: true,
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()

@@ -652,6 +652,8 @@ mod tests {
 
     fn fixture_input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            network_mode: Default::default(),
+            l3_network: None,
             vm_name,
             tenant: None,
             backend_name: "firecracker",

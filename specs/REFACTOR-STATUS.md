@@ -100,6 +100,57 @@ for detailed scope and acceptance criteria.
   - [x] Keep the removed MCP server and smoke lane out of CI
   - [x] Complete workspace and Linux clippy verification; the first live run
         passed and measured a 19–21 minute runner wait
+ - [~] Plan 276 — Content-addressing conformance and defense
+      (`specs/plans/276-content-addressing-conformance-and-defense.md`)
+  - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
+  - [ ] WS1 — reconcile the two claim tier vocabularies (`model/claims.toml`
+        `level` vs ADR claim-frontmatter `status`) so a mistier cannot
+        silently disengage `check-no-overclaim`
+  - [x] WS2 — prose over-claim meta-gate, shipped as `xtask check-no-overclaim`
+  - [ ] WS3 — replay golden-vector corpus across every content-address surface,
+        recording σ and κ where a transform is in play (no corpus in tree;
+        `check-content-address-determinism` pins the `serde_json preserve_order`
+        drift mechanism, not an address)
+  - [ ] WS4 — ≥2 independent verifiers over the WS3 corpus
+  - [ ] WS5 — bind each witness to its recorded red-proof
+  - [~] WS6 — **lead item**: content-address the caches, verify on read. The
+        2026-08-01 recon revision reverses finding 2 — integrity-on-read is the
+        one attestation property no surveyed system enforces, mvm included —
+        which promoted this from tail to lead
+    - [x] Dev-build artifact cache, shipped in #2053: `mvm_core::action` +
+          `verify_artifacts_on_disk`, verify on read, fail closed to a cold
+          miss, and eviction of **both** the record and the build directory —
+          a record-only eviction would leave the poisoned tree under a name a
+          later build re-adopts. Unblocks plan 279 WS1
+    - [ ] Workload/builder kernel cache: still path-trusting.
+          `verify_fetched_kernel` exists with **no production caller** —
+          neither the fetch nor the read path checks a kernel against its pin
+    - [ ] Cold-tier background scrub (recon §7.9)
+  - [ ] WS7 — σ/κ separation and the transform descriptor: the protocol digest
+        over plaintext and the storage address over bytes at rest as disjoint
+        types, σ as a set, descriptor as an open enumeration. Free while every
+        surface is `Identity`; a format migration per transform family later
+  - [x] Discharged elsewhere: sealed transcript root anchored into the audit
+        chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
+        (recon §7.7 → #2019)
+
+- [~] Plan 279 — L3 TUN-over-vsock network mode
+  (`specs/plans/279-l3-tun-over-vsock.md`, ADR-035)
+  - [x] W1–W8 — canonical `NetworkMode::L3Vsock`, the shared fuzzable wire
+        protocol, the pure policy core, the guest `mvm-net-agent`, the
+        machine-scoped host gateway, audit kinds, docs, and the unprivileged
+        end-to-end suite
+  - [x] W9 — backend-neutral `GuestChannelProvider` + typed `GuestService`,
+        host-owned `VmInstanceIdentity` per boot, the signed `NetworkLease`
+        with a local standalone authority, capability-gated forwarding
+        backends, and the launch-specification no-guest-NIC guard
+  - [x] Privileged Linux lane executed on a Linux/KVM host: real host TUN,
+        real nftables, live forwarding witness, verified-clean teardown
+  - [x] BDD suite `s25_l3_vsock` (23 hermetic scenarios)
+  - [ ] macOS forwarding backend — capability-declared and refusing; the
+        userspace socket gateway is not implemented
+  - [ ] WSL2 validation on a real runner; node-to-node transport; mvmd
+        node-control RPC surface
 
 - [~] Plan 265 — Fast-start SLO, backend sequencing & competitive positioning
   (`specs/plans/265-fast-start-slo-sequencing-positioning.md`)

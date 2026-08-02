@@ -2767,6 +2767,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
+ "mvm-net",
  "mvm-protocol",
  "mvm-runtime",
  "mvm-sdk",
@@ -2822,6 +2823,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
+ "mvm-net",
  "mvm-protocol",
  "mvm-runtime",
  "serde",
@@ -2967,9 +2969,13 @@ dependencies = [
 name = "mvm-net"
 version = "0.18.0"
 dependencies = [
+ "ipnet",
  "mvm-core",
  "mvm-protocol",
+ "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3010,6 +3016,7 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-fs",
+ "mvm-net",
  "mvm-protocol",
  "mvm-volume-contract",
  "nix 0.29.0",

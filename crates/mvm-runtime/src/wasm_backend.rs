@@ -360,6 +360,7 @@ impl VmBackend for WasmBackend {
             // no later `stop()` boundary to reap the endpoint at, so its
             // decrypted secrets must not outlive this call either way.
             crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &config.name);
+            crate::netd_spawn::reap_netd(&state_dir);
         }
         let exit = result?;
 

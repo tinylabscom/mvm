@@ -80,6 +80,8 @@ pub fn admit_and_boot_local(
         .with_context(|| format!("hashing rootfs at {}", req.rootfs_path.display()))?;
 
     let synthesis = SynthesisInput {
+        network_mode: Default::default(),
+        l3_network: None,
         vm_name: &req.name,
         tenant: Some(LOCAL_TENANT),
         backend_name: &req.backend_name,
