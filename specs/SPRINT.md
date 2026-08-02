@@ -896,6 +896,13 @@ Then unify + retire the old paths:
         marker ownership, exact-PID teardown, cleanup ordering, and
         reconciliation. The analogous warm-pool claim-refusal cleanup remains
         a separate open gate.
+      Factory parents now receive an authority-free admitted plan and a signed
+      `checkpoint.created` anchor before entering the pool (#1962). Live KVM
+      validation proves a production-replenished parent is anchored and the
+      next claim passes the former `ParentUnaudited` gate, restores a child, and
+      reaches post-restore signaling. It then fails closed because the child's
+      identity/grant re-pin does not complete; that handshake remains the hard
+      blocker, with egress/broker/exit channel parity still behind it.
 - [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
 - [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
 - Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.

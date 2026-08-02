@@ -4,6 +4,12 @@
 
 **Status:** Active.
 
+Current live status: Firecracker factory parents are now admitted without
+workload authority and anchored by a signed `checkpoint.created` event before
+pooling. KVM validation passes the former `ParentUnaudited` refusal and restores
+a child; post-restore identity/grant re-pin is the next fail-closed gate, so the
+Firecracker `standby_pool` capability remains disabled.
+
 > Backend sequencing, the concrete warm-start/density SLOs, the new
 > restore-path security witnesses, and the competitive-positioning
 > deliverables live in Plan 265, which depends on this plan's substrate

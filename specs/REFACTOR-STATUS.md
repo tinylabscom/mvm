@@ -134,5 +134,7 @@ for detailed scope and acceptance criteria.
   - [x] Persistent-machine Firecracker stop fails closed and preserves state
         until process exit is verified (#2007; live KVM recheck passed)
   - [~] Live warm-launch, fork-isolation, and restore-clock verification
+        — parent audit anchoring is fixed and live-proven (#1962); the claim
+        now restores a child and stops at post-restore identity/grant re-pin
   - [ ] Typed-connector egress-policy enrichment
   - [ ] OCI-image template build path and CLI facade completion

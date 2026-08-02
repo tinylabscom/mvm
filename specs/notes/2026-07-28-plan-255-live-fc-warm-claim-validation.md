@@ -1039,3 +1039,66 @@ as a claim latency.
 
 `standby_pool` stays `false`. The flip was not proposed: the claim is refused,
 not green.
+
+---
+
+## Sixth live run (2026-08-01 UTC) — audited parent accepted; post-restore re-pin is next
+
+Host: the same Linux 6.8.0-124 / Firecracker v1.14.1 KVM machine. Source:
+`fix/audit-standby-parent-at-spawn` at `965cdacb0`, with the Firecracker
+`standby_pool` capability enabled only in the host's validation checkout. The
+committed capability remains `false`.
+
+The new spawn path admits an authority-free plan for the factory parent and
+emits `checkpoint.created` before recording it as claimable. Two live checks
+established the boundary:
+
+1. An existing unaudited `vm_full` parent changed from
+   `recorded_creation_digest == None` to its exact signed checkpoint digest
+   after the new audit function ran.
+2. A parent replenished through the production path was immediately recorded
+   `idle`, `pid=0`, with a 512 MiB checkpoint and its creation digest already
+   resolvable from the signed chain. No repair step was needed.
+
+The next unnamed transient run found that compatible parent and crossed the
+lineage gate. The refusal is no longer `ParentUnaudited`:
+
+```text
+DEBUG machine run warm-pool eligibility mode=Transient warm_pool_size=1
+WARN  standby claim failed; cold-booting
+      standby=standby-83b9ed2a22fec8a2
+      error=claim standby: forked child 'vm-aa06291e' never answered the
+            post-restore identity handshake: signaling post-restore to vm-aa06291e
+```
+
+The runner restored a real child and reached post-restore signaling, then
+failed closed at the previously identified re-pin half of BLOCKER-3 and
+cold-booted. The failed child and cold-booted workload left no process or state
+directory behind. Replenishment produced a fresh idle parent whose creation
+digest was also present in the signed chain, proving the fix survives the
+normal claim-refusal/replenish cycle.
+
+The command later failed because this checkout's universal initramfs selected
+the sealed agent, which refuses the dev-only `Exec` verb even with
+`--profile dev`. That is independent of parent lineage and occurred after the
+warm claim had already reached the post-restore handshake.
+
+### Gate list — updated after the sixth run
+
+1. **BUG-1** — fixed and live-proven.
+2. **BUG-2** — no longer blocks claim selection.
+3. **BLOCKER-3** — now the hard blocker: the forked child is live, but its
+   post-restore identity/grant re-pin does not complete.
+4. **BLOCKER-4** — still open: parity for egress, broker, and exit channels
+   remains unproven until BLOCKER-3 clears.
+5. **Issue #1962 / BLOCKER-5** — fixed and live-proven. Parents created by the
+   production replenish path carry a signed creation anchor, and the claim
+   passes the former `ParentUnaudited` gate.
+6. **Deferred failed-stop sharp edge** — no failure reproduced in this run;
+   cleanup left no orphan, but the fail-closed implementation work remains a
+   prerequisite to arming the capability.
+7. Only then: complete the Task 7 success-path timings and consider flipping
+   `standby_pool`.
+
+`standby_pool` stays `false`: lineage is now correct, but a warm child is not
+usable until the post-restore identity handshake succeeds.
