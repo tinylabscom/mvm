@@ -241,6 +241,9 @@ jobs:
       - name: no new builder shell-job dispatch sites
         run: cargo run -p xtask -- check-builder-shell-job-sites
 
+      - name: every VMM boot path seeds the guest CSPRNG
+        run: cargo run -p xtask -- check-guest-entropy-seed
+
       - name: runtime-overlay version pinned to workspace
         run: cargo run -p xtask -- check-runtime-overlay-version
 

@@ -79,6 +79,12 @@ impl FdtBuilder {
         self.pad_struct();
     }
 
+    /// Raw byte-blob property. Used for `/chosen/rng-seed`, whose value is
+    /// opaque entropy rather than cells or a string.
+    pub fn prop_bytes(&mut self, name: &str, bytes: &[u8]) {
+        self.prop_raw(name, bytes);
+    }
+
     pub fn prop_empty(&mut self, name: &str) {
         self.prop_raw(name, &[]);
     }
@@ -166,15 +172,44 @@ const IRQ_LEVEL_HI: u32 = 4;
 /// SPI on guest EOI, which only works with edge semantics.
 const IRQ_EDGE_RISING: u32 = 1;
 
+/// Bytes of entropy handed to the guest through `/chosen/rng-seed`. 32 bytes
+/// is what other arm64 VMMs pass and is comfortably above the pool's init
+/// threshold.
+pub const RNG_SEED_LEN: usize = 32;
+
+/// Fresh seed from the host OS CSPRNG. Call once per boot — reusing a seed
+/// across guests would hand them a shared starting state.
+pub fn fresh_rng_seed() -> [u8; RNG_SEED_LEN] {
+    use rand::RngCore;
+    let mut seed = [0u8; RNG_SEED_LEN];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    seed
+}
+
 /// Build a device tree for an arm64 Linux guest: one CPU, GICv3, arch timer,
 /// PL011 console (with IRQ + clock), PSCI over HVC, memory, and `/chosen`
 /// bootargs. Enough for the kernel to set up its console and boot.
+///
+/// `rng_seed` seeds the guest CSPRNG through `/chosen/rng-seed`. Pass fresh
+/// host entropy on every boot. Omitting it is what makes a workload sit at
+/// `random: crng init done` for seconds: this guest has no NIC, no rotating
+/// disk, and no virtio-rng, so there is almost no interrupt jitter for the
+/// kernel to harvest, and the first userspace `getrandom(2)` blocks until the
+/// pool initialises.
+///
+/// Linux credits the seed at `early_init_dt_scan_chosen` and zeroes the
+/// property afterwards. No kernel config is needed: the old
+/// `CONFIG_RANDOM_TRUST_BOOTLOADER` gate was removed in 6.2 and trust is now
+/// unconditional, leaving `random.trust_bootloader=0` on the cmdline as the
+/// only way to turn it off — which mvm never sets. This is the same mechanism
+/// other arm64 VMMs use.
 pub fn build_dtb(
     bootargs: &str,
     ram_base: u64,
     ram_size: u64,
     initrd: Option<(u64, u64)>,
     virtio: &[(u64, u32)],
+    rng_seed: Option<&[u8]>,
 ) -> Vec<u8> {
     let reg_pair = |addr: u64, size: u64| {
         [
@@ -210,6 +245,9 @@ pub fn build_dtb(
     f.begin_node("chosen");
     f.prop_str("bootargs", bootargs);
     f.prop_str("stdout-path", &format!("/pl011@{SERIAL_MMIO_BASE:x}"));
+    if let Some(seed) = rng_seed {
+        f.prop_bytes("rng-seed", seed);
+    }
     if let Some((start, end)) = initrd {
         f.prop_cells("linux,initrd-start", &[(start >> 32) as u32, start as u32]);
         f.prop_cells("linux,initrd-end", &[(end >> 32) as u32, end as u32]);
@@ -300,6 +338,7 @@ mod tests {
             0x2000_0000,
             None,
             &[],
+            None,
         );
         assert_eq!(be32(&dtb, 0), FDT_MAGIC);
         assert_eq!(be32(&dtb, 4) as usize, dtb.len(), "totalsize == blob len");
@@ -320,6 +359,7 @@ mod tests {
             0x2000_0000,
             None,
             &[],
+            None,
         );
         let needle = b"earlycon=pl011,mmio32,0x9000000";
         assert!(
@@ -344,7 +384,7 @@ mod tests {
 
     #[test]
     fn initrd_props_present_only_when_supplied() {
-        let without = build_dtb("x", 0x8000_0000, 0x2000_0000, None, &[]);
+        let without = build_dtb("x", 0x8000_0000, 0x2000_0000, None, &[], None);
         assert!(!without.windows(18).any(|w| w == b"linux,initrd-start"));
         let with = build_dtb(
             "x",
@@ -352,6 +392,7 @@ mod tests {
             0x2000_0000,
             Some((0x9000_0000, 0x9000_0600)),
             &[],
+            None,
         );
         assert!(with.windows(18).any(|w| w == b"linux,initrd-start"));
         assert!(with.windows(16).any(|w| w == b"linux,initrd-end"));
@@ -359,8 +400,43 @@ mod tests {
 
     #[test]
     fn struct_block_is_4_byte_aligned() {
-        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[]);
+        let dtb = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], None);
         assert!(be32(&dtb, 8).is_multiple_of(4), "off_dt_struct 4-aligned");
         assert!(be32(&dtb, 16).is_multiple_of(8), "off_mem_rsvmap 8-aligned");
+    }
+
+    #[test]
+    fn rng_seed_is_embedded_verbatim_when_supplied() {
+        // Without a seed the guest has no entropy source at all — no NIC, no
+        // rotating disk, no virtio-rng — and userspace blocks for seconds on
+        // CSPRNG init before the workload runs.
+        let seed: Vec<u8> = (0..RNG_SEED_LEN as u8).collect();
+        let with = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], Some(&seed));
+        assert!(
+            with.windows(seed.len()).any(|w| w == seed.as_slice()),
+            "the seed bytes must reach the blob verbatim"
+        );
+        assert!(
+            with.windows(8).any(|w| w == b"rng-seed"),
+            "the property must be named rng-seed for Linux to credit it"
+        );
+    }
+
+    #[test]
+    fn no_rng_seed_property_when_none_is_supplied() {
+        let without = build_dtb("x", 0x4000_0000, 0x1000_0000, None, &[], None);
+        assert!(
+            !without.windows(8).any(|w| w == b"rng-seed"),
+            "an absent seed must not leave a stray property name behind"
+        );
+    }
+
+    #[test]
+    fn fresh_rng_seed_differs_between_boots() {
+        // A seed reused across guests would hand them a shared starting state.
+        let a = fresh_rng_seed();
+        let b = fresh_rng_seed();
+        assert_ne!(a, b);
+        assert_ne!(a, [0u8; RNG_SEED_LEN], "seed must not be all zeroes");
     }
 }

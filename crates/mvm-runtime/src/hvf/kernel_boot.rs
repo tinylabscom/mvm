@@ -460,12 +460,18 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     if channels.virtiofs_root.is_some() {
         virtio_nodes.push((FS_MMIO_BASE, FS_IRQ));
     }
+    // Fresh host entropy per boot. Without it the guest — which has no NIC,
+    // no rotating disk, and no virtio-rng — has almost no interrupt jitter to
+    // harvest, so the first userspace `getrandom(2)` blocks for seconds on
+    // CSPRNG init before the workload can start.
+    let rng_seed = fdt::fresh_rng_seed();
     let dtb = fdt::build_dtb(
         &bootargs,
         RAM_BASE,
         ram_size as u64,
         initrd_bounds,
         &virtio_nodes,
+        Some(&rng_seed),
     );
     if dtb.len() > FDT_MAX_SIZE as usize {
         return Err(HvfError::BadKernel);
