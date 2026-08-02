@@ -59,7 +59,10 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 ///   deserialization (unknown variant), which the agent surfaces as a
 ///   clean error; the coordinator gates sending these verbs on node
 ///   capability, so no bump was taken.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// - `3`: fenced block-volume start, lease renewal, ciphertext transfer,
+///   and atomic restore request/response variants. These operations are
+///   coordinated across agent and hostd and have no safe legacy fallback.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 // ============================================================================
 // Request/Response types
@@ -351,9 +354,8 @@ mod tests {
     /// here means a PR can't silently bump the const without also
     /// updating this test (and prompting the fixture re-gen).
     #[test]
-    fn protocol_version_is_two() {
-        // Bumped from 1 to 2 in the workspace-volume attach change.
-        assert_eq!(PROTOCOL_VERSION, 2);
+    fn protocol_version_is_three() {
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     #[test]
