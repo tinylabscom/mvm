@@ -37,13 +37,12 @@ Feature: Transient sandbox boot
     Then the command exits with code 0
     And the output contains "1 received"
 
-  # Still open, and for one specific reason: `/bin/ping` by absolute path is not
-  # satisfied by a PATH-order stand-in, and the bind mount that would satisfy it
-  # cannot apply here. `/bin/ping` on a busybox image is a symlink to the
-  # multi-call binary, replacing that link needs a write, and the rootfs is
-  # read-only under verity. The unqualified scenario above is the same egress
-  # path within reach today.
-  @live @wip
+  # By absolute path, so no PATH-order stand-in satisfies this one. `/bin/ping`
+  # on a busybox image is a symlink to the multi-call binary and the rootfs is
+  # read-only under verity, so the link cannot be replaced in place either; the
+  # init stacks a tmpfs over `/bin` alone and substitutes in the upper, leaving
+  # the verified lower bytes and every other applet as the image shipped them.
+  @live
   Scenario: machine run reaches an admitted host with ping
     When I run mvmctl in an isolated live home with "machine run --name bdd-egress-ping --image alpine --allow-host google.com --timeout 120 -- /bin/ping -c 1 google.com"
     Then the command exits with code 0

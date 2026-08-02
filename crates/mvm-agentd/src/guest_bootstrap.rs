@@ -108,10 +108,100 @@ pub fn mount_mediated_tools() {
         // Always reachable by name, even when the image ships no copy to mount
         // over and even when the rootfs is sealed against the mount.
         install_mediated_tool(source, target);
-        if Path::new(target).exists() {
-            bind_mount_file(source, target);
+        if !Path::new(target).exists() {
+            continue;
+        }
+        let Err(first) = substitute_in_place(source, target) else {
+            continue;
+        };
+        // The image's copy is a symlink and the rootfs will not take the write
+        // that replaces it. Make just its directory writable and retry, so a
+        // caller running the tool by absolute path reaches the stand-in too.
+        match overlay_parent_for_write(Path::new(target)) {
+            Ok(()) => {
+                if let Err(second) = substitute_in_place(source, target) {
+                    eprintln!("mvm-guest-init: {target} not substituted after overlay: {second}");
+                }
+            }
+            Err(e) => eprintln!(
+                "mvm-guest-init: {target} left as the image shipped it ({first}); \
+                 directory overlay: {e}"
+            ),
         }
     }
+}
+
+/// Make `dir` writable in place by stacking a tmpfs over it.
+///
+/// The verified image is the lower layer and stays exactly as the registry
+/// served it — dm-verity still covers those blocks, and nothing writes through
+/// to them. Only the substitution lands in the upper, which is root-owned on
+/// the `/run` tmpfs, so the workload's unprivileged uid cannot reach it either.
+/// Scoped to the one directory holding a mediated tool rather than the whole
+/// root, so every other path keeps resolving straight to the sealed image.
+fn overlay_parent_for_write(target: &Path) -> Result<(), String> {
+    let dir = target
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
+    let (upper, work) = overlay_dirs_for(dir);
+    for path in [&upper, &work] {
+        fs::create_dir_all(path).map_err(|e| format!("mkdir {}: {e}", path.display()))?;
+    }
+    // overlayfs requires upper and work on one filesystem; both are on /run.
+    let options = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        dir.display(),
+        upper.display(),
+        work.display()
+    );
+    mount_overlay(dir, &options)
+}
+
+/// Where a directory's overlay upper and work dirs live.
+///
+/// Mirrors the directory under one root so two mediated tools in different
+/// directories cannot collide on the same upper.
+fn overlay_dirs_for(dir: &Path) -> (PathBuf, PathBuf) {
+    let base = Path::new("/run/mvm/overlay").join(dir.strip_prefix("/").unwrap_or(dir));
+    (base.join("upper"), base.join("work"))
+}
+
+fn mount_overlay(target: &Path, options: &str) -> Result<(), String> {
+    let target_str = target
+        .to_str()
+        .ok_or_else(|| format!("{} is not valid UTF-8", target.display()))?;
+    let (Some(source_c), Some(target_c), Some(fstype_c), Some(options_c)) = (
+        cstring_str("overlay"),
+        cstring_str(target_str),
+        cstring_str("overlay"),
+        cstring_str(options),
+    ) else {
+        return Err("mount arguments contain NUL".to_string());
+    };
+    // SAFETY: every pointer is NUL-terminated and outlives the call.
+    let rc = unsafe {
+        libc::mount(
+            source_c.as_ptr(),
+            target_c.as_ptr(),
+            fstype_c.as_ptr(),
+            0,
+            options_c.as_ptr().cast::<libc::c_void>(),
+        )
+    };
+    if rc != 0 {
+        return Err(format!(
+            "mount overlay on {}: {}",
+            target.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Replace the image's copy of a tool with the stand-in, in place.
+fn substitute_in_place(source: &str, target: &str) -> Result<(), String> {
+    replace_symlink_target(Path::new(target))?;
+    bind_mount_file(source, target)
 }
 
 /// Link a stand-in into the mediated-tool directory so `PATH` finds it.
@@ -177,17 +267,12 @@ pub fn replace_symlink_target(target: &Path) -> Result<(), String> {
 
 /// `mount(source, target, NULL, MS_BIND, NULL)` over an existing file.
 ///
-/// The target must already exist as a file; creating one is exactly what this
-/// avoids, so the image keeps the bytes the registry served.
-pub fn bind_mount_file(source: &str, target: &str) {
-    if let Err(e) = replace_symlink_target(Path::new(target)) {
-        // Non-fatal, and deliberately before the mount: leaving the image's own
-        // tool in place is far better than mounting through a link.
-        eprintln!("mvm-guest-init: not substituting {target}: {e}");
-        return;
-    }
+/// The target must already exist as a regular file — creating one is exactly
+/// what this avoids, so the image keeps the bytes the registry served.
+/// [`substitute_in_place`] is responsible for getting it there.
+pub fn bind_mount_file(source: &str, target: &str) -> Result<(), String> {
     let (Some(source_c), Some(target_c)) = (cstring_str(source), cstring_str(target)) else {
-        return;
+        return Err("mount arguments contain NUL".to_string());
     };
     // SAFETY: both paths are NUL-terminated and live for the call; MS_BIND
     // with a null fstype/data is the documented file-bind form.
@@ -201,13 +286,12 @@ pub fn bind_mount_file(source: &str, target: &str) {
         )
     };
     if rc != 0 {
-        // Non-fatal: the workload keeps the image's own tool, which simply
-        // does not work here. Failing PID 1 over a `ping` would be worse.
-        eprintln!(
-            "mvm-guest-init: bind {source} over {target}: {}",
+        return Err(format!(
+            "bind {source} over {target}: {}",
             std::io::Error::last_os_error()
-        );
+        ));
     }
+    Ok(())
 }
 
 pub fn provision_egress_ca() {
@@ -681,6 +765,33 @@ mod tests {
             fs::read_link(bin.join("ping")).unwrap(),
             Path::new("/mvm/runtime/ping")
         );
+    }
+
+    #[test]
+    fn overlay_dirs_mirror_the_directory_under_one_root() {
+        let (upper, work) = overlay_dirs_for(Path::new("/bin"));
+        assert_eq!(upper, Path::new("/run/mvm/overlay/bin/upper"));
+        assert_eq!(work, Path::new("/run/mvm/overlay/bin/work"));
+    }
+
+    /// Two tools in different directories must not share an upper, or the
+    /// second overlay would inherit the first's substitution.
+    #[test]
+    fn overlay_dirs_do_not_collide_across_directories() {
+        let (bin_upper, _) = overlay_dirs_for(Path::new("/bin"));
+        let (sbin_upper, _) = overlay_dirs_for(Path::new("/usr/sbin"));
+        assert_ne!(bin_upper, sbin_upper);
+        assert_eq!(sbin_upper, Path::new("/run/mvm/overlay/usr/sbin/upper"));
+    }
+
+    /// upperdir and workdir must sit on one filesystem for overlayfs to mount;
+    /// both live under the /run tmpfs the init already mounted.
+    #[test]
+    fn overlay_upper_and_work_share_a_filesystem() {
+        let (upper, work) = overlay_dirs_for(Path::new("/bin"));
+        assert!(upper.starts_with("/run"));
+        assert!(work.starts_with("/run"));
+        assert_eq!(upper.parent(), work.parent());
     }
 
     #[test]
