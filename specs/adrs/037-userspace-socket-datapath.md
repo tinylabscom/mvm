@@ -299,4 +299,5 @@ the right reason rather than for "macOS". Closing that gap needs the
 which remains a separate decision and a separate ADR.
 
 Multi-queue, IPv6, and zero-copy transfer are orthogonal and tracked in
-plan 285's deferred set.
+the deferred set of `specs/plans/285-l3-tun-over-vsock.md` (referenced by
+filename because `285` is used twice on main).
