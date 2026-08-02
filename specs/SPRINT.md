@@ -60,12 +60,19 @@
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
 - [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
-      <rev>/` is served on a hit if `rootfs.ext4` merely exists as a file: no
-      digest, no signature, so content substitution is undetected, and the
-      provenance recorder then signs whatever bytes are on disk. The audit log
-      faithfully records a substituted image as legitimate. Plan 276 is written
-      and Proposed; this moves WS6 into the sprint. Prerequisite for plan 279
-      WS1 so the new cache key and the new verification do not land together.
+      <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
+      digest, no signature, so content substitution went undetected and the
+      provenance recorder then signed whatever bytes were on disk — the audit
+      log faithfully recording a substituted image as legitimate.
+  - [x] Dev-build artifact cache closed in #2053: `mvm_core::action` +
+        `verify_artifacts_on_disk`, verified on read, failing closed to a cold
+        miss, and evicting both the record and the build directory. Evicting
+        only the record would leave the poisoned tree under a name a later
+        build can re-adopt. Also closed a mid-build leak of `dev_builds_dir()`
+        on failure paths. This unblocks plan 279 WS1.
+  - [ ] Kernel cache still open: `resolve_kernel` returns `Cached` on
+        `path.exists()`, and `verify_fetched_kernel` has no production caller,
+        so neither the fetch nor the read path checks a kernel against its pin.
 
 - [ ] Build action identity + artifact manifest — **plan 279**
       (`specs/plans/279-build-action-identity-and-artifact-manifest.md`).

@@ -6,6 +6,7 @@
 **Source:** [UOR-Foundation](https://github.com/UOR-Foundation) and [Hologram-Technologies](https://github.com/Hologram-Technologies) GitHub orgs, deep-read at code level (43 repos surveyed, 24 read in depth)
 **Related:** [`uor-addr-integration-assessment.md`](./uor-addr-integration-assessment.md), [`uor-framework-integration-exploration.md`](./uor-framework-integration-exploration.md)
 **Updated:** 2026-07-31 — added §7.6 (data-plane provability at the vsock chokepoint, from a code-grounded read of the sealed-transcript ↔ audit-chain binding), §7.7 (identity & permissions in the packet — signed capability vs hashed claim), and a §9 note on a machine-checked Lean-4 reference spec as the third verifier.
+**Updated:** 2026-08-01 — a second, deeper pass (upstream crate source + primary literature, not just repo-level reads) **reverses finding 2** and adds four sections: §7.8 (σ/κ separation and the transform descriptor), §7.9 (verify-on-read as the founding definition, with the measured corruption rates behind it), §7.10 (deduplication scope as a side-channel decision), and §7.11 (reconciliation prerequisites among mutually distrusting peers). The original finding 2 — "mvm is ahead on every security-critical primitive" — was drawn from a survey that missed `kappa-registry`'s enforcement surface; see §7.1.
 
 ## TL;DR
 
@@ -19,15 +20,20 @@ Three findings reframe the collaboration question:
    conventional canonicalize-then-hash core. It buys nothing over `sha256 +
    serde_jcs`. Confirmed independently by four separate deep reads.
 
-2. **mvm is ahead on every security-critical primitive.** The entire ecosystem
-   trusts content-hash-only ("the name is the hash", verify-by-re-derivation).
-   There is **no per-bundle signing, no signed ExecutionPlan, no hash-linked
-   signed audit chain, and no temporal/nonce admission** anywhere in it — Ed25519
-   appears only in `hologram-network`'s wire layer and as unimplemented trait
-   seams. mvm's `key_id`-pinned signed bundles, validity-window/nonce plans, and
-   RFC-6962 Merkle audit chain are strictly stronger. Adopt their content-identity
-   and dedup ideas as a **complement layered under** mvm's authenticity, never as
-   a replacement for it.
+2. **Attestation coverage across the ecosystem is asymmetric, and integrity is
+   the shared gap.** *(Revised 2026-08-01 — this replaces "mvm is ahead on every
+   security-critical primitive", which the first pass got wrong.)* `kappa-registry`
+   does enforce authenticity, freshness and ordering: closed-constructor asserter
+   anchors held by a compile-fail test, hybrid-logical-clock watermarks giving
+   O(1) bulk invalidation before a timestamp, and an Ed25519-signed epoch chain
+   over a seven-leaf, domain-separated, backward-linked Merkle root with per-leaf
+   selective disclosure. What **no** surveyed system enforces is **integrity on
+   read**: `kappa-registry` verifies at four of thirteen write paths and at no read
+   path, and mvm's workload kernel and build cache are trusted-by-path for the same
+   reason. That is the one property a content address exists to supply, and it is
+   unenforced everywhere. mvm's `key_id`-pinned signed bundles, validity-window/nonce
+   plans and RFC-6962 Merkle audit chain remain strong and stay the authority layer —
+   but "mvm is ahead" was the wrong conclusion, and the gap is shared, not theirs.
 
 3. **The prior disposition holds and extends.** The two existing UOR research
    notes already concluded "conform to UOR-ADDR JSON, take no crate dependency,
@@ -238,22 +244,36 @@ Follow-up analysis on three questions: is content-addressable data useful for mv
 hash/attestation features; can a Hologram `holospace` run inside a microVM; and can
 content-addressing defend against attacks.
 
-### 7.1 Content-addressing supplies integrity — one of attestation's four properties
+### 7.1 Attestation needs four properties — and integrity is the one nobody enforces
 
-Attestation needs four properties; content-addressing supplies exactly one.
+*Revised 2026-08-01. The first pass recorded this table as "content-addressing
+supplies integrity; mvm already has the other three; the ecosystem stops at
+integrity." A deeper read of `kappa-registry` shows both halves of that were wrong:
+they have the other three too, and **neither side enforces integrity on read**.*
 
-| Property | Question | Mechanism | mvm status |
+| Property | Question | Mechanism | Coverage |
 | --- | --- | --- | --- |
-| Integrity | *what* are the bytes | content-address (the hash **is** the tamper check) | shipped everywhere |
-| Authenticity | *who* authorized them | Ed25519 `key_id` pinning | shipped |
-| Freshness | *when* / is it stale | validity window + nonce replay store | shipped |
-| Ordering | *in what sequence* | hash-linked signed audit chain + RFC-6962 Merkle | shipped |
+| **Integrity** | *what* are the bytes | content address, **recomputed and compared** | The property content-addressing exists to supply. `kappa-registry`: verified on 4 of 13 write paths, on **no** read path. mvm: trusted-by-path for the workload kernel and build cache. **The shared gap.** |
+| Authenticity | *who* authorized them | Ed25519 key pinning · closed-constructor anchors | Shipped in mvm. Shipped in `kappa-registry` — an asserter anchor has no public constructor and a compile-fail test holds the boundary. |
+| Freshness | *when* / is it stale | validity window · nonce replay store · watermarks | Shipped in mvm. Shipped in `kappa-registry` as O(1) bulk invalidation before a timestamp over a hybrid logical clock. |
+| Ordering | *in what sequence* | hash-linked signed chain · Merkle root | Shipped in mvm. Shipped in `kappa-registry` as a seven-leaf domain-separated Ed25519-signed epoch root, backward-linked, with per-leaf selective disclosure. |
 
-The whole UOR/Hologram ecosystem stops at **integrity** (content-hash-only,
-verify-by-re-derivation). mvm already layers the other three on top, so
-content-addressing does not *complete* mvm's attestation — mvm completed it already.
-UOR's additive value is narrow: semantic identity (already realized in
-`SemanticAddress`), canonicalization rigor (§6 U4/U5), and coverage breadth (§7.2).
+**`kappa-registry` maturity, corrected.** Eleven crates, 30,742 lines, store format
+v5. It passes 1032/1032 OCI distribution-spec v1.1 conformance and 187/187 kappa
+conformance across five levels with zero warnings. It ships encryption at rest
+across blob content, storage paths and every index table; Veilid-transported
+federation with Merkle-search-tree reconciliation; auditable key-directory absence
+proofs; and the signed epoch chain above. The earlier "real, single-node, auth-stub"
+characterisation understated it materially. It is not a prototype — it is a
+conformant substrate that does not yet enforce the property its addressing scheme
+implies.
+
+**The asymmetry, stated directly.** Authenticity, freshness and ordering are well
+covered on both sides. Integrity — the property a content address is supposed to
+deliver for free — is the one no surveyed system enforces on read. *A signed chain
+over addresses that were never checked attests to pointers, not to content.* That
+reframes §7.2 from "a coverage gain" to "the one unenforced property", and it is why
+verify-on-read is now the lead item rather than the tail.
 
 ### 7.2 The coverage gap: content-address the kernel + cache, verify on read
 
@@ -467,17 +487,175 @@ new work is the §7.6 sealed-transcript-root audit binding plus completion of Pl
 post-restore grant delivery. A general attenuatable capability remains deferred until an actual
 delegation requirement appears.
 
+### 7.8 σ/κ separation and the transform descriptor
+
+*Added 2026-08-01. New material; ranked as an **adopt** alongside the methodology
+upgrade.*
+
+Every transform applied at rest separates the digest a protocol names content by
+from the digest of the bytes actually stored. This is the general case, not an
+encryption special case, and the precedents are unanimous: git object IDs have never
+hashed the bytes on disk in any implementation (loose objects are deflated, packed
+objects are delta-encoded against a base); ZFS compresses and encrypts beneath a
+checksum carried in the parent block pointer; deduplicating backup systems address
+chunks while files are manifests; columnar table formats address manifests which
+address encoded files.
+
+- **σ** is the protocol digest, computed over plaintext — the ETag, the content-digest
+  header, the object identifier.
+- **κ** is the storage address, computed over the bytes at rest — it derives the path,
+  it is the verification target, and it is the unit of federated transfer.
+
+Under the identity transform the two are numerically equal and remain **distinct
+quantities**. The type separation is what stops the property regressing silently.
+
+Two consequences:
+
+1. **σ is a set.** One storage address is reachable by two or more protocol digests.
+   That is exactly what a dual-hash transition requires and what multi-axis
+   registration provides — and it is the real answer to the SHA-256-vs-BLAKE3
+   question in §8, which "pin one axis" would foreclose.
+2. **The descriptor is an open enumeration, not a boolean.**
+
+   ```
+   framing  : Whole | Fixed{frame_size} | Chunked{manifest}
+   per_frame: [ Identity | Aead | Deflate | Delta{base} | Erasure{k,m} ]
+   seek_map : Implicit | Explicit{cumulative} | None
+   ```
+
+   Framing is the outer layer and transforms apply per frame. That is what makes
+   ranged reads into transformed content possible: whole-object sealing means a
+   ten-byte range request against a ten-gigabyte object must process the whole
+   object, which removes the operation rather than slowing it.
+
+**Why now, while mvm is still all-identity-transform.** Modelling this as a single
+label — or as an optional "encrypted" flag — costs one format migration per transform
+family, forever. Modelling the axis once, while every transform in the tree is still
+`Identity`, costs a newtype pair and no migration.
+
+### 7.9 Verify-on-read is the founding definition, not an enhancement
+
+*Added 2026-08-01.*
+
+The archival system that established content-addressing as a systems primitive
+specified that **on retrieval, both client and server compute the fingerprint and
+compare it to the one requested**. The claim content-addressing makes is not "the
+name is a hash"; it is "a block cannot be modified without changing its address" —
+and that claim is cashable only if something recomputes. §7.1's finding is that
+nobody does.
+
+The corruption rate is measured, not hypothetical. A field study of 1.53 million
+drives over 41 months recorded more than 400,000 checksum mismatches. Nearline drives
+develop them an order of magnitude more often than enterprise drives. Mismatches
+within a disk are **not independent** — they show high spatial and temporal locality —
+and mismatches across disks in the same system are not independent either. A
+follow-on study found 8% were discovered during RAID reconstruction, i.e. correlated
+with the moment redundancy is already degraded.
+
+The second corruption class in that taxonomy is the one that matters most here:
+**identity discrepancies** — an intact block that is the *wrong* block. Content-addressing
+detects it for free; a path-trusting store cannot see it at all. This is precisely the
+workload-kernel cache-skew class that currently mimics real bugs in mvm.
+
+Practical form, by object size:
+
+- **Small objects** — rehash before responding.
+- **Streamed objects** — carry a running hash across frames, deliver the verdict in a
+  trailer.
+- **Cold objects** — background scrub over the reachability walk. This is the only tier
+  that catches the locality pattern above; on-access verification never visits the
+  blocks that are quietly rotting.
+
+### 7.10 Deduplication scope is a side-channel decision, and the conformant answer is free
+
+*Added 2026-08-01. Sharpens the cross-tenant dedup rule already stated in §7.4.*
+
+Cross-user deduplication with a truthful existence response **is** an oracle: one bit
+per probe, and a target drawn from an enumerable set is recoverable in proportion to
+its entropy. The foundational study concluded cross-user dedup should be disabled by
+default, and that public storage should provide unlinkability of users and data even
+when data is encrypted before upload.
+
+Two facts make the fix cheap in registry terms:
+
+- The distribution specification once required a cross-repository mount to name a
+  source the client has read access to — an authorizable check. **Version 1.1 made
+  that source optional**, so a mount may be attempted with no source to authorize
+  against.
+- The same specification states a registry unable or unwilling to mount should return
+  202 and begin the upload session, and that a push with or without an attempted mount
+  takes **the same number of API requests**.
+
+**Consequence: declining a cross-namespace mount is fully conformant.** Same request
+count, same client code path, no error a client does not already handle.
+Namespace-scoped dedup by default — with cross-namespace mounts honoured only where
+the caller is authorized on the source — costs bandwidth, not correctness, and is
+stronger than any probabilistic scheme because nothing has to be misreported.
+
+Under per-namespace key derivation the property is stronger still: identical plaintext
+yields different ciphertext, a different address and a different path, so the
+cross-tenant oracle **cannot form arithmetically** rather than being prevented by
+policy.
+
+No CVE, advisory or published threat model was located for cross-tenant
+blob-existence side channels in container registries. The attack has been in the
+literature since 2010 and appears unexamined in this industry as a named class.
+
+### 7.11 Reconciliation prerequisites among mutually distrusting peers
+
+*Added 2026-08-01. Gates the §8 "distributed content-addressed transport" item.*
+
+Range-based set reconciliation and Merkle-search-tree page diffing remain the right
+references, with two prerequisites that must be settled **before** either is used
+among peers that do not trust each other.
+
+- **The fingerprint must be multiset-homomorphic.** Where it is not — an XOR
+  aggregation being the common case — a peer withholds arbitrary data by claiming
+  absence. This requires no collision-finding and is invisible to functional testing,
+  because reconciliation converges cleanly with data missing. All commonly cited
+  candidates except non-commutative Cayley hashes are usable.
+- **A search-tree root is not necessarily a cryptographic commitment.** The widely used
+  MST implementation derives page and root digests from a non-cryptographic 128-bit
+  hash under a fixed key, independent of the user-supplied hasher — which governs key
+  and value digests only. That is appropriate for detecting accidental divergence and
+  inadequate for a signed root. **A reconciliation root and an attested root are
+  different structures with different requirements**; do not sign the former.
+
+### 7.12 The nine axes, and where content-addressing breaks
+
+*Added 2026-08-01.*
+
+Across roughly three hundred systems surveyed — block, file, object, content-addressed,
+package distribution, backup, table format, log, key-value, vector, graph and
+domain-specific families — nine axes cover the design space: naming, mutability,
+granularity, access, verification, consistency, transport, topology, and **transform**.
+
+**Transform (D9) is the axis that silently invalidates naive content-addressing**, is
+present in every mature storage system, and is what motivates §7.8. Nine patterns
+recur across every family — name/content separation, Merkle structure over content,
+transform at rest with an identity case, chunk-and-reassemble, append-only log with a
+signed or ordered root, anti-entropy reconciliation, tiering and lifecycle,
+multi-tenancy with isolation, attestation with provenance. Every surveyed system is a
+combination of these; none introduces a tenth.
+
 ## 8. Interop hazards and alignment points
 
 Concrete cross-project mechanics that decide whether mvm and the UOR/Hologram
 addresses can ever line up:
 
-- **Hash-axis fragmentation — decide before any κ interop.** mvm standardizes on
-  SHA-256; `uor-addr` defaults SHA-256 but `uor-r4`/`hologram` mint on the BLAKE3
-  axis. A κ-label is `<axis>:<hex>`, so the *same bytes* get *different addresses* on
-  different axes — mixing axes across a fleet fragments identity. Interop must pin one
-  axis (SHA-256 keeps mvm unchanged; BLAKE3 buys speed + agility but re-addresses
-  everything).
+- **Hash-axis handling — a σ set, not a pinned axis.** *(Revised 2026-08-01.)* mvm
+  standardizes on SHA-256; `uor-addr` defaults SHA-256 but `uor-r4`/`hologram` mint on
+  the BLAKE3 axis. A κ-label is `<axis>:<hex>`, so the *same bytes* get *different
+  addresses* on different axes. The first pass concluded "interop must pin one axis";
+  §7.8 supersedes that. The resolution is a **σ set** — one storage address reachable
+  by more than one protocol digest. Pinning a single axis would foreclose exactly the
+  dual-hash transition and multi-axis registration that make the fragmentation
+  survivable.
+- **Transform agreement — settle it before either side ships a non-identity transform.**
+  Addresses stop meaning the same thing across projects the moment either side
+  compresses, encrypts, deltas or erasure-codes at rest (§7.8). Agreeing the descriptor
+  while everything is still `Identity` is free; agreeing it afterwards is a format
+  migration on both sides.
 - **Canonical wire-form divergence.** Three address strings are in play: mvm's
   `sha256:<hex>`, UOR-Foundation's kappa `<axis>:<hex>`, and `uor:sha256:<hex>`
   (uor-registry). mvm's `sha256:<hex>` equals the kappa SHA-256 form byte-for-byte;
@@ -569,10 +747,10 @@ should we consider this" is: Phase 1 now, the rest when its trigger fires.
 
 | Phase | Timing | Work | Gate / trigger |
 | --- | --- | --- | --- |
-| **0 — Decide & scope** | Now (days) | Adopt "conform, don't consume" as explicit policy; pin SHA-256 as the canonical axis; turn §6 U1–U5 + §7.5 defensive coverage into a `specs/plans/` doc. | None. |
-| **1 — Methodology + defensive coverage** | Next 1–2 sprints | U1 tiers · U4 replay-vector lane · U2 prose over-claim gate · U3 falsifiability table · U5 ≥2-verifier oracle bar; content-address kernel + build cache with verify-on-read; anchor the sealed data-plane transcript root into the audit chain (§7.6). All in-house, no dependency. | Phase 0 plan approved. |
-| **2 — Interop alignment** | Mid-term, triggered | Agree axis + wire-form + in-toto/SLSA canonicalization with the sibling projects; read `uor-foundation` (the real κ engine); evaluate `uor-addr-1` (lighter crate). | A real second consumer of the addresses **and** a UOR/Hologram-side conversation. |
-| **3 — Runtime / fleet / AI** | Long-term, opportunistic | holospace object model (migrate-by-κ-closure) into mvmd; content-addressed inter-VM routing (mvmd only — no east-west path in mvm, §7.6); evaluate an established attenuatable-capability format only if offline/multi-hop delegation becomes a concrete requirement (§7.7); `hologram-ai` interop for the deferred `ai` command; distributed transport (RBSR / iroh-blobs). | A concrete mvmd migration/scale requirement, a concrete offline/multi-hop delegation requirement, or the `ai` command leaving deferred status. |
+| **0 — Decide & scope** | Now (days) | Adopt "conform, don't consume" as explicit policy; establish the **σ-set contract** for addresses (§7.8 — *not* "pin one axis", which the first pass proposed); turn §6 U1–U5 + §7.5 defensive coverage into a `specs/plans/` doc. | None. |
+| **1 — Methodology + defensive coverage** | Next 1–2 sprints | Content-address the workload kernel + build cache with **verification on read as well as on write** (§7.9 — now the lead item, per the revised §7.1); U4 replay-vector lane (recording σ **and** κ wherever a transform is in play); U1 tiers · U2 prose over-claim gate · U3 falsifiability table · U5 ≥2-verifier oracle bar. All in-house, no dependency. *(The §7.6 sealed-transcript root anchoring listed here originally shipped separately — see plan 280.)* | Phase 0 plan approved. |
+| **2 — Interop alignment** | Mid-term, triggered | Agree the **σ-set contract, canonical wire form and transform descriptor** with the sibling projects **before either side ships a non-identity transform** (§7.8); agree in-toto/SLSA canonicalization; read `uor-foundation` (the real κ engine); evaluate `uor-addr-1` (lighter crate). | A real second consumer of the addresses **and** a UOR/Hologram-side conversation. |
+| **3 — Runtime / fleet / AI** | Long-term, opportunistic | holospace object model (migrate-by-κ-closure) into mvmd; content-addressed inter-VM routing (mvmd only — no east-west path in mvm, §7.6); evaluate an established attenuatable-capability format only if offline/multi-hop delegation becomes a concrete requirement (§7.7); `hologram-ai` interop for the deferred `ai` command; distributed transport (RBSR / iroh-blobs) **with §7.11's multiset-homomorphic-fingerprint and attested-root prerequisites settled first**. | A concrete mvmd migration/scale requirement, a concrete offline/multi-hop delegation requirement, or the `ai` command leaving deferred status. |
 
 **Bottom line:** consider **Phase 1 now** — it is the highest-ROI, lowest-risk, fully
 in-house work, and it doubles as security hardening (the two defensive pursuits). Hold
@@ -591,6 +769,15 @@ Phases 2–3 until their trigger appears; revisit this doc when it does.
   shared address reveals two tenants hold identical content, and an address
   fingerprints known content (a cross-tenant confirmation oracle). Dedup within a
   boundary; never across it.
+- **Never derive an address from a non-collision-resistant digest.** MD5, CRC32C
+  and CRC64 are required as *attestations* and disqualified as *addresses*. Enforce
+  with disjoint types and a compile-fail test, not with review.
+- **Never sign state that cannot be substantiated.** The order is content → index →
+  root → signature → publication. A crash before signing is recoverable; the reverse
+  order forks the chain and has no recovery path.
+- **Never sign a reconciliation root.** An MST page/root digest from a
+  non-cryptographic hash detects accidental divergence and is not a commitment
+  (§7.11).
 - **Licensing gap:** `uor-vv`/`uor-conformance`/`uor-nanda`/`arch-map` ship no
   LICENSE. Even as sibling projects, reusable text/scripts need a license before
   verbatim reuse.
