@@ -51,6 +51,12 @@ const EVENTS_PER_POLL: usize = 64;
 /// wrapper writes short envelope JSON there, never arbitrary blobs.
 const FD3_HEADER_MAX: usize = 64 * 1024;
 
+/// Per-frame payload limit on the fd-3 control channel. A `Control` event is
+/// handed to the sink as one unit — unlike stdout/stderr it is never split
+/// across events — so its payload is held to the same single-frame wire
+/// budget a stdout/stderr chunk already is.
+const FD3_PAYLOAD_MAX: usize = MAX_DATA_CHUNK_SIZE;
+
 /// Control-record `kind` namespace reserved for the agent.
 ///
 /// The child holds fd 3 by construction, so it writes the same channel the
@@ -343,83 +349,177 @@ fn spawn_stream_reader<R: Read + Send + 'static>(
     });
 }
 
-/// Reader thread for the fd-3 control channel. Frame layout:
+/// Why [`decode_fd3_frame`] could not produce a record from the front of its
+/// input.
+///
+/// [`Fd3Error::Incomplete`] is the only variant that means "not yet" rather
+/// than "not ever": `buf` simply hasn't accumulated a whole frame, and the
+/// same bytes are still good once more have arrived. Every other variant is
+/// fatal — the frame that failed to validate is also the one carrying the
+/// offset of whatever comes next, so there is no way to skip past it and keep
+/// framing the bytes behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fd3Error {
+    /// `header_len` exceeds [`FD3_HEADER_MAX`].
+    HeaderTooLarge,
+    /// `payload_len` exceeds [`FD3_PAYLOAD_MAX`].
+    PayloadTooLarge,
+    /// The header bytes are not valid UTF-8.
+    NonUtf8Header,
+    /// `buf` does not yet hold a complete frame.
+    Incomplete,
+}
+
+impl std::fmt::Display for Fd3Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fd3Error::HeaderTooLarge => write!(f, "header exceeds {FD3_HEADER_MAX} bytes"),
+            Fd3Error::PayloadTooLarge => write!(f, "payload exceeds {FD3_PAYLOAD_MAX} bytes"),
+            Fd3Error::NonUtf8Header => write!(f, "header is not valid UTF-8"),
+            Fd3Error::Incomplete => write!(f, "frame is incomplete"),
+        }
+    }
+}
+
+impl std::error::Error for Fd3Error {}
+
+/// Decode one fd-3 control-channel frame from the front of `buf`. Frame
+/// layout:
 ///
 /// ```text
 ///   header_len:  u32 LE   (4 bytes; max 64 KiB)
 ///   header_json: bytes    (header_len bytes; UTF-8 JSON)
-///   payload_len: u32 LE   (4 bytes)
+///   payload_len: u32 LE   (4 bytes; max 48 KiB)
 ///   payload:     bytes    (payload_len bytes)
 /// ```
 ///
-/// Reads until EOF or `total_max` bytes, whichever comes first, emitting each
-/// complete record as it is parsed. Past the cap it simply stops reading: the
-/// channel carries structured records the host correlates by kind, so dropping
-/// later ones beats killing the wrapper. A partial record at EOF, an oversized
-/// header, or a non-UTF-8 header ends the stream — all three are corruption
-/// signals, and the host already tolerates a response that stops at any point.
+/// Pure: no I/O, no allocation ahead of what `buf` already holds, no panic on
+/// adversarial input. `Ok((consumed, event))` means `buf[..consumed]` was
+/// exactly one frame; the caller advances by `consumed` and may call again
+/// immediately, since one read often lands more than one frame.
+/// `Err(Fd3Error::Incomplete)` means the opposite of advancing: the caller
+/// must retry the same bytes once more have arrived, not skip any of them.
+/// Every declared length is bounds-checked before the allocation it gates, so
+/// a hostile length never buys more than one rejected comparison.
+pub fn decode_fd3_frame(buf: &[u8]) -> Result<(usize, EntrypointEvent), Fd3Error> {
+    const LEN: usize = 4;
+
+    if buf.len() < LEN {
+        return Err(Fd3Error::Incomplete);
+    }
+    let header_len = read_u32_le(&buf[..LEN]) as usize;
+    if header_len > FD3_HEADER_MAX {
+        return Err(Fd3Error::HeaderTooLarge);
+    }
+
+    let header_end = LEN + header_len;
+    if buf.len() < header_end {
+        return Err(Fd3Error::Incomplete);
+    }
+    let header_json =
+        String::from_utf8(buf[LEN..header_end].to_vec()).map_err(|_| Fd3Error::NonUtf8Header)?;
+
+    let payload_len_end = header_end + LEN;
+    if buf.len() < payload_len_end {
+        return Err(Fd3Error::Incomplete);
+    }
+    let payload_len = read_u32_le(&buf[header_end..payload_len_end]) as usize;
+    if payload_len > FD3_PAYLOAD_MAX {
+        return Err(Fd3Error::PayloadTooLarge);
+    }
+
+    let payload_end = payload_len_end + payload_len;
+    if buf.len() < payload_end {
+        return Err(Fd3Error::Incomplete);
+    }
+    let payload = buf[payload_len_end..payload_end].to_vec();
+
+    Ok((
+        payload_end,
+        EntrypointEvent::Control {
+            header_json,
+            payload,
+        },
+    ))
+}
+
+/// `src` must be exactly 4 bytes — every call site slices it that way.
+fn read_u32_le(src: &[u8]) -> u32 {
+    u32::from_le_bytes(src.try_into().expect("caller sliced exactly 4 bytes"))
+}
+
+/// Reader thread for the fd-3 control channel. [`decode_fd3_frame`] owns the
+/// wire layout and every bounds check; this loop owns the policy around it —
+/// read, decode whatever is buffered, apply the reserved-kind gate, hand the
+/// rest to the sink, and enforce the per-call byte budget.
 ///
-/// A record claiming [`RESERVED_KIND_PREFIX`] is dropped and parsing continues.
-/// This is the boundary at which fd-3's bytes stop being untrusted, so it is
-/// the only place the rule can hold without every downstream consumer having to
-/// remember it: a workload that could mint an agent-authored record would be
-/// able to forge a gap marker, and a verifier that trusts one will bless a
-/// chain skipping output it never saw.
+/// Reads until EOF or `total_max` bytes, whichever comes first. Past the cap,
+/// or on any frame [`decode_fd3_frame`] refuses, the reader logs why and
+/// stops: a corrupt or hostile stream must not read the same as a call that
+/// never opened fd-3's control channel at all. A partial frame still open at
+/// real EOF is logged too, for the same reason — a wrapper cut off mid-record
+/// is not the same as one that wrote nothing.
+///
+/// A record claiming [`RESERVED_KIND_PREFIX`] is dropped and parsing
+/// continues. This is the boundary at which fd-3's bytes stop being
+/// untrusted, so it is the only place the rule can hold without every
+/// downstream consumer having to remember it: a workload that could mint an
+/// agent-authored record would be able to forge a gap marker, and a verifier
+/// that trusts one will bless a chain skipping output it never saw.
 fn spawn_control_reader(read_fd: OwnedFd, total_max: usize, tx: Sender<EntrypointEvent>) {
     std::thread::spawn(move || {
-        let file = std::fs::File::from(read_fd);
-        let mut reader = std::io::BufReader::new(file);
-        let mut consumed: usize = 0;
+        let mut reader = std::fs::File::from(read_fd);
+        let mut pending: Vec<u8> = Vec::new();
+        let mut read_buf = vec![0u8; READ_BUF_BYTES];
+        let mut total_consumed: usize = 0;
 
         loop {
-            let mut len_buf = [0u8; 4];
-            if reader.read_exact(&mut len_buf).is_err() {
-                break; // EOF or transient I/O error
-            }
-            let header_len = u32::from_le_bytes(len_buf) as usize;
-            if header_len > FD3_HEADER_MAX {
-                break; // refuse oversized header — likely corrupt
-            }
-            consumed = consumed.saturating_add(4 + header_len);
-            if consumed > total_max {
-                break;
-            }
-
-            let mut header_bytes = vec![0u8; header_len];
-            if reader.read_exact(&mut header_bytes).is_err() {
-                break;
-            }
-            let Ok(header_json) = String::from_utf8(header_bytes) else {
-                break;
-            };
-
-            if reader.read_exact(&mut len_buf).is_err() {
-                break;
-            }
-            let payload_len = u32::from_le_bytes(len_buf) as usize;
-            consumed = consumed.saturating_add(4 + payload_len);
-            if consumed > total_max {
-                break;
-            }
-
-            let mut payload = vec![0u8; payload_len];
-            if reader.read_exact(&mut payload).is_err() {
-                break;
+            match decode_fd3_frame(&pending) {
+                Ok((consumed, event)) => {
+                    pending.drain(..consumed);
+                    total_consumed = total_consumed.saturating_add(consumed);
+                    if total_consumed > total_max {
+                        eprintln!(
+                            "mvm-guest-agent: fd-3 control channel closed: cumulative cap of \
+                             {total_max} bytes exceeded"
+                        );
+                        return;
+                    }
+                    // Framing is intact, so keep parsing — only this record is refused.
+                    let is_reserved = matches!(
+                        &event,
+                        EntrypointEvent::Control { header_json, .. }
+                            if claims_reserved_kind(header_json)
+                    );
+                    if !is_reserved && tx.send(event).is_err() {
+                        return; // the pump is gone; nothing left to feed
+                    }
+                    continue; // `pending` may already hold the next frame
+                }
+                Err(Fd3Error::Incomplete) => {} // fall through and read more
+                Err(err) => {
+                    eprintln!("mvm-guest-agent: fd-3 control channel closed: {err}");
+                    return;
+                }
             }
 
-            // Framing is intact, so keep parsing — only this record is refused.
-            if claims_reserved_kind(&header_json) {
-                continue;
-            }
-
-            if tx
-                .send(EntrypointEvent::Control {
-                    header_json,
-                    payload,
-                })
-                .is_err()
-            {
-                return;
+            match reader.read(&mut read_buf) {
+                Ok(0) => {
+                    if !pending.is_empty() {
+                        eprintln!(
+                            "mvm-guest-agent: fd-3 control channel closed: {} leftover byte(s) \
+                             at EOF never formed a complete frame",
+                            pending.len()
+                        );
+                    }
+                    return;
+                }
+                Ok(n) => pending.extend_from_slice(&read_buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    eprintln!("mvm-guest-agent: fd-3 control channel closed: read error: {e}");
+                    return;
+                }
             }
         }
     });
@@ -634,6 +734,157 @@ mod tests {
                 other => panic!("expected a control event, got {other:?}"),
             })
             .collect()
+    }
+
+    /// Encode one fd-3 frame with an arbitrary payload.
+    fn frame_bytes(header_json: &str, payload: &[u8]) -> Vec<u8> {
+        let header = header_json.as_bytes();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        frame.extend_from_slice(header);
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    // -- decode_fd3_frame: pure, no thread or pipe involved ------------
+
+    #[test]
+    fn decode_well_formed_frame_reports_bytes_consumed() {
+        let frame = frame_bytes(r#"{"kind":"app.log"}"#, b"payload-bytes");
+        let (consumed, event) = decode_fd3_frame(&frame).expect("well-formed frame decodes");
+        assert_eq!(consumed, frame.len());
+        match event {
+            EntrypointEvent::Control {
+                header_json,
+                payload,
+            } => {
+                assert_eq!(header_json, r#"{"kind":"app.log"}"#);
+                assert_eq!(payload, b"payload-bytes");
+            }
+            other => panic!("expected Control, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_refuses_a_header_over_the_size_cap() {
+        // The length prefix alone is enough to refuse — no header bytes,
+        // let alone a payload, ever need to arrive.
+        let oversized = ((FD3_HEADER_MAX + 1) as u32).to_le_bytes();
+        assert_eq!(decode_fd3_frame(&oversized), Err(Fd3Error::HeaderTooLarge));
+    }
+
+    #[test]
+    fn decode_refuses_a_payload_over_the_size_cap() {
+        let header = br#"{"kind":"app.log"}"#;
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        frame.extend_from_slice(header);
+        frame.extend_from_slice(&((FD3_PAYLOAD_MAX + 1) as u32).to_le_bytes());
+        // No payload bytes needed — same fail-fast property as the header.
+        assert_eq!(decode_fd3_frame(&frame), Err(Fd3Error::PayloadTooLarge));
+    }
+
+    #[test]
+    fn decode_refuses_a_non_utf8_header() {
+        let bad_header: [u8; 3] = [0xff, 0xfe, 0xfd];
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(bad_header.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&bad_header);
+        assert_eq!(decode_fd3_frame(&frame), Err(Fd3Error::NonUtf8Header));
+    }
+
+    #[test]
+    fn decode_reports_incomplete_without_consuming_a_truncated_frame() {
+        let full = frame_bytes(r#"{"kind":"app.log"}"#, b"payload");
+        for cut in 0..full.len() {
+            assert_eq!(
+                decode_fd3_frame(&full[..cut]),
+                Err(Fd3Error::Incomplete),
+                "a {cut}-byte prefix must report Incomplete, not a fatal error"
+            );
+        }
+        // The full frame decodes cleanly once every byte is present — proof
+        // the prefixes above were genuinely awaiting more bytes, not silently
+        // rejecting a frame no `Err` variant carries a byte count for.
+        let (consumed, _) = decode_fd3_frame(&full).expect("complete frame decodes");
+        assert_eq!(consumed, full.len());
+    }
+
+    #[test]
+    fn decode_reads_back_to_back_frames_from_one_buffer() {
+        let first = frame_bytes(r#"{"kind":"a"}"#, b"");
+        let second = frame_bytes(r#"{"kind":"b"}"#, b"xyz");
+        let mut both = first.clone();
+        both.extend_from_slice(&second);
+
+        let (consumed_first, event_first) = decode_fd3_frame(&both).expect("first frame decodes");
+        assert_eq!(consumed_first, first.len());
+        match event_first {
+            EntrypointEvent::Control { header_json, .. } => {
+                assert_eq!(header_json, r#"{"kind":"a"}"#);
+            }
+            other => panic!("expected Control, got {other:?}"),
+        }
+
+        let (consumed_second, event_second) =
+            decode_fd3_frame(&both[consumed_first..]).expect("second frame decodes");
+        assert_eq!(consumed_second, second.len());
+        match event_second {
+            EntrypointEvent::Control {
+                header_json,
+                payload,
+            } => {
+                assert_eq!(header_json, r#"{"kind":"b"}"#);
+                assert_eq!(payload, b"xyz");
+            }
+            other => panic!("expected Control, got {other:?}"),
+        }
+        assert_eq!(consumed_first + consumed_second, both.len());
+    }
+
+    // -- spawn_control_reader: the fatal cases stop the stream ---------
+
+    #[test]
+    fn a_header_too_large_frame_ends_the_control_stream() {
+        // Once one frame fails structural validation there is no reliable
+        // offset for the next one, so the reader must stop rather than try
+        // to resync on what looks like a fresh frame.
+        let mut wire = ((FD3_HEADER_MAX + 1) as u32).to_le_bytes().to_vec();
+        wire.extend_from_slice(&control_frame(r#"{"kind":"app.log"}"#));
+        assert!(
+            read_control_frames(&wire).is_empty(),
+            "a fatal decode error must end the stream, not resync on the next frame"
+        );
+    }
+
+    #[test]
+    fn a_truncated_frame_at_eof_yields_no_records() {
+        // Header promises 10 bytes; the wire closes 5 bytes short.
+        let mut wire = 10u32.to_le_bytes().to_vec();
+        wire.extend_from_slice(b"short");
+        assert!(read_control_frames(&wire).is_empty());
+    }
+
+    #[test]
+    fn the_cumulative_cap_stops_the_stream_once_exceeded() {
+        use std::io::Write;
+        let small = control_frame(r#"{"kind":"a"}"#);
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        let (tx, rx) = mpsc::channel();
+        // Two frames fit exactly; a third pushes cumulative bytes over.
+        spawn_control_reader(OwnedFd::from(reader), small.len() * 2, tx);
+        for _ in 0..3 {
+            writer.write_all(&small).expect("write frame");
+        }
+        drop(writer);
+
+        let records: Vec<_> = rx.into_iter().collect();
+        assert_eq!(
+            records.len(),
+            2,
+            "expected exactly the two frames the cap admits, got {records:?}"
+        );
     }
 
     #[test]
