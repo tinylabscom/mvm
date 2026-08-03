@@ -9,15 +9,24 @@ use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
 use mvm_protocol::l3::limits::MTU_V1;
 
 /// Ceiling on concurrent host sockets for one machine.
-pub const DEFAULT_MAX_HOST_SOCKETS: usize = 1024;
+///
+/// Sized against [`FLOW_BUFFER_BYTES`], the real per-flow cost (both socket
+/// ring buffers plus both per-flow device queues at MTU size) rather than
+/// the 32 KiB of ring buffers alone: the per-flow figure is 176,768 bytes,
+/// 5.4x the ring-buffer-only estimate this cap was first set against. At
+/// 1024 that put the worst case per machine near 173 MiB; at 256 it is back
+/// under 44 MiB, which is where the cap was always assumed to sit.
+pub const DEFAULT_MAX_HOST_SOCKETS: usize = 256;
 
 /// Descriptors held back for the process itself: audit log, vsock,
 /// control channel, logging, and slack.
 pub const FD_RESERVE: usize = 64;
 
 /// Concurrent half-open connections. Each parks a connecting descriptor,
-/// so this is sized for a burst, not for a flood.
-pub const DEFAULT_MAX_HALF_OPEN: usize = 128;
+/// so this is sized for a burst, not for a flood, and scales with
+/// [`DEFAULT_MAX_HOST_SOCKETS`]: a half-open entry holds a real file
+/// descriptor, so it draws on the same budget an established socket does.
+pub const DEFAULT_MAX_HALF_OPEN: usize = 32;
 
 /// How long a half-open entry waits for its host connect.
 pub const HALF_OPEN_TIMEOUT_MILLIS: u64 = 10_000;
@@ -144,9 +153,9 @@ mod tests {
         assert_eq!(FLOW_TX_QUEUE_DEPTH, 31 + 32 + 2);
         // 32 KiB of ring buffers + (31 + 65) × 1500 bytes of device queues.
         assert_eq!(FLOW_BUFFER_BYTES, 32_768 + 144_000);
-        // 1024 flows at that, plus the handle's own 2 × 256 × 1500.
-        assert_eq!(MEMORY_CEILING_BYTES, 1024 * 176_768 + 768_000);
-        assert_eq!(MEMORY_CEILING_BYTES, 181_778_432);
+        // 256 flows at that, plus the handle's own 2 × 256 × 1500.
+        assert_eq!(MEMORY_CEILING_BYTES, 256 * 176_768 + 768_000);
+        assert_eq!(MEMORY_CEILING_BYTES, 46_020_608);
         const {
             assert!(
                 DEFAULT_MAX_HOST_SOCKETS < mvm_net::l3::flow::DEFAULT_MAX_FLOWS,

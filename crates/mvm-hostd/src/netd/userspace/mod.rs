@@ -158,7 +158,7 @@ impl UserspaceSocketDatapath {
         // Symmetric, and at the machine-wide default: this is the one
         // device a machine has, so its depth does not multiply by the
         // socket cap the way a flow's does. The asymmetric per-flow
-        // derivation exists to keep 1024 copies affordable; against a
+        // derivation exists to keep 256 copies affordable; against a
         // single queue there is no such pressure, in either direction.
         // (Not "because its stack emits nothing" — an interface answers
         // unmatched ingress with a reset or an unreachable whether or not
