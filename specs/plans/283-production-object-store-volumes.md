@@ -384,6 +384,11 @@ Merged implementation PRs so far: mvm
 prematurely on 2026-08-02; the worker-handoff follow-up and its evidence must
 land before the shipped ledger is final.
 
+Follow-up review: mvm
+[`#2100`](https://github.com/tinylabscom/mvm/pull/2100) and mvmd
+[`#203`](https://github.com/tinylabscom/mvmd/pull/203). Both remain draft and
+issue #2040 remains open until their required matrices are green and they land.
+
 ## Out of scope
 
 - A direct general-purpose object-store FUSE filesystem.
