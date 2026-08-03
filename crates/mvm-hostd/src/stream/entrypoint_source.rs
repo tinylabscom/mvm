@@ -389,7 +389,8 @@ mod tests {
         let manifest = broker
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .seal();
+            .seal()
+            .expect("a persisting broker seals");
         assert_eq!(manifest.chunks.len(), 1, "the released capture still seals");
 
         assert!(!sink.is_recorded());

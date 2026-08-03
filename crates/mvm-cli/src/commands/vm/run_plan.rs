@@ -369,6 +369,7 @@ fn synthesis_input_for_app<'a>(workload: &'a Workload, app: &'a App) -> Result<S
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        stream_retention: Default::default(),
     })
 }
 

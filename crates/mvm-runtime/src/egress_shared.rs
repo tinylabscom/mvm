@@ -60,6 +60,24 @@ pub fn decode_plan_secrets_from_state(
     Ok(Some((plan.secrets, plan.redaction, plan.tenant.0)))
 }
 
+/// The output-retention mode an admitted plan was signed with.
+///
+/// Read off the launch config's own copy of the plan rather than the state
+/// dir, so a warm claim answers it before the child has a state dir at all —
+/// the same source [`effective_vsock_egress`] partitions the warm pool on.
+///
+/// Every uncertain case answers `Persist`: an unadmitted boot, a plan that
+/// will not decode, a plan predating the field. Recording is the safe side of
+/// this decision — the failure mode of the wrong answer here is a transcript
+/// that exists when nobody asked for one, against a workload silently going
+/// unrecorded.
+pub fn plan_stream_retention(plan_json: Option<&str>) -> mvm_core::plan::StreamRetention {
+    plan_json
+        .and_then(|json| mvm_core::plan::plan_from_admitted_json(json).ok())
+        .map(|plan| plan.stream_retention)
+        .unwrap_or_default()
+}
+
 /// True when `plan_json` — an admitted plan in either the bare or the signed
 /// shape — binds at least one egress secret.
 ///
@@ -119,6 +137,34 @@ mod tests {
         let out = decode_plan_secrets_from_state(&dir).unwrap();
         assert!(out.is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every shape that is not an explicit, decodable opt-out has to come back
+    /// recording — an undecodable plan reading as `Ephemeral` would turn a
+    /// parse bug into a silently unrecorded workload.
+    #[test]
+    fn retention_reads_persist_unless_a_decodable_plan_opts_out() {
+        use mvm_core::plan::StreamRetention;
+        use mvm_core::plan::test_support::PlanFixture;
+
+        assert_eq!(plan_stream_retention(None), StreamRetention::Persist);
+        assert_eq!(
+            plan_stream_retention(Some("not a plan")),
+            StreamRetention::Persist
+        );
+        assert_eq!(
+            plan_stream_retention(Some(&plan_json_without_secrets())),
+            StreamRetention::Persist
+        );
+
+        let opted_out = PlanFixture::new()
+            .stream_retention(StreamRetention::Ephemeral)
+            .build();
+        let json = serde_json::to_string(&opted_out).unwrap();
+        assert_eq!(
+            plan_stream_retention(Some(&json)),
+            StreamRetention::Ephemeral
+        );
     }
 
     #[test]

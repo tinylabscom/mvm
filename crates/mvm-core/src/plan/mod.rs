@@ -65,8 +65,8 @@ pub use types::{
     AuditTaxonomy, DepsVolumeBinding, DepsVolumeBindingError, FsPolicyRef, HostShareGrant,
     KeyRotationSpec, Nonce, NonceParseError, PlanId, PlanSeccompTier, PlanSeccompTierParseError,
     PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
-    SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef, TenantId, TimeoutSpec, Variant,
-    WorkloadId, WorkloadIntent,
+    SecretReleasePolicy, SecretSource, ShareKind, SignedImageRef, StreamRetention, TenantId,
+    TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
 };
 pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,

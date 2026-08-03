@@ -360,25 +360,27 @@ gates them:
 
 ## Deliverables
 
-- [ ] `specs/adrs/035-workload-stream-plane.md` — posture, the claim-15 trade
-      stated plainly, the input asymmetry, the tracing boundary, residual risks.
+- [x] `specs/adrs/035-workload-stream-plane.md` — posture, the tracing
+      boundary, the redaction trade, and the three shipped limits. The claim-15
+      trade and the input asymmetry stay with the input plane (T11–T16), which
+      is where that decision is actually made.
 - [ ] Claim 15 reworded and claim 17 added to the claims table in
       `specs/adrs/001-microvm-security-posture.md`, each with `fn:`/`ci:`
       witnesses that `xtask check-claim-catalog` resolves.
-- [ ] `CLAUDE.md` corrected on three drifts this plan had to work around: the
+- [x] `CLAUDE.md` corrected on three drifts this plan had to work around: the
       claims ledger lives in ADR-001, not `specs/claims/catalog.md`;
       `mvm-client` has no `dyn MvmClient` facade; and the claim-12 narrative
       names `audit_chain_carries_no_payload_bytes` as a witness, which exists
       nowhere in the tree. The ADR-001 ledger row is correct, so
       `check-claim-catalog` never caught it — only the prose is wrong. Audit the
       rest of that narrative for the same failure while fixing it.
-- [ ] Website documentation:
+- [x] Website documentation (Phase 1 half):
       `public/src/content/docs/guides/workload-output-streaming.md` (following
-      output live and after exit, the retention and verification model, feeding
-      a running workload); the stream surfaces added to
-      `public/src/content/docs/reference/cli-commands.md`; and the claim-15
-      rewording plus claim 17 reflected under
-      `public/src/content/docs/security/`.
+      output live and after exit, the verification model, the `--stream`
+      filter, what a truncation or gap notice means, and the three limits); the
+      stream surfaces added to
+      `public/src/content/docs/reference/cli-commands.md`. Feeding a running
+      workload, the claim-15 rewording, and claim 17 belong to T15–T16.
 - [ ] `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` updated in the same
       change as each workstream lands.
 
@@ -1824,7 +1826,7 @@ git commit -am "feat(hostd): seal the stream transcript for detached workloads"
 - Produces: `ExecutionPlanInput.stream_retention: StreamRetention`;
   `StreamRetention::{Persist, Ephemeral}` defaulting to `Persist`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -1843,16 +1845,35 @@ fn admission_records_the_retention_mode_in_the_chain() {
 The second test is the property that makes an absent transcript attributable
 rather than ambiguous.
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-core plan::` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-core plan::` plus
+  `cargo nextest run -p mvm-hostd` (the emitter, and therefore the chain
+  assertion, lives in `mvm-hostd`, not `mvm-core`) — FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add the field with `#[serde(default)]`, thread it into `plan.admitted`, and have
 the broker skip `TranscriptWriter` (live fan-out only) under `Ephemeral`.
 
-- [ ] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-core plan::` — PASS.
+As landed: `StreamRetention` lives in `mvm-protocol::plan::types` beside
+`NetworkMode`; the field is **always serialized** rather than omitted at its
+default, so the signed bytes state the decision instead of implying it by
+absence. `StreamBroker::live_only` is the ephemeral constructor, `seal()`
+returns `Option<TranscriptManifest>` (no manifest, rather than an empty one
+asserting the workload printed nothing), and `StreamPlane::attach` never
+creates a capture directory for an ephemeral run — while still discarding a
+previous recording boot's transcript, so nobody else's recording can be read as
+this run's. The mode reaches the plane off the launch config's own copy of the
+admitted plan (`egress_shared::plan_stream_retention`), which answers `Persist`
+for every uncertain case.
 
-- [ ] **Step 5: Write ADR-035 and the guide**
+The plan-payload-freedom witness this plan owed itself is
+`stream_audit_entries_carry_the_binding_and_no_payload_bytes`: it pins the
+*exhaustive* label set of a `stream.subscribed` entry, so a future label
+carrying captured bytes fails whatever it is called.
+
+- [x] **Step 4: Run to verify it passes** — the same two — PASS.
+
+- [x] **Step 5: Write ADR-035 and the guide**
 
 ADR-035 records: the two-source architecture and why vsock-only goes dark on
 boot failure; ring retention over fail-closed bounds; hash-chain plus seal;
@@ -1861,16 +1882,22 @@ not what was written); the tracing boundary; the always-on retention default and
 its signed opt-out. The guide covers following output live and after exit, the
 verification model, and the `--stream` filter.
 
-Correct `CLAUDE.md`'s two drifts: the claims ledger is the table in
-`specs/adrs/001-microvm-security-posture.md`, not `specs/claims/catalog.md`; and
-`mvm-client` has no `dyn MvmClient` facade.
+Correct `CLAUDE.md`'s drifts: the claims ledger is the table in
+`specs/adrs/001-microvm-security-posture.md`, not `specs/claims/catalog.md`;
+`mvm-client` has no `dyn MvmClient` facade; and the claim-12 narrative names
+four tests, three `xtask check-handler-*` gates, and a `fuzz_service_call.rs`
+target that **none of** exist. The audit of "the rest of that narrative" found
+the same failure in claim 13 (all six named tests absent), claim 10
+(`test_resolve_network_policy_default_is_deny_all` absent), and five dead
+`specs/` paths. All corrected against the ADR-001 rows, which were right
+throughout.
 
-- [ ] **Step 6: Run the doc gates**
+- [x] **Step 6: Run the doc gates**
 
 Run: `cargo run -p xtask check-doc-claims && cargo run -p xtask check-adr-coverage && cargo run -p xtask check-no-overclaim && cargo test --workspace --doc`
 Expected: clean.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```sh
 git commit -am "feat(plan): signed stream retention mode, ADR-035, and the streaming guide"

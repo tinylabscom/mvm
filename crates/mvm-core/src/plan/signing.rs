@@ -221,6 +221,7 @@ pub mod test_support {
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
+            stream_retention: Default::default(),
             schema_version: SCHEMA_VERSION,
             plan_id: PlanId("01HXTESTPLAN000000000000".to_string()),
             plan_version: 1,

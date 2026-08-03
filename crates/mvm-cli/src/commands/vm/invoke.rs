@@ -1282,6 +1282,7 @@ mod captured_tests {
                     vm_name: vm,
                     console_log: &state.join("console.log"),
                     redaction: &redaction,
+                    retention: mvm_core::plan::StreamRetention::Persist,
                 })
                 .expect("attach a plane");
 
@@ -1486,6 +1487,7 @@ mod captured_tests {
                 vm_name: vm,
                 console_log: &state.join("console.log"),
                 redaction: &redaction,
+                retention: mvm_core::plan::StreamRetention::Persist,
             })
             .expect("attach a plane");
 

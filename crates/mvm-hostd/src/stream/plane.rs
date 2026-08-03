@@ -85,7 +85,9 @@ struct VmStream {
     console: Option<ConsoleSourceHandle>,
     server: StreamServerHandle,
     broker: SharedBroker,
-    transcript_dir: PathBuf,
+    /// Where this capture's manifest goes, or `None` when the plan admitted
+    /// the run as ephemeral and there is no transcript to write one for.
+    transcript_dir: Option<PathBuf>,
 }
 
 /// The per-process registry of live per-VM stream captures.
@@ -130,10 +132,17 @@ impl StreamPlane {
         if registry.contains_key(vm) {
             return Ok(());
         }
-        let transcript_dir = config::vm_stream_transcript_dir(vm);
+        // Where this VM's capture lives, whether or not this run writes one:
+        // the discard below has to reach a previous run's transcript even when
+        // this run keeps none. An ephemeral run gets a broker and a socket and
+        // no disk at all — the directory is never created, so the mode is
+        // visible as an absence rather than as an empty artifact somebody has
+        // to interpret.
+        let capture_dir = config::vm_stream_transcript_dir(vm);
+        let transcript_dir = capture.retention.persists().then(|| capture_dir.clone());
         let broker: SharedBroker = Arc::new(Mutex::new(build_broker(
             vm,
-            &transcript_dir,
+            transcript_dir.as_deref(),
             capture.redaction,
         )?));
 
@@ -148,7 +157,12 @@ impl StreamPlane {
         // segments away. Fail the attach if they cannot go: the new writer
         // would otherwise lay chunks over files its manifest does not
         // describe. `server` unbinds on the way out.
-        discard_previous_capture(&transcript_dir)?;
+        //
+        // An ephemeral run discards too, and for a sharper reason: a previous
+        // recording boot's transcript left in place would be read as this
+        // run's, so the one shape worse than no recording — somebody else's,
+        // presented as yours — cannot arise.
+        discard_previous_capture(&capture_dir)?;
 
         registry.insert(
             vm.to_string(),
@@ -193,6 +207,10 @@ impl StreamPlane {
         let held = self.registry().remove(vm);
         match held {
             Some(stream) => seal_capture(vm, stream),
+            // Nothing held here, so this process cannot know whether the run
+            // was ephemeral. The journal answers it: an ephemeral capture
+            // wrote none, so the adopt finds nothing to rebuild and correctly
+            // does nothing.
             None => adopt_capture(vm),
         }
     }
@@ -230,15 +248,16 @@ impl ConsoleStreamer for StreamPlane {
 /// redaction policy the launch handed the substitution endpoint.
 fn build_broker(
     vm: &str,
-    transcript_dir: &Path,
+    transcript_dir: Option<&Path>,
     redaction: &RedactionPolicy,
 ) -> Result<StreamBroker> {
-    let writer = build_writer(vm, transcript_dir)?;
-    Ok(StreamBroker::new(
-        vm,
-        writer,
-        StreamRedaction::curated(redaction),
-    ))
+    let redaction = StreamRedaction::curated(redaction);
+    // Same seam either way. Retention decides whether the cleared bytes are
+    // also written down, never whether they are cleared.
+    match transcript_dir {
+        Some(dir) => Ok(StreamBroker::new(vm, build_writer(vm, dir)?, redaction)),
+        None => Ok(StreamBroker::live_only(vm, redaction)),
+    }
 }
 
 /// Provision the durable half: a fresh capture directory, a per-capture data
@@ -279,8 +298,17 @@ fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
 /// the module docs on why a boot starts from an empty one, and why this runs
 /// only after the socket claim.
 fn discard_previous_capture(dir: &Path) -> Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("read the capture dir {}", dir.display()))?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // No directory is the same state as an empty one, and it is the
+        // ordinary state for a first boot and for every ephemeral run — the
+        // recording path creates it later, when it has a writer to put in it.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(anyhow::Error::new(error))
+                .with_context(|| format!("read the capture dir {}", dir.display()));
+        }
+    };
     for entry in entries {
         let path = entry
             .with_context(|| format!("read the capture dir {}", dir.display()))?
@@ -348,10 +376,16 @@ fn seal_capture(vm: &str, stream: VmStream) {
         );
         return;
     };
-    let manifest = broker
+    let sealed = broker
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner)
         .seal();
+    let (Some(transcript_dir), Some(manifest)) = (transcript_dir, sealed) else {
+        // An ephemeral capture. Both halves are absent together — the broker
+        // has no manifest and the plane has no directory to put one in — so
+        // there is nothing to write and nothing lost by not writing it.
+        return;
+    };
     if let Err(error) = write_manifest(&transcript_dir, &manifest) {
         tracing::warn!(
             vm = %vm,
@@ -527,6 +561,7 @@ fn now_unix_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::plan::StreamRetention;
     use mvm_core::stream_client::{
         OutputRecord, OutputRequest, RecordOrigin, StreamAvailability, StreamOpts, open_vm_output,
     };
@@ -557,12 +592,22 @@ mod tests {
         (env, tmp)
     }
 
-    /// One workload's capture, the way the runner hands it over.
+    /// One workload's capture, the way the runner hands it over — recording,
+    /// which is what an admitted plan says unless it opts out.
     fn capture<'a>(vm: &'a str, console_log: &'a Path) -> ConsoleCapture<'a> {
         ConsoleCapture {
             vm_name: vm,
             console_log,
             redaction: &DEFAULT_REDACTION,
+            retention: StreamRetention::Persist,
+        }
+    }
+
+    /// The same capture under a plan that opted out of a durable transcript.
+    fn ephemeral_capture<'a>(vm: &'a str, console_log: &'a Path) -> ConsoleCapture<'a> {
+        ConsoleCapture {
+            retention: StreamRetention::Ephemeral,
+            ..capture(vm, console_log)
         }
     }
 
@@ -786,6 +831,88 @@ mod tests {
         assert_eq!(sealed_payloads("plane-last-words"), [b"kernel panic\n"]);
     }
 
+    /// The signed opt-out takes away the recording and nothing else. A run
+    /// that cannot be followed while it runs would be a different and much
+    /// worse feature than a run that is not kept.
+    #[test]
+    fn an_ephemeral_capture_still_streams_live() {
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-ephemeral-live");
+        let plane = StreamPlane::new();
+        plane
+            .attach(&ephemeral_capture("plane-ephemeral-live", &console))
+            .expect("attach");
+
+        let follower = Follower::attach("plane-ephemeral-live");
+        assert_eq!(follower.availability, StreamAvailability::LiveOnly);
+        std::fs::write(&console, b"still watchable\n").expect("write the console capture");
+        let record = follower.next();
+        assert!(
+            matches!(record.origin, RecordOrigin::Live { .. }),
+            "an ephemeral capture is served by the broker like any other: {:?}",
+            record.origin
+        );
+        assert_eq!(record.payload, b"still watchable\n");
+
+        plane.release("plane-ephemeral-live");
+    }
+
+    /// Nothing durable, and nothing that looks durable either: no capture
+    /// directory, no manifest, no journal for a later stop to adopt. An empty
+    /// artifact would be worse than none, because it asserts the workload
+    /// printed nothing.
+    #[test]
+    fn an_ephemeral_capture_leaves_nothing_on_disk() {
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-ephemeral-disk");
+        let plane = StreamPlane::new();
+        plane
+            .attach(&ephemeral_capture("plane-ephemeral-disk", &console))
+            .expect("attach");
+
+        std::fs::write(&console, b"unrecorded\n").expect("write the console capture");
+        let mut sink = plane.entrypoint_sink("plane-ephemeral-disk");
+        sink.ingest(StreamKind::Stdout, b"also unrecorded");
+        drop(sink);
+        plane.release("plane-ephemeral-disk");
+
+        let dir = config::vm_stream_transcript_dir("plane-ephemeral-disk");
+        assert!(
+            !dir.exists(),
+            "an ephemeral run must not create a capture dir at all: {}",
+            dir.display()
+        );
+        assert!(manifest_of("plane-ephemeral-disk").is_none());
+    }
+
+    /// A machine that recorded, then restarted under a plan that opted out,
+    /// must not leave the old run's transcript behind to be read as the new
+    /// one's. Somebody else's recording presented as yours is the one outcome
+    /// worse than no recording.
+    #[test]
+    fn an_ephemeral_restart_discards_the_previous_runs_recording() {
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-ephemeral-restart");
+        let first = StreamPlane::new();
+        first
+            .attach(&capture("plane-ephemeral-restart", &console))
+            .expect("first attach");
+        std::fs::write(&console, b"first run\n").expect("write the console capture");
+        first.release("plane-ephemeral-restart");
+        assert!(manifest_of("plane-ephemeral-restart").is_some());
+
+        let second = StreamPlane::new();
+        second
+            .attach(&ephemeral_capture("plane-ephemeral-restart", &console))
+            .expect("second attach");
+        second.release("plane-ephemeral-restart");
+
+        assert!(
+            manifest_of("plane-ephemeral-restart").is_none(),
+            "the previous run's manifest must not survive an ephemeral restart"
+        );
+    }
+
     #[test]
     fn both_sources_land_in_one_capture_with_the_entrypoint_keeping_its_channels() {
         // The design's premise, end to end: the console covers the windows the
@@ -850,6 +977,7 @@ mod tests {
                 vm_name: "plane-policy",
                 console_log: &console,
                 redaction: &narrowed,
+                retention: StreamRetention::Persist,
             })
             .expect("attach");
 

@@ -18,7 +18,7 @@ use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
     DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, NetworkMode, Nonce, PlanId,
     PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
-    SignedImageRef, TenantId, WorkloadId,
+    SignedImageRef, StreamRetention, TenantId, WorkloadId,
 };
 use crate::plan::verb::VerbId;
 use crate::protocol::broker::ServiceId;
@@ -213,6 +213,16 @@ pub struct ExecutionPlan {
     /// sidecar is attached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceId>,
+
+    /// Whether this workload's captured output is kept after the run.
+    ///
+    /// Always serialized, unlike the optional pins above: the point of
+    /// admitting the mode is that the signed bytes state it outright, so an
+    /// absent transcript is attributable to a decision rather than to a gap in
+    /// the record. `#[serde(default)]` still makes a plan without the field
+    /// deserialize as [`StreamRetention::Persist`], the recording default.
+    #[serde(default)]
+    pub stream_retention: StreamRetention,
 }
 
 #[cfg(test)]
@@ -293,6 +303,7 @@ mod tests {
             deps_volume: None,
             shares: Vec::new(),
             services: Vec::new(),
+            stream_retention: StreamRetention::Persist,
         }
     }
 
@@ -374,5 +385,33 @@ mod tests {
         let round: ExecutionPlan =
             serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
         assert_eq!(round.agent_verbs, with.agent_verbs);
+    }
+
+    /// The recording default has to survive both directions: a plan that says
+    /// nothing records, and a plan that opts out says so in the bytes that get
+    /// signed. Omitting `persist` from the wire would be the cheaper encoding
+    /// and the wrong one — the mode is only useful if the artifact states it.
+    #[test]
+    fn stream_retention_defaults_to_persist_and_states_itself_on_the_wire() {
+        let plan = minimal_plan();
+        assert_eq!(plan.stream_retention, StreamRetention::Persist);
+
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(
+            json.contains("\"stream_retention\":\"persist\""),
+            "the admitted mode must be in the signed bytes, not implied by absence: {json}"
+        );
+
+        // A plan predating the field still deserializes, and it records.
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value.as_object_mut().unwrap().remove("stream_retention");
+        let back: ExecutionPlan = serde_json::from_value(value).unwrap();
+        assert_eq!(back.stream_retention, StreamRetention::Persist);
+
+        let mut opted_out = plan.clone();
+        opted_out.stream_retention = StreamRetention::Ephemeral;
+        let round: ExecutionPlan =
+            serde_json::from_str(&serde_json::to_string(&opted_out).unwrap()).unwrap();
+        assert_eq!(round.stream_retention, StreamRetention::Ephemeral);
     }
 }

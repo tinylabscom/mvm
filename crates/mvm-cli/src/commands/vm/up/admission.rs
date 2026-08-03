@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 
-use mvm_core::plan::SynthesisInput;
+use mvm_core::plan::{StreamRetention, SynthesisInput};
 use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
@@ -258,6 +258,12 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             )
         }),
         services: p.services.clone(),
+        // Recorded, always, and not reachable from a flag. A caller who could
+        // turn the transcript off from the command line would leave an absent
+        // recording indistinguishable from a suppressed one; opting out is a
+        // decision for whoever authors and signs the plan, and it lands in the
+        // chain as `plan.admitted`'s retention label either way.
+        stream_retention: StreamRetention::Persist,
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {

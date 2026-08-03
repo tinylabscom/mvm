@@ -23,7 +23,7 @@ pub use types::{
     FsPolicyRef, HostShareGrant, InputKind, KeyRotationSpec, NetworkMode, Nonce, NonceParseError,
     PlanId, PlanSeccompTier, PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin,
     Resources, RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind,
-    SignedImageRef, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+    SignedImageRef, StreamRetention, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
 };
 pub use validity::FreshnessClaims;
 pub use verb::{VerbId, VerbIdError};

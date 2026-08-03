@@ -14,7 +14,7 @@ use mvm_agentd::vsock::BROKER_PORT;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_state_dir, vm_substitution_endpoint_socket, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
-use mvm_core::plan::{ExecutionPlan, SecretBinding};
+use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
@@ -30,7 +30,7 @@ use crate::checkpoint::{
     verify_lineage,
 };
 use crate::driver::{ChildForkRequest, RunningVm, StandbyParentSpawn, VmmDriver};
-use crate::egress_shared::decode_plan_secrets_from_state;
+use crate::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 use crate::standby_pool::SupervisorStandbyPool;
 use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
@@ -227,18 +227,25 @@ pub trait ConsoleStreamer: Send + Sync {
     fn stop(&self, vm_name: &str);
 }
 
-/// One workload's console capture: which VM, which file, and the redaction
-/// policy its recorded output is cleared under.
+/// One workload's console capture: which VM, which file, the redaction policy
+/// its recorded output is cleared under, and whether that output is kept.
 ///
 /// The policy rides along rather than being resolved on the far side because
 /// it is the *launch's* policy — the same value this call's caller already
 /// handed the substitution endpoint. A capture that picked its own would give
 /// one answer on egress and a different one in the transcript.
+///
+/// The retention mode rides along for the same reason and one more: it comes
+/// off the *signed plan*, so a streamer that read it from anywhere else would
+/// be honouring something nobody admitted.
 pub struct ConsoleCapture<'a> {
     pub vm_name: &'a str,
     /// The write-only capture file the backend is already writing.
     pub console_log: &'a Path,
     pub redaction: &'a RedactionPolicy,
+    /// Whether the admitted plan asked for a durable transcript. Capture and
+    /// live fan-out happen either way; this decides only what outlives the run.
+    pub retention: StreamRetention,
 }
 
 /// The hook a process that registered no real streamer gets: console bytes
@@ -444,6 +451,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             vm_name: &inputs.config.name,
             console_log: &socks.console_log,
             redaction: inputs.redaction,
+            retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         });
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed
@@ -620,6 +628,7 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             vm_name: &child.0,
             console_log: &socks.console_log,
             redaction: &redaction,
+            retention: plan_stream_retention(child_cfg.plan_json.as_deref()),
         });
 
         // (7) Close that window before the claim commits: deliver the token to

@@ -39,14 +39,15 @@
 //! | `*_policy` / `fs_policy` | `"local-default"` (resolver maps to Noops) |
 //! | `valid_from`/`valid_until` | now + 10 min window |
 //! | `nonce` | fresh 128 bits from `OsRng` per invocation |
+//! | `stream_retention` | caller-supplied; `Persist` unless a driver opts the run out of a durable transcript |
 //! | everything else | conservative defaults (no attestation, destroy-on-exit, etc.) |
 
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
     AuditTaxonomy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec, Nonce, PlanId,
     PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION,
-    SecretBinding, SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
-    WorkloadIntent,
+    SecretBinding, SecretReleasePolicy, SignedImageRef, StreamRetention, TenantId, TimeoutSpec,
+    WorkloadId, WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -172,6 +173,12 @@ pub struct SynthesisInput<'a> {
     /// the workload calls none: the broker answers `NotBound` and the launch
     /// path attaches no SDK sidecar.
     pub services: Vec<mvm_protocol::protocol::broker::ServiceId>,
+    /// Whether this workload's captured output is kept after the run.
+    /// [`StreamRetention::Persist`] (the default) writes an encrypted,
+    /// hash-chained transcript sealed at exit; `Ephemeral` fans the output out
+    /// live and keeps nothing. Admitted rather than flagged so an absent
+    /// transcript is attributable to a signed decision.
+    pub stream_retention: StreamRetention,
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -293,6 +300,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
         services: input.services.clone(),
+        stream_retention: input.stream_retention,
     };
 
     // Content-address the finished plan. The fresh nonce makes this unique per
@@ -404,6 +412,7 @@ mod tests {
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),
+            stream_retention: Default::default(),
         }
     }
 

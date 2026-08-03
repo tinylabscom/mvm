@@ -139,6 +139,7 @@ export default defineConfig({
             { label: "Secrets and Credentials", slug: "guides/secrets-and-credentials" },
             { label: "Persistent Workspaces", slug: "guides/persistent-workspaces" },
             { label: "Audit and Receipts", slug: "guides/audit-and-receipts" },
+            { label: "Workload Output Streaming", slug: "guides/workload-output-streaming" },
             { label: "Observability and Results", slug: "guides/observability-and-results" },
             { label: "Manifests", slug: "guides/manifests" },
             { label: "Networking", slug: "guides/networking" },

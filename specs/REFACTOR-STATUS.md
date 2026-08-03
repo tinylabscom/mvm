@@ -44,7 +44,18 @@ for detailed scope and acceptance criteria.
         reports as incomplete, because nothing on disk records what the
         departed process shed on its way out. Teardown also kills before
         releasing the capture, so a dying guest's last words reach the chain
-  - [ ] T10 — signed stream-retention mode, ADR-035, and the Phase 1 guide
+  - [x] T10 — `ExecutionPlan.stream_retention` (`Persist` default / `Ephemeral`
+        opt-out) is admitted, labelled on `plan.admitted`, and honoured by the
+        plane: an ephemeral run gets the same broker, socket, redaction, chain
+        and fan-out, creates no capture directory, and seals to no manifest
+        rather than to an empty one that would assert the workload printed
+        nothing. ADR-035 records the posture including the three limits found
+        during execution (the console fallback is unredacted, the follow half
+        is open for detached workloads, a spliced read repeats its adopted
+        prefix). Website guide `guides/workload-output-streaming.md` plus the
+        stream surfaces in the CLI reference. `CLAUDE.md` corrected on the
+        claims-ledger location, the `mvm-client` facade, and the fabricated
+        claim-12/13 witness names
   - [ ] T11–T16 — the input plane (Phase 2)
   - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
         transcript is now sealed by whatever stops the VM. The *follow* half

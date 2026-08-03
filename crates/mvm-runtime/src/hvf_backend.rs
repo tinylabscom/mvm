@@ -906,6 +906,7 @@ mod tests {
             audit_labels: Default::default(),
             agent_verbs: None,
             services: Vec::new(),
+            stream_retention: Default::default(),
         };
         let plan = synthesize_plan(&input).expect("synthesize plan with secret");
         let json = serde_json::to_string(&plan).expect("serialize plan");

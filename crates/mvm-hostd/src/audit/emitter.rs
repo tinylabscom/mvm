@@ -142,6 +142,10 @@ pub mod stream_audit {
     /// Label: the stream sequence number the reader starts at. Records
     /// before it were produced before the attach and are not delivered.
     pub const LABEL_FROM_SEQ: &str = "stream_from_seq";
+    /// Label on `plan.admitted`: the retention mode the plan was admitted
+    /// under, so a later reader can tell a run that kept no transcript from a
+    /// run whose transcript went missing.
+    pub const LABEL_RETENTION: &str = "stream_retention";
 }
 
 /// Extract the `image.created` label set from a node's provenance attributes.
@@ -323,11 +327,23 @@ impl AuditEmitter {
     /// Emit `plan.admitted` — fires immediately after `admit_for_run`
     /// succeeds. Binds the plan_id, signer (via `audit_labels` extras),
     /// and the workload context.
+    ///
+    /// Also carries the admitted output-retention mode. Without it, a workload
+    /// with no transcript is ambiguous — nobody can tell a run that was
+    /// admitted not to keep one from a run whose recording was lost or
+    /// removed. The mode is a word off the signed plan, so recording it costs
+    /// nothing and settles the question from the chain alone.
     pub fn emit_admitted(&self, plan: &ExecutionPlan, signer_id: &str) -> Result<()> {
         self.emit(
             plan,
             "plan.admitted",
-            [("signer_id".to_string(), signer_id.to_string())],
+            [
+                ("signer_id".to_string(), signer_id.to_string()),
+                (
+                    stream_audit::LABEL_RETENTION.to_string(),
+                    plan.stream_retention.as_str().to_string(),
+                ),
+            ],
         )
     }
 
@@ -795,6 +811,98 @@ mod tests {
         );
         assert!(lines[0].contains("plan.admitted"));
         assert!(lines[1].contains("plan.launched"));
+    }
+
+    /// The property that makes an absent transcript attributable rather than
+    /// ambiguous: the mode the plan was admitted under is in the chain, so
+    /// "was this run recorded?" is answerable without the recording.
+    #[test]
+    fn admission_records_the_retention_mode_in_the_chain() {
+        use mvm_core::plan::StreamRetention;
+
+        for (retention, expected) in [
+            (StreamRetention::Persist, "persist"),
+            (StreamRetention::Ephemeral, "ephemeral"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+            let emitter =
+                AuditEmitter::with_dir(SigningKey::from_bytes(&seed), dir.path()).expect("emitter");
+            let plan = mvm_core::plan::test_support::PlanFixture::new()
+                .stream_retention(retention)
+                .build();
+            emitter.emit_admitted(&plan, "host:test").expect("emit");
+
+            let entry = only_entry(dir.path(), "local");
+            assert_eq!(entry["event"], "plan.admitted");
+            assert_eq!(
+                entry["labels"][stream_audit::LABEL_RETENTION],
+                expected,
+                "the admitted retention mode must be a label on the chain entry: {entry}"
+            );
+        }
+    }
+
+    /// A stream event names who attached and where in the sequence, and
+    /// carries none of what the workload printed.
+    ///
+    /// The exhaustive label-set assertion is the part that matters. A
+    /// substring check only refutes the payload a test happened to think of;
+    /// pinning the whole key set means a future label carrying captured bytes
+    /// fails here whatever it is called.
+    #[test]
+    fn stream_audit_entries_carry_the_binding_and_no_payload_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+        let key = SigningKey::from_bytes(&seed);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).expect("emitter");
+        let plan = fixture_plan("local", "plan-stream");
+
+        emitter
+            .emit_stream_subscribed(&plan, "vm-under-watch", 7, 42)
+            .expect("emit");
+
+        let entry = only_entry(dir.path(), "local");
+        assert_eq!(entry["event"], stream_audit::SUBSCRIBED_EVENT);
+        assert_eq!(entry["plan_id"], "plan-stream");
+        assert_eq!(
+            entry["labels"][stream_audit::LABEL_VM_NAME],
+            "vm-under-watch"
+        );
+        assert_eq!(entry["labels"][stream_audit::LABEL_READER_ID], "7");
+        assert_eq!(entry["labels"][stream_audit::LABEL_FROM_SEQ], "42");
+
+        let labels = entry["labels"].as_object().expect("labels object");
+        let mut keys: Vec<&str> = labels.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                stream_audit::LABEL_FROM_SEQ,
+                stream_audit::LABEL_READER_ID,
+                stream_audit::LABEL_VM_NAME,
+            ],
+            "a stream event carries the binding and nothing else"
+        );
+
+        verify_audit_chain(&dir.path().join("local.jsonl"), &vk)
+            .expect("the entry is chain-signed like any other");
+    }
+
+    /// The single entry in a tenant's chain, unwrapped from its signed
+    /// envelope. Panics rather than returning an error: a test that wrote one
+    /// entry and cannot read it back has already failed.
+    fn only_entry(audit_dir: &Path, tenant: &str) -> serde_json::Value {
+        let content = std::fs::read_to_string(audit_dir.join(format!("{tenant}.jsonl")))
+            .expect("read the chain");
+        let mut lines = content.lines();
+        let line = lines.next().expect("one entry");
+        assert!(lines.next().is_none(), "expected exactly one entry");
+        let envelope: serde_json::Value = serde_json::from_str(line).expect("envelope json");
+        envelope["entry"].clone()
     }
 
     #[test]

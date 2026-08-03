@@ -244,6 +244,7 @@ fn admit_standby_parent_plan(
         audit_labels: Default::default(),
         agent_verbs: None,
         services: Vec::new(),
+        stream_retention: Default::default(),
     };
     let ledger = InMemoryNonceLedger::new();
     admit_for_run(&input, &SystemClock, &ledger, None, None)

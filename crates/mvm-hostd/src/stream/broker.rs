@@ -169,7 +169,10 @@ impl StreamAudit {
 /// The host-side stream broker for one VM.
 pub struct StreamBroker {
     vm: String,
-    durable: DurableSink,
+    /// `None` for a capture admitted as ephemeral: nothing is written and
+    /// nothing is sealed. Everything else about the broker is identical, so
+    /// the mode cannot quietly change what a live follower sees.
+    durable: Option<DurableSink>,
     redaction: StreamRedaction,
     audit: Option<StreamAudit>,
     reader_bounds: CaptureBounds,
@@ -188,9 +191,28 @@ impl StreamBroker {
     /// [`StreamRedaction::curated`] — see that type for why the parameter is
     /// not a bare [`StreamRedactor`].
     pub fn new(vm: &str, writer: TranscriptWriter, redaction: StreamRedaction) -> Self {
+        Self::over(vm, Some(DurableSink::new(vm, writer)), redaction)
+    }
+
+    /// Build a broker that fans out and keeps nothing.
+    ///
+    /// The shape a plan admitted as ephemeral gets. Only the durable half goes
+    /// away: redaction, chaining, sequencing and fan-out are unchanged, so a
+    /// live follower sees the same records and verifies them the same way, and
+    /// nothing about the workload's observability *while it runs* is reduced.
+    /// What ends is the recording — [`seal`](Self::seal) has no manifest to
+    /// hand back, and a reader arriving after the VM is gone finds no
+    /// transcript of it.
+    pub fn live_only(vm: &str, redaction: StreamRedaction) -> Self {
+        Self::over(vm, None, redaction)
+    }
+
+    /// The one assembly both constructors go through, so the two shapes can
+    /// only ever differ in the durable half.
+    fn over(vm: &str, durable: Option<DurableSink>, redaction: StreamRedaction) -> Self {
         Self {
             vm: vm.to_string(),
-            durable: DurableSink::new(vm, writer),
+            durable,
             redaction,
             audit: None,
             reader_bounds: DEFAULT_READER_BOUNDS,
@@ -227,7 +249,14 @@ impl StreamBroker {
 
     /// Counters for everything this broker has done.
     pub fn counters(&self) -> StreamCounters {
-        let durable = self.durable.counts();
+        // An ephemeral capture has nothing to fail at persisting, so its
+        // durable counters are zero rather than absent — "wrote nothing on
+        // purpose" must not read as "lost everything".
+        let durable = self
+            .durable
+            .as_ref()
+            .map(DurableSink::counts)
+            .unwrap_or_default();
         StreamCounters {
             persist_failures: durable.missing(),
             persist_lapses: durable.lapses,
@@ -236,19 +265,29 @@ impl StreamBroker {
         }
     }
 
+    /// Whether this broker keeps a durable transcript.
+    pub fn persists(&self) -> bool {
+        self.durable.is_some()
+    }
+
     /// Block until every record ingested so far has reached the durable
     /// writer. Test-only: nothing in production waits on the store, which is
     /// the whole point of it being on another thread.
     #[cfg(test)]
     pub(in crate::stream) fn drain_transcript(&self) {
-        self.durable.drain();
+        if let Some(durable) = self.durable.as_ref() {
+            durable.drain();
+        }
     }
 
     /// The lock the durable writer takes for every append. Test-only: holding
     /// it is how a test stands in for a disk that stopped answering.
     #[cfg(test)]
     pub(in crate::stream) fn transcript_lock(&self) -> Arc<Mutex<TranscriptWriter>> {
-        self.durable.writer_lock()
+        self.durable
+            .as_ref()
+            .expect("a persisting broker has a writer")
+            .writer_lock()
     }
 
     /// Chunks accepted so far. Never decreases and never stalls — ingest has
@@ -311,7 +350,9 @@ impl StreamBroker {
         self.counters.ingested = self.counters.ingested.saturating_add(1);
         let cleared = self.clear_for_display(source, kind, bytes);
         let record = Arc::new(self.seal_record(source, cleared.kind, cleared.body));
-        self.durable.push(&record);
+        if let Some(durable) = self.durable.as_ref() {
+            durable.push(&record);
+        }
         self.fan_out(record);
         cleared.outcome
     }
@@ -328,8 +369,14 @@ impl StreamBroker {
     ///
     /// Waits for the writer thread to finish what is queued, so a record it
     /// accepted before the seal is a record the manifest accounts for.
-    pub fn seal(self) -> TranscriptManifest {
-        self.durable.seal()
+    ///
+    /// `None` for an ephemeral capture. Not an empty manifest: a manifest with
+    /// no chunks asserts that the workload produced nothing, which is a
+    /// different and false claim. The reason this capture has no transcript
+    /// lives in the plan's retention mode and in `plan.admitted`, not in a
+    /// zero-length artifact.
+    pub fn seal(self) -> Option<TranscriptManifest> {
+        self.durable.map(DurableSink::seal)
     }
 
     /// Run the chunk through the seam and count what it decided.
@@ -743,7 +790,7 @@ mod tests {
         assert_eq!(b.counters().redaction_failures, 1);
 
         let TestBroker { broker, dir } = b;
-        let manifest = broker.seal();
+        let manifest = broker.seal().expect("a persisting broker seals");
         // The chunk on disk is the marker, not the payload: ciphertext of
         // the withheld bytes would be a leak deferred, not prevented.
         assert_eq!(manifest.chunks.len(), 1);
@@ -773,7 +820,7 @@ mod tests {
             b"card 4111111111111111",
         );
 
-        let manifest = b.seal();
+        let manifest = b.seal().expect("a persisting broker seals");
         verify_sealed_root(&manifest).expect("sealed root");
         verify_chunks(&manifest, dir.path()).expect("chunks");
         assert_eq!(
@@ -790,6 +837,50 @@ mod tests {
         assert!(
             !bytes.windows(16).any(|w| w == b"4111111111111111"),
             "the transcript stores what was shown, not what was written"
+        );
+    }
+
+    /// An ephemeral broker is the same broker with the disk taken out:
+    /// redacted, chained, sequenced, delivered — and sealed to nothing.
+    #[test]
+    fn a_live_only_broker_fans_out_redacted_records_and_seals_no_manifest() {
+        let mut b = StreamBroker::live_only(
+            "vm-a",
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        );
+        assert!(!b.persists());
+        let mut reader = b.subscribe();
+
+        b.ingest(
+            StreamSource::Entrypoint,
+            StreamKind::Stdout,
+            b"card 4111111111111111",
+        );
+        b.ingest(StreamSource::Console, StreamKind::Stdout, b"second");
+
+        let window = reader.drain_verified();
+        assert_eq!(window.records.len(), 2, "the fan-out is unchanged");
+        assert_eq!(window.records[0].seq, 0);
+        assert_eq!(window.records[1].seq, 1);
+        assert_eq!(window.records[1].prev_hash, window.records[0].hash());
+        assert!(
+            !window.records[0]
+                .payload
+                .windows(16)
+                .any(|w| w == b"4111111111111111"),
+            "the redaction seam runs whether or not anything is written down"
+        );
+
+        let counters = b.counters();
+        assert_eq!(counters.ingested, 2);
+        assert_eq!(
+            (counters.persist_failures, counters.persist_shed),
+            (0, 0),
+            "nothing was lost; there was nowhere for it to go"
+        );
+        assert!(
+            b.seal().is_none(),
+            "no manifest, rather than one asserting the workload printed nothing"
         );
     }
 
@@ -995,7 +1086,7 @@ mod tests {
         b.drain_transcript();
         assert_eq!(b.counters().persist_failures, 5);
 
-        let manifest = b.seal();
+        let manifest = b.seal().expect("a persisting broker seals");
         verify_sealed_root(&manifest).expect("the truncated manifest still seals");
         verify_chunks(&manifest, dir.path()).expect("the chunks that landed verify");
         assert_eq!(manifest.chunks.len(), 2);
@@ -1022,7 +1113,7 @@ mod tests {
         b.ingest(StreamSource::Entrypoint, StreamKind::Stdout, b"all of it");
         b.drain_transcript();
         assert_eq!(b.counters().persist_failures, 0);
-        let manifest = b.seal();
+        let manifest = b.seal().expect("a persisting broker seals");
         assert!(!manifest.is_truncated());
         assert_eq!(manifest.refused_chunks, 0);
     }
@@ -1142,7 +1233,7 @@ mod tests {
             "a full budget prunes; it is not a store failure"
         );
 
-        let manifest = b.seal();
+        let manifest = b.seal().expect("a persisting broker seals");
         assert!(manifest.evicted_chunks > 0);
         assert!(manifest.is_truncated(), "a window declares itself a window");
         assert_eq!(manifest.retention, RetentionPolicy::Ring);
@@ -1180,7 +1271,7 @@ mod tests {
         // No drain: `seal` is the production teardown, and it has to be the
         // thing that waits — a manifest missing whatever was still queued
         // would be a hole nothing declares.
-        let manifest = b.seal();
+        let manifest = b.seal().expect("a persisting broker seals");
         assert!(
             !manifest.chunks.is_empty(),
             "a healthy writer racing an unbounded producer must still land some records — \
@@ -1253,7 +1344,7 @@ mod tests {
         assert!(shed > 0, "a wedged writer must actually shed");
         assert_eq!(b.counters().persist_failures, shed);
 
-        let manifest = b.seal();
+        let manifest = b.seal().expect("a persisting broker seals");
         assert!(
             manifest.is_truncated(),
             "a transcript that lost records must not seal as complete"
@@ -1293,7 +1384,10 @@ mod tests {
             files <= ceiling,
             "20k chunks left {files} files, expected at most {ceiling}"
         );
-        assert_eq!(b.seal().chunks.len(), 20_000);
+        assert_eq!(
+            b.seal().expect("a persisting broker seals").chunks.len(),
+            20_000
+        );
     }
 
     #[test]

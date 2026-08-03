@@ -71,6 +71,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine logs <name>` | View the workload's captured stdout/stderr — live while it runs, and still readable after it exits (`-f` to follow, `-n` for how many recorded records to replay first; a record is one captured write, not one line). Falls back to the machine's console log when no output capture exists, saying so. Exits nonzero when there is no source at all, and warns on stderr when what it shows is a window rather than the whole run — a truncated capture, a pruned live window, or a hole between the recorded and live halves |
 | `mvmctl machine logs <name> --stream <stdout\|stderr\|trace\|all>` | Show one channel only (default `all`). Workload stdout goes to stdout and stderr to stderr, so a pipeline filters the channel it asked for. Refused on a machine whose only source is its console log: that log merges both channels with no labels, so narrowing it has no honest answer. A recorded capture holding nothing on the requested channel is reported as such, not as a missing capture |
 | `mvmctl machine logs <name> --hypervisor` | View the VMM's own diagnostic log (`firecracker.log`) rather than workload output, `-f` to follow it. Firecracker writes one; the other backends do not |
+| `mvmctl machine logs <name> -f \| grep …` | Workload stdout is written to stdout and stderr to stderr, so an ordinary pipeline filters the channel it asked for. A closed pipe (`\| head -1`) ends the read cleanly rather than erroring |
 | `mvmctl machine diff <name>` | Show filesystem changes in a running VM (created/modified/deleted since boot) |
 | `mvmctl machine diff <name> --json` | Output filesystem diff as JSON |
 | `mvmctl machine wait <name> --for <component>` | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2. |
@@ -456,6 +457,46 @@ guest, on any tier.
 | `mvmctl machine check-artifact <artifact.mvm>` | Verify a portable artifact and preview its admission posture without extracting or booting |
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
+
+### Workload output capture
+
+`machine run` attaches to the workload's output by default — `--detach`,
+`--json`, and `--up-json` are the three ways to opt out. Interrupting an
+attached run on a **persistent** machine detaches from the output and leaves
+the machine running; the command says so before it blocks.
+
+Every workload's stdout and stderr are captured whether or not anybody is
+watching. Two sources feed one stream: the guest's entrypoint frames over
+vsock, which keep their channel, and the hypervisor's console capture, which
+covers boot and anything written after the guest agent is gone. Console-sourced
+records are recorded as `stdout` whichever fd wrote them, because a console is
+one merged byte stream; a narrowed `--stream` read prints a note saying so.
+
+Records are hash-chained and the recorded transcript is sealed to a Merkle root
+at exit, so `machine logs` verifies what it shows and **exits nonzero on a
+verification failure**, mirroring `mvmctl trust audit verify`. A pruned window
+is not a failure: retention is a ring, so a chatty workload loses its oldest
+records rather than being throttled or killed, and the loss is announced as a
+gap or truncation notice on stderr.
+
+Recording is on by default and the opt-out is `ExecutionPlan.stream_retention`
+(`persist` / `ephemeral`) — a signed plan field, deliberately not a CLI flag,
+recorded on the `plan.admitted` audit entry so an absent transcript is
+attributable rather than ambiguous.
+
+Three limits are worth knowing before you rely on this:
+
+- The recorded transcript is redacted; the **console fallback is not**, so a
+  read that falls back to (or splices in) the console shows raw guest bytes.
+- A machine started with `-d` is captured only for as long as the starting
+  process lives, so a detached machine's later output reaches no recorder. You
+  still see it, via the unchained console log.
+- A spliced read **repeats** the part the recording already showed, because
+  console byte offsets and transcript sequence numbers share no coordinate.
+  Duplicated, never lost.
+
+Full walkthrough: [Workload output
+streaming](/guides/workload-output-streaming/).
 
 ### Runtime overlay updates
 

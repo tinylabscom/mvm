@@ -1209,6 +1209,7 @@ mod tests {
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),
+            stream_retention: Default::default(),
             schema_version: SCHEMA_VERSION,
             // Overwritten below with the content-address, matching what
             // sign_plan stamps — so a test's `plan.plan_id` equals the id that

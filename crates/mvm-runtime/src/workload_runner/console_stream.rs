@@ -78,6 +78,7 @@ mod tests {
             vm_name: vm,
             console_log: Path::new("/dev/null"),
             redaction: &REDACTION,
+            retention: mvm_core::plan::StreamRetention::Persist,
         }
     }
 

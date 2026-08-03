@@ -956,6 +956,7 @@ mod tests {
                 vm_name: "planed-vm",
                 console_log: &console,
                 redaction: &redaction,
+                retention: mvm_core::plan::StreamRetention::Persist,
             })
             .expect("attach a plane");
 

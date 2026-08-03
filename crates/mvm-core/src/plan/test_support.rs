@@ -16,7 +16,8 @@ use crate::plan::execution_plan::{ExecutionPlan, SCHEMA_VERSION};
 use crate::plan::types::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, FsPolicyRef,
     KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
-    RuntimeProfileRef, SecretBinding, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
+    RuntimeProfileRef, SecretBinding, SignedImageRef, StreamRetention, TenantId, TimeoutSpec,
+    WorkloadId,
 };
 use mvm_protocol::protocol::broker::ServiceId;
 
@@ -32,6 +33,7 @@ pub struct PlanFixture {
     valid_from: Option<DateTime<Utc>>,
     valid_until: Option<DateTime<Utc>>,
     services: Vec<ServiceId>,
+    stream_retention: StreamRetention,
 }
 
 impl Default for PlanFixture {
@@ -46,6 +48,7 @@ impl Default for PlanFixture {
             valid_from: None,
             valid_until: None,
             services: Vec::new(),
+            stream_retention: StreamRetention::default(),
         }
     }
 }
@@ -89,6 +92,14 @@ impl PlanFixture {
     /// broker's dispatch gate and the SDK-sidecar attachment decision.
     pub fn services(mut self, services: Vec<ServiceId>) -> Self {
         self.services = services;
+        self
+    }
+
+    /// Whether this plan's captured output is kept after the run. The default
+    /// is [`StreamRetention::Persist`]; a test pins `Ephemeral` to exercise the
+    /// signed opt-out.
+    pub fn stream_retention(mut self, retention: StreamRetention) -> Self {
+        self.stream_retention = retention;
         self
     }
 
@@ -161,6 +172,7 @@ impl PlanFixture {
             deps_volume: None,
             shares: Vec::new(),
             services: self.services,
+            stream_retention: self.stream_retention,
         }
     }
 }
@@ -201,6 +213,21 @@ mod tests {
         assert_eq!(plan.nonce, Nonce::from_bytes([7u8; 16]));
         assert_eq!(plan.valid_from, from);
         assert_eq!(plan.valid_until, until);
+    }
+
+    #[test]
+    fn stream_retention_defaults_to_persist() {
+        assert_eq!(
+            PlanFixture::new().build().stream_retention,
+            StreamRetention::Persist
+        );
+        assert_eq!(
+            PlanFixture::new()
+                .stream_retention(StreamRetention::Ephemeral)
+                .build()
+                .stream_retention,
+            StreamRetention::Ephemeral
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: Default::default(),
+        stream_retention: Default::default(),
         schema_version: SCHEMA_VERSION,
         plan_id: PlanId("test-plan-001".to_string()),
         plan_version: 1,
