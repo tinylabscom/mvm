@@ -88,11 +88,47 @@ Worth knowing generally: **a stale supervisor makes a fixed build look broken.**
 supervisor processes before believing a live result. The tell was the console line's missing field, not
 the error message.
 
+## Claims 1 and 2, witnessed adversarially
+
+A second probe ran a guest that *attempts* host-fs access and *attempts* elevation, rather than one
+reporting its starting uid. Same command shape, both backends.
+
+| Probe | HVF | Firecracker |
+|---|---|---|
+| `id` | `uid=901 gid=901` | `uid=901 gid=901` |
+| `CapEff` | `0` | `0` |
+| `CapBnd` | full (`000001ffffffffff`) | full (`000001ffffffffff`) |
+| `NoNewPrivs` | `0` | `0` |
+| `su` / `sudo` / setuid binaries | fails / absent / **0 present** | fails / absent / **0 present** |
+| write `/etc/passwd` | read-only fs | read-only fs |
+| `chown 0:0 /tmp` | operation not permitted | read-only fs |
+| **`unshare -r id`** | **`uid=0(root)`** | `unshare: Invalid argument` |
+| `mount -t proc` | permission denied | denied |
+| virtiofs / 9p / nfs mounts | **none** | **none** |
+| `/proc/1/root` | permission denied | permission denied |
+
+**Claim 1 holds on both.** No host-fs transport is mounted at all — the count of virtiofs/9p/nfs mounts is
+zero, so there is nothing to escape from. `/proc/1/root` is refused.
+
+**Claim 2's outcome holds on both, but for weaker reasons than the claim names.** Nothing escalates: no
+setuid binaries exist, the rootfs is read-only, and `CapEff` is empty. But `NoNewPrivs` is `0` and the
+capability bounding set is *full*, so the mechanism ADR-001 names for claims 1/2 —
+`setpriv --bounding-set=-all --no-new-privs` (W2.3) — is not applied to the OCI workload process. It is
+wired from the nix-built guest path, not this one. The outcome currently rests on the image shipping zero
+setuid binaries rather than on the named control.
+
+**One genuine per-backend divergence.** `unshare -r` yields uid 0 in a user namespace on HVF and is
+rejected on Firecracker. `nix/images/kernel/workload.nix` lists `NAMESPACES` and `CGROUPS` under
+`requiredExtraDisables` precisely "so Kconfig cannot silently select them back on", noting they stay
+enabled only in `builder.nix` for the Nix sandbox. Firecracker matches that intent; HVF boots a kernel
+that does not. Filed as #2101, together with the `no_new_privs` gap.
+
+Both are the same family as #2091 and were found the same way: per-claim CI is green in every case, and
+only running both backends shows the difference.
+
 ## Not witnessed here
 
 - **Claim 15** (no interactive access to a sealed production microVM) — needs a sealed prod image; the
   alpine image used here is neither sealed nor prod.
-- **Claims 1 and 2 proper** — witnessing these needs a guest that *attempts* host-fs access and *attempts*
-  elevation, not a report of its starting uid.
 - The `forward proxy failed to start: binding forward proxy on 127.0.0.1:18080` line in the guest console
   is the known NIC-less loopback gap, pre-existing and untouched by this work.
