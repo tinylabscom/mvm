@@ -170,17 +170,18 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 
 ## Security model
 
-mvm makes fifteen CI-enforced security claims (numbered 1–15), plus a
-`Preview` claim 16 (egress-substitution leak-gate, ADR-023 — witnesses
-are machine-checked but promotion into ADR-001's numbered prose is a
-pending maintainer decision, mirroring claim 14's path). Each one is
+mvm makes fifteen CI-enforced security claims (numbered 1–15), plus two
+`Preview` claims: 16 (egress-substitution leak-gate, ADR-023) and 17
+(workload input plane). For both, witnesses are machine-checked but
+promotion into ADR-001's numbered prose is a pending maintainer
+decision, mirroring claim 14's path. Each one is
 backed by a test or a workflow gate. **ADR-001
 (`specs/adrs/001-microvm-security-posture.md`) is the source of truth**
 for the claim numbering, threat model, and per-backend tier matrix;
 this section is the summary.
 
 **The ledger is the claims table inside ADR-001**, not a separate
-catalog file: `xtask check-claim-catalog` parses that table (rows 1–16,
+catalog file: `xtask check-claim-catalog` parses that table (rows 1–17,
 witnesses spelled `fn:<test_name>` / `ci:<job_name>`) and fails when a
 named witness stops existing. `model/claims.toml` is the parallel
 conformance ID register that `xtask check-conformance` reads. There is
@@ -404,7 +405,8 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
     `workflow_dispatch`-only, so none of the six gate a PR; they run
     on manual dispatch.
-15. **No interactive access to a sealed production microVM.** The sole
+15. **A sealed production microVM has no shell, no `do_exec`, no PTY,
+    and no input that can change what runs.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
     console (`crates/mvm-agentd/src/console.rs`), which is gated behind
     the `interactive` Cargo feature — so a sealed prod agent (built
@@ -425,6 +427,25 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     sibling to `prod-agent-runentry-contract`. Serial-console passthrough
     was considered and rejected (fatal on an input-less console); there
     is exactly one interactive transport and it is dev-only.
+    This claim used to hold by **absence** — a sealed VM had no host→guest
+    byte path at all. The workload input plane built one, so it now holds
+    by policy for the input half: bytes reach the already-running
+    entrypoint's stdin and nothing else, cannot select a program or alter
+    argv or env (the entrypoint is fixed at admission), and are refused
+    without a grant in the signed plan. See `Preview` claim 17.
+
+`Preview` claim 17 — **workload stdin is grant-gated, single-writer,
+secret-scanned across frames, and every refusal audited**
+(`crates/mvm-hostd/src/stream/input_gate.rs`). It is a preview and not a
+numbered claim because three of its four legs have no production caller
+yet: the known-secret set is empty on every real VM (`InputGate::bind`
+is never called outside tests), the sealed-tier shell-entrypoint refusal
+is dormant (every call site passes an empty `entrypoint_argv`), and the
+granted half has no operator surface (nothing calls `open_input`,
+`invoke` always sends `stream_input: false`). The ungranted-refusal half
+*is* proven end to end against a real `admit_for_run` and
+`verify_audit_chain`. ADR-001's ledger carries the full limits note; do
+not paraphrase this row as enforced without it.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the
 host-side vsock proxy socket is mode 0700 (W1.2), the proxy port

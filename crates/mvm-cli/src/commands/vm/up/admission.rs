@@ -234,10 +234,11 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     // must not have already spent the boot work it exists to avoid. Gated on
     // `restrict_agent_verbs` — the same "non-interactive, non-ad-hoc, non-dev,
     // sealed image" posture the ProdSafe verb attenuation uses — because that
-    // is this codebase's existing "sealed production" signal, and D7 is
-    // scoped to exactly that tier. A dev, interactive, or ad-hoc-argv run
-    // already carries a DevOnly Exec grant, so refining its input grant would
-    // not close anything the Exec grant hasn't already opened.
+    // is this codebase's existing "sealed production" signal, and the
+    // shell-entrypoint refusal is scoped to exactly that tier. A dev,
+    // interactive, or ad-hoc-argv run already carries a DevOnly Exec grant, so
+    // refining its input grant would not close anything the Exec grant hasn't
+    // already opened.
     if p.restrict_agent_verbs
         && mvm_protocol::stream::input::grants_input_for(&p.services)
         && entrypoint_is_shell_shaped(&p.entrypoint_argv, p.entrypoint_shebang.as_deref())
@@ -1434,11 +1435,11 @@ mod admit_plan_tests {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // D7 — `--prod` refuses the input grant for a shell-shaped
-    // entrypoint. These three are what make the rule a real gate
-    // rather than a blanket ban: a non-shell entrypoint keeps its
-    // grant, a shell entrypoint keeps booting when nothing granted it
-    // input in the first place, and only the intersection refuses.
+    // A sealed-production run refuses the input grant when the
+    // entrypoint is shell-shaped. These three are what make the rule a
+    // real gate rather than a blanket ban: a non-shell entrypoint keeps
+    // its grant, a shell entrypoint keeps booting when nothing granted
+    // it input in the first place, and only the intersection refuses.
     // ──────────────────────────────────────────────────────────────
 
     fn stream_grant_service() -> mvm_protocol::protocol::broker::ServiceId {
@@ -1584,10 +1585,10 @@ mod admit_plan_tests {
 
     #[test]
     fn a_dev_profile_shell_entrypoint_with_the_grant_is_not_refused() {
-        // D7 is scoped to the sealed-production tier (restrict_agent_verbs).
-        // A dev/interactive/ad-hoc run already carries a DevOnly Exec grant,
-        // so the refusal must not fire there — it would be a no-op wearing a
-        // security label.
+        // The refusal is scoped to the sealed-production tier
+        // (restrict_agent_verbs). A dev/interactive/ad-hoc run already carries
+        // a DevOnly Exec grant, so it must not fire there — it would be a
+        // no-op wearing a security label.
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -1625,7 +1626,7 @@ mod admit_plan_tests {
             ],
             entrypoint_shebang: None,
         })
-        .expect("dev-tier runs are out of D7's scope")
+        .expect("dev-tier runs are out of the shell-entrypoint refusal's scope")
         .expect("Some when admission ran");
 
         assert!(!ctx.admitted.plan_id().0.is_empty());
@@ -1658,9 +1659,10 @@ mod entrypoint_shape_tests {
     #[test]
     fn a_bare_busybox_invocation_is_shell_shaped_even_with_a_non_shell_applet() {
         // Unlike mvm_protocol::entrypoint's SDK-declaration check (which lets
-        // "busybox true" through because the named applet isn't a shell),
-        // D7 treats busybox itself as the risk: invoked bare it drops into an
-        // interactive shell, so any invocation is refused on basename alone.
+        // "busybox true" through because the named applet isn't a shell), the
+        // admission gate treats busybox itself as the risk: invoked bare it
+        // drops into an interactive shell, so any invocation is refused on
+        // basename alone.
         assert!(entrypoint_is_shell_shaped(&argv(&["busybox"]), None));
         assert!(entrypoint_is_shell_shaped(
             &argv(&["busybox", "true"]),

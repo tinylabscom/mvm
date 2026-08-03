@@ -64,6 +64,13 @@
       ]
     },
     {
+      "path": "crates/mvm-cli/src/commands/vm/up/admission.rs",
+      "package": "mvm-cli",
+      "claims": [
+        17
+      ]
+    },
+    {
       "path": "crates/mvm-core/src/plan/bundle.rs",
       "package": "mvm-core",
       "claims": [
@@ -104,6 +111,13 @@
       "claims": [
         1,
         8
+      ]
+    },
+    {
+      "path": "crates/mvm-hostd/src/stream/input_gate.rs",
+      "package": "mvm-hostd",
+      "claims": [
+        17
       ]
     },
     {

@@ -2142,30 +2142,54 @@ entrypoint with the grant is admitted under `--prod`, and a shell entrypoint
 - Modify: `specs/adrs/001-microvm-security-posture.md` (claims table, rows 15 and 17)
 - Modify: `crates/mvm-agentd/fuzz/fuzz_targets/` (add an input-frame target)
 
-- [ ] **Step 1: Reword claim 15**
+- [x] **Step 1: Reword claim 15**
 
 State what it now guarantees — no shell, no exec, no argv or env control, no
 PTY on a sealed image — rather than implying no input path exists.
 
-- [ ] **Step 2: Add claim 17** with witnesses naming the T12 and T14 tests:
+- [x] **Step 2: Add claim 17** with witnesses naming the T12 and T14 tests:
   `fn:input_is_refused_without_a_plan_grant`,
   `fn:a_second_writer_is_refused_while_the_lease_is_held`,
   `fn:secret_material_split_across_frames_is_still_refused`,
-  `fn:every_refusal_is_audited`, and the `--prod` shell-refusal test.
+  `fn:every_refusal_is_audited`, and the `--prod` shell-refusal test
+  (`fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason`).
 
-- [ ] **Step 3: Add the input-frame fuzz target** so the new parser joins claim 5.
+  Shipped at status **`Preview`**, not `Shipped`. Three of the four legs have
+  no production caller — the known-secret set is empty on every real VM
+  (`InputGate::bind` is test-only), the shell-entrypoint refusal is dormant
+  (every call site passes an empty `entrypoint_argv`), and the granted half
+  has no operator surface. Only the ungranted-refusal half is proven end to
+  end, against a real `admit_for_run` and `verify_audit_chain`. The four
+  limits are written into the ledger as a "Preview 17 limits" note so the row
+  cannot be read as enforced; promotion needs limits 1–3 to close. Row 17
+  also required `model/claims.toml` (`MVM-SEC-17`), a
+  `features/suites/s26_workload_input/` scenario, a regenerated
+  `CONFORMANCE.md`, and a re-pinned `xtask/mutation-witness-baseline.json`
+  (the surface gained `input_gate.rs` and `up/admission.rs`).
 
-- [ ] **Step 4: Run the ledger gates**
+- [x] **Step 3: Add the input-frame fuzz target** so the new parser joins claim 5.
+
+`fuzz_input_frame` covers `InputFrame` and `CloseInput`; wired into the
+`fuzz` job in `security.yml` and named as `ci:fuzz_input_frame` on row 5.
+
+- [x] **Step 3b (folded in): drop the `D7` decision-row IDs from Rust comments.**
+Five comments in `crates/mvm-cli/src/commands/vm/up/admission.rs` cited the
+plan's decision-row ID by name. `check-no-spec-refs-in-comments` did not catch
+them — its regex matches `Plan N` / `ADR-N` / `W#` / `#NNNN`, not a bare
+two-character token — so they would have become dangling labels once this plan
+is archived. Reworded to describe the rule.
+
+- [x] **Step 4: Run the ledger gates**
 
 Run: `cargo run -p xtask check-claim-catalog && cargo run -p xtask check-claim-witness-freshness && cargo run -p xtask check-no-overclaim`
 Expected: every named witness resolves.
 
-- [ ] **Step 5: Verify the untouched claim-15 witnesses still pass**
+- [x] **Step 5: Verify the untouched claim-15 witnesses still pass**
 
 Run: `cargo nextest run --workspace -E 'test(console_refused_on_sealed_image) or test(prod_console_attachment_has_no_input)'`
 Expected: PASS — the console capture still has no host input fd.
 
-- [ ] **Step 6: Commit** — `git commit -am "docs(claims): reword claim 15 and add claim 17 for the input channel"`
+- [x] **Step 6: Commit** — `git commit -am "docs(claims): reword claim 15 and add claim 17 for the input channel"`
 
 ---
 

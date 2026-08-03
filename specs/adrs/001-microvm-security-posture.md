@@ -115,7 +115,7 @@ ledger is the checked source of truth for *what proves it*.
 
 ### The claims
 
-Sixteen claims: fifteen numbered guarantees plus one preview claim not
+Seventeen claims: fifteen numbered guarantees plus two preview claims not
 yet promoted to the numbered set. L1 (the host) has no claim of its own
 per the threat model above.
 
@@ -135,7 +135,43 @@ per the threat model above.
 | 12 | Every host-side broker service is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited | cross-cutting | Binding-gated dispatch with a rejection ladder for unbound and out-of-profile calls; the handler registry is linted for policy-schema and composition coverage |
 | 13 | No raw secret value crosses the broker channel | data containment | `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space; secret-bearing buffers are zeroized on drop |
 | 14 | Every OCI image admission records provenance in the chain-signed audit log | supply chain | A `plan.oci_provenance` entry carries the registry host, repo, supplied reference, resolved manifest digest, layer digest list, trust policy, and cosign verdict; a production pull or run refuses a mutable reference before any network fetch |
-| 15 | No interactive access to a sealed production microVM | L4 | Only the dev `/init` variant serves a console; the sealed rootfs is dm-verity protected; the backend captures the guest console write-only, with no host input; the host accessible-gate refuses `console` on a sealed image; the agent's console and `do_exec` are both `interactive`-gated |
+| 15 | A sealed production microVM has no shell, no `do_exec`, no PTY, and no input that can change what runs | L4 | Only the dev `/init` variant serves a console; the sealed rootfs is dm-verity protected; the backend captures the guest console write-only, with no host input; the host accessible-gate refuses `console` on a sealed image; the agent's console and `do_exec` are both `interactive`-gated. The host→guest input plane carries bytes to the already-running entrypoint's stdin and nothing else: it cannot select a program, alter argv or env, or spawn anything, because the entrypoint is fixed at admission, and it is refused outright without a grant in the signed plan |
+
+**Claim 15 changed shape.** It used to hold by *absence*: a sealed
+production microVM had no host→guest byte path at all, so "nobody can
+drive it" needed no policy. The workload input plane built one. What
+survives is narrower and worth stating plainly: no shell, no `do_exec`
+and no PTY on a sealed image, unchanged; and input bytes that reach a
+running workload's stdin cannot select a program, alter its argv or
+environment, or spawn anything, because the entrypoint is fixed at
+admission and the plane writes to a pipe, not to a launcher. Refusing
+input without a plan grant is now a *policy* decision made by host code,
+not a consequence of there being nothing to refuse — a strictly weaker
+guarantee than the one this claim used to make. Preview 17 states what
+that policy enforces and, more importantly, what it does not enforce
+yet.
+
+**Preview 17 — workload stdin is grant-gated, single-writer, secret-scanned
+and audited.** The host→guest input plane refuses every write unless the
+workload's signed `ExecutionPlan` carries the input grant; it arbitrates
+concurrent writers with a per-VM lease so two consumers cannot interleave
+into one byte stream; it scans across frame boundaries and withholds a
+tail that is still a live prefix of a known secret rather than shipping it
+and refusing afterwards; it emits a chain-signed, payload-free entry for
+every refusal and every grant, and declines the decision entirely when it
+cannot record it; and under a sealed production posture it refuses the
+grant outright for a shell-shaped entrypoint, since streaming stdin to a
+shell is interactive access wearing a different hat.
+
+This is a preview, not a shipped claim, and the reason is that most of the
+enforcement has no production caller yet. The four limits are stated in
+the ledger's "Preview 17 limits" note below and are load-bearing: the
+known-secret set is empty on every real VM, the shell-entrypoint refusal
+is dormant, the granted half of the path has no operator surface, and the
+scan is a backstop rather than a defence. The ungranted-refusal half —
+the default-deny that matters most — *is* proven end to end against the
+real admission pipeline and the real audit chain. Promotion to a numbered
+claim waits on the rest becoming live.
 
 **Preview 16 — egress substitution keeps a raw secret off the guest.** A
 tokenized-replacement mechanism on the host-owned substitution proxy
@@ -266,6 +302,7 @@ framework mapping, is the source of truth.
 | 12 | T1574 (capability-granting variant), T1078 (Valid Accounts — unauthorized service invocation) | Authorization; signed binding gate, enforced dispatch, chain-signed audit |
 | 13 | T1078 (unauthorized audit attribution), T1565 (audit-chain variant) | Authentication, authorization; workload-emitted entries chain-signed under a distinct audit category |
 | 15 | T1021 (Remote Services — interactive session into a sealed workload), T1059 (interactive console surface eliminated, not detected) | Scope reduction by build-time exclusion, same family as claim 4 |
+| 17 | T1059 (driving a running interpreter through its stdin), T1078 (Valid Accounts — unauthorized write into a workload's input) | Authorization, execution isolation; signed grant gate, single-writer lease, chain-signed refusal audit |
 
 ### Cold-state guarantee
 
@@ -396,7 +433,7 @@ replace either.
 ### Positive
 
 - The project's security story is fifteen enumerated, CI-enforced claims
-  plus one preview claim, each with a named witness, rather than a single
+  plus two preview claims, each with a named witness, rather than a single
   vsock-only assertion resting on unstated layers beneath it.
 - A new contributor gets one document that states what mvm protects
   against, what it explicitly does not, and how each protection is
@@ -466,7 +503,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 2  | No guest binary can elevate to uid 0 | fn:set_no_new_privs, fn:virtiofs_mount_flags_keep_workspace_read_only, ci:check-abi-layout | setpriv --no-new-privs + RO config binds (ADR-001 §W2.2) | Shipped |
 | 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts, fn:verify_and_resume_rejects_tampered_mem, ci:check-abi-layout | dm-verity + roothash on **block+ext4** backends — Firecracker + Option B (ADR-001 §W3, ADR-106); the restore path also verifies the sealed snapshot envelope (HMAC + epoch) before resuming; virtiofs-root is a dev-tier path with a weaker contract that does **not** witness this claim (ADR-107) | Shipped |
 | 4  | The guest agent has no do_exec in production builds | ci:prod-agent-runentry-contract | ELF symbol contract (ADR-001 §W4.3) | Shipped |
-| 5  | Vsock framing + supervisor-config JSON are fuzzed | ci:fuzz_guest_request, ci:fuzz_authenticated_frame, ci:fuzz_supervisor_config | cargo-fuzz (ADR-001 §W4.1/W4.2) | Shipped |
+| 5  | Vsock framing + supervisor-config JSON are fuzzed | ci:fuzz_guest_request, ci:fuzz_authenticated_frame, ci:fuzz_supervisor_config, ci:fuzz_input_frame | cargo-fuzz (ADR-001 §W4.1/W4.2) | Shipped |
 | 6  | The pre-built dev image is hash-verified | ci:hash-verify-tests, fn:download_runtime_overlay_rejects_checksum_mismatch | SHA-256 manifest (ADR-001 §W5.1) | Shipped |
 | 7  | Cargo deps are audited on every PR | ci:cargo-deny, ci:cargo-audit, ci:reproducibility | RUSTSEC + deny.toml (ADR-001 §W5.2/W5.3) | Shipped |
 | 8  | Every workload runs from a signed, audited ExecutionPlan | fn:synthesize_plan, fn:admit_for_run, fn:verify_audit_chain | Ed25519 + chain-signed audit log (ADR-014) | Shipped |
@@ -476,8 +513,9 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 12 | Every host-side service binding is plan-gated and audited | fn:unbound_service_returns_not_bound, fn:service_call_rejects_unknown_envelope_fields | ExecutionPlan.services binding (ADR-020) | Shipped |
 | 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-023) | Shipped |
 | 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md) | Shipped |
-| 15 | No interactive access to a sealed production microVM | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + interactive-gated agent (Plan 165 WS-C, ADR-001 §W4.3 extension) | Shipped |
+| 15 | A sealed production microVM has no shell, no do_exec, no PTY, and no input that can change what runs | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + interactive-gated agent (Plan 165 WS-C, ADR-001 §W4.3 extension); the input plane writes to a fixed entrypoint's stdin and selects nothing — see row 17 | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
+| 17 | Workload stdin is grant-gated, single-writer, secret-scanned across frames, and every refusal is audited | fn:input_is_refused_without_a_plan_grant, fn:a_second_writer_is_refused_while_the_lease_is_held, fn:secret_material_split_across_frames_is_still_refused, fn:every_refusal_is_audited, fn:a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason | input grant token in a signed ExecutionPlan.services + per-VM lease with TTL + sliding-window secret scan + chain-signed payload-free refusal audit + sealed-tier shell-entrypoint refusal. Read the limits note below before treating this as enforced | Preview |
 
 Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
 it is registered here for witness machine-checking and tracked by its own doc
@@ -486,6 +524,42 @@ numbered claim in ADR-001's source-of-truth table is a separate maintainer
 decision. It does not restate or replace the broker rows 12/13 — those are the
 shipped broker delivery; row 16 backs the same two invariants on the egress
 substitution path.
+
+**Preview 17 limits — what the input plane does not enforce yet.** Row 17
+is `Preview` rather than `Shipped` because three of its four legs have no
+production caller. Stating that here is the point of a ledger; a row that
+read as enforced while the enforcement was dormant would be the exact
+failure this table exists to prevent.
+
+1. **The secret scan is inert in production.** `InputGate::bind` — the only
+   way a known secret enters the scanner — has no caller outside tests, so
+   the known-secret set is empty on every real VM. The scanner is correct
+   and witnessed (`fn:secret_material_split_across_frames_is_still_refused`
+   and its siblings hold across three-way and one-byte-at-a-time splits);
+   it currently has nothing to match against.
+2. **The shell-entrypoint refusal cannot fire yet.** Every production call
+   site passes an empty `entrypoint_argv` to `admit_plan_for_boot`, so the
+   gate never sees a shell to refuse. It is dormant *safely* only because
+   the grant is dormant too. Whoever makes the input grant live must wire a
+   live entrypoint resolver in the same change, or the refusal ships as a
+   label rather than a control.
+3. **The granted half has no operator surface.** No CLI verb calls
+   `StreamPlane::open_input`, `mvmctl invoke` always sends
+   `stream_input: false`, and nothing refreshes the lease from the client
+   side. The *ungranted-refusal* half is proven end to end — against a real
+   `admit_for_run`, a real chain, and `verify_audit_chain`
+   (`fn:a_plan_from_the_real_admission_pipeline_opens_the_gate`,
+   `fn:every_refusal_is_audited`). The granted half is proven in-process
+   only.
+4. **The scan is a backstop, not a defence.** Base64, hex, any derivation,
+   and a split that straddles the sliding window all defeat it. It catches
+   a confused host-side caller, not a determined one. The real guarantee is
+   upstream and structural: the host has no reason to send a secret into a
+   guest, because secrets are substituted on egress (rows 13 and 16) rather
+   than handed over.
+
+Promotion of row 17 to a numbered claim requires limits 1–3 to close. Limit
+4 is permanent and is a property of scanning, not a gap to fix.
 
 **Claim 3 backend scoping (ADR-107).** Claim 3's witness, dm-verity, is
 block-device-specific: it ratifies the claim on the **block+ext4** backends

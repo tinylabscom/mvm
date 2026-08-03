@@ -87,3 +87,11 @@ path = "fuzz_targets/fuzz_dns_codec.rs"
 test = false
 doc = false
 bench = false
+
+# Host→guest workload input wire.
+[[bin]]
+name = "fuzz_input_frame"
+path = "fuzz_targets/fuzz_input_frame.rs"
+test = false
+doc = false
+bench = false

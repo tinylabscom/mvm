@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-02
+Last updated: 2026-08-03
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -56,7 +56,17 @@ for detailed scope and acceptance criteria.
         stream surfaces in the CLI reference. `CLAUDE.md` corrected on the
         claims-ledger location, the `mvm-client` facade, and the fabricated
         claim-12/13 witness names
-  - [ ] T11–T16 — the input plane (Phase 2)
+  - [x] T11–T15 — the input plane (Phase 2): frame DTOs and the plan grant;
+        the grant/lease/secret-scan gate; agent-side delivery and EOF; the
+        route from gate to guest sink; the sealed-tier refusal of the input
+        grant for a shell-shaped entrypoint; and the claims ledger — claim 15
+        reworded (it used to hold by *absence*, there being no host→guest byte
+        path at all, and now holds by *policy*) and claim 17 added at status
+        `Preview` with a four-item limits note, because three of its four legs
+        have no production caller yet: the known-secret set is empty on every
+        real VM, the shell-entrypoint refusal is dormant behind an empty
+        `entrypoint_argv`, and the granted half has no operator surface
+  - [ ] T16 — the input plane's documentation
   - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
         transcript is now sealed by whatever stops the VM. The *follow* half
         remains: the console follower still dies with the starting process, so

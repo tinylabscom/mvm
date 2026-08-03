@@ -344,6 +344,17 @@ jobs:
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
         run: cargo fuzz run fuzz_dns_codec -- -max_total_time="$DURATION"
 
+      - name: Fuzz workload input frames (fuzz_input_frame)
+        working-directory: crates/mvm-agentd
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # The host→guest input plane put `InputFrame` and `CloseInput` on the
+        # guest's wire. Both are deserialized before anything inspects them,
+        # so the same "never panic on adversarial bytes" contract as
+        # fuzz_guest_request applies.
+        run: cargo fuzz run fuzz_input_frame -- -max_total_time="$DURATION"
+
       - name: Fuzz authed path (signed-side)
         working-directory: crates/mvm-agentd
         env:
