@@ -479,6 +479,55 @@ pub enum AgentRequest {
         instance_id: String,
         action: InstanceAction,
     },
+    /// Start an instance with fleet-resolved encrypted block volumes.
+    StartInstanceWithBlockVolumes {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        #[serde(default)]
+        workspace_id: Option<String>,
+        volumes: Vec<crate::instance::BlockVolumeAttach>,
+    },
+    /// Refresh the same fenced leases before their UTC expiry.
+    RenewBlockVolumeLeases {
+        tenant_id: String,
+        pool_id: String,
+        instance_id: String,
+        volumes: Vec<crate::instance::BlockVolumeAttach>,
+    },
+    /// Read one bounded ciphertext chunk from a fenced, detached volume image.
+    ReadBlockVolumeChunk {
+        tenant_id: String,
+        pool_id: String,
+        volume: crate::instance::BlockVolumeTransfer,
+        offset: u64,
+        max_bytes: u32,
+    },
+    /// Create private restore staging for an exact encrypted image.
+    BeginBlockVolumeRestore {
+        tenant_id: String,
+        pool_id: String,
+        restore: crate::instance::BlockVolumeRestore,
+    },
+    /// Append one verified ciphertext chunk to restore staging.
+    WriteBlockVolumeRestoreChunk {
+        tenant_id: String,
+        pool_id: String,
+        transfer_id: String,
+        chunk: crate::instance::BlockVolumeChunk,
+    },
+    /// Verify, fsync, and atomically publish a staged encrypted image.
+    CommitBlockVolumeRestore {
+        tenant_id: String,
+        pool_id: String,
+        transfer_id: String,
+    },
+    /// Idempotently discard private restore staging.
+    AbortBlockVolumeRestore {
+        tenant_id: String,
+        pool_id: String,
+        transfer_id: String,
+    },
     /// Forward a sandbox operation (filesystem, exec, logs) to the guest agent.
     SandboxAction {
         tenant_id: String,
@@ -621,6 +670,16 @@ pub enum AgentResponse {
     InstanceActionResult {
         success: bool,
         new_status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// A bounded encrypted-image chunk returned to the gateway.
+    BlockVolumeChunk(crate::instance::BlockVolumeChunk),
+    /// Progress or completion of a worker-side image restore.
+    BlockVolumeTransferResult {
+        success: bool,
+        next_offset: u64,
+        complete: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -2088,6 +2147,94 @@ mod tests {
                 instance_id: "i1".to_string(),
                 action: InstanceAction::Start,
             },
+            AgentRequest::StartInstanceWithBlockVolumes {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                workspace_id: Some("ws1".to_string()),
+                volumes: vec![crate::instance::BlockVolumeAttach {
+                    org_id: "org1".to_string(),
+                    workspace_id: "ws1".to_string(),
+                    volume_id: "vol1".to_string(),
+                    guest_path: "/data".to_string(),
+                    read_only: false,
+                    encrypted: true,
+                    size_mib: 1024,
+                    initialize_if_missing: false,
+                    fencing_token: 1,
+                    lease_expires_at: "2026-08-02T12:00:00Z".to_string(),
+                    data_key_version: 1,
+                }],
+            },
+            AgentRequest::RenewBlockVolumeLeases {
+                tenant_id: "t1".to_string(),
+                pool_id: "p1".to_string(),
+                instance_id: "i1".to_string(),
+                volumes: vec![crate::instance::BlockVolumeAttach {
+                    org_id: "org1".to_string(),
+                    workspace_id: "ws1".to_string(),
+                    volume_id: "vol1".to_string(),
+                    guest_path: "/data".to_string(),
+                    read_only: false,
+                    encrypted: true,
+                    size_mib: 1024,
+                    initialize_if_missing: false,
+                    fencing_token: 1,
+                    lease_expires_at: "2026-08-02T12:01:00Z".to_string(),
+                    data_key_version: 1,
+                }],
+            },
+            AgentRequest::ReadBlockVolumeChunk {
+                tenant_id: "t1".into(),
+                pool_id: "p1".into(),
+                volume: crate::instance::BlockVolumeTransfer {
+                    org_id: "org1".into(),
+                    workspace_id: "ws1".into(),
+                    volume_id: "vol1".into(),
+                    fencing_token: 2,
+                    data_key_version: 1,
+                },
+                offset: 0,
+                max_bytes: 1024,
+            },
+            AgentRequest::BeginBlockVolumeRestore {
+                tenant_id: "t1".into(),
+                pool_id: "p1".into(),
+                restore: crate::instance::BlockVolumeRestore {
+                    transfer_id: "restore1".into(),
+                    volume: crate::instance::BlockVolumeTransfer {
+                        org_id: "org1".into(),
+                        workspace_id: "ws1".into(),
+                        volume_id: "vol1".into(),
+                        fencing_token: 3,
+                        data_key_version: 1,
+                    },
+                    expected_size: 2,
+                    expected_sha256: "ab".repeat(32),
+                },
+            },
+            AgentRequest::WriteBlockVolumeRestoreChunk {
+                tenant_id: "t1".into(),
+                pool_id: "p1".into(),
+                transfer_id: "restore1".into(),
+                chunk: crate::instance::BlockVolumeChunk {
+                    offset: 0,
+                    total_size: 2,
+                    sha256: "ab".repeat(32),
+                    data_hex: "00ff".into(),
+                    eof: true,
+                },
+            },
+            AgentRequest::CommitBlockVolumeRestore {
+                tenant_id: "t1".into(),
+                pool_id: "p1".into(),
+                transfer_id: "restore1".into(),
+            },
+            AgentRequest::AbortBlockVolumeRestore {
+                tenant_id: "t1".into(),
+                pool_id: "p1".into(),
+                transfer_id: "restore1".into(),
+            },
             AgentRequest::SandboxAction {
                 tenant_id: "t1".to_string(),
                 pool_id: "p1".to_string(),
@@ -2244,6 +2391,19 @@ mod tests {
             AgentResponse::InstanceActionResult {
                 success: true,
                 new_status: "running".to_string(),
+                error: None,
+            },
+            AgentResponse::BlockVolumeChunk(crate::instance::BlockVolumeChunk {
+                offset: 0,
+                total_size: 1,
+                sha256: "ab".repeat(32),
+                data_hex: "00".into(),
+                eof: true,
+            }),
+            AgentResponse::BlockVolumeTransferResult {
+                success: true,
+                next_offset: 1,
+                complete: true,
                 error: None,
             },
             AgentResponse::SandboxResult {

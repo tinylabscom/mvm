@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use crate::idle_metrics::IdleMetrics;
 use crate::pool::Role;
 
+/// Maximum ciphertext bytes carried in one block-volume transfer frame.
+pub const MAX_BLOCK_VOLUME_TRANSFER_CHUNK_BYTES: usize = 384 * 1024;
+const SHA256_HEX_LEN: usize = 64;
+
 // ============================================================================
 // Workspace volume attach + workload classification (cross-repo with mvmd)
 // ============================================================================
@@ -40,6 +44,206 @@ pub struct VolumeAttach {
     /// Mount path inside the guest.
     pub mount_path: String,
     pub mode: VolumeMode,
+}
+
+/// Fleet-resolved block volume attached to an instance at boot.
+///
+/// This carries only identity and admitted mount intent. Provider credentials,
+/// encryption keys, object names, and host paths are deliberately absent; the
+/// mvmd worker resolves its local encrypted image from these identifiers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlockVolumeAttach {
+    pub org_id: String,
+    pub workspace_id: String,
+    pub volume_id: String,
+    pub guest_path: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub encrypted: bool,
+    /// Allocated image capacity used only when the control plane explicitly
+    /// authorizes first materialization on an empty worker.
+    pub size_mib: u32,
+    /// Whether this attachment may create a fresh encrypted image if absent.
+    #[serde(default)]
+    pub initialize_if_missing: bool,
+    /// Exclusive-writer epoch admitted by the fleet control plane.
+    pub fencing_token: u64,
+    /// UTC expiry for the writer lease. The worker must stop the workload
+    /// before allowing this lease to lapse.
+    pub lease_expires_at: String,
+    /// Version of the resource data-key derivation used by this image.
+    pub data_key_version: u32,
+}
+
+impl BlockVolumeAttach {
+    /// Reject malformed or unsafe identity and mount intent before dispatch.
+    pub fn validate(&self) -> Result<()> {
+        validate_volume_identity(&self.org_id, &self.workspace_id, &self.volume_id)?;
+        crate::crypto::policy::validate_mount_path(&self.guest_path)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        if self.fencing_token == 0 {
+            bail!("fencing_token must be non-zero");
+        }
+        if self.size_mib == 0 {
+            bail!("size_mib must be non-zero");
+        }
+        let lease_expiry = chrono::DateTime::parse_from_rfc3339(&self.lease_expires_at)
+            .map_err(|_| anyhow::anyhow!("lease_expires_at must be RFC 3339 UTC time"))?;
+        if lease_expiry.offset().local_minus_utc() != 0 {
+            bail!("lease_expires_at must use UTC");
+        }
+        if self.data_key_version == 0 {
+            bail!("data_key_version must be non-zero");
+        }
+        Ok(())
+    }
+}
+
+/// Fenced identity used to transfer an encrypted block image without exposing
+/// provider configuration, keys, object names, or host paths.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlockVolumeTransfer {
+    /// Organization owning the volume.
+    pub org_id: String,
+    /// Workspace owning the volume.
+    pub workspace_id: String,
+    /// Canonical persistent-volume identifier.
+    pub volume_id: String,
+    /// Current control-plane mutation epoch.
+    pub fencing_token: u64,
+    /// Version of the locally derived LUKS data key.
+    pub data_key_version: u32,
+}
+
+impl BlockVolumeTransfer {
+    /// Reject malformed identity or an unfenced transfer.
+    pub fn validate(&self) -> Result<()> {
+        validate_volume_identity(&self.org_id, &self.workspace_id, &self.volume_id)?;
+        if self.fencing_token == 0 {
+            bail!("fencing_token must be non-zero");
+        }
+        if self.data_key_version == 0 {
+            bail!("data_key_version must be non-zero");
+        }
+        Ok(())
+    }
+}
+
+/// One bounded, content-addressed ciphertext chunk read from a worker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlockVolumeChunk {
+    /// Byte offset in the encrypted image.
+    pub offset: u64,
+    /// Total encrypted image length observed by the worker.
+    pub total_size: u64,
+    /// SHA-256 digest of the decoded chunk bytes.
+    pub sha256: String,
+    /// Hex-encoded ciphertext bytes. Hex keeps JSON framing deterministic.
+    pub data_hex: String,
+    /// Whether this chunk reaches the observed end of the image.
+    pub eof: bool,
+}
+
+impl BlockVolumeChunk {
+    /// Validate framing bounds, digest shape, and end-of-image arithmetic.
+    pub fn validate(&self) -> Result<()> {
+        if !valid_sha256(&self.sha256) {
+            bail!("block-volume chunk digest must be lowercase SHA-256");
+        }
+        if self.data_hex.len() > MAX_BLOCK_VOLUME_TRANSFER_CHUNK_BYTES * 2
+            || !self.data_hex.len().is_multiple_of(2)
+            || !self
+                .data_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("block-volume chunk data is malformed or exceeds the frame bound");
+        }
+        let decoded_len = u64::try_from(self.data_hex.len() / 2)
+            .map_err(|_| anyhow::anyhow!("block-volume chunk length is unsupported"))?;
+        if self.total_size == 0 || decoded_len == 0 {
+            bail!("block-volume chunk must make progress within a non-empty image");
+        }
+        let end = self
+            .offset
+            .checked_add(decoded_len)
+            .ok_or_else(|| anyhow::anyhow!("block-volume chunk offset overflow"))?;
+        if end > self.total_size || self.eof != (end == self.total_size) {
+            bail!("block-volume chunk does not match the image length");
+        }
+        Ok(())
+    }
+}
+
+/// Expected immutable image used to begin a private worker-side restore.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlockVolumeRestore {
+    /// Unpredictable identifier for this bounded staging attempt.
+    pub transfer_id: String,
+    /// Fenced destination identity.
+    pub volume: BlockVolumeTransfer,
+    /// Exact encrypted image byte length.
+    pub expected_size: u64,
+    /// SHA-256 digest of the complete encrypted image.
+    pub expected_sha256: String,
+}
+
+impl BlockVolumeRestore {
+    /// Validate restore identity and exact expected content metadata.
+    pub fn validate(&self) -> Result<()> {
+        self.volume.validate()?;
+        validate_block_volume_transfer_id(&self.transfer_id)?;
+        if self.expected_size == 0 {
+            bail!("block-volume restore size must be non-zero");
+        }
+        if !valid_sha256(&self.expected_sha256) {
+            bail!("block-volume restore digest must be lowercase SHA-256");
+        }
+        Ok(())
+    }
+}
+
+fn validate_volume_identity(org_id: &str, workspace_id: &str, volume_id: &str) -> Result<()> {
+    for (label, value) in [
+        ("org_id", org_id),
+        ("workspace_id", workspace_id),
+        ("volume_id", volume_id),
+    ] {
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            bail!("{label} is not a valid volume identity");
+        }
+    }
+    Ok(())
+}
+
+/// Validate an opaque restore transfer identifier at every wire boundary.
+pub fn validate_block_volume_transfer_id(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("transfer_id is not valid");
+    }
+    Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == SHA256_HEX_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Workload class — drives sleep policy, auto-provision rules, and
@@ -378,6 +582,7 @@ pub fn validate_transition(from: InstanceStatus, to: InstanceStatus) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     #[test]
     fn test_valid_transitions() {
@@ -825,6 +1030,103 @@ mod tests {
         let json = serde_json::to_string(&attach).unwrap();
         let parsed: VolumeAttach = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, attach);
+    }
+
+    #[test]
+    fn block_volume_attach_validates_and_carries_no_secrets_or_paths() {
+        let attach = BlockVolumeAttach {
+            org_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            volume_id: "vol-1".into(),
+            guest_path: "/data".into(),
+            read_only: false,
+            encrypted: true,
+            size_mib: 1024,
+            initialize_if_missing: false,
+            fencing_token: 4,
+            lease_expires_at: "2026-08-02T12:00:00Z".into(),
+            data_key_version: 1,
+        };
+        attach.validate().unwrap();
+        let json = serde_json::to_string(&attach).unwrap();
+        assert!(!json.contains("credential"));
+        assert!(!json.contains("encryption_key"));
+        assert!(!json.contains("host_path"));
+        assert_eq!(
+            serde_json::from_str::<BlockVolumeAttach>(&json).unwrap(),
+            attach
+        );
+    }
+
+    #[test]
+    fn block_volume_attach_rejects_bad_identity_path_and_epoch() {
+        let mut attach = BlockVolumeAttach {
+            org_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            volume_id: "../vol".into(),
+            guest_path: "/data".into(),
+            read_only: true,
+            encrypted: true,
+            size_mib: 1024,
+            initialize_if_missing: false,
+            fencing_token: 1,
+            lease_expires_at: "2026-08-02T12:00:00Z".into(),
+            data_key_version: 1,
+        };
+        assert!(attach.validate().is_err());
+        attach.volume_id = "vol-1".into();
+        attach.guest_path = "/etc".into();
+        assert!(attach.validate().is_err());
+        attach.guest_path = "/data".into();
+        attach.fencing_token = 0;
+        assert!(attach.validate().is_err());
+        attach.fencing_token = 1;
+        attach.lease_expires_at = "not-a-time".into();
+        assert!(attach.validate().is_err());
+    }
+
+    #[test]
+    fn block_volume_transfer_chunks_enforce_bounds_and_image_arithmetic() {
+        let data = b"ciphertext";
+        let mut chunk = BlockVolumeChunk {
+            offset: 0,
+            total_size: u64::try_from(data.len()).unwrap(),
+            sha256: hex::encode(sha2::Sha256::digest(data)),
+            data_hex: hex::encode(data),
+            eof: true,
+        };
+        chunk.validate().unwrap();
+
+        chunk.eof = false;
+        assert!(chunk.validate().is_err());
+        chunk.eof = true;
+        chunk.data_hex = "z0".into();
+        assert!(chunk.validate().is_err());
+        chunk.data_hex.clear();
+        chunk.sha256 = hex::encode(sha2::Sha256::digest([]));
+        assert!(chunk.validate().is_err());
+    }
+
+    #[test]
+    fn block_volume_restore_validates_fenced_identity_and_digest() {
+        let mut restore = BlockVolumeRestore {
+            transfer_id: "restore-1".into(),
+            volume: BlockVolumeTransfer {
+                org_id: "org-1".into(),
+                workspace_id: "workspace-1".into(),
+                volume_id: "volume-1".into(),
+                fencing_token: 9,
+                data_key_version: 2,
+            },
+            expected_size: 4096,
+            expected_sha256: "ab".repeat(32),
+        };
+        restore.validate().unwrap();
+        restore.volume.fencing_token = 0;
+        assert!(restore.validate().is_err());
+        restore.volume.fencing_token = 9;
+        restore.expected_sha256 = "not-a-digest".into();
+        assert!(restore.validate().is_err());
     }
 
     // ------------- DesiredInstance -------------

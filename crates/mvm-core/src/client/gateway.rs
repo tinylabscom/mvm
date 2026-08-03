@@ -346,6 +346,7 @@ impl RemoteVolumeCreateBuilder {
 struct CreateRemoteVolumeBody<'a> {
     name: &'a str,
     size_gib: u32,
+    encrypted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     storage_class: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -390,6 +391,7 @@ impl GatewayBackend {
         let body = CreateRemoteVolumeBody {
             name: &request.name,
             size_gib: request.size_gib,
+            encrypted: true,
             storage_class: request.storage_class.as_deref(),
             from_snapshot_id: request.from_snapshot_id.as_deref(),
             bucket_id: request.bucket_id.as_deref(),
@@ -1110,13 +1112,14 @@ mod tests {
         let body = CreateRemoteVolumeBody {
             name: &request.name,
             size_gib: request.size_gib,
+            encrypted: true,
             storage_class: request.storage_class.as_deref(),
             from_snapshot_id: request.from_snapshot_id.as_deref(),
             bucket_id: request.bucket_id.as_deref(),
         };
         assert_eq!(
             serde_json::to_string(&body).unwrap(),
-            r#"{"name":"data","size_gib":4}"#
+            r#"{"name":"data","size_gib":4,"encrypted":true}"#
         );
     }
 

@@ -133,9 +133,12 @@ updates only its own entry below.
       defect reported as #2052, and the exact Apple-container E2E now passes on
       current main, closing #2054. #2048 now caches confirmed default-release
       404s per version and architecture for 24 hours while mirrors and transient
-      failures remain retryable. The production-volume epic #2040 and the
-      subsequently filed entropy issue #2060 are also closed with merged
-      evidence. The final GitHub open-issue query returned zero results.
+      failures remain retryable. The production-volume epic #2040 was closed
+      with the then-available evidence, but was subsequently reopened after the
+      claimed cross-worker proof was found to cover gateway-local directories
+      rather than the gateway→agent→hostd data plane. The subsequently filed
+      entropy issue #2060 is closed with merged evidence. The historical
+      open-issue query at that point returned zero results.
       A scheduled run on an older commit subsequently filed #2067: the no-SSH
       scanner had not classified a protected-credential-path refusal test as
       deny-only, and the `mvm-cli` mutation shard lacked the pinned Zig
@@ -154,7 +157,7 @@ updates only its own entry below.
       is clean with 27 relevant privilege-drop mutants caught.
       Tracked in plan 284.
 
-- [x] Production object-store volumes — **plan 283 / issue #2040**. Standardize
+- [ ] Production object-store volumes — **plan 283 / issue #2040**. Standardize
       remote volume I/O on Apache Arrow `object_store` while preserving the
       accepted mvm↔mvmd ownership boundary and mvmd's distinction between
       multi-attach `StorageBucket` and exclusive block `VolumeRecord`. Completion
@@ -162,7 +165,9 @@ updates only its own entry below.
       local/block attachment, encrypted durable checkpoints and cross-worker
       restore, working remote CLI/API policy, MinIO integration, and Linux/KVM
       persistence/restore proof. Registry-only, compile-only, and mocked-only
-      paths do not satisfy the issue.
+      paths do not satisfy the issue. Follow-up verification is open because
+      the original cross-worker claim covered gateway-local directories rather
+      than the gateway→agent→hostd worker data plane.
   - [x] WS1: external implementations can run the canonical trait-object
         contract; the unregistered member-only S3 mount provider is removed;
         template-registry S3 remains independently gated; the two-surface gate
@@ -213,16 +218,22 @@ updates only its own entry below.
         Twenty-one gateway client tests, including one real loopback HTTP request, nine CLI
         lifecycle parser tests, touched-crate checks, all-target Clippy, and the
         complete 115-scenario / 523-step BDD suite pass.
-  - [x] WS4/WS5 policy/WS6/WS7: mvmd PRs #199, #201, and #202 deliver durable
-        manifests and encrypted checkpoints, fresh-worker restore, fencing,
+  - [ ] WS4/WS5 policy/WS6/WS7: mvmd PRs #199, #201, and #202 deliver durable
+        manifests and encrypted checkpoints, gateway-local restore, fencing,
         retention/GC, API policy, metrics, signed lifecycle/refusal audits, and
         operator documentation. The real MinIO lane proves encrypted multipart
         I/O, conditional conflict handling, pagination beyond 1,000 objects,
         and cleanup. A live Firecracker/KVM run proves encrypted attach, restart
         persistence, checkpoint, mutation, restore into fresh state, digest
         recovery, and clean teardown. mvm PR #2064 supplies the authenticated
-        remote CLI. Issue #2040 records the rejected speculative clauses that
-        conflict with the shipped resource and artifact contracts.
+        remote CLI. The follow-up now supplies the missing canonical
+        `VolumeRecord` gateway→agent→hostd transfer, exact-node placement,
+        worker-local LUKS derivation, lease renewal/watchdog, and protocol v3.
+        The composed Linux/KVM proof is now green: two isolated production
+        workers preserve boot counts 1→2 across a source restart, transfer the
+        encrypted image through gateway→agent→hostd, and observe boot count 3
+        after destination restore. Both follow-up PR matrices are green; this
+        item and issue #2040 remain open until both changes land.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout

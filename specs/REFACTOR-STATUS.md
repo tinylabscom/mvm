@@ -65,15 +65,16 @@ for detailed scope and acceptance criteria.
   - [x] Add a fail-closed bounding-set result classifier whose Linux mutation
         witness kills the final comparison survivor from the corrected-head run
 
-- [x] Plan 283 — Production object-store volumes
+- [ ] Plan 283 — Production object-store volumes
       (`specs/plans/283-production-object-store-volumes.md`, issue #2040)
   - [x] Canonical mvm contract and dead S3-path removal
   - [x] Live local/block attachment through the admitted VM launch path
   - [x] mvmd OpenDAL → `object_store` migration with mandatory encryption
   - [x] Authenticated remote volume CLI/client lifecycle with typed failures
-  - [x] Durable encrypted checkpoint/API policy and cross-worker restore closeout
+  - [x] Canonical worker handoff, Linux/KVM composition proof, and follow-up PR
+        matrices are green
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
-  - [x] Reconcile rejected speculative clauses and close #2040 with evidence
+  - [ ] Reconcile rejected speculative clauses and close #2040 with evidence
 
 - [x] Plan 282 — Merge queue auto-requeue
       (`specs/plans/282-merge-queue-auto-requeue.md`)
