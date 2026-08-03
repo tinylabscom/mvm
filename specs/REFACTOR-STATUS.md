@@ -6,8 +6,8 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
-- [~] Plan 289 — Sensitive egress redaction
-      (`specs/plans/289-sensitive-egress-redaction.md`)
+- [~] Plan 290 — Sensitive egress redaction
+      (`specs/plans/290-sensitive-egress-redaction.md`)
   - [x] Validated byte detector and pinned, no-default-feature LeakGuard adapter
   - [x] Shared supplemental coverage for masking and reversible replacement
   - [x] Default secret/PII policy arms compressed and over-cap fail-closed gates
@@ -16,6 +16,16 @@ for detailed scope and acceptance criteria.
   - [ ] Structured/streaming body coverage and split-boundary witnesses
   - [ ] Signed CLI policy lowering and admission posture reporting
   - [ ] Build-level claim promotion and adversarial backend witnesses
+
+- [x] Plan 289 — Host-side machine logs
+      (`specs/plans/289-host-side-machine-logs.md`)
+  - [x] Read backend-captured logs from the isolated host VM state directory
+  - [x] Preserve log flags and legacy fallback without shell interpolation;
+        follow mode honors the requested line count
+  - [x] Cover host-only CLI behavior and log resolution with regression tests
+  - [x] Keep isolated test state behind the canonical config resolver and home
+        isolation gates
+  - [x] Complete workspace tests, check, formatting, and all-target clippy
 
 - [x] Plan 286 — Guest-kernel hardware floor
       (`specs/plans/286-kernel-floor.md`)

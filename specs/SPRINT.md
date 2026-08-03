@@ -10,7 +10,7 @@
 
 ## Current issue delivery
 
-- [~] Sensitive egress redaction — **plan 289**. The first delivery establishes
+- [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
       a validated byte-span detector contract and supplements the curated
       scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
       Azure connection-string, Telegram-token and Discord-token detectors.
@@ -23,6 +23,18 @@
       all-target Clippy, cargo-deny and RustSec gates pass. Linux builder-VM
       all-target Clippy remains before WS1 acceptance; streaming bodies, policy
       lowering, admission posture and claim witnesses remain in WS2-WS4.
+
+- [x] Host-side machine logs — **plan 289**. `machine logs` now reads backend
+      console captures directly from the isolated host VM state directory, so
+      macOS no longer attempts to connect to or auto-start the retired
+      interactive dev VM. Host `tail` receives paths as process arguments,
+      `-f` honors the requested `--lines`/`-n` count through
+      `tail -n <lines> -f`, hypervisor and legacy fallback behavior is retained,
+      and unit plus real-CLI regression coverage proves the command works with
+      dev-VM auto-start disabled. Isolated test state also resolves through the
+      canonical explicit-root config helper, and the CLI subprocess receives an
+      isolated home. Workspace tests, check, all-target clippy, formatting, and
+      both home policy gates are green.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 
