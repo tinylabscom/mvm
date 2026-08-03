@@ -291,6 +291,12 @@ impl UserspaceHandle {
     /// each one parks a real descriptor and they compete for the same
     /// budget. Two separate counters whose sum can exceed what the process
     /// was granted would not be a budget.
+    ///
+    /// A flow that released its socket early — a host error resets and
+    /// closes in the same step — still counts here until the next service
+    /// pass reaps it. That over-counts by at most one pass's worth, in the
+    /// direction of refusing a newcomer rather than over-subscribing the
+    /// process's descriptors.
     pub(crate) fn open_socket_count(&self) -> usize {
         self.flows.len() + self.half_open.len()
     }
@@ -948,6 +954,39 @@ mod tests {
             "the reset is addressed from the lease, not from the guest's own SYN"
         );
         assert_eq!(handle.open_socket_count(), 0, "and the descriptor is gone");
+    }
+
+    /// A flow that has just been reset still owes the guest that reset.
+    /// Reaping it on the pass that ended it would discard the one packet
+    /// explaining why — putting the guest back at the silent hang the reset
+    /// exists to prevent.
+    #[test]
+    fn a_reset_flow_is_not_reaped_before_the_guest_has_its_reset() {
+        let (mut handle, _held) = handle_with_open_flows(1);
+        let mut buf = [0u8; MTU_V1 as usize];
+        // Drain the handshake, so the only thing left to read is the reset.
+        // Bounded: a read path that never reports `WouldBlock` must fail an
+        // assertion below rather than spin here.
+        for _ in 0..SERVICE_ATTEMPTS {
+            if handle.recv_from_network(&mut buf).is_err() {
+                break;
+            }
+        }
+        handle
+            .flows
+            .values_mut()
+            .next()
+            .expect("the fixture flow")
+            .on_host_error(std::io::ErrorKind::ConnectionReset);
+
+        handle.service(1).expect("service");
+
+        let n = handle
+            .recv_from_network(&mut buf)
+            .expect("the reset must outlive the pass that produced it");
+        let ip = smoltcp::wire::Ipv4Packet::new_checked(&buf[..n]).expect("ipv4");
+        let seg = smoltcp::wire::TcpPacket::new_checked(ip.payload()).expect("tcp");
+        assert!(seg.rst(), "the packet held back must be the reset itself");
     }
 
     /// Until UDP has a translation of its own, a datagram must be refused

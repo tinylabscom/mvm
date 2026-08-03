@@ -969,8 +969,8 @@ only by unit tests. The wiring landed here.
 
 - [x] **Step 1: Write the failing tests**
 
-Landed as eighteen tests: eight on the flow (`tcp.rs`) and ten on the handle
-(`mod.rs`), plus one on the device's new host-originated push path.
+Landed as nineteen tests: eight on the flow (`tcp.rs`) and eleven on the
+handle (`mod.rs`), plus one on the device's new host-originated push path.
 
 Beyond the sketched four: `every_terminal_host_error_resets_the_guest`
 (all six terminal kinds, not the two a fixture happens to use),
@@ -1079,13 +1079,28 @@ still holds.
 
 - [x] **Step 4: Run tests and confirm they pass**
 
-`cargo nextest run -p mvm-hostd` → 1395 passed / 2 skipped.
-`-E 'test(userspace)'` → 96 passed. clippy `-D warnings` clean (`metrics()`
+`cargo nextest run -p mvm-hostd` → 1396 passed / 2 skipped.
+`-E 'test(userspace)'` → 97 passed. clippy `-D warnings` clean (`metrics()`
 is `pub`, not `pub(crate)`, for the `dead_code` reason recorded under Task
 11); nightly fmt clean; `check-file-size` clean; `cargo zigbuild --target
 x86_64-unknown-linux-gnu -p mvm-hostd --all-targets` clean.
 
-Mutation results are recorded in the follow-up note below.
+Mutation-checked. Each red is timed on an already-built tree — a first
+measurement that counted the rebuild inside its budget reported a false
+"hang", which is worth recording because a real hang and a slow rebuild look
+identical from outside:
+
+| Mutation | Result |
+| --- | --- |
+| `is_terminal_host_error` → always `false` | 7 red in 0.10 s, incl. `a_host_side_reset_reaches_the_guest_as_a_reset` |
+| `is_terminal_host_error` → always `true` | `a_would_block_is_not_treated_as_a_host_error` red, 0.10 s |
+| drop the `poll` from `on_host_error` | 5 red in 0.12 s — the abort alone queues nothing |
+| drop the `on_host_error` call from `pump` | `a_failed_host_write_still_resolves_the_write_half` + `..._resets_the_guest_too` red, 0.09 s |
+| `close()` no longer clears `flows` | `close_shuts_every_host_socket_and_is_idempotent` red, 0.10 s |
+| `close()` no longer clears `half_open` | `close_releases_connects_that_are_still_in_flight` red, 0.09 s |
+| budget counts only `flows.len()` | `the_budget_counts_half_open_and_established_together` red, 0.11 s |
+| `resolve_connects` drops its resets | `a_failed_connect_reaches_the_guest_as_a_reset` red, 0.68 s |
+| reaper drops the `pending_to_guest()` guard | **survived at first.** The guard's claim — a reset flow must outlive the pass that ended it — had no witness. `a_reset_flow_is_not_reaped_before_the_guest_has_its_reset` was added for it; the mutation now reddens in 0.14 s |
 
 - [x] **Step 5: Commit**
 
