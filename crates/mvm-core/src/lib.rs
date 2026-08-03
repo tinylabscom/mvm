@@ -10,6 +10,7 @@
 /// recomputes each artifact's digest before a cache entry is trusted.
 pub mod action;
 pub mod arch;
+pub mod at_rest;
 pub mod build_env;
 pub mod catalog;
 pub mod checkpoint;

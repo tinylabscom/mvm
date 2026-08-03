@@ -199,4 +199,91 @@ mod tests {
         p.resources.mem_mib += 1;
         assert!(verify_plan_id(&p).is_err());
     }
+
+    /// Replay vectors: frozen inputs and the addresses they must produce.
+    ///
+    /// Worth pinning specifically because this surface does **not** use JCS.
+    /// It serializes with `serde_json::to_vec` and relies on serde_json's
+    /// default key ordering, which holds only while the `preserve_order`
+    /// feature is off. `xtask check-content-address-determinism` pins that
+    /// feature flag; nothing pinned the address the flag protects. If the
+    /// feature ever arrives through a transitive dependency, this fails
+    /// naming the address that moved rather than the flag that changed.
+    ///
+    /// `MVM_PRINT_ADDRESS_VECTORS=1` prints instead of asserting, so
+    /// reseeding is deliberate and leaves a diff that has to be justified.
+    mod replay_vectors {
+        use super::*;
+        use chrono::{DateTime, Utc};
+
+        fn check(name: &str, actual: &str, expected: &str) {
+            if std::env::var_os("MVM_PRINT_ADDRESS_VECTORS").is_some() {
+                println!("plan_id\t{name}\t{actual}");
+                return;
+            }
+            assert_eq!(
+                actual, expected,
+                "plan_id/{name}: address moved. If this was intended, say why in \
+                 the commit — every plan already addressed this way just changed."
+            );
+        }
+
+        /// `PlanFixture::build` defaults its validity window to `Utc::now()`,
+        /// which would make the address differ on every run.
+        fn window() -> (DateTime<Utc>, DateTime<Utc>) {
+            (
+                "2020-01-01T00:00:00Z".parse().expect("valid RFC 3339"),
+                "2030-01-01T00:00:00Z".parse().expect("valid RFC 3339"),
+            )
+        }
+
+        fn fixture(tenant: &str, nonce: u8) -> PlanFixture {
+            let (from, until) = window();
+            PlanFixture::new()
+                .tenant(tenant)
+                .workload("vm-alpha")
+                .runtime_profile("firecracker")
+                .nonce([nonce; 16])
+                .validity(from, until)
+        }
+
+        #[test]
+        fn base_plan_address_is_frozen() {
+            let plan = fixture("acme", 7).build();
+            check(
+                "base",
+                compute_plan_id(&plan).0.as_str(),
+                "sha256:e10bf564197b5ff3bdfdecab609f5a17c4a913f2d0564e327ee432164622a1cc",
+            );
+        }
+
+        #[test]
+        fn stored_plan_id_is_excluded_from_its_own_address() {
+            // What makes the id a content-address rather than a
+            // self-referential field: relabelling must not move it.
+            let plan = fixture("acme", 7).plan_id("a-different-id").build();
+            check(
+                "differing-stored-id-addresses-the-same",
+                compute_plan_id(&plan).0.as_str(),
+                "sha256:e10bf564197b5ff3bdfdecab609f5a17c4a913f2d0564e327ee432164622a1cc",
+            );
+        }
+
+        #[test]
+        fn load_bearing_fields_move_the_address() {
+            // The exclusion above must not accidentally exclude real content.
+            let tenant = fixture("globex", 7).build();
+            check(
+                "tenant-differs",
+                compute_plan_id(&tenant).0.as_str(),
+                "sha256:3ca3c8731bb38170eec52969f42ab62ebd8b06fd71bd14d82973d5ceca32c0b4",
+            );
+            let nonce = fixture("acme", 8).build();
+            check(
+                "nonce-differs",
+                compute_plan_id(&nonce).0.as_str(),
+                "sha256:6217c06cc369296b1430e3cbf231384f9457eeb0df6032bcb93dcca5a6abc75d",
+            );
+        }
+    }
 }
