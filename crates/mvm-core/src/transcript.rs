@@ -927,13 +927,62 @@ mod tests {
         ])
     }
 
+    /// The exact bytes the sealed root of [`two_chunk_manifest`] is a Merkle
+    /// tree over: leaf 0 is the serialized root metadata, then one leaf per
+    /// chunk record in capture order.
+    ///
+    /// Pinned as the preimage rather than as the resulting digest. A digest
+    /// pin catches the same changes, but the only way to re-pin one is to
+    /// paste the hex out of the failure it just produced — so the value ends
+    /// up asserting that the code agrees with itself, and a reviewer has no
+    /// way to tell an intended change from an accidental one. These bytes are
+    /// readable: a new field, a reordered leaf, or a changed domain separator
+    /// shows up in the diff as the thing it is.
+    const PINNED_ROOT_PREIMAGE: [&str; 3] = [
+        r#"{"domain":"mvm.transcript.metadata.v1","format_version":6,"capture_id":"cap-1","binding":{"tenant_id":"t","vm_name":"vm","session_id":null},"bounds":{"max_duration_secs":60,"max_bytes":1000,"max_chunks":3},"created_unix_secs":1,"wrapped_data_key_b64":"","recipient":"host-key-1","retention":"fail_closed","chunk_count":2,"refused_chunks":0,"refused_bytes":0,"evicted_chunks":0,"evicted_bytes":0,"adopted":false}"#,
+        r#"{"domain":"mvm.transcript.chunk.v1","chunk":{"seq":0,"file":"0.seg","offset":0,"sha256_hex":"1111111111111111111111111111111111111111111111111111111111111111","size_bytes":48,"direction":"egress","dropped":false,"prev_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}"#,
+        r#"{"domain":"mvm.transcript.chunk.v1","chunk":{"seq":1,"file":"0.seg","offset":48,"sha256_hex":"2222222222222222222222222222222222222222222222222222222222222222","size_bytes":64,"direction":"ingress","dropped":true,"prev_hash":"1111111111111111111111111111111111111111111111111111111111111111"}}"#,
+    ];
+
     #[test]
     fn sealed_root_vector_is_pinned() {
         let m = two_chunk_manifest();
+        // Derived from the pinned bytes, never from a second call into
+        // `sealed_root_hex`: computing the expectation from the code under
+        // test would compare the production path against itself and assert
+        // nothing at all.
+        let from_preimage = hex::encode(mvm_protocol::merkle::merkle_root(&PINNED_ROOT_PREIMAGE));
         assert_eq!(
-            m.sealed_root_hex,
-            "b061d53821350933ff448cc62975d1a9afac38a53913eccf2779f222fe391239"
+            m.sealed_root_hex, from_preimage,
+            "the sealed root no longer commits to PINNED_ROOT_PREIMAGE; diff the leaf \
+             construction in `sealed_root_hex` against those bytes to see what moved"
         );
+    }
+
+    #[test]
+    fn pinned_chunk_leaves_decode_to_the_fixture_chunk_records() {
+        // Turns a root mismatch from "some hex moved" into a field-level diff:
+        // a `ChunkRecord` that gains, loses, or renames a field fails here
+        // naming the field, rather than only as a changed digest.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PinnedChunkLeaf {
+            domain: String,
+            chunk: ChunkRecord,
+        }
+
+        let m = two_chunk_manifest();
+        assert_eq!(
+            PINNED_ROOT_PREIMAGE.len(),
+            m.chunks.len() + 1,
+            "the preimage must hold the metadata leaf plus one leaf per chunk"
+        );
+        for (leaf, record) in PINNED_ROOT_PREIMAGE[1..].iter().zip(&m.chunks) {
+            let decoded: PinnedChunkLeaf =
+                serde_json::from_str(leaf).expect("pinned chunk leaf parses as a chunk record");
+            assert_eq!(decoded.domain, "mvm.transcript.chunk.v1");
+            assert_eq!(&decoded.chunk, record);
+        }
     }
 
     /// The root `sealed_root_vector_is_pinned` pinned before the manifest
