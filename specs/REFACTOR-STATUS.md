@@ -12,7 +12,8 @@ for detailed scope and acceptance criteria.
   - [x] Preserve log flags and legacy fallback without shell interpolation;
         follow mode honors the requested line count
   - [x] Cover host-only CLI behavior and log resolution with regression tests
-  - [x] Keep isolated test state behind the canonical config resolver
+  - [x] Keep isolated test state behind the canonical config resolver and home
+        isolation gates
   - [x] Complete workspace tests, check, formatting, and all-target clippy
 
 - [x] Plan 286 — Guest-kernel hardware floor

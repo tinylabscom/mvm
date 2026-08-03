@@ -18,8 +18,9 @@
       `tail -n <lines> -f`, hypervisor and legacy fallback behavior is retained,
       and unit plus real-CLI regression coverage proves the command works with
       dev-VM auto-start disabled. Isolated test state also resolves through the
-      canonical explicit-root config helper. Workspace tests, check, all-target
-      clippy, formatting, and the single-home policy gate are green.
+      canonical explicit-root config helper, and the CLI subprocess receives an
+      isolated home. Workspace tests, check, all-target clippy, formatting, and
+      both home policy gates are green.
 
 ### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
 

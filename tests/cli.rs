@@ -193,6 +193,7 @@ fn machine_logs_reads_host_state_without_dev_vm() {
 
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .env("MVM_HOME", mvm_home.path())
+        .env("HOME", mvm_home.path())
         .env("MVM_NO_AUTO_DEV", "1")
         .args(["machine", "logs", "log-test", "--lines", "2"])
         .output()
