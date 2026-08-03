@@ -126,6 +126,7 @@ export default defineConfig({
             { label: "Overview", slug: "guides" },
             { label: "Writing Nix Flakes", slug: "guides/nix-flakes" },
             { label: "Nix and OCI", slug: "guides/nix-and-oci" },
+            { label: "From dev loop to attested image", slug: "guides/develop-to-attested" },
             { label: "From Workload IR to MicroVM Image", slug: "guides/ir-to-image" },
             { label: "Building MicroVM Images", slug: "guides/building-microvm-images" },
             { label: "Building from Source", slug: "guides/building-from-source" },
