@@ -6,11 +6,17 @@ flakes**, or **decorated functions** — on macOS and Linux, with a security
 posture that is enforced by CI, not by documentation.
 
 Every machine boots its own Linux kernel under a real hypervisor. There is no
-Docker on the runtime path, no SSH in any guest, and (on the in-house macOS
-backend) no guest network device at all: guest I/O crosses **vsock**, where the
-host can audit flows, substitute secrets so the workload never sees raw
-credentials, detect-and-replace secrets and structured PII on owned cleartext
-egress paths, and enforce default-deny egress from a signed execution plan.
+Docker on the runtime path, no SSH in any guest, and **no guest network device
+at all** — on any workload backend. Every byte a workload sends crosses
+**vsock**, where the host can audit flows, substitute secrets so the workload
+never sees raw credentials, detect-and-replace secrets and structured PII on
+owned cleartext egress paths, and enforce default-deny egress from a signed
+execution plan.
+
+That last point is load-bearing: because the guest has no NIC, the **host
+originates every outbound connection**. That is what makes default-deny egress,
+"no raw secret reaches the guest", and the audit chain mechanically enforceable
+rather than merely intended.
 
 ```
 macOS 26+ (Apple Silicon)  →  in-house HVF VMM (Hypervisor.framework, zero extra deps)
@@ -454,8 +460,35 @@ detailed sequence.
 
 Backend selection is automatic per host (`--hypervisor` overrides); all backends
 consume the same image artifacts. Egress is default-deny — where policy admits
-flows they are enforced and audited host-side, and on the in-house backend all
-guest I/O rides vsock through a per-VM gating endpoint (there is no guest NIC).
+flows they are enforced and audited host-side.
+
+### Vsock-only: the invariant the other guarantees rest on
+
+**No workload microVM has a network device.** Not on one backend — on every
+one. Firecracker's config sequence omits `/network-interfaces`; libkrun pins
+`NetworkingMode::VsockDirect` and never calls a net attach; the in-house HVF
+device model has no net device; the QEMU dev/test driver emits no `-netdev`.
+Guest I/O leaves over virtio-vsock to a per-VM host-side endpoint, and the host
+originates the real connection.
+
+This is enforced mechanically, not by convention. Two CI gates fail closed on
+any regression:
+
+- **`xtask check-vsock-only-egress`** — fails if `virtio_net`, a tap device, or
+  a userspace-gateway token appears anywhere on a workload path.
+- **`xtask check-uniform-vsock-egress`** — pins Firecracker, libkrun, and HVF to
+  a single egress-endpoint spawn site, so no backend can grow a second gate.
+
+The type system enforces it too: the host-side forwarding seam accepts only an
+`AdmittedPacket`, a type with private fields and no public constructor. There is
+no way to reach a datapath with bytes that have not passed policy, because there
+is no way to construct one.
+
+**The builder VM is the deliberate exception.** It runs `nix build` and does
+have a NIC, because it must reach package mirrors. It carries no untrusted
+tenant workload — a different tier with a different contract. `MVM_NETWORKING`,
+gvproxy, and passt configure *that* VM's networking and are never consulted by
+any workload backend.
 
 ## Security model
 
