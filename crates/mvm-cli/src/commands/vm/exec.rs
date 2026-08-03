@@ -797,7 +797,7 @@ fn build_exec_request(
                 // surfacing only after a full pull + rootfs materialization. The
                 // rootfs boots verity-sealed, so the kernel must carry dm-verity;
                 // the builder kernel (which drops it) is never a stand-in.
-                let kernel_path = ensure_workload_kernel(prod)?;
+                let kernel_path = ensure_workload_kernel()?;
                 // Enforce that invariant host-side: a kernel with no dm-verity
                 // support would panic the guest in early init opening
                 // /dev/mapper/control, with no host signal. Fail fast instead.

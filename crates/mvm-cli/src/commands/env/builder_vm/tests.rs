@@ -98,33 +98,27 @@ mod default_microvm_tests {
         );
     }
 
+    /// One rule for every workload boot: no default-microvm kernel stands in,
+    /// dev or prod. The previous split ("prod never reuses the dev default, dev
+    /// may") meant a workload's kernel — and therefore whether it could enter a
+    /// user namespace — depended on which images happened to be cached locally.
     #[test]
-    fn prod_workload_kernel_cache_never_reuses_dev_default_kernel() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().to_string_lossy().to_string();
-        let dev_kernel = tmp.path().join("default-microvm/dev/vmlinux");
-        std::fs::create_dir_all(dev_kernel.parent().unwrap()).unwrap();
-        std::fs::write(&dev_kernel, b"dev-kernel").unwrap();
+    fn no_default_microvm_kernel_is_ever_reused_as_the_workload_kernel() {
+        for variant in ["dev", "prod"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let cache_dir = tmp.path().to_string_lossy().to_string();
+            let kernel = tmp
+                .path()
+                .join(format!("default-microvm/{variant}/vmlinux"));
+            std::fs::create_dir_all(kernel.parent().unwrap()).unwrap();
+            std::fs::write(&kernel, b"default-kernel").unwrap();
 
-        assert_eq!(
-            find_cached_workload_kernel(&cache_dir, "x86_64", true),
-            None,
-            "prod/workload boots must not silently reuse a dev-tier default kernel"
-        );
-    }
-
-    #[test]
-    fn dev_workload_kernel_cache_may_reuse_dev_default_kernel() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().to_string_lossy().to_string();
-        let dev_kernel = tmp.path().join("default-microvm/dev/vmlinux");
-        std::fs::create_dir_all(dev_kernel.parent().unwrap()).unwrap();
-        std::fs::write(&dev_kernel, b"dev-kernel").unwrap();
-
-        assert_eq!(
-            find_cached_workload_kernel(&cache_dir, "x86_64", false),
-            Some(dev_kernel.to_string_lossy().to_string())
-        );
+            assert_eq!(
+                find_cached_workload_kernel(&cache_dir, "x86_64"),
+                None,
+                "the {variant} default-microvm kernel must not stand in for the workload kernel"
+            );
+        }
     }
 
     #[test]
@@ -135,7 +129,7 @@ mod default_microvm_tests {
         std::fs::create_dir_all(dev_kernel.parent().unwrap()).unwrap();
         std::fs::write(&dev_kernel, b"dev-kernel").unwrap();
 
-        let resolved = resolve_workload_kernel_bootstrap(&cache_dir, "x86_64", true, false);
+        let resolved = resolve_workload_kernel_bootstrap(&cache_dir, "x86_64", false);
         assert_eq!(
             resolved,
             WorkloadKernelBootstrap::Download(format!(
@@ -150,7 +144,7 @@ mod default_microvm_tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache_dir = tmp.path().to_string_lossy().to_string();
 
-        let resolved = resolve_workload_kernel_bootstrap(&cache_dir, "x86_64", true, true);
+        let resolved = resolve_workload_kernel_bootstrap(&cache_dir, "x86_64", true);
         assert_eq!(
             resolved,
             WorkloadKernelBootstrap::BuildLocal(format!(
