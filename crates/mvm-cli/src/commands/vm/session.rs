@@ -1033,6 +1033,8 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             restrict_agent_verbs: !is_dev
                 && crate::commands::vm::agent_verbs::image_is_sealed(rootfs),
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })?;
         let Some(ctx) = ctx else { return Ok(None) };
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();

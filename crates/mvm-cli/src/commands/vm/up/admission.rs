@@ -103,6 +103,66 @@ pub(in crate::commands::vm) struct AdmitPlanForBootParams<'a> {
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs
     /// (ConsoleOpen, Exec) that a ProdSafe grant would refuse.
     pub restrict_agent_verbs: bool,
+    /// The resolved entrypoint's argv, when the caller has resolved one.
+    /// Feeds [`entrypoint_is_shell_shaped`], which refuses the workload input
+    /// grant under a sealed production posture (`restrict_agent_verbs`) when
+    /// this looks like a shell. Empty means "unresolved", not "known safe" —
+    /// no launch path resolves this yet (see the doc on the check site in
+    /// `admit_plan_for_boot`), so this is a hook for a future caller rather
+    /// than an enforced gate today.
+    pub entrypoint_argv: Vec<String>,
+    /// The entrypoint's shebang line, when it is a script and the caller has
+    /// read it. `None` skips that limb of [`entrypoint_is_shell_shaped`].
+    pub entrypoint_shebang: Option<Vec<u8>>,
+}
+
+/// Shell basenames [`entrypoint_is_shell_shaped`] refuses on direct match.
+/// A superset of `mvm_protocol::entrypoint`'s own shell set: that helper
+/// treats a bare `busybox` invocation (no applet argument) as safe, because
+/// for the SDK-declaration gate it validates an applet name is what matters.
+/// Here a bare `busybox` is itself the risk — invoked with no arguments it
+/// drops into an interactive shell — so it is refused directly rather than
+/// only when a shell applet is named.
+const DIRECT_SHELL_BASENAMES: &[&str] =
+    &["sh", "bash", "dash", "ash", "busybox", "zsh", "ksh", "fish"];
+
+/// Last path segment of `program`. A local stand-in for
+/// `std::path::Path::file_name()`: an entrypoint argv element is wire/JSON
+/// data (a plain string), not a host filesystem path, and may use either
+/// separator.
+fn program_basename(program: &str) -> &str {
+    program.rsplit(['/', '\\']).next().unwrap_or(program)
+}
+
+/// Whether `argv`'s own program name is a direct shell match, reusing
+/// `mvm_protocol::entrypoint`'s argv/env/busybox-applet resolution for
+/// everything except the bare-`busybox` case it deliberately excludes.
+fn argv_is_shell(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|prog| DIRECT_SHELL_BASENAMES.contains(&program_basename(prog)))
+        || mvm_protocol::entrypoint::detect_shell_entrypoint_argv(argv).is_some()
+}
+
+/// Whether a resolved entrypoint is shell-shaped, per the design's rule for
+/// refusing the workload input grant under a sealed production posture: its
+/// own argv names a shell (directly, via `env`, or as a busybox applet, or
+/// busybox itself), its script shebang names one, or the argv carries an
+/// inline-command flag (`-c`) — the shape every "run this string"
+/// invocation takes, and one a renamed or wrapped interpreter still has to
+/// carry to accept an inline command.
+///
+/// This is a heuristic, not a proof. A wrapper script, a program that
+/// `exec`s a shell, or an interpreter invoked under an unusual name defeats
+/// it. What still holds is the signed grant itself: input only reaches a
+/// program the admitted plan chose, never one input bytes select.
+pub(in crate::commands::vm) fn entrypoint_is_shell_shaped(
+    argv: &[String],
+    shebang: Option<&[u8]>,
+) -> bool {
+    argv_is_shell(argv)
+        || argv.iter().skip(1).any(|arg| arg == "-c")
+        || shebang
+            .is_some_and(|bytes| mvm_protocol::entrypoint::detect_shell_shebang(bytes).is_some())
 }
 
 /// Bundle of artifacts produced by a successful admission: the
@@ -168,6 +228,26 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
 ) -> Result<Option<AdmissionContext>> {
     if p.no_supervisor {
         return Ok(None);
+    }
+
+    // Refuse before any hashing, bundle reads, or signing: a rejection here
+    // must not have already spent the boot work it exists to avoid. Gated on
+    // `restrict_agent_verbs` — the same "non-interactive, non-ad-hoc, non-dev,
+    // sealed image" posture the ProdSafe verb attenuation uses — because that
+    // is this codebase's existing "sealed production" signal, and D7 is
+    // scoped to exactly that tier. A dev, interactive, or ad-hoc-argv run
+    // already carries a DevOnly Exec grant, so refining its input grant would
+    // not close anything the Exec grant hasn't already opened.
+    if p.restrict_agent_verbs
+        && mvm_protocol::stream::input::grants_input_for(&p.services)
+        && entrypoint_is_shell_shaped(&p.entrypoint_argv, p.entrypoint_shebang.as_deref())
+    {
+        anyhow::bail!(
+            "refusing the workload input grant: the resolved entrypoint {:?} is \
+             shell-shaped, and under a sealed production posture streaming stdin \
+             to a shell is interactive access wearing a different hat",
+            p.entrypoint_argv,
+        );
     }
     let sha = match p.precomputed_image_sha256 {
         Some(sha) => sha,
@@ -568,6 +648,8 @@ fn untrusted_transient_admit_in(
             // they must not receive an attenuated verb grant.
             restrict_agent_verbs: false,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it on
@@ -852,6 +934,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .expect("must succeed");
         assert!(result.is_none(), "no_supervisor must return None");
@@ -888,6 +972,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -988,6 +1074,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .expect_err("missing rootfs must fail");
         assert!(
@@ -1031,6 +1119,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .unwrap()
         .unwrap();
@@ -1058,6 +1148,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .unwrap()
         .unwrap();
@@ -1110,6 +1202,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1184,6 +1278,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1236,6 +1332,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1295,6 +1393,8 @@ mod admit_plan_tests {
             agent_verb_override: vec![],
             restrict_agent_verbs: true,
             services: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })
         .expect("admission")
         .expect("Some when admission ran");
@@ -1331,5 +1431,291 @@ mod admit_plan_tests {
                 .or_else(|| default_agent_verbs(false, false, false))
                 .is_none()
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // D7 — `--prod` refuses the input grant for a shell-shaped
+    // entrypoint. These three are what make the rule a real gate
+    // rather than a blanket ban: a non-shell entrypoint keeps its
+    // grant, a shell entrypoint keeps booting when nothing granted it
+    // input in the first place, and only the intersection refuses.
+    // ──────────────────────────────────────────────────────────────
+
+    fn stream_grant_service() -> mvm_protocol::protocol::broker::ServiceId {
+        mvm_protocol::protocol::broker::ServiceId::parse(
+            mvm_protocol::stream::input::INPUT_GRANT_SERVICE,
+        )
+        .expect("the input grant token is a valid service id")
+    }
+
+    #[test]
+    fn a_non_shell_entrypoint_with_the_grant_is_admitted_under_prod() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"non-shell-entrypoint-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-non-shell-granted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: vec![stream_grant_service()],
+            entrypoint_argv: vec!["python".to_string(), "-m".to_string(), "app".to_string()],
+            entrypoint_shebang: None,
+        })
+        .expect("a non-shell entrypoint must not be refused")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+
+    #[test]
+    fn a_shell_entrypoint_without_the_grant_is_admitted_output_streaming_is_unconditional() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"shell-entrypoint-no-grant-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-shell-ungranted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(), // no host.stream.v1 grant
+            entrypoint_argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string(),
+            ],
+            entrypoint_shebang: None,
+        })
+        .expect("a shell entrypoint must still boot when nothing granted it input")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+
+    #[test]
+    fn a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"shell-entrypoint-granted-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-shell-granted",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: vec![stream_grant_service()],
+            entrypoint_argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string(),
+            ],
+            entrypoint_shebang: None,
+        })
+        .expect_err("a shell entrypoint carrying the grant must be refused");
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("shell-shaped"),
+            "the refusal must name the reason: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_dev_profile_shell_entrypoint_with_the_grant_is_not_refused() {
+        // D7 is scoped to the sealed-production tier (restrict_agent_verbs).
+        // A dev/interactive/ad-hoc run already carries a DevOnly Exec grant,
+        // so the refusal must not fire there — it would be a no-op wearing a
+        // security label.
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"dev-shell-entrypoint-payload");
+        let ledger = InMemoryNonceLedger::new();
+
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name: "vm-dev-shell",
+            backend_name: "firecracker",
+            rootfs_path: &rootfs,
+            precomputed_image_sha256: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: false,
+            services: vec![stream_grant_service()],
+            entrypoint_argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string(),
+            ],
+            entrypoint_shebang: None,
+        })
+        .expect("dev-tier runs are out of D7's scope")
+        .expect("Some when admission ran");
+
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod entrypoint_shape_tests {
+    use super::*;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn every_direct_shell_basename_is_shell_shaped() {
+        for name in DIRECT_SHELL_BASENAMES {
+            assert!(
+                entrypoint_is_shell_shaped(&argv(&[name]), None),
+                "{name} must be treated as a shell"
+            );
+            // A full path to the same program must match on basename alone.
+            assert!(
+                entrypoint_is_shell_shaped(&argv(&[&format!("/usr/local/bin/{name}")]), None),
+                "a full path to {name} must be treated as a shell"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_busybox_invocation_is_shell_shaped_even_with_a_non_shell_applet() {
+        // Unlike mvm_protocol::entrypoint's SDK-declaration check (which lets
+        // "busybox true" through because the named applet isn't a shell),
+        // D7 treats busybox itself as the risk: invoked bare it drops into an
+        // interactive shell, so any invocation is refused on basename alone.
+        assert!(entrypoint_is_shell_shaped(&argv(&["busybox"]), None));
+        assert!(entrypoint_is_shell_shaped(
+            &argv(&["busybox", "true"]),
+            None
+        ));
+    }
+
+    #[test]
+    fn an_env_wrapped_shell_is_shell_shaped() {
+        // Reused from mvm_protocol::entrypoint::detect_shell_entrypoint_argv
+        // rather than reimplemented: env indirection, -S/--split-string, and
+        // env-assignment skipping all apply here for free.
+        assert!(entrypoint_is_shell_shaped(
+            &argv(&["/usr/bin/env", "bash", "-lc", "echo no"]),
+            None
+        ));
+    }
+
+    #[test]
+    fn a_script_whose_shebang_names_a_shell_is_shell_shaped() {
+        assert!(entrypoint_is_shell_shaped(
+            &argv(&["./entrypoint.sh"]),
+            Some(b"#!/bin/bash\necho hi\n"),
+        ));
+    }
+
+    #[test]
+    fn a_script_whose_shebang_names_a_non_shell_interpreter_is_not_shell_shaped() {
+        assert!(!entrypoint_is_shell_shaped(
+            &argv(&["./entrypoint.py"]),
+            Some(b"#!/usr/bin/env python3\n"),
+        ));
+    }
+
+    #[test]
+    fn an_inline_command_flag_makes_any_interpreter_shell_shaped() {
+        // Deliberately not restricted to programs already named as shells:
+        // an inline-command flag is the shape every "run this string"
+        // invocation takes, including a renamed or wrapped interpreter.
+        assert!(entrypoint_is_shell_shaped(
+            &argv(&["python", "-c", "print(1)"]),
+            None
+        ));
+    }
+
+    #[test]
+    fn an_ordinary_argv_program_is_not_shell_shaped() {
+        assert!(!entrypoint_is_shell_shaped(
+            &argv(&["python", "-m", "app"]),
+            None
+        ));
+    }
+
+    #[test]
+    fn an_empty_argv_is_not_shell_shaped() {
+        assert!(!entrypoint_is_shell_shaped(&[], None));
     }
 }

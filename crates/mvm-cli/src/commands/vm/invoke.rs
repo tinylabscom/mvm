@@ -219,6 +219,8 @@ fn admit_entrypoint_boot(
         restrict_agent_verbs: !params.keep_alive_dev
             && super::agent_verbs::image_is_sealed(params.rootfs),
         services: Vec::new(),
+        entrypoint_argv: Vec::new(),
+        entrypoint_shebang: None,
     })?;
     let Some(ctx) = ctx else { return Ok(None) };
 

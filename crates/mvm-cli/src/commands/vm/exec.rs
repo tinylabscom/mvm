@@ -439,6 +439,8 @@ pub(in crate::commands) fn run_secure_with_source(
                 crate::commands::vm::agent_verbs::image_is_sealed(rootfs),
             ),
             services: admit_host_services.clone(),
+            entrypoint_argv: Vec::new(),
+            entrypoint_shebang: None,
         })?;
         let Some(c) = ctx else { return Ok(None) };
         // Persist the bare plan so the pre-start moat / endpoint can read it

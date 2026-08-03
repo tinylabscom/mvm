@@ -245,6 +245,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             image_sealed,
         ),
         services: Vec::new(),
+        entrypoint_argv: Vec::new(),
+        entrypoint_shebang: None,
     })?;
     let mut start_config = VmStartParams {
         name: name.to_string(),
