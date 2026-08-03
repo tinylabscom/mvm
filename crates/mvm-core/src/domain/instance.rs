@@ -165,6 +165,9 @@ impl BlockVolumeChunk {
         }
         let decoded_len = u64::try_from(self.data_hex.len() / 2)
             .map_err(|_| anyhow::anyhow!("block-volume chunk length is unsupported"))?;
+        if self.total_size == 0 || decoded_len == 0 {
+            bail!("block-volume chunk must make progress within a non-empty image");
+        }
         let end = self
             .offset
             .checked_add(decoded_len)
@@ -1098,6 +1101,9 @@ mod tests {
         assert!(chunk.validate().is_err());
         chunk.eof = true;
         chunk.data_hex = "z0".into();
+        assert!(chunk.validate().is_err());
+        chunk.data_hex.clear();
+        chunk.sha256 = hex::encode(sha2::Sha256::digest([]));
         assert!(chunk.validate().is_err());
     }
 
