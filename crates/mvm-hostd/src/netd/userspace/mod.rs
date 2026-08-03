@@ -369,11 +369,19 @@ impl UserspaceHandle {
     }
 
     /// Move both directions of every established flow, and reap the ones
-    /// that have finished.
+    /// that have finished or gone idle.
     fn pump_flows(&mut self, now_millis: u64) {
         let Self { flows, metrics, .. } = self;
         flows.retain(|_, flow| {
-            flow.pump(now_millis, metrics);
+            let stats = flow.pump(now_millis, metrics);
+            fold_throughput(metrics, &stats);
+            // Nothing here ages a flow for being quiet. An established flow
+            // is reclaimed when its *peer* is gone — the host socket's
+            // keepalive surfaces that as an error, and the error path
+            // resets the guest and releases the descriptor — never for
+            // having nothing to say. This datapath carries protocols that
+            // are idle by design, and a quiet stream is a working stream.
+            //
             // A finished flow is kept while it still holds packets for the
             // guest — the reset explaining why it finished, above all.
             // Reaping it with those undelivered would put the guest back at
@@ -419,7 +427,10 @@ impl UserspaceHandle {
         // second host socket for a connection that already exists.
         if let Some(established) = self.flows.get_mut(&flow) {
             return match established.deliver_from_guest(bytes) {
-                PushOutcome::Queued => Ok(()),
+                PushOutcome::Queued => {
+                    self.metrics.packets_egress = self.metrics.packets_egress.saturating_add(1);
+                    Ok(())
+                }
                 PushOutcome::DroppedQueueFull => Err(DatapathError::Io(std::io::Error::from(
                     std::io::ErrorKind::WouldBlock,
                 ))),
@@ -465,7 +476,10 @@ impl UserspaceHandle {
             .half_open
             .on_syn(flow, syn.to_vec(), dst, self.now_millis)
         {
-            SynOutcome::Started | SynOutcome::Folded => Ok(()),
+            SynOutcome::Started | SynOutcome::Folded => {
+                self.metrics.packets_egress = self.metrics.packets_egress.saturating_add(1);
+                Ok(())
+            }
             SynOutcome::Refused(code) => {
                 self.metrics.record_deny(code);
                 Err(DatapathError::Io(std::io::Error::new(
@@ -500,12 +514,13 @@ impl UserspaceHandle {
         // guest whose connect failed, and that guest is blocked on nothing
         // else; a flow with data to move is, by definition, one whose
         // connect worked.
-        if let Some(packet) = self.device.pop_for_guest() {
-            return Some(packet);
-        }
-        self.flows
-            .values_mut()
-            .find_map(EstablishedFlow::next_guest_packet)
+        let packet = self.device.pop_for_guest().or_else(|| {
+            self.flows
+                .values_mut()
+                .find_map(EstablishedFlow::next_guest_packet)
+        })?;
+        self.metrics.packets_ingress = self.metrics.packets_ingress.saturating_add(1);
+        Some(packet)
     }
 }
 
@@ -575,11 +590,32 @@ impl Drop for UserspaceHandle {
     }
 }
 
+/// Fold one pump pass's byte movement into the machine's counters.
+///
+/// Without this the datapath is unobservable for throughput: nothing else
+/// records whether it is carrying traffic at all. The same argument that
+/// made a queue drop countable rather than silent applies to the traffic
+/// the drop is measured against.
+///
+/// **Packets are counted at the guest seam and bytes at the host seam**, and
+/// on a datapath that translates flows into host sockets those are honestly
+/// different quantities: a guest packet includes framing and may be a pure
+/// ACK carrying nothing, while a host byte is payload that actually crossed
+/// the network. Counting bytes at the guest seam as well would put two
+/// meanings behind one counter, so `bytes_egress` is payload written to the
+/// host socket and `packets_egress` is packets accepted from the guest.
+fn fold_throughput(metrics: &mut GatewayMetrics, stats: &tcp::PumpStats) {
+    metrics.bytes_egress = metrics.bytes_egress.saturating_add(stats.to_host as u64);
+    metrics.bytes_ingress = metrics.bytes_ingress.saturating_add(stats.to_guest as u64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::netd::test_packets::v4_packet;
+    use mvm_net::l3::flow::DEFAULT_TCP_IDLE_MILLIS;
     use smoltcp::wire::{TcpControl, TcpRepr, TcpSeqNumber};
+    use std::io::{Read, Write};
     use std::net::{Ipv4Addr, TcpListener};
     use std::time::Duration;
 
@@ -764,30 +800,115 @@ mod tests {
         control: TcpControl,
         payload: &[u8],
     ) -> (FlowKey, Vec<u8>) {
-        let segment = TcpRepr {
-            src_port: guest_port,
-            dst_port: dst.port(),
-            control,
-            seq_number: TcpSeqNumber(GUEST_ISN as i32),
-            ack_number: matches!(control, TcpControl::Syn)
-                .then_some(None)
-                .unwrap_or(Some(TcpSeqNumber(1))),
-            window_len: u16::MAX,
-            window_scale: None,
-            max_seg_size: matches!(control, TcpControl::Syn).then_some(1_400),
-            sack_permitted: false,
-            sack_ranges: [None; 3],
-            timestamp: None,
-            payload,
-        };
-        let bytes = emit_v4_segment(request().guest, v4_of(dst), &segment);
-        let key = FlowKey {
-            protocol: proto::TCP,
+        GuestSegment {
             guest_port,
-            remote: dst.ip(),
-            remote_port: dst.port(),
-        };
-        (key, bytes)
+            dst,
+            control,
+            seq: GUEST_ISN,
+            ack: (!matches!(control, TcpControl::Syn)).then_some(1),
+            payload,
+        }
+        .emit()
+    }
+
+    /// A guest segment described by every field that matters, rather than
+    /// by a row of positional arguments: once the sequence and the
+    /// acknowledgement are both callers' business, two adjacent `u32`s in a
+    /// signature are a transposition waiting to happen.
+    struct GuestSegment<'a> {
+        guest_port: u16,
+        dst: SocketAddr,
+        control: TcpControl,
+        seq: u32,
+        ack: Option<u32>,
+        payload: &'a [u8],
+    }
+
+    impl GuestSegment<'_> {
+        fn emit(&self) -> (FlowKey, Vec<u8>) {
+            let segment = TcpRepr {
+                src_port: self.guest_port,
+                dst_port: self.dst.port(),
+                control: self.control,
+                seq_number: TcpSeqNumber(self.seq as i32),
+                ack_number: self.ack.map(|a| TcpSeqNumber(a as i32)),
+                window_len: u16::MAX,
+                window_scale: None,
+                max_seg_size: matches!(self.control, TcpControl::Syn).then_some(1_400),
+                sack_permitted: false,
+                sack_ranges: [None; 3],
+                timestamp: None,
+                payload: self.payload,
+            };
+            let bytes = emit_v4_segment(request().guest, v4_of(self.dst), &segment);
+            let key = FlowKey {
+                protocol: proto::TCP,
+                guest_port: self.guest_port,
+                remote: self.dst.ip(),
+                remote_port: self.dst.port(),
+            };
+            (key, bytes)
+        }
+    }
+
+    /// The stack's initial sequence number, read out of the SYN-ACK it
+    /// produced for `guest_port`.
+    fn syn_ack_isn(packet: &[u8], guest_port: u16) -> Option<u32> {
+        let ip = smoltcp::wire::Ipv4Packet::new_checked(packet).ok()?;
+        let seg = smoltcp::wire::TcpPacket::new_checked(ip.payload()).ok()?;
+        (seg.syn() && seg.ack() && seg.dst_port() == guest_port).then(|| seg.seq_number().0 as u32)
+    }
+
+    /// Answer the SYN-ACK, so the guest side reaches ESTABLISHED.
+    ///
+    /// Without this a handle's flows sit in SYN-RECEIVED, where smoltcp
+    /// will neither deliver a payload to the host nor accept one for the
+    /// guest — so every throughput assertion over such a flow would be
+    /// vacuous. Returns the acknowledgement number the guest must carry
+    /// from here on.
+    fn complete_handshake(handle: &mut UserspaceHandle, guest_port: u16, dst: SocketAddr) -> u32 {
+        let mut buf = [0u8; MTU_V1 as usize];
+        for _ in 0..SERVICE_ATTEMPTS {
+            let Ok(n) = handle.recv_from_network(&mut buf) else {
+                break;
+            };
+            let Some(isn) = syn_ack_isn(&buf[..n], guest_port) else {
+                continue;
+            };
+            let ack = isn.wrapping_add(1);
+            let reply = GuestSegment {
+                guest_port,
+                dst,
+                control: TcpControl::None,
+                seq: GUEST_ISN.wrapping_add(1),
+                ack: Some(ack),
+                payload: &[],
+            }
+            .emit();
+            deliver(handle, &reply).expect("the guest's handshake ACK is accepted");
+            handle.service(0).expect("service");
+            return ack;
+        }
+        panic!("the flow's stack must answer the replayed SYN with a SYN-ACK");
+    }
+
+    /// A handle carrying one flow whose guest has completed its handshake,
+    /// with the accepted peer at the far end so a test can see what
+    /// actually crossed the host socket.
+    fn handle_with_an_established_conversation()
+    -> (UserspaceHandle, SocketAddr, std::net::TcpStream, u32) {
+        let held = listener();
+        let dst = held.local_addr().expect("local addr");
+        let mut handle = open_test_handle();
+        let syn = guest_segment(50_000, dst, TcpControl::Syn, &[]);
+        deliver(&mut handle, &syn).expect("a SYN toward a live listener is accepted");
+        assert!(
+            drive_until(&mut handle, |h| h.flows.len() == 1),
+            "the fixture's loopback connect must resolve"
+        );
+        let (peer, _) = held.accept().expect("accept the flow's host socket");
+        let ack = complete_handshake(&mut handle, 50_000, dst);
+        (handle, dst, peer, ack)
     }
 
     fn udp_segment(guest_port: u16, dst: SocketAddr) -> (FlowKey, Vec<u8>) {
@@ -987,6 +1108,132 @@ mod tests {
         let ip = smoltcp::wire::Ipv4Packet::new_checked(&buf[..n]).expect("ipv4");
         let seg = smoltcp::wire::TcpPacket::new_checked(ip.payload()).expect("tcp");
         assert!(seg.rst(), "the packet held back must be the reset itself");
+    }
+
+    /// **The streaming case.** A Server-Sent Events stream between events,
+    /// or a WebSocket between messages, is idle by design and may stay that
+    /// way for hours. Reclaiming it would look to the guest like a
+    /// connection that dropped for no reason, with nothing in any log to
+    /// say why. Quietness is not a fault, and nothing here may treat it as
+    /// one.
+    #[test]
+    fn a_quiet_flow_whose_peer_is_alive_is_never_reclaimed() {
+        let (mut handle, _dst, _peer, _ack) = handle_with_an_established_conversation();
+        // Well past any idle bound the rest of the system uses for a flow
+        // *table* entry, whose cost is a row rather than a live socket.
+        for step in 1..=4u64 {
+            let now = step * DEFAULT_TCP_IDLE_MILLIS;
+            handle.service(now).expect("service");
+            assert_eq!(
+                handle.flows.len(),
+                1,
+                "a quiet connection with a live peer was reclaimed at {now} ms"
+            );
+        }
+        assert_eq!(handle.open_socket_count(), 1);
+    }
+
+    /// And the resource hole that closes: a peer that goes away takes its
+    /// descriptor with it, without the guest having to do anything.
+    #[test]
+    fn a_flow_whose_peer_is_gone_is_reclaimed() {
+        let (mut handle, _dst, peer, _ack) = handle_with_an_established_conversation();
+        assert_eq!(handle.open_socket_count(), 1);
+
+        // An abortive close, which is what a peer that crashed or was
+        // killed looks like on the wire. The graceful path is a FIN and is
+        // covered by the half-close tests; this is the one that has to
+        // surface as an error on the host socket.
+        let sock = socket2::SockRef::from(&peer);
+        sock.set_linger(Some(Duration::ZERO))
+            .expect("an abortive close");
+        drop(peer);
+
+        assert!(
+            drive_until(&mut handle, |h| h
+                .flows
+                .values()
+                .all(EstablishedFlow::host_socket_closed)),
+            "a flow whose peer is gone must give the descriptor back"
+        );
+
+        // The guest is told, and only once it has been told is the flow
+        // reaped — the reset is the last thing this flow owes anyone.
+        let mut buf = [0u8; MTU_V1 as usize];
+        let mut saw_reset = false;
+        for _ in 0..SERVICE_ATTEMPTS {
+            let Ok(n) = handle.recv_from_network(&mut buf) else {
+                break;
+            };
+            let Ok(ip) = smoltcp::wire::Ipv4Packet::new_checked(&buf[..n]) else {
+                continue;
+            };
+            if let Ok(seg) = smoltcp::wire::TcpPacket::new_checked(ip.payload()) {
+                saw_reset |= seg.rst();
+            }
+        }
+        assert!(saw_reset, "the guest must learn that its peer is gone");
+
+        handle.service(1).expect("service");
+        assert!(handle.flows.is_empty());
+        assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    /// A datapath nobody can see the throughput of cannot be told from one
+    /// carrying nothing at all — and this is also the end-to-end witness
+    /// that the wiring works: a guest packet in at the trait method, the
+    /// same bytes out of a host socket a real peer is reading.
+    #[test]
+    fn the_traffic_it_carries_crosses_the_host_socket_and_is_counted() {
+        let (mut handle, dst, mut peer, ack) = handle_with_an_established_conversation();
+        let accepted = handle.metrics().packets_egress;
+        let ingress = handle.metrics().packets_ingress;
+        assert!(accepted >= 1, "the SYN that opened the flow was counted");
+        assert!(ingress >= 1, "the SYN-ACK handed back was counted");
+
+        let body = b"payload-that-crosses";
+        let data = GuestSegment {
+            guest_port: 50_000,
+            dst,
+            control: TcpControl::None,
+            seq: GUEST_ISN.wrapping_add(1),
+            ack: Some(ack),
+            payload: body,
+        }
+        .emit();
+        deliver(&mut handle, &data).expect("an established flow takes its guest's bytes");
+        assert_eq!(handle.metrics().packets_egress, accepted + 1);
+
+        handle.service(1).expect("service");
+
+        assert_eq!(
+            handle.metrics().bytes_egress,
+            body.len() as u64,
+            "the bytes a pass moved onto the host socket must be counted, not discarded"
+        );
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("a bounded read");
+        let mut got = vec![0u8; body.len()];
+        peer.read_exact(&mut got)
+            .expect("the peer reads what the guest sent");
+        assert_eq!(
+            got.as_slice(),
+            body,
+            "and the bytes counted must be the bytes that crossed"
+        );
+    }
+
+    /// The other direction, at the same seam.
+    #[test]
+    fn bytes_arriving_from_the_peer_are_counted_too() {
+        let (mut handle, _dst, mut peer, _ack) = handle_with_an_established_conversation();
+        peer.write_all(b"a-response").expect("peer write");
+        peer.flush().expect("flush");
+        assert!(
+            drive_until(&mut handle, |h| h.metrics().bytes_ingress > 0),
+            "bytes read off a host socket must reach the counters"
+        );
+        assert_eq!(handle.metrics().bytes_ingress, b"a-response".len() as u64);
     }
 
     /// Until UDP has a translation of its own, a datagram must be refused

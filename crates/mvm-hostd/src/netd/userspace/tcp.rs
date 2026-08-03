@@ -54,7 +54,7 @@ use smoltcp::wire::{
     HardwareAddress, IpAddress, IpCidr, IpListenEndpoint, IpProtocol, Ipv4Packet, Ipv4Repr,
     Ipv6Packet, Ipv6Repr, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber,
 };
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, SockRef, Socket, TcpKeepalive, Type};
 
 use crate::netd::datapath::DatapathError;
 use crate::netd::metrics::GatewayMetrics;
@@ -62,8 +62,8 @@ use crate::netd::metrics::GatewayMetrics;
 use super::accept_mtu;
 use super::device::{GuestDevice, PushOutcome, QueueDepths};
 use super::limits::{
-    FLOW_RX_QUEUE_DEPTH, FLOW_TX_QUEUE_DEPTH, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER,
-    SOCKET_TX_BUFFER,
+    FLOW_RX_QUEUE_DEPTH, FLOW_TX_QUEUE_DEPTH, HALF_OPEN_TIMEOUT_MILLIS, KEEPALIVE_IDLE_SECS,
+    KEEPALIVE_PROBE_INTERVAL_SECS, KEEPALIVE_PROBE_RETRIES, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
 };
 
 /// A guest SYN held back from the stack while its host connect runs.
@@ -454,6 +454,10 @@ pub struct EstablishedFlow {
     /// that has already run, and every retransmit and timeout on this flow
     /// would be judged against the wrong instant.
     last_polled_millis: u64,
+    /// A reset is owed to the guest but has not been sent, because the
+    /// stack is still holding bytes the host already received for it.
+    /// See [`Self::deliver_then_reset`].
+    reset_pending: bool,
 }
 
 impl EstablishedFlow {
@@ -484,6 +488,23 @@ impl EstablishedFlow {
         // Re-asserted rather than assumed: a blocking write in the pump
         // would park the whole drive loop on one slow destination.
         host.set_nonblocking(true)?;
+        // The only thing that separates a connection nobody is using from
+        // one nobody is answering. An established flow is otherwise
+        // ageless — nothing in TCP obliges either end to speak — so without
+        // this a peer that vanished silently holds its descriptor for as
+        // long as the machine lives. Deliberately *not* an idle timer:
+        // this datapath carries streaming protocols that are quiet by
+        // design, and quietness is not a fault. When the probes go
+        // unanswered the socket errors, and the ordinary host-error path
+        // resets the guest and gives the descriptor back.
+        SockRef::from(&host).set_tcp_keepalive(
+            &TcpKeepalive::new()
+                .with_time(std::time::Duration::from_secs(KEEPALIVE_IDLE_SECS))
+                .with_interval(std::time::Duration::from_secs(
+                    KEEPALIVE_PROBE_INTERVAL_SECS,
+                ))
+                .with_retries(KEEPALIVE_PROBE_RETRIES),
+        )?;
 
         // The per-flow depths, never the machine-wide default: this device
         // is per flow, so its depths multiply by the socket cap and are
@@ -546,6 +567,7 @@ impl EstablishedFlow {
             host_read_eof: false,
             host_error: None,
             last_polled_millis: now_millis,
+            reset_pending: false,
         })
     }
 
@@ -612,7 +634,9 @@ impl EstablishedFlow {
         // A host socket that failed is a conversation that cannot continue,
         // in either direction. Told here rather than left for a caller to
         // notice, because the caller that does not notice leaves the guest
-        // waiting on a socket nobody is going to answer.
+        // waiting on a socket nobody is going to answer. A reset deferred
+        // by [`Self::deliver_then_reset`] is retried on every later pass,
+        // which is why this does not test `host_error` alone.
         if let Some(kind) = self.host_error {
             self.on_host_error(kind);
         }
@@ -680,20 +704,53 @@ impl EstablishedFlow {
         if !is_terminal_host_error(kind) {
             return;
         }
-        // Already resolved: the descriptor is gone and the reset, if one
-        // was owed, has been queued.
-        if self.host.is_none() {
+        if self.host.is_some() {
+            // `get_or_insert`, so the *first* error is the one that
+            // explains the flow. A later one is a consequence of it.
+            self.host_error.get_or_insert(kind);
+            // The descriptor is dead whatever happens next; release it now
+            // rather than holding it for however long the reset takes.
+            self.close_host();
+            self.reset_pending = true;
+        }
+        if self.reset_pending {
+            self.deliver_then_reset();
+        }
+    }
+
+    /// Hand the guest everything the host already received for it, and only
+    /// then reset.
+    ///
+    /// The peer's last act is very often to send a complete response and
+    /// then close hard — `SO_LINGER 0`, which surfaces here as
+    /// `ECONNRESET`. Those bytes are already on this host, sitting in the
+    /// stack's send buffer, and smoltcp's aborted-socket dispatch emits a
+    /// **payload-less** RST: resetting first throws away a response the
+    /// server did send, and the guest's application sees a request that
+    /// failed for no reason. Losing an answered request is worse than the
+    /// hang the reset exists to prevent.
+    ///
+    /// So the reset waits for the send buffer to empty, which means waiting
+    /// for the guest to *acknowledge* those bytes rather than merely for
+    /// them to be emitted. A reset arriving alongside unacknowledged data
+    /// is entitled to discard it — that is what a receiving stack does with
+    /// its pending receive queue — so "emitted" is not the same as
+    /// "delivered", and only the acknowledgement proves the second.
+    ///
+    /// Bounded by the caller: a guest that never acknowledges stops moving
+    /// bytes, and the handle's idle reaper takes the flow. Nothing here
+    /// waits forever.
+    fn deliver_then_reset(&mut self) {
+        // Emit whatever the guest's window allows before anything else.
+        self.poll(self.last_polled_millis);
+        if self.socket().send_queue() > 0 {
             return;
         }
-        // `get_or_insert`, so the *first* error is the one that explains
-        // the flow. A later one is a consequence of it.
-        self.host_error.get_or_insert(kind);
         self.sockets.get_mut::<TcpSocket>(self.handle).abort();
-        // Aborting only moves the socket's state; the reset leaves on the
-        // next poll, and this method's contract is that the packet is
-        // queued by the time it returns.
+        // Aborting only moves the socket's state; the reset itself leaves
+        // on the next poll.
         self.poll(self.last_polled_millis);
-        self.close_host();
+        self.reset_pending = false;
     }
 
     /// Release the host descriptor now rather than at drop.
@@ -2093,6 +2150,31 @@ mod tests {
             let _ = flow.take_guest_packets();
         }
 
+        /// Acknowledge every data segment in `packets`, as a real guest's
+        /// stack would.
+        ///
+        /// Needed because "the host emitted it" and "the guest has it" are
+        /// different claims: a reset arriving beside unacknowledged data is
+        /// entitled to discard it. A fixture that only checked emission
+        /// could not tell the two apart.
+        fn acknowledge(&mut self, flow: &mut EstablishedFlow, packets: &[Vec<u8>]) {
+            for p in packets {
+                let Ok(ip) = smoltcp::wire::Ipv4Packet::new_checked(p.as_slice()) else {
+                    continue;
+                };
+                let Ok(seg) = smoltcp::wire::TcpPacket::new_checked(ip.payload()) else {
+                    continue;
+                };
+                let end = (seg.seq_number().0 as u32).wrapping_add(seg.payload().len() as u32);
+                // Signed compare, the arithmetic TCP sequence space is
+                // defined on, so a wrap does not read as a jump backwards.
+                if end.wrapping_sub(self.ack) as i32 > 0 {
+                    self.ack = end;
+                }
+            }
+            flow.deliver_from_guest(&self.segment(TcpControl::None, Some(self.ack), &[]));
+        }
+
         fn fin(&mut self, flow: &mut EstablishedFlow) {
             flow.deliver_from_guest(&self.segment(TcpControl::Fin, Some(self.ack), &[]));
             self.seq = self.seq.wrapping_add(1);
@@ -2889,6 +2971,119 @@ mod tests {
         let _ = flow.pump_ignoring_metrics(0);
         assert!(rst_in(&flow.take_guest_packets()).is_some());
         assert_eq!(flow.host_error(), Some(io::ErrorKind::BrokenPipe));
+    }
+
+    /// Load the stack's send buffer with a peer response the guest has not
+    /// been given yet, without letting it reach the guest-bound queue.
+    ///
+    /// This is the state one pump pass is in when it reads a response and
+    /// then meets `ECONNRESET` on the next read — the ordinary shape of a
+    /// peer that answers and closes with `SO_LINGER 0`.
+    fn buffer_a_peer_response(
+        flow: &mut EstablishedFlow,
+        peer: &mut std::net::TcpStream,
+        body: &[u8],
+    ) {
+        peer.write_all(body).expect("the peer writes its response");
+        peer.flush().expect("flush");
+        let mut stats = PumpStats::default();
+        for _ in 0..PUMP_ATTEMPTS {
+            flow.host_to_guest(&mut stats);
+            if flow.socket().send_queue() >= body.len() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            flow.socket().send_queue() >= body.len(),
+            "the fixture must leave the response inside the stack, unsent"
+        );
+        assert!(
+            !carries_payload(&flow.take_guest_packets(), body),
+            "and it must not already have reached the guest"
+        );
+    }
+
+    /// A peer that answers and then closes hard is the common case, not an
+    /// edge case. Resetting first would throw away a response the server
+    /// did send, and the guest's application would see a request that
+    /// failed for no reason — worse than the hang the reset prevents.
+    #[test]
+    fn a_peers_buffered_response_reaches_the_guest_before_the_reset() {
+        let (mut flow, mut peer, mut g) = established_flow_with_peer();
+        let body = b"HTTP/1.0 200 OK\r\n\r\nthe-answer";
+        buffer_a_peer_response(&mut flow, &mut peer, body);
+
+        flow.on_host_error(io::ErrorKind::ConnectionReset);
+
+        let first = flow.take_guest_packets();
+        assert!(
+            carries_payload(&first, body),
+            "the guest must be given what the host already holds for it"
+        );
+        assert!(
+            rst_in(&first).is_none(),
+            "and the reset must not overtake it: a reset beside unacknowledged \
+             data is entitled to discard that data"
+        );
+
+        // Once the guest has acknowledged the response, the reset follows.
+        g.acknowledge(&mut flow, &first);
+        flow.pump_ignoring_metrics(1);
+        assert!(
+            rst_in(&flow.take_guest_packets()).is_some(),
+            "the guest still has to learn that the flow is over"
+        );
+        assert!(flow.host_socket_closed(), "and the descriptor is released");
+    }
+
+    /// The window assertion again, on a flow whose sequence numbers have
+    /// *moved*. Against a quiescent flow the correct answer and the ISN
+    /// coincide, so that case cannot tell a live number from a stale one.
+    #[test]
+    fn the_reset_is_in_window_after_the_flow_has_carried_data() {
+        let (mut flow, mut peer, mut g) = established_flow_with_peer();
+        let body = b"a-response-that-advances-the-sequence";
+        buffer_a_peer_response(&mut flow, &mut peer, body);
+
+        flow.on_host_error(io::ErrorKind::ConnectionReset);
+        let delivered = flow.take_guest_packets();
+        assert!(carries_payload(&delivered, body));
+        g.acknowledge(&mut flow, &delivered);
+        flow.pump_ignoring_metrics(1);
+
+        let (seq, ack) = rst_in(&flow.take_guest_packets()).expect("a reset");
+        assert_eq!(
+            seq, g.ack,
+            "the reset must carry the sequence after the data, not the handshake's"
+        );
+        assert_ne!(
+            seq, GUEST_ISN,
+            "a fixture where the two coincide could not tell a live number from a stale one"
+        );
+        assert_eq!(ack, g.seq, "and acknowledge everything the guest sent");
+    }
+
+    /// An established flow is reclaimed when its peer stops answering, not
+    /// when it goes quiet — so something has to be doing the asking.
+    ///
+    /// Asserted by reading the option back rather than by waiting for a
+    /// probe to fail: the shortest honest keepalive timeout is over a
+    /// minute, which no unit test should sit through, and an unasserted
+    /// `setsockopt` is one a refactor deletes in silence.
+    #[test]
+    fn a_flows_host_socket_asks_whether_its_peer_is_still_there() {
+        let (flow, _peer, _g) = established_flow_with_peer();
+        let host = flow
+            .host
+            .as_ref()
+            .expect("the fixture flow holds its socket");
+        assert!(
+            SockRef::from(host)
+                .keepalive()
+                .expect("reading the keepalive flag back"),
+            "a flow whose peer vanishes must be able to find out"
+        );
     }
 
     /// A reset the datapath could not build leaves a guest hanging until

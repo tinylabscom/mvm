@@ -1079,8 +1079,8 @@ still holds.
 
 - [x] **Step 4: Run tests and confirm they pass**
 
-`cargo nextest run -p mvm-hostd` → 1396 passed / 2 skipped.
-`-E 'test(userspace)'` → 97 passed. clippy `-D warnings` clean (`metrics()`
+`cargo nextest run -p mvm-hostd` → 1403 passed / 2 skipped (after review round 1).
+`-E 'test(userspace)'` → 104 passed. clippy `-D warnings` clean (`metrics()`
 is `pub`, not `pub(crate)`, for the `dead_code` reason recorded under Task
 11); nightly fmt clean; `check-file-size` clean; `cargo zigbuild --target
 x86_64-unknown-linux-gnu -p mvm-hostd --all-targets` clean.
@@ -1108,6 +1108,83 @@ identical from outside:
 git add crates/mvm-hostd/src/netd/ specs/plans/287-userspace-socket-datapath.md
 git commit -m "feat(netd): surface host socket errors to the guest and close deterministically"
 ```
+
+**Review round 1 landed on top** (`fix(netd): deliver before resetting, and
+reclaim on a dead peer rather than a quiet one`).
+
+1. **The reset was discarding data the peer had already sent.** `abort()` was
+   called after `host_to_guest` had buffered the peer's bytes, and smoltcp's
+   aborted-socket dispatch emits a **payload-less** RST — so a server that
+   answered and then closed with `SO_LINGER 0` (`ECONNRESET`, the ordinary
+   shape of a hard close) lost its whole response, and the guest's
+   application saw a request that failed for no reason. Losing an answered
+   request is worse than the hang the reset exists to prevent.
+
+   `deliver_then_reset` now polls first and holds the reset back while
+   `send_queue() > 0`, retrying on each later pump pass. It waits for the
+   guest to *acknowledge* rather than merely for the bytes to be emitted: a
+   reset arriving beside unacknowledged data is entitled to discard it, so
+   emission is not delivery. Witnessed by
+   `a_peers_buffered_response_reaches_the_guest_before_the_reset`, which
+   asserts the payload arrives **and** that no reset accompanies it, then
+   that the reset follows the acknowledgement.
+
+2. **The idle-timeout instruction was withdrawn and is not implemented.** An
+   idleness reaper would have killed Server-Sent Events and WebSocket
+   streams, which are plain TCP, fully carried here, and idle *by design* —
+   the failure would have looked like a connection dropped for no reason
+   with nothing in any log. Idleness cannot distinguish a connection nobody
+   is using from one nobody is answering.
+
+   What landed instead: `SO_KEEPALIVE` on every flow's host socket
+   (`KEEPALIVE_IDLE_SECS` 60, `KEEPALIVE_PROBE_INTERVAL_SECS` 10,
+   `KEEPALIVE_PROBE_RETRIES` 3 — a vanished peer surfaces as a socket error
+   within ~90 s instead of a platform default's two hours). No new reap path
+   was needed: the probes failing make the socket error, and the host-error
+   path already resets the guest and releases the descriptor.
+   `a_quiet_flow_whose_peer_is_alive_is_never_reclaimed` is the streaming
+   case made executable — it is the test that would have caught the
+   withdrawn instruction — and `a_flow_whose_peer_is_gone_is_reclaimed`
+   closes the resource hole with an abortive peer close.
+
+   **Residual hole, stated rather than papered over:** a peer that stays
+   alive indefinitely while the guest has forgotten the flow keeps its
+   descriptor. Keepalive cannot see that, and no idle timer may be used to
+   guess at it. The shape that would close it is a liveness probe *toward
+   the guest* — this datapath terminates the guest's TCP, so it can ask the
+   guest's stack directly — reaping only on no answer, which distinguishes
+   "nobody wants this" from "nothing to send". Not implemented; the blast
+   radius is one guest's own per-machine budget, and machine teardown
+   reclaims everything.
+
+3. **Throughput is counted.** `PumpStats` was discarded, so nothing recorded
+   whether the datapath was carrying traffic at all. `fold_throughput` folds
+   each pass's bytes in, and packets are counted where they cross the guest
+   seam. Packets at the guest seam and bytes at the host seam are different
+   quantities on a socket-translating datapath — a guest packet includes
+   framing and may be a pure ACK — so they are documented as such rather
+   than collapsed into one number that would be wrong for both.
+
+The handle fixture now completes a real handshake
+(`handle_with_an_established_conversation`), which is what makes
+`the_traffic_it_carries_crosses_the_host_socket_and_is_counted` an
+end-to-end witness: a guest packet in at the datapath's own entry point,
+the same bytes read out of a host socket by a real peer.
+
+Round-1 mutations, all observed on an already-built tree:
+
+| Mutation | Result |
+| --- | --- |
+| `deliver_then_reset` aborts without delivering | `a_peers_buffered_response_reaches_the_guest_before_the_reset` + `the_reset_is_in_window_after_the_flow_has_carried_data` red, 0.12 s |
+| the keepalive `setsockopt` removed | `a_flows_host_socket_asks_whether_its_peer_is_still_there` red, 0.11 s |
+| `fold_throughput` not called | both throughput tests red, 0.64 s |
+| `packets_ingress` not counted | `the_traffic_it_carries_crosses_the_host_socket_and_is_counted` red, 0.14 s |
+| an idleness reaper re-introduced | `a_quiet_flow_whose_peer_is_alive_is_never_reclaimed` red, 0.10 s |
+
+The ceiling did not move: the one field added is an inline `bool`, and
+keepalive is a socket option, not memory. 1403 tests pass, and the full
+crate suite was run five times to confirm the flake that came in with the
+withdrawn idle measure left with it.
 
 **Known gap, not this task's:** nothing in production calls
 `UserspaceHandle::service`. `DatapathHandle` has no `service` method and the

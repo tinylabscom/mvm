@@ -36,6 +36,31 @@ pub const DEFAULT_MAX_HALF_OPEN: usize = 64;
 /// How long a half-open entry waits for its host connect.
 pub const HALF_OPEN_TIMEOUT_MILLIS: u64 = 10_000;
 
+/// How long a quiet established connection waits before the host starts
+/// asking whether its peer is still there.
+///
+/// This, and not an idle timer, is how an established flow is reclaimed.
+/// Idleness cannot distinguish a connection nobody is using from one nobody
+/// is *answering*, and this datapath carries both: a Server-Sent Events
+/// stream between events and a WebSocket between messages are idle **by
+/// design**, indefinitely, and a reaper that measured quietness would kill
+/// them and leave nothing in the logs but a dropped connection. A keepalive
+/// probe asks the question idleness only guesses at.
+///
+/// Long enough that ordinary quiet connections cost no probes worth
+/// counting, short enough that a descriptor behind a vanished peer comes
+/// back in about a minute and a half rather than the two hours a platform
+/// default would take.
+pub const KEEPALIVE_IDLE_SECS: u64 = 60;
+
+/// Gap between probes once the peer has stopped answering.
+pub const KEEPALIVE_PROBE_INTERVAL_SECS: u64 = 10;
+
+/// Unanswered probes before the connection is declared dead. With the two
+/// figures above, a vanished peer surfaces as a socket error within
+/// 60 + 3 x 10 seconds.
+pub const KEEPALIVE_PROBE_RETRIES: u32 = 3;
+
 pub const SOCKET_RX_BUFFER: usize = 16 * 1024;
 pub const SOCKET_TX_BUFFER: usize = 16 * 1024;
 
