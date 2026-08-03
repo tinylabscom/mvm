@@ -418,27 +418,42 @@ pub fn pivot_to_root(new_root: &Path) -> Result<()> {
 pub fn drop_privilege(uid: u32, gid: u32) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // Drop any supplementary groups first while still root.
-        // SAFETY: setgroups(0, NULL) is the documented Linux way to clear all supplementary groups.
-        if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
-            return Err(MountError::syscall(
-                "setgroups",
-                std::io::Error::last_os_error(),
-            ));
-        }
-        // Order matters: setgid before setuid so the saved gid stays usable.
-        setgid(gid)?;
-        setuid(uid)?;
-        // Paranoia: confirm we cannot regain root.
-        // SAFETY: getuid() has no precondition and cannot fail.
-        if unsafe { libc::getuid() } == 0 {
-            return Err(MountError::Syscall {
-                context: "privilege drop failed: still uid 0".to_string(),
-                source: std::io::Error::from_raw_os_error(libc::EPERM),
-            });
-        }
+        drop_privilege_raw(uid, gid)
+            .map_err(|source| MountError::syscall("privilege drop", source))?;
     }
     let _ = (uid, gid);
+    Ok(())
+}
+
+/// The privilege drop as bare syscalls, allocating nothing on any path.
+///
+/// This is the single implementation; `drop_privilege` is the wrapper that
+/// adds a typed error for the pid-1 path. It exists separately because the
+/// other caller runs inside a `pre_exec` hook — that is, in a forked child
+/// before `exec` — where allocating can deadlock if another thread held the
+/// allocator lock at fork time. Bare syscalls plus `last_os_error` (which
+/// only wraps errno) keep that path allocation-free.
+#[cfg(target_os = "linux")]
+pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
+    // Drop any supplementary groups first while still root.
+    // SAFETY: setgroups(0, NULL) is the documented Linux way to clear all supplementary groups.
+    if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Order matters: setgid before setuid so the saved gid stays usable.
+    // SAFETY: both receive a plain id value; no pointer contract.
+    if unsafe { libc::setgid(gid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above.
+    if unsafe { libc::setuid(uid) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Paranoia: confirm we cannot regain root.
+    // SAFETY: getuid() has no precondition and cannot fail.
+    if unsafe { libc::getuid() } == 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+    }
     Ok(())
 }
 
@@ -651,32 +666,6 @@ fn ensure_dir(path: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(MountError::syscall(format!("mkdir {path}"), e)),
     }
-}
-
-#[cfg(target_os = "linux")]
-fn setuid(uid: u32) -> Result<()> {
-    // SAFETY: setuid receives a plain uid_t value; no pointer contract.
-    let rc = unsafe { libc::setuid(uid) };
-    if rc != 0 {
-        return Err(MountError::syscall(
-            format!("setuid({uid})"),
-            std::io::Error::last_os_error(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn setgid(gid: u32) -> Result<()> {
-    // SAFETY: setgid receives a plain gid_t value; no pointer contract.
-    let rc = unsafe { libc::setgid(gid) };
-    if rc != 0 {
-        return Err(MountError::syscall(
-            format!("setgid({gid})"),
-            std::io::Error::last_os_error(),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]

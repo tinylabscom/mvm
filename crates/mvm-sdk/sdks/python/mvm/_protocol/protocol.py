@@ -792,6 +792,17 @@ class GuestResponse13:
 
 
 @dataclass
+class WorkloadPrivilegeRefused:
+    uid: int
+    verb: str
+
+
+@dataclass
+class GuestResponse14:
+    WorkloadPrivilegeRefused: WorkloadPrivilegeRefused
+
+
+@dataclass
 class CheckpointResult:
     failed: List[str]
     success: bool
@@ -799,7 +810,7 @@ class CheckpointResult:
 
 
 @dataclass
-class GuestResponse15:
+class GuestResponse16:
     CheckpointResult: CheckpointResult
 
 
@@ -809,12 +820,12 @@ class PrimedStatusReport:
 
 
 @dataclass
-class GuestResponse17:
+class GuestResponse18:
     PrimedStatusReport: PrimedStatusReport
 
 
 @dataclass
-class GuestResponse19:
+class GuestResponse20:
     ExecEvent: ExecEvent
 
 
@@ -824,7 +835,7 @@ class ExecBatchResult:
 
 
 @dataclass
-class GuestResponse20:
+class GuestResponse21:
     ExecBatchResult: ExecBatchResult
 
 
@@ -834,7 +845,7 @@ class DetachedStarted:
 
 
 @dataclass
-class GuestResponse21:
+class GuestResponse22:
     DetachedStarted: DetachedStarted
 
 
@@ -847,7 +858,7 @@ class PostRestoreAck:
 
 
 @dataclass
-class GuestResponse22:
+class GuestResponse23:
     PostRestoreAck: PostRestoreAck
 
 
@@ -858,7 +869,7 @@ class PortForwardStarted:
 
 
 @dataclass
-class GuestResponse24:
+class GuestResponse25:
     PortForwardStarted: PortForwardStarted
 
 
@@ -869,7 +880,7 @@ class UnixSocketForwardStarted:
 
 
 @dataclass
-class GuestResponse25:
+class GuestResponse26:
     UnixSocketForwardStarted: UnixSocketForwardStarted
 
 
@@ -880,7 +891,7 @@ class ConsoleOpened:
 
 
 @dataclass
-class GuestResponse26:
+class GuestResponse27:
     ConsoleOpened: ConsoleOpened
 
 
@@ -891,7 +902,7 @@ class ConsoleExited:
 
 
 @dataclass
-class GuestResponse27:
+class GuestResponse28:
     ConsoleExited: ConsoleExited
 
 
@@ -901,7 +912,7 @@ class ConsoleResized:
 
 
 @dataclass
-class GuestResponse28:
+class GuestResponse29:
     ConsoleResized: ConsoleResized
 
 
@@ -913,7 +924,7 @@ class EntrypointStatusReport:
 
 
 @dataclass
-class GuestResponse29:
+class GuestResponse30:
     EntrypointStatusReport: EntrypointStatusReport
 
 
@@ -924,7 +935,7 @@ class UpdateIdleTimeoutAck:
 
 
 @dataclass
-class GuestResponse35:
+class GuestResponse36:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
 
 
@@ -1401,12 +1412,12 @@ class ProbeStatusReport:
 
 
 @dataclass
-class GuestResponse16:
+class GuestResponse17:
     ProbeStatusReport: ProbeStatusReport
 
 
 @dataclass
-class GuestResponse18:
+class GuestResponse19:
     EntrypointEvent: EntrypointEvent
 
 
@@ -1416,27 +1427,27 @@ class FsDiffResult:
 
 
 @dataclass
-class GuestResponse23:
+class GuestResponse24:
     FsDiffResult: FsDiffResult
 
 
 @dataclass
-class GuestResponse30:
+class GuestResponse31:
     ReadinessStatusReport: ReadinessReport
 
 
 @dataclass
-class GuestResponse31:
+class GuestResponse32:
     FsResult: FsResult
 
 
 @dataclass
-class GuestResponse33:
+class GuestResponse34:
     ProcWaitEvent: ProcWaitEvent
 
 
 @dataclass
-class GuestResponse34:
+class GuestResponse35:
     VolumeMountResult: VolumeMountResult
 
 
@@ -1577,12 +1588,12 @@ class IntegrationStatusReport:
 
 
 @dataclass
-class GuestResponse14:
+class GuestResponse15:
     IntegrationStatusReport: IntegrationStatusReport
 
 
 @dataclass
-class GuestResponse32:
+class GuestResponse33:
     ProcResult: ProcResult
 
 
@@ -1622,6 +1633,7 @@ GuestResponse = Union[
     GuestResponse33,
     GuestResponse34,
     GuestResponse35,
+    GuestResponse36,
 ]
 
 

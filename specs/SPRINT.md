@@ -60,6 +60,21 @@ updates only its own entry below.
       `LocalBackend` (starts after #2078/#2080/#2081 land the shared
       inventory/volume/secret types).
 
+- [x] #2091 — no workload runs as root. `mvm-oci-init` is pid 1 and spawned
+      the agent as a root child, so `is_pid1()` was false, `apply_activation`
+      returned before `drop_privilege`, and the agent kept uid 0 — and since
+      none of its five workload-spawn sites sets a uid, every workload launched
+      through it ran as root. Firecracker boots the agent as pid 1 and so
+      already dropped to 901; the variable was the init, not the backend. The
+      OCI init now spawns the agent with the workload identity, and
+      `Verb::spawns_workload_process` plus one check on the shared request path
+      refuse any workload-spawning verb served at uid 0, so a boot path that
+      never reaches the drop fails closed instead of silently running as root.
+      Live: HVF moves from `uid=0(root)` to `uid=901`, Firecracker stays at
+      `uid=901`; reverting the mechanism makes the gate refuse with a
+      self-describing error. Evidence in
+      `specs/research/no-root-workload-live-witness.md`.
+
 - [x] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
       6.12.100 configs and remove unsupported physical hardware, radio/input,
       filesystem, power-management, tracing/debug, keyring, task-accounting,
