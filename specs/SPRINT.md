@@ -10,6 +10,24 @@
 
 ## Current issue delivery
 
+### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
+
+Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,
+`volume`, `secret`, `audit`). Each issue lands via its own PR; each PR
+updates only its own entry below.
+
+- [ ] #2078 — canonical unified machine inventory through mvm-client.
+
+- [ ] #2080 — reusable local encrypted-volume lifecycle service.
+
+- [ ] #2081 — reusable write-only local secret lifecycle service.
+
+- [ ] #2082 — normalized verified local audit events for UI consumers.
+
+- [ ] #2079 — persistent + transient launch lifecycle through
+      `LocalBackend` (starts after #2078/#2080/#2081 land the shared
+      inventory/volume/secret types).
+
 - [x] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
       6.12.100 configs and remove unsupported physical hardware, radio/input,
       filesystem, power-management, tracing/debug, keyring, task-accounting,
