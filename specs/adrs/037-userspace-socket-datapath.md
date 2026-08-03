@@ -197,11 +197,12 @@ without bound and the stated ceiling is fiction.
 The datapath lives in `crates/mvm-hostd/src/netd/userspace/`, beside
 `linux.rs` and below the seam.
 
-`gateway.rs` is 1486 lines against the repository's `MAX_PROD_LINES` of
-1500 — **fourteen lines of headroom**. It cannot absorb any part of this
-work. If the readiness plumbing turns out to need more than a trivial
-change there, `gateway.rs` is split first, as its own commit, before any
-of this lands on top of it.
+`gateway.rs` is a large file, but it is not near the file-size gate.
+`xtask check-file-size` counts **production lines only** — those before a
+file's first top-level `#[cfg(test)]`, per this repo's trailing-tests
+convention. `gateway.rs` is ~1466 lines total but its production body is
+**889**, against a `MAX_PROD_LINES` of 1500. It has ample headroom, and a
+change there needs no preparatory split.
 
 | File | Responsibility |
 |---|---|
