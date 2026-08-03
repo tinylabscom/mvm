@@ -891,6 +891,7 @@ pub fn belongs_to(lease: &AddressLease, addr: Ipv4Addr) -> bool {
 mod tests {
     use super::*;
     use crate::netd::datapath::LoopbackDatapath;
+    use crate::netd::test_packets::{tcp, v4_packet};
     use mvm_core::policy::projection::{CanonicalEgress, CanonicalRule, Proto};
     use mvm_net::l3::{AddressAllocator, IngressMapping};
     use mvm_protocol::l3::proto;
@@ -949,27 +950,6 @@ mod tests {
         let ready_frame = frame::encode(MessageType::Ready, SESSION.0, 0, &ready.encode()).unwrap();
         let (_, events) = gw.handle_control_frame(&ready_frame, 1).unwrap();
         assert!(matches!(events[0], GatewayEvent::TunnelReady { .. }));
-    }
-
-    fn v4_packet(protocol: u8, src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
-        let total = 20 + payload.len();
-        let mut p = vec![0u8; 20];
-        p[0] = 0x45;
-        p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
-        p[9] = protocol;
-        p[12..16].copy_from_slice(&src.octets());
-        p[16..20].copy_from_slice(&dst.octets());
-        p.extend_from_slice(payload);
-        p
-    }
-
-    fn tcp(src_port: u16, dst_port: u16, flags: u8) -> Vec<u8> {
-        let mut t = vec![0u8; 20];
-        t[0..2].copy_from_slice(&src_port.to_be_bytes());
-        t[2..4].copy_from_slice(&dst_port.to_be_bytes());
-        t[12] = 0x50;
-        t[13] = flags;
-        t
     }
 
     #[test]

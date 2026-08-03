@@ -148,12 +148,13 @@ impl HalfOpenTable {
         let (socket, refused_at_open) = match start_connect(dst) {
             Ok(socket) => (socket, false),
             Err(ConnectStartError::Refused(socket)) => (socket, true),
-            // The socket itself could not be created or bound to the
-            // destination family — descriptor exhaustion or an address the
-            // host has no route for. Both mean the host has no room to hold
-            // this half-open, which is what the full-table code says.
+            // No socket at all: EMFILE, an address family the host cannot
+            // open, or a sandbox refusing the call. Not a capacity
+            // condition — reporting it as a full table would point an
+            // operator at a ceiling mvm chose instead of at the one the OS
+            // is imposing.
             Err(ConnectStartError::NoSocket) => {
-                return SynOutcome::Refused(DenyCode::FlowTableFull);
+                return SynOutcome::Refused(DenyCode::HostSocketUnavailable);
             }
         };
         self.entries.insert(
@@ -169,28 +170,32 @@ impl HalfOpenTable {
         SynOutcome::Started
     }
 
-    /// Entries whose host connect has completed **successfully**, removed
-    /// from the table as they are yielded.
+    /// Poll every half-open connect once and take out everything the kernel
+    /// has decided, leaving only those still in flight.
     ///
-    /// Yielded once: replaying a SYN a second time would re-drive a
-    /// handshake the guest has already completed. Entries whose connect
-    /// failed are dropped here rather than returned — telling the guest is
-    /// the reset path's job, and reporting them as replayable is precisely
-    /// the lie this type exists to prevent.
-    pub fn replayable(&mut self) -> Vec<HalfOpen> {
-        let mut ready = Vec::new();
+    /// Each resolved entry is yielded exactly once — it is *moved* out of
+    /// the map, so "once" is structural rather than bookkept. Replaying a
+    /// SYN a second time would re-drive a handshake the guest has already
+    /// completed.
+    ///
+    /// Failures come back alongside successes rather than being discarded:
+    /// a guest whose connect failed is still waiting on a SYN-ACK that will
+    /// never arrive, and the caller cannot synthesize the reset it is owed
+    /// for a flow it was never told about.
+    pub fn resolve(&mut self) -> Resolved {
+        let mut out = Resolved::default();
         let mut still_pending = BTreeMap::new();
         for (key, entry) in std::mem::take(&mut self.entries) {
             match progress(&entry) {
                 ConnectProgress::Pending => {
                     still_pending.insert(key, entry);
                 }
-                ConnectProgress::Established => ready.push(entry),
-                ConnectProgress::Failed => drop(entry),
+                ConnectProgress::Established => out.established.push(entry),
+                ConnectProgress::Failed => out.failed.push(entry),
             }
         }
         self.entries = still_pending;
-        ready
+        out
     }
 
     /// Drop entries whose host connect has taken longer than
@@ -200,13 +205,23 @@ impl HalfOpenTable {
     /// dropping firewall — parks a descriptor until the kernel's own much
     /// longer connect timeout, which is a hostile guest's cheapest way to
     /// hold host resources.
+    ///
+    /// An entry whose connect has *already succeeded* is never aged out,
+    /// however old it is. Expiry and resolution are driven independently,
+    /// so a loop that expires more often than it resolves would otherwise
+    /// discard connections the host had genuinely established and leave the
+    /// guest's SYN unanswered — punishing a slow poller, not a slow
+    /// destination.
     pub fn expire(&mut self, now_millis: u64) -> Vec<HalfOpen> {
         let mut dropped = Vec::new();
         let mut kept = BTreeMap::new();
         for (key, entry) in std::mem::take(&mut self.entries) {
             // Saturating: a caller whose clock stepped backwards must not
             // wrap into an enormous age and expire every live entry.
-            if now_millis.saturating_sub(entry.opened_at_millis) >= HALF_OPEN_TIMEOUT_MILLIS {
+            let aged =
+                now_millis.saturating_sub(entry.opened_at_millis) >= HALF_OPEN_TIMEOUT_MILLIS;
+            // Short-circuited so the common, un-aged case costs no syscall.
+            if aged && progress(&entry) != ConnectProgress::Established {
                 dropped.push(entry);
             } else {
                 kept.insert(key, entry);
@@ -217,11 +232,24 @@ impl HalfOpenTable {
     }
 }
 
+/// What one [`HalfOpenTable::resolve`] took out of the table.
+#[derive(Debug, Default)]
+pub struct Resolved {
+    /// Connects that succeeded. Replay these SYNs into the stack; it will
+    /// emit the SYN-ACK and the guest reaches ESTABLISHED — now, and only
+    /// now, truthfully.
+    pub established: Vec<HalfOpen>,
+    /// Connects that failed. Each of these owes the guest a reset: it is
+    /// still waiting on a handshake that will never complete.
+    pub failed: Vec<HalfOpen>,
+}
+
 /// Why a connect could not even be started.
 enum ConnectStartError {
-    /// The kernel answered synchronously with a failure. The socket comes
-    /// back so the entry can still exist and be reported to the guest
-    /// through the same path as an asynchronous failure.
+    /// The kernel answered synchronously with a terminal failure —
+    /// `ECONNREFUSED`, `EAGAIN`, `ENETUNREACH`. The socket comes back so
+    /// the entry can still exist and be reported to the guest through the
+    /// same path as an asynchronous failure.
     Refused(TcpStream),
     /// No socket to speak of.
     NoSocket,
@@ -238,17 +266,31 @@ fn start_connect(dst: SocketAddr) -> Result<TcpStream, ConnectStartError> {
         // Connected outright — loopback often does.
         Ok(()) => Ok(socket.into()),
         Err(e) if is_in_progress(&e) => Ok(socket.into()),
-        // A synchronous refusal. The error has been handed to us and
-        // `SO_ERROR` cleared with it, so the caller latches this rather
-        // than trusting a later readiness check to rediscover it.
+        // Anything else is terminal, and the error has been handed to us
+        // inline — never stored in the socket, so `SO_ERROR` is empty and a
+        // later readiness check cannot rediscover it. Latched instead.
         Err(_) => Err(ConnectStartError::Refused(socket.into())),
     }
 }
 
+/// Whether a `connect(2)` return means the kernel has *taken* the connect
+/// and will report its outcome later.
+///
+/// Matched on the raw errno, never on [`io::ErrorKind`]. `EINPROGRESS` and
+/// `EAGAIN` both map to [`io::ErrorKind::WouldBlock`] on some platforms,
+/// and they mean opposite things here: `EINPROGRESS` is a connect under
+/// way, while `EAGAIN` — which Linux returns for ephemeral-port and
+/// route-cache exhaustion — is **terminal**. Accepting `EAGAIN` as
+/// in-progress leaves a socket that never left `TCP_CLOSE`; Linux reports
+/// `TCP_CLOSE` as `POLLHUP`, so it reads as writable, and its `SO_ERROR` is
+/// empty because the error was returned inline and never stored. That is
+/// `Established` on an unconnected socket — the same lie the latch exists
+/// to stop, reached through the arm that skips the latch.
 fn is_in_progress(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::WouldBlock)
-        || e.raw_os_error() == Some(libc::EINPROGRESS)
-        || e.raw_os_error() == Some(libc::EALREADY)
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EINPROGRESS) | Some(libc::EALREADY)
+    )
 }
 
 /// Where this entry's host connect has got to.
@@ -299,7 +341,9 @@ fn is_writable(socket: &TcpStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netd::test_packets::{tcp, v4_packet};
     use mvm_net::l3::flow::FlowKey;
+    use mvm_protocol::l3::ip::proto;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
     use std::time::{Duration, Instant};
 
@@ -311,7 +355,7 @@ mod tests {
 
     fn key_with_port(guest_port: u16) -> FlowKey {
         FlowKey {
-            protocol: mvm_protocol::l3::ip::proto::TCP,
+            protocol: proto::TCP,
             guest_port,
             remote: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             remote_port: 443,
@@ -319,22 +363,12 @@ mod tests {
     }
 
     fn syn_bytes() -> Vec<u8> {
-        let mut tcp = vec![0u8; 20];
-        tcp[0..2].copy_from_slice(&50_000u16.to_be_bytes());
-        tcp[2..4].copy_from_slice(&443u16.to_be_bytes());
-        tcp[12] = 0x50;
-        tcp[13] = mvm_protocol::l3::ip::TCP_SYN;
-
-        let total = 20 + tcp.len();
-        let mut packet = vec![0u8; 20];
-        packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
-        packet[8] = 64;
-        packet[9] = mvm_protocol::l3::ip::proto::TCP;
-        packet[12..16].copy_from_slice(&Ipv4Addr::new(10, 0, 0, 2).octets());
-        packet[16..20].copy_from_slice(&Ipv4Addr::new(10, 0, 0, 1).octets());
-        packet.extend_from_slice(&tcp);
-        packet
+        v4_packet(
+            proto::TCP,
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(10, 0, 0, 1),
+            &tcp(50_000, 443, mvm_protocol::l3::ip::TCP_SYN),
+        )
     }
 
     fn listener() -> TcpListener {
@@ -355,11 +389,30 @@ mod tests {
     fn poll_until_replayable(t: &mut HalfOpenTable, budget: Duration) -> Vec<HalfOpen> {
         let deadline = Instant::now() + budget;
         loop {
-            let ready = t.replayable();
+            let ready = t.resolve().established;
             if !ready.is_empty() || Instant::now() >= deadline {
                 return ready;
             }
             std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// A `HalfOpen` around a socket that really is connected — writable,
+    /// with an empty `SO_ERROR`. That state is byte-identical to the trap
+    /// states (a drained synchronous error, an `EAGAIN` socket still in
+    /// `TCP_CLOSE`), so only `refused_at_open` can tell them apart.
+    ///
+    /// `held` is borrowed rather than opened here so the caller keeps the
+    /// listener alive: dropping it would RST the peer and the socket would
+    /// stop being the writable-with-no-error state under test.
+    fn entry_over_a_live_socket(held: &TcpListener, refused_at_open: bool) -> HalfOpen {
+        let addr = held.local_addr().expect("local addr");
+        HalfOpen {
+            key: key(),
+            syn: syn_bytes(),
+            socket: std::net::TcpStream::connect(addr).expect("connect"),
+            opened_at_millis: 0,
+            refused_at_open,
         }
     }
 
@@ -369,7 +422,7 @@ mod tests {
         let outcome = t.on_syn(key(), syn_bytes(), unreachable_dst(), 0);
         assert!(matches!(outcome, SynOutcome::Started));
         assert!(
-            t.replayable().is_empty(),
+            t.resolve().established.is_empty(),
             "nothing may be replayed into the stack before connect resolves"
         );
     }
@@ -427,6 +480,11 @@ mod tests {
     /// A fold that refreshed the entry's clock would hand a guest an
     /// unbounded descriptor hold for the price of one SYN every ten
     /// seconds.
+    ///
+    /// Asserted on the stored timestamp rather than through `expire`: a
+    /// live loopback connect may or may not have completed by the time
+    /// `expire` runs, and since expiry rescues completed connects, routing
+    /// this property through `expire` would make it a race.
     #[test]
     fn a_retransmit_does_not_extend_the_half_open_timeout() {
         let held = listener();
@@ -434,18 +492,25 @@ mod tests {
         let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN);
         t.on_syn(key(), syn_bytes(), dst, 0);
         t.on_syn(key(), syn_bytes(), dst, HALF_OPEN_TIMEOUT_MILLIS - 1);
-        assert_eq!(t.expire(HALF_OPEN_TIMEOUT_MILLIS).len(), 1);
+        assert_eq!(
+            t.entries[&key()].opened_at_millis,
+            0,
+            "a retransmit must not restart the clock"
+        );
     }
 
+    /// The entry is latched-failed so its connect can never resolve to
+    /// `Established`, which is what makes the drop deterministic — expiry
+    /// deliberately rescues completed connects.
     #[test]
     fn a_half_open_entry_times_out() {
         let held = listener();
-        let dst = held.local_addr().expect("local addr");
         let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN);
-        t.on_syn(key(), syn_bytes(), dst, 0);
+        t.entries
+            .insert(key(), entry_over_a_live_socket(&held, true));
         let dropped = t.expire(HALF_OPEN_TIMEOUT_MILLIS);
         assert_eq!(dropped.len(), 1);
-        assert_eq!(t.len(), 0);
+        assert!(t.is_empty());
     }
 
     #[test]
@@ -474,7 +539,7 @@ mod tests {
         assert_eq!(first[0].key(), key());
         assert_eq!(first[0].syn(), syn_bytes().as_slice());
         assert!(
-            t.replayable().is_empty(),
+            t.resolve().established.is_empty(),
             "an entry must not be replayed twice — that would re-drive the handshake"
         );
         assert_eq!(t.len(), 0);
@@ -493,16 +558,21 @@ mod tests {
         ));
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
+            let resolved = t.resolve();
             assert!(
-                t.replayable().is_empty(),
+                resolved.established.is_empty(),
                 "a connect that failed must never be reported as established"
             );
-            if t.is_empty() {
+            if let Some(failed) = resolved.failed.first() {
+                // The caller must learn *which* flow failed, or it cannot
+                // synthesize the reset the guest is owed.
+                assert_eq!(failed.key(), key());
+                assert!(t.is_empty());
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("a refused connect must resolve and be dropped, not linger until timeout");
+        panic!("a refused connect must resolve and be reported as failed, not linger");
     }
 
     /// The other half of the same inversion, and the one no live socket can
@@ -514,18 +584,71 @@ mod tests {
     #[test]
     fn a_drained_error_is_not_mistaken_for_a_completed_connect() {
         let held = listener();
-        let addr = held.local_addr().expect("local addr");
-        let connected = std::net::TcpStream::connect(addr).expect("connect");
-        let mut entry = HalfOpen {
-            key: key(),
-            syn: syn_bytes(),
-            socket: connected,
-            opened_at_millis: 0,
-            refused_at_open: true,
-        };
+        let mut entry = entry_over_a_live_socket(&held, true);
         assert_eq!(progress(&entry), ConnectProgress::Failed);
         entry.refused_at_open = false;
         assert_eq!(progress(&entry), ConnectProgress::Established);
+    }
+
+    /// `EAGAIN` from `connect(2)` — Linux returns it for ephemeral-port and
+    /// route-cache exhaustion — is **terminal**, not a connect in progress.
+    /// It shares [`io::ErrorKind::WouldBlock`] with `EINPROGRESS`, so only
+    /// the raw errno separates them; classifying on `ErrorKind` reads
+    /// `EAGAIN` as in-progress, leaves a socket that never left
+    /// `TCP_CLOSE`, and `TCP_CLOSE` polls as `POLLHUP` with an empty
+    /// `SO_ERROR` — which is `Established` on a socket connected to
+    /// nothing.
+    #[test]
+    fn eagain_at_connect_is_terminal_not_a_connect_in_progress() {
+        let eagain = io::Error::from_raw_os_error(libc::EAGAIN);
+        assert!(
+            !is_in_progress(&eagain),
+            "EAGAIN is a failed connect, not one the kernel has taken"
+        );
+        assert!(is_in_progress(&io::Error::from_raw_os_error(
+            libc::EINPROGRESS
+        )));
+        assert!(!is_in_progress(&io::Error::from_raw_os_error(
+            libc::ECONNREFUSED
+        )));
+        // The whole trap in one line: the two errnos are indistinguishable
+        // through `ErrorKind` on this platform, so a classifier that looks
+        // at `ErrorKind` cannot be correct.
+        if eagain.kind() == io::Error::from_raw_os_error(libc::EINPROGRESS).kind() {
+            assert_ne!(libc::EAGAIN, libc::EINPROGRESS);
+        }
+    }
+
+    /// The end of the chain finding 1 opens: an `EAGAIN` classified as
+    /// terminal latches, and a latched entry over a socket that polls
+    /// writable-with-no-error still resolves to `Failed`.
+    #[test]
+    fn an_eagain_at_open_is_latched_and_never_becomes_established() {
+        let eagain = io::Error::from_raw_os_error(libc::EAGAIN);
+        let held = listener();
+        let entry = entry_over_a_live_socket(&held, !is_in_progress(&eagain));
+        assert_eq!(
+            progress(&entry),
+            ConnectProgress::Failed,
+            "an EAGAIN connect must never be reported as established"
+        );
+    }
+
+    /// Expiry and resolution are driven independently. A loop that expires
+    /// more often than it resolves must not throw away connections the host
+    /// actually established.
+    #[test]
+    fn expiry_does_not_discard_a_connect_that_already_completed() {
+        let held = listener();
+        let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN);
+        t.entries
+            .insert(key(), entry_over_a_live_socket(&held, false));
+        assert!(
+            t.expire(HALF_OPEN_TIMEOUT_MILLIS * 10).is_empty(),
+            "a completed connect is not a stalled one, however old"
+        );
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.resolve().established.len(), 1);
     }
 
     #[test]
@@ -538,5 +661,21 @@ mod tests {
             SynOutcome::Refused(DenyCode::FlowTableFull)
         ));
         assert_eq!(t.len(), 0);
+    }
+
+    /// A full table and a host that cannot open a socket are different
+    /// conditions and must not share an audit label: one points an operator
+    /// at a ceiling mvm chose, the other at the descriptor limit the OS is
+    /// imposing.
+    #[test]
+    fn a_socket_that_cannot_be_opened_is_not_reported_as_a_full_table() {
+        assert_ne!(
+            DenyCode::HostSocketUnavailable.as_str(),
+            DenyCode::FlowTableFull.as_str()
+        );
+        assert_eq!(
+            DenyCode::HostSocketUnavailable.as_str(),
+            "host_socket_unavailable"
+        );
     }
 }

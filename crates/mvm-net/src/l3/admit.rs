@@ -97,6 +97,13 @@ pub enum DenyCode {
     IcmpDenied,
     GatewayServiceDenied,
     FlowTableFull,
+    /// The host could not open a socket to re-originate the flow on:
+    /// descriptor exhaustion, an address family the host cannot open, or a
+    /// sandbox refusing the call. Deliberately distinct from
+    /// [`Self::FlowTableFull`] — that one names a ceiling mvm chose and an
+    /// operator can raise, this one names the process running out of what
+    /// the OS grants it, and the two send an operator to different places.
+    HostSocketUnavailable,
     UnsolicitedInbound,
     WrongDestination,
     SessionNotReady,
@@ -124,6 +131,7 @@ impl DenyCode {
             Self::IcmpDenied => "icmp_denied",
             Self::GatewayServiceDenied => "gateway_service_denied",
             Self::FlowTableFull => "flow_table_full",
+            Self::HostSocketUnavailable => "host_socket_unavailable",
             Self::UnsolicitedInbound => "unsolicited_inbound",
             Self::WrongDestination => "wrong_destination",
             Self::SessionNotReady => "session_not_ready",
@@ -1512,6 +1520,7 @@ mod tests {
             DenyCode::IcmpDenied,
             DenyCode::GatewayServiceDenied,
             DenyCode::FlowTableFull,
+            DenyCode::HostSocketUnavailable,
             DenyCode::UnsolicitedInbound,
             DenyCode::WrongDestination,
             DenyCode::SessionNotReady,

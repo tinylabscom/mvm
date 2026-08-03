@@ -33,6 +33,9 @@ pub mod datapath;
 pub mod gateway;
 pub mod metrics;
 pub mod packet;
+/// IPv4/TCP builders shared by this module tree's tests.
+#[cfg(test)]
+pub(crate) mod test_packets;
 /// The per-port Unix-socket guest channel — the concrete transport behind
 /// the backend-neutral abstraction for every VMM whose host-facing endpoint
 /// is a per-VM socket.

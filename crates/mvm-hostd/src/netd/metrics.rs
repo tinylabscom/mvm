@@ -114,6 +114,7 @@ mod tests {
             DenyCode::IcmpDenied,
             DenyCode::GatewayServiceDenied,
             DenyCode::FlowTableFull,
+            DenyCode::HostSocketUnavailable,
             DenyCode::UnsolicitedInbound,
             DenyCode::WrongDestination,
             DenyCode::SessionNotReady,
@@ -122,7 +123,7 @@ mod tests {
             m.record_deny(code);
         }
         // Recording the same closed set twice cannot grow the label set.
-        assert_eq!(m.denies().count(), 21);
-        assert_eq!(m.total_denies(), 42);
+        assert_eq!(m.denies().count(), 22);
+        assert_eq!(m.total_denies(), 44);
     }
 }
