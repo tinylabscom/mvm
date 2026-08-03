@@ -719,8 +719,9 @@ mod admitted_environment_tests {
         .expect("matching kernel must be admitted");
     }
 
-    /// A different kernel than the plan pinned is refused. This is the #2101
-    /// case: same plan, same image, a kernel swapped underneath.
+    /// A different kernel than the plan pinned is refused: same plan, same
+    /// image, a kernel swapped underneath — the substitution that used to be
+    /// invisible because nothing in the plan described the environment.
     #[test]
     fn substituted_kernel_is_refused() {
         let tmp = tempfile::tempdir().expect("tempdir");
