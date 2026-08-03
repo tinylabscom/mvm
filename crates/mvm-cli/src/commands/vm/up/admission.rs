@@ -219,6 +219,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         .map(|(policy_ref, _)| policy_ref.as_str());
 
     let input = SynthesisInput {
+        kernel_sha256: None,
         network_mode: Default::default(),
         l3_network: None,
         vm_name: p.vm_name,
