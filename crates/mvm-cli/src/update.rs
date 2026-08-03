@@ -241,6 +241,7 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
 
     if std::env::var("MVM_SKIP_HASH_VERIFY").is_ok() {
         ui::warn("MVM_SKIP_HASH_VERIFY set — skipping kernel checksum verification (never in CI).");
+        record_kernel_pin(dest);
         return Ok(());
     }
 
@@ -265,7 +266,25 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
         );
     }
     ui::success(&format!("Verified {asset}."));
+    record_kernel_pin(dest);
     Ok(())
+}
+
+/// Record the fetched kernel's digest beside it so the *read* path can check
+/// it later.
+///
+/// The checksum-manifest comparison above happens once, at fetch. Nothing
+/// re-derived it afterwards, so a kernel that rotted, was truncated, or was
+/// replaced on disk was served on the strength of its filename. Best-effort:
+/// failing to write the pin costs a re-fetch next time, which is the safe
+/// direction.
+fn record_kernel_pin(dest: &Path) {
+    if let Err(e) = mvm_build::kernel_fetch::record_kernel_digest(dest) {
+        ui::warn(&format!(
+            "could not record the kernel digest beside {} ({e}); it will be re-fetched on next use",
+            dest.display()
+        ));
+    }
 }
 
 /// Check if a directory is writable by the current user.

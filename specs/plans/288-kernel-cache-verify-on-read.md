@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Proposed. Completes plan 276 WS6 — its dev-build-artifact half shipped in #2053; this is the kernel half. Not yet scheduled into `specs/SPRINT.md`.
+**Status:** WS1–WS3 landed; WS4 (shared sidecar helper) and WS5 (CI caller gate) open. Completes plan 276 WS6 — its dev-build-artifact half shipped in #2053; this is the kernel half. Not yet scheduled into `specs/SPRINT.md`.
 
 **Goal:** No workload or builder kernel is booted from cache without its bytes being checked against a recorded digest. The check must fail closed, evict what it rejects, and be impossible for a future caller to skip by accident.
 
@@ -13,6 +13,13 @@
 So this is not "write verification". The verification is written. This plan connects it, and then removes the shape that let it drift unconnected.
 
 **Why it drifted, and the durable fix.** `resolve_kernel` returns `KernelResolution::Cached(PathBuf)` whenever `path.exists()`. A bare `PathBuf` is a perfectly usable value, so `resolve_pinned_kernel_with` does the natural thing — `Cached(p) => Ok(p.display().to_string())` — and nothing anywhere signals that a step was skipped. Adding a call at that one site fixes today's bug and leaves the same trap for the next caller. The fix that lasts is to make a path you have not verified **unrepresentable**, per the workspace rule that illegal states should not be constructible.
+
+## Corrections found while implementing
+
+Two of this plan's assumptions were wrong, both in the safe direction:
+
+- **The fetch path already verifies.** `mvmctl`'s `download_kernel` fetches `kernel-<arch>-checksums-sha256.txt`, finds the asset line and compares before admitting the file. WS2's "verify against the published manifest" was already done. What was missing is that nothing *recorded* the result, so no later read had anything to check against.
+- **`resolve_kernel` had a second bypass.** `mvm-client`'s HVF path called `cached_kernel_path` + `path.exists()` directly, never touching the resolver. Changing `KernelResolution::Cached` to carry a verified type surfaced the first bypass as a compile error; this one only appeared by grepping, which is an argument for the type carrying further than it currently does.
 
 ## Architecture
 
