@@ -10,6 +10,20 @@
 
 ## Current issue delivery
 
+- [~] Sensitive egress redaction — **plan 290**. The first delivery establishes
+      a validated byte-span detector contract and supplements the curated
+      scanner with LeakGuard's reviewed JWT, URL-credential, full private-key,
+      Azure connection-string, Telegram-token and Discord-token detectors.
+      Arbitrary payloads are scanned as bounded UTF-8 islands without losing
+      byte offsets; invalid or overlapping detector spans fail closed and no
+      finding carries matched bytes. The same detector feeds one-way masking
+      and request-scoped reversible replacement. Default curated secret/PII
+      protection now arms compressed and over-cap refusal before forwarding.
+      The serial workspace test suite, workspace check, host workspace
+      all-target Clippy, cargo-deny and RustSec gates pass. Linux builder-VM
+      all-target Clippy remains before WS1 acceptance; streaming bodies, policy
+      lowering, admission posture and claim witnesses remain in WS2-WS4.
+
 - [x] Host-side machine logs — **plan 289**. `machine logs` now reads backend
       console captures directly from the isolated host VM state directory, so
       macOS no longer attempts to connect to or auto-start the retired

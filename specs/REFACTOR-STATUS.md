@@ -6,6 +6,17 @@ This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
 
 ## In-flight plans
+- [~] Plan 290 — Sensitive egress redaction
+      (`specs/plans/290-sensitive-egress-redaction.md`)
+  - [x] Validated byte detector and pinned, no-default-feature LeakGuard adapter
+  - [x] Shared supplemental coverage for masking and reversible replacement
+  - [x] Default secret/PII policy arms compressed and over-cap fail-closed gates
+  - [~] Host workspace tests/check, workspace all-target Clippy and supply-chain
+        gates pass; Linux builder-VM workspace all-target Clippy remains
+  - [ ] Structured/streaming body coverage and split-boundary witnesses
+  - [ ] Signed CLI policy lowering and admission posture reporting
+  - [ ] Build-level claim promotion and adversarial backend witnesses
+
 - [x] Plan 289 — Host-side machine logs
       (`specs/plans/289-host-side-machine-logs.md`)
   - [x] Read backend-captured logs from the isolated host VM state directory

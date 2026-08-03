@@ -196,6 +196,10 @@ aho-corasick = "1"
 # for steganographic Unicode. Keep `perf` + `unicode-perl` for `\b`/`\d`
 # semantics without carrying the full default Unicode table set.
 regex = { version = "1", default-features = false, features = ["perf", "std", "unicode-case", "unicode-perl"] }
+# Supplemental high-confidence credential scanners. The host adapter keeps the
+# production boundary byte-oriented and enables only explicitly reviewed kinds;
+# default features are unnecessary because mvm does not ship leakguard's CLI.
+leakguard = { version = "=0.8.0", default-features = false }
 
 # Crypto
 aes-gcm = "0.11"

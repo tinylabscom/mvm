@@ -49,7 +49,8 @@ where
     // Mask undeclared secret/PII first so a declared placeholder (host-reserved,
     // not secret-shaped) survives to be substituted, while undeclared secrets in
     // any other header or the body are masked and never reach the wire.
-    let hits = redact_request(&mut req, redactor, action);
+    let hits = redact_request(&mut req, redactor, action)
+        .map_err(|_| TerminatorError::FailClosed("fail_closed_detector"))?;
     let prepared =
         prepare_request(endpoint, req).map_err(|e| TerminatorError::Refused(e.to_string()))?;
     let resp = forward(&prepared, orig_dst).map_err(|e| TerminatorError::Forward(e.to_string()))?;
@@ -81,19 +82,6 @@ mod tests {
     /// placeholders survive, undeclared secret/PII content is masked.
     fn default_redactor() -> RedactingSubstitution {
         RedactingSubstitution::with_default_rules()
-    }
-
-    /// An action opted into entropy redaction — arms the cleartext-scan
-    /// fail-closed gate (a compressed / over-cap body must be refused).
-    fn redaction_opted_in_action() -> RedactionAction {
-        use mvm_core::policy::EntropyMode;
-        RedactionAction {
-            entropy: EntropyMode::Redact {
-                min_bits_per_char: 4.0,
-                min_run_len: 20,
-            },
-            ..Default::default()
-        }
     }
 
     /// Build a `(registry, resolver, _dir)` with one bearer secret `name`=`value`
@@ -280,8 +268,8 @@ mod tests {
     fn compressed_body_to_redaction_destination_fails_closed_before_forwarding() {
         let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
         let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
-        // A compressed body the host can't scan in cleartext, to a destination
-        // opted into redaction → must fail closed (a silent bypass otherwise).
+        // The default action protects curated secrets and PII, so a compressed
+        // body the host cannot scan must fail closed.
         // The gate triggers on the content-encoding header, not the body bytes,
         // so a placeholder ASCII body is enough to prove the refusal.
         let raw = format!(
@@ -293,7 +281,7 @@ mod tests {
         let forward_called = Arc::new(Mutex::new(false));
         let fc = Arc::clone(&forward_called);
         let redactor = default_redactor();
-        let action = redaction_opted_in_action();
+        let action = RedactionAction::default();
         let result = handle_request(
             raw.as_bytes(),
             orig_dst,
@@ -323,8 +311,8 @@ mod tests {
     fn over_cap_body_to_redaction_destination_fails_closed_before_forwarding() {
         let (reg, resolver, ph, _dir) = setup("openai", "REALTOKEN", &["api.openai.com"]);
         let endpoint = SubstitutionEndpoint::new(&reg, &resolver);
-        // A body one byte over the scan cap, to a redaction-opted-in destination
-        // → can't be scanned within bounds, so refuse rather than forward.
+        // The default action protects curated secrets and PII, so a body one
+        // byte over the cap is refused rather than forwarded unscanned.
         let over = mvm_core::policy::DEFAULT_BODY_CAP_BYTES as usize + 1;
         let mut raw = format!(
             "POST /v1/x HTTP/1.1\r\nhost: api.openai.com\r\nauthorization: Bearer {ph}\r\n\
@@ -337,7 +325,7 @@ mod tests {
         let forward_called = Arc::new(Mutex::new(false));
         let fc = Arc::clone(&forward_called);
         let redactor = default_redactor();
-        let action = redaction_opted_in_action();
+        let action = RedactionAction::default();
         let result = handle_request(
             &raw,
             orig_dst,
