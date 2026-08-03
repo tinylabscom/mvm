@@ -309,6 +309,10 @@ fn announce(args: &Args, stream: &VmOutputStream, sinks: &mut Sinks<'_>) {
             ),
         ),
         StreamAvailability::HistoryOnly => {}
+        StreamAvailability::HistoryAndConsole => {
+            let line = describe_history_and_console(args);
+            notice(sinks, &line);
+        }
         StreamAvailability::ConsoleOnly => announce_console_only(args, sinks),
     }
     if let Some(line) = describe_console_merge(args) {
@@ -401,6 +405,25 @@ fn announce_console_only(args: &Args, sinks: &mut Sinks<'_>) {
             args.name
         ),
     );
+}
+
+/// Two sources, read one after the other, and the reader has to be told where
+/// the seam is.
+///
+/// The recorded half was sealed by a process that did not capture it, so it
+/// stops where *that* process exited — for a detached start, seconds into the
+/// run. Everything after it comes off the console log: same bytes the guest
+/// wrote, none of the guarantees. Saying so is what stops the unchained
+/// remainder being read as if the chain covered it, and what explains the
+/// repeated lines where the two halves overlap.
+fn describe_history_and_console(args: &Args) -> String {
+    format!(
+        "note: microVM {:?} was recorded by a process that exited before the run did; what the \
+         recording covers is shown first, then the console log covering the rest — which merges \
+         stdout and stderr, is not hash-chained, and repeats the part the recording already \
+         showed",
+        args.name
+    )
 }
 
 /// Write one operator notice on stderr, degrading rather than raising.
@@ -734,6 +757,21 @@ mod tests {
             "{described}"
         );
         assert!(described.contains("uncounted"), "{described}");
+    }
+
+    #[test]
+    fn a_spliced_read_names_the_seam_and_the_overlap() {
+        // Two sources shown back to back. A reader not told where the chained
+        // half stops reads the console remainder as if the chain covered it,
+        // and reads the repeated prefix as the workload having said it twice.
+        let described = describe_history_and_console(&parse(&["m"]).expect("parse"));
+        assert!(
+            described.contains("exited before the run did"),
+            "{described}"
+        );
+        assert!(described.contains("console log"), "{described}");
+        assert!(described.contains("not hash-chained"), "{described}");
+        assert!(described.contains("repeats"), "{described}");
     }
 
     #[test]

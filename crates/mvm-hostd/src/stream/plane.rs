@@ -50,6 +50,7 @@
 //! because a refused bind means someone else's live capture is in there.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -381,6 +382,13 @@ fn seal_capture(vm: &str, stream: VmStream) {
 ///   the very next append makes fail verification.
 /// - **No journal** means there is nothing to rebuild from — an unrecorded
 ///   VM, or one whose journal could not be written. Silence is correct.
+///
+/// The first of those is a check, and a check races: two concurrent stops, or
+/// a stop that overlaps the owner's own seal, can both pass it. So the write
+/// itself is exclusive ([`link_manifest_exclusively`]) rather than the
+/// overwriting [`write_manifest`] the owner uses — an adopted floor can never
+/// land on top of anything, whoever wins the race, while the owner's exact
+/// seal still overwrites an adopted one as it should.
 fn adopt_capture(vm: &str) {
     let dir = config::vm_stream_transcript_dir(vm);
     if dir.join(MANIFEST_FILENAME).exists() {
@@ -404,8 +412,8 @@ fn adopt_capture(vm: &str) {
     for (file, declared) in &replayed.declared_lengths {
         drop_unaccounted_tail(&dir.join(file), *declared);
     }
-    match write_manifest(&dir, &replayed.manifest) {
-        Ok(()) => {
+    match link_manifest_exclusively(&dir, &replayed.manifest) {
+        Ok(true) => {
             journal::CaptureJournal::discard(&dir.join(journal::JOURNAL_FILENAME));
             tracing::info!(
                 vm = %vm,
@@ -414,6 +422,11 @@ fn adopt_capture(vm: &str) {
                  as an incomplete record because the capturing process is gone"
             );
         }
+        Ok(false) => tracing::debug!(
+            vm = %vm,
+            "this capture was sealed by someone else while it was being rebuilt; leaving \
+             their manifest in place"
+        ),
         Err(error) => tracing::warn!(
             vm = %vm,
             error = %format!("{error:#}"),
@@ -450,6 +463,59 @@ fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
     let path = dir.join(MANIFEST_FILENAME);
     let body = serde_json::to_vec_pretty(manifest).context("serialize the capture manifest")?;
     atomic_write(&path, &body).with_context(|| format!("write {}", path.display()))
+}
+
+/// Publish the manifest only if nothing has published one yet, and report
+/// which happened.
+///
+/// A whole file written elsewhere and then `link`ed into place: `link(2)`
+/// fails with `EEXIST` rather than replacing, and it fails or succeeds as one
+/// operation, so this is both atomic and exclusive where
+/// [`write_manifest`]'s rename is only atomic. That is what an adopted seal
+/// needs — the manifest it would replace is by definition a better one, either
+/// another adopter that got there first or the owning process's exact seal.
+///
+/// `Ok(false)` means someone else's manifest is there.
+fn link_manifest_exclusively(dir: &Path, manifest: &TranscriptManifest) -> Result<bool> {
+    let path = dir.join(MANIFEST_FILENAME);
+    let body = serde_json::to_vec_pretty(manifest).context("serialize the capture manifest")?;
+    let staged = dir.join(format!(
+        "{MANIFEST_FILENAME}.{}.{}.adopting",
+        std::process::id(),
+        now_unix_nanos()
+    ));
+    write_staged(&staged, &body)
+        .with_context(|| format!("stage the manifest for {}", path.display()))?;
+
+    let linked = std::fs::hard_link(&staged, &path);
+    // Whichever way the link went, the staging name has served its purpose:
+    // on success the manifest is a second name for the same inode, on failure
+    // it is litter in a capture directory a reader will scan.
+    let _ = std::fs::remove_file(&staged);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => {
+            Err(anyhow::Error::from(error)).with_context(|| format!("publish {}", path.display()))
+        }
+    }
+}
+
+/// Write the staged copy, refusing to reuse a name that already exists and
+/// syncing before it is linked into place.
+fn write_staged(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(body)?;
+    file.sync_all()
+}
+
+fn now_unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
 }
 
 fn now_unix_secs() -> u64 {
@@ -578,20 +644,25 @@ mod tests {
         serde_json::from_slice(&bytes).ok()
     }
 
-    /// Every record a sealed capture holds, with the channel it was recorded
-    /// on — the half a console-only capture could never supply.
+    /// The **durable** half of a sealed capture, with the channel each record
+    /// was recorded on — the half a console-only capture could never supply.
+    ///
+    /// Console records are filtered out rather than asserted against: an
+    /// adopted capture is deliberately read with the console spliced behind
+    /// it, and what these tests are about is what the chain holds.
     fn sealed_records(vm: &str) -> Vec<(StreamKind, Vec<u8>)> {
         let mut stream =
             open_vm_output(vm, OutputRequest::default()).expect("the sealed transcript must open");
-        assert_eq!(
-            stream.availability(),
-            StreamAvailability::HistoryOnly,
-            "a released VM has no live broker left"
+        assert!(
+            !stream.availability().is_live(),
+            "a released VM has no live broker left: {:?}",
+            stream.availability()
         );
         let mut out = Vec::new();
         while let Some(record) = stream.next_output().expect("read the sealed capture") {
-            assert_eq!(record.origin, RecordOrigin::Durable);
-            out.push((record.kind, record.payload));
+            if record.origin == RecordOrigin::Durable {
+                out.push((record.kind, record.payload));
+            }
         }
         out
     }
@@ -950,6 +1021,101 @@ mod tests {
                 .join(journal::JOURNAL_FILENAME)
                 .exists(),
             "the mirror is superseded by the manifest and must not outlive it"
+        );
+    }
+
+    #[test]
+    fn an_adopted_seal_never_lands_on_top_of_a_manifest_that_appeared_mid_rebuild() {
+        // The existence check and the write are two steps, and two concurrent
+        // stops — or a stop racing the owner's own seal — can both pass the
+        // check. The write itself has to be the exclusive one, or an adopted
+        // floor overwrites an exact seal.
+        let (_env, _tmp) = isolated_home();
+        let dir = config::vm_stream_transcript_dir("plane-link-race");
+        std::fs::create_dir_all(&dir).expect("capture dir");
+
+        let incumbent = br#"{"whoever":"got here first"}"#;
+        std::fs::write(dir.join(MANIFEST_FILENAME), incumbent).expect("incumbent manifest");
+
+        let mut manifest = TranscriptWriter::new(
+            &dir,
+            aead::Key::from_bytes([0x44; 32]),
+            stream_capture_config(StreamCaptureIdentity {
+                capture_id: "race".to_string(),
+                binding: CaptureBinding {
+                    tenant_id: DEFAULT_TENANT.to_string(),
+                    vm_name: "plane-link-race".to_string(),
+                    session_id: None,
+                },
+                created_unix_secs: 0,
+                recipient: TRANSCRIPT_KEK_RECIPIENT.to_string(),
+                wrapped_data_key_b64: String::new(),
+            }),
+        )
+        .sealed_manifest();
+        manifest.adopted = true;
+
+        assert!(
+            !link_manifest_exclusively(&dir, &manifest).expect("the publish attempt returns"),
+            "an adopted seal must report that it did not publish"
+        );
+        assert_eq!(
+            std::fs::read(dir.join(MANIFEST_FILENAME)).expect("read"),
+            incumbent,
+            "and must leave the manifest that beat it exactly as it was"
+        );
+        assert!(
+            !std::fs::read_dir(&dir)
+                .expect("read the capture dir")
+                .filter_map(Result::ok)
+                .any(|e| e.file_name().to_string_lossy().ends_with(".adopting")),
+            "a refused publish must not leave its staging file behind"
+        );
+    }
+
+    #[test]
+    fn a_journal_naming_a_segment_outside_the_capture_dir_seals_nothing() {
+        // `adopt_capture` joins journalled names onto the capture dir and
+        // opens them for a truncating `set_len` before anything verifies them.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-traversal");
+        detached_start("plane-traversal", &console, b"legitimate output\n");
+
+        let dir = config::vm_stream_transcript_dir("plane-traversal");
+        let victim = config::mvm_keys_dir().join("host-signer.ed25519");
+        std::fs::create_dir_all(config::mvm_keys_dir()).expect("keys dir");
+        std::fs::write(&victim, b"private key material").expect("victim");
+
+        // Point every journalled record at the key, the way a tampered or
+        // corrupted mirror would.
+        let journal_path = dir.join(journal::JOURNAL_FILENAME);
+        let whole = std::fs::read_to_string(&journal_path).expect("read the journal");
+        let escape = "../../keys/host-signer.ed25519";
+        let rewritten: Vec<String> = whole
+            .lines()
+            .map(|line| {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(line).expect("a journal line parses");
+                if let Some(file) = value.pointer_mut("/chunk/chunk/file") {
+                    *file = serde_json::Value::String(escape.to_string());
+                }
+                serde_json::to_string(&value).expect("reserialize")
+            })
+            .collect();
+        std::fs::write(&journal_path, format!("{}\n", rewritten.join("\n")))
+            .expect("rewrite the journal");
+
+        StreamPlane::new().release("plane-traversal");
+
+        assert_eq!(
+            std::fs::read(&victim).expect("the key is still there"),
+            b"private key material",
+            "nothing outside the capture dir may be opened, let alone truncated"
+        );
+        assert_eq!(
+            manifest_of("plane-traversal"),
+            None,
+            "a journal naming a path outside its directory must seal nothing"
         );
     }
 

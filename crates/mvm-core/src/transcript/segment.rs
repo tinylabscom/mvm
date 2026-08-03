@@ -524,7 +524,12 @@ pub(crate) fn slice_chunk<'a>(
 }
 
 /// Reject anything that is not a plain filename inside the capture dir.
-fn check_safe_name(file: &str) -> Result<(), TranscriptError> {
+///
+/// Public because verification is not the first thing that touches a chunk
+/// name. A caller rebuilding a manifest from an on-disk record set joins these
+/// names onto a directory and opens them well before anything verifies, so the
+/// guard has to be available at that first touch rather than only at the last.
+pub fn check_safe_name(file: &str) -> Result<(), TranscriptError> {
     if file.is_empty() || file.contains('/') || file.contains('\\') || file == "." || file == ".." {
         return Err(TranscriptError::UnsafeChunkName(file.to_string()));
     }

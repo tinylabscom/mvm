@@ -33,6 +33,15 @@
 //! started has nothing here to splice. This reader takes whatever manifest
 //! exists; keeping one current is the writing side's job.
 //!
+//! **An adopted transcript must not displace the console.** A capture sealed by
+//! a process that did not record it stops where *that process* exited, not
+//! where the run did — for a detached start, seconds into a run that then went
+//! on for hours. The console capture the backend keeps writing covers the rest,
+//! so an adopted history is read *and then* the console is, rather than the
+//! partial chained artifact standing in for the whole run. It is the one shape
+//! where two sources are read together, and the origin label on every record
+//! says which of them vouched for it.
+//!
 //! **Where the two halves meet is checked for a hole.** A durable half that
 //! stops at the last seal and a live half that starts where the follower
 //! attached can leave a run of sequence numbers in neither source, and
@@ -216,6 +225,15 @@ pub enum StreamAvailability {
     /// No broker. Everything came off the durable transcript — the after-exit
     /// read.
     HistoryOnly,
+    /// No broker, and the durable transcript that answered is an **adopted**
+    /// one: rebuilt by a process that did not own the capture, so it stops
+    /// wherever the owning process exited rather than where the run did. The
+    /// console capture the backend kept writing for the whole life of the VM
+    /// is spliced after it to cover the rest.
+    ///
+    /// The ordinary shape of `machine run -d` followed by `machine stop`: the
+    /// chained half is seconds long and the console half is the run.
+    HistoryAndConsole,
     /// Neither the broker nor a transcript answered, so the console capture is
     /// all there is: no channel separation and no hash chain.
     ConsoleOnly,
@@ -227,6 +245,22 @@ impl StreamAvailability {
     pub fn is_live(self) -> bool {
         matches!(self, Self::LiveAndHistory | Self::LiveOnly)
     }
+}
+
+/// What the durable half contributed, as far as the tail resolution cares.
+///
+/// Three states rather than the `bool` this used to be, because "a transcript
+/// answered" and "a transcript answered *for the whole run*" are different
+/// questions and only the second one licenses dropping the console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableHalf {
+    /// No transcript at all.
+    Absent,
+    /// A transcript its own writer sealed. It accounts for the run.
+    Owned,
+    /// A transcript rebuilt after its writer was gone. It accounts for the
+    /// window that writer lived through, and nothing after it.
+    Adopted,
 }
 
 /// What a consumer is asking a VM for.
@@ -282,9 +316,11 @@ impl OutputLocator {
 enum Tail {
     /// The broker, over its per-VM socket.
     Broker(Box<dyn StreamReader>),
-    /// The console capture on disk. Only ever chosen when neither other source
-    /// answered — a running broker already republishes these bytes, so reading
-    /// the file beside it would double every line.
+    /// The console capture on disk. Never chosen beside a *broker*, which
+    /// already republishes these bytes — reading the file next to one would
+    /// double every line. It is chosen behind an **adopted** transcript, whose
+    /// writer died long before the run did and which therefore covers only a
+    /// prefix of what this file holds.
     Console(ConsoleTail),
 }
 
@@ -458,12 +494,18 @@ pub fn open_vm_output_at(
     // clean and matched nothing is still a capture: counting it absent would
     // throw it away, fall through to the console, and announce "no output
     // capture" over a transcript sitting right there.
-    let present = history.is_some();
+    let durable = history.as_ref().map_or(DurableHalf::Absent, |history| {
+        if history.truncation.is_some_and(|t| t.adopted) {
+            DurableHalf::Adopted
+        } else {
+            DurableHalf::Owned
+        }
+    });
     let (records, truncation, empty_history) = history.map_or_else(
         || (VecDeque::new(), None, None),
         |history| (history.records, history.truncation, history.empty),
     );
-    let (tail, availability) = resolve_tail(locator, request, live, present)?;
+    let (tail, availability) = resolve_tail(locator, request, live, durable)?;
     Ok(VmOutputStream {
         history: records,
         tail,
@@ -479,21 +521,76 @@ pub fn open_vm_output_at(
 
 /// Which source continues the read once staged history is spent, and which
 /// sources answered at all.
+///
+/// The one case worth spelling out is an **adopted** durable half with no
+/// broker. The chained transcript stops where the process that recorded it
+/// exited — for a detached start, seconds into a run that then went on for
+/// hours — while the backend kept appending to the console capture for the
+/// whole life of the VM. Resolving that to `HistoryOnly` would let a partial
+/// artifact *displace* a more complete one and hand the operator the first two
+/// seconds of a thirty-minute run. So the console is spliced on behind the
+/// history, labelled [`RecordOrigin::Console`] for what it is.
 fn resolve_tail(
     locator: &OutputLocator,
     request: OutputRequest,
     live: Option<Box<dyn StreamReader>>,
-    history_present: bool,
+    durable: DurableHalf,
 ) -> Result<(Option<Tail>, StreamAvailability), StreamError> {
-    Ok(match (live, history_present) {
-        (Some(live), true) => (Some(Tail::Broker(live)), StreamAvailability::LiveAndHistory),
-        (Some(live), false) => (Some(Tail::Broker(live)), StreamAvailability::LiveOnly),
-        (None, true) => (None, StreamAvailability::HistoryOnly),
-        (None, false) => (
+    Ok(match (live, durable) {
+        (Some(live), DurableHalf::Absent) => {
+            (Some(Tail::Broker(live)), StreamAvailability::LiveOnly)
+        }
+        (Some(live), _) => (Some(Tail::Broker(live)), StreamAvailability::LiveAndHistory),
+        (None, DurableHalf::Owned) => (None, StreamAvailability::HistoryOnly),
+        (None, DurableHalf::Adopted) => match open_console_behind_history(locator, request) {
+            Some(console) => (
+                Some(Tail::Console(console)),
+                StreamAvailability::HistoryAndConsole,
+            ),
+            None => (None, StreamAvailability::HistoryOnly),
+        },
+        (None, DurableHalf::Absent) => (
             Some(Tail::Console(open_console(locator, request)?)),
             StreamAvailability::ConsoleOnly,
         ),
     })
+}
+
+/// The console capture, to be read behind an adopted transcript — or `None`
+/// when it cannot honestly stand behind one.
+///
+/// Never an error, unlike [`open_console`]: the durable half already answered,
+/// so a console that is absent or that cannot honour the request costs the
+/// read the uncovered remainder and nothing else. Turning either into a
+/// failure would take away the history too.
+///
+/// **The overlap is deliberate and it is not deduplicated.** Console offsets
+/// and transcript sequence numbers share no coordinate — the transcript is
+/// redacted, is interleaved with entrypoint frames the console never saw, and
+/// may have evicted its own head — so there is no offset this could seek to
+/// that would not risk dropping real output. Replaying the console whole
+/// repeats the prefix the transcript already showed, which is bounded by how
+/// long the departed process lived: on the shape this exists for, seconds
+/// against the whole run. Repeating a little beats omitting a lot, and the
+/// origin label says which half is which.
+fn open_console_behind_history(
+    locator: &OutputLocator,
+    request: OutputRequest,
+) -> Option<ConsoleTail> {
+    if !locator.console_log.try_exists().unwrap_or(false) {
+        return None;
+    }
+    // A channel selection or a resume point is something the console cannot
+    // answer. The history can, so the read keeps it and drops the console
+    // rather than refusing both.
+    if ConsoleUnsupported::of(&request.opts).is_some() {
+        return None;
+    }
+    let mut console = ConsoleTail::open(&locator.console_log, request.opts.follow);
+    if let Some(tail) = request.console_tail_bytes {
+        let _ = console.seek_to_last(tail);
+    }
+    Some(console)
 }
 
 /// Dial the broker, distinguishing "no broker here" from "could not dial".
@@ -1181,9 +1278,12 @@ mod tests {
     }
 
     #[test]
-    fn the_console_fallback_is_not_used_beside_a_transcript() {
-        // The broker's own console follower already republishes these bytes,
-        // so reading the file beside a real source would double every line.
+    fn the_console_fallback_is_not_used_beside_an_owner_sealed_transcript() {
+        // The broker's own console follower already republished these bytes
+        // into a capture its writer sealed, so reading the file beside it
+        // would double every line. Only an *adopted* transcript — one that
+        // stops where its recorder exited rather than where the run did —
+        // licenses the splice.
         let root = tempfile::tempdir().expect("tempdir");
         let mut locator = stdout_capture(root.path(), &["from-transcript"]);
         locator.console_log = root.path().join("console.log");
@@ -1274,13 +1374,9 @@ mod tests {
         assert!(matches!(err, StreamError::Transcript { .. }), "{err}");
     }
 
-    #[test]
-    fn an_adopted_capture_reports_that_its_shortfall_is_only_a_floor() {
-        // A manifest rebuilt without the writer that produced it cannot know
-        // what that writer dropped on its way out. Reading it as whole is the
-        // one outcome the flag exists to prevent.
-        let root = tempfile::tempdir().expect("tempdir");
-        let locator = stdout_capture(root.path(), &["one", "two"]);
+    /// Reseal `locator`'s manifest as one a later process rebuilt — what
+    /// `StreamPlane::release` writes for a workload it did not start.
+    fn mark_adopted(locator: &OutputLocator) {
         let manifest_path = locator.transcript_dir.join(MANIFEST_FILENAME);
         let raw = std::fs::read(&manifest_path).expect("read manifest");
         let mut manifest: TranscriptManifest = serde_json::from_slice(&raw).expect("parse");
@@ -1292,6 +1388,85 @@ mod tests {
             serde_json::to_vec_pretty(&manifest).expect("serialize"),
         )
         .expect("write manifest");
+    }
+
+    #[test]
+    fn an_adopted_capture_does_not_hide_the_console_output_it_never_covered() {
+        // The `machine run -d` shape. The recording process exits seconds in,
+        // the workload runs on for half an hour writing to the console the
+        // backend still owns, and the later `stop` seals a transcript covering
+        // only the first seconds. Resolving that to `HistoryOnly` would let
+        // the partial chained artifact *displace* the console file holding the
+        // rest — a net loss against having no manifest at all.
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut locator = stdout_capture(root.path(), &["the first seconds"]);
+        mark_adopted(&locator);
+        locator.console_log = root.path().join("console.log");
+        std::fs::write(
+            &locator.console_log,
+            b"the first seconds\nTHIRTY MINUTES OF WORK\ndone\n",
+        )
+        .expect("console capture");
+
+        let mut stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
+        let got = drain(&mut stream);
+        let whole = payloads(&got).concat();
+        assert!(
+            whole.contains("THIRTY MINUTES OF WORK") && whole.contains("done"),
+            "the run's output after the recorder exited must reach the reader: {whole:?}"
+        );
+        assert_eq!(stream.availability(), StreamAvailability::HistoryAndConsole);
+        assert!(
+            got.iter().any(|r| r.origin == RecordOrigin::Durable),
+            "the chained half is still shown"
+        );
+        assert!(
+            got.iter().any(|r| r.origin == RecordOrigin::Console),
+            "and the unchained remainder says what it is"
+        );
+    }
+
+    #[test]
+    fn an_adopted_capture_with_no_console_beside_it_reads_as_history_only() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let locator = stdout_capture(root.path(), &["all there was"]);
+        mark_adopted(&locator);
+
+        let mut stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
+        assert_eq!(stream.availability(), StreamAvailability::HistoryOnly);
+        assert_eq!(payloads(&drain(&mut stream)), vec!["all there was"]);
+    }
+
+    #[test]
+    fn a_channel_narrowed_read_of_an_adopted_capture_keeps_the_history_rather_than_refusing() {
+        // The console cannot separate channels, so it drops out of a narrowed
+        // read — but the durable half can answer, and refusing the whole read
+        // the way a console-only VM does would take that away too.
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut locator = seal_capture(
+            root.path(),
+            &[(Direction::Stderr, b"err-0"), (Direction::Stdout, b"out-1")],
+            RetentionPolicy::Ring,
+            bounds(),
+        );
+        mark_adopted(&locator);
+        locator.console_log = root.path().join("console.log");
+        std::fs::write(&locator.console_log, b"merged, unlabelled").expect("console capture");
+
+        let mut stream =
+            open_vm_output_at(&locator, only(StreamKind::Stderr)).expect("the history answers");
+        assert_eq!(stream.availability(), StreamAvailability::HistoryOnly);
+        assert_eq!(payloads(&drain(&mut stream)), vec!["err-0"]);
+    }
+
+    #[test]
+    fn an_adopted_capture_reports_that_its_shortfall_is_only_a_floor() {
+        // A manifest rebuilt without the writer that produced it cannot know
+        // what that writer dropped on its way out. Reading it as whole is the
+        // one outcome the flag exists to prevent.
+        let root = tempfile::tempdir().expect("tempdir");
+        let locator = stdout_capture(root.path(), &["one", "two"]);
+        mark_adopted(&locator);
 
         let mut stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
         let truncation = stream

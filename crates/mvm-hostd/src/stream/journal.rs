@@ -36,7 +36,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use mvm_core::transcript::{ChunkRecord, TranscriptManifest, sealed_root_hex};
+use mvm_core::transcript::{ChunkRecord, TranscriptManifest, check_safe_name, sealed_root_hex};
 use serde::{Deserialize, Serialize};
 
 /// The mirrored manifest, beside the segments it describes.
@@ -147,10 +147,11 @@ impl CaptureJournal {
         if self.file.is_none() {
             self.open()?;
         }
-        let file = self
-            .file
-            .as_mut()
-            .expect("open() leaves a file handle or returns an error");
+        let Some(file) = self.file.as_mut() else {
+            return Err(std::io::Error::other(
+                "the capture journal has no open handle",
+            ));
+        };
         let mut body = serde_json::to_vec(line)?;
         body.push(b'\n');
         file.write_all(&body)?;
@@ -168,10 +169,14 @@ impl CaptureJournal {
             .create(true)
             .truncate(true)
             .open(&self.path)?;
-        let header = self
-            .header
-            .take()
-            .expect("the header is written exactly once, on the first append");
+        // Errors rather than asserts: the header is taken exactly once by
+        // construction, and a journal that somehow lost it is worth one broken
+        // mirror, never a killed teardown.
+        let Some(header) = self.header.take() else {
+            return Err(std::io::Error::other(
+                "the capture journal header was already written",
+            ));
+        };
         let mut body = serde_json::to_vec(&JournalLine::Header(header))?;
         body.push(b'\n');
         file.write_all(&body)?;
@@ -197,6 +202,13 @@ pub(in crate::stream) struct ReplayedCapture {
 /// Lines that do not parse are skipped, not fatal: the last line of a journal
 /// whose writer was killed mid-append is a partial one, and refusing the whole
 /// capture over it would throw away every record before it.
+///
+/// A chunk **name** is the one thing here that is not merely skipped. Every
+/// name in the returned capture is joined onto `dir` and opened for writing by
+/// the caller that cuts unaccounted tails, so a name carrying `..` or a leading
+/// `/` is an arbitrary-file truncation driven by a file on disk. That is a
+/// refusal of the whole journal, not of one line: a mirror carrying one is not
+/// a mirror this process wrote.
 pub(in crate::stream) fn replay(dir: &Path) -> Option<ReplayedCapture> {
     let file = File::open(dir.join(JOURNAL_FILENAME)).ok()?;
     let mut manifest: Option<TranscriptManifest> = None;
@@ -207,6 +219,15 @@ pub(in crate::stream) fn replay(dir: &Path) -> Option<ReplayedCapture> {
         match serde_json::from_str::<JournalLine>(&line) {
             Ok(JournalLine::Header(header)) => manifest = Some(*header),
             Ok(JournalLine::Chunk(entry)) => {
+                if let Err(error) = check_safe_name(&entry.chunk.file) {
+                    tracing::warn!(
+                        dir = %dir.display(),
+                        error = %error,
+                        "capture journal names a segment outside its own directory; refusing to \
+                         rebuild anything from it"
+                    );
+                    return None;
+                }
                 chunks.push(entry.chunk);
                 shortfall = entry.shortfall;
             }
@@ -230,8 +251,20 @@ pub(in crate::stream) fn replay(dir: &Path) -> Option<ReplayedCapture> {
     // Always. Nothing on disk records what the departed process shed after
     // its last journalled chunk, so this manifest is a floor by construction.
     manifest.adopted = true;
-    manifest.sealed_root_hex =
-        sealed_root_hex(&manifest).expect("fixed transcript root metadata serializes");
+    // The header came off disk, so its `format_version` is whatever was
+    // written there — a bumped format, or a hand-edited file, makes the root
+    // unrepresentable. A journal this process cannot re-root is a journal it
+    // refuses, never a crashed `machine stop`.
+    let Ok(root) = sealed_root_hex(&manifest) else {
+        tracing::warn!(
+            dir = %dir.display(),
+            format_version = manifest.format_version,
+            "capture journal was written in a manifest format this build cannot re-seal; \
+             leaving the transcript unsealed rather than rebuilding it wrong"
+        );
+        return None;
+    };
+    manifest.sealed_root_hex = root;
 
     let declared_lengths = declared_lengths(&manifest.chunks);
     Some(ReplayedCapture {
@@ -350,6 +383,84 @@ mod tests {
         let replayed = replay(dir.path()).expect("a torn journal still replays");
         assert_eq!(replayed.manifest.chunks.len(), 2);
         verify_sealed_root(&replayed.manifest).expect("verify");
+    }
+
+    /// Rewrite every chunk line's `file` field, the way a journal an attacker
+    /// (or a bug) put a traversal name into would read.
+    fn rename_journalled_segments(dir: &Path, to: &str) {
+        let path = dir.join(JOURNAL_FILENAME);
+        let whole = std::fs::read_to_string(&path).expect("read journal");
+        let rewritten: Vec<String> = whole
+            .lines()
+            .map(|line| match serde_json::from_str::<JournalLine>(line) {
+                Ok(JournalLine::Chunk(mut entry)) => {
+                    entry.chunk.file = to.to_string();
+                    serde_json::to_string(&JournalLine::Chunk(entry)).expect("reserialize")
+                }
+                _ => line.to_string(),
+            })
+            .collect();
+        std::fs::write(&path, format!("{}\n", rewritten.join("\n"))).expect("rewrite journal");
+    }
+
+    #[test]
+    fn a_journal_naming_a_path_outside_the_capture_dir_is_refused_whole() {
+        // `replay`'s caller joins these names onto the capture dir and opens
+        // them for a truncating `set_len`, so a traversal name here is an
+        // arbitrary-file truncation primitive driven by a file on disk.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let capture_dir = dir.path().join("capture");
+        std::fs::create_dir_all(&capture_dir).expect("capture dir");
+        let victim = dir.path().join("host-signer.ed25519");
+        std::fs::write(&victim, b"private key material that must not be truncated")
+            .expect("victim");
+        let before = std::fs::read(&victim).expect("read victim");
+
+        capture(&capture_dir, &[b"one", b"two"]);
+        rename_journalled_segments(&capture_dir, "../host-signer.ed25519");
+
+        assert_eq!(
+            replay(&capture_dir),
+            None,
+            "a journal naming a path outside its own directory must rebuild nothing"
+        );
+        assert_eq!(
+            std::fs::read(&victim).expect("the victim is still there"),
+            before,
+            "nothing outside the capture dir may be touched"
+        );
+    }
+
+    #[test]
+    fn an_absolute_segment_name_is_refused_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        capture(dir.path(), &[b"one"]);
+        rename_journalled_segments(dir.path(), "/etc/passwd");
+        assert_eq!(replay(dir.path()), None);
+    }
+
+    #[test]
+    fn a_journal_in_a_format_this_build_cannot_reseal_returns_none_rather_than_panicking() {
+        // The header is deserialized from disk, so its format version is
+        // whatever was written there. The next format bump, or a hand-edited
+        // journal, must not abort the `machine stop` that reads it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        capture(dir.path(), &[b"one"]);
+        let path = dir.path().join(JOURNAL_FILENAME);
+        let whole = std::fs::read_to_string(&path).expect("read journal");
+        let rewritten: Vec<String> = whole
+            .lines()
+            .map(|line| match serde_json::from_str::<JournalLine>(line) {
+                Ok(JournalLine::Header(mut header)) => {
+                    header.format_version = u32::MAX;
+                    serde_json::to_string(&JournalLine::Header(header)).expect("reserialize")
+                }
+                _ => line.to_string(),
+            })
+            .collect();
+        std::fs::write(&path, format!("{}\n", rewritten.join("\n"))).expect("rewrite journal");
+
+        assert_eq!(replay(dir.path()), None);
     }
 
     #[test]

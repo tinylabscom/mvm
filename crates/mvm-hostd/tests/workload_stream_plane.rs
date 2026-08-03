@@ -413,11 +413,68 @@ fn a_detached_start_is_sealed_by_the_later_stop_that_ends_the_vm() {
     let (availability, records) = sealed_run("detached-vm");
     assert_eq!(
         availability,
-        StreamAvailability::HistoryOnly,
-        "the run must be readable off the durable half, not the console fallback"
+        StreamAvailability::HistoryAndConsole,
+        "the run is readable off the durable half, with the console covering what it could not"
     );
-    assert_eq!(payloads(&records), [b"started and left running\n"]);
-    assert!(records.iter().all(|r| r.origin == RecordOrigin::Durable));
+    let durable: Vec<Vec<u8>> = records
+        .iter()
+        .filter(|r| r.origin == RecordOrigin::Durable)
+        .map(|r| r.payload.clone())
+        .collect();
+    assert_eq!(
+        durable,
+        [b"started and left running\n"],
+        "the chained half holds what the departed process recorded"
+    );
+}
+
+#[test]
+fn a_detached_runs_output_after_its_recorder_exited_still_reaches_the_reader() {
+    // The shape that matters and the one an adopted manifest cannot cover on
+    // its own: the CLI exits two seconds in, the workload prints for another
+    // half hour into the console the backend still owns, and the later `stop`
+    // seals a transcript describing only those two seconds. If `logs` reports
+    // that transcript and nothing else, the run's actual output is sitting on
+    // disk and never shown — a partial artifact *displacing* a complete one.
+    register();
+    let (_env, _tmp) = isolated_home();
+
+    let starting = Arc::new(StreamPlane::new());
+    launch(&runner_in_process(&starting), "outlived-vm");
+    std::fs::write(console_log("outlived-vm"), b"the first seconds\n")
+        .expect("write the console capture");
+    settle();
+    // The starting process exits. Its console follower dies with it; the
+    // backend's own write-only capture does not.
+    drop(starting);
+
+    std::fs::write(
+        console_log("outlived-vm"),
+        b"the first seconds\nTHIRTY MINUTES OF WORK\nfinished\n",
+    )
+    .expect("the workload keeps printing");
+
+    runner_in_process(&Arc::new(StreamPlane::new()))
+        .stop(&VmId("outlived-vm".to_string()))
+        .expect("stop");
+
+    let (availability, records) = sealed_run("outlived-vm");
+    // The output first: what a user typing `mvmctl logs` gets back is the
+    // whole point, and an availability label they never see is not.
+    let whole = String::from_utf8(payloads(&records).concat()).expect("utf-8");
+    assert!(
+        whole.contains("THIRTY MINUTES OF WORK") && whole.contains("finished"),
+        "everything the workload printed after its recorder exited must be returned: {whole:?}"
+    );
+    assert_eq!(availability, StreamAvailability::HistoryAndConsole);
+    assert!(
+        records.iter().any(|r| r.origin == RecordOrigin::Durable),
+        "the chained half is still shown"
+    );
+    assert!(
+        records.iter().any(|r| r.origin == RecordOrigin::Console),
+        "and the remainder is labelled as the unchained source it is"
+    );
 }
 
 #[test]
@@ -492,8 +549,13 @@ fn a_foreground_run_detached_part_way_through_still_seals_when_the_vm_stops() {
         .expect("stop");
 
     let (availability, records) = sealed_run("detached-later-vm");
-    assert_eq!(availability, StreamAvailability::HistoryOnly);
-    assert_eq!(payloads(&records), [b"printed before the detach\n"]);
+    assert_eq!(availability, StreamAvailability::HistoryAndConsole);
+    let durable: Vec<Vec<u8>> = records
+        .iter()
+        .filter(|r| r.origin == RecordOrigin::Durable)
+        .map(|r| r.payload.clone())
+        .collect();
+    assert_eq!(durable, [b"printed before the detach\n"]);
 }
 
 /// Sanity: the helper resolves paths the same way the reader does, so a

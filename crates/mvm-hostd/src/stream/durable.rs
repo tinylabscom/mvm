@@ -316,18 +316,20 @@ impl DurableSink {
 }
 
 /// A sink dropped without sealing still lets its writer finish, under the same
-/// bound the seal uses.
+/// bound the seal uses, so the records already handed over reach the journal
+/// instead of racing the unwind.
 ///
-/// This is the host process exiting with a workload still running — a detached
-/// start, or a foreground run whose caller detached. Nothing seals here, and
-/// nothing should: the manifest belongs to whoever ends the VM. What must
-/// happen is that the records already handed over reach the journal, so that
-/// later seal describes the whole of what this process captured rather than
-/// whatever the writer thread happened to have finished when the process
-/// unwound around it.
+/// **This does not run at process exit, and must not be relied on to.** The
+/// production plane is held in a process-global `OnceLock`, and Rust does not
+/// drop statics — so for the shape this whole mechanism exists for, a detached
+/// start whose host process exits, nothing here fires. What the later seal
+/// rebuilds is whatever the writer thread had finished appending, and an
+/// adopted manifest declares itself a floor precisely because of that. This
+/// impl covers the cases where a sink genuinely is dropped: an embedder that
+/// owns its own plane, and this crate's tests.
 ///
 /// Bounded, for the reason [`DurableSink::seal`] is bounded: a disk that has
-/// stopped answering must not hold a process open on the way out.
+/// stopped answering must not hold a caller open on the way out.
 impl Drop for DurableSink {
     fn drop(&mut self) {
         self.jobs = None;

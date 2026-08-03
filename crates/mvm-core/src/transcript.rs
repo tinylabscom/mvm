@@ -22,7 +22,7 @@ mod ring;
 mod segment;
 pub use ring::*;
 use segment::SegmentBounds;
-pub use segment::{SEGMENT_MAX_CHUNKS, SEGMENT_MAX_CIPHERTEXT_BYTES};
+pub use segment::{SEGMENT_MAX_CHUNKS, SEGMENT_MAX_CIPHERTEXT_BYTES, check_safe_name};
 
 /// Filename of the host transcript key-encryption key, under the keys dir.
 pub const TRANSCRIPT_KEK_FILENAME: &str = "transcript-kek.bin";
