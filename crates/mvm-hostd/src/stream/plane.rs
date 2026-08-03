@@ -857,12 +857,18 @@ mod tests {
         plane.release("plane-ephemeral-live");
     }
 
-    /// Nothing durable, and nothing that looks durable either: no capture
-    /// directory, no manifest, no journal for a later stop to adopt. An empty
-    /// artifact would be worse than none, because it asserts the workload
-    /// printed nothing.
+    /// No transcript directory and no manifest — no journal for a later stop
+    /// to adopt, either. An empty transcript artifact would be worse than
+    /// none, because it asserts the workload printed nothing.
+    ///
+    /// This plane never touches the backend's own console capture, so that
+    /// file is untouched by the retention mode: it is still there, and still
+    /// readable by `logs`, after an ephemeral run. That is not a gap in the
+    /// plane — it is a fact an operator picking `Ephemeral` to keep output
+    /// off disk needs to know, so it is checked here rather than left
+    /// implicit.
     #[test]
-    fn an_ephemeral_capture_leaves_nothing_on_disk() {
+    fn an_ephemeral_capture_creates_no_transcript_dir_or_manifest() {
         let (_env, _tmp) = isolated_home();
         let console = console_log_for("plane-ephemeral-disk");
         let plane = StreamPlane::new();
@@ -883,6 +889,12 @@ mod tests {
             dir.display()
         );
         assert!(manifest_of("plane-ephemeral-disk").is_none());
+        assert!(
+            console.exists(),
+            "the backend's console capture is outside this plane and must survive \
+             an ephemeral release: {}",
+            console.display()
+        );
     }
 
     /// A machine that recorded, then restarted under a plan that opted out,

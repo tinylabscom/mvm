@@ -110,10 +110,9 @@ pub trait ServiceHandler: Send + Sync + 'static {
         payload: serde_json::Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ServiceDispatchResult> + Send + 'a>>;
 
-    /// Services this handler composes with. A CI lint
-    /// (`xtask check-handler-composition`) verifies the declared list
-    /// matches actual `ctx.invoke(…)` call sites. Default empty (no
-    /// composition).
+    /// Services this handler composes with. Declared by hand and not
+    /// currently checked against actual `ctx.invoke(…)` call sites, so a
+    /// stale list is possible. Default empty (no composition).
     fn composes_with(&self) -> &[ServiceId] {
         &[]
     }

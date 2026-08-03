@@ -227,16 +227,21 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    entry (W2.2).
 3. **A tampered rootfs ext4 fails to boot.** dm-verity sidecar +
    kernel-cmdline roothash + `mvm-verity-init` initramfs (W3 —
-   shipped 2026-04-30; see plan 27 + the runbook in
-   `specs/adrs/001-microvm-security-posture.md` §"Runbook: W3
-   verified-boot verification"). CI lane `verified-boot-artifacts`
-   in `security.yml` asserts the artifacts are emitted; live-KVM
-   tamper regression confirms the kernel panics before userspace
-   on a flipped data block.
+   shipped 2026-04-30; see plan 27 and the claim-3 row of
+   `specs/adrs/001-microvm-security-posture.md`'s "Claims ledger
+   (claim → witness)" table — there is no separate runbook section).
+   CI lane `verified-boot-artifacts` in `security.yml` asserts the
+   artifacts are emitted; `verify_and_resume_rejects_tampered_mem`
+   confirms a tampered snapshot is rejected before resume, and
+   live-KVM tamper regression confirms the kernel panics before
+   userspace on a flipped data block.
 4. **The guest agent does not contain `do_exec` in production
-   builds.** `prod-agent-no-exec` job in `.github/workflows/ci.yml`
-   builds the agent without `interactive` and asserts the
-   `mvm_guest_agent::do_exec` symbol is absent (W4.3).
+   builds.** `scripts/check-prod-agent-no-exec.sh`, run by the
+   `prod-agent-runentry-contract` job in
+   `.github/workflows/security.yml` (tag pushes + nightly cron +
+   manual dispatch, not every PR), builds the agent without
+   `interactive` and asserts the `mvm_guest_agent::do_exec` symbol is
+   absent (W4.3).
 5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
    targets at `crates/mvm-agentd/fuzz/` cover `GuestRequest` and
    `AuthenticatedFrame` (W4.2). Plan 88 W6 adds
@@ -246,16 +251,24 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    host↔guest type ensures unexpected fields fail-closed (W4.1). The
    virtio-net frame parsers that Plan 87/88 brought online live
    inside libkrun (C), passt (C), and gvproxy (Go) — their fuzz
-   coverage belongs upstream and is tracked in ADR-003 §"New
-   untrusted-input surfaces". Since the vsock-egress convergence
+   coverage belongs upstream, in those projects' own repositories;
+   `specs/adrs/003-hypervisor-egress-policy.md` was rewritten around
+   the vsock-only chokepoint and no longer tracks this gap under any
+   heading. Since the vsock-egress convergence, though,
    those three parsers are **off the workload path entirely** (no
    workload guest has a NIC); they remain reachable only from
    builder-VM and Stage 0 traffic, which carries no untrusted
    tenant workload.
-6. **Pre-built dev image is hash-verified.** `download_dev_image`
-   fetches the per-arch `*-checksums-sha256.txt` manifest, streams
-   the artifact through SHA-256, and rejects + deletes on mismatch
-   (W5.1). `MVM_SKIP_HASH_VERIFY=1` is the documented emergency
+6. **Pre-built dev image is hash-verified.** No function named
+   `download_dev_image` exists; the real pipeline is
+   `fetch_expected_hashes` + `verify_artifact_hash`
+   (`crates/mvm-cli/src/commands/env/artifact_verify.rs`), which fetch
+   the per-arch `*-checksums-sha256.txt` manifest, stream the
+   artifact through SHA-256, and reject + delete on mismatch (W5.1).
+   The builder-VM/dev-image orchestration in
+   `crates/mvm-cli/src/commands/env/builder_vm/stage0_cache.rs`
+   (`download_builder_vm_image`) and `.../builder_vm/default_microvm.rs`
+   call them. `MVM_SKIP_HASH_VERIFY=1` is the documented emergency
    escape; never set it in CI.
 7. **Cargo deps are audited on every PR.** `deny.toml` + the `deny`
    and `audit` jobs in CI (W5.2). Reproducibility double-build
@@ -263,7 +276,8 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 8. **Every workload runs from a signed, audited `ExecutionPlan`.**
    `mvmctl up` synthesizes a typed `ExecutionPlan`, signs it under
    the host's Ed25519 keypair at `~/.mvm/keys/host-signer.ed25519`
-   (mode 0600), verifies it through `mvm_plan::verify_plan`,
+   (mode 0600), verifies it through `mvm_core::plan::verify_plan`
+   (`mvm_plan` is not a crate — `plan` is a module of `mvm-core`),
    enforces the G4 validity window + nonce replay-store, and only
    then dispatches the backend. Each admission emits
    `plan.admitted` / `plan.launched` / `plan.failed` chain-signed
@@ -276,8 +290,9 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    protects the host signer's redacted `Debug`).
 9. **Every published bundle is content-addressed, key_id-pinned, and
    re-verified at fetch and at admit time.** Sprint 52 W2 +
-   admit-time re-verify follow-on. `mvm_plan::bundle::read_and_verify_bundle`
-   + `mvm_plan::bundle::verify_plan_bundle` exercise the
+   admit-time re-verify follow-on.
+   `mvm_core::plan::bundle::read_and_verify_bundle`
+   + `mvm_core::plan::bundle::verify_plan_bundle` exercise the
    rejection ladder on every PR: unknown-key, tampered manifest,
    key_id mismatch, tampered artifact, missing artifact, unsafe
    path, schema bump, pin-archive sha256 drift, pin-signature
@@ -304,8 +319,11 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    closed on high/critical CVE findings or stub SBOM/CVE
    (`mvm_build::app_deps_gate::apply_install_gate`); `mvmctl deps
    inspect` / `mvmctl deps audit` surface the sealed sidecars without
-   a VM spawn. The `app-deps-audit` job in `.github/workflows/ci.yml`
-   (Followup D) gates every PR: it exercises `mvmctl build compile` on
+   a VM spawn. The `app-deps-audit` job lives in
+   `.github/workflows/ci-full.yml` (Followup D), not `ci.yml` — that
+   workflow is `workflow_dispatch`-only, so this lane does **not**
+   gate every PR; it runs on manual dispatch. It exercises `mvmctl
+   build compile` on
    `examples/python/hello-app-with-deps/`, seals a clean + a high-CVE
    fixture via `mvm-build`'s `mvm-app-deps-fixture-tool` example,
    asserts `mvmctl deps inspect --json` reports a well-formed report,
@@ -371,9 +389,10 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     labels; `mvm_hostd::supervisor::verify_audit_chain` continues to detect
     drift, surfaced via `mvmctl trust audit verify`. `--prod` refuses
     mutable references before any network fetch
-    (`crates/mvm-cli/src/commands/image.rs::
+    (`crates/mvm-cli/src/commands/image/pull_core.rs::
     prod_pull_requires_digest_pin_before_network` and
-    `prod_run_image_requires_digest_pin_before_network`), demands an
+    `prod_run_image_requires_digest_pin_before_network` — `image` is a
+    directory of modules, not a single `image.rs` file), demands an
     explicit registry policy, and requires cosign verification of the
     resolved digest before cache admission or boot. The OCI
     `unpack_layer` fuzz harness lives in
@@ -381,9 +400,10 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     + nightly cron + manual dispatch); the
     `oci-layer-unpack-adversarial`, `oci-digest-mismatch-reject`,
     `oci-malformed-manifest`, `oci-mutable-tag-prod-reject`,
-    `oci-reproducibility`, and `oci-image-runner-smoke` lanes in
-    `.github/workflows/ci.yml` gate every PR that touches the OCI
-    surface.
+    `oci-reproducibility`, and `oci-image-runner-smoke` lanes live in
+    `.github/workflows/ci-full.yml`, not `ci.yml` — that workflow is
+    `workflow_dispatch`-only, so none of the six gate a PR; they run
+    on manual dispatch.
 15. **No interactive access to a sealed production microVM.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
     console (`crates/mvm-agentd/src/console.rs`), which is gated behind
@@ -394,7 +414,8 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     variant serves a shell; (2) the prod rootfs is dm-verity sealed
     (claim 3); (3) the backend captures the guest console **write-only**
     to `console.log` with no host input fd
-    (`mvm_backend::libkrun::open_console_capture` /
+    (`mvm_runtime::libkrun::open_console_capture` — `mvm_backend` is
+    not a crate, this is a function in `mvm-runtime` — and
     `prod_console_attachment_has_no_input`); (4) the host
     `enforce_accessible_gate` refuses `mvmctl console` on a sealed VM
     (`console_refused_on_sealed_image`); (5) the agent console + `do_exec`

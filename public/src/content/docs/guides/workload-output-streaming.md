@@ -29,13 +29,20 @@ mvmctl machine logs my-machine -f | grep ERROR      # searches stdout only
 mvmctl machine logs my-machine -f 2>/dev/null       # drops the workload's stderr
 ```
 
-`machine run` attaches to the output itself unless you pass `--detach` or ask
-for JSON, so you usually do not have to follow up with `logs` at all:
+A **persistent** machine — one you keep alive with `-d`, `--ttl`, or
+`--healthcheck` — attaches to the output itself once it boots, unless you
+pass `--detach` or ask for JSON, so you usually do not have to follow up
+with `logs` at all:
 
 ```sh
 mvmctl machine run --healthcheck 'curl -fsS localhost/health' \
   --name svc --image ghcr.io/example/service:1.4
 ```
+
+This is specific to the persistent lifecycle. A plain foreground (transient)
+`machine run` streams its own output directly as the workload runs, not
+through this attach step; and passing a command after `--` on a persistent
+machine opens an interactive console instead of attaching to its log stream.
 
 Interrupting an attached `machine run` on a **persistent** machine detaches
 from the output; the machine keeps running. That is the opposite of what
@@ -98,7 +105,7 @@ note saying so whenever you narrow.
 ```
 microVM `my-machine` has no output capture; its console log at
 /…/console.log is one unlabelled stream merging stdout and stderr, so
---stream stderr cannot be honoured — drop it to read the whole console
+a channel selection cannot be honoured — drop it to read the whole console
 ```
 
 Refusing is deliberate. Filtering a merged stream would put the wrong bytes on
@@ -163,8 +170,15 @@ Recording is on by default for every workload. The opt-out lives in the
 signed execution plan, as `stream_retention`:
 
 - `persist` (the default) — keep an encrypted transcript, sealed at exit.
-- `ephemeral` — fan out live and keep nothing. `mvmctl machine logs -f` works
-  exactly as before; there is simply no recording to read afterwards.
+- `ephemeral` — fan out live and keep no chained, verifiable transcript.
+  `mvmctl machine logs -f` works exactly as before while the workload runs.
+
+`ephemeral` does not mean no bytes land on disk. The backend still writes its
+own `console.log` — outside this plane, unredacted, unaffected by the
+retention mode — and once the run ends, `mvmctl machine logs` falls back to
+reading that file, printing the run's output in full. Choose `ephemeral` to
+skip the audited, hash-chained copy; it does not stop the output from being
+readable afterward.
 
 There is deliberately **no CLI flag** for this. A flag would make a missing
 transcript ambiguous: nobody reading the evidence later could tell a run that

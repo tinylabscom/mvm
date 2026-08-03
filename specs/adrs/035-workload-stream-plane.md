@@ -157,11 +157,19 @@ capability.
 Always-on capture is a data-retention change — output that used to evaporate
 is now written to disk, encrypted. The opt-out for that is
 `ExecutionPlan.stream_retention`, defaulting to `Persist`, with `Ephemeral`
-meaning "fan out live, keep nothing". An ephemeral run gets an identical
-broker, an identical socket, identical redaction and chaining and fan-out; it
-just never creates a capture directory. Sealing an ephemeral capture yields no
-manifest rather than an empty one, because a manifest with zero chunks asserts
-that the workload printed nothing, which is a different and false claim.
+meaning "fan out live, keep no chained, verifiable transcript". An ephemeral
+run gets an identical broker, an identical socket, identical redaction and
+chaining and fan-out; it just never creates a capture directory. Sealing an
+ephemeral capture yields no manifest rather than an empty one, because a
+manifest with zero chunks asserts that the workload printed nothing, which is
+a different and false claim.
+
+`Ephemeral` does not mean no bytes reach disk. The backend still writes its
+own `console.log` into the VM state dir — outside this plane, unredacted,
+untouched by the retention mode — and `mvmctl machine logs` still falls back
+to reading it once the broker is gone. An operator choosing `Ephemeral` to
+keep sensitive output off disk needs to know that choice does not do that;
+it only forgoes the audited, hash-chained copy.
 
 **The mode is in the signed plan, not on a command line.** A CLI flag would
 make an absent transcript ambiguous: nobody reading the evidence later could
