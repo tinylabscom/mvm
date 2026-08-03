@@ -1,308 +1,95 @@
 //! `mvmctl machine ls` — the single listing of every microVM on the host.
 //!
-//! Three stores describe a microVM and none of them is complete on its own:
-//! the persisted spec registry (a machine the user created by name), the live
-//! backend scan joined with the VM name registry (what is actually booted), and
-//! the per-VM state dirs underneath both. A machine started from a spec, a
-//! transient `machine run`, and a direct-boot VM must all appear here, so this
-//! joins the spec registry against the live listing by name.
+//! The spec×live join, the typed record, and the visibility semantics all
+//! live in the shared inventory service (`mvm_client::inventory`), so this
+//! module is presentation only: it maps the CLI flags onto an
+//! [`InventoryQuery`], fetches the canonical records, and renders them as a
+//! table or as JSON. The JSON output *is* the serialized inventory record —
+//! the same typed shape any other consumer of the service sees.
 
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 
-use mvm_client::{LocalBackend, MachineFilter, MachineState, MachineStatus, MvmClient};
-use mvm_runtime::machine::persist::MachineSpec;
+use mvm_client::inventory::{InventoryQuery, MachineInventoryRecord, list_local_inventory};
+use mvm_client::{LocalBackend, MachineStatus};
 
-use super::{MachineListArgs, health_cell, humanize_age, list_machine_specs, machine_status_label};
-
-/// Where a listed microVM's definition lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum MachineKind {
-    /// Backed by a persisted spec: survives a stop, restartable by name.
-    Persistent,
-    /// Live only. A `machine run` or a direct-boot VM; it leaves nothing
-    /// behind once it exits.
-    Transient,
-}
-
-impl MachineKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Persistent => "persistent",
-            Self::Transient => "transient",
-        }
-    }
-}
-
-/// One microVM, from whichever stores know about it. A persistent machine that
-/// is not booted has `live: None`; a transient one always has `live: Some`.
-pub(super) struct ListedMachine {
-    kind: MachineKind,
-    name: String,
-    live: Option<MachineState>,
-    spec: Option<MachineSpec>,
-}
-
-impl ListedMachine {
-    /// Status label, lowercase. SDK facades parse this field out of
-    /// `--json` (`running` / `starting` / `failed`, anything else read as
-    /// stopped), so it stays the snake_case `MachineStatus` wire form. A
-    /// machine with no live row falls back to the pid-file probe.
-    fn status(&self) -> String {
-        let Some(live) = &self.live else {
-            return machine_status_label(&self.name).to_string();
-        };
-        let label = status_label(live.status);
-        // `MachineStatus::Failed` is a unit variant, so the reason rides
-        // alongside it; keep it visible rather than dropping it.
-        match (&live.status, &live.status_detail) {
-            (MachineStatus::Failed, Some(reason)) => format!("{label} ({reason})"),
-            _ => label,
-        }
-    }
-
-    /// `"dev"` / `"prod"`, resolved the same way as the boot-time SDK
-    /// envelope. Read by `Sandbox.connect(id)` to inherit the dev-only exec
-    /// guard when attaching to a running machine from a fresh process, so a
-    /// transient machine resolves it too — fail-closed to `prod`.
-    fn build_mode(&self) -> &'static str {
-        super::runtime::resolve_machine_build_mode(
-            self.spec.as_ref().and_then(|s| s.manifest.as_deref()),
-            &self.name,
-        )
-    }
-
-    /// What the machine was made from: the spec's image/manifest for a
-    /// persistent machine, and whatever the backend knows for a transient one.
-    fn source(&self) -> String {
-        let from_spec = self
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.image.as_deref().or(spec.manifest.as_deref()));
-        if let Some(source) = from_spec {
-            return source.to_string();
-        }
-        self.live
-            .as_ref()
-            .and_then(|live| live.flake_ref.as_deref().or(live.profile.as_deref()))
-            .unwrap_or("-")
-            .to_string()
-    }
-
-    fn backend(&self) -> &str {
-        self.live
-            .as_ref()
-            .map(|live| live.backend.as_str())
-            .unwrap_or("-")
-    }
-
-    fn ports(&self) -> String {
-        let Some(live) = &self.live else {
-            return "-".to_string();
-        };
-        if live.ports.is_empty() {
-            return "-".to_string();
-        }
-        live.ports
-            .iter()
-            .map(|p| format!("{}→{}", p.host, p.guest))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    fn health(&self) -> &'static str {
-        let readiness = self
-            .live
-            .as_ref()
-            .and_then(|live| live.readiness.clone())
-            .or_else(|| mvm_client::readiness_of(&self.name));
-        health_cell(readiness.as_ref())
-    }
-
-    /// Age from the spec's creation time. A transient machine was never
-    /// created as a spec, so it has none.
-    fn age(&self, now: chrono::DateTime<chrono::Utc>) -> String {
-        humanize_age(
-            self.spec.as_ref().and_then(|s| s.created_at.as_deref()),
-            now,
-        )
-    }
-}
+use super::{MachineListArgs, health_cell, humanize_age};
 
 pub(super) fn list_machines(args: MachineListArgs) -> Result<()> {
-    let tag_filter = parse_tag_filter(&args.tags)?;
-    let specs = list_machine_specs()?;
-    let live = live_machines()?;
+    let query = query_from_args(&args)?;
+    let records = fetch_local_inventory()?;
     let now = chrono::Utc::now();
 
-    let machines: Vec<ListedMachine> = join_by_name(specs, live)
+    let visible: Vec<MachineInventoryRecord> = records
         .into_iter()
-        .filter(|m| passes_filters(m, args.all, &tag_filter, args.show_expired, now))
+        .filter(|record| query.matches(record, now))
         .collect();
 
     if args.json {
-        return emit_json(&machines, now);
+        // The listing's JSON is the canonical inventory record, verbatim —
+        // SDK facades parse `name` / `status` / `build_mode` / `kind` out of
+        // it, and those keys are pinned by the record's wire contract.
+        crate::json_out::emit_json(&visible)?;
+        return Ok(());
     }
-    if machines.is_empty() {
+    if visible.is_empty() {
         println!("no machines");
         return Ok(());
     }
-    println!("{}", format_table(&machines, now));
+    println!("{}", format_table(&visible, now));
     Ok(())
 }
 
-/// Every VM a backend currently knows about, joined with the VM name registry.
-fn live_machines() -> Result<Vec<MachineState>> {
+/// The canonical unfiltered inventory, via the shared service.
+fn fetch_local_inventory() -> Result<Vec<MachineInventoryRecord>> {
     let client = LocalBackend::new();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("build runtime for machine listing")?;
     runtime
-        .block_on(client.list_machines(MachineFilter::all()))
+        .block_on(list_local_inventory(&client))
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("listing machines")
 }
 
-/// Join the two stores by name: every spec becomes a persistent row (carrying
-/// its live state when booted), and every live VM left over is transient.
-/// Persistent rows come first, each block name-sorted, so the listing is
-/// stable and the two kinds read as groups.
-pub(super) fn join_by_name(specs: Vec<MachineSpec>, live: Vec<MachineState>) -> Vec<ListedMachine> {
-    let mut by_name: BTreeMap<String, MachineState> = live
-        .into_iter()
-        .map(|state| (state.name.clone(), state))
-        .collect();
-
-    let mut persistent: Vec<ListedMachine> = specs
-        .into_iter()
-        .map(|spec| ListedMachine {
-            kind: MachineKind::Persistent,
-            live: by_name.remove(&spec.name),
-            name: spec.name.clone(),
-            spec: Some(spec),
-        })
-        .collect();
-    persistent.sort_by(|a, b| a.name.cmp(&b.name));
-
-    // Whatever the spec registry did not claim is running without a spec.
-    let transient = by_name.into_values().map(|state| ListedMachine {
-        kind: MachineKind::Transient,
-        name: state.name.clone(),
-        live: Some(state),
-        spec: None,
-    });
-
-    persistent.into_iter().chain(transient).collect()
-}
-
-fn parse_tag_filter(raw_tags: &[String]) -> Result<BTreeMap<String, String>> {
-    let mut filter = BTreeMap::new();
-    for raw in raw_tags {
+/// Map the CLI flags onto the shared visibility query: `--all` includes
+/// stopped transients, `--show-expired` includes elapsed-TTL machines, and
+/// each `--tag KEY=VALUE` adds a must-match constraint.
+pub(super) fn query_from_args(args: &MachineListArgs) -> Result<InventoryQuery> {
+    let mut tags = BTreeMap::new();
+    for raw in &args.tags {
         let (k, v) = mvm_core::crypto::policy::InputValidator::parse_tag_arg(raw)
             .with_context(|| format!("Invalid --tag value: {:?}", raw))?;
-        filter.insert(k, v);
+        tags.insert(k, v);
     }
-    Ok(filter)
+    Ok(InventoryQuery {
+        include_stopped_transient: args.all,
+        include_expired: args.show_expired,
+        tags,
+    })
 }
 
-/// Visibility policy. A persistent machine always lists — it exists whether or
-/// not it is booted, and hiding it would lose the only record of it. A
-/// transient machine exists only while it runs, so a stopped one is leftover
-/// state and stays hidden unless asked for.
-pub(super) fn passes_filters(
-    m: &ListedMachine,
-    all: bool,
-    tag_filter: &BTreeMap<String, String>,
-    show_expired: bool,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    let stopped = m
-        .live
-        .as_ref()
-        .map(|live| live.status == MachineStatus::Stopped)
-        .unwrap_or(true);
-    if !all && m.kind == MachineKind::Transient && stopped {
-        return false;
-    }
-    if !tag_filter.is_empty() {
-        let tags = m.live.as_ref().map(|live| &live.tags);
-        let matches = tags.is_some_and(|tags| {
-            tag_filter
-                .iter()
-                .all(|(k, v)| tags.get(k).map(String::as_str) == Some(v.as_str()))
-        });
-        if !matches {
-            return false;
-        }
-    }
-    if !show_expired && expired(m, now) {
-        return false;
-    }
-    true
-}
-
-/// Whether a machine's TTL has elapsed. A missing or unparseable `expires_at`
-/// is treated as "no TTL" (never expired).
-fn expired(m: &ListedMachine, now: chrono::DateTime<chrono::Utc>) -> bool {
-    m.live
-        .as_ref()
-        .and_then(|live| live.expires_at.as_deref())
-        .and_then(mvm_core::util::time::parse_iso8601)
-        .map(|t| t < now)
-        .unwrap_or(false)
-}
-
-/// The snake_case wire label for a status, as SDK facades parse it.
-fn status_label(status: MachineStatus) -> String {
-    match serde_json::to_value(status) {
-        Ok(serde_json::Value::String(label)) => label,
-        _ => "stopped".to_string(),
+/// STATUS cell: the typed wire label, with a failure reason kept visible
+/// beside it rather than dropped.
+pub(super) fn status_cell(record: &MachineInventoryRecord) -> String {
+    match (&record.status, &record.status_detail) {
+        (MachineStatus::Failed, Some(reason)) => format!("failed ({reason})"),
+        (status, _) => status.wire_label().to_string(),
     }
 }
 
-/// Serialize one row. The persisted spec is flattened at the top level and
-/// `status` / `build_mode` sit beside it — the shape SDK facades already
-/// parse. A transient machine has no spec to flatten, so it carries the
-/// common fields alone. Built as a map rather than a struct because
-/// `#[serde(flatten)]` over an optional spec would emit `name` twice.
-fn json_row(m: &ListedMachine, now: chrono::DateTime<chrono::Utc>) -> Result<serde_json::Value> {
-    let mut obj = match &m.spec {
-        Some(spec) => match serde_json::to_value(spec)? {
-            serde_json::Value::Object(map) => map,
-            other => anyhow::bail!("machine spec must serialize to a JSON object, got {other}"),
-        },
-        None => serde_json::Map::new(),
-    };
-
-    let mut set = |key: &str, value: serde_json::Value| {
-        obj.insert(key.to_string(), value);
-    };
-    set("name", m.name.clone().into());
-    set("kind", serde_json::to_value(m.kind)?);
-    set("status", m.status().into());
-    set("build_mode", m.build_mode().into());
-    set("health", m.health().into());
-    set("backend", m.backend().into());
-    set("source", m.source().into());
-    set("age", m.age(now).into());
-    set("expired", expired(m, now).into());
-    if let Some(live) = &m.live {
-        set("live", serde_json::to_value(live)?);
+fn ports_cell(record: &MachineInventoryRecord) -> String {
+    if record.ports.is_empty() {
+        return "-".to_string();
     }
-
-    Ok(serde_json::Value::Object(obj))
-}
-
-fn emit_json(machines: &[ListedMachine], now: chrono::DateTime<chrono::Utc>) -> Result<()> {
-    let rows = machines
+    record
+        .ports
         .iter()
-        .map(|m| json_row(m, now))
-        .collect::<Result<Vec<_>>>()?;
-    crate::json_out::emit_json(&rows)?;
-    Ok(())
+        .map(|p| format!("{}→{}", p.host, p.guest))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// One rendered row, already stringified for display.
@@ -330,27 +117,31 @@ impl Cells {
             age: "AGE".into(),
         }
     }
+
+    fn from_record(record: &MachineInventoryRecord, now: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            name: record.name.clone(),
+            kind: record.kind.label().to_string(),
+            status: status_cell(record),
+            health: health_cell(record.readiness.as_ref()).to_string(),
+            backend: record.backend.clone().unwrap_or_else(|| "-".to_string()),
+            ports: ports_cell(record),
+            source: record.source.clone().unwrap_or_else(|| "-".to_string()),
+            age: humanize_age(record.created_at.as_deref(), now),
+        }
+    }
 }
 
 /// Render the table: a header plus left-aligned columns padded to their widest
 /// cell, so a column nothing populates collapses to its header width. Pure so
 /// the alignment is unit-testable.
 pub(super) fn format_table(
-    machines: &[ListedMachine],
+    records: &[MachineInventoryRecord],
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    let rows: Vec<Cells> = machines
+    let rows: Vec<Cells> = records
         .iter()
-        .map(|m| Cells {
-            name: m.name.clone(),
-            kind: m.kind.label().to_string(),
-            status: m.status(),
-            health: m.health().to_string(),
-            backend: m.backend().to_string(),
-            ports: m.ports(),
-            source: m.source(),
-            age: m.age(now),
-        })
+        .map(|record| Cells::from_record(record, now))
         .collect();
 
     let header = Cells::header();
