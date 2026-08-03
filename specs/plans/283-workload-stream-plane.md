@@ -2054,6 +2054,62 @@ Expected: clean.
 
 ---
 
+### Task 13b: route input frames from the gate to the guest sink
+
+Added during execution, and confirmed independently by Task 13's review. The
+input plane has a host gate, a guest sink, and **nothing between them**.
+`InputSink` has zero production call sites, and no remaining task wires one — so
+without this, Phase 2 would ship documented and policy-gated with no code path
+connecting an `InputFrame` to a workload's stdin. Phase 2's exit criterion
+cannot be met.
+
+This mirrors the output half exactly, where the broker, the console source and
+the entrypoint source each landed correct and unreachable until a task was added
+to construct them.
+
+**Files:**
+- Modify: `crates/mvm-agentd/src/vsock/` (a request arm for input frames)
+- Modify: `crates/mvm-hostd/src/stream/` (drive `take_admitted` toward the guest)
+- Modify: the per-VM plane wiring that already owns the broker's lifetime
+
+**TWO GUARANTEES THIS SEAM CAN SILENTLY DESTROY.** Both were established at real
+cost in earlier tasks; neither is enforced by a type across this boundary.
+
+1. **Acceptance order.** The gate scans for secret material by concatenating
+   bytes in the order it accepted them, and deliberately does not reassemble by
+   `seq`. Feed `InputSink::write_frame` with what `take_admitted` yields, in that
+   order, never re-batched or reordered across polls or across concurrent
+   handler invocations. Reorder here and a secret split across two frames scans
+   as non-contiguous at the gate and reassembles contiguously in the guest.
+2. **The withheld tail.** The gate withholds a live secret-prefix suffix rather
+   than shipping it and refusing later. Call `deliver_tail(InputClose.trailing)`
+   before `close()`. The guest side already forces that ordering by type —
+   `deliver_tail` takes `&mut self`, `close` takes `self` — but nothing forces
+   the host side to hand the tail over at all.
+
+- [ ] **Step 1: Write the failing test** — a plan-granted consumer writes to a
+  running workload's stdin and the workload sees it; an ungranted one is refused
+  and the refusal is in the chain. Must fail today for want of a route.
+
+- [ ] **Step 2: Run to verify it fails.**
+
+- [ ] **Step 3: Implement the route.** Input travels the same vsock transport as
+  everything else; the guest has no NIC and gains none here.
+
+- [ ] **Step 4: Preserve both guarantees above**, with a test for each that fails
+  if the order or the tail is dropped.
+
+- [ ] **Step 5: Never stall.** A child not reading stdin must not block the host,
+  and a slow host must not stall the child's output.
+
+- [ ] **Step 6: Commit**
+
+```sh
+git commit -am "feat(stream): route granted input frames to the workload's stdin"
+```
+
+---
+
 ### Task 14: `--prod` refuses the input grant for shell-shaped entrypoints
 
 **Files:**
