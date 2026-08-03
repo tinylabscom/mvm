@@ -273,11 +273,16 @@ pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<
 /// Record the fetched kernel's digest beside it so the *read* path can check
 /// it later.
 ///
+/// Gated to match `download_kernel`, its only caller. Without the gate it is
+/// dead code in every build that compiles this crate without `builder-vm` —
+/// invisible to the default workspace run, caught by the feature-matrix lanes.
+///
 /// The checksum-manifest comparison above happens once, at fetch. Nothing
 /// re-derived it afterwards, so a kernel that rotted, was truncated, or was
 /// replaced on disk was served on the strength of its filename. Best-effort:
 /// failing to write the pin costs a re-fetch next time, which is the safe
 /// direction.
+#[cfg(feature = "builder-vm")]
 fn record_kernel_pin(dest: &Path) {
     if let Err(e) = mvm_build::kernel_fetch::record_kernel_digest(dest) {
         ui::warn(&format!(
