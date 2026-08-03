@@ -21,8 +21,28 @@
 //!
 //!   A delivery the transport refuses is not dropped either. The gate has no
 //!   un-accept — it scanned those bytes and advanced past their `seq`, so the
-//!   writer cannot resend them — and they go out in front of the next frame's,
-//!   which is the same concatenation in the same order the scan described.
+//!   writer cannot resend them — so the wire frame stays queued *verbatim* and
+//!   is offered again, ahead of the next one. Same concatenation, same order,
+//!   and the same wire number, which is what makes the retry safe (below).
+//!
+//! - **Delivery is exactly once, not at least once.** A transport call can
+//!   fail after the guest already took the bytes: the answer is lost, not the
+//!   frame. Retrying under a fresh number would write those bytes into the
+//!   workload's stdin twice, and neither this end's ordering check nor the
+//!   guest's would see it — a silent duplication traded for a silent loss.
+//!   The retry therefore carries the frame's own identity, its wire `seq`, and
+//!   the guest recognises a repeat of the number it last accepted as the
+//!   re-offer it is, answering without enqueueing anything. Wire numbers are
+//!   minted here, once per accepted frame, and never carry different bytes on
+//!   a second showing, which is what makes the number an identity.
+//!
+//! - **The queue behind a wedged guest is bounded.** The guest caps what it
+//!   will hold for a workload that stopped reading, and answers `QueueFull`
+//!   rather than growing; this end mirrors that cap, refuses with
+//!   [`InputRouteError::Backlogged`] *before* the gate sees the frame, and so
+//!   costs a wedged workload a bounded amount of host memory rather than an
+//!   unbounded one. Refusing ahead of the gate is what leaves the frame
+//!   re-offerable: the gate never saw its `seq`, so the writer may try again.
 //!
 //! - **The withheld tail is handed over.** The gate holds back the tail of the
 //!   stream that is still a live prefix of a known secret rather than shipping
@@ -38,6 +58,18 @@
 //! goes through [`InputGate::open`], so a route that exists is a route the
 //! signed plan admitted.
 //!
+//! ## Why the wire numbers a frame travels under are not the writer's
+//!
+//! The gate's `seq` orders one *writer's* frames. [`WireSequence`] orders
+//! everything one VM's stdin ever receives, and those stop being the same
+//! sequence the moment a lease changes hands: a successor's first frame is
+//! `seq` 0 in its own numbering, and the guest — which refuses anything that
+//! does not advance past what it already delivered — would refuse it for its
+//! predecessor's sequence. The counter is therefore per VM and outlives any
+//! one route, so a handover is invisible to the guest while still being the
+//! strictly increasing order the scan describes. One wire frame per accepted
+//! caller frame either way, empty payloads included.
+//!
 //! ## Why one RPC per frame
 //!
 //! [`VsockInput`] opens a control connection, sends one frame, reads its
@@ -52,12 +84,46 @@
 //! reading its stdin queues on the guest side and answers `QueueFull`, which
 //! the writer can see, rather than parking the host.
 
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use anyhow::{Context, Result, bail};
+use mvm_agentd::stream_input::MAX_PENDING_INPUT_BYTES;
 use mvm_agentd::vsock::{StreamInputRefusal, StreamInputResult};
 use mvm_protocol::stream::input::{CloseInput, InputFrame};
+use zeroize::Zeroize;
 
 use crate::plan_admission::AdmittedPlan;
 use crate::stream::input_gate::{InputGate, InputRefusal, InputSession};
+
+/// How much cleared-but-undelivered input one route will hold before it starts
+/// refusing.
+///
+/// The same number the guest holds for a workload that stopped reading, and
+/// for the same reason: both bound how much input is kept alive on a wedged
+/// workload's behalf, and a host mirror that grew without limit would make the
+/// guest's cap pointless — the memory would simply pile up one hop earlier.
+pub const MAX_UNDELIVERED_INPUT_BYTES: usize = MAX_PENDING_INPUT_BYTES;
+
+/// The delivery-order counter for one VM's stdin.
+///
+/// Shared rather than owned by a route so it outlives any single writer — see
+/// the module docs on why the wire numbers are not the writer's own.
+#[derive(Clone, Default)]
+pub struct WireSequence(Arc<AtomicU64>);
+
+impl WireSequence {
+    /// Mint the next delivery number.
+    fn mint(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// The last number minted for this VM, or `None` before the first.
+    fn last(&self) -> Option<u64> {
+        self.0.load(Ordering::SeqCst).checked_sub(1)
+    }
+}
 
 /// Where bytes the gate cleared actually go.
 ///
@@ -66,16 +132,22 @@ use crate::stream::input_gate::{InputGate, InputRefusal, InputSession};
 /// route's ordering guarantee has to hold for both. Not a security seam: the
 /// gate decides whether there are any bytes to carry, so the worst a wrong
 /// implementation can do is fail to deliver them.
+///
+/// Both methods borrow rather than take ownership, so the route keeps the only
+/// copy of the bytes and can zeroize it once the guest has them — and so it
+/// can offer the very same frame again when a call fails without knowing
+/// whether the guest took it.
 pub trait InputTransport: Send {
     /// Carry one admitted frame to the workload.
     ///
-    /// `frame.seq` is the sequence number the gate accepted, not one the
-    /// transport minted, so the receiving end can check the order it was
-    /// promised.
-    fn deliver(&mut self, frame: InputFrame) -> Result<()>;
+    /// `frame.seq` is this VM's delivery number, not the writer's own, so the
+    /// receiving end can check the order it was promised across a change of
+    /// writer. A repeat of a number already delivered is a retry of that same
+    /// frame and must not reach the workload twice.
+    fn deliver(&mut self, frame: &InputFrame) -> Result<()>;
 
     /// Carry the withheld tail and the end of the stream.
-    fn close(&mut self, close: CloseInput) -> Result<()>;
+    fn close(&mut self, close: &CloseInput) -> Result<()>;
 }
 
 /// How a write to a workload's stdin failed.
@@ -88,9 +160,58 @@ pub enum InputRouteError {
     /// No writer has an open input session for this workload.
     #[error("no input session is open for this workload")]
     NoSession,
+    /// The route is already holding as much undelivered input as it will. The
+    /// frame was never offered to the gate, so the writer may offer it again.
+    #[error("the workload's input backlog is full ({queued} of {limit} bytes undelivered)")]
+    Backlogged {
+        /// Bytes already cleared and still waiting for the transport.
+        queued: usize,
+        /// The cap that stopped this frame.
+        limit: usize,
+    },
     /// The gate cleared the bytes; carrying them to the guest failed.
     #[error("the workload's input transport failed: {0:#}")]
     Transport(#[from] anyhow::Error),
+}
+
+/// Wire frames the transport has not taken yet, oldest first.
+///
+/// A type of its own for its `Drop`: these are bytes the gate cleared for a
+/// workload, and a route that ends without delivering them should not leave
+/// them on the host heap any more than [`InputSession`] leaves its own outbox
+/// there.
+#[derive(Default)]
+struct Pending {
+    frames: VecDeque<InputFrame>,
+    bytes: usize,
+}
+
+impl Pending {
+    /// Queue one wire frame — including an empty one, because the guest checks
+    /// the sequence and a skipped number reads as a lost frame.
+    fn push(&mut self, frame: InputFrame) {
+        self.bytes = self.bytes.saturating_add(frame.payload.len());
+        self.frames.push_back(frame);
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        for frame in &mut self.frames {
+            frame.payload.zeroize();
+        }
+    }
+}
+
+/// What a displaced route could not hand over.
+///
+/// Returned rather than logged in here so the plane, which knows the VM this
+/// happened on, is the one place that reports it.
+pub struct DisplacedRoute {
+    /// The lease holder that lost the stream.
+    pub holder: String,
+    /// Bytes the gate had cleared that now go nowhere.
+    pub stranded_bytes: usize,
 }
 
 /// One admitted writer's road to a workload's stdin: the gate session that
@@ -102,35 +223,33 @@ pub enum InputRouteError {
 pub struct InputRoute {
     session: InputSession,
     transport: Box<dyn InputTransport>,
-    /// Bytes the gate cleared that the transport would not take.
-    ///
-    /// Held rather than dropped because the gate has no un-accept: it has
-    /// already scanned these bytes and advanced past their `seq`, so a writer
-    /// cannot resend them — offering the same frame again is refused as out of
-    /// order. Losing them here would be a silent hole in the middle of a
-    /// stream. They go out in front of the next frame's, which is the same
-    /// concatenation in the same order the scan already described, so carrying
-    /// them costs the ordering guarantee nothing.
-    undelivered: Vec<u8>,
+    pending: Pending,
+    wire_seq: WireSequence,
 }
 
 impl InputRoute {
-    /// Take the input lease on `vm` under `admitted` and point it at
-    /// `transport`.
+    /// Take the input lease on `vm` under `admitted`, point it at `transport`,
+    /// and number its deliveries out of `wire_seq`.
     ///
     /// The only constructor, and it opens the gate first: a route that exists
     /// is one the signed plan admitted, the lease was free for, and the audit
     /// chain recorded. There is deliberately no way to build one that skips
     /// any of those.
+    ///
+    /// `wire_seq` belongs to the VM rather than to this route, so a route that
+    /// succeeds a lapsed one carries on numbering where its predecessor
+    /// stopped instead of restarting at a number the guest has already seen.
     pub fn open(
         vm: &str,
         admitted: &AdmittedPlan,
         transport: Box<dyn InputTransport>,
+        wire_seq: WireSequence,
     ) -> Result<Self, InputRefusal> {
         Ok(Self {
             session: InputGate::open(vm, admitted)?,
             transport,
-            undelivered: Vec::new(),
+            pending: Pending::default(),
+            wire_seq,
         })
     }
 
@@ -144,27 +263,29 @@ impl InputRoute {
     ///
     /// Accept, drain and deliver happen here and nowhere else, in that order,
     /// without yielding: that is what keeps the bytes the scan concatenated in
-    /// one order from reaching the guest in another. The wire frame carries
-    /// the caller's own `seq`, so the guest sees the same sequence the gate
-    /// accepted — including a frame whose cleared payload is empty because the
-    /// gate is still withholding a live secret prefix.
+    /// one order from reaching the guest in another. One wire frame is minted
+    /// per accepted caller frame — including one whose cleared payload is
+    /// empty because the gate is still withholding a live secret prefix — so
+    /// acceptance order, wire order and delivery order are one order.
+    ///
+    /// The backlog check comes first, ahead of the gate, so a refusal here
+    /// leaves the frame re-offerable: the gate never saw its `seq`.
     pub fn write(&mut self, frame: InputFrame) -> Result<(), InputRouteError> {
-        let seq = frame.seq;
+        // Drain before measuring. The queue only ever moves when something
+        // offers it to the transport, so a cap checked without a drain attempt
+        // first would be a cap the route could never get back under: every
+        // frame that might have emptied it would be refused for its fullness.
+        // The outcome is not reported here — the flush at the end of this call
+        // retries the very same frames and reports for both.
+        let _ = flush_into(&mut *self.transport, &mut self.pending);
+        self.reject_if_backlogged(frame.payload.len())?;
         self.session.write(frame)?;
         let cleared = self.session.take_admitted()?;
-        self.undelivered.extend_from_slice(&cleared);
-        let payload = std::mem::take(&mut self.undelivered);
-        // Copied so a transport that refuses can hand the bytes back — see
-        // `undelivered`. One small memcpy per frame buys "no byte the gate
-        // cleared is dropped without an error".
-        if let Err(error) = self.transport.deliver(InputFrame {
-            seq,
-            payload: payload.clone(),
-        }) {
-            self.undelivered = payload;
-            return Err(InputRouteError::Transport(error));
-        }
-        Ok(())
+        self.pending.push(InputFrame {
+            seq: self.wire_seq.mint(),
+            payload: cleared,
+        });
+        flush_into(&mut *self.transport, &mut self.pending)
     }
 
     /// Extend the lease without writing, for a writer that is idle but alive.
@@ -181,17 +302,97 @@ impl InputRoute {
         let Self {
             session,
             mut transport,
-            mut undelivered,
+            mut pending,
+            wire_seq,
         } = self;
-        let mut close = session.close()?;
-        // Anything a failed delivery left behind is older than the tail and
-        // goes back in front of it, so the last bytes on the wire are the last
-        // bytes the writer sent.
-        undelivered.extend_from_slice(&close.trailing);
-        close.trailing = undelivered;
-        transport.close(close)?;
+        let mut ending = session.close()?;
+        let outcome = end_stream(&mut *transport, &mut pending, &wire_seq, &ending.trailing);
+        ending.trailing.zeroize();
+        outcome
+    }
+
+    /// Wind this route up because another writer took the VM's stdin.
+    ///
+    /// Deliberately not a [`close`](Self::close). The successor is about to
+    /// write to the same stdin, so sending EOF here would end a stream that is
+    /// not over and leave the successor writing into a closed pipe.
+    ///
+    /// Nothing is flushed, and that is not an oversight either. The gate has
+    /// already taken this session's lease away, and every path that moves
+    /// bytes out of a session is lease-gated precisely so a writer that
+    /// stalled cannot deliver into a stdin somebody else now holds. The
+    /// withheld tail is the sharper case: it is a live prefix of a known
+    /// secret, and only *closing* proves it was only ever a prefix. Shipping
+    /// it here would let the successor's first bytes complete it inside the
+    /// guest, with neither writer's scanner having seen the whole of it.
+    ///
+    /// So those bytes are lost — zeroized on the way out — and the caller is
+    /// told how many, because losing them in silence is the failure this
+    /// returns a value to prevent.
+    #[must_use]
+    pub fn displace(self) -> DisplacedRoute {
+        DisplacedRoute {
+            holder: self.session.holder().to_string(),
+            stranded_bytes: self
+                .pending
+                .bytes
+                .saturating_add(self.session.stranded_len()),
+        }
+    }
+
+    fn reject_if_backlogged(&self, incoming: usize) -> Result<(), InputRouteError> {
+        let queued = self.pending.bytes;
+        if queued.saturating_add(incoming) > MAX_UNDELIVERED_INPUT_BYTES {
+            return Err(InputRouteError::Backlogged {
+                queued,
+                limit: MAX_UNDELIVERED_INPUT_BYTES,
+            });
+        }
         Ok(())
     }
+}
+
+/// Offer every queued wire frame, oldest first, stopping at the first one the
+/// transport will not take.
+///
+/// A frame the transport refuses goes back on the front of the queue exactly
+/// as it was — same number, same bytes — because the call may have failed
+/// after the guest already took it, and only an unchanged re-offer lets the
+/// guest recognise the retry instead of writing the bytes a second time.
+fn flush_into(
+    transport: &mut dyn InputTransport,
+    pending: &mut Pending,
+) -> Result<(), InputRouteError> {
+    while let Some(mut frame) = pending.frames.pop_front() {
+        if let Err(error) = transport.deliver(&frame) {
+            pending.frames.push_front(frame);
+            return Err(InputRouteError::Transport(error));
+        }
+        pending.bytes = pending.bytes.saturating_sub(frame.payload.len());
+        // The guest has them now; the host copy has no further use.
+        frame.payload.zeroize();
+    }
+    Ok(())
+}
+
+/// Hand over what is still queued, then the withheld tail and EOF.
+fn end_stream(
+    transport: &mut dyn InputTransport,
+    pending: &mut Pending,
+    wire_seq: &WireSequence,
+    trailing: &[u8],
+) -> Result<(), InputRouteError> {
+    flush_into(transport, pending)?;
+    let mut message = CloseInput {
+        // EOF sits after the last number this VM's stdin actually saw, not
+        // after the writer's own last frame: the two differ whenever a lease
+        // changed hands, and the guest checks against what it received.
+        after_seq: wire_seq.last(),
+        trailing: trailing.to_vec(),
+    };
+    let sent = transport.close(&message);
+    message.trailing.zeroize();
+    sent.map_err(InputRouteError::Transport)
 }
 
 /// The production transport: the guest agent's vsock control channel, which is
@@ -234,11 +435,13 @@ impl VsockInput {
 }
 
 impl InputTransport for VsockInput {
-    fn deliver(&mut self, frame: InputFrame) -> Result<()> {
+    fn deliver(&mut self, frame: &InputFrame) -> Result<()> {
+        let frame = frame.clone();
         self.call(move |stream| mvm_agentd::vsock::send_stream_input(stream, frame))
     }
 
-    fn close(&mut self, close: CloseInput) -> Result<()> {
+    fn close(&mut self, close: &CloseInput) -> Result<()> {
+        let close = close.clone();
         self.call(move |stream| mvm_agentd::vsock::send_close_stream_input(stream, close))
     }
 }
@@ -310,13 +513,13 @@ mod tests {
     }
 
     impl InputTransport for Recorder {
-        fn deliver(&mut self, frame: InputFrame) -> Result<()> {
-            self.carried().frames.push(frame);
+        fn deliver(&mut self, frame: &InputFrame) -> Result<()> {
+            self.carried().frames.push(frame.clone());
             Ok(())
         }
 
-        fn close(&mut self, close: CloseInput) -> Result<()> {
-            self.carried().closed = Some(close);
+        fn close(&mut self, close: &CloseInput) -> Result<()> {
+            self.carried().closed = Some(close.clone());
             Ok(())
         }
     }
@@ -327,11 +530,11 @@ mod tests {
     struct Unreachable;
 
     impl InputTransport for Unreachable {
-        fn deliver(&mut self, _frame: InputFrame) -> Result<()> {
+        fn deliver(&mut self, _frame: &InputFrame) -> Result<()> {
             bail!("the guest agent is not answering")
         }
 
-        fn close(&mut self, _close: CloseInput) -> Result<()> {
+        fn close(&mut self, _close: &CloseInput) -> Result<()> {
             bail!("the guest agent is not answering")
         }
     }
@@ -373,6 +576,7 @@ mod tests {
             vm,
             &admitted(vec![stream_service()]),
             Box::new(recorder.clone()),
+            WireSequence::default(),
         )
         .expect("the plan grants input");
         (route, recorder)
@@ -402,7 +606,12 @@ mod tests {
         let vm = unique_vm("route-ungranted");
         InputGate::bind(&vm, InputBinding::new());
         assert!(matches!(
-            InputRoute::open(&vm, &admitted(vec![]), Box::new(Recorder::default())),
+            InputRoute::open(
+                &vm,
+                &admitted(vec![]),
+                Box::new(Recorder::default()),
+                WireSequence::default()
+            ),
             Err(InputRefusal::NotGranted)
         ));
         assert_eq!(InputGate::lease_holder(&vm), None);
@@ -496,7 +705,7 @@ mod tests {
     struct FlakyFor(Arc<Mutex<usize>>, Recorder);
 
     impl InputTransport for FlakyFor {
-        fn deliver(&mut self, frame: InputFrame) -> Result<()> {
+        fn deliver(&mut self, frame: &InputFrame) -> Result<()> {
             let mut left = self.0.lock().expect("no test panics under this lock");
             if *left > 0 {
                 *left -= 1;
@@ -506,7 +715,7 @@ mod tests {
             self.1.deliver(frame)
         }
 
-        fn close(&mut self, close: CloseInput) -> Result<()> {
+        fn close(&mut self, close: &CloseInput) -> Result<()> {
             self.1.close(close)
         }
     }
@@ -521,8 +730,13 @@ mod tests {
         InputGate::bind(&vm, InputBinding::new());
         let carried = Recorder::default();
         let flaky = FlakyFor(Arc::new(Mutex::new(1)), carried.clone());
-        let mut route = InputRoute::open(&vm, &admitted(vec![stream_service()]), Box::new(flaky))
-            .expect("the plan grants input");
+        let mut route = InputRoute::open(
+            &vm,
+            &admitted(vec![stream_service()]),
+            Box::new(flaky),
+            WireSequence::default(),
+        )
+        .expect("the plan grants input");
 
         assert!(matches!(
             route.write(frame(0, b"lost?")),
@@ -546,8 +760,13 @@ mod tests {
         InputGate::bind(&vm, InputBinding::new());
         let carried = Recorder::default();
         let flaky = FlakyFor(Arc::new(Mutex::new(1)), carried.clone());
-        let mut route = InputRoute::open(&vm, &admitted(vec![stream_service()]), Box::new(flaky))
-            .expect("the plan grants input");
+        let mut route = InputRoute::open(
+            &vm,
+            &admitted(vec![stream_service()]),
+            Box::new(flaky),
+            WireSequence::default(),
+        )
+        .expect("the plan grants input");
 
         assert!(route.write(frame(0, b"stranded")).is_err());
         route.close().expect("the lease is live");
@@ -567,6 +786,7 @@ mod tests {
             &vm,
             &admitted(vec![stream_service()]),
             Box::new(Unreachable),
+            WireSequence::default(),
         )
         .expect("the plan grants input");
         assert!(matches!(
@@ -587,6 +807,7 @@ mod tests {
             &vm,
             &admitted(vec![stream_service()]),
             Box::new(carried.clone()),
+            WireSequence::default(),
         )
         .expect("the plan grants input");
         std::thread::sleep(std::time::Duration::from_millis(40));
@@ -604,6 +825,170 @@ mod tests {
             Err(InputRouteError::Refused(InputRefusal::LeaseExpired))
         ));
         assert!(carried.carried().closed.is_none(), "nor close it");
+    }
+
+    #[test]
+    fn a_route_holding_a_full_backlog_refuses_rather_than_growing() {
+        // The guest caps what it will hold for a workload that stopped reading
+        // and answers `QueueFull`. A host mirror with no cap would make that
+        // pointless: the memory would pile up one hop earlier, on a host that
+        // is serving every other VM too.
+        let vm = unique_vm("route-backlog");
+        InputGate::bind(&vm, InputBinding::new());
+        let mut route = InputRoute::open(
+            &vm,
+            &admitted(vec![stream_service()]),
+            Box::new(Unreachable),
+            WireSequence::default(),
+        )
+        .expect("the plan grants input");
+
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut refusal = None;
+        for seq in 0..64 {
+            match route.write(frame(seq, &chunk)) {
+                Err(InputRouteError::Backlogged { queued, .. }) => {
+                    refusal = Some(queued);
+                    break;
+                }
+                // Every delivery fails; the bytes stay queued.
+                Err(InputRouteError::Transport(_)) => {}
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+        let queued = refusal.expect("an undeliverable backlog must stop growing at its budget");
+        assert!(
+            queued <= MAX_UNDELIVERED_INPUT_BYTES,
+            "{queued} bytes is past the {MAX_UNDELIVERED_INPUT_BYTES} budget"
+        );
+    }
+
+    #[test]
+    fn a_backlog_refusal_leaves_the_frame_re_offerable() {
+        // The refusal happens ahead of the gate, so the frame's `seq` was
+        // never consumed. A writer that waited for the backlog to drain must
+        // be able to offer the very same frame rather than having lost it.
+        let vm = unique_vm("route-backlog-retry");
+        InputGate::bind(&vm, InputBinding::new());
+        let carried = Recorder::default();
+        let stuck = Arc::new(Mutex::new(usize::MAX));
+        let flaky = FlakyFor(Arc::clone(&stuck), carried.clone());
+        let mut route = InputRoute::open(
+            &vm,
+            &admitted(vec![stream_service()]),
+            Box::new(flaky),
+            WireSequence::default(),
+        )
+        .expect("the plan grants input");
+
+        let chunk = vec![b'x'; 256 * 1024];
+        let mut refused_at = None;
+        for seq in 0..64 {
+            if let Err(InputRouteError::Backlogged { .. }) = route.write(frame(seq, &chunk)) {
+                refused_at = Some(seq);
+                break;
+            }
+        }
+        let seq = refused_at.expect("the backlog fills");
+
+        // The transport recovers and the backlog drains, so the frame the
+        // backlog refused is welcome now.
+        *stuck.lock().expect("no test panics under this lock") = 0;
+        route
+            .write(frame(seq, b"drained"))
+            .expect("the refused frame was never consumed by the gate");
+        assert!(
+            carried.stdin_bytes().ends_with(b"drained"),
+            "and it arrives behind everything that was already queued"
+        );
+    }
+
+    #[test]
+    fn a_displaced_route_reports_the_bytes_it_can_no_longer_deliver() {
+        // A route whose lease lapsed cannot hand its bytes over: every
+        // extraction path is lease-gated so a stalled writer cannot deliver
+        // into a stdin its successor now owns, and the withheld tail is a live
+        // secret prefix that only closing proves harmless. Those bytes are
+        // therefore lost — and losing them in silence is the failure this
+        // return value exists to prevent.
+        let vm = unique_vm("route-displaced");
+        InputGate::bind(
+            &vm,
+            InputBinding::new().with_secret(KnownSecret::host_material(b"AKIAIOSFODNN7EXAMPLE")),
+        );
+        let mut route = InputRoute::open(
+            &vm,
+            &admitted(vec![stream_service()]),
+            Box::new(Unreachable),
+            WireSequence::default(),
+        )
+        .expect("the plan grants input");
+        let holder = route.holder().to_string();
+
+        assert!(matches!(
+            route.write(frame(0, b"echo AKIAIOSFODNN")),
+            Err(InputRouteError::Transport(_))
+        ));
+
+        let displaced = route.displace();
+        assert_eq!(displaced.holder, holder, "the report names who lost it");
+        assert_eq!(
+            displaced.stranded_bytes,
+            b"echo ".len() + b"AKIAIOSFODNN".len(),
+            "the undelivered frame and the withheld tail are both counted"
+        );
+    }
+
+    #[test]
+    fn a_successor_numbers_its_deliveries_where_its_predecessor_stopped() {
+        // The guest refuses anything that does not advance past what it
+        // already delivered, and it has no idea a lease changed hands. A
+        // successor that restarted numbering would be refused for its
+        // predecessor's sequence and the stdin would be wedged for good.
+        let vm = unique_vm("route-resume");
+        InputGate::bind(
+            &vm,
+            InputBinding::new().with_lease_ttl(std::time::Duration::from_millis(20)),
+        );
+        let wire_seq = WireSequence::default();
+        let carried = Recorder::default();
+        let mut first = InputRoute::open(
+            &vm,
+            &admitted(vec![stream_service()]),
+            Box::new(carried.clone()),
+            wire_seq.clone(),
+        )
+        .expect("the plan grants input");
+        first
+            .write(frame(0, b"first"))
+            .expect("the gate cleared it");
+        first.write(frame(1, b"more")).expect("and this one");
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let _ = first.displace();
+
+        let mut second = InputRoute::open(
+            &vm,
+            &admitted(vec![stream_service()]),
+            Box::new(carried.clone()),
+            wire_seq,
+        )
+        .expect("a lapsed lease is takeable");
+        // The successor's own numbering starts at zero, as any writer's does.
+        second
+            .write(frame(0, b"second"))
+            .expect("the gate cleared it");
+        second.close().expect("the lease is live");
+
+        assert_eq!(
+            carried.seqs(),
+            [0, 1, 2],
+            "one continuous delivery order across the handover"
+        );
+        assert_eq!(
+            carried.carried().closed.as_ref().map(|c| c.after_seq),
+            Some(Some(2)),
+            "and EOF sits after the last number the guest actually saw"
+        );
     }
 
     #[test]

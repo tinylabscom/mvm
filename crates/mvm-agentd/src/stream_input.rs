@@ -18,6 +18,12 @@
 //!   the guest a secret the gate saw as non-contiguous. The gate holds up its
 //!   end by refusing any frame whose `seq` does not advance; this side holds up
 //!   its end by not reordering, and neither can drift from what was scanned.
+//! - **A frame delivered twice is written once.** The host's call can fail
+//!   after this end already queued the bytes, so it offers the frame again —
+//!   the same bytes under the same [`InputFrame::seq`], which is what makes
+//!   the repeat recognisable. [`InputDesk::write_frame`] answers a repeat of
+//!   the sequence it last took without queueing anything, so a lost answer
+//!   costs a round trip rather than duplicating the workload's stdin.
 //! - **A child that is not reading cannot stall anything else.** A pipe holds
 //!   a page or two, so a `write` into a wedged stdin blocks — and blocking on
 //!   the caller's thread would park whichever loop it shares. Writes therefore
@@ -183,14 +189,16 @@ struct OpenInput {
     sink: InputSink,
     /// Highest `seq` handed to the sink, or `None` before the first frame.
     ///
-    /// The host's gate already refuses a frame whose `seq` does not advance,
-    /// so this is the same rule checked at the other end of the wire. That is
-    /// the point: the gate scans for secret material over the concatenation of
-    /// what it accepted, in acceptance order, so a transport that delivered
-    /// two frames out of order could reassemble inside the guest a secret the
-    /// gate saw as two harmless halves. Refusing here means such a transport
-    /// is caught by the end that would suffer from it, not only promised
-    /// against by the end that would cause it.
+    /// The host mints a strictly increasing number per delivery and refuses to
+    /// let a writer's frames go out of order, so this is the same rule checked
+    /// at the other end of the wire. That is the point: the gate scans for
+    /// secret material over the concatenation of what it accepted, in
+    /// acceptance order, so a transport that delivered two frames out of order
+    /// could reassemble inside the guest a secret the gate saw as two harmless
+    /// halves. Refusing here means such a transport is caught by the end that
+    /// would suffer from it, not only promised against by the end that would
+    /// cause it — and a *repeat* of this number, which is a retry rather than
+    /// a reorder, is answered without queueing the bytes again.
     delivered_seq: Option<u64>,
 }
 
@@ -223,21 +231,35 @@ impl InputDesk {
     }
 
     /// Queue one admitted frame for the workload.
+    ///
+    /// Repeating the `seq` this desk last took is a *retry*, not an error, and
+    /// it is answered without queueing anything. The host offers a frame again
+    /// when its call failed without telling it whether the frame arrived —
+    /// a connection reset after the enqueue, most obviously — and it re-offers
+    /// the identical frame under the identical number precisely so this end
+    /// can tell the two apart. Treating the repeat as new would write those
+    /// bytes into the workload's stdin twice, which neither end's ordering
+    /// check would ever see.
     pub fn write_frame(frame: InputFrame) -> StreamInputResult {
         let mut slot = desk();
         let Some(open) = slot.as_mut() else {
             return no_workload();
         };
-        if let Some(last) = open.delivered_seq
-            && frame.seq <= last
-        {
-            return refused(
-                StreamInputRefusal::OutOfOrder,
-                format!(
-                    "input frame seq {} does not advance past the delivered {last}",
-                    frame.seq
-                ),
-            );
+        if let Some(last) = open.delivered_seq {
+            if frame.seq == last {
+                return StreamInputResult::Accepted {
+                    queued_bytes: open.sink.queued_bytes() as u64,
+                };
+            }
+            if frame.seq < last {
+                return refused(
+                    StreamInputRefusal::OutOfOrder,
+                    format!(
+                        "input frame seq {} does not advance past the delivered {last}",
+                        frame.seq
+                    ),
+                );
+            }
         }
         let seq = frame.seq;
         match open.sink.write_frame(frame) {
@@ -538,8 +560,6 @@ mod tests {
         let child = desk_over_cat();
 
         let _ = queued(&InputDesk::write_frame(frame(4, b"first")));
-        let refused = InputDesk::write_frame(frame(4, b"replayed"));
-        assert_eq!(refusal_kind(&refused), StreamInputRefusal::OutOfOrder);
         let earlier = InputDesk::write_frame(frame(1, b"overtaking"));
         assert_eq!(refusal_kind(&earlier), StreamInputRefusal::OutOfOrder);
         let _ = queued(&InputDesk::write_frame(frame(5, b"second")));
@@ -553,6 +573,34 @@ mod tests {
             out.stdout, b"firstsecond",
             "a refused frame must contribute no bytes at all"
         );
+    }
+
+    #[test]
+    fn re_offering_the_frame_just_taken_does_not_write_it_twice() {
+        // The host's call can fail after this end already queued the bytes —
+        // a reset mid-answer — so it offers the identical frame again. Taking
+        // it as new would put those bytes into the workload's stdin twice, and
+        // neither end's ordering check would see it.
+        let _guard = desk_test();
+        let child = desk_over_cat();
+
+        let _ = queued(&InputDesk::write_frame(frame(0, b"once")));
+        let replay = InputDesk::write_frame(frame(0, b"once"));
+        assert!(
+            matches!(replay, StreamInputResult::Accepted { .. }),
+            "a retry is answered, not refused: {replay:?}"
+        );
+        let _ = queued(&InputDesk::write_frame(frame(1, b" only")));
+        assert_eq!(
+            InputDesk::close(CloseInput {
+                after_seq: Some(1),
+                trailing: Vec::new(),
+            }),
+            StreamInputResult::Closed
+        );
+
+        let out = child.wait_with_output().expect("cat exits after EOF");
+        assert_eq!(out.stdout, b"once only");
     }
 
     #[test]

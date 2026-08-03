@@ -152,6 +152,18 @@ fn handle_run_entrypoint(
     // the pool's `dispatch` synthesizes the same `EntrypointEvent`
     // stream (Stdout / Stderr / Exit | Error) we'd produce below.
     if let Some(Some(pool)) = WARM_POOL.get() {
+        // A warm worker's stdin belongs to the pool, not to this call, so
+        // there is no pipe to hand the input desk. Refusing is the only honest
+        // answer: accepting and quietly ignoring the flag would leave the host
+        // holding an input lease, and the writer offering frames, for a stdin
+        // that closed before the workload ever ran.
+        if stream_input {
+            return evt(EntrypointEvent::Error {
+                kind: RunEntrypointError::InternalError,
+                message: "streamed stdin is not available while a warm process pool is active"
+                    .into(),
+            });
+        }
         return dispatch_via_warm_pool(file, pool, stdin, timeout_secs, env);
     }
 

@@ -73,7 +73,10 @@ pub use input_gate::{
     CATEGORY_HOST_SECRET, DEFAULT_LEASE_TTL, InputAudit, InputAuditSink, InputBinding, InputGate,
     InputRefusal, InputSession, KnownSecret,
 };
-pub use input_route::{InputRoute, InputRouteError, InputTransport, VsockInput};
+pub use input_route::{
+    DisplacedRoute, InputRoute, InputRouteError, InputTransport, MAX_UNDELIVERED_INPUT_BYTES,
+    VsockInput, WireSequence,
+};
 pub use plane::StreamPlane;
 pub use redact::{
     ClearOutcome, REDACTION_FAILED_EVENT, Redacted, RedactionFailed, StreamRedaction,

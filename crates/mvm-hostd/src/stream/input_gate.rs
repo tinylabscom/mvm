@@ -612,6 +612,20 @@ impl InputSession {
         self.check_live()
     }
 
+    /// How many bytes this session is holding that it can no longer hand over:
+    /// what it cleared but nobody drained, plus the tail it withheld.
+    ///
+    /// A count, never the bytes — and deliberately not gated on the lease,
+    /// because the one caller is a lapsed session's undertaker and a number is
+    /// not an extraction path. It exists so losing those bytes at a change of
+    /// writer can be reported rather than happening in silence.
+    #[must_use]
+    pub fn stranded_len(&self) -> usize {
+        self.outbox
+            .len()
+            .saturating_add(self.scanner.withheld_len())
+    }
+
     /// End the session: flush what was held back, release the lease, and fix
     /// where EOF sits in the sequence.
     ///
@@ -881,6 +895,11 @@ impl SecretScanner {
     /// of a secret, which is not a secret.
     fn flush(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending)
+    }
+
+    /// How much is being withheld. A length, not the bytes.
+    fn withheld_len(&self) -> usize {
+        self.pending.len()
     }
 
     /// The category of the first known secret contained in `buf`.

@@ -255,6 +255,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             crate::commands::vm::agent_verbs::default_agent_verbs(
                 p.restrict_agent_verbs,
                 !p.shares.is_empty(),
+                mvm_protocol::stream::input::grants_input_for(&p.services),
             )
         }),
         services: p.services.clone(),
@@ -1310,14 +1311,14 @@ mod admit_plan_tests {
         // Default path: sealed-prod, no shares → run-entrypoint present, mount-volume absent.
         let d = parse_agent_verb_override(&[])
             .unwrap()
-            .or_else(|| default_agent_verbs(true, false))
+            .or_else(|| default_agent_verbs(true, false, false))
             .unwrap();
         assert!(d.iter().any(|v| v.as_str() == "run-entrypoint"));
         assert!(!d.iter().any(|v| v.as_str() == "mount-volume"));
         // Override path: explicit set replaces the default.
         let o = parse_agent_verb_override(&["run-entrypoint".into()])
             .unwrap()
-            .or_else(|| default_agent_verbs(true, false))
+            .or_else(|| default_agent_verbs(true, false, false))
             .unwrap();
         assert_eq!(
             o.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
@@ -1327,7 +1328,7 @@ mod admit_plan_tests {
         assert!(
             parse_agent_verb_override(&[])
                 .unwrap()
-                .or_else(|| default_agent_verbs(false, false))
+                .or_else(|| default_agent_verbs(false, false, false))
                 .is_none()
         );
     }

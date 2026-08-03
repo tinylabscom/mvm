@@ -73,7 +73,7 @@ use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_
 use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
 use crate::stream::entrypoint_source::EntrypointSink;
 use crate::stream::input_gate::InputRefusal;
-use crate::stream::input_route::{InputRoute, InputRouteError, InputTransport};
+use crate::stream::input_route::{InputRoute, InputRouteError, InputTransport, WireSequence};
 use crate::stream::journal;
 use crate::stream::redact::StreamRedaction;
 use crate::stream::serve::{self, StreamServerHandle, serve_stream};
@@ -112,7 +112,19 @@ struct VmStream {
 /// it would make a slow guest on one VM stall writes to every other.
 pub struct StreamPlane {
     vms: Mutex<HashMap<String, VmStream>>,
-    inputs: Mutex<HashMap<String, SharedRoute>>,
+    inputs: Mutex<HashMap<String, VmInput>>,
+}
+
+/// One VM's input registration: the route whichever writer holds the lease is
+/// using, and the delivery counter that outlives all of them.
+///
+/// The counter is here rather than inside the route because it answers to the
+/// *guest's* stdin, which does not restart when a lease changes hands — see
+/// [`input_route`](crate::stream::input_route)'s module docs.
+#[derive(Clone)]
+struct VmInput {
+    route: SharedRoute,
+    wire_seq: WireSequence,
 }
 
 /// One VM's input route, shared between the map and whoever is mid-write.
@@ -230,6 +242,7 @@ impl StreamPlane {
     /// departed writer left beside the segments and sealed from that instead.
     /// Doing nothing in the second case is what left every non-foreground
     /// workload with a directory of ciphertext and no manifest.
+    ///
     /// Open the host→guest input route for `vm` under `admitted`.
     ///
     /// Everything that decides whether a writer may do this lives in
@@ -239,24 +252,61 @@ impl StreamPlane {
     /// [`release`](Self::release) ends the input stream along with the
     /// capture.
     ///
-    /// A route already open for `vm` is not replaced — the gate's lease has
-    /// already refused this caller by then, so reaching here twice would mean
-    /// the same writer opening twice.
+    /// A route already open for `vm` whose lease is still live refuses this
+    /// caller — the gate does it, below, before anything of the incumbent's is
+    /// touched. What can still arrive here is a *successor*: an incumbent that
+    /// let its lease lapse does not hold the stream any more, and this call is
+    /// the new writer taking it over. That handover is not silent. The
+    /// displaced route is wound up explicitly, what it can no longer deliver
+    /// is reported, and the VM's delivery counter carries across it so the
+    /// successor is not refused by the guest for its predecessor's sequence.
     pub fn open_input(
         &self,
         vm: &str,
         admitted: &crate::plan_admission::AdmittedPlan,
         transport: Box<dyn InputTransport>,
     ) -> Result<(), InputRefusal> {
-        let route = InputRoute::open(vm, admitted, transport)?;
-        self.inputs()
-            .insert(vm.to_string(), Arc::new(Mutex::new(Some(route))));
+        // Cloned out from under the registry lock, which is not held across
+        // anything below: winding up an incumbent waits on that VM's route
+        // lock, and a wedged guest holding it must not stall every other VM.
+        let incumbent = self.inputs().get(vm).cloned();
+        let wire_seq = incumbent
+            .as_ref()
+            .map_or_else(WireSequence::default, |held| held.wire_seq.clone());
+
+        // The gate first: a live incumbent lease refuses here, so the wind-up
+        // below can only ever be reached for one that already lapsed.
+        let route = InputRoute::open(vm, admitted, transport, wire_seq.clone())?;
+
+        if let Some(held) = incumbent {
+            wind_up_displaced(vm, &held.route);
+        }
+        self.inputs().insert(
+            vm.to_string(),
+            VmInput {
+                route: Arc::new(Mutex::new(Some(route))),
+                wire_seq,
+            },
+        );
         Ok(())
     }
 
     /// Whether a writer currently holds `vm`'s input route.
     pub fn input_is_open(&self, vm: &str) -> bool {
         self.inputs().contains_key(vm)
+    }
+
+    /// Extend `vm`'s input lease without writing anything.
+    ///
+    /// The lease exists to free a stdin whose writer died, not to punish one
+    /// that is thinking: without this, an interactive writer that paused past
+    /// the TTL would find its next write refused *and* its close refused,
+    /// which drops the tail the gate withheld. Keeping the lease alive is the
+    /// holder's job, and this is the only way to do it without sending bytes.
+    pub fn refresh_input(&self, vm: &str) -> Result<(), InputRouteError> {
+        let shared = self.route(vm)?;
+        let mut held = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        held.as_mut().ok_or(InputRouteError::NoSession)?.refresh()
     }
 
     /// Offer one frame to `vm`'s workload.
@@ -278,8 +328,8 @@ impl StreamPlane {
 
     /// End `vm`'s input stream: the withheld tail, then EOF.
     pub fn close_input(&self, vm: &str) -> Result<(), InputRouteError> {
-        let shared = self.inputs().remove(vm).ok_or(InputRouteError::NoSession)?;
-        close_shared(&shared)
+        let held = self.inputs().remove(vm).ok_or(InputRouteError::NoSession)?;
+        close_shared(&held.route)
     }
 
     /// This VM's route, or the absence of one. Cloned out from under the
@@ -287,19 +337,31 @@ impl StreamPlane {
     fn route(&self, vm: &str) -> Result<SharedRoute, InputRouteError> {
         self.inputs()
             .get(vm)
-            .map(Arc::clone)
+            .map(|held| Arc::clone(&held.route))
             .ok_or(InputRouteError::NoSession)
     }
 
+    /// Tear `vm`'s capture down and seal its transcript.
+    ///
+    /// Two shapes, and both have to end in a sealed manifest. When this plane
+    /// holds the capture, the seal comes from the writer that produced it and
+    /// accounts for the whole of it. When it does not — a workload started
+    /// detached and stopped by a later invocation, or a foreground run whose
+    /// caller was interrupted — the capture is rebuilt from the journal its
+    /// departed writer left beside the segments and sealed from that instead.
+    /// Doing nothing in the second case is what left every non-foreground
+    /// workload with a directory of ciphertext and no manifest.
     pub fn release(&self, vm: &str) {
         // The input stream goes first, and it goes properly: a route dropped
         // rather than closed would leave a workload waiting on a stdin that
         // never EOFs, and would lose the tail the gate withheld.
         let held = self.inputs().remove(vm);
-        if let Some(shared) = held
-            && let Err(error) = close_shared(&shared)
+        if let Some(held) = held
+            && let Err(error) = close_shared(&held.route)
         {
-            tracing::debug!(
+            // A workload that never saw EOF and a tail that never arrived are
+            // both data-loss events, not diagnostic detail.
+            tracing::warn!(
                 vm = %vm,
                 error = %error,
                 "the workload's input stream could not be closed cleanly at teardown"
@@ -321,7 +383,7 @@ impl StreamPlane {
     /// The input registry, recovered rather than propagated on poison for the
     /// same reason as the capture registry: a panicking writer must not take
     /// every other VM's input path down with it.
-    fn inputs(&self) -> MutexGuard<'_, HashMap<String, SharedRoute>> {
+    fn inputs(&self) -> MutexGuard<'_, HashMap<String, VmInput>> {
         self.inputs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -359,6 +421,30 @@ impl ConsoleStreamer for StreamPlane {
 fn close_shared(shared: &SharedRoute) -> Result<(), InputRouteError> {
     let taken = shared.lock().unwrap_or_else(PoisonError::into_inner).take();
     taken.map_or(Err(InputRouteError::NoSession), InputRoute::close)
+}
+
+/// Wind up the route a successor displaced, and say what it cost.
+///
+/// The route's own lock is taken and *waited on*, not skipped: a predecessor
+/// that is mid-delivery has to finish before the successor's first frame goes
+/// out, or two writers interleave in the one stdin the lease exists to
+/// arbitrate. Taking the route out under that lock is also what makes a
+/// concurrent `write_input` on the stale handle answer `NoSession` rather than
+/// deliver.
+fn wind_up_displaced(vm: &str, route: &SharedRoute) {
+    let taken = route.lock().unwrap_or_else(PoisonError::into_inner).take();
+    let Some(route) = taken else {
+        // Already closed or released; there is nothing to lose.
+        return;
+    };
+    let displaced = route.displace();
+    tracing::warn!(
+        vm = %vm,
+        holder = %displaced.holder,
+        stranded_bytes = displaced.stranded_bytes,
+        "a new writer took the workload's stdin from a lease that had lapsed; \
+         the previous writer's undelivered bytes are discarded"
+    );
 }
 
 /// Build the VM's broker over a fresh encrypted transcript, under the same
