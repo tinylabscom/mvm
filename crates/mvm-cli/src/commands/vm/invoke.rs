@@ -226,15 +226,15 @@ fn admit_entrypoint_boot(
     let guest_profile = super::up::guest_profile_for_boot(params.keep_alive_dev, params.rootfs);
     super::up::attach_guest_boot_config_for_plan(
         &mut start_config,
-        &ctx.admitted.plan,
+        ctx.admitted.plan(),
         &ctx.host_signer_public_path,
         guest_profile,
     )?;
     if super::up::persists_plan_before_start(params.backend_name) {
-        super::plan_persist::write_plan(params.vm_name, &ctx.admitted.plan)
+        super::plan_persist::write_plan(params.vm_name, ctx.admitted.plan())
             .context("persisting admitted plan for the pre-start egress moat")?;
     }
-    let plan_json = serde_json::to_string(&ctx.admitted.signed)
+    let plan_json = serde_json::to_string(ctx.admitted.signed())
         .context("serializing admitted plan for the session VM")?;
     let bundle_json = ctx
         .policy_bundle
@@ -244,7 +244,7 @@ fn admit_entrypoint_boot(
         .context("serializing admitted policy bundle for the session VM")?;
     Ok(Some(EntrypointAdmission {
         substrate: crate::exec::SessionAuditSubstrate {
-            tenant_id: ctx.admitted.plan.tenant.0.clone(),
+            tenant_id: ctx.admitted.plan().tenant.0.clone(),
             plan_json,
             bundle_json,
             config_files: start_config.config_files,
@@ -1592,7 +1592,7 @@ mod tests {
         let verbs = admitted
             .context
             .admitted
-            .plan
+            .plan()
             .agent_verbs
             .as_ref()
             .expect("sealed entrypoint plan should carry agent verbs");

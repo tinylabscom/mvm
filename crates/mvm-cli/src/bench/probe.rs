@@ -308,8 +308,8 @@ mod tests {
         let admitted =
             admit_probe_plan(&rootfs, "bench-probe", "libkrun", Some(tmp.path())).unwrap();
         // The admitted plan binds the workload name we passed.
-        assert_eq!(admitted.plan.image.name, "bench-probe");
-        assert_eq!(admitted.plan.resources.mem_mib, u64::from(PROBE_MEM_MIB));
+        assert_eq!(admitted.plan().image.name, "bench-probe");
+        assert_eq!(admitted.plan().resources.mem_mib, u64::from(PROBE_MEM_MIB));
     }
 
     #[test]
@@ -323,6 +323,6 @@ mod tests {
         let second =
             admit_probe_plan(&rootfs, "bench-probe-b", "firecracker", Some(tmp.path())).unwrap();
 
-        assert_ne!(first.plan.nonce, second.plan.nonce);
+        assert_ne!(first.plan().nonce, second.plan().nonce);
     }
 }

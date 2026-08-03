@@ -89,12 +89,73 @@ impl Default for InMemoryNonceLedger {
 /// bridge audit substrate and any cross-process consumer — the canonical
 /// `SignedExecutionPlan` envelope, which [`populate_audit_substrate`]
 /// serializes verbatim onto `VmStartConfig.plan_json`.
+///
+/// **The fields are private, and that is the type's whole point.** Consumers
+/// downstream of admission — the egress gate, the share enforcer, the workload
+/// input gate — decide what a workload may do by reading this plan, so a value
+/// of this type has to be a claim that the plan *was* signed, verified,
+/// window-checked and replay-checked, not merely a struct shaped like one. Both
+/// halves of that are enforced by privacy: [`admit_for_run`] is the only
+/// non-test code that can build one (a struct literal needs every field named,
+/// and there is no `Default` to spread from), and no accessor hands out a `&mut`
+/// or an owned field, so a caller that legitimately holds one cannot afterwards
+/// push a grant into `plan.services` that admission never saw.
 #[derive(Debug)]
 pub struct AdmittedPlan {
-    pub plan: ExecutionPlan,
-    pub plan_id: PlanId,
-    pub signer_id: String,
-    pub signed: SignedExecutionPlan,
+    plan: ExecutionPlan,
+    plan_id: PlanId,
+    signer_id: String,
+    signed: SignedExecutionPlan,
+}
+
+impl AdmittedPlan {
+    /// The verified plan body — what every downstream authorization decision
+    /// reads.
+    #[must_use]
+    pub fn plan(&self) -> &ExecutionPlan {
+        &self.plan
+    }
+
+    /// The plan's content-address, re-derived and checked during admission.
+    #[must_use]
+    pub fn plan_id(&self) -> &PlanId {
+        &self.plan_id
+    }
+
+    /// The host signer whose key the plan verified under.
+    #[must_use]
+    pub fn signer_id(&self) -> &str {
+        &self.signer_id
+    }
+
+    /// The canonical signed envelope, for a consumer that re-verifies rather
+    /// than trusting this process.
+    #[must_use]
+    pub fn signed(&self) -> &SignedExecutionPlan {
+        &self.signed
+    }
+
+    /// Mint one without admitting it — **tests only**, and unreachable from a
+    /// production build because the whole `impl` is `#[cfg(test)]`.
+    ///
+    /// A test that exercises a downstream consumer needs a plan of its own
+    /// choosing; going through [`admit_for_run`] for each would drag the
+    /// keystore and the nonce ledger into tests about something else. That
+    /// convenience is exactly the forgery this type exists to prevent, so it is
+    /// compiled out of every artifact anyone ships.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        plan: ExecutionPlan,
+        signer_id: String,
+        signed: SignedExecutionPlan,
+    ) -> Self {
+        Self {
+            plan_id: plan.plan_id.clone(),
+            signer_id,
+            plan,
+            signed,
+        }
+    }
 }
 
 /// Optional bundle-admission context for plans pinned to a
@@ -244,7 +305,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// the claim-10 gateway-bridge supervisor path. Call this unconditionally; call
 /// `populate_audit_substrate` when a backend has a signed-plan consumer.
 pub fn thread_tenant_id(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted: &AdmittedPlan) {
-    cfg.tenant_id = Some(admitted.plan.tenant.0.clone());
+    cfg.tenant_id = Some(admitted.plan().tenant.0.clone());
 }
 
 pub fn populate_audit_substrate(
@@ -254,7 +315,7 @@ pub fn populate_audit_substrate(
 ) -> Result<()> {
     thread_tenant_id(cfg, admitted);
 
-    let plan_json = serde_json::to_string(&admitted.signed)
+    let plan_json = serde_json::to_string(admitted.signed())
         .context("serializing SignedExecutionPlan for VmStartConfig.plan_json")?;
     if plan_json.len() > PLAN_JSON_MAX_BYTES {
         anyhow::bail!(
@@ -268,7 +329,7 @@ pub fn populate_audit_substrate(
     // `bundle_json` carries the resolved tenant **PolicyBundle** (network /
     // egress / tool policy) that the supervisor's L4 gate + observers consume.
     // It is NOT the ExecutionPlan's `.mvmpkg` artifact pin
-    // (`admitted.plan.bundle`, a `PlanArtifact` — content-addressed
+    // (`admitted.plan().bundle`, a `PlanArtifact` — content-addressed
     // kernel/rootfs, verified separately at admit time via `verify_plan_bundle`).
     // Feeding the pin here was a conflation the supervisor's PolicyBundle decode
     // would reject. `None` until a policy-bundle source is wired.
@@ -625,8 +686,8 @@ pub fn admit_and_start(
 
     let mut config = params.config;
     populate_audit_substrate(&mut config, &admitted, params.policy_bundle)?;
-    enforce_admitted_shares(&config.volumes, &admitted.plan)?;
-    enforce_sdk_sidecar_attachment(&config.volumes, &admitted.plan)?;
+    enforce_admitted_shares(&config.volumes, admitted.plan())?;
+    enforce_sdk_sidecar_attachment(&config.volumes, admitted.plan())?;
 
     let vm_id = backend
         .start(&config)
@@ -641,6 +702,101 @@ mod tests {
     use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// This module's own source, for the unforgeability check below.
+    const SOURCE: &str = include_str!("plan_admission.rs");
+
+    /// The production half of it — everything before this test module, so the
+    /// checks below cannot be satisfied by a string literal written here.
+    fn production_source() -> &'static str {
+        SOURCE
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("this module keeps its tests at the end")
+            .0
+    }
+
+    /// The body of the `AdmittedPlan` declaration, plus the derives above it.
+    fn admitted_plan_declaration() -> (&'static str, &'static str) {
+        let (before, after) = production_source()
+            .split_once("pub struct AdmittedPlan {")
+            .expect("the type is declared in this file");
+        let derives = before
+            .rfind("#[derive(")
+            .map(|at| &before[at..])
+            .unwrap_or_default();
+        let body = after
+            .split_once("\n}")
+            .expect("the declaration is brace-terminated")
+            .0;
+        (derives, body)
+    }
+
+    /// Every `impl ... for AdmittedPlan` line, i.e. trait impls on the type.
+    fn trait_impls_on_admitted_plan() -> Vec<&'static str> {
+        production_source()
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with("impl") && line.contains("for AdmittedPlan"))
+            .collect()
+    }
+
+    #[test]
+    fn an_admitted_plan_cannot_be_fabricated_outside_this_module() {
+        // Downstream consumers — the share enforcer, the workload input gate —
+        // treat a value of this type as proof that admission ran, so a caller
+        // able to mint one has the authority admission was supposed to hold.
+        // What stops them is a set of *absences* in this declaration, and an
+        // absence is exactly what no runtime assertion can observe: the honest
+        // form is a compile-fail test, and this workspace has no harness for
+        // one. So the source is the assertion, and each branch below names the
+        // public path it keeps closed.
+        let (derives, body) = admitted_plan_declaration();
+
+        // 1. No `pub` field: a struct literal needs every field named, and a
+        //    private one makes the literal unwritable outside this module.
+        //    Privacy also means no `&mut` reaches a field, so a caller holding
+        //    a legitimately-admitted plan cannot afterwards push a service
+        //    grant into it that admission never saw.
+        for field in ["plan", "plan_id", "signer_id", "signed"] {
+            assert!(
+                body.contains(&format!("\n    {field}: ")),
+                "`AdmittedPlan.{field}` must stay private — a pub field is a forge"
+            );
+        }
+
+        // 2. No derive that reconstitutes one: `Clone` would let a caller
+        //    duplicate a legitimate plan (harmless alone, but it is the first
+        //    half of clone-then-mutate), `Default` and `Deserialize` would
+        //    each build one from nothing at all.
+        for derive in ["Clone", "Default", "Deserialize", "Serialize"] {
+            assert!(
+                !derives.contains(derive),
+                "`AdmittedPlan` must not derive {derive} — it is a second way to obtain one"
+            );
+        }
+
+        // 3. No trait impl offering a conversion in: `From`/`TryFrom`, a
+        //    hand-written `Default`, a `Deserialize` impl.
+        assert!(
+            trait_impls_on_admitted_plan().is_empty(),
+            "no trait may be implemented for AdmittedPlan without re-checking \
+             whether it hands out a construction path: {:?}",
+            trait_impls_on_admitted_plan()
+        );
+
+        // 4. The one convenience constructor is compiled out of production.
+        assert!(
+            SOURCE.contains("#[cfg(test)]\n    pub(crate) fn for_test("),
+            "the test constructor must stay `#[cfg(test)]` and crate-private"
+        );
+
+        // 5. And `admit_for_run` is the only place that writes the literal.
+        let literals = production_source().matches("Ok(AdmittedPlan {").count();
+        assert_eq!(
+            literals, 1,
+            "exactly one production construction site, inside admit_for_run"
+        );
+    }
 
     fn fixture_input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
@@ -884,15 +1040,15 @@ mod tests {
             None,
         )
         .expect("happy path");
-        assert!(!admitted.plan_id.0.is_empty());
-        assert!(admitted.signer_id.starts_with("host:"));
+        assert!(!admitted.plan_id().0.is_empty());
+        assert!(admitted.signer_id().starts_with("host:"));
         // The signed envelope must be re-verifiable with the public
         // half of the host signer.
         let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
-            [(&admitted.signer_id, &signer.verifying)];
-        let recovered = mvm_core::plan::verify_plan(&admitted.signed, &trusted).unwrap();
-        assert_eq!(recovered.plan_id, admitted.plan_id);
+            [(admitted.signer_id(), &signer.verifying)];
+        let recovered = mvm_core::plan::verify_plan(admitted.signed(), &trusted).unwrap();
+        assert_eq!(&recovered.plan_id, admitted.plan_id());
     }
 
     #[test]
@@ -907,13 +1063,13 @@ mod tests {
         )
         .expect("happy path");
         assert!(
-            admitted.plan_id.0.starts_with("sha256:"),
+            admitted.plan_id().0.starts_with("sha256:"),
             "content-addressed, not a UUID: {}",
-            admitted.plan_id.0
+            admitted.plan_id().0
         );
         // The admission path enforces the content-address; the admitted plan
         // re-derives to exactly its stored id.
-        assert_eq!(mvm_core::plan::verify_plan_id(&admitted.plan), Ok(()));
+        assert_eq!(mvm_core::plan::verify_plan_id(admitted.plan()), Ok(()));
     }
 
     #[test]
@@ -980,8 +1136,8 @@ mod tests {
         // proving it round-trips here closes the contract.
         let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
-            [(&admitted.signer_id, &signer.verifying)];
-        assert!(verify_plan(&admitted.signed, &trusted).is_ok());
+            [(admitted.signer_id(), &signer.verifying)];
+        assert!(verify_plan(admitted.signed(), &trusted).is_ok());
     }
 
     #[test]
@@ -1151,7 +1307,7 @@ mod tests {
             Some(&ctx),
         )
         .expect("clean pin admits");
-        assert!(admitted.plan.bundle.is_some());
+        assert!(admitted.plan().bundle.is_some());
     }
 
     #[test]
@@ -1266,7 +1422,7 @@ mod tests {
         // The broker spawn keys off this label.
         assert_eq!(
             cfg.tenant_id.as_deref(),
-            Some(admitted.plan.tenant.0.as_str())
+            Some(admitted.plan().tenant.0.as_str())
         );
         // It must NOT thread the signed plan / policy bundle — that flips
         // libkrun/HVF onto the gateway-bridge supervisor (+ its ~/.mvm/keys
@@ -1300,7 +1456,7 @@ mod tests {
         populate_audit_substrate(&mut cfg, &admitted, None).expect("populate");
         assert_eq!(
             cfg.tenant_id.as_deref(),
-            Some(admitted.plan.tenant.0.as_str())
+            Some(admitted.plan().tenant.0.as_str())
         );
         let plan_json = cfg.plan_json.expect("plan_json populated");
         let roundtrip: mvm_core::plan::SignedExecutionPlan =
@@ -1309,10 +1465,10 @@ mod tests {
         // confirm the plan_id matches what the producer admitted.
         let signer = crate::audit::host_keypair::load_or_init_at(dir.path()).unwrap();
         let trusted: [(&str, &ed25519_dalek::VerifyingKey); 1] =
-            [(&admitted.signer_id, &signer.verifying)];
+            [(admitted.signer_id(), &signer.verifying)];
         let recovered =
             mvm_core::plan::verify_plan(&roundtrip, &trusted).expect("envelope re-verifies");
-        assert_eq!(recovered.plan_id, admitted.plan_id);
+        assert_eq!(&recovered.plan_id, admitted.plan_id());
         // fixture has no bundle pin, so bundle_json stays None
         assert!(cfg.bundle_json.is_none());
     }
@@ -1321,7 +1477,7 @@ mod tests {
     fn bundle_json_carries_a_policy_bundle_not_the_artifact_pin() {
         // De-conflation: bundle_json is the tenant PolicyBundle the
         // supervisor's L4 gate + observers consume — sourced from the
-        // policy_bundle arg, NOT from `admitted.plan.bundle` (the .mvmpkg
+        // policy_bundle arg, NOT from `admitted.plan().bundle` (the .mvmpkg
         // PlanArtifact pin, a different bundle verified separately).
         use mvm_core::vm_backend::VmStartConfig;
         let dir = tempfile::tempdir().unwrap();
@@ -1489,13 +1645,13 @@ mod tests {
         )
         .expect("happy path");
         assert_eq!(
-            admitted.plan.audit_labels["origin.descriptor"],
+            admitted.plan().audit_labels["origin.descriptor"],
             "blake3:testvalue"
         );
         // Profile-derived keys must still be present and authoritative.
-        assert!(!admitted.plan.audit_labels["intent"].is_empty());
-        assert!(!admitted.plan.audit_labels["admission_profile"].is_empty());
-        assert_eq!(admitted.plan.audit_labels["seccomp_tier"], "standard");
+        assert!(!admitted.plan().audit_labels["intent"].is_empty());
+        assert!(!admitted.plan().audit_labels["admission_profile"].is_empty());
+        assert_eq!(admitted.plan().audit_labels["seccomp_tier"], "standard");
     }
 
     // ───────────────────────────────────────────────────────────────
@@ -1553,7 +1709,7 @@ mod tests {
         assert!(!envelope.pubkey_hex.is_empty(), "pubkey_hex must be set");
         assert_eq!(
             envelope.plan_nonce_hex,
-            admitted.plan.nonce.as_hex(),
+            admitted.plan().nonce.as_hex(),
             "nonce hex must match plan"
         );
         let pub_arr: [u8; 32] = hex::decode(&envelope.pubkey_hex)
@@ -1566,7 +1722,7 @@ mod tests {
             .verify(
                 &vk,
                 "vm-verb-grant",
-                &admitted.plan.nonce,
+                &admitted.plan().nonce,
                 SystemClock.now(),
             )
             .expect("grant must verify under the signer key");
@@ -1692,8 +1848,8 @@ mod tests {
         .expect("admit + boot");
 
         // Admission ran (claim 8): a signed plan id under the host signer.
-        assert!(!started.admitted.plan_id.0.is_empty());
-        assert!(started.admitted.signer_id.starts_with("host:"));
+        assert!(!started.admitted.plan_id().0.is_empty());
+        assert!(started.admitted.signer_id().starts_with("host:"));
         // The backend actually started the VM and reports it running.
         assert_eq!(started.vm_id.0, "vm-boot");
         assert!(matches!(

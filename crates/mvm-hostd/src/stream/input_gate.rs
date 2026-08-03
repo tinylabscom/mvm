@@ -11,11 +11,14 @@
 //! - **Default-deny.** [`InputGate::open`] refuses unless the plan carries the
 //!   input grant, and it takes an [`AdmittedPlan`] rather than a bare
 //!   `ExecutionPlan` — "signed" is the whole basis of the grant, so the
-//!   parameter is the type only the admission pipeline mints, not a value any
-//!   caller can synthesize with the token pasted in. Not a warning and not a
-//!   degraded mode: no session object exists, so there is nothing to write
-//!   through. The grant check reads the same token the plan DTOs define, so a
-//!   plan cannot mean one thing here and another to the admission path.
+//!   parameter is the type only the admission pipeline mints. That is enforced
+//!   rather than asserted: `AdmittedPlan`'s fields are private, so no caller
+//!   outside admission can write the struct literal, and no accessor hands back
+//!   a `&mut`, so a caller holding a real one cannot push the grant token into
+//!   it afterwards. Not a warning and not a degraded mode: no session object
+//!   exists, so there is nothing to write through. The grant check reads the
+//!   same token the plan DTOs define, so a plan cannot mean one thing here and
+//!   another to the admission path.
 //! - **One writer at a time.** Two consumers interleaving into one byte stream
 //!   produce garbage that neither of them sent, so concurrency is arbitrated
 //!   rather than merged: a lease, held by exactly one session per VM. The
@@ -200,6 +203,18 @@ impl Drop for KnownSecret {
     }
 }
 
+/// Keeps [`InputAuditSink`] closed to outside implementations.
+///
+/// Not a namespacing device: a sink is the *only* record that a writer reached
+/// a sealed workload, so an implementation that returns `Ok(())` without
+/// writing anything would leave the gate believing every decision was
+/// chain-recorded while the chain stayed empty. That is a strictly worse
+/// failure than an unreachable chain, which the gate refuses on. Sealing means
+/// no crate outside this one can write that impl at all.
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// Where the gate records what it decided.
 ///
 /// A trait rather than the one concrete chain emitter because "the chain is
@@ -208,7 +223,11 @@ impl Drop for KnownSecret {
 /// and the only honest way to exercise that is to hand the gate a sink that
 /// fails. Both methods report failure so the gate, not the sink, decides what
 /// an unrecordable decision means.
-pub trait InputAuditSink: Send + Sync {
+///
+/// Sealed: [`InputAudit`] is the only implementation outside this module's
+/// tests, so "somewhere other than the host chain" is not a place a caller can
+/// send these decisions.
+pub trait InputAuditSink: sealed::Sealed + Send + Sync {
     /// Record an admitted writer.
     fn record_granted(&self, plan: &ExecutionPlan, vm: &str, holder: &str) -> anyhow::Result<()>;
     /// Record a refusal and why.
@@ -236,6 +255,8 @@ impl InputAudit {
         Self { emitter }
     }
 }
+
+impl sealed::Sealed for InputAudit {}
 
 impl InputAuditSink for InputAudit {
     fn record_granted(&self, plan: &ExecutionPlan, vm: &str, holder: &str) -> anyhow::Result<()> {
@@ -305,15 +326,29 @@ impl InputBinding {
     }
 
     /// Send this VM's input decisions to a specific chain.
+    ///
+    /// [`InputAudit`] and nothing else: the parameter is the concrete chain
+    /// binding rather than `Arc<dyn InputAuditSink>` so that "record these
+    /// somewhere else" is not an option a production caller has. A sink that
+    /// answers `Ok(())` without writing would satisfy the gate's every check
+    /// and leave no trace that a writer ever reached the workload.
     #[must_use]
-    pub fn with_audit(self, audit: InputAudit) -> Self {
-        self.with_audit_sink(Arc::new(audit))
+    pub fn with_audit(mut self, audit: InputAudit) -> Self {
+        self.audit = Some(Arc::new(audit));
+        self
     }
 
-    /// Send this VM's input decisions to an arbitrary [`InputAuditSink`], for
-    /// an embedder that records them somewhere other than the host chain.
+    /// Send this VM's input decisions to an arbitrary [`InputAuditSink`] —
+    /// **tests only**, and compiled out of every production build.
+    ///
+    /// The gate has to behave correctly when the chain is unreachable, and the
+    /// only honest way to reach that state in a test is to install a sink that
+    /// fails. Leaving the same door open at runtime would let a caller install
+    /// one that *succeeds* without writing, which is the failure this whole
+    /// module is built to prevent.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_audit_sink(mut self, sink: Arc<dyn InputAuditSink>) -> Self {
+    pub(crate) fn with_audit_sink(mut self, sink: Arc<dyn InputAuditSink>) -> Self {
         self.audit = Some(sink);
         self
     }
@@ -417,13 +452,15 @@ impl InputGate {
     /// in-process caller can forge is not a grant. An `ExecutionPlan` carrying
     /// the input token is a value anyone can synthesize; only admission
     /// produces the plan that has been signed, verified, window-checked and
-    /// replay-checked. Taking the proof-carrying type is what makes the
-    /// signature enforce what the docs assert.
+    /// replay-checked, and `AdmittedPlan`'s private fields are what keep the
+    /// two from being the same thing — there is no literal to write and no
+    /// mutable accessor to reach through. Taking the proof-carrying type is
+    /// what makes the signature enforce what the docs assert.
     ///
     /// Refuses unless the plan grants input, unless the lease is free (or
     /// lapsed), and unless the grant itself can be chain-recorded.
     pub fn open(vm: &str, admitted: &AdmittedPlan) -> Result<InputSession, InputRefusal> {
-        let plan = &admitted.plan;
+        let plan = admitted.plan();
         let resolved = resolve(vm);
 
         // No chain, no decision. Checked ahead of the lease so a VM whose
@@ -937,17 +974,18 @@ mod tests {
     /// The gate takes the proof-carrying type, so every test has to produce
     /// one. `a_plan_from_the_real_admission_pipeline_opens_the_gate` drives
     /// `admit_for_run` end to end so this shortcut cannot drift from what
-    /// admission actually mints.
+    /// admission actually mints — and the shortcut itself is
+    /// `AdmittedPlan::for_test`, a `#[cfg(test)]` constructor that does not
+    /// exist in a production build.
     fn admitted_with(services: Vec<ServiceId>) -> AdmittedPlan {
-        let plan = PlanFixture::new().services(services).build();
+        admitted_from(PlanFixture::new().services(services).build())
+    }
+
+    /// The same, over a caller-built fixture plan.
+    fn admitted_from(plan: ExecutionPlan) -> AdmittedPlan {
         let signer_id = "host:test".to_string();
         let signed = sign_plan(&plan, &SigningKey::from_bytes(&[7u8; 32]), &signer_id);
-        AdmittedPlan {
-            plan_id: plan.plan_id.clone(),
-            signer_id,
-            plan,
-            signed,
-        }
+        AdmittedPlan::for_test(plan, signer_id, signed)
     }
 
     /// A synthesis input the real admission pipeline accepts, for the one test
@@ -993,6 +1031,8 @@ mod tests {
     /// gate has to behave correctly in, and handing it one that fails is the
     /// only honest way to get there.
     struct BrokenSink;
+
+    impl sealed::Sealed for BrokenSink {}
 
     impl InputAuditSink for BrokenSink {
         fn record_granted(&self, _: &ExecutionPlan, _: &str, _: &str) -> anyhow::Result<()> {
@@ -1124,23 +1164,15 @@ mod tests {
             &vm,
             InputBinding::new().with_secret(KnownSecret::host_material(secret.as_bytes())),
         );
-        let plan = {
-            let built = PlanFixture::new()
+        let plan = admitted_from(
+            PlanFixture::new()
                 .services(vec![stream_service()])
                 .audit_labels(BTreeMap::from([(
                     "workload_owner".to_string(),
                     "team-a".to_string(),
                 )]))
-                .build();
-            let signer_id = "host:test".to_string();
-            let signed = sign_plan(&built, &SigningKey::from_bytes(&[7u8; 32]), &signer_id);
-            AdmittedPlan {
-                plan_id: built.plan_id.clone(),
-                signer_id,
-                plan: built,
-                signed,
-            }
-        };
+                .build(),
+        );
         let mut session = InputGate::open(&vm, &plan).expect("the plan grants input");
         session
             .write(InputFrame {
@@ -1214,7 +1246,7 @@ mod tests {
             Some(session.holder())
         );
         assert!(
-            session.holder().starts_with(&plan.plan_id.0),
+            session.holder().starts_with(&plan.plan_id().0),
             "the holder names the plan that admitted it: {}",
             session.holder()
         );
@@ -1719,6 +1751,59 @@ mod tests {
             InputGate::lease_holder(&vm),
             None,
             "the lease goes straight back, so the VM is not wedged by a dead chain"
+        );
+    }
+
+    #[test]
+    fn a_production_build_cannot_swap_in_a_discarding_audit_sink() {
+        // A sink that answers `Ok(())` without writing is worse than the
+        // unreachable chain the test above covers: the gate believes every
+        // decision was chain-recorded, admits the writer, and leaves no trace
+        // that anyone reached the workload. Two absences stop it — the trait is
+        // sealed, and the sink-injection point is compiled out of production —
+        // and neither is observable at runtime, so the source is the assertion.
+        let src = include_str!("input_gate.rs");
+
+        assert!(
+            src.contains("pub trait InputAuditSink: sealed::Sealed"),
+            "the trait must stay sealed so no outside crate can implement it"
+        );
+        assert!(
+            src.contains("mod sealed {"),
+            "the sealing supertrait must live in a private module"
+        );
+        assert!(
+            src.contains("#[cfg(test)]\n    #[must_use]\n    pub(crate) fn with_audit_sink("),
+            "the arbitrary-sink injection point must stay `#[cfg(test)]` and crate-private"
+        );
+        assert!(
+            src.contains("pub fn with_audit(mut self, audit: InputAudit)"),
+            "the production binding must take the concrete chain, not `dyn InputAuditSink`"
+        );
+
+        // And inside this crate, the only implementations are the real chain
+        // and the deliberately-failing test double — nothing that discards.
+        let (production, tests) = src
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("this module keeps its tests at the end");
+        let impls = |section: &str| -> Vec<String> {
+            section
+                .lines()
+                .map(str::trim_start)
+                .filter(|line| line.starts_with("impl") && line.contains("InputAuditSink for"))
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(
+            impls(production),
+            ["impl InputAuditSink for InputAudit {"],
+            "the chain binding is the only production sink"
+        );
+        assert_eq!(
+            impls(tests),
+            ["impl InputAuditSink for BrokenSink {"],
+            "the only test sink fails loudly; a silently-succeeding one would \
+             make every assertion about the chain vacuous"
         );
     }
 

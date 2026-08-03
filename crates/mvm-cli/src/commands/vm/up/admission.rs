@@ -130,8 +130,8 @@ pub(in crate::commands::vm) struct AdmissionContext {
 impl std::fmt::Debug for AdmissionContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AdmissionContext")
-            .field("plan_id", &self.admitted.plan_id)
-            .field("signer_id", &self.admitted.signer_id)
+            .field("plan_id", self.admitted.plan_id())
+            .field("signer_id", &self.admitted.signer_id())
             .field("emitter", &"<redacted: FileAuditSigner>")
             .finish()
     }
@@ -280,8 +280,8 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         admission_ctx.as_ref(),
     )?;
     tracing::info!(
-        plan_id = %admitted.plan_id.0,
-        signer_id = %admitted.signer_id,
+        plan_id = %admitted.plan_id().0,
+        signer_id = %admitted.signer_id(),
         tenant = %p.tenant,
         workload = %p.vm_name,
         backend = %p.backend_name,
@@ -317,7 +317,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         {
             let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
                 .context("opening fallback audit chain emitter")?;
-            emit_policy_resolve_failure(&admitted.plan, &fallback, &err);
+            emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
             return Err(err);
         }
         PolicyAdmissionResolution {
@@ -325,12 +325,12 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
             audit: Some(bundle.audit.clone()),
         }
     } else {
-        match resolve_policy_for_admission(&admitted.plan, p.policy_dir) {
+        match resolve_policy_for_admission(admitted.plan(), p.policy_dir) {
             Ok(resolved) => resolved,
             Err(err) => {
                 let fallback = build_default_audit_emitter(signer.signing, p.audit_dir)
                     .context("opening fallback audit chain emitter")?;
-                emit_policy_resolve_failure(&admitted.plan, &fallback, &err);
+                emit_policy_resolve_failure(admitted.plan(), &fallback, &err);
                 return Err(err);
             }
         }
@@ -345,7 +345,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         Err(err) => {
             let err = err.context("opening audit chain emitter");
             match build_default_audit_emitter(signer.signing, p.audit_dir) {
-                Ok(fallback) => emit_policy_audit_invalid(&admitted.plan, &fallback, &err),
+                Ok(fallback) => emit_policy_audit_invalid(admitted.plan(), &fallback, &err),
                 Err(fallback_err) => tracing::warn!(
                     error = %fallback_err,
                     "audit emit_failed for policy-audit-invalid skipped; fallback emitter failed"
@@ -355,17 +355,17 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
         }
     };
 
-    if let Err(e) = emitter.emit_admitted(&admitted.plan, &admitted.signer_id) {
+    if let Err(e) = emitter.emit_admitted(admitted.plan(), admitted.signer_id()) {
         tracing::warn!(error = %e, "audit emit_admitted failed (non-fatal)");
     }
-    if let Some(verbs) = admitted.plan.agent_verbs.as_ref()
-        && let Err(e) = emitter.emit_grant_required(&admitted.plan, verbs)
+    if let Some(verbs) = admitted.plan().agent_verbs.as_ref()
+        && let Err(e) = emitter.emit_grant_required(admitted.plan(), verbs)
     {
         tracing::warn!(error = %e, "audit emit_grant_required failed (non-fatal)");
     }
     // Claim 1 / claim 8 — record the admitted host-fs grants in the
     // chain-signed log (no-op when there are none).
-    if let Err(e) = emitter.emit_shares_admitted(&admitted.plan) {
+    if let Err(e) = emitter.emit_shares_admitted(admitted.plan()) {
         tracing::warn!(error = %e, "audit emit_shares_admitted failed (non-fatal)");
     }
 
@@ -376,7 +376,7 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     // facing: it validates the policy refs against the on-disk
     // bundle so a missing file / typo / bad L4 CIDR fails the boot
     // loudly *now* instead of silently passing through with Noops.
-    emit_policy_resolved(&admitted.plan, &emitter, resolved.slots_mode);
+    emit_policy_resolved(admitted.plan(), &emitter, resolved.slots_mode);
 
     // Slice 3 (b) — load the resolved tenant PolicyBundle (None for a
     // local-default plan) so populate_audit_substrate can deliver it to the
@@ -386,8 +386,8 @@ pub(in crate::commands::vm) fn admit_plan_for_boot(
     let policy_bundle = match generated_bundle {
         Some(bundle) => Some(bundle),
         None => match p.policy_dir {
-            Some(dir) => resolve_policy_bundle_with_dir(&admitted.plan, dir),
-            None => resolve_policy_bundle(&admitted.plan),
+            Some(dir) => resolve_policy_bundle_with_dir(admitted.plan(), dir),
+            None => resolve_policy_bundle(admitted.plan()),
         }
         .context("loading the tenant policy bundle for the bridge")?,
     };
@@ -458,7 +458,7 @@ pub(super) fn attach_guest_boot_config(
 ) -> Result<()> {
     attach_guest_boot_config_for_plan(
         start_config,
-        &admission.admitted.plan,
+        admission.admitted.plan(),
         &admission.host_signer_public_path,
         profile,
     )
@@ -572,13 +572,13 @@ fn untrusted_transient_admit_in(
         // Persist the bare plan so the pre-start moat / endpoint can read it on
         // the backends that consume it from disk.
         if persists_plan_before_start(&backend_name) {
-            crate::commands::vm::plan_persist::write_plan(vm_name, &c.admitted.plan)
+            crate::commands::vm::plan_persist::write_plan(vm_name, c.admitted.plan())
                 .context("persisting admitted plan for the untrusted transient run")?;
         }
-        let plan_json = serde_json::to_string(&c.admitted.signed)
+        let plan_json = serde_json::to_string(c.admitted.signed())
             .context("serializing admitted plan for the untrusted transient run")?;
         Ok(Some(crate::exec::SessionAuditSubstrate {
-            tenant_id: c.admitted.plan.tenant.0.clone(),
+            tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
             bundle_json: None,
             config_files: vec![],
@@ -649,13 +649,13 @@ pub(in crate::commands::vm) fn emit_launched_if(
     persist_plan: bool,
 ) {
     let Some(ctx) = ctx else { return };
-    if let Err(e) = ctx.emitter.emit_launched(&ctx.admitted.plan, backend) {
+    if let Err(e) = ctx.emitter.emit_launched(ctx.admitted.plan(), backend) {
         tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
     }
     if persist_plan
         && let Err(e) = crate::commands::vm::plan_persist::write_plan(
-            &ctx.admitted.plan.workload.0,
-            &ctx.admitted.plan,
+            &ctx.admitted.plan().workload.0,
+            ctx.admitted.plan(),
         )
     {
         tracing::warn!(
@@ -682,7 +682,7 @@ pub(in crate::commands::vm) fn emit_boot_posture_if(
         mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
     };
     if let Err(e) = ctx.emitter.emit_boot_posture(
-        &ctx.admitted.plan,
+        ctx.admitted.plan(),
         label,
         runtime_source_policy.audit_label(),
     ) {
@@ -700,7 +700,7 @@ pub(super) fn enforce_shares_if(
     volumes: &[mvm_core::vm_backend::VmVolume],
 ) -> Result<()> {
     if let Some(ctx) = ctx {
-        mvm_hostd::plan_admission::enforce_admitted_shares(volumes, &ctx.admitted.plan)
+        mvm_hostd::plan_admission::enforce_admitted_shares(volumes, ctx.admitted.plan())
             .context("admission share check")?;
     }
     Ok(())
@@ -717,7 +717,7 @@ pub(in crate::commands::vm) fn emit_failed_if(
 ) {
     let Some(ctx) = ctx else { return };
     let msg = format!("{err:#}");
-    if let Err(e) = ctx.emitter.emit_failed(&ctx.admitted.plan, class, &msg) {
+    if let Err(e) = ctx.emitter.emit_failed(ctx.admitted.plan(), class, &msg) {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
     }
 }
@@ -890,17 +890,17 @@ mod admit_plan_tests {
         })
         .expect("admission")
         .expect("Some when admission ran");
-        assert!(!ctx.admitted.plan_id.0.is_empty());
-        assert_eq!(ctx.admitted.plan.workload.0, "vm-happy");
-        assert_eq!(ctx.admitted.plan.tenant.0, "local");
-        assert_eq!(ctx.admitted.plan.resources.cpus, 2);
-        assert_eq!(ctx.admitted.plan.resources.mem_mib, 512);
+        assert!(!ctx.admitted.plan_id().0.is_empty());
+        assert_eq!(ctx.admitted.plan().workload.0, "vm-happy");
+        assert_eq!(ctx.admitted.plan().tenant.0, "local");
+        assert_eq!(ctx.admitted.plan().resources.cpus, 2);
+        assert_eq!(ctx.admitted.plan().resources.mem_mib, 512);
         assert_eq!(
-            ctx.admitted.plan.admission_profile.seccomp_tier,
+            ctx.admitted.plan().admission_profile.seccomp_tier,
             mvm_core::plan::PlanSeccompTier::Network
         );
         assert_eq!(
-            ctx.admitted.plan.admission_profile.secret_release,
+            ctx.admitted.plan().admission_profile.secret_release,
             mvm_core::plan::SecretReleasePolicy::PlanBound
         );
 
@@ -910,7 +910,7 @@ mod admit_plan_tests {
         let audit_path = audit_dir.path().join("local.jsonl");
         let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
         assert!(content.contains("plan.admitted"));
-        assert!(content.contains(&ctx.admitted.plan_id.0));
+        assert!(content.contains(&ctx.admitted.plan_id().0));
     }
 
     // The shared untrusted-transient admit closure (used by both `mvmctl run`
@@ -1060,8 +1060,8 @@ mod admit_plan_tests {
         })
         .unwrap()
         .unwrap();
-        assert_ne!(a1.admitted.plan_id, a2.admitted.plan_id);
-        assert_ne!(a1.admitted.plan.nonce, a2.admitted.plan.nonce);
+        assert_ne!(a1.admitted.plan_id(), a2.admitted.plan_id());
+        assert_ne!(a1.admitted.plan().nonce, a2.admitted.plan().nonce);
     }
 
     #[test]
@@ -1199,7 +1199,7 @@ mod admit_plan_tests {
             "audit chain must record slots_mode=noop for local-default refs: {content}"
         );
         // Sanity: plan_id matches.
-        assert!(content.contains(&ctx.admitted.plan_id.0));
+        assert!(content.contains(&ctx.admitted.plan_id().0));
     }
 
     #[test]
@@ -1239,10 +1239,10 @@ mod admit_plan_tests {
         .expect("admission")
         .expect("Some when admission ran");
 
-        assert_ne!(ctx.admitted.plan.network_policy.0, LOCAL_DEFAULT);
+        assert_ne!(ctx.admitted.plan().network_policy.0, LOCAL_DEFAULT);
         assert_eq!(
-            ctx.admitted.plan.network_policy.0,
-            ctx.admitted.plan.egress_policy.0
+            ctx.admitted.plan().network_policy.0,
+            ctx.admitted.plan().egress_policy.0
         );
         let bundle = ctx.policy_bundle.expect("generated policy bundle");
         assert_eq!(bundle.network.l4.len(), 1);
@@ -1298,7 +1298,7 @@ mod admit_plan_tests {
         .expect("admission")
         .expect("Some when admission ran");
 
-        assert_ne!(ctx.admitted.plan.network_policy.0, LOCAL_DEFAULT);
+        assert_ne!(ctx.admitted.plan().network_policy.0, LOCAL_DEFAULT);
         let bundle = ctx.policy_bundle.expect("generated policy bundle");
         assert_eq!(bundle.egress.mode.as_deref(), Some("open"));
         assert!(bundle.network.l4.is_empty());

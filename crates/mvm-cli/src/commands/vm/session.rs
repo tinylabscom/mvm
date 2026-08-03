@@ -1039,11 +1039,11 @@ fn cmd_start(args: StartArgs) -> Result<()> {
         let guest_profile = super::up::guest_profile_for_boot(is_dev, rootfs);
         super::up::attach_guest_boot_config_for_plan(
             &mut start_config,
-            &ctx.admitted.plan,
+            ctx.admitted.plan(),
             &ctx.host_signer_public_path,
             guest_profile,
         )?;
-        let plan_json = serde_json::to_string(&ctx.admitted.signed)
+        let plan_json = serde_json::to_string(ctx.admitted.signed())
             .context("serializing admitted plan for session start")?;
         let bundle_json = ctx
             .policy_bundle
@@ -1051,7 +1051,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             .map(serde_json::to_string)
             .transpose()
             .context("serializing admitted policy bundle for session start")?;
-        let tenant_id = ctx.admitted.plan.tenant.0.clone();
+        let tenant_id = ctx.admitted.plan().tenant.0.clone();
         let config_files = start_config.config_files;
         *ctx_sink.borrow_mut() = Some(ctx);
         Ok(Some(crate::exec::SessionAuditSubstrate {

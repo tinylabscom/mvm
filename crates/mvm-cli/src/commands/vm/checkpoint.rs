@@ -1012,11 +1012,11 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
     })?;
 
     let child_plan_json = admission.as_ref().map(|ctx| {
-        serde_json::to_string(&ctx.admitted.signed).expect("admitted plan is always serializable")
+        serde_json::to_string(ctx.admitted.signed()).expect("admitted plan is always serializable")
     });
     let child_tenant_id = admission
         .as_ref()
-        .map(|ctx| ctx.admitted.plan.tenant.0.clone());
+        .map(|ctx| ctx.admitted.plan().tenant.0.clone());
 
     // Mint the child's verb-grant sidecar up front so it's readable below for
     // post-restore delivery. Mirrors the former Vz backend's fork path.

@@ -285,7 +285,7 @@ fn audit_captured_parent(
         .context("loading the host signer to sign the parent's creation entry")?;
     let emitter = super::vm::audit_chain::AuditEmitter::new(signer.signing)
         .context("opening the audit chain to record the parent's creation")?;
-    mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &admitted.plan, &meta)
+    mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, admitted.plan(), &meta)
         .context("emitting checkpoint.created for the captured standby parent")
 }
 
@@ -908,14 +908,18 @@ mod tests {
             admit_standby_parent_plan(&handle, "firecracker", "tenant-a", &"cd".repeat(32), 2, 512)
                 .unwrap();
 
-        assert!(admitted.plan.secrets.is_empty(), "no secret bindings");
+        assert!(admitted.plan().secrets.is_empty(), "no secret bindings");
         assert!(
-            admitted.plan.services.is_empty(),
+            admitted.plan().services.is_empty(),
             "no host-service bindings"
         );
-        assert_eq!(admitted.plan.workload.0, handle.id, "named for the parent");
         assert_eq!(
-            admitted.plan.image.sha256,
+            admitted.plan().workload.0,
+            handle.id,
+            "named for the parent"
+        );
+        assert_eq!(
+            admitted.plan().image.sha256,
             "cd".repeat(32),
             "the plan describes the rootfs the parent actually booted"
         );
