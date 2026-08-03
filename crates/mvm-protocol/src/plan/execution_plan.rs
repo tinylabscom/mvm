@@ -225,87 +225,91 @@ pub struct ExecutionPlan {
     pub stream_retention: StreamRetention,
 }
 
+/// Minimal, valid local `ExecutionPlan`. Rebuilt inline rather than
+/// reusing `mvm-core`'s `plan::signing::test_support::sample_plan` —
+/// that fixture lives above `plan::signing` (which stays in
+/// `mvm-core`), so it's unreachable from here. A fixed timestamp
+/// stands in for `Utc::now()`, which needs chrono's `clock` feature
+/// this crate doesn't enable.
+///
+/// `pub(crate)` (not module-private) so other in-crate test modules —
+/// e.g. `crate::stream::input`'s plan-grant tests — can build a plan
+/// without duplicating this fixture.
 #[cfg(test)]
-mod tests {
+pub(crate) fn minimal_plan() -> ExecutionPlan {
     use alloc::collections::BTreeMap;
     use alloc::string::ToString;
-    use alloc::vec;
 
     use chrono::{Duration, TimeZone};
 
-    use super::*;
     use crate::plan::types::{AttestationMode, PlanSeccompTier, TimeoutSpec};
 
-    /// Minimal, valid local `ExecutionPlan`. Rebuilt inline rather than
-    /// reusing `mvm-core`'s `plan::signing::test_support::sample_plan` —
-    /// that fixture lives above `plan::signing` (which stays in
-    /// `mvm-core`), so it's unreachable from here. A fixed timestamp
-    /// stands in for `Utc::now()`, which needs chrono's `clock` feature
-    /// this crate doesn't enable.
-    fn minimal_plan() -> ExecutionPlan {
-        let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
-        ExecutionPlan {
-            schema_version: SCHEMA_VERSION,
-            plan_id: PlanId("fixture-plan".to_string()),
-            plan_version: 1,
-            tenant: TenantId("local".to_string()),
-            workload: WorkloadId("vm-test".to_string()),
-            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
-            image: SignedImageRef {
-                name: "vm-test".to_string(),
-                sha256: "a".repeat(64),
-                cosign_bundle: None,
-                entrypoint_present: true,
+    let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
+    ExecutionPlan {
+        schema_version: SCHEMA_VERSION,
+        plan_id: PlanId("fixture-plan".to_string()),
+        plan_version: 1,
+        tenant: TenantId("local".to_string()),
+        workload: WorkloadId("vm-test".to_string()),
+        runtime_profile: RuntimeProfileRef("firecracker".to_string()),
+        image: SignedImageRef {
+            name: "vm-test".to_string(),
+            sha256: "a".repeat(64),
+            cosign_bundle: None,
+            entrypoint_present: true,
+        },
+        resources: Resources {
+            cpus: 1,
+            mem_mib: 128,
+            disk_mib: 0,
+            timeouts: TimeoutSpec {
+                boot_secs: 30,
+                exec_secs: 0,
             },
-            resources: Resources {
-                cpus: 1,
-                mem_mib: 128,
-                disk_mib: 0,
-                timeouts: TimeoutSpec {
-                    boot_secs: 30,
-                    exec_secs: 0,
-                },
-            },
-            admission_profile: AdmissionProfile::local_default(
-                "vm:boot",
-                PlanSeccompTier::Standard,
-            ),
-            network_policy: PolicyRef("local-default".to_string()),
-            network_mode: Default::default(),
-            snapshot_at: Default::default(),
-            build_provenance: Default::default(),
-            fs_policy: FsPolicyRef("local-default".to_string()),
-            secrets: Vec::new(),
-            egress_policy: PolicyRef("local-default".to_string()),
-            redaction: Default::default(),
-            reversible_replacement: Default::default(),
-            tool_policy: PolicyRef("local-default".to_string()),
-            artifact_policy: ArtifactPolicy {
-                capture_paths: Vec::new(),
-                retention_days: 0,
-            },
-            audit_labels: BTreeMap::new(),
-            key_rotation: KeyRotationSpec { interval_days: 0 },
-            attestation: AttestationRequirement {
-                mode: AttestationMode::Noop,
-            },
-            release_pin: None,
-            post_run: PostRunLifecycle {
-                destroy_on_exit: true,
-                snapshot_on_idle: false,
-                idle_secs: 0,
-            },
-            valid_from,
-            valid_until: valid_from + Duration::minutes(10),
-            nonce: Nonce::from_bytes([0u8; 16]),
-            agent_verbs: None,
-            bundle: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            services: Vec::new(),
-            stream_retention: StreamRetention::Persist,
-        }
+        },
+        admission_profile: AdmissionProfile::local_default("vm:boot", PlanSeccompTier::Standard),
+        network_policy: PolicyRef("local-default".to_string()),
+        network_mode: Default::default(),
+        snapshot_at: Default::default(),
+        build_provenance: Default::default(),
+        fs_policy: FsPolicyRef("local-default".to_string()),
+        secrets: Vec::new(),
+        egress_policy: PolicyRef("local-default".to_string()),
+        redaction: Default::default(),
+        reversible_replacement: Default::default(),
+        tool_policy: PolicyRef("local-default".to_string()),
+        artifact_policy: ArtifactPolicy {
+            capture_paths: Vec::new(),
+            retention_days: 0,
+        },
+        audit_labels: BTreeMap::new(),
+        key_rotation: KeyRotationSpec { interval_days: 0 },
+        attestation: AttestationRequirement {
+            mode: AttestationMode::Noop,
+        },
+        release_pin: None,
+        post_run: PostRunLifecycle {
+            destroy_on_exit: true,
+            snapshot_on_idle: false,
+            idle_secs: 0,
+        },
+        valid_from,
+        valid_until: valid_from + Duration::minutes(10),
+        nonce: Nonce::from_bytes([0u8; 16]),
+        agent_verbs: None,
+        bundle: None,
+        deps_volume: None,
+        shares: Vec::new(),
+        services: Vec::new(),
+        stream_retention: StreamRetention::Persist,
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
 
     #[test]
     fn services_default_empty_and_roundtrip() {

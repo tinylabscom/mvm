@@ -8,9 +8,15 @@
 //! stream instead of per tenant. [`verify_chain_from`] is the same check
 //! anchored at a caller-supplied hash instead of the zero genesis marker,
 //! for verifying a pruned or partially-fetched window of a longer chain.
+//!
+//! [`input`] carries the mirror-image direction: host→guest bytes on the
+//! input plane, default-deny behind a signed plan grant instead of
+//! always-on.
 
 pub mod chain;
+pub mod input;
 pub mod record;
 
 pub use chain::{ChainError, verify_chain, verify_chain_from};
+pub use input::{CloseInput, INPUT_GRANT_SERVICE, InputFrame, grants_input, grants_input_for};
 pub use record::{StreamKind, StreamRecord, StreamSource};

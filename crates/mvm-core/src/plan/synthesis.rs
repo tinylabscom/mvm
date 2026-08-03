@@ -171,7 +171,9 @@ pub struct SynthesisInput<'a> {
     /// Host services this workload is authorized to call over the broker
     /// channel, threaded verbatim into the plan. Empty (the common case) means
     /// the workload calls none: the broker answers `NotBound` and the launch
-    /// path attaches no SDK sidecar.
+    /// path attaches no SDK sidecar. The same list also carries the input-plane
+    /// grant (`mvm_protocol::stream::INPUT_GRANT_SERVICE`) — no dedicated field
+    /// was needed, since `mvm_protocol::stream::grants_input` reads this list.
     pub services: Vec<mvm_protocol::protocol::broker::ServiceId>,
     /// Whether this workload's captured output is kept after the run.
     /// [`StreamRetention::Persist`] (the default) writes an encrypted,
