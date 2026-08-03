@@ -16,6 +16,9 @@ pub(crate) fn v4_packet(protocol: u8, src: Ipv4Addr, dst: Ipv4Addr, payload: &[u
     let mut p = vec![0u8; 20];
     p[0] = 0x45;
     p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+    // A zero TTL is a packet every real forwarder drops; these stand in for
+    // packets a guest actually sent.
+    p[8] = 64;
     p[9] = protocol;
     p[12..16].copy_from_slice(&src.octets());
     p[16..20].copy_from_slice(&dst.octets());
