@@ -188,6 +188,14 @@ impl HalfOpenTable {
         self.entries.is_empty()
     }
 
+    /// Drop every held entry, closing the host descriptor each one parks.
+    ///
+    /// Teardown, not policy: the guests behind these entries are owed
+    /// nothing, because the machine they belong to is going away with them.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     /// Take a guest SYN.
     ///
     /// `dst` is the already-admitted destination; admission happens before
@@ -438,6 +446,14 @@ pub struct EstablishedFlow {
     /// rather than dropped: a silent drop here is a guest hanging to its
     /// own timeout with nothing to explain it.
     host_error: Option<io::ErrorKind>,
+    /// The clock the stack was last driven at.
+    ///
+    /// Held so a host-side failure can be turned into a reset *now*,
+    /// without a timestamp from the caller: a reset built at time zero on a
+    /// stack whose timers are minutes in would be emitted against a clock
+    /// that has already run, and every retransmit and timeout on this flow
+    /// would be judged against the wrong instant.
+    last_polled_millis: u64,
 }
 
 impl EstablishedFlow {
@@ -529,6 +545,7 @@ impl EstablishedFlow {
             write_shutdown: false,
             host_read_eof: false,
             host_error: None,
+            last_polled_millis: now_millis,
         })
     }
 
@@ -546,12 +563,30 @@ impl EstablishedFlow {
         self.device.push_from_guest(packet)
     }
 
+    /// Take one packet the stack has produced for the guest, oldest first.
+    ///
+    /// The single-packet form is what a datapath read wants: its caller
+    /// hands over one buffer and takes one packet, and a version that
+    /// drained the whole queue would need somewhere to put the rest.
+    pub fn next_guest_packet(&mut self) -> Option<Vec<u8>> {
+        self.device.pop_for_guest()
+    }
+
+    /// Packets waiting on the guest's drain.
+    ///
+    /// A flow whose connection has ended still owes the guest whatever it
+    /// already produced — the reset that explains the ending, above all —
+    /// so this is what stops a reaper discarding those bytes.
+    pub fn pending_to_guest(&self) -> usize {
+        self.device.pending_to_guest()
+    }
+
     /// Take everything the stack has produced for the guest.
     ///
     /// Bounded by the device's queue depth, which drops rather than grows.
     pub fn take_guest_packets(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        while let Some(packet) = self.device.pop_for_guest() {
+        while let Some(packet) = self.next_guest_packet() {
             out.push(packet);
         }
         out
@@ -574,6 +609,13 @@ impl EstablishedFlow {
         }
         self.forward_guest_fin();
         self.host_to_guest(&mut stats);
+        // A host socket that failed is a conversation that cannot continue,
+        // in either direction. Told here rather than left for a caller to
+        // notice, because the caller that does not notice leaves the guest
+        // waiting on a socket nobody is going to answer.
+        if let Some(kind) = self.host_error {
+            self.on_host_error(kind);
+        }
         // Emit what the two directions produced, so the guest's ACKs and
         // the peer's bytes leave in the pass they arrived in.
         self.poll(now_millis);
@@ -610,6 +652,48 @@ impl EstablishedFlow {
             self.guest_fin_seen = true;
         }
         self.forward_guest_fin();
+    }
+
+    /// Tell the guest that this flow's host socket has failed, and release
+    /// it.
+    ///
+    /// Without this the guest's stack waits on a connection nobody is going
+    /// to answer, for as long as its own retransmit timer takes to give up
+    /// — minutes, during which the guest's application looks wedged for no
+    /// visible reason. A reset turns that into an immediate `ECONNRESET`,
+    /// which the guest's stack already knows what to do with.
+    ///
+    /// The reset comes from the live socket's own [`TcpSocket::abort`],
+    /// **not** from [`synthesize_rst`]. That function answers a SYN whose
+    /// sequence number is right there in the held SYN; an established flow
+    /// has no held SYN, and its correct sequence numbers live inside the
+    /// stack, where nothing outside can read them. Fabricating a pair here
+    /// would produce a reset outside the guest's window, which its stack
+    /// discards in silence — leaving exactly the hang this exists to
+    /// prevent, now with a packet on the wire to make it look handled.
+    /// smoltcp emits one reset per aborted connection and then forgets the
+    /// endpoint, so calling this twice cannot produce two.
+    ///
+    /// [`io::ErrorKind::WouldBlock`] and [`io::ErrorKind::Interrupted`] are
+    /// not failures and are ignored — see [`is_terminal_host_error`].
+    pub fn on_host_error(&mut self, kind: io::ErrorKind) {
+        if !is_terminal_host_error(kind) {
+            return;
+        }
+        // Already resolved: the descriptor is gone and the reset, if one
+        // was owed, has been queued.
+        if self.host.is_none() {
+            return;
+        }
+        // `get_or_insert`, so the *first* error is the one that explains
+        // the flow. A later one is a consequence of it.
+        self.host_error.get_or_insert(kind);
+        self.sockets.get_mut::<TcpSocket>(self.handle).abort();
+        // Aborting only moves the socket's state; the reset leaves on the
+        // next poll, and this method's contract is that the packet is
+        // queued by the time it returns.
+        self.poll(self.last_polled_millis);
+        self.close_host();
     }
 
     /// Release the host descriptor now rather than at drop.
@@ -664,6 +748,7 @@ impl EstablishedFlow {
     }
 
     fn poll(&mut self, now_millis: u64) {
+        self.last_polled_millis = now_millis;
         self.interface
             .poll(smol_now(now_millis), &mut self.device, &mut self.sockets);
     }
@@ -822,6 +907,24 @@ impl std::fmt::Debug for EstablishedFlow {
             .field("host_error", &self.host_error)
             .finish()
     }
+}
+
+/// Whether a host-socket error ends the flow, as opposed to asking the
+/// caller to come back.
+///
+/// The two transient kinds are named and everything else is terminal,
+/// rather than the reverse. A kind missing from a terminal *allow*-list is
+/// a flow that hangs until the guest's own timer gives up, with nothing to
+/// say why; a kind wrongly treated as terminal is a connection that ends
+/// with a reset the guest's application sees immediately. The second
+/// failure is visible and the first is not, so the default falls that way.
+///
+/// `WouldBlock` and `Interrupted` are not failures at all: they are a
+/// non-blocking socket saying "not now" and a syscall interrupted by a
+/// signal. Treating either as fatal would tear down healthy flows under
+/// exactly the load that produces them.
+fn is_terminal_host_error(kind: io::ErrorKind) -> bool {
+    !matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
 }
 
 /// What one attempt to hand bytes to the host socket did.
@@ -987,10 +1090,16 @@ pub fn synthesize_rst(key: &FlowKey, guest: IpAddr, acknowledging: u32) -> Optio
 /// Emit `tcp` inside an IPv4 header. The header checksum is written by
 /// `emit` and covers only the header, so writing the segment afterwards
 /// does not invalidate it.
-fn emit_v4_segment(remote: Ipv4Addr, guest: Ipv4Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
+///
+/// Named by direction rather than by role: this datapath emits segments
+/// both ways — host-originated resets toward the guest, and, in the test
+/// fixtures, guest segments toward a destination — and a signature that
+/// said `remote, guest` would read as an argument order the second use
+/// violates.
+pub(super) fn emit_v4_segment(src: Ipv4Addr, dst: Ipv4Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
     let ip = Ipv4Repr {
-        src_addr: remote,
-        dst_addr: guest,
+        src_addr: src,
+        dst_addr: dst,
         next_header: IpProtocol::Tcp,
         payload_len: tcp.buffer_len(),
         hop_limit: RESET_HOP_LIMIT,
@@ -1001,8 +1110,8 @@ fn emit_v4_segment(remote: Ipv4Addr, guest: Ipv4Addr, tcp: &TcpRepr<'_>) -> Vec<
     ip.emit(&mut packet, &checksums);
     tcp.emit(
         &mut TcpPacket::new_unchecked(packet.payload_mut()),
-        &remote.into(),
-        &guest.into(),
+        &src.into(),
+        &dst.into(),
         &checksums,
     );
     bytes
@@ -2623,6 +2732,163 @@ mod tests {
         assert!(!flow.host_socket_closed());
         flow.close_host();
         assert!(flow.host_socket_closed());
+    }
+
+    /// The first reset in `packets`, as its (sequence, acknowledgement)
+    /// pair.
+    ///
+    /// Both numbers come back rather than a bare "there was a reset",
+    /// because a reset outside the guest's window is discarded by its stack
+    /// and is no reset at all — the assertion that matters is about the
+    /// numbers, not the flag.
+    fn rst_in(packets: &[Vec<u8>]) -> Option<(u32, u32)> {
+        packets.iter().find_map(|p| {
+            let ip = smoltcp::wire::Ipv4Packet::new_checked(p.as_slice()).ok()?;
+            let tcp = smoltcp::wire::TcpPacket::new_checked(ip.payload()).ok()?;
+            tcp.rst()
+                .then(|| (tcp.seq_number().0 as u32, tcp.ack_number().0 as u32))
+        })
+    }
+
+    /// A flow whose host socket will refuse the next write outright, with
+    /// guest data already sitting in the stack waiting to go over it.
+    ///
+    /// The write half is shut down behind the flow's back — the flow's own
+    /// `write_shutdown` stays false — so the next `write` is `EPIPE`
+    /// without any timing or peer cooperation. A fixture that waited for a
+    /// peer to reset would be a fixture that can hang.
+    fn flow_whose_host_write_fails_with_data_queued()
+    -> (EstablishedFlow, std::net::TcpStream, FakeGuest) {
+        let (mut flow, peer, mut g) = established_flow_with_peer();
+        flow.host
+            .as_ref()
+            .expect("the fixture flow holds its host socket")
+            .shutdown(Shutdown::Write)
+            .expect("shutting the write half down cannot fail on a live socket");
+        g.offer(&mut flow, 4 * 1_024);
+        assert!(
+            flow.socket().recv_queue() > 0,
+            "the fixture must leave guest bytes the host has not taken"
+        );
+        (flow, peer, g)
+    }
+
+    /// A host-side failure the guest never learns about is a multi-minute
+    /// hang: the guest's stack sits on a connection nobody will answer
+    /// until its own retransmit timer gives up.
+    #[test]
+    fn a_host_side_reset_reaches_the_guest_as_a_reset() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        flow.on_host_error(io::ErrorKind::ConnectionReset);
+        assert!(
+            rst_in(&flow.take_guest_packets()).is_some(),
+            "the guest's stack must learn, rather than hang to its own timeout"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_host_also_resets_rather_than_hanging() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        flow.on_host_error(io::ErrorKind::HostUnreachable);
+        assert!(rst_in(&flow.take_guest_packets()).is_some());
+    }
+
+    /// Every terminal kind, not just the two the fixtures happen to
+    /// exercise: a kind missing from the terminal set is a flow that hangs.
+    #[test]
+    fn every_terminal_host_error_resets_the_guest() {
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::HostUnreachable,
+            io::ErrorKind::NetworkUnreachable,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::TimedOut,
+        ] {
+            let (mut flow, _peer, _g) = established_flow_with_peer();
+            flow.on_host_error(kind);
+            assert!(
+                rst_in(&flow.take_guest_packets()).is_some(),
+                "{kind:?} left the guest waiting on a host socket that is gone"
+            );
+            assert_eq!(flow.host_error(), Some(kind));
+            assert!(flow.host_socket_closed(), "{kind:?} must release the fd");
+        }
+    }
+
+    /// A transient would-block is not a failure and must not tear anything
+    /// down: treating one as fatal would reset healthy flows under load,
+    /// which is worse than the hang being fixed.
+    #[test]
+    fn a_would_block_is_not_treated_as_a_host_error() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::Interrupted] {
+            let (mut flow, _peer, _g) = established_flow_with_peer();
+            flow.on_host_error(kind);
+            assert!(flow.take_guest_packets().is_empty(), "{kind:?} emitted");
+            assert!(!flow.host_socket_closed(), "{kind:?} closed the socket");
+            assert_eq!(flow.host_error(), None, "{kind:?} was latched");
+        }
+    }
+
+    /// The numbers are the whole point. A reset carrying a sequence the
+    /// guest's stack has never heard of is discarded in silence, which puts
+    /// the guest back at the hang this exists to prevent — so the reset is
+    /// taken from the live stack rather than fabricated.
+    #[test]
+    fn the_reset_a_host_error_produces_sits_inside_the_guests_window() {
+        let (mut flow, _peer, g) = established_flow_with_peer();
+        flow.on_host_error(io::ErrorKind::ConnectionReset);
+        let (seq, ack) = rst_in(&flow.take_guest_packets()).expect("a reset");
+        assert_eq!(
+            seq, g.ack,
+            "the reset's sequence must be the next byte the guest expects from us"
+        );
+        assert_eq!(
+            ack, g.seq,
+            "and it must acknowledge everything the guest has sent"
+        );
+    }
+
+    /// Two errors on one flow are one reset: smoltcp forgets the endpoint
+    /// after emitting it, and the flow must not fabricate a second.
+    #[test]
+    fn a_second_host_error_does_not_produce_a_second_reset() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        flow.on_host_error(io::ErrorKind::ConnectionReset);
+        assert!(rst_in(&flow.take_guest_packets()).is_some());
+        flow.on_host_error(io::ErrorKind::TimedOut);
+        assert!(
+            rst_in(&flow.take_guest_packets()).is_none(),
+            "one aborted connection is one reset"
+        );
+        assert_eq!(
+            flow.host_error(),
+            Some(io::ErrorKind::ConnectionReset),
+            "the first error is the one that explains the flow"
+        );
+    }
+
+    /// The carried-forward gap: a flow whose host write failed with data
+    /// still queued never reached `forward_guest_fin`, so it claimed to be
+    /// open forever while nothing could ever drain it.
+    #[test]
+    fn a_failed_host_write_still_resolves_the_write_half() {
+        let (mut flow, _peer, _g) = flow_whose_host_write_fails_with_data_queued();
+        let _ = flow.pump_ignoring_metrics(0);
+        assert!(
+            flow.host_write_shutdown() || flow.host_socket_closed(),
+            "a flow that can never drain must not sit forever claiming it is still open"
+        );
+    }
+
+    /// And the guest is told, rather than left to time out against a socket
+    /// that will never take another byte.
+    #[test]
+    fn a_failed_host_write_resets_the_guest_too() {
+        let (mut flow, _peer, _g) = flow_whose_host_write_fails_with_data_queued();
+        let _ = flow.pump_ignoring_metrics(0);
+        assert!(rst_in(&flow.take_guest_packets()).is_some());
+        assert_eq!(flow.host_error(), Some(io::ErrorKind::BrokenPipe));
     }
 
     /// A reset the datapath could not build leaves a guest hanging until

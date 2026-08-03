@@ -24,6 +24,14 @@ pub struct GatewayMetrics {
     pub stale_session_frames: u64,
     pub queue_drops_ingress: u64,
     pub queue_drops_egress: u64,
+    /// Guest TCP segments for a connection the datapath has no state for.
+    ///
+    /// Its own counter rather than a deny or a datapath error, because the
+    /// ordinary cause is neither: a guest's last ACK arriving just after
+    /// its flow was reaped is routine, and folding it into an error counter
+    /// would make that counter climb on every healthy connection close. A
+    /// sustained rise here is still worth seeing, so it is not swallowed.
+    pub segments_without_flow: u64,
     pub dns_admitted: u64,
     pub dns_denied: u64,
     pub dns_rate_limited: u64,

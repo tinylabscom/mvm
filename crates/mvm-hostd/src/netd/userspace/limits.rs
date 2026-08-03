@@ -130,11 +130,30 @@ pub const FLOW_BUFFER_BYTES: usize = SOCKET_RX_BUFFER
     + SOCKET_TX_BUFFER
     + (FLOW_RX_QUEUE_DEPTH + FLOW_TX_QUEUE_DEPTH) * MTU_V1 as usize;
 
+/// Worst-case bytes the half-open table holds: one guest SYN per entry,
+/// each bounded by the link MTU because that is what the datapath admits.
+///
+/// Held rather than parsed-and-discarded because the SYN is replayed into
+/// the flow's own stack once the host side is real, so smoltcp answers the
+/// packet the guest actually sent.
+///
+/// The resets these entries owe their guests when a connect fails do *not*
+/// need a term of their own: they go onto the machine-wide device's
+/// guest-bound queue, which is already counted below.
+pub const HALF_OPEN_BUFFER_BYTES: usize = DEFAULT_MAX_HALF_OPEN * MTU_V1 as usize;
+
 /// Worst-case buffer footprint for one machine at the socket cap: every
 /// flow at its own bound, plus the machine-wide guest-facing device the
-/// datapath handle owns.
-pub const MEMORY_CEILING_BYTES: usize =
-    DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize;
+/// datapath handle owns, plus the SYNs its half-open table is holding.
+///
+/// An upper bound, not an attainable state: half-open and established
+/// entries share one descriptor budget, so a machine cannot in fact hold
+/// [`DEFAULT_MAX_HOST_SOCKETS`] flows *and* [`DEFAULT_MAX_HALF_OPEN`]
+/// half-open entries at once. Summed anyway, because a ceiling that has to
+/// be reasoned about to be believed is a ceiling nobody will re-check.
+pub const MEMORY_CEILING_BYTES: usize = DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES
+    + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize
+    + HALF_OPEN_BUFFER_BYTES;
 
 #[cfg(test)]
 mod tests {
@@ -158,9 +177,12 @@ mod tests {
         assert_eq!(FLOW_TX_QUEUE_DEPTH, 31 + 32 + 2);
         // 32 KiB of ring buffers + (31 + 65) × 1500 bytes of device queues.
         assert_eq!(FLOW_BUFFER_BYTES, 32_768 + 144_000);
-        // 256 flows at that, plus the handle's own 2 × 256 × 1500.
-        assert_eq!(MEMORY_CEILING_BYTES, 256 * 176_768 + 768_000);
-        assert_eq!(MEMORY_CEILING_BYTES, 46_020_608);
+        // 64 held SYNs, each at most an MTU.
+        assert_eq!(HALF_OPEN_BUFFER_BYTES, 96_000);
+        // 256 flows at that, plus the handle's own 2 × 256 × 1500, plus the
+        // SYNs the half-open table holds.
+        assert_eq!(MEMORY_CEILING_BYTES, 256 * 176_768 + 768_000 + 96_000);
+        assert_eq!(MEMORY_CEILING_BYTES, 46_116_608);
         const {
             assert!(
                 DEFAULT_MAX_HOST_SOCKETS < mvm_net::l3::flow::DEFAULT_MAX_FLOWS,

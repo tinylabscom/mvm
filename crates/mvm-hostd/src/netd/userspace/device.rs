@@ -105,9 +105,38 @@ impl GuestDevice {
         PushOutcome::Queued
     }
 
+    /// Queue a packet for the guest that the stack did not produce.
+    ///
+    /// The resets a datapath owes a guest whose *connect* failed have no
+    /// stack behind them — the whole point of the deferred handshake is
+    /// that no stack was ever built for a destination that refused — so
+    /// they need a way onto this queue that does not go through a
+    /// [`phy::TxToken`].
+    ///
+    /// Bounded and counted exactly like the stack's own path: same depth,
+    /// same drop-the-newcomer rule, same counter. A second queue with its
+    /// own bound would be a second thing to size and a second thing to get
+    /// wrong.
+    pub fn push_to_guest(&mut self, bytes: Vec<u8>) -> PushOutcome {
+        if bytes.len() > self.mtu {
+            return PushOutcome::DroppedOversized;
+        }
+        if self.to_guest.len() >= self.depths.to_guest {
+            self.dropped_to_guest = self.dropped_to_guest.saturating_add(1);
+            return PushOutcome::DroppedQueueFull;
+        }
+        self.to_guest.push_back(bytes);
+        PushOutcome::Queued
+    }
+
     /// Drain one packet the stack produced for the guest, oldest first.
     pub fn pop_for_guest(&mut self) -> Option<Vec<u8>> {
         self.to_guest.pop_front()
+    }
+
+    /// How many packets are waiting on the guest to drain them.
+    pub fn pending_to_guest(&self) -> usize {
+        self.to_guest.len()
     }
 
     /// How many guest-sent packets are waiting on the stack to consume
@@ -312,6 +341,37 @@ mod tests {
         );
         assert_eq!(dev.push_from_guest(&vec![0u8; 1500]), PushOutcome::Queued);
         assert_eq!(dev.pending_from_guest(), 1);
+    }
+
+    /// A host-originated packet takes the same bounded path as a
+    /// stack-produced one, or it is a second unbounded queue in disguise.
+    #[test]
+    fn a_host_originated_packet_reaches_the_guest_under_the_same_bound() {
+        let mut dev = GuestDevice::new(
+            1500,
+            QueueDepths {
+                from_guest: 4,
+                to_guest: 2,
+            },
+        );
+        assert_eq!(dev.push_to_guest(ipv4_stub()), PushOutcome::Queued);
+        assert_eq!(dev.push_to_guest(ipv4_stub()), PushOutcome::Queued);
+        assert_eq!(dev.pending_to_guest(), 2);
+        assert_eq!(
+            dev.push_to_guest(ipv4_stub()),
+            PushOutcome::DroppedQueueFull
+        );
+        assert_eq!(
+            dev.dropped_to_guest(),
+            1,
+            "a drop on this path must be as countable as one on the stack's"
+        );
+        assert_eq!(
+            dev.push_to_guest(vec![0u8; 1501]),
+            PushOutcome::DroppedOversized
+        );
+        assert_eq!(dev.pop_for_guest(), Some(ipv4_stub()));
+        assert_eq!(dev.pending_to_guest(), 1);
     }
 
     /// The two depths are not interchangeable, so a device built with

@@ -960,49 +960,146 @@ git commit -m "feat(netd): pump established flows with backpressure and half-clo
 ### Task 12: Host errors reach the guest; close is deterministic
 
 **Files:**
-- Modify: `crates/mvm-hostd/src/netd/userspace/tcp.rs`, `crates/mvm-hostd/src/netd/userspace/mod.rs`
+- Modify: `crates/mvm-hostd/src/netd/userspace/tcp.rs`, `crates/mvm-hostd/src/netd/userspace/mod.rs`, `crates/mvm-hostd/src/netd/userspace/device.rs`, `crates/mvm-hostd/src/netd/userspace/limits.rs`, `crates/mvm-hostd/src/netd/metrics.rs`
 
-- [ ] **Step 1: Write the failing tests**
+**The largest part of this task was not the error handling.** A review found
+`HalfOpenTable` and `EstablishedFlow` unreachable from production code:
+`UserspaceHandle` held neither, so everything Tasks 9–11 built was exercised
+only by unit tests. The wiring landed here.
 
-```rust
-#[test]
-fn a_host_side_reset_reaches_the_guest_as_a_reset() {
-    let mut flow = established_flow();
-    flow.on_host_error(std::io::ErrorKind::ConnectionReset);
-    let out = flow.take_guest_packets();
-    assert!(out.iter().any(|p| tcp_flags(p).contains_rst()),
-        "the guest's stack must learn, rather than hang to its own timeout");
-}
+- [x] **Step 1: Write the failing tests**
 
-#[test]
-fn close_shuts_every_host_socket_and_is_idempotent() {
-    let mut handle = handle_with_open_flows(8);
-    handle.close().expect("close");
-    assert_eq!(handle.open_socket_count(), 0);
-    handle.close().expect("close must be safe to call twice");
-}
-```
+Landed as eighteen tests: eight on the flow (`tcp.rs`) and ten on the handle
+(`mod.rs`), plus one on the device's new host-originated push path.
 
-- [ ] **Step 2: Run and confirm failure**
+Beyond the sketched four: `every_terminal_host_error_resets_the_guest`
+(all six terminal kinds, not the two a fixture happens to use),
+`a_second_host_error_does_not_produce_a_second_reset`,
+`the_reset_a_host_error_produces_sits_inside_the_guests_window`, and
+`a_failed_host_write_resets_the_guest_too`.
+
+The window test is the one that matters: it asserts the emitted reset's
+sequence equals the next byte the guest expects and its acknowledgement
+equals everything the guest has sent. A reset outside that window is
+discarded in silence by the guest's stack, which is the hang this task
+exists to prevent — with a packet on the wire to make it look handled.
+
+On the handle: `a_guest_syn_becomes_a_flow_over_a_real_host_socket`,
+`the_stacks_reply_reaches_the_guest_through_recv`,
+`guest_data_reaches_the_flow_that_owns_it`,
+`the_budget_counts_half_open_and_established_together`,
+`a_failed_connect_reaches_the_guest_as_a_reset`,
+`udp_is_refused_rather_than_silently_dropped`,
+`a_segment_for_no_flow_opens_nothing_and_is_counted`,
+`a_retransmitted_syn_costs_no_second_socket`,
+`close_shuts_every_host_socket_and_is_idempotent`,
+`close_releases_connects_that_are_still_in_flight`,
+`close_on_a_handle_that_never_opened_a_socket_is_a_no_op`, and
+`a_closed_handle_refuses_to_open_new_flows`.
+
+Every handle fixture drives real loopback connects through a bounded
+service loop (`SERVICE_ATTEMPTS`), so a connect that never resolves fails an
+assertion rather than hanging.
+
+- [x] **Step 2: Run and confirm failure**
 
 Run: `cargo nextest run -p mvm-hostd a_host_side_reset_reaches`
-Expected: FAIL.
+Observed: `error[E0599]: no method named `on_host_error` found for struct
+`userspace::tcp::EstablishedFlow`` — 7 compile errors, `error: could not
+compile `mvm-hostd` (lib test)`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
-Map `ConnectionReset` / `HostUnreachable` / `ConnectionAborted` on an established flow to a synthesized RST toward the guest. `close()` drains every table, closing each descriptor, and is safe on both the normal and failed-startup paths.
+Four decisions worth recording.
 
-- [ ] **Step 4: Run tests and confirm they pass**
+1. **The reset comes from the live socket's `abort()`, not from
+   `synthesize_rst`.** That function answers a SYN whose sequence number is
+   in the held SYN; an established flow has no held SYN, and its correct
+   numbers live inside the stack where nothing outside can read them —
+   smoltcp exposes no sequence accessor. `abort()` moves the socket to
+   CLOSED and its dispatch emits `RST` at `remote_last_seq` acknowledging
+   `remote_seq_no + rx_buffer.len()`, then forgets the endpoint, so one
+   aborted connection is exactly one reset however many times it is called.
+   `synthesize_rst` keeps the failed-*connect* path, where no stack exists.
+   `on_host_error` polls at the flow's last-polled clock — held in a new
+   `last_polled_millis` field — because the method's contract is that the
+   packet is queued by the time it returns, and the signature carries no
+   timestamp.
 
-Run: `cargo nextest run -p mvm-hostd -E 'test(host_side_reset) or test(close_shuts_every)'`
-Expected: PASS.
+2. **Terminal is the default; the two transient kinds are named.** A kind
+   missing from a terminal allow-list is a flow that hangs with nothing to
+   say why; a kind wrongly called terminal is a connection that ends with an
+   `ECONNRESET` the application sees immediately. Only the second failure is
+   visible, so the default falls that way. `WouldBlock` and `Interrupted`
+   are no-ops.
 
-- [ ] **Step 5: Commit**
+3. **One combined budget.** Half-open and established entries each park a
+   real descriptor and compete for the same allowance, so
+   `open_socket_count()` is their sum and `open_flow` refuses at
+   `budget`. `HalfOpenTable`'s own capacity stays as a second, tighter cap
+   on the half-open *class* (`DEFAULT_MAX_HALF_OPEN.min(budget)`), so a
+   connect flood cannot crowd out established flows. Both drop the newcomer.
+
+4. **The reset queue is the machine-wide device, not a new queue.**
+   `GuestDevice::push_to_guest` puts a host-originated packet on the same
+   bounded `to_guest` queue, under the same depth, the same
+   drop-the-newcomer rule, and the same `dropped_to_guest` counter. The
+   handle's device had become dead state once flows carried their own; this
+   is what it is for. It also means the resets owed to failed connects need
+   no term of their own in the ceiling.
+
+`pump` now calls `on_host_error` when a direction latched one. That closes
+the gap Task 11 §8.3 carried forward: a flow whose host write failed with
+data still queued never reached `forward_guest_fin` (the `recv_queue() > 0`
+guard), so it sat claiming to be open with nothing able to drain it. A
+terminal host error is now what resolves it, in the same mechanism that
+tells the guest.
+
+`send_to_network` classifies on the admitted metadata: established flow →
+`deliver_from_guest`; TCP SYN-without-ACK → `HalfOpenTable::on_syn` with the
+destination taken from the admitted `FlowKey` (never a re-parse of guest
+bytes, which would put a second parse below the policy seam); any other TCP
+segment → dropped and counted under `GatewayMetrics::segments_without_flow`,
+because the ordinary cause is a guest's last ACK arriving after its flow was
+reaped and an error counter that climbs on every healthy close is useless;
+non-TCP → refused with `DatapathError::Unsupported` and a `ProtocolDenied`
+deny, so a UDP datagram fails loudly on the first packet rather than
+vanishing. `ForwardingCapabilities::USERSPACE_SOCKETS` still advertises
+`udp: true`, which is over-claiming until Task 13 lands — left alone
+deliberately, since flipping it changes admission rather than the datapath.
+
+**The ceiling moved.** The half-open table's held SYNs were a per-handle
+allocation the formula did not model: `HALF_OPEN_BUFFER_BYTES =
+DEFAULT_MAX_HALF_OPEN * MTU_V1` = 96,000 bytes.
+`MEMORY_CEILING_BYTES` goes 46,020,608 → **46,116,608**, and
+`the_per_machine_memory_ceiling_is_what_we_claim` pins the new term
+separately. `EstablishedFlow` grew one inline `u64`, no heap, so
+`FLOW_BUFFER_BYTES` is unchanged and `a_flows_inline_size_stays_pinned`
+still holds.
+
+- [x] **Step 4: Run tests and confirm they pass**
+
+`cargo nextest run -p mvm-hostd` → 1395 passed / 2 skipped.
+`-E 'test(userspace)'` → 96 passed. clippy `-D warnings` clean (`metrics()`
+is `pub`, not `pub(crate)`, for the `dead_code` reason recorded under Task
+11); nightly fmt clean; `check-file-size` clean; `cargo zigbuild --target
+x86_64-unknown-linux-gnu -p mvm-hostd --all-targets` clean.
+
+Mutation results are recorded in the follow-up note below.
+
+- [x] **Step 5: Commit**
 
 ```sh
-git add crates/mvm-hostd/src/netd/userspace/
+git add crates/mvm-hostd/src/netd/ specs/plans/287-userspace-socket-datapath.md
 git commit -m "feat(netd): surface host socket errors to the guest and close deterministically"
 ```
+
+**Known gap, not this task's:** nothing in production calls
+`UserspaceHandle::service`. `DatapathHandle` has no `service` method and the
+gateway drives only `send_to_network` / `recv_from_network`, so connects
+never resolve outside tests. `UserspaceSocketDatapath` is also not what
+`host_datapath()` returns on macOS — that is still `MacosUserspaceGateway`,
+which refuses. Both are wiring above this seam.
 
 ---
 

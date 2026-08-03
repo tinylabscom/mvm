@@ -15,21 +15,28 @@ pub mod device;
 pub mod limits;
 pub mod tcp;
 
+use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, RawFd};
 
 use mio::Poll;
 use mvm_net::l3::AdmittedPacket;
+use mvm_net::l3::admit::DenyCode;
 use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
+use mvm_net::l3::flow::FlowKey;
+use mvm_protocol::l3::ip::{self, ParsedIpPacket, proto};
 use mvm_protocol::l3::limits::MTU_V1;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
 use self::device::{GuestDevice, PushOutcome, QueueDepths};
-use self::limits::{DEFAULT_MAX_HOST_SOCKETS, FD_RESERVE};
+use self::limits::{DEFAULT_MAX_HALF_OPEN, DEFAULT_MAX_HOST_SOCKETS, FD_RESERVE};
+use self::tcp::{EstablishedFlow, HalfOpenTable, SynOutcome};
 use super::datapath::{
     DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
 };
+use super::metrics::GatewayMetrics;
 
 /// Concurrent host sockets this process can afford.
 ///
@@ -187,14 +194,25 @@ impl UserspaceSocketDatapath {
         // whether or not anything is in it.
         let sockets = SocketSet::new(Vec::new());
 
+        let guest = IpAddr::V4(req.guest);
         Ok(UserspaceHandle {
             machine_id: req.machine_id.clone(),
             poll: Some(poll),
             device,
             interface,
             sockets,
+            guest,
+            mtu: accept_mtu(req.mtu as usize)?,
             budget,
-            open_sockets: 0,
+            // Whichever is tighter. The half-open figure is sized against
+            // real connect demand, but a process whose descriptor budget is
+            // smaller than that demand cannot honour it, and a table
+            // allowed to hold more entries than the process has descriptors
+            // would refuse at `socket()` rather than at its own bound.
+            half_open: HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN.min(budget), guest),
+            flows: BTreeMap::new(),
+            metrics: GatewayMetrics::default(),
+            now_millis: 0,
             closed: false,
         })
     }
@@ -230,70 +248,264 @@ pub struct UserspaceHandle {
     /// regardless of readiness (see `netd/mod.rs`'s pump loop, which does
     /// not gate the datapath call on a datapath event).
     poll: Option<Poll>,
+    /// The machine-wide guest-facing device.
+    ///
+    /// Carries no flow traffic — each flow terminates in its own stack over
+    /// its own device — but it is where a packet the *host* originates for
+    /// a guest goes when there is no flow to put it on: the resets owed to
+    /// a connect that failed or timed out before any stack existed. Its
+    /// queue is already bounded and already counted, which is why those
+    /// resets do not get a second queue of their own.
     device: GuestDevice,
     interface: Interface,
     sockets: SocketSet<'static>,
+    /// The address this session leased the guest. The authority on where a
+    /// host-originated packet is addressed — never the source field of
+    /// whatever the guest last sent.
+    guest: IpAddr,
+    /// Link MTU, checked once at open and reused for every flow's device so
+    /// no flow can be built with buffers the ceiling has not budgeted for.
+    mtu: usize,
     /// Ceiling on concurrent host sockets, computed once at open time from
     /// the process's actual descriptor budget.
     budget: usize,
-    open_sockets: usize,
+    half_open: HalfOpenTable,
+    flows: BTreeMap<FlowKey, EstablishedFlow>,
+    metrics: GatewayMetrics,
+    /// The clock the last [`Self::service`] ran at.
+    ///
+    /// [`DatapathHandle::send_to_network`] carries no timestamp and this
+    /// datapath deliberately reads no clock of its own — every time it uses
+    /// comes from its driver, so a test drives it deterministically. A SYN
+    /// arriving between two service passes is therefore timed as of the
+    /// last one, which is one tick of skew against a half-open timeout of
+    /// [`limits::HALF_OPEN_TIMEOUT_MILLIS`].
+    now_millis: u64,
     closed: bool,
 }
 
 impl UserspaceHandle {
-    /// Host sockets currently open for this machine. Always zero until a
-    /// later task starts opening one per admitted flow.
+    /// Host sockets currently open for this machine.
+    ///
+    /// Half-open and established entries are counted **together** because
+    /// each one parks a real descriptor and they compete for the same
+    /// budget. Two separate counters whose sum can exceed what the process
+    /// was granted would not be a budget.
     pub(crate) fn open_socket_count(&self) -> usize {
-        self.open_sockets
+        self.flows.len() + self.half_open.len()
     }
 
-    /// Drive the datapath: poll smoltcp, resolve completed connects, pump
-    /// established flows, expire timed-out state.
+    /// This machine's counters.
     ///
-    /// No flows exist yet, so today this is exactly the smoltcp poll and
-    /// nothing else — correct, not a placeholder. An interface with an
-    /// empty socket set legitimately has no ingress or egress work beyond
-    /// that poll; later tasks add work here as they add state to expire
-    /// and connects to resolve.
+    /// `pub`, like [`Self::service`], because the driver that folds these
+    /// into the gateway's own record lives outside this crate's netd
+    /// module tree — and because a `pub(crate)` accessor with only a test
+    /// caller trips `dead_code` under `-D warnings`.
+    pub fn metrics(&self) -> &GatewayMetrics {
+        &self.metrics
+    }
+
+    /// Drive the datapath: resolve completed connects, promote them into
+    /// flows, expire what has timed out, pump every established flow, and
+    /// poll the machine-wide interface.
     pub fn service(&mut self, now_millis: u64) -> Result<(), DatapathError> {
         if self.closed {
             return Err(DatapathError::Io(std::io::Error::from(
                 std::io::ErrorKind::BrokenPipe,
             )));
         }
+        self.now_millis = now_millis;
+        self.resolve_connects(now_millis);
+        self.expire_half_open();
+        self.pump_flows(now_millis);
         let now = SmolInstant::from_millis(now_millis as i64);
         self.interface
             .poll(now, &mut self.device, &mut self.sockets);
         Ok(())
     }
-}
 
-impl DatapathHandle for UserspaceHandle {
-    fn send_to_network(&mut self, packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+    /// Take out every connect the kernel has decided: successes become
+    /// flows, failures become the resets their guests are owed.
+    fn resolve_connects(&mut self, now_millis: u64) {
+        let resolved = self.half_open.resolve(&mut self.metrics);
+        for reset in resolved.resets {
+            self.queue_for_guest(reset);
+        }
+        for entry in resolved.established {
+            let key = entry.key();
+            match EstablishedFlow::from_half_open(entry, self.guest, self.mtu, now_millis) {
+                Ok(flow) => {
+                    self.flows.insert(key, flow);
+                }
+                // The connect succeeded but the flow could not be built.
+                // Counted rather than dropped: the guest is left waiting on
+                // a SYN-ACK that is not coming, which is the one outcome
+                // the deferred handshake exists to make impossible.
+                Err(_) => self.metrics.datapath_errors += 1,
+            }
+        }
+        // `resolved.failed` drops here, and each entry's host descriptor
+        // closes with it. The reset each one owed was built above, before
+        // the socket went away.
+    }
+
+    /// Drop half-open entries whose destination never answered, telling
+    /// each guest so.
+    fn expire_half_open(&mut self) {
+        let guest = self.guest;
+        for entry in self.half_open.expire(self.now_millis) {
+            match entry.reset_for_guest(guest) {
+                Some(reset) => self.queue_for_guest(reset),
+                None => self.metrics.datapath_errors += 1,
+            }
+            self.metrics.flows_expired += 1;
+        }
+    }
+
+    /// Move both directions of every established flow, and reap the ones
+    /// that have finished.
+    fn pump_flows(&mut self, now_millis: u64) {
+        let Self { flows, metrics, .. } = self;
+        flows.retain(|_, flow| {
+            flow.pump(now_millis, metrics);
+            // A finished flow is kept while it still holds packets for the
+            // guest — the reset explaining why it finished, above all.
+            // Reaping it with those undelivered would put the guest back at
+            // the silent hang the reset exists to prevent.
+            flow.is_active() || flow.pending_to_guest() > 0
+        });
+    }
+
+    /// Put a host-originated packet on the machine-wide guest-bound queue.
+    fn queue_for_guest(&mut self, packet: Vec<u8>) {
+        if self.device.push_to_guest(packet) != PushOutcome::Queued {
+            // The device counts this for a debugger holding the handle;
+            // this is the same drop in the counter an operator reads.
+            self.metrics.queue_drops_egress = self.metrics.queue_drops_egress.saturating_add(1);
+        }
+    }
+
+    /// Forward one admitted guest packet, given what admission already
+    /// parsed out of it.
+    ///
+    /// Split out of [`DatapathHandle::send_to_network`] for the reason
+    /// [`accept_packet_size`] is: an `AdmittedPacket` is constructible only
+    /// by `mvm_net::l3`'s admitter, so a unit test in this crate cannot
+    /// build one, and a wiring that could only be driven through the trait
+    /// method could not be tested at all.
+    fn forward(
+        &mut self,
+        flow: FlowKey,
+        meta: &ParsedIpPacket,
+        bytes: &[u8],
+    ) -> Result<(), DatapathError> {
         if self.closed {
             return Err(DatapathError::Io(std::io::Error::from(
                 std::io::ErrorKind::BrokenPipe,
             )));
         }
-        accept_packet_size(packet.bytes().len())?;
-        match self.device.push_from_guest(packet.bytes()) {
-            PushOutcome::Queued => Ok(()),
-            // The guest-to-stack queue is full. This is congestion, not a
-            // hard failure — the same condition a nonblocking write hitting
-            // a full socket buffer reports — so it is surfaced the same
-            // way a caller already knows how to interpret.
-            PushOutcome::DroppedQueueFull => Err(DatapathError::Io(std::io::Error::from(
-                std::io::ErrorKind::WouldBlock,
-            ))),
-            // Unreachable through this method — `accept_packet_size` above
-            // has already refused anything oversized — but the device is
-            // the backstop for every other way in, and a silent arm here
-            // would hide a real drop if one ever arrived by another path.
-            PushOutcome::DroppedOversized => Err(DatapathError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "packet exceeds the link MTU",
-            ))),
+        accept_packet_size(bytes.len())?;
+        if meta.protocol != proto::TCP {
+            return Err(self.refuse_protocol(meta.protocol));
         }
+        // Established first, so a SYN retransmitted after the handshake
+        // completed reaches the flow that owns it instead of opening a
+        // second host socket for a connection that already exists.
+        if let Some(established) = self.flows.get_mut(&flow) {
+            return match established.deliver_from_guest(bytes) {
+                PushOutcome::Queued => Ok(()),
+                PushOutcome::DroppedQueueFull => Err(DatapathError::Io(std::io::Error::from(
+                    std::io::ErrorKind::WouldBlock,
+                ))),
+                PushOutcome::DroppedOversized => Err(DatapathError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "packet exceeds the link MTU",
+                ))),
+            };
+        }
+        let flags = ip::tcp_flags(bytes, meta).ok_or_else(|| {
+            DatapathError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "a TCP packet with no readable flag byte",
+            ))
+        })?;
+        if !meta.is_tcp_syn_only(flags) {
+            // A segment for a connection this datapath has no record of:
+            // most often the guest's last ACK arriving after its flow was
+            // reaped, which is routine and must not be reported as an
+            // error. Counted under its own name so it also cannot hide.
+            self.metrics.segments_without_flow += 1;
+            return Ok(());
+        }
+        self.open_flow(flow, bytes)
+    }
+
+    /// Start a host connect for a guest SYN, if the budget allows.
+    fn open_flow(&mut self, flow: FlowKey, syn: &[u8]) -> Result<(), DatapathError> {
+        if self.open_socket_count() >= self.budget {
+            // Drop the newcomer, never a live entry — the posture the rest
+            // of this subsystem takes at capacity.
+            self.metrics.record_deny(DenyCode::FlowTableFull);
+            return Err(DatapathError::Io(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                format!("{} host sockets already open for this machine", self.budget),
+            )));
+        }
+        // The destination comes from the admitted flow key, never from a
+        // re-read of the guest's bytes: re-deriving it here would put a
+        // second parse below the policy seam that checked the first.
+        let dst = SocketAddr::new(flow.remote, flow.remote_port);
+        match self
+            .half_open
+            .on_syn(flow, syn.to_vec(), dst, self.now_millis)
+        {
+            SynOutcome::Started | SynOutcome::Folded => Ok(()),
+            SynOutcome::Refused(code) => {
+                self.metrics.record_deny(code);
+                Err(DatapathError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    format!(
+                        "the host refused a connect for this flow: {}",
+                        code.as_str()
+                    ),
+                )))
+            }
+        }
+    }
+
+    /// Refuse a transport this datapath cannot translate.
+    ///
+    /// Refused rather than dropped. A silently discarded UDP datagram is a
+    /// guest whose resolver or QUIC connection hangs with nothing anywhere
+    /// to say why; an error reaches the caller's `datapath_errors` counter
+    /// on the very first packet.
+    fn refuse_protocol(&mut self, protocol: u8) -> DatapathError {
+        self.metrics.record_deny(DenyCode::ProtocolDenied);
+        DatapathError::Unsupported {
+            platform: "the userspace socket datapath",
+            detail: format!("IP protocol {protocol} is not translated to a host socket"),
+        }
+    }
+
+    /// The next packet waiting for the guest, from anywhere this handle
+    /// holds one.
+    fn next_guest_packet(&mut self) -> Option<Vec<u8>> {
+        // Host-originated packets first. They are the resets owed to a
+        // guest whose connect failed, and that guest is blocked on nothing
+        // else; a flow with data to move is, by definition, one whose
+        // connect worked.
+        if let Some(packet) = self.device.pop_for_guest() {
+            return Some(packet);
+        }
+        self.flows
+            .values_mut()
+            .find_map(EstablishedFlow::next_guest_packet)
+    }
+}
+
+impl DatapathHandle for UserspaceHandle {
+    fn send_to_network(&mut self, packet: &AdmittedPacket<'_>) -> Result<(), DatapathError> {
+        self.forward(packet.flow(), packet.meta(), packet.bytes())
     }
 
     fn recv_from_network(&mut self, buf: &mut [u8]) -> Result<usize, DatapathError> {
@@ -302,7 +514,7 @@ impl DatapathHandle for UserspaceHandle {
                 std::io::ErrorKind::BrokenPipe,
             )));
         }
-        match self.device.pop_for_guest() {
+        match self.next_guest_packet() {
             Some(packet) => {
                 let n = packet.len().min(buf.len());
                 buf[..n].copy_from_slice(&packet[..n]);
@@ -319,6 +531,13 @@ impl DatapathHandle for UserspaceHandle {
             return Ok(());
         }
         self.closed = true;
+        // Every entry in either table parks a host descriptor, so dropping
+        // them here is what actually closes those. Deferring to the
+        // handle's own drop would leak them for as long as anything still
+        // holds the handle — and this runs on the failed-startup path too,
+        // where the tables may never have held anything at all.
+        self.flows.clear();
+        self.half_open.clear();
         // Drop now, not whenever the handle itself happens to drop: the
         // readiness contract promises that closing frees the descriptor
         // number for the next `open` anywhere in the process to reuse.
@@ -353,6 +572,17 @@ impl Drop for UserspaceHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::netd::test_packets::v4_packet;
+    use smoltcp::wire::{TcpControl, TcpRepr, TcpSeqNumber};
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::time::Duration;
+
+    use super::tcp::emit_v4_segment;
+
+    /// Service passes a fixture will wait through for a loopback connect to
+    /// resolve. Bounded, so a fixture that never resolves fails an
+    /// assertion instead of hanging the suite.
+    const SERVICE_ATTEMPTS: usize = 200;
 
     fn request() -> DatapathRequest {
         DatapathRequest {
@@ -496,5 +726,328 @@ mod tests {
         let mut handle = open_test_handle();
         handle.close().expect("close");
         assert!(handle.service(0).is_err());
+    }
+
+    fn v4_of(addr: SocketAddr) -> Ipv4Addr {
+        match addr.ip() {
+            IpAddr::V4(a) => a,
+            IpAddr::V6(_) => unreachable!("the fixture destinations are IPv4"),
+        }
+    }
+
+    /// The guest's initial sequence number. Any value works; a fixed one
+    /// makes a desynchronised fixture obvious in a packet dump.
+    const GUEST_ISN: u32 = 1_000;
+
+    /// One guest segment toward `dst`, paired with the flow key admission
+    /// would have derived from it.
+    ///
+    /// The pair is built together because the datapath trusts the *key* for
+    /// the destination it connects to and the *bytes* for what it replays
+    /// into the stack; a fixture that let the two disagree would be testing
+    /// a state admission cannot produce.
+    ///
+    /// Emitted through the same builder the datapath's own resets go
+    /// through, rather than a hand-laid header: a segment with a zero
+    /// checksum is dropped by the flow's stack before it reaches any of the
+    /// state under test, and the test would then be asserting against a
+    /// packet nothing ever saw.
+    fn guest_segment(
+        guest_port: u16,
+        dst: SocketAddr,
+        control: TcpControl,
+        payload: &[u8],
+    ) -> (FlowKey, Vec<u8>) {
+        let segment = TcpRepr {
+            src_port: guest_port,
+            dst_port: dst.port(),
+            control,
+            seq_number: TcpSeqNumber(GUEST_ISN as i32),
+            ack_number: matches!(control, TcpControl::Syn)
+                .then_some(None)
+                .unwrap_or(Some(TcpSeqNumber(1))),
+            window_len: u16::MAX,
+            window_scale: None,
+            max_seg_size: matches!(control, TcpControl::Syn).then_some(1_400),
+            sack_permitted: false,
+            sack_ranges: [None; 3],
+            timestamp: None,
+            payload,
+        };
+        let bytes = emit_v4_segment(request().guest, v4_of(dst), &segment);
+        let key = FlowKey {
+            protocol: proto::TCP,
+            guest_port,
+            remote: dst.ip(),
+            remote_port: dst.port(),
+        };
+        (key, bytes)
+    }
+
+    fn udp_segment(guest_port: u16, dst: SocketAddr) -> (FlowKey, Vec<u8>) {
+        let mut datagram = vec![0u8; 8];
+        datagram[0..2].copy_from_slice(&guest_port.to_be_bytes());
+        datagram[2..4].copy_from_slice(&dst.port().to_be_bytes());
+        datagram[4..6].copy_from_slice(&8u16.to_be_bytes());
+        let bytes = v4_packet(proto::UDP, request().guest, v4_of(dst), &datagram);
+        let key = FlowKey {
+            protocol: proto::UDP,
+            guest_port,
+            remote: dst.ip(),
+            remote_port: dst.port(),
+        };
+        (key, bytes)
+    }
+
+    /// Hand a fixture packet to the handle exactly as `send_to_network`
+    /// would, with the metadata admission would have attached.
+    fn deliver(
+        handle: &mut UserspaceHandle,
+        packet: &(FlowKey, Vec<u8>),
+    ) -> Result<(), DatapathError> {
+        let meta = ip::parse(&packet.1).expect("the fixture packet parses");
+        handle.forward(packet.0, &meta, &packet.1)
+    }
+
+    fn listener() -> TcpListener {
+        TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener")
+    }
+
+    /// An address nothing is listening on, so a connect to it is refused
+    /// rather than left pending.
+    fn dead_destination() -> SocketAddr {
+        let l = listener();
+        let addr = l.local_addr().expect("local addr");
+        drop(l);
+        addr
+    }
+
+    /// Drive `handle` until `ready` holds, or fail. Bounded on both counts:
+    /// a condition that never comes true must produce an assertion, never a
+    /// hang.
+    fn drive_until(handle: &mut UserspaceHandle, ready: impl Fn(&UserspaceHandle) -> bool) -> bool {
+        for pass in 0..SERVICE_ATTEMPTS {
+            handle.service(pass as u64).expect("service");
+            if ready(handle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    }
+
+    /// A handle carrying `count` established flows over real host sockets.
+    ///
+    /// The listener is returned rather than dropped: dropping it would
+    /// reset every connection and the flows would stop being open sockets.
+    fn handle_with_open_flows(count: usize) -> (UserspaceHandle, TcpListener) {
+        let held = listener();
+        let dst = held.local_addr().expect("local addr");
+        let mut handle = open_test_handle();
+        for i in 0..count {
+            let syn = guest_segment(50_000 + i as u16, dst, TcpControl::Syn, &[]);
+            deliver(&mut handle, &syn).expect("a SYN toward a live listener is accepted");
+        }
+        assert!(
+            drive_until(&mut handle, |h| h.flows.len() == count),
+            "the fixture's {count} loopback connects must resolve"
+        );
+        (handle, held)
+    }
+
+    #[test]
+    fn a_guest_syn_becomes_a_flow_over_a_real_host_socket() {
+        let (handle, _held) = handle_with_open_flows(1);
+        assert_eq!(handle.open_socket_count(), 1);
+        assert!(
+            handle.half_open.is_empty(),
+            "a resolved entry must leave the half-open table"
+        );
+    }
+
+    /// The handshake the flow's stack produced has to be reachable through
+    /// the datapath's own read path, or the guest never reaches ESTABLISHED
+    /// however well the tables behave.
+    #[test]
+    fn the_stacks_reply_reaches_the_guest_through_recv() {
+        let (mut handle, _held) = handle_with_open_flows(1);
+        let mut buf = [0u8; MTU_V1 as usize];
+        let n = handle
+            .recv_from_network(&mut buf)
+            .expect("the flow's stack answered the replayed SYN");
+        let ip = smoltcp::wire::Ipv4Packet::new_checked(&buf[..n]).expect("ipv4");
+        let seg = smoltcp::wire::TcpPacket::new_checked(ip.payload()).expect("tcp");
+        assert!(
+            seg.syn() && seg.ack(),
+            "the guest is owed the SYN-ACK its deferred handshake earned"
+        );
+    }
+
+    /// A packet for an established flow must reach that flow's stack, not
+    /// the machine-wide device, which has no socket for it.
+    #[test]
+    fn guest_data_reaches_the_flow_that_owns_it() {
+        let (mut handle, held) = handle_with_open_flows(1);
+        let dst = held.local_addr().expect("local addr");
+        let data = guest_segment(50_000, dst, TcpControl::None, b"hello");
+        deliver(&mut handle, &data).expect("an established flow takes its guest's bytes");
+        assert!(
+            handle.flows.values().any(|f| f.bytes_buffered() > 0),
+            "the flow's own device must hold what the guest sent"
+        );
+    }
+
+    /// Half-open and established entries compete for one descriptor budget.
+    /// Two independent bounds whose sum can exceed it would not be a bound.
+    #[test]
+    fn the_budget_counts_half_open_and_established_together() {
+        let held = listener();
+        let dst = held.local_addr().expect("local addr");
+        let mut handle = open_test_handle();
+        handle.budget = 2;
+
+        for i in 0..2 {
+            let syn = guest_segment(50_000 + i, dst, TcpControl::Syn, &[]);
+            deliver(&mut handle, &syn).expect("inside the budget");
+        }
+        let third = guest_segment(50_002, dst, TcpControl::Syn, &[]);
+        assert!(
+            deliver(&mut handle, &third).is_err(),
+            "the newcomer is refused at the budget, never by evicting a live entry"
+        );
+        assert_eq!(handle.open_socket_count(), 2);
+        assert_eq!(handle.metrics().denies_for(DenyCode::FlowTableFull), 1);
+
+        // And the two that were admitted are still the ones that survive
+        // once they become established.
+        assert!(drive_until(&mut handle, |h| h.flows.len() == 2));
+        assert_eq!(handle.open_socket_count(), 2);
+    }
+
+    /// A connect that fails owes its guest a reset, and that reset has to
+    /// come out of the read path — otherwise the guest waits on a SYN-ACK
+    /// that is never coming, for as long as its own connect timeout.
+    #[test]
+    fn a_failed_connect_reaches_the_guest_as_a_reset() {
+        let mut handle = open_test_handle();
+        let syn = guest_segment(50_000, dead_destination(), TcpControl::Syn, &[]);
+        deliver(&mut handle, &syn).expect("the SYN is taken; the connect is what fails");
+
+        let mut buf = [0u8; MTU_V1 as usize];
+        assert!(
+            drive_until(&mut handle, |h| h.device.pending_to_guest() > 0),
+            "a refused connect must produce the reset the guest is owed"
+        );
+        let n = handle.recv_from_network(&mut buf).expect("the reset");
+        let ip = smoltcp::wire::Ipv4Packet::new_checked(&buf[..n]).expect("ipv4");
+        let seg = smoltcp::wire::TcpPacket::new_checked(ip.payload()).expect("tcp");
+        assert!(seg.rst(), "the guest must be told, not left to time out");
+        assert_eq!(
+            ip.dst_addr(),
+            request().guest,
+            "the reset is addressed from the lease, not from the guest's own SYN"
+        );
+        assert_eq!(handle.open_socket_count(), 0, "and the descriptor is gone");
+    }
+
+    /// Until UDP has a translation of its own, a datagram must be refused
+    /// where the caller can see it. A silently dropped datagram is a guest
+    /// that hangs with nothing anywhere to explain it.
+    #[test]
+    fn udp_is_refused_rather_than_silently_dropped() {
+        let mut handle = open_test_handle();
+        let datagram = udp_segment(50_000, dead_destination());
+        let err = deliver(&mut handle, &datagram).expect_err("UDP is not translated yet");
+        assert!(matches!(err, DatapathError::Unsupported { .. }));
+        assert_eq!(handle.metrics().denies_for(DenyCode::ProtocolDenied), 1);
+        assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    /// A segment for a connection the datapath has no state for — most
+    /// often a guest's last ACK arriving after its flow was reaped — is
+    /// routine, and must neither open a host socket nor be reported as an
+    /// error. It is still counted.
+    #[test]
+    fn a_segment_for_no_flow_opens_nothing_and_is_counted() {
+        let mut handle = open_test_handle();
+        let stray = guest_segment(50_000, dead_destination(), TcpControl::None, b"stray");
+        deliver(&mut handle, &stray).expect("a stray segment is not an error");
+        assert_eq!(handle.open_socket_count(), 0);
+        assert_eq!(handle.metrics().segments_without_flow, 1);
+    }
+
+    /// A retransmitted SYN must not cost a second descriptor, whether the
+    /// first one is still connecting or has already become a flow.
+    #[test]
+    fn a_retransmitted_syn_costs_no_second_socket() {
+        let held = listener();
+        let dst = held.local_addr().expect("local addr");
+        let mut handle = open_test_handle();
+        let syn = guest_segment(50_000, dst, TcpControl::Syn, &[]);
+
+        deliver(&mut handle, &syn).expect("first SYN");
+        deliver(&mut handle, &syn).expect("a retransmit folds into the entry");
+        assert_eq!(handle.open_socket_count(), 1);
+
+        assert!(drive_until(&mut handle, |h| h.flows.len() == 1));
+        deliver(&mut handle, &syn).expect("and a retransmit after establishment");
+        assert_eq!(
+            handle.open_socket_count(),
+            1,
+            "a SYN for an established flow belongs to that flow, not to a new connect"
+        );
+    }
+
+    /// Per-flow cost here is a descriptor, so a close that leaked one would
+    /// accumulate across machine restarts until the process could not open
+    /// its own audit log.
+    #[test]
+    fn close_shuts_every_host_socket_and_is_idempotent() {
+        let (mut handle, _held) = handle_with_open_flows(8);
+        assert_eq!(handle.open_socket_count(), 8);
+        handle.close().expect("close");
+        assert_eq!(handle.open_socket_count(), 0);
+        handle.close().expect("close must be safe to call twice");
+        assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    /// The failed-startup path: nothing was ever populated, and close must
+    /// not care.
+    #[test]
+    fn close_on_a_handle_that_never_opened_a_socket_is_a_no_op() {
+        let mut handle = open_test_handle();
+        assert_eq!(handle.open_socket_count(), 0);
+        handle.close().expect("close");
+        handle.close().expect("close again");
+        assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    /// Half-open entries hold descriptors too, and a close that only
+    /// cleared the established table would leak every connect in flight.
+    #[test]
+    fn close_releases_connects_that_are_still_in_flight() {
+        let held = listener();
+        let dst = held.local_addr().expect("local addr");
+        let mut handle = open_test_handle();
+        for i in 0..4 {
+            let syn = guest_segment(50_000 + i, dst, TcpControl::Syn, &[]);
+            deliver(&mut handle, &syn).expect("SYN");
+        }
+        assert_eq!(handle.open_socket_count(), 4);
+        handle.close().expect("close");
+        assert_eq!(handle.open_socket_count(), 0);
+    }
+
+    /// A closed handle must not keep taking guest packets, or a machine
+    /// that has been torn down goes on opening host sockets.
+    #[test]
+    fn a_closed_handle_refuses_to_open_new_flows() {
+        let held = listener();
+        let dst = held.local_addr().expect("local addr");
+        let mut handle = open_test_handle();
+        handle.close().expect("close");
+        let syn = guest_segment(50_000, dst, TcpControl::Syn, &[]);
+        assert!(deliver(&mut handle, &syn).is_err());
+        assert_eq!(handle.open_socket_count(), 0);
     }
 }
