@@ -34,6 +34,7 @@ pub struct PlanFixture {
     valid_until: Option<DateTime<Utc>>,
     services: Vec<ServiceId>,
     stream_retention: StreamRetention,
+    audit_labels: BTreeMap<String, String>,
 }
 
 impl Default for PlanFixture {
@@ -49,6 +50,7 @@ impl Default for PlanFixture {
             valid_until: None,
             services: Vec::new(),
             stream_retention: StreamRetention::default(),
+            audit_labels: BTreeMap::new(),
         }
     }
 }
@@ -103,6 +105,15 @@ impl PlanFixture {
         self
     }
 
+    /// Labels the plan carries onto every audit entry emitted under it.
+    /// Default empty, which is *not* what a production plan looks like — a
+    /// test asserting on an entry's exact key set needs one of these to prove
+    /// the assertion covers the merge rather than the fixture's silence.
+    pub fn audit_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.audit_labels = labels;
+        self
+    }
+
     /// Pin an explicit validity window. Without this the plan is valid from
     /// `now` to `now + 10min`.
     pub fn validity(mut self, from: DateTime<Utc>, until: DateTime<Utc>) -> Self {
@@ -153,7 +164,7 @@ impl PlanFixture {
                 capture_paths: Vec::new(),
                 retention_days: 0,
             },
-            audit_labels: BTreeMap::new(),
+            audit_labels: self.audit_labels,
             key_rotation: KeyRotationSpec { interval_days: 0 },
             attestation: AttestationRequirement {
                 mode: AttestationMode::Noop,
@@ -205,7 +216,15 @@ mod tests {
             .runtime_profile("hvf")
             .nonce([7u8; 16])
             .validity(from, until)
+            .audit_labels(BTreeMap::from([(
+                "owner".to_string(),
+                "team-a".to_string(),
+            )]))
             .build();
+        assert_eq!(
+            plan.audit_labels.get("owner").map(String::as_str),
+            Some("team-a")
+        );
         assert_eq!(plan.tenant.0, "acme");
         assert_eq!(plan.plan_id.0, "p-1");
         assert_eq!(plan.workload.0, "w-1");

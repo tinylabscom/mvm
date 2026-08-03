@@ -65,8 +65,8 @@ pub use fanout::{
     ReaderHandle, ReaderStart,
 };
 pub use input_gate::{
-    CATEGORY_HOST_SECRET, DEFAULT_LEASE_TTL, InputAudit, InputBinding, InputClose, InputGate,
-    InputRefusal, InputSession, KnownSecret,
+    CATEGORY_HOST_SECRET, DEFAULT_LEASE_TTL, InputAudit, InputAuditSink, InputBinding, InputClose,
+    InputGate, InputRefusal, InputSession, KnownSecret,
 };
 pub use plane::StreamPlane;
 pub use redact::{

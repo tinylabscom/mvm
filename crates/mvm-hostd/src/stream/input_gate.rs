@@ -8,16 +8,22 @@
 //! It now holds by policy, which is a strictly weaker guarantee — so four
 //! properties carry the weight the absence used to:
 //!
-//! - **Default-deny.** [`InputGate::open`] refuses unless the *signed* plan
-//!   carries the input grant. Not a warning and not a degraded mode: no
-//!   session object exists, so there is nothing to write through. The grant
-//!   check reads the same token the plan DTOs define, so a plan cannot mean
-//!   one thing here and another to the admission path.
+//! - **Default-deny.** [`InputGate::open`] refuses unless the plan carries the
+//!   input grant, and it takes an [`AdmittedPlan`] rather than a bare
+//!   `ExecutionPlan` — "signed" is the whole basis of the grant, so the
+//!   parameter is the type only the admission pipeline mints, not a value any
+//!   caller can synthesize with the token pasted in. Not a warning and not a
+//!   degraded mode: no session object exists, so there is nothing to write
+//!   through. The grant check reads the same token the plan DTOs define, so a
+//!   plan cannot mean one thing here and another to the admission path.
 //! - **One writer at a time.** Two consumers interleaving into one byte stream
 //!   produce garbage that neither of them sent, so concurrency is arbitrated
 //!   rather than merged: a lease, held by exactly one session per VM. The
 //!   lease expires, and the holder refreshes it by writing — a consumer that
-//!   takes the lease and dies must not wedge the VM's stdin forever.
+//!   takes the lease and dies must not wedge the VM's stdin forever. Every
+//!   path that moves bytes out of a session is gated on it, extraction
+//!   included: a writer that stalled past its TTL must not deliver into a
+//!   stdin its successor now owns.
 //! - **The secret scan spans frame boundaries.** A scanner that inspects one
 //!   frame at a time is defeated by splitting a secret across two writes, so
 //!   [`SecretScanner`] carries a sliding window and, more than that, *withholds*
@@ -31,7 +37,24 @@
 //!   emits a chain-signed entry naming the binding and the reason. Never the
 //!   frame bytes, and never the matched secret — writing the secret into the
 //!   log to explain why it was refused would ship it anyway, through the one
-//!   file an operator is most likely to read.
+//!   file an operator is most likely to read. A decision the gate cannot
+//!   record is a decision it declines to make: that refusal has its own
+//!   [`InputRefusal::Unauditable`] reason, so "you were not granted" never
+//!   stands in for "we could not record that you were".
+//!
+//! ## Ordering: one order, not three
+//!
+//! The scan runs over the concatenation of what the gate cleared, in arrival
+//! order, so arrival order has to *be* delivery order — otherwise a secret
+//! split across two frames and sent out of order would scan as non-contiguous
+//! here and reassemble contiguously inside the guest, defeated by the very
+//! `seq` field the frames carry. The gate closes that by refusing any frame
+//! whose `seq` does not advance past the last one it accepted
+//! ([`InputRefusal::OutOfOrder`]) rather than buffering and re-sorting, which
+//! would mean holding bytes it has already decided about. Arrival order, `seq`
+//! order and delivery order are therefore one order, and
+//! [`InputSession::take_admitted`] states the delivery half as the caller's
+//! contract.
 //!
 //! ## Ordering: close against an in-flight frame
 //!
@@ -54,6 +77,7 @@ use mvm_protocol::stream::input::{InputFrame, grants_input};
 use zeroize::Zeroize;
 
 use crate::audit::emitter::AuditEmitter;
+use crate::plan_admission::AdmittedPlan;
 
 /// How long a writer keeps the input lease without touching it.
 ///
@@ -72,14 +96,18 @@ pub const CATEGORY_HOST_SECRET: &str = "host-secret";
 /// nothing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InputRefusal {
-    /// The signed plan carries no input grant, or the grant could not be
-    /// written to the chain-signed log.
-    ///
-    /// The two are the same answer on purpose: input into a sealed workload
-    /// that leaves no signed trace is input the gate declines to have
-    /// happened.
+    /// The admitted plan carries no input grant.
     #[error("no admitted input grant for this workload")]
     NotGranted,
+    /// The decision could not be written to the chain-signed log.
+    ///
+    /// Distinct from [`Self::NotGranted`] because the two are different facts
+    /// and an operator debugging one must not be handed the other: input into
+    /// a sealed workload that leaves no signed trace is input the gate
+    /// declines to have happened, which is not the same as a plan that never
+    /// asked for it.
+    #[error("the input decision could not be recorded in the audit chain")]
+    Unauditable,
     /// Another writer holds the single-writer lease and has not let it lapse.
     #[error("another writer holds the input lease ({holder})")]
     LeaseHeld {
@@ -97,6 +125,17 @@ pub enum InputRefusal {
     /// reacquire.
     #[error("the input lease expired")]
     LeaseExpired,
+    /// A frame arrived at or before the highest `seq` this session already
+    /// accepted. The gate refuses rather than reorders, because the secret
+    /// scan runs in arrival order and a stream the caller may re-sort is a
+    /// stream the scan does not describe.
+    #[error("input frame seq {seq} does not advance past the accepted {after}")]
+    OutOfOrder {
+        /// The `seq` the refused frame carried.
+        seq: u64,
+        /// The highest `seq` this session had already accepted.
+        after: u64,
+    },
 }
 
 impl InputRefusal {
@@ -106,9 +145,11 @@ impl InputRefusal {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::NotGranted => "not-granted",
+            Self::Unauditable => "unauditable",
             Self::LeaseHeld { .. } => "lease-held",
             Self::SecretMaterial { .. } => "secret-material",
             Self::LeaseExpired => "lease-expired",
+            Self::OutOfOrder { .. } => "out-of-order",
         }
     }
 }
@@ -159,7 +200,28 @@ impl Drop for KnownSecret {
     }
 }
 
-/// Binds the gate's refusals for one VM to the chain-signed audit log.
+/// Where the gate records what it decided.
+///
+/// A trait rather than the one concrete chain emitter because "the chain is
+/// unreachable" is a state the gate has to behave correctly in — it is the
+/// difference between refusing and silently admitting an unrecorded writer —
+/// and the only honest way to exercise that is to hand the gate a sink that
+/// fails. Both methods report failure so the gate, not the sink, decides what
+/// an unrecordable decision means.
+pub trait InputAuditSink: Send + Sync {
+    /// Record an admitted writer.
+    fn record_granted(&self, plan: &ExecutionPlan, vm: &str, holder: &str) -> anyhow::Result<()>;
+    /// Record a refusal and why.
+    fn record_refused(
+        &self,
+        plan: &ExecutionPlan,
+        vm: &str,
+        refusal: &InputRefusal,
+    ) -> anyhow::Result<()>;
+}
+
+/// Binds the gate's decisions for one VM to the chain-signed audit log — the
+/// production [`InputAuditSink`].
 ///
 /// Separate from the plan, which arrives per call: one VM's audit binding
 /// outlives any single writer's session.
@@ -173,25 +235,41 @@ impl InputAudit {
     pub fn new(emitter: AuditEmitter) -> Self {
         Self { emitter }
     }
+}
 
-    /// Record an admitted writer. The caller treats a failure here as a
-    /// refusal: an unauditable grant is not a grant.
-    fn granted(&self, plan: &ExecutionPlan, vm: &str, holder: &str) -> anyhow::Result<()> {
+impl InputAuditSink for InputAudit {
+    fn record_granted(&self, plan: &ExecutionPlan, vm: &str, holder: &str) -> anyhow::Result<()> {
         self.emitter.emit_stream_input_granted(plan, vm, holder)
     }
 
-    /// Record a refusal. Failing to write it does not soften the refusal — the
-    /// bytes are already not going anywhere — so this reports rather than
-    /// propagates.
-    fn refused(&self, plan: &ExecutionPlan, vm: &str, refusal: &InputRefusal) {
-        if let Err(err) = self.emitter.emit_stream_input_refused(plan, vm, refusal) {
-            tracing::warn!(
-                vm = %vm,
-                reason = refusal.reason(),
-                error = %err,
-                "workload input refusal not recorded in the audit chain"
-            );
-        }
+    fn record_refused(
+        &self,
+        plan: &ExecutionPlan,
+        vm: &str,
+        refusal: &InputRefusal,
+    ) -> anyhow::Result<()> {
+        self.emitter.emit_stream_input_refused(plan, vm, refusal)
+    }
+}
+
+/// Record a refusal, best effort.
+///
+/// Failing to write it does not soften the refusal — the bytes are already not
+/// going anywhere — so this reports rather than propagates. The inverse of the
+/// grant path, where an unrecordable decision *is* the refusal.
+fn audit_refused(
+    sink: &dyn InputAuditSink,
+    plan: &ExecutionPlan,
+    vm: &str,
+    refusal: &InputRefusal,
+) {
+    if let Err(err) = sink.record_refused(plan, vm, refusal) {
+        tracing::warn!(
+            vm = %vm,
+            reason = refusal.reason(),
+            error = %err,
+            "workload input refusal not recorded in the audit chain"
+        );
     }
 }
 
@@ -203,7 +281,7 @@ impl InputAudit {
 /// recognise, a VM-specific chain, and a lease lifetime.
 pub struct InputBinding {
     secrets: Vec<KnownSecret>,
-    audit: Option<Arc<InputAudit>>,
+    audit: Option<Arc<dyn InputAuditSink>>,
     lease_ttl: Duration,
 }
 
@@ -228,8 +306,15 @@ impl InputBinding {
 
     /// Send this VM's input decisions to a specific chain.
     #[must_use]
-    pub fn with_audit(mut self, audit: InputAudit) -> Self {
-        self.audit = Some(Arc::new(audit));
+    pub fn with_audit(self, audit: InputAudit) -> Self {
+        self.with_audit_sink(Arc::new(audit))
+    }
+
+    /// Send this VM's input decisions to an arbitrary [`InputAuditSink`], for
+    /// an embedder that records them somewhere other than the host chain.
+    #[must_use]
+    pub fn with_audit_sink(mut self, sink: Arc<dyn InputAuditSink>) -> Self {
+        self.audit = Some(sink);
         self
     }
 
@@ -251,7 +336,7 @@ impl Default for InputBinding {
 /// into every session that opens.
 struct Bound {
     secrets: Arc<Vec<KnownSecret>>,
-    audit: Option<Arc<InputAudit>>,
+    audit: Option<Arc<dyn InputAuditSink>>,
     lease_ttl: Duration,
 }
 
@@ -289,7 +374,7 @@ fn gate() -> MutexGuard<'static, GateState> {
 
 /// What one VM's binding supplies, resolved once per open.
 struct Resolved {
-    audit: Option<Arc<InputAudit>>,
+    audit: Option<Arc<dyn InputAuditSink>>,
     secrets: Arc<Vec<KnownSecret>>,
     lease_ttl: Duration,
 }
@@ -301,6 +386,12 @@ pub struct InputGate;
 impl InputGate {
     /// Install what the gate needs to police `vm`'s stdin. Replaces any
     /// previous binding; call it before the workload is reachable.
+    ///
+    /// A session snapshots the secret set at [`open`](Self::open) and holds it
+    /// for its lifetime, so re-binding does not change what a *live* session
+    /// recognises — a secret registered mid-session is recognised by the next
+    /// writer, not the current one. Deliberate: the alternative is a scanner
+    /// whose window can change under a partially-scanned stream.
     pub fn bind(vm: &str, binding: InputBinding) {
         let bound = Bound {
             secrets: Arc::new(binding.secrets),
@@ -319,40 +410,52 @@ impl InputGate {
         state.leases.remove(vm);
     }
 
-    /// Take the input lease on `vm` under the authority of `plan`.
+    /// Take the input lease on `vm` under the authority of `admitted`.
+    ///
+    /// The parameter is an [`AdmittedPlan`] — what the admission pipeline
+    /// mints — and not a bare `ExecutionPlan`, because a grant that any
+    /// in-process caller can forge is not a grant. An `ExecutionPlan` carrying
+    /// the input token is a value anyone can synthesize; only admission
+    /// produces the plan that has been signed, verified, window-checked and
+    /// replay-checked. Taking the proof-carrying type is what makes the
+    /// signature enforce what the docs assert.
     ///
     /// Refuses unless the plan grants input, unless the lease is free (or
     /// lapsed), and unless the grant itself can be chain-recorded.
-    pub fn open(vm: &str, plan: &ExecutionPlan) -> Result<InputSession, InputRefusal> {
+    pub fn open(vm: &str, admitted: &AdmittedPlan) -> Result<InputSession, InputRefusal> {
+        let plan = &admitted.plan;
         let resolved = resolve(vm);
 
+        // No chain, no decision. Checked ahead of the lease so a VM whose
+        // audit is unreachable cannot hold a would-be writer out even briefly.
+        let Some(audit) = resolved.audit else {
+            tracing::warn!(vm = %vm, "workload input refused: no chain to record the decision in");
+            return Err(InputRefusal::Unauditable);
+        };
+
         if !grants_input(plan) {
-            return Err(record_refusal(
-                resolved.audit.as_deref(),
-                plan,
-                vm,
-                InputRefusal::NotGranted,
-            ));
+            audit_refused(audit.as_ref(), plan, vm, &InputRefusal::NotGranted);
+            return Err(InputRefusal::NotGranted);
         }
 
         let holder = match claim_lease(vm, plan, resolved.lease_ttl) {
             Ok(holder) => holder,
             Err(refusal) => {
-                return Err(record_refusal(resolved.audit.as_deref(), plan, vm, refusal));
+                audit_refused(audit.as_ref(), plan, vm, &refusal);
+                return Err(refusal);
             }
         };
 
         // An unauditable admission is the exact hole this gate exists to
-        // close, so it fails closed and gives the lease straight back.
-        let Some(audit) = resolved.audit else {
-            release_lease(vm, &holder);
-            tracing::warn!(vm = %vm, "workload input refused: no chain to record the grant in");
-            return Err(InputRefusal::NotGranted);
-        };
-        if let Err(err) = audit.granted(plan, vm, &holder) {
+        // close, so it fails closed and gives the lease straight back. The
+        // refusal is recorded on the way out: the emit that just failed may
+        // have failed transiently, and a refusal nobody can see is the same
+        // defect one layer down.
+        if let Err(err) = audit.record_granted(plan, vm, &holder) {
             release_lease(vm, &holder);
             tracing::warn!(vm = %vm, error = %err, "workload input refused: grant not recorded");
-            return Err(InputRefusal::NotGranted);
+            audit_refused(audit.as_ref(), plan, vm, &InputRefusal::Unauditable);
+            return Err(InputRefusal::Unauditable);
         }
 
         Ok(InputSession {
@@ -389,7 +492,7 @@ pub struct InputSession {
     vm: String,
     plan: ExecutionPlan,
     holder: String,
-    audit: Arc<InputAudit>,
+    audit: Arc<dyn InputAuditSink>,
     lease_ttl: Duration,
     scanner: SecretScanner,
     outbox: Vec<u8>,
@@ -410,40 +513,64 @@ impl InputSession {
     /// Offer one frame. On `Ok` the bytes cleared for the guest are in the
     /// outbox; anything still a live prefix of a known secret is held back
     /// until the next frame or [`close`](Self::close) resolves it.
+    ///
+    /// Frames must arrive in strictly increasing `seq`; one that does not
+    /// advance is refused with [`InputRefusal::OutOfOrder`] and contributes
+    /// nothing to the scan. See [`take_admitted`](Self::take_admitted) for why
+    /// the gate refuses instead of reordering.
     pub fn write(&mut self, frame: InputFrame) -> Result<(), InputRefusal> {
-        if let Some(refusal) = &self.refused {
-            return Err(refusal.clone());
+        self.check_live()?;
+        if let Some(after) = self.highest_accepted_seq
+            && frame.seq <= after
+        {
+            // Audited but not latched: a frame that never reached the scanner
+            // leaves the session's view of the stream intact, so a writer that
+            // sent one out of turn can carry on in order.
+            let refusal = InputRefusal::OutOfOrder {
+                seq: frame.seq,
+                after,
+            };
+            audit_refused(self.audit.as_ref(), &self.plan, &self.vm, &refusal);
+            return Err(refusal);
         }
-        self.renew_lease()?;
         match self.scanner.admit(&frame.payload) {
             Ok(cleared) => {
                 self.outbox.extend_from_slice(&cleared);
-                self.highest_accepted_seq = Some(
-                    self.highest_accepted_seq
-                        .map_or(frame.seq, |seq| seq.max(frame.seq)),
-                );
+                self.highest_accepted_seq = Some(frame.seq);
                 Ok(())
             }
-            Err(category) => Err(self.refuse(InputRefusal::SecretMaterial { category })),
+            Err(category) => Err(self.latch(InputRefusal::SecretMaterial { category })),
         }
     }
 
-    /// Take the bytes cleared for delivery so far.
+    /// Take the bytes cleared for delivery so far, in the order the guest must
+    /// receive them.
+    ///
+    /// **Contract: the caller writes these bytes to the workload's stdin in
+    /// exactly this order and never re-sorts them by frame `seq`.** The secret
+    /// scan runs over this concatenation, so scan order has to be delivery
+    /// order — a consumer that buffered and re-sorted could reassemble, inside
+    /// the guest, a secret that was non-contiguous here. The gate holds up its
+    /// end by refusing any frame whose `seq` does not advance, so following
+    /// arrival order and following `seq` order are the same thing and neither
+    /// can drift from what was scanned.
+    ///
+    /// Gated on the lease, because draining is a byte-extraction path: a
+    /// writer whose lease lapsed while it stalled must not deliver into a
+    /// stdin its successor now owns.
     ///
     /// The gate clears bytes; it does not own the transport that carries them.
     /// The single leaseholder drains this and delivers, which is also what
     /// bounds the buffer — nothing accumulates here that its own owner did not
     /// choose to leave.
-    pub fn take_admitted(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.outbox)
+    pub fn take_admitted(&mut self) -> Result<Vec<u8>, InputRefusal> {
+        self.check_live()?;
+        Ok(std::mem::take(&mut self.outbox))
     }
 
     /// Extend the lease without writing, for a holder that is idle but alive.
     pub fn refresh(&mut self) -> Result<(), InputRefusal> {
-        if let Some(refusal) = &self.refused {
-            return Err(refusal.clone());
-        }
-        self.renew_lease()
+        self.check_live()
     }
 
     /// End the session: flush what was held back, release the lease, and fix
@@ -452,15 +579,32 @@ impl InputSession {
     /// The withheld tail ships here because it is, by construction, a proper
     /// prefix of a secret and not a secret — dropping it would silently
     /// swallow the caller's last bytes.
-    #[must_use]
-    pub fn close(mut self) -> InputClose {
+    ///
+    /// Gated on the lease like every other extraction path, and for a sharper
+    /// reason: `close` decides where EOF sits, so a stalled writer closing
+    /// after its lease lapsed would close a stdin its successor is still
+    /// using. Taking `self` by value keeps a closed session from being written
+    /// to, but that is a compile-time guard and expiry is a runtime condition.
+    /// A lost lease yields nothing at all, EOF included.
+    pub fn close(mut self) -> Result<InputClose, InputRefusal> {
+        self.check_live()?;
         let mut trailing = std::mem::take(&mut self.outbox);
         trailing.extend_from_slice(&self.scanner.flush());
         release_lease(&self.vm, &self.holder);
-        InputClose {
+        Ok(InputClose {
             after_seq: self.highest_accepted_seq,
             trailing,
+        })
+    }
+
+    /// The two runtime conditions every byte-moving call shares: a session
+    /// that refused once stays refused, and a session that lost its lease no
+    /// longer speaks for the VM.
+    fn check_live(&mut self) -> Result<(), InputRefusal> {
+        if let Some(refusal) = &self.refused {
+            return Err(refusal.clone());
         }
+        self.renew_lease()
     }
 
     /// Re-take our own lease, or find out we lost it.
@@ -481,13 +625,15 @@ impl InputSession {
         if renewed {
             Ok(())
         } else {
-            Err(self.refuse(InputRefusal::LeaseExpired))
+            Err(self.latch(InputRefusal::LeaseExpired))
         }
     }
 
-    /// Record the refusal once, latch it, and hand it back.
-    fn refuse(&mut self, refusal: InputRefusal) -> InputRefusal {
-        self.audit.refused(&self.plan, &self.vm, &refusal);
+    /// Record the refusal once, latch it, and hand it back. Latched refusals
+    /// are the terminal ones — the session cannot recover from them, and a
+    /// caller that keeps probing learns nothing new.
+    fn latch(&mut self, refusal: InputRefusal) -> InputRefusal {
+        audit_refused(self.audit.as_ref(), &self.plan, &self.vm, &refusal);
         self.refused = Some(refusal.clone());
         refusal
     }
@@ -497,7 +643,16 @@ impl Drop for InputSession {
     /// A dropped session frees the VM's stdin immediately rather than at
     /// lease expiry. `close` already released it; releasing keys on the holder
     /// id, so this cannot take a lease a later writer acquired.
+    ///
+    /// Anything cleared but not drained is discarded here, which is the right
+    /// outcome rather than data loss: a session that ended without
+    /// [`close`](InputSession::close) has no owner left to deliver those bytes
+    /// and no boundary to deliver them before, so shipping them would be an
+    /// unattributed write into a stdin somebody else may now hold. They are
+    /// zeroized rather than merely freed so cleared input does not linger on
+    /// the heap; the withheld tail is zeroized by the scanner's own `Drop`.
     fn drop(&mut self) {
+        self.outbox.zeroize();
         release_lease(&self.vm, &self.holder);
     }
 }
@@ -574,42 +729,45 @@ fn release_lease(vm: &str, holder: &str) {
     }
 }
 
-/// Emit the refusal and hand it back, so a caller writes one expression rather
-/// than an emit-then-return pair it could get out of step.
-fn record_refusal(
-    audit: Option<&InputAudit>,
-    plan: &ExecutionPlan,
-    vm: &str,
-    refusal: InputRefusal,
-) -> InputRefusal {
-    match audit {
-        Some(audit) => audit.refused(plan, vm, &refusal),
-        None => tracing::warn!(
-            vm = %vm,
-            reason = refusal.reason(),
-            "workload input refused with no chain to record it in"
-        ),
-    }
-    refusal
-}
-
-static PROCESS_AUDIT: OnceLock<Option<Arc<InputAudit>>> = OnceLock::new();
-
 /// The chain a decision lands in when the VM's binding names none.
 ///
 /// `None` when the host chain cannot be opened at all; the gate then refuses
-/// every grant, because an input path nobody can audit is the thing this
-/// module exists to prevent.
-fn process_audit() -> Option<Arc<InputAudit>> {
-    PROCESS_AUDIT
-        .get_or_init(|| match build_process_audit() {
-            Ok(audit) => Some(Arc::new(audit)),
-            Err(err) => {
-                tracing::warn!(error = %err, "workload input decisions cannot be chain-recorded");
-                None
-            }
-        })
-        .clone()
+/// every decision on that VM, because an input path nobody can audit is the
+/// thing this module exists to prevent.
+fn process_audit() -> Option<Arc<dyn InputAuditSink>> {
+    static PROCESS_AUDIT: OnceLock<Mutex<Option<Arc<InputAudit>>>> = OnceLock::new();
+    let slot = PROCESS_AUDIT.get_or_init(|| Mutex::new(None));
+    let sink: Arc<dyn InputAuditSink> = cached_audit(slot, build_process_audit)?;
+    Some(sink)
+}
+
+/// Return the cached chain, building one on first use — and caching it **only
+/// on success**.
+///
+/// A failure is deliberately not remembered. Caching it would let a single
+/// transient error at process start disable workload input for the entire
+/// lifetime of the host process: a blip promoted to a permanent, silent policy
+/// change nobody asked for. Retrying costs one filesystem open on a path that
+/// is already refusing.
+fn cached_audit(
+    slot: &Mutex<Option<Arc<InputAudit>>>,
+    build: impl FnOnce() -> anyhow::Result<InputAudit>,
+) -> Option<Arc<InputAudit>> {
+    let mut cached = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(audit) = cached.as_ref() {
+        return Some(Arc::clone(audit));
+    }
+    match build() {
+        Ok(audit) => {
+            let audit = Arc::new(audit);
+            *cached = Some(Arc::clone(&audit));
+            Some(audit)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "workload input decisions cannot be chain-recorded");
+            None
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -740,12 +898,14 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::test_support::PlanFixture;
+    use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput, sign_plan};
     use mvm_protocol::protocol::broker::ServiceId;
     use mvm_protocol::stream::input::INPUT_GRANT_SERVICE;
     use tempfile::TempDir;
 
     use super::*;
     use crate::audit::emitter::stream_audit;
+    use crate::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
     use crate::supervisor::verify_audit_chain;
 
     /// Fixed so a test can verify the scratch chain's signatures.
@@ -769,6 +929,84 @@ mod tests {
     /// The plan token that authorizes the input plane.
     fn stream_service() -> ServiceId {
         ServiceId::parse(INPUT_GRANT_SERVICE).expect("the grant token is a valid service id")
+    }
+
+    /// An `AdmittedPlan` over a fixture plan binding `services`, signed the way
+    /// admission signs.
+    ///
+    /// The gate takes the proof-carrying type, so every test has to produce
+    /// one. `a_plan_from_the_real_admission_pipeline_opens_the_gate` drives
+    /// `admit_for_run` end to end so this shortcut cannot drift from what
+    /// admission actually mints.
+    fn admitted_with(services: Vec<ServiceId>) -> AdmittedPlan {
+        let plan = PlanFixture::new().services(services).build();
+        let signer_id = "host:test".to_string();
+        let signed = sign_plan(&plan, &SigningKey::from_bytes(&[7u8; 32]), &signer_id);
+        AdmittedPlan {
+            plan_id: plan.plan_id.clone(),
+            signer_id,
+            plan,
+            signed,
+        }
+    }
+
+    /// A synthesis input the real admission pipeline accepts, for the one test
+    /// that goes through it.
+    fn synthesis_input(vm_name: &str) -> SynthesisInput<'_> {
+        const FIXTURE_SHA: &str =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        SynthesisInput {
+            vm_name,
+            tenant: None,
+            backend_name: "firecracker",
+            image_name: "img",
+            image_sha256: FIXTURE_SHA,
+            image_cosign_bundle: None,
+            intent: None,
+            seccomp_tier: PlanSeccompTier::Standard,
+            network_policy_ref: None,
+            fs_policy_ref: None,
+            egress_policy_ref: None,
+            tool_policy_ref: None,
+            secret_release: SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            audit_event_prefix: None,
+            cpus: 1,
+            mem_mib: 256,
+            disk_mib: 0,
+            boot_timeout_secs: 30,
+            exec_timeout_secs: 0,
+            destroy_on_exit: true,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+            audit_labels: Default::default(),
+            agent_verbs: None,
+            services: Vec::new(),
+            stream_retention: Default::default(),
+        }
+    }
+
+    /// A sink that cannot write. The chain being unreachable is a state the
+    /// gate has to behave correctly in, and handing it one that fails is the
+    /// only honest way to get there.
+    struct BrokenSink;
+
+    impl InputAuditSink for BrokenSink {
+        fn record_granted(&self, _: &ExecutionPlan, _: &str, _: &str) -> anyhow::Result<()> {
+            anyhow::bail!("the chain is unreachable")
+        }
+
+        fn record_refused(
+            &self,
+            _: &ExecutionPlan,
+            _: &str,
+            _: &InputRefusal,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("the chain is unreachable")
+        }
     }
 
     /// One entry of the scratch chain, flattened to what these tests assert on.
@@ -808,7 +1046,7 @@ mod tests {
             &vm,
             InputBinding::new().with_secret(KnownSecret::host_material(secret.as_bytes())),
         );
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         InputGate::open(&vm, &plan).expect("the plan grants input")
     }
 
@@ -816,7 +1054,7 @@ mod tests {
 
     #[test]
     fn input_is_refused_without_a_plan_grant() {
-        let plan = PlanFixture::new().build(); // no host.stream.v1
+        let plan = admitted_with(vec![]); // no host.stream.v1
         assert!(matches!(
             InputGate::open("vm-a", &plan),
             Err(InputRefusal::NotGranted)
@@ -825,7 +1063,7 @@ mod tests {
 
     #[test]
     fn a_second_writer_is_refused_while_the_lease_is_held() {
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let _first = InputGate::open("vm-a", &plan).expect("first session");
         assert!(matches!(
             InputGate::open("vm-a", &plan),
@@ -854,7 +1092,7 @@ mod tests {
 
     #[test]
     fn every_refusal_is_audited() {
-        let plan = PlanFixture::new().build();
+        let plan = admitted_with(vec![]);
         let _ = InputGate::open("vm-a", &plan);
         let entries = read_chain("vm-a");
         assert!(
@@ -873,6 +1111,11 @@ mod tests {
     /// check only refutes the leak a test thought of, while pinning the whole
     /// label set means a future label carrying frame bytes fails here whatever
     /// it is named.
+    ///
+    /// The plan carries an audit label of its own, because `AuditEntry` merges
+    /// `plan.audit_labels` into every entry: against a plan with none, the key
+    /// set would be the gate's labels alone and the assertion would prove less
+    /// than it claims on any production plan.
     #[test]
     fn stream_input_audit_records_the_reason_and_none_of_the_refused_bytes() {
         let secret = "AKIAIOSFODNN7EXAMPLE";
@@ -881,7 +1124,23 @@ mod tests {
             &vm,
             InputBinding::new().with_secret(KnownSecret::host_material(secret.as_bytes())),
         );
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = {
+            let built = PlanFixture::new()
+                .services(vec![stream_service()])
+                .audit_labels(BTreeMap::from([(
+                    "workload_owner".to_string(),
+                    "team-a".to_string(),
+                )]))
+                .build();
+            let signer_id = "host:test".to_string();
+            let signed = sign_plan(&built, &SigningKey::from_bytes(&[7u8; 32]), &signer_id);
+            AdmittedPlan {
+                plan_id: built.plan_id.clone(),
+                signer_id,
+                plan: built,
+                signed,
+            }
+        };
         let mut session = InputGate::open(&vm, &plan).expect("the plan grants input");
         session
             .write(InputFrame {
@@ -923,8 +1182,10 @@ mod tests {
                 stream_audit::LABEL_REASON,
                 stream_audit::LABEL_SECRET_CATEGORY,
                 stream_audit::LABEL_VM_NAME,
+                "workload_owner",
             ],
-            "a refusal carries the binding and the reason and nothing else"
+            "a refusal carries the binding, the reason, the plan's own labels, \
+             and nothing else"
         );
 
         let path = test_chain_dir().join("local.jsonl");
@@ -946,7 +1207,7 @@ mod tests {
     #[test]
     fn a_granting_plan_opens_a_session_and_a_lease() {
         let vm = unique_vm("vm-grant");
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let session = InputGate::open(&vm, &plan).expect("the plan grants input");
         assert_eq!(
             InputGate::lease_holder(&vm).as_deref(),
@@ -963,7 +1224,7 @@ mod tests {
     fn an_unrelated_service_binding_does_not_grant_input() {
         let vm = unique_vm("vm-other-service");
         let other = ServiceId::parse("host.audit.v1").expect("valid service id");
-        let plan = PlanFixture::new().services(vec![other]).build();
+        let plan = admitted_with(vec![other]);
         assert!(matches!(
             InputGate::open(&vm, &plan),
             Err(InputRefusal::NotGranted)
@@ -976,10 +1237,10 @@ mod tests {
     #[test]
     fn a_released_lease_lets_the_next_writer_in() {
         let vm = unique_vm("vm-lease-release");
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let first = InputGate::open(&vm, &plan).expect("first session");
         let held = first.holder().to_string();
-        let closed = first.close();
+        let closed = first.close().expect("the lease was live");
         assert!(closed.trailing.is_empty(), "nothing was written");
         assert_eq!(InputGate::lease_holder(&vm), None);
 
@@ -990,7 +1251,7 @@ mod tests {
     #[test]
     fn a_dropped_session_frees_the_lease() {
         let vm = unique_vm("vm-lease-drop");
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         drop(InputGate::open(&vm, &plan).expect("first session"));
         assert_eq!(InputGate::lease_holder(&vm), None);
         InputGate::open(&vm, &plan).expect("a crashed writer must not wedge stdin");
@@ -1005,7 +1266,7 @@ mod tests {
             &vm,
             InputBinding::new().with_lease_ttl(Duration::from_millis(20)),
         );
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let mut stale = InputGate::open(&vm, &plan).expect("first session");
         std::thread::sleep(Duration::from_millis(40));
 
@@ -1024,7 +1285,10 @@ mod tests {
                 payload: b"mine now".to_vec(),
             })
             .expect("the new holder writes");
-        assert_eq!(fresh.take_admitted(), b"mine now");
+        assert_eq!(
+            fresh.take_admitted().expect("its lease is live"),
+            b"mine now"
+        );
     }
 
     #[test]
@@ -1034,18 +1298,63 @@ mod tests {
             &vm,
             InputBinding::new().with_lease_ttl(Duration::from_millis(60)),
         );
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let mut session = InputGate::open(&vm, &plan).expect("first session");
-        for _ in 0..4 {
+        for seq in 0..4u64 {
             std::thread::sleep(Duration::from_millis(20));
             session
                 .write(InputFrame {
-                    seq: 0,
+                    seq,
                     payload: b".".to_vec(),
                 })
                 .expect("an active writer keeps its lease");
         }
         session.refresh().expect("an idle writer can hold it too");
+    }
+
+    #[test]
+    fn a_writer_that_lost_the_lease_cannot_deliver_into_its_successors_stdin() {
+        // The interleaving the lease exists to prevent, driven end to end: A
+        // clears bytes, stalls past the TTL, B takes over — and A's owner then
+        // tries to deliver. `close(self)` stops A writing *through* a closed
+        // session at compile time, but expiry is a runtime condition, so both
+        // of A's byte-extraction paths have to check it too.
+        let vm = unique_vm("vm-interleave");
+        InputGate::bind(
+            &vm,
+            InputBinding::new().with_lease_ttl(Duration::from_millis(20)),
+        );
+        let plan = admitted_with(vec![stream_service()]);
+        let mut stalled = InputGate::open(&vm, &plan).expect("first session");
+        stalled
+            .write(InputFrame {
+                seq: 0,
+                payload: b"rm -rf /\n".to_vec(),
+            })
+            .expect("cleared while the lease was live");
+
+        std::thread::sleep(Duration::from_millis(40));
+        let mut successor = InputGate::open(&vm, &plan).expect("a lapsed lease is takeable");
+        successor
+            .write(InputFrame {
+                seq: 0,
+                payload: b"ls\n".to_vec(),
+            })
+            .expect("the new holder writes");
+
+        assert!(
+            matches!(stalled.take_admitted(), Err(InputRefusal::LeaseExpired)),
+            "draining is a byte-extraction path and must be gated on the lease"
+        );
+        assert!(
+            matches!(stalled.close(), Err(InputRefusal::LeaseExpired)),
+            "so is close, which would otherwise close a stdin it no longer owns"
+        );
+        assert_eq!(
+            successor.take_admitted().expect("its lease is live"),
+            b"ls\n",
+            "only the leaseholder's bytes reach the stream"
+        );
     }
 
     // --- the secret scan ---------------------------------------------------
@@ -1063,7 +1372,7 @@ mod tests {
             })
             .expect("a prefix is not a match");
         assert_eq!(
-            session.take_admitted(),
+            session.take_admitted().expect("the lease is live"),
             b"echo ",
             "the live prefix stays on the host until it is resolved"
         );
@@ -1078,14 +1387,22 @@ mod tests {
                 payload: b"AKIA".to_vec(),
             })
             .expect("a prefix is not a match");
-        assert!(session.take_admitted().is_empty());
+        assert!(
+            session
+                .take_admitted()
+                .expect("the lease is live")
+                .is_empty()
+        );
         session
             .write(InputFrame {
                 seq: 1,
                 payload: b"DEMO\n".to_vec(),
             })
             .expect("it was never a secret");
-        assert_eq!(session.take_admitted(), b"AKIADEMO\n");
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            b"AKIADEMO\n"
+        );
     }
 
     #[test]
@@ -1098,7 +1415,7 @@ mod tests {
             })
             .expect("nothing to match");
         assert_eq!(
-            session.take_admitted(),
+            session.take_admitted().expect("the lease is live"),
             b"ls -la\n",
             "a suffix that is not a prefix of any secret ships immediately"
         );
@@ -1127,10 +1444,13 @@ mod tests {
     #[test]
     fn a_secret_split_three_ways_is_still_refused() {
         let mut session = granted_session_with_known_secret("AKIAIOSFODNN7EXAMPLE");
-        for chunk in [b"AKIAIOS".as_slice(), b"FODNN7EX".as_slice()] {
+        for (seq, chunk) in [b"AKIAIOS".as_slice(), b"FODNN7EX".as_slice()]
+            .into_iter()
+            .enumerate()
+        {
             session
                 .write(InputFrame {
-                    seq: 0,
+                    seq: u64::try_from(seq).expect("fits"),
                     payload: chunk.to_vec(),
                 })
                 .expect("no complete secret yet");
@@ -1168,7 +1488,7 @@ mod tests {
     #[test]
     fn a_vm_with_no_registered_secrets_delivers_verbatim() {
         let vm = unique_vm("vm-no-secrets");
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let mut session = InputGate::open(&vm, &plan).expect("the plan grants input");
         session
             .write(InputFrame {
@@ -1176,7 +1496,10 @@ mod tests {
                 payload: b"AKIAIOSFODNN7EXAMPLE".to_vec(),
             })
             .expect("the gate recognises only what it was told about");
-        assert_eq!(session.take_admitted(), b"AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            b"AKIAIOSFODNN7EXAMPLE"
+        );
     }
 
     #[test]
@@ -1191,7 +1514,7 @@ mod tests {
     #[test]
     fn close_is_ordered_after_the_highest_accepted_seq() {
         let vm = unique_vm("vm-close");
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let mut session = InputGate::open(&vm, &plan).expect("the plan grants input");
         for seq in 0..3u64 {
             session
@@ -1201,7 +1524,7 @@ mod tests {
                 })
                 .expect("accepted");
         }
-        let closed = session.close();
+        let closed = session.close().expect("the lease is live");
         assert_eq!(closed.after_seq, Some(2));
         assert_eq!(closed.trailing, b"xxx");
         assert_eq!(InputGate::lease_holder(&vm), None);
@@ -1210,10 +1533,11 @@ mod tests {
     #[test]
     fn closing_a_session_that_wrote_nothing_has_no_boundary() {
         let vm = unique_vm("vm-close-empty");
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let closed = InputGate::open(&vm, &plan)
             .expect("the plan grants input")
-            .close();
+            .close()
+            .expect("the lease is live");
         assert_eq!(closed.after_seq, None);
         assert!(closed.trailing.is_empty());
     }
@@ -1229,7 +1553,7 @@ mod tests {
                 payload: b"AKIA".to_vec(),
             })
             .expect("a prefix is not a match");
-        let closed = session.close();
+        let closed = session.close().expect("the lease is live");
         assert_eq!(closed.after_seq, Some(7));
         assert_eq!(closed.trailing, b"AKIA");
     }
@@ -1240,10 +1564,178 @@ mod tests {
     fn unbinding_drops_the_lease_with_the_binding() {
         let vm = unique_vm("vm-unbind");
         InputGate::bind(&vm, InputBinding::new());
-        let plan = PlanFixture::new().services(vec![stream_service()]).build();
+        let plan = admitted_with(vec![stream_service()]);
         let _session = InputGate::open(&vm, &plan).expect("the plan grants input");
         InputGate::unbind(&vm);
         assert_eq!(InputGate::lease_holder(&vm), None);
+    }
+
+    // --- ordering ----------------------------------------------------------
+
+    #[test]
+    fn a_frame_that_does_not_advance_the_sequence_is_refused_rather_than_reordered() {
+        // Scan order is delivery order. If the gate accepted a frame that went
+        // backwards, a secret split in two and sent out of order would scan as
+        // non-contiguous here and reassemble contiguously inside the guest —
+        // the scan defeated by the very `seq` field the frames carry.
+        let mut session = granted_session_with_known_secret("AKIAIOSFODNN7EXAMPLE");
+        session
+            .write(InputFrame {
+                seq: 1,
+                payload: b"7EXAMPLE".to_vec(),
+            })
+            .expect("the first frame sets the boundary wherever it starts");
+        assert!(
+            matches!(
+                session.write(InputFrame {
+                    seq: 0,
+                    payload: b"AKIAIOSFODNN".to_vec()
+                }),
+                Err(InputRefusal::OutOfOrder { seq: 0, after: 1 })
+            ),
+            "the other half of the secret must not be admitted behind the first"
+        );
+        assert!(
+            matches!(
+                session.write(InputFrame {
+                    seq: 1,
+                    payload: b"again".to_vec()
+                }),
+                Err(InputRefusal::OutOfOrder { seq: 1, after: 1 })
+            ),
+            "a repeat is not an advance"
+        );
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            b"7EXAMPLE",
+            "the reordered half never entered the stream"
+        );
+    }
+
+    #[test]
+    fn an_out_of_order_refusal_is_audited_and_leaves_the_session_usable() {
+        let vm = unique_vm("vm-order-audit");
+        let plan = admitted_with(vec![stream_service()]);
+        let mut session = InputGate::open(&vm, &plan).expect("the plan grants input");
+        for (seq, payload) in [(4u64, "a"), (2, "b"), (5, "c")] {
+            let _ = session.write(InputFrame {
+                seq,
+                payload: payload.as_bytes().to_vec(),
+            });
+        }
+        assert_eq!(
+            session.take_admitted().expect("the lease is live"),
+            b"ac",
+            "the frame that went backwards contributed nothing, the next one did"
+        );
+
+        let refusals: Vec<ChainEntry> = read_chain(&vm)
+            .into_iter()
+            .filter(|e| e.kind == stream_audit::INPUT_REFUSED_EVENT)
+            .collect();
+        assert_eq!(refusals.len(), 1, "one refusal, one entry");
+        assert_eq!(
+            refusals[0]
+                .labels
+                .get(stream_audit::LABEL_REASON)
+                .map(String::as_str),
+            Some("out-of-order")
+        );
+        assert_eq!(
+            refusals[0]
+                .labels
+                .get(stream_audit::LABEL_SEQ)
+                .map(String::as_str),
+            Some("2"),
+            "a position, never a payload"
+        );
+    }
+
+    // --- the plan the gate will accept -------------------------------------
+
+    #[test]
+    fn a_plan_from_the_real_admission_pipeline_opens_the_gate() {
+        // The gate takes admission's own output, so a synthesized plan with
+        // the grant token pasted into `services` is not a key that fits — it
+        // is the wrong type. Driving `admit_for_run` here keeps the fixture
+        // shortcut the other tests use from drifting away from what admission
+        // actually mints, and shows default-deny surviving the real path.
+        let keys = tempfile::tempdir().expect("scratch keys dir");
+        let vm = unique_vm("vm-real-admission");
+
+        let ungranted = admit_for_run(
+            &synthesis_input(&vm),
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+        )
+        .expect("the fixture input admits");
+        assert!(matches!(
+            InputGate::open(&vm, &ungranted),
+            Err(InputRefusal::NotGranted)
+        ));
+
+        let mut granting = synthesis_input(&vm);
+        granting.services = vec![stream_service()];
+        let admitted = admit_for_run(
+            &granting,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(keys.path()),
+            None,
+        )
+        .expect("the granting input admits");
+        let session =
+            InputGate::open(&vm, &admitted).expect("an admitted plan carrying the grant opens");
+        assert_eq!(
+            InputGate::lease_holder(&vm).as_deref(),
+            Some(session.holder())
+        );
+    }
+
+    // --- the unauditable path ----------------------------------------------
+
+    #[test]
+    fn a_grant_that_cannot_be_recorded_is_refused_as_unauditable() {
+        // Not `NotGranted`: an operator debugging this must not be told "you
+        // were not granted" when the truth is "we could not record that you
+        // were".
+        let vm = unique_vm("vm-unauditable");
+        InputGate::bind(
+            &vm,
+            InputBinding::new().with_audit_sink(Arc::new(BrokenSink)),
+        );
+        let plan = admitted_with(vec![stream_service()]);
+
+        // `.err()` rather than `expect_err`: a session has no `Debug`, on
+        // purpose — it carries the plan and the secret-scanner state.
+        let refusal = InputGate::open(&vm, &plan)
+            .err()
+            .expect("an unauditable grant is not a grant");
+        assert_eq!(refusal, InputRefusal::Unauditable);
+        assert_eq!(refusal.reason(), "unauditable");
+        assert_eq!(
+            InputGate::lease_holder(&vm),
+            None,
+            "the lease goes straight back, so the VM is not wedged by a dead chain"
+        );
+    }
+
+    #[test]
+    fn a_transient_chain_failure_does_not_disable_input_for_the_process() {
+        // Caching the failure would let one blip at process start turn
+        // workload input off for the lifetime of the host process — a silent
+        // policy change nobody asked for.
+        let slot = Mutex::new(None);
+        assert!(
+            cached_audit(&slot, || anyhow::bail!("the chain is briefly unreachable")).is_none(),
+            "a build failure yields no chain"
+        );
+        assert!(
+            cached_audit(&slot, build_process_audit).is_some(),
+            "and a later attempt must still be able to succeed"
+        );
     }
 
     #[test]
