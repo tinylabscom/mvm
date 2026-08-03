@@ -159,6 +159,14 @@
       directions are enforced by tests that parse the specific named nix list;
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
+- [x] Two-verifier oracle bar — **plan 276 WS4**. A signed audit chain frozen
+      at `tests/vectors/audit-chain-v1.jsonl`, read by both the host verifier
+      and the `no_std` mirror. The previous parity test compared them over a
+      chain generated fresh with a random key each run, so neither ever saw
+      bytes the other could also see. Diverging the mirror's serialization of
+      an absent optional field now fails over the shared corpus. riscv32 stays
+      a compile oracle — bare metal has no test harness.
+
 - [~] Content-address replay vectors — **plan 276 WS3**. Frozen
       input→address vectors for `ir_hash`, the RFC-6962 leaf/interior/root
       helpers, `compute_plan_id` and `bundle_sha256`. The tests that covered

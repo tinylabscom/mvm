@@ -13,6 +13,11 @@
 # `suite` names the Gherkin file under `features/suites/` that carries the
 # scenario (R3). Every claim must have a scenario and at least one witness.
 #
+# `independent_verifiers` records how many independent implementations of a
+# format a claim rests on, each checked against one shared corpus rather than
+# against input it generated for itself. Two implementations that only ever see
+# their own output agree by construction and prove nothing about each other.
+#
 # `witness_kinds` names the witness kinds that are meaningful for this claim,
 # and each named kind must have at least one live witness. It exists because
 # a witness can be deleted from the list below without any gate noticing: the
@@ -126,10 +131,13 @@ level = "build"
 witness_kinds = ["fn"]
 suite = "admission_audit"
 statement = "Every workload runs from a signed, audited ExecutionPlan"
+independent_verifiers = 2
 witnesses = [
     "fn:synthesize_plan",
     "fn:admit_for_run",
     "fn:verify_audit_chain",
+    "fn:frozen_chain_matches_what_the_signer_produces_and_the_host_verifier_accepts",
+    "fn:no_std_verifier_accepts_the_same_corpus_the_host_verifier_does",
 ]
 
 [[claim]]

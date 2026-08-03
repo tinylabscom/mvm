@@ -132,10 +132,13 @@ for detailed scope and acceptance criteria.
         `interior_hash`, `merkle_root`, `compute_plan_id` and `bundle_sha256`
         now carry frozen addresses. The existing `ir_hash` tests were all
         *relational*, so a canonicalization change moving every address
-        consistently passed all four — planted and confirmed. Remaining: the
-        audit `prev_hash` spine, which needs a fixed keypair fixture and
-        belongs with WS4
-  - [ ] WS4 — ≥2 independent verifiers over the WS3 corpus
+        consistently passed all four — planted and confirmed. The audit `prev_hash`
+        spine is closed by WS4's frozen signed corpus
+  - [x] WS4 — one frozen signed audit chain both verifiers read. The existing
+        parity test compared them over a randomly-keyed chain generated per
+        run, which no verifier outside that process could ever see. riscv32 is
+        a compile oracle, not an executing one — the executing pair is the host
+        verifier and the no_std mirror, with wasm executing the mirror
   - [ ] WS5 — bind each witness to its recorded red-proof
   - [~] WS6 — **lead item**: content-address the caches, verify on read. The
         2026-08-01 recon revision reverses finding 2 — integrity-on-read is the

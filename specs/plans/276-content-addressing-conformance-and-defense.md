@@ -130,14 +130,21 @@ The sharpest finding is what the existing `ir_hash` tests are: **all four are re
 - [x] `bundle_sha256` vectors in `plan/bundle.rs`, including a raw-byte case (NUL, 0xff, 0x80) that a digest passing through any string conversion would fail.
 - [x] Seeded from shipped behaviour, so they freeze what ships rather than asserting what it ought to be. `MVM_PRINT_ADDRESS_VECTORS=1` prints instead of asserting, making a reseed a deliberate act with a diff that has to be justified.
 - [x] Falsifiability rows for both crates, each with the planted defect recorded.
-- [ ] **Remaining: the audit `prev_hash` spine.** The chain link is `sha256(serde_json(entry) || prev_hash)` computed inside `verify_audit_chain_bytes`, with no separate public function, so a vector needs signed envelopes and therefore a fixed keypair fixture. That fixture is also what WS4 needs to feed one corpus to the host, wasm and riscv32 verifiers, so it belongs there rather than here.
+- [x] The audit `prev_hash` spine, closed by WS4: the spine is exercised by the frozen signed corpus, whose `a_reordered_corpus_breaks_the_chain` vector swaps two validly-signed entries and must fail — signatures alone do not order a chain.
 - [ ] Fold `SemanticAddress`'s existing 13 goldens into the same corpus shape, so WS4 has one vector set rather than two conventions.
 
 ### WS4 — Two-verifier oracle bar (U5)
-- [ ] Make the WS3 replay corpus the shared vector set the existing host↔no_std audit-verifiers both consume (`mvm_verify_matches_supervisor_chain` pins the equivalence today over ad-hoc input, not a frozen corpus).
-- [ ] Add the riscv32/ESP32 verifier (edge tier) as the third independent oracle over the same corpus where it builds.
-- [ ] Record in `model/claims.toml` which claims are backed by ≥2 independent verifiers.
-- [ ] `VERIFICATION.md` row (planted: diverge one verifier's canonicalizer → parity test fires).
+
+**What the bar actually needed.** `mvm_verify_matches_supervisor_chain` already compared the two implementations, but over a chain generated **fresh with a random key on every run**. Those bytes exist only inside that process, so they can never reach a verifier that does not link the host signer — and an oracle bar means little if each implementation only ever sees input it produced itself.
+
+**Honesty about the third verifier.** The riscv32 target is `cargo build -p mvm-protocol --lib` only; bare metal has no test harness, so it is a *compile* oracle, not an executing one. The executing pair is the host verifier and the `no_std` mirror, with wasm executing the mirror a second way. Claiming three executing oracles would have been wrong.
+
+- [x] `tests/vectors/audit-chain-v1.jsonl` + `.pubkey` — a signed chain frozen on disk. Deterministic via a fixed signing seed and fixed timestamps (Ed25519 is deterministic per RFC 8032). `MVM_REGEN_AUDIT_CORPUS=1` rewrites it.
+- [x] `mvm-hostd` owns generating it and asserts the committed bytes still match what the signer emits, so the corpus cannot drift from the writer unnoticed — the failure names the real consequence: every chain already written just became unverifiable.
+- [x] The `no_std` mirror reads the same bytes via `include_str!` rather than the filesystem, which is what lets the identical test execute under `wasm32-wasip1`.
+- [x] Vectors cover the shapes the two must agree on: optional-field absence (`skip_serializing_if`), content-address labels that lineage verification reads back, a tampered entry, and a reordering of validly-signed entries.
+- [x] `model/claims.toml` records `independent_verifiers` on MVM-SEC-08, with the two corpus tests as witnesses. The field is documented as meaning *one shared corpus*, since implementations that only see their own output agree by construction.
+- [x] Falsifiability: diverging the mirror's serialization of an absent optional field fires `SignatureInvalid` over the shared corpus.
 
 ### WS5 — Falsifiability binding (U3)
 
