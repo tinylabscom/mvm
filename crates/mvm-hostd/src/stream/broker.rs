@@ -1181,6 +1181,12 @@ mod tests {
         // thing that waits — a manifest missing whatever was still queued
         // would be a hole nothing declares.
         let manifest = b.seal();
+        assert!(
+            !manifest.chunks.is_empty(),
+            "a healthy writer racing an unbounded producer must still land some records — \
+             otherwise the accounting check below passes vacuously on a broker that recorded \
+             nothing at all"
+        );
         assert_eq!(
             manifest.chunks.len() as u64 + manifest.refused_chunks,
             total as u64,

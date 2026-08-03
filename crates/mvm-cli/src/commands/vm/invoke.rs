@@ -721,6 +721,13 @@ fn notice(sinks: &mut EventSinks<'_>, line: &str) {
 struct RecordedDivergence {
     masked_chunks: u64,
     withheld_chunks: u64,
+    /// Chunks that came back [`RecordedCopy::NotRecorded`] after the call
+    /// had already been sampled as recorded — the capture's broker was
+    /// released mid-dispatch (a teardown racing this call). Tracked
+    /// separately from the up-front `recorded` flag because that flag is
+    /// sampled once, before the first frame arrives, and cannot see a
+    /// release that lands after it.
+    dropped_chunks: u64,
     /// Sorted and deduplicated, so the line reads the same across runs.
     rules_fired: std::collections::BTreeSet<&'static str>,
 }
@@ -729,7 +736,10 @@ impl RecordedDivergence {
     fn note(&mut self, recorded: &mvm_hostd::stream::RecordedCopy) {
         use mvm_hostd::stream::RecordedCopy;
         match recorded {
-            RecordedCopy::NotRecorded | RecordedCopy::Identical => {}
+            RecordedCopy::NotRecorded => {
+                self.dropped_chunks = self.dropped_chunks.saturating_add(1);
+            }
+            RecordedCopy::Identical => {}
             RecordedCopy::Masked { rules_fired } => {
                 self.masked_chunks = self.masked_chunks.saturating_add(1);
                 self.rules_fired.extend(rules_fired.iter().copied());
@@ -742,10 +752,16 @@ impl RecordedDivergence {
 
     /// One line naming the divergence, or `None` when the two copies agree.
     fn describe(&self, vm_name: &str) -> Option<String> {
-        if self.masked_chunks == 0 && self.withheld_chunks == 0 {
+        if self.masked_chunks == 0 && self.withheld_chunks == 0 && self.dropped_chunks == 0 {
             return None;
         }
         let mut parts = Vec::new();
+        if self.dropped_chunks > 0 {
+            parts.push(format!(
+                "{} chunk(s) went unrecorded because the capture ended mid-call",
+                self.dropped_chunks
+            ));
+        }
         if self.masked_chunks > 0 {
             parts.push(format!(
                 "{} chunk(s) masked by: {}",
@@ -1198,21 +1214,21 @@ mod streaming_tests {
 
     #[test]
     fn a_call_whose_copies_agree_says_nothing() {
-        // A notice that fires on every call stops being read.
+        // A notice that fires on every call stops being read. Noted directly
+        // against `RecordedCopy::Identical` rather than through `uncaptured()`
+        // — that helper's sink answers every frame `NotRecorded`, which is
+        // itself something `report` must now surface (see the mid-call-release
+        // regression test in `captured_tests`), so it can no longer stand in
+        // for "nothing diverged".
         let (mut out, mut err) = (Vec::new(), Vec::new());
         {
-            let mut capture = uncaptured();
             let mut sinks = buffers(&mut out, &mut err);
-            write_entrypoint_event(
-                &EntrypointEvent::Stdout {
-                    chunk: b"nothing to see here".to_vec(),
-                },
-                &mut capture,
-                &mut sinks,
-            );
+            sinks
+                .divergence
+                .note(&mvm_hostd::stream::RecordedCopy::Identical);
             sinks.report("quiet-vm", true);
         }
-        assert_eq!(out, b"nothing to see here");
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
         assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
     }
 }
@@ -1446,6 +1462,59 @@ mod captured_tests {
             captured.recorded(KindFilter::only(StreamKind::Trace)),
             vec![(StreamKind::Trace, br#"{"event":"ready"}"#.to_vec())],
             "the structured record belongs on the trace channel, not stdout"
+        );
+    }
+
+    #[test]
+    fn a_release_mid_call_is_reported_not_swallowed() {
+        // `recorded` is sampled once, before the first frame. A teardown that
+        // lands between two frames of the same dispatch — `release` sealing
+        // the transcript out from under a call still streaming — must not
+        // leave the report describing a clean call just because that one
+        // early sample was still true.
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let _env = env;
+        let vm = "invoke-mid-release-vm";
+        let state = mvm_core::config::vm_state_dir(vm);
+        std::fs::create_dir_all(&state).expect("state dir");
+        let plane = StreamPlane::new();
+        let redaction = RedactionPolicy::default();
+        plane
+            .attach(&ConsoleCapture {
+                vm_name: vm,
+                console_log: &state.join("console.log"),
+                redaction: &redaction,
+            })
+            .expect("attach a plane");
+
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        {
+            let mut capture = plane.entrypoint_sink(vm);
+            let recorded = capture.is_recorded();
+            assert!(recorded, "the plane just attached this VM");
+            let mut sinks = CallOutput {
+                sinks: EventSinks {
+                    out: Box::new(&mut out),
+                    err: Box::new(&mut err),
+                },
+                divergence: RecordedDivergence::default(),
+            };
+            write_entrypoint_event(&stdout(b"before"), &mut capture, &mut sinks);
+            plane.release(vm); // a teardown racing this call
+            write_entrypoint_event(&stdout(b"after"), &mut capture, &mut sinks);
+            sinks.report(vm, recorded);
+        }
+
+        assert_eq!(
+            out, b"beforeafter",
+            "the caller still gets its own bytes in full, release or not"
+        );
+        let rendered = String::from_utf8(err).expect("utf8");
+        assert!(
+            rendered.contains("went unrecorded"),
+            "a chunk dropped by a mid-call release must not be silent: {rendered}"
         );
     }
 }

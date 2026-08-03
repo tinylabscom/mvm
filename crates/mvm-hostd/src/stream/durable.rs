@@ -27,8 +27,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-use mvm_core::transcript::{Direction, TranscriptManifest, TranscriptWriter};
+use mvm_core::transcript::{Direction, TranscriptManifest, TranscriptWriter, sealed_root_hex};
 use mvm_protocol::stream::{StreamKind, StreamRecord};
 
 /// Records the writer thread may fall behind before the hand-off starts
@@ -90,6 +91,13 @@ struct PersistCounters {
     /// Whether the hand-off is currently dropping. Same reason as `lapses`:
     /// the transition is what gets logged.
     shedding: AtomicBool,
+    /// Every record ever offered to [`DurableSink::push`], regardless of what
+    /// happened to it. Kept independent of the writer's own bookkeeping
+    /// because [`DurableSink::seal`]'s degraded path cannot read the writer
+    /// at all — this is the one count it can still trust.
+    total: AtomicU64,
+    /// Plaintext bytes in `total`.
+    total_bytes: AtomicU64,
 }
 
 /// What the durable half has done, for a caller assembling broker counters.
@@ -117,8 +125,15 @@ pub(in crate::stream) struct DurableSink {
     /// Shared with the writer thread. The sink only takes it to seal, and only
     /// after that thread has joined.
     writer: Arc<Mutex<TranscriptWriter>>,
-    /// `None` if the writer thread could not be spawned, which falls back to
-    /// writing inline rather than dropping the record.
+    /// A fresh, chunkless manifest for this capture, captured before `writer`
+    /// ever moved behind the lock. [`seal`](Self::seal)'s degraded path reads
+    /// this instead of `writer` when the writer thread never releases it —
+    /// the one manifest shape this sink can produce without touching a lock
+    /// that may be held by a disk syscall that is never coming back.
+    seed: TranscriptManifest,
+    /// `None` if the writer thread could not be spawned, or once it has
+    /// stopped taking work. Either way `push` sheds rather than falling back
+    /// to an inline write — see the module docs.
     jobs: Option<SyncSender<PersistJob>>,
     worker: Option<JoinHandle<()>>,
     counters: Arc<PersistCounters>,
@@ -126,6 +141,10 @@ pub(in crate::stream) struct DurableSink {
 
 impl DurableSink {
     pub fn new(vm: &str, writer: TranscriptWriter) -> Self {
+        // Taken before the writer moves behind the lock: an empty manifest is
+        // cheap to build and is the only state `seal` can still hand back if
+        // that lock is never released.
+        let seed = writer.sealed_manifest();
         let writer = Arc::new(Mutex::new(writer));
         let counters = Arc::new(PersistCounters::default());
         let (jobs, inbox) = sync_channel(DURABLE_QUEUE_DEPTH);
@@ -133,29 +152,53 @@ impl DurableSink {
         Self {
             vm: vm.to_string(),
             writer,
+            seed,
             // A thread that would not start must not cost the capture its
-            // transcript: without one, `push` writes inline.
+            // transcript by pulling the disk onto the producer's own thread:
+            // without one, `push` sheds every record, same as a full queue.
             jobs: worker.as_ref().map(|_| jobs),
             worker,
             counters,
         }
     }
 
-    /// Hand one record to the writer, or drop it. Never waits.
+    /// A sink with no writer thread at all, as if [`spawn_writer`] had
+    /// failed — the thread-table-exhaustion case a real spawn failure cannot
+    /// be made to happen on demand.
+    #[cfg(test)]
+    fn new_without_writer_thread(vm: &str, writer: TranscriptWriter) -> Self {
+        let seed = writer.sealed_manifest();
+        Self {
+            vm: vm.to_string(),
+            writer: Arc::new(Mutex::new(writer)),
+            seed,
+            jobs: None,
+            worker: None,
+            counters: Arc::new(PersistCounters::default()),
+        }
+    }
+
+    /// Hand one record to the writer, or drop it. Never waits, and never
+    /// touches the disk itself: whether there is no writer thread to hand
+    /// this to, or its queue is full, or the thread has already died, the
+    /// answer is the same shed a full queue gets, accounted the same way.
+    /// Writing inline here would put the producer's own thread behind
+    /// whatever the disk is doing at that moment — the exact stall this
+    /// whole module exists to remove, reached through the one door that
+    /// used to bypass it.
     pub fn push(&self, record: &Arc<StreamRecord>) {
+        self.counters.total.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .total_bytes
+            .fetch_add(record.payload.len() as u64, Ordering::Relaxed);
         let Some(jobs) = self.jobs.as_ref() else {
-            // No writer thread at all. The record still has to reach the
-            // transcript, so it goes there from here — slower, never silently
-            // absent.
-            return write_chunk(&self.writer, &self.counters, record);
+            return note_shed(&self.vm, &self.counters, record);
         };
         match jobs.try_send(PersistJob::Chunk(Arc::clone(record))) {
             Ok(()) => note_handed_over(&self.vm, &self.counters),
             Err(TrySendError::Full(_)) => note_shed(&self.vm, &self.counters, record),
-            // The writer thread is gone; the same inline fallback applies.
-            Err(TrySendError::Disconnected(_)) => {
-                write_chunk(&self.writer, &self.counters, record);
-            }
+            // The writer thread is gone; the shed path applies here too.
+            Err(TrySendError::Disconnected(_)) => note_shed(&self.vm, &self.counters, record),
         }
     }
 
@@ -163,7 +206,7 @@ impl DurableSink {
     #[cfg(test)]
     pub fn drain(&self) {
         let Some(jobs) = self.jobs.as_ref() else {
-            return; // nothing is queued: `push` wrote inline
+            return; // no writer thread: `push` sheds, nothing is ever queued
         };
         let (done, wait) = sync_channel(1);
         if jobs.send(PersistJob::Drained(done)).is_ok() {
@@ -188,13 +231,32 @@ impl DurableSink {
         }
     }
 
-    /// Stop taking work, wait for what is queued to land, and seal.
+    /// Stop taking work, wait — up to a bound — for what is queued to land,
+    /// and seal.
+    ///
+    /// This runs on whatever thread tears the VM down
+    /// (`ConsoleStreamer::stop` → `release`), so it cannot wait out a
+    /// genuinely hung disk: the writer thread holds `writer`'s lock for the
+    /// length of its blocking append, and a syscall stuck in the kernel is
+    /// not something this process can interrupt. Past
+    /// [`SEAL_JOIN_TIMEOUT`] this gives up on ever reading that writer again
+    /// and reports the whole capture as unwritten instead — the shed
+    /// hand-off's own rule ("an honest hole beats a stall"), extended to the
+    /// one thing it didn't cover: the writer itself never finishing.
     pub fn seal(mut self) -> TranscriptManifest {
         self.jobs = None;
-        if let Some(worker) = self.worker.take() {
-            // A panicked writer is already counted as refusals; what matters
-            // here is that it is no longer holding the lock.
-            let _ = worker.join();
+        let joined = match self.worker.take() {
+            Some(worker) => wait_for_writer(worker, SEAL_JOIN_TIMEOUT),
+            None => true,
+        };
+        if !joined {
+            tracing::warn!(
+                vm = %self.vm,
+                "durable writer did not exit within the seal deadline; this capture's \
+                 transcript is reported as fully unwritten rather than block VM teardown on \
+                 a disk that may never answer"
+            );
+            return self.degraded_manifest();
         }
         let mut writer = lock_writer(&self.writer);
         // Records shed at the hand-off never reached the writer, so it cannot
@@ -207,6 +269,54 @@ impl DurableSink {
         );
         writer.sealed_manifest()
     }
+
+    /// The manifest for a writer this sink gave up waiting on: no chunks,
+    /// because none can be vouched for without the lock, and every record
+    /// this sink was ever handed counted as refused — `total` rather than
+    /// just `shed_chunks`, because some of what the wedged writer already
+    /// took before it stopped answering may in fact be sitting on disk, and
+    /// this manifest cannot tell which. Declaring all of it missing is the
+    /// direction that never overclaims completeness.
+    fn degraded_manifest(&self) -> TranscriptManifest {
+        let mut manifest = self.seed.clone();
+        manifest.refused_chunks = self.counters.total.load(Ordering::Relaxed);
+        manifest.refused_bytes = self.counters.total_bytes.load(Ordering::Relaxed);
+        manifest.sealed_root_hex =
+            sealed_root_hex(&manifest).expect("fixed transcript root metadata serializes");
+        manifest
+    }
+}
+
+/// How long [`DurableSink::seal`] waits for the writer thread to exit before
+/// giving up on it. Bounded so a teardown that races a hung disk returns in
+/// seconds rather than never — see the module docs on why the hand-off would
+/// rather shed than couple the workload to that same disk.
+const SEAL_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How often [`wait_for_writer`] checks whether the writer thread has exited.
+const SEAL_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Wait for `worker` to exit, but not past `timeout`. Polls rather than
+/// joining directly because a plain `join` has no timeout in `std`, and this
+/// module cannot add a dependency to get one.
+///
+/// A worker still running once the deadline passes is detached here: dropping
+/// a [`JoinHandle`] without joining does not stop the thread, but nothing in
+/// this process waits on it again. Whatever kept it alive this long — a write
+/// syscall blocked in the kernel — is not something a timeout in this
+/// function can do anything about; the thread finishes, if it ever does, on
+/// its own.
+fn wait_for_writer(worker: JoinHandle<()>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !worker.is_finished() {
+        if Instant::now() >= deadline {
+            drop(worker);
+            return false;
+        }
+        std::thread::sleep(SEAL_JOIN_POLL_INTERVAL);
+    }
+    let _ = worker.join();
+    true
 }
 
 /// Drop one record at the hand-off, and account for it.
@@ -324,21 +434,6 @@ fn append(
     }
 }
 
-/// The inline fallback for a capture with no writer thread. Counts a refusal
-/// the same way, without the outage-transition log the thread keeps.
-fn write_chunk(
-    writer: &Arc<Mutex<TranscriptWriter>>,
-    counters: &Arc<PersistCounters>,
-    record: &StreamRecord,
-) {
-    if lock_writer(writer)
-        .push(direction_for(record.kind), &record.payload)
-        .is_err()
-    {
-        counters.refused.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 fn direction_for(kind: StreamKind) -> Direction {
     match kind {
         StreamKind::Stdout => Direction::Stdout,
@@ -359,7 +454,7 @@ mod tests {
     use super::*;
     use mvm_core::crypto::aead;
     use mvm_core::transcript::{
-        CaptureBinding, CaptureBounds, RetentionPolicy, TranscriptWriterConfig,
+        CaptureBinding, CaptureBounds, RetentionPolicy, TranscriptWriterConfig, verify_sealed_root,
     };
     use mvm_protocol::stream::StreamSource;
     use std::path::Path;
@@ -498,5 +593,91 @@ mod tests {
             shed_chunks: 4,
         };
         assert_eq!(counts.missing(), 7);
+    }
+
+    #[test]
+    fn a_missing_writer_thread_sheds_rather_than_writing_inline() {
+        // `jobs` reads `None` for a second reason besides a full queue: no
+        // writer thread was ever spawned for this capture (thread-table
+        // exhaustion on a busy host). The old fallback wrote inline here on
+        // the producer's own thread — holding the writer's lock, standing in
+        // for a disk that cannot answer, proves the difference: that
+        // fallback would block on it forever, this path must not touch it
+        // at all.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sink = DurableSink::new_without_writer_thread("vm-durable", writer_at(dir.path()));
+        let held = sink.writer_lock();
+        let wedged = held.lock().expect("the writer lock");
+
+        let total = 8u64;
+        let (finished, pushing) = std::sync::mpsc::channel();
+        let pusher = std::thread::spawn(move || {
+            for seq in 0..total {
+                sink.push(&record(seq));
+            }
+            let _ = finished.send(());
+            sink
+        });
+        let returned = pushing.recv_timeout(Duration::from_secs(5)).is_ok();
+        drop(wedged);
+        assert!(
+            returned,
+            "push must never write inline on the producer thread"
+        );
+
+        let sink = pusher.join().expect("the pushing thread");
+        let counts = sink.counts();
+        assert_eq!(
+            counts.shed_chunks, total,
+            "every record must be accounted as shed, not written inline"
+        );
+        let manifest = sink.seal();
+        assert_eq!(manifest.refused_chunks, total);
+        assert!(
+            manifest.is_truncated(),
+            "a transcript that dropped every record must say so"
+        );
+    }
+
+    #[test]
+    fn seal_does_not_hang_when_the_writer_thread_cannot_return() {
+        // The writer thread holds `writer`'s lock for the length of its
+        // blocking append, same as a hung disk would. Holding that lock from
+        // the test simulates the writer never returning, which is exactly
+        // the case `seal` cannot wait out — it runs on the VM teardown path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sink = DurableSink::new("vm-durable", writer_at(dir.path()));
+        let held = sink.writer_lock();
+        let wedged = held.lock().expect("the writer lock");
+
+        let total = 4u64;
+        for seq in 0..total {
+            sink.push(&record(seq));
+        }
+
+        let (finished, sealing) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = finished.send(sink.seal());
+        });
+        let outcome = sealing.recv_timeout(SEAL_JOIN_TIMEOUT + Duration::from_secs(5));
+        // Only now: the writer thread these records were handed to is stuck
+        // acquiring this same lock, and would otherwise hold it forever.
+        drop(wedged);
+        let manifest = outcome.expect(
+            "seal must return within its bound even when the writer \
+                                        thread never does",
+        );
+
+        assert!(
+            manifest.chunks.is_empty(),
+            "a writer that never released its lock cannot be vouched for"
+        );
+        assert_eq!(manifest.refused_chunks, total);
+        assert_eq!(manifest.refused_bytes, total * PAYLOAD.len() as u64);
+        assert!(
+            manifest.is_truncated(),
+            "a degraded seal must not look like a complete capture"
+        );
+        verify_sealed_root(&manifest).expect("the degraded manifest still verifies");
     }
 }
