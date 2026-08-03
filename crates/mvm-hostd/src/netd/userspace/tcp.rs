@@ -40,22 +40,28 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 
 use mvm_net::l3::admit::DenyCode;
+use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
 use mvm_net::l3::flow::FlowKey;
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::ChecksumCapabilities;
+use smoltcp::socket::tcp::{RecvError, Socket as TcpSocket, SocketBuffer};
+use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
-    IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6Packet, Ipv6Repr, TcpControl, TcpPacket, TcpRepr,
-    TcpSeqNumber,
+    HardwareAddress, IpAddress, IpCidr, IpListenEndpoint, IpProtocol, Ipv4Packet, Ipv4Repr,
+    Ipv6Packet, Ipv6Repr, TcpControl, TcpPacket, TcpRepr, TcpSeqNumber,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::netd::datapath::DatapathError;
 use crate::netd::metrics::GatewayMetrics;
 
-use super::limits::HALF_OPEN_TIMEOUT_MILLIS;
+use super::device::{GuestDevice, PushOutcome};
+use super::limits::{HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER};
 
 /// A guest SYN held back from the stack while its host connect runs.
 pub struct HalfOpen {
@@ -354,6 +360,471 @@ fn fail_flow(out: &mut Resolved, entry: HalfOpen, guest: IpAddr, metrics: &mut G
     out.failed.push(entry);
 }
 
+/// What one bounded pump pass moved.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PumpStats {
+    /// Bytes taken out of the stack and written to the host socket.
+    pub to_host: usize,
+    /// Bytes read off the host socket and handed to the stack.
+    pub to_guest: usize,
+    /// Times a direction had bytes to move and the far side would not take
+    /// them. This is the visible half of backpressure: the bytes stay
+    /// where they were and the window closes behind them.
+    pub stalled: usize,
+}
+
+/// The most either direction may move in one pass.
+///
+/// Not a new number: it is the tighter of the two per-socket buffers, the
+/// same pair the per-machine memory ceiling is computed from. One pass
+/// cannot exceed it anyway, because nothing refills a buffer mid-pass — so
+/// this states the bound rather than inventing one, and keeps it stated if
+/// a later change ever does let a buffer drain inside a pass.
+pub const fn max_bytes_per_pass() -> usize {
+    if SOCKET_RX_BUFFER < SOCKET_TX_BUFFER {
+        SOCKET_RX_BUFFER
+    } else {
+        SOCKET_TX_BUFFER
+    }
+}
+
+/// One admitted flow: the guest's TCP terminated in userspace, and the same
+/// conversation re-originated on a host socket.
+///
+/// Each flow carries its own stack rather than sharing one interface with a
+/// socket per flow. The guest addresses each flow at *its own* destination,
+/// so a shared interface would have to hold every destination any guest
+/// dialled — smoltcp's address list holds four — or else answer for every
+/// address in existence via `set_any_ip`, which is a far wider surface than
+/// one interface per admitted destination. Per-flow also makes the buffer
+/// ceiling per-flow arithmetic rather than a shared pool one talkative flow
+/// can monopolise.
+pub struct EstablishedFlow {
+    key: FlowKey,
+    /// The address this session leased the guest, for the resets a failing
+    /// flow owes it.
+    guest: IpAddr,
+    /// `Option` so the descriptor can be released deterministically rather
+    /// than whenever the flow happens to drop.
+    host: Option<TcpStream>,
+    device: GuestDevice,
+    interface: Interface,
+    sockets: SocketSet<'static>,
+    handle: SocketHandle,
+    /// The guest has closed its sending half. Latched, because the host
+    /// shutdown it implies may have to wait for buffered bytes to drain.
+    guest_fin_seen: bool,
+    /// The shutdown has been attempted, successfully or not.
+    fin_forwarded: bool,
+    write_shutdown: bool,
+    host_read_eof: bool,
+    /// The first non-recoverable host-socket error this flow met. Kept
+    /// rather than dropped: a silent drop here is a guest hanging to its
+    /// own timeout with nothing to explain it.
+    host_error: Option<io::ErrorKind>,
+}
+
+impl EstablishedFlow {
+    /// Build a flow from a half-open entry whose host connect completed,
+    /// replaying the held SYN into the flow's own stack so the guest's
+    /// handshake completes only against a destination that really accepted.
+    pub fn from_half_open(
+        entry: HalfOpen,
+        guest: IpAddr,
+        mtu: usize,
+        now_millis: u64,
+    ) -> Result<Self, DatapathError> {
+        let key = entry.key();
+        let syn = entry.syn().to_vec();
+        let mut flow = Self::open(entry.into_socket(), key, guest, mtu)?;
+        flow.deliver_from_guest(&syn);
+        flow.poll(now_millis);
+        Ok(flow)
+    }
+
+    fn open(
+        host: TcpStream,
+        key: FlowKey,
+        guest: IpAddr,
+        mtu: usize,
+    ) -> Result<Self, DatapathError> {
+        // Re-asserted rather than assumed: a blocking write in the pump
+        // would park the whole drive loop on one slow destination.
+        host.set_nonblocking(true)?;
+
+        let mut device = GuestDevice::new(mtu, DEFAULT_QUEUE_DEPTH);
+        let mut config = Config::new(HardwareAddress::Ip);
+        // A predictable seed makes this flow's ISNs predictable to the
+        // guest, which is the one party we do not trust.
+        config.random_seed = rand::random();
+        let mut interface = Interface::new(config, &mut device, SmolInstant::from_millis(0i64));
+        interface.update_ip_addrs(|addrs| {
+            addrs
+                .push(host_cidr(key.remote))
+                .expect("a freshly created address list has room for its first entry");
+        });
+
+        let mut socket = TcpSocket::new(
+            SocketBuffer::new(vec![0u8; SOCKET_RX_BUFFER]),
+            SocketBuffer::new(vec![0u8; SOCKET_TX_BUFFER]),
+        );
+        socket
+            .listen(IpListenEndpoint {
+                addr: Some(smol_addr(key.remote)),
+                port: key.remote_port,
+            })
+            .map_err(|e| {
+                DatapathError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("cannot terminate the guest half of {key:?}: {e}"),
+                ))
+            })?;
+        let mut sockets = SocketSet::new(Vec::new());
+        let handle = sockets.add(socket);
+
+        Ok(Self {
+            key,
+            guest,
+            host: Some(host),
+            device,
+            interface,
+            sockets,
+            handle,
+            guest_fin_seen: false,
+            fin_forwarded: false,
+            write_shutdown: false,
+            host_read_eof: false,
+            host_error: None,
+        })
+    }
+
+    pub fn key(&self) -> FlowKey {
+        self.key
+    }
+
+    /// The address this session leased the guest.
+    pub fn guest(&self) -> IpAddr {
+        self.guest
+    }
+
+    /// Hand a guest packet to this flow's stack.
+    pub fn deliver_from_guest(&mut self, packet: &[u8]) -> PushOutcome {
+        self.device.push_from_guest(packet)
+    }
+
+    /// Take everything the stack has produced for the guest.
+    ///
+    /// Bounded by the device's queue depth, which drops rather than grows.
+    pub fn take_guest_packets(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while let Some(packet) = self.device.pop_for_guest() {
+            out.push(packet);
+        }
+        out
+    }
+
+    /// Move bytes in both directions, once, within a bounded budget.
+    pub fn pump(&mut self, now_millis: u64) -> PumpStats {
+        let mut stats = PumpStats::default();
+        // Ingest what the guest sent and let the stack answer it, so this
+        // pass works on the freshest state rather than the last one's.
+        self.poll(now_millis);
+        if self.guest_to_host(&mut stats) {
+            self.guest_fin_seen = true;
+        }
+        self.forward_guest_fin();
+        self.host_to_guest(&mut stats);
+        // Emit what the two directions produced, so the guest's ACKs and
+        // the peer's bytes leave in the pass they arrived in.
+        self.poll(now_millis);
+        stats
+    }
+
+    /// The guest has closed its sending half.
+    ///
+    /// `shutdown(Write)`, never `close`: the peer may have a whole response
+    /// still to write, and closing would discard it and break every
+    /// half-duplex protocol. Guest bytes the host has not seen yet are
+    /// written first — see [`Self::forward_guest_fin`].
+    pub fn on_guest_fin(&mut self) {
+        self.guest_fin_seen = true;
+        let mut stats = PumpStats::default();
+        let _ = self.guest_to_host(&mut stats);
+        self.forward_guest_fin();
+    }
+
+    /// Release the host descriptor now rather than at drop.
+    pub fn close_host(&mut self) {
+        self.host = None;
+    }
+
+    /// Bytes this flow is holding on the guest's behalf, in either
+    /// direction. Bounded by the two per-socket buffers, which is what
+    /// makes the per-machine ceiling a real number.
+    pub fn bytes_buffered(&self) -> usize {
+        let socket = self.socket();
+        socket.recv_queue() + socket.send_queue()
+    }
+
+    /// Whether the host socket's write half has been shut down.
+    pub fn host_write_shutdown(&self) -> bool {
+        self.write_shutdown
+    }
+
+    /// Whether the host descriptor has been released.
+    pub fn host_socket_closed(&self) -> bool {
+        self.host.is_none()
+    }
+
+    /// Whether the guest's connection is still exchanging packets.
+    pub fn is_active(&self) -> bool {
+        self.socket().is_active()
+    }
+
+    /// The first non-recoverable host-socket error, if any. The guest is
+    /// owed a reset for it; building that reset is not this type's job.
+    pub fn host_error(&self) -> Option<io::ErrorKind> {
+        self.host_error
+    }
+
+    fn socket(&self) -> &TcpSocket<'static> {
+        self.sockets.get::<TcpSocket>(self.handle)
+    }
+
+    fn poll(&mut self, now_millis: u64) {
+        let now = SmolInstant::from_millis(now_millis as i64);
+        self.interface
+            .poll(now, &mut self.device, &mut self.sockets);
+    }
+
+    /// Move guest bytes out of the stack and onto the host socket, and
+    /// report whether the guest has finished sending.
+    ///
+    /// The host write's own return value decides how much is consumed from
+    /// the stack, so a short write leaves the remainder exactly where it
+    /// was and `WouldBlock` consumes nothing at all. There is no second
+    /// copy and no offset to keep. That *is* the backpressure mechanism:
+    /// unconsumed bytes hold the stack's receive window closed, and the
+    /// guest's own TCP stops sending. Nothing counts them and nothing has
+    /// to.
+    fn guest_to_host(&mut self, stats: &mut PumpStats) -> bool {
+        let Self {
+            host,
+            sockets,
+            handle,
+            host_error,
+            write_shutdown,
+            ..
+        } = self;
+        // Nothing may follow a FIN we have already forwarded.
+        if *write_shutdown {
+            return false;
+        }
+        let Some(stream) = host.as_mut() else {
+            return false;
+        };
+        let socket = sockets.get_mut::<TcpSocket>(*handle);
+        let mut budget = max_bytes_per_pass();
+        while budget > 0 {
+            let borrowed = &mut *stream;
+            let step = match socket.recv(|data| write_some(borrowed, data, budget)) {
+                Ok(step) => step,
+                // Every byte the guest will ever send has been handed over.
+                Err(RecvError::Finished) => return true,
+                Err(RecvError::InvalidState) => break,
+            };
+            match step {
+                HostWrite::Wrote(n) => {
+                    stats.to_host += n;
+                    budget -= n;
+                }
+                HostWrite::Idle => break,
+                HostWrite::Blocked => {
+                    stats.stalled += 1;
+                    break;
+                }
+                HostWrite::Failed(kind) => {
+                    *host_error = Some(kind);
+                    break;
+                }
+            }
+        }
+        false
+    }
+
+    /// Move peer bytes off the host socket and into the stack.
+    ///
+    /// The mirror of the rule above: when the stack's send buffer is full
+    /// we stop reading the host socket, its own receive window closes, and
+    /// the peer stalls.
+    fn host_to_guest(&mut self, stats: &mut PumpStats) {
+        let Self {
+            host,
+            sockets,
+            handle,
+            host_read_eof,
+            host_error,
+            ..
+        } = self;
+        if *host_read_eof {
+            return;
+        }
+        let Some(stream) = host.as_mut() else {
+            return;
+        };
+        let socket = sockets.get_mut::<TcpSocket>(*handle);
+        let mut budget = max_bytes_per_pass();
+        while budget > 0 {
+            if !socket.may_send() {
+                break;
+            }
+            if !socket.can_send() {
+                stats.stalled += 1;
+                break;
+            }
+            let borrowed = &mut *stream;
+            let step = match socket.send(|buf| read_some(borrowed, buf, budget)) {
+                Ok(step) => step,
+                Err(_) => break,
+            };
+            match step {
+                HostRead::Read(n) => {
+                    stats.to_guest += n;
+                    budget -= n;
+                }
+                HostRead::Idle => break,
+                // The peer has closed its sending half. Pass that on as a
+                // FIN so the guest's read returns instead of hanging; our
+                // own write half stays open, because the guest may not be
+                // finished.
+                HostRead::Eof => {
+                    *host_read_eof = true;
+                    socket.close();
+                    break;
+                }
+                HostRead::Failed(kind) => {
+                    *host_error = Some(kind);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Hand the guest's FIN on to the host, once, and only once every guest
+    /// byte has already been written there.
+    ///
+    /// Shutting down early truncates the request: the guest's last segment
+    /// can still be sitting in the stack's receive buffer when its FIN
+    /// arrives, and the peer would see a short body followed by a clean
+    /// close — indistinguishable from the guest having sent exactly that.
+    fn forward_guest_fin(&mut self) {
+        if !self.guest_fin_seen || self.fin_forwarded {
+            return;
+        }
+        if self.socket().recv_queue() > 0 {
+            return;
+        }
+        let Some(stream) = self.host.as_ref() else {
+            return;
+        };
+        // Latched before the call, so a shutdown the kernel refuses — the
+        // peer having already reset, say — is not retried every pass.
+        self.fin_forwarded = true;
+        match stream.shutdown(Shutdown::Write) {
+            Ok(()) => self.write_shutdown = true,
+            Err(e) => self.host_error = Some(e.kind()),
+        }
+    }
+}
+
+impl std::fmt::Debug for EstablishedFlow {
+    /// Hand-written for the same reason [`HalfOpen`]'s is: the buffers hold
+    /// guest-controlled bytes, and a derived `Debug` would splatter them
+    /// into any log line that formats a flow table.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EstablishedFlow")
+            .field("key", &self.key)
+            .field("bytes_buffered", &self.bytes_buffered())
+            .field("write_shutdown", &self.write_shutdown)
+            .field("host_read_eof", &self.host_read_eof)
+            .field("host_closed", &self.host.is_none())
+            .field("host_error", &self.host_error)
+            .finish()
+    }
+}
+
+/// What one attempt to hand bytes to the host socket did.
+enum HostWrite {
+    Wrote(usize),
+    /// There was nothing to write. Not a stall: there was no demand.
+    Idle,
+    /// The host will not take a byte. Nothing was consumed from the stack.
+    Blocked,
+    Failed(io::ErrorKind),
+}
+
+/// What one attempt to take bytes off the host socket did.
+enum HostRead {
+    Read(usize),
+    /// Nothing available right now.
+    Idle,
+    /// The peer closed its sending half.
+    Eof,
+    Failed(io::ErrorKind),
+}
+
+/// Write at most `budget` bytes of `data`, reporting how many the host
+/// actually took so the caller consumes exactly that much.
+fn write_some(stream: &mut TcpStream, data: &mut [u8], budget: usize) -> (usize, HostWrite) {
+    let take = data.len().min(budget);
+    if take == 0 {
+        return (0, HostWrite::Idle);
+    }
+    match stream.write(&data[..take]) {
+        // Zero bytes written from a non-empty slice is not progress; read
+        // as a refusal so the loop cannot spin on it.
+        Ok(0) => (0, HostWrite::Blocked),
+        Ok(n) => (n, HostWrite::Wrote(n)),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => (0, HostWrite::Blocked),
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => (0, HostWrite::Idle),
+        Err(e) => (0, HostWrite::Failed(e.kind())),
+    }
+}
+
+/// Read at most `budget` bytes into the stack's send buffer, reporting how
+/// many arrived so the caller enqueues exactly that much.
+fn read_some(stream: &mut TcpStream, buf: &mut [u8], budget: usize) -> (usize, HostRead) {
+    let take = buf.len().min(budget);
+    if take == 0 {
+        return (0, HostRead::Idle);
+    }
+    match stream.read(&mut buf[..take]) {
+        Ok(0) => (0, HostRead::Eof),
+        Ok(n) => (n, HostRead::Read(n)),
+        // A host with nothing to say is idle, not stalled — the stall in
+        // this direction is our *own* buffer filling up.
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => (0, HostRead::Idle),
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => (0, HostRead::Idle),
+        Err(e) => (0, HostRead::Failed(e.kind())),
+    }
+}
+
+/// The single-host prefix for `ip`, the only address a flow's stack answers
+/// for: the destination the guest dialled and policy admitted.
+fn host_cidr(ip: IpAddr) -> IpCidr {
+    match ip {
+        IpAddr::V4(a) => IpCidr::new(IpAddress::Ipv4(a), 32),
+        IpAddr::V6(a) => IpCidr::new(IpAddress::Ipv6(a), 128),
+    }
+}
+
+fn smol_addr(ip: IpAddr) -> IpAddress {
+    match ip {
+        IpAddr::V4(a) => IpAddress::Ipv4(a),
+        IpAddr::V6(a) => IpAddress::Ipv6(a),
+    }
+}
+
 /// Assert that the socket really is connected to the destination policy
 /// admitted, and refuse the flow if it is not.
 ///
@@ -429,8 +900,8 @@ pub fn synthesize_rst(key: &FlowKey, guest: IpAddr, acknowledging: u32) -> Optio
         payload: &[],
     };
     match (key.remote, guest) {
-        (IpAddr::V4(remote), IpAddr::V4(guest)) => Some(emit_v4_reset(remote, guest, &tcp)),
-        (IpAddr::V6(remote), IpAddr::V6(guest)) => Some(emit_v6_reset(remote, guest, &tcp)),
+        (IpAddr::V4(remote), IpAddr::V4(guest)) => Some(emit_v4_segment(remote, guest, &tcp)),
+        (IpAddr::V6(remote), IpAddr::V6(guest)) => Some(emit_v6_segment(remote, guest, &tcp)),
         _ => None,
     }
 }
@@ -438,7 +909,7 @@ pub fn synthesize_rst(key: &FlowKey, guest: IpAddr, acknowledging: u32) -> Optio
 /// Emit `tcp` inside an IPv4 header. The header checksum is written by
 /// `emit` and covers only the header, so writing the segment afterwards
 /// does not invalidate it.
-fn emit_v4_reset(remote: Ipv4Addr, guest: Ipv4Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
+fn emit_v4_segment(remote: Ipv4Addr, guest: Ipv4Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
     let ip = Ipv4Repr {
         src_addr: remote,
         dst_addr: guest,
@@ -462,7 +933,7 @@ fn emit_v4_reset(remote: Ipv4Addr, guest: Ipv4Addr, tcp: &TcpRepr<'_>) -> Vec<u8
 /// Emit `tcp` inside an IPv6 header. IPv6 has no header checksum, but the
 /// TCP checksum is computed over a different pseudo-header from IPv4's, so
 /// the two cannot share an emitter.
-fn emit_v6_reset(remote: Ipv6Addr, guest: Ipv6Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
+fn emit_v6_segment(remote: Ipv6Addr, guest: Ipv6Addr, tcp: &TcpRepr<'_>) -> Vec<u8> {
     let ip = Ipv6Repr {
         src_addr: remote,
         dst_addr: guest,
@@ -588,10 +1059,14 @@ mod tests {
     use crate::netd::test_packets::{tcp, v4_packet};
     use mvm_net::l3::flow::FlowKey;
     use mvm_protocol::l3::ip::proto;
+    use mvm_protocol::l3::limits::MTU_V1;
+    use std::io::{Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
     use std::time::{Duration, Instant};
 
-    use super::super::limits::{DEFAULT_MAX_HALF_OPEN, HALF_OPEN_TIMEOUT_MILLIS};
+    use super::super::limits::{
+        DEFAULT_MAX_HALF_OPEN, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
+    };
 
     /// The address the session leased this guest. Deliberately not the
     /// source address `syn_bytes` carries: the reset must be addressed from
@@ -1251,6 +1726,430 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("a refused connect must produce the reset its guest is owed");
+    }
+
+    // ---- established flows ------------------------------------------
+
+    /// The destination the fixture flow was admitted for.
+    ///
+    /// Deliberately not a loopback address, even though the host socket
+    /// underneath *is* a loopback pair: the guest-facing stack is addressed
+    /// by the admitted destination while the host socket is addressed by
+    /// the kernel, and a fixture where the two coincide could not tell
+    /// which of them a bug had reached for.
+    fn flow_key() -> FlowKey {
+        FlowKey {
+            protocol: proto::TCP,
+            guest_port: 50_000,
+            remote: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)),
+            remote_port: 443,
+        }
+    }
+
+    fn guest_v4() -> Ipv4Addr {
+        match guest() {
+            IpAddr::V4(a) => a,
+            IpAddr::V6(_) => unreachable!("the fixture lease is IPv4"),
+        }
+    }
+
+    /// The guest's initial sequence number. Any value works; a fixed one
+    /// makes a desynchronised fixture obvious in a packet dump.
+    const GUEST_ISN: u32 = 1_000;
+
+    /// Writes attempted before a fixture that cannot fill a socket gives up.
+    ///
+    /// A fake that never reports `WouldBlock` would turn this suite's
+    /// negatives into a hang rather than a failure, so every fill is
+    /// bounded and its inability to block is reported to the caller.
+    const FILL_ATTEMPTS: usize = 512;
+
+    /// Pump passes a fixture will wait through for the peer's bytes to
+    /// cross loopback. Bounded for the same reason.
+    const PUMP_ATTEMPTS: usize = 100;
+
+    /// A guest TCP endpoint driven by hand.
+    ///
+    /// The real guest is on the other side of a vsock link; here its
+    /// segments are built directly so a test can decide exactly what the
+    /// stack sees and when.
+    struct FakeGuest {
+        key: FlowKey,
+        guest: Ipv4Addr,
+        seq: u32,
+        /// What to acknowledge — the stack's ISN plus one. Zero until the
+        /// SYN-ACK has been read.
+        ack: u32,
+    }
+
+    impl FakeGuest {
+        fn new(key: FlowKey) -> Self {
+            Self {
+                key,
+                guest: guest_v4(),
+                seq: GUEST_ISN,
+                ack: 0,
+            }
+        }
+
+        fn remote_v4(&self) -> Ipv4Addr {
+            match self.key.remote {
+                IpAddr::V4(a) => a,
+                IpAddr::V6(_) => unreachable!("the fixture flow is IPv4"),
+            }
+        }
+
+        fn segment(&self, control: TcpControl, ack: Option<u32>, payload: &[u8]) -> Vec<u8> {
+            let tcp = TcpRepr {
+                src_port: self.key.guest_port,
+                dst_port: self.key.remote_port,
+                control,
+                seq_number: TcpSeqNumber(self.seq as i32),
+                ack_number: ack.map(|a| TcpSeqNumber(a as i32)),
+                window_len: u16::MAX,
+                window_scale: None,
+                max_seg_size: matches!(control, TcpControl::Syn).then_some(1_400),
+                sack_permitted: false,
+                sack_ranges: [None; 3],
+                timestamp: None,
+                payload,
+            };
+            emit_v4_segment(self.guest, self.remote_v4(), &tcp)
+        }
+
+        fn syn(&self) -> Vec<u8> {
+            self.segment(TcpControl::Syn, None, &[])
+        }
+
+        /// Answer the SYN-ACK the flow's constructor already produced, so
+        /// the stack reaches ESTABLISHED.
+        fn complete_handshake(&mut self, flow: &mut EstablishedFlow) {
+            self.ack = peer_isn(&flow.take_guest_packets()) + 1;
+            self.seq = GUEST_ISN + 1;
+            flow.deliver_from_guest(&self.segment(TcpControl::None, Some(self.ack), &[]));
+            flow.pump(0);
+            let _ = flow.take_guest_packets();
+            assert!(
+                flow.is_active(),
+                "the fixture must reach ESTABLISHED before any test runs"
+            );
+        }
+
+        fn send(&mut self, flow: &mut EstablishedFlow, payload: &[u8]) {
+            flow.deliver_from_guest(&self.segment(TcpControl::None, Some(self.ack), payload));
+            self.seq = self.seq.wrapping_add(payload.len() as u32);
+        }
+
+        /// Offer `bytes` of guest data in segments that fit the MTU, and
+        /// let the stack take in as much of it as its window allows.
+        ///
+        /// The poll matters: without it the segments sit in the device
+        /// queue and the socket's receive buffer stays empty, which would
+        /// make every assertion about buffered bytes vacuous.
+        fn offer(&mut self, flow: &mut EstablishedFlow, bytes: usize) {
+            let chunk = [0xABu8; 1_024];
+            let mut sent = 0;
+            while sent < bytes {
+                let n = chunk.len().min(bytes - sent);
+                self.send(flow, &chunk[..n]);
+                sent += n;
+            }
+            flow.poll(0);
+            let _ = flow.take_guest_packets();
+        }
+
+        fn fin(&mut self, flow: &mut EstablishedFlow) {
+            flow.deliver_from_guest(&self.segment(TcpControl::Fin, Some(self.ack), &[]));
+            self.seq = self.seq.wrapping_add(1);
+        }
+    }
+
+    fn peer_isn(packets: &[Vec<u8>]) -> u32 {
+        for p in packets {
+            let ip = smoltcp::wire::Ipv4Packet::new_checked(p.as_slice()).expect("ipv4");
+            let tcp = smoltcp::wire::TcpPacket::new_checked(ip.payload()).expect("tcp");
+            if tcp.syn() && tcp.ack() {
+                return tcp.seq_number().0 as u32;
+            }
+        }
+        panic!("the stack must answer a replayed SYN with a SYN-ACK");
+    }
+
+    fn carries_payload(packets: &[Vec<u8>], wanted: &[u8]) -> bool {
+        packets.iter().any(|p| {
+            let Ok(ip) = smoltcp::wire::Ipv4Packet::new_checked(p.as_slice()) else {
+                return false;
+            };
+            let Ok(tcp) = smoltcp::wire::TcpPacket::new_checked(ip.payload()) else {
+                return false;
+            };
+            tcp.payload().windows(wanted.len()).any(|w| w == wanted)
+        })
+    }
+
+    /// A connected loopback pair: the flow's host socket, and the peer at
+    /// the far end standing in for the real destination.
+    fn host_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let l = listener();
+        let host = std::net::TcpStream::connect(l.local_addr().expect("local addr"))
+            .expect("connect to the fixture listener");
+        let (peer, _) = l.accept().expect("accept");
+        (host, peer)
+    }
+
+    /// Consecutive refusals a fixture takes as "this socket is staying
+    /// full".
+    ///
+    /// One refusal is not the last word. `write` returns `WouldBlock` when
+    /// the *send* buffer is full, and the kernel then keeps moving those
+    /// bytes into the peer's receive buffer, which frees room here — so a
+    /// fixture that stopped at the first refusal would hand the pump a
+    /// socket that had quietly become writable again.
+    const SETTLED_BLOCKS: usize = 8;
+
+    /// Write into `sock` until the kernel keeps refusing.
+    ///
+    /// Returns whether it settled full, and how much went in. Bounded on
+    /// both counts: a socket that never blocks makes the caller assert,
+    /// never spin.
+    fn fill_until_would_block(sock: &std::net::TcpStream) -> (bool, usize) {
+        sock.set_nonblocking(true).expect("nonblocking");
+        let chunk = [0u8; 16 * 1024];
+        let mut writer: &std::net::TcpStream = sock;
+        let mut total = 0usize;
+        let mut refusals = 0usize;
+        for _ in 0..FILL_ATTEMPTS {
+            match writer.write(&chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    refusals = 0;
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    refusals += 1;
+                    if refusals >= SETTLED_BLOCKS {
+                        return (true, total);
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => break,
+            }
+        }
+        (false, total)
+    }
+
+    fn half_open_over(host: std::net::TcpStream, key: FlowKey, syn: Vec<u8>) -> HalfOpen {
+        HalfOpen {
+            key,
+            syn,
+            socket: host,
+            opened_at_millis: 0,
+            refused_at_open: false,
+        }
+    }
+
+    fn flow_over(host: std::net::TcpStream) -> (EstablishedFlow, FakeGuest) {
+        let mut g = FakeGuest::new(flow_key());
+        let entry = half_open_over(host, flow_key(), g.syn());
+        let mut flow = EstablishedFlow::from_half_open(entry, guest(), MTU_V1 as usize, 0)
+            .expect("a completed connect becomes a flow");
+        g.complete_handshake(&mut flow);
+        (flow, g)
+    }
+
+    /// The peer is returned rather than dropped: dropping it would reset
+    /// the connection and every test below would be measuring a dead
+    /// socket.
+    fn established_flow_with_peer() -> (EstablishedFlow, std::net::TcpStream, FakeGuest) {
+        let (host, peer) = host_pair();
+        let (flow, g) = flow_over(host);
+        (flow, peer, g)
+    }
+
+    /// A flow whose host socket will not take another byte, with a full
+    /// receive buffer of guest data waiting to go out over it.
+    fn established_flow_with_full_host_buffer() -> (EstablishedFlow, std::net::TcpStream, FakeGuest)
+    {
+        let (host, peer) = host_pair();
+        let (blocked, filled) = fill_until_would_block(&host);
+        assert!(
+            blocked && filled > 0,
+            "the fixture must actually block the host socket, not merely write to it"
+        );
+        let (mut flow, mut g) = flow_over(host);
+        g.offer(&mut flow, SOCKET_RX_BUFFER);
+        (flow, peer, g)
+    }
+
+    fn pump_until_guest_packets(flow: &mut EstablishedFlow) -> Vec<Vec<u8>> {
+        for pass in 0..PUMP_ATTEMPTS {
+            flow.pump(pass as u64);
+            let out = flow.take_guest_packets();
+            if !out.is_empty() {
+                return out;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Vec::new()
+    }
+
+    /// Backpressure is what makes the stated memory ceiling real. Without
+    /// it the buffers grow to meet demand and the ceiling is fiction.
+    #[test]
+    fn a_slow_host_socket_stops_us_accepting_from_the_stack() {
+        let (mut flow, _peer, _g) = established_flow_with_full_host_buffer();
+        let buffered_before = flow.bytes_buffered();
+        assert!(buffered_before > 0, "the fixture must have data to move");
+
+        let stats = flow.pump(0);
+
+        assert!(
+            stats.stalled > 0,
+            "a host socket that will not take a byte must register as a stall"
+        );
+        assert_eq!(stats.to_host, 0, "and nothing may claim to have moved");
+        assert_eq!(
+            flow.bytes_buffered(),
+            buffered_before,
+            "a stall must leave the guest's bytes in the stack, not discard them"
+        );
+        assert!(
+            flow.bytes_buffered() <= SOCKET_RX_BUFFER + SOCKET_TX_BUFFER,
+            "buffering must stop at the per-socket bound, not grow to meet demand"
+        );
+    }
+
+    /// The same property under sustained demand: a guest that keeps
+    /// pushing at a host socket that never drains must not be able to grow
+    /// this flow's footprint past the bound the memory ceiling is computed
+    /// from.
+    #[test]
+    fn backpressure_holds_while_the_guest_keeps_pushing() {
+        let (mut flow, _peer, mut g) = established_flow_with_full_host_buffer();
+        for pass in 0..16u64 {
+            g.offer(&mut flow, SOCKET_RX_BUFFER);
+            let stats = flow.pump(pass);
+            assert_eq!(stats.to_host, 0, "the host socket is still full");
+            assert!(
+                flow.bytes_buffered() <= SOCKET_RX_BUFFER + SOCKET_TX_BUFFER,
+                "pass {pass} grew the flow past the per-socket bound"
+            );
+        }
+    }
+
+    /// Closing outright would discard the peer's remaining response and
+    /// break every half-duplex protocol.
+    #[test]
+    fn a_guest_fin_half_closes_the_host_socket() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        flow.on_guest_fin();
+        assert!(flow.host_write_shutdown());
+        assert!(
+            !flow.host_socket_closed(),
+            "the peer must still be able to send"
+        );
+    }
+
+    /// The same thing through the path production actually takes: the FIN
+    /// arrives as a packet and the pump notices it.
+    #[test]
+    fn a_guest_fin_arriving_as_a_packet_half_closes_the_host_socket() {
+        let (mut flow, _peer, mut g) = established_flow_with_peer();
+        g.fin(&mut flow);
+        flow.pump(0);
+        assert!(flow.host_write_shutdown());
+        assert!(!flow.host_socket_closed());
+    }
+
+    /// Shutting the write half down before the guest's last bytes have
+    /// been written truncates the request — the same bug as closing, one
+    /// segment earlier.
+    #[test]
+    fn a_guest_fin_does_not_truncate_data_the_host_has_not_seen() {
+        let (mut flow, mut peer, mut g) = established_flow_with_peer();
+        peer.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("a bounded read");
+        let request = b"GET / HTTP/1.0\r\n\r\n";
+        g.send(&mut flow, request);
+        g.fin(&mut flow);
+        flow.pump(0);
+        assert!(flow.host_write_shutdown());
+
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got)
+            .expect("the peer reads to the EOF our shutdown produced");
+        assert_eq!(
+            got.as_slice(),
+            request,
+            "the guest's last bytes must precede the FIN we forward"
+        );
+    }
+
+    /// The peer's response after our FIN must still reach the guest.
+    #[test]
+    fn the_peer_can_still_send_after_a_guest_fin() {
+        let (mut flow, mut peer, _g) = established_flow_with_peer();
+        flow.on_guest_fin();
+        peer.write_all(b"trailing response").expect("peer write");
+        let to_guest = pump_until_guest_packets(&mut flow);
+        assert!(
+            !to_guest.is_empty(),
+            "a half-close must not discard what the peer had left to send"
+        );
+        assert!(
+            carries_payload(&to_guest, b"trailing response"),
+            "and what reaches the guest must be the peer's bytes"
+        );
+    }
+
+    /// A hostile guest must not be able to make one pump pass run forever.
+    #[test]
+    fn a_pump_pass_terminates_under_a_saturating_peer() {
+        let (mut flow, peer, _g) = established_flow_with_peer();
+        let (_blocked, stuffed) = fill_until_would_block(&peer);
+        assert!(
+            stuffed > max_bytes_per_pass(),
+            "the fixture must offer more than one pass is allowed to take"
+        );
+
+        let stats = flow.pump(0);
+
+        assert!(stats.to_guest > 0, "a readable peer must produce progress");
+        assert!(
+            stats.to_guest <= max_bytes_per_pass(),
+            "one pass must be bounded so the drive loop keeps servicing other work"
+        );
+        assert!(
+            stats.to_guest < stuffed,
+            "and it must stop before draining what the peer offered"
+        );
+
+        // The stack's send buffer is now full and the guest has
+        // acknowledged none of it, so the next pass must refuse to take
+        // more off the host socket rather than park it somewhere else.
+        let next = flow.pump(1);
+        assert_eq!(next.to_guest, 0, "there is nowhere to put more");
+        assert!(
+            next.stalled > 0,
+            "and refusing to read is a stall, reported as one"
+        );
+    }
+
+    /// Neither side ready must be a cheap no-op, not a spin.
+    #[test]
+    fn a_pump_pass_on_an_idle_flow_moves_nothing() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        assert_eq!(flow.pump(0), PumpStats::default());
+    }
+
+    /// Without a way to actually close it, the half-close test's "still
+    /// open" assertion would be vacuously true.
+    #[test]
+    fn closing_the_host_socket_is_observable() {
+        let (mut flow, _peer, _g) = established_flow_with_peer();
+        assert!(!flow.host_socket_closed());
+        flow.close_host();
+        assert!(flow.host_socket_closed());
     }
 
     /// A reset the datapath could not build leaves a guest hanging until

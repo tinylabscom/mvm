@@ -28,6 +28,13 @@ use std::process::Command;
 /// into the build.
 const ALLOWLIST: &[&str] = &[
     "bitflags",
+    // Neither defmt major is compiled: both are optional dependencies nobody
+    // enables. smoltcp's `alloc` feature names `defmt?/alloc`, and that weak
+    // reference alone resolves defmt 0.3 into the lock beside the 1.1 jiff
+    // declares — `cargo tree -e normal -i defmt@0.3.100` and `@1.1.0` both
+    // print nothing. 0.3.100 is upstream's own shim over 1.1, so even were a
+    // defmt build ever enabled there would be one real copy behind the two.
+    "defmt",
     "getrandom",
     "hashbrown",
     // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;

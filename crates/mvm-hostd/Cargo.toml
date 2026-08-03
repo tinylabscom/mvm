@@ -165,7 +165,14 @@ tracing-subscriber.workspace = true
 # `multicast` feature off, both reaching `process_nxt_hdr` and socket
 # dispatch. Do not weaken the admission guard on the strength of the
 # interface configuration.
-smoltcp = { version = "0.13.1", default-features = false, features = ["medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
+#
+# `alloc` is on because every established flow owns its socket set and its
+# TCP ring buffers. Without it smoltcp can only borrow that storage for the
+# socket set's own lifetime, which for per-flow owned state leaves a
+# self-referential struct or a leaked allocation per connection. It adds no
+# crate to the tree: it turns on the owned-slice arm of `managed`, which is
+# already there as smoltcp's own dependency.
+smoltcp = { version = "0.13.1", default-features = false, features = ["alloc", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

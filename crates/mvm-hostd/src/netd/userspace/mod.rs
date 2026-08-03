@@ -21,7 +21,7 @@ use mio::Poll;
 use mvm_net::l3::AdmittedPacket;
 use mvm_net::l3::config::DEFAULT_QUEUE_DEPTH;
 use mvm_protocol::l3::limits::MTU_V1;
-use smoltcp::iface::{Config, Interface, SocketSet, SocketStorage};
+use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
@@ -141,16 +141,12 @@ impl UserspaceSocketDatapath {
                 .expect("a freshly created address list has room for its first entry");
         });
 
-        // No sockets exist yet — nothing opens a host socket per flow until
-        // a later task wires that up — so the set's backing storage is
-        // genuinely empty rather than pre-sized and unused. Without
-        // smoltcp's `alloc` feature (deliberately not enabled — see the
-        // crate-level note on this workspace's smoltcp feature set) an
-        // owned `SocketSet` needs borrowed storage; a `'static` empty
-        // slice costs nothing to hold and there is nothing yet to put in
-        // it.
-        let storage: &'static mut [SocketStorage<'static>] = &mut [];
-        let sockets = SocketSet::new(storage);
+        // Empty, and it stays empty: an established flow terminates the
+        // guest's TCP in its own stack, addressed at its own destination,
+        // rather than as one socket in a set shared across destinations.
+        // This set is here for the interface `poll` below, which takes one
+        // whether or not anything is in it.
+        let sockets = SocketSet::new(Vec::new());
 
         Ok(UserspaceHandle {
             machine_id: req.machine_id.clone(),
