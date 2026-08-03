@@ -41,10 +41,34 @@ pub enum PushOutcome {
     DroppedOversized,
 }
 
+/// How deep each of the two queues is allowed to be.
+///
+/// Named rather than two bare `usize` arguments in a row: the two are no
+/// longer equal, and transposing them would give the guest-bound queue a
+/// depth argued for the guest-facing one — a silent, expensive mistake
+/// that reads correctly at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueDepths {
+    /// Packets the guest may have waiting on the stack.
+    pub from_guest: usize,
+    /// Packets the stack may have waiting on the guest's drain.
+    pub to_guest: usize,
+}
+
+impl QueueDepths {
+    /// The same depth both ways, for a device whose stack emits nothing.
+    pub fn symmetric(depth: usize) -> Self {
+        Self {
+            from_guest: depth,
+            to_guest: depth,
+        }
+    }
+}
+
 /// The virtual NIC smoltcp drives, backed by two bounded packet queues.
 pub struct GuestDevice {
     mtu: usize,
-    queue_depth: usize,
+    depths: QueueDepths,
     /// Packets the guest sent, awaiting delivery to the stack. This is
     /// smoltcp's receive side — see the module doc for why.
     from_guest: VecDeque<Vec<u8>>,
@@ -56,10 +80,10 @@ pub struct GuestDevice {
 }
 
 impl GuestDevice {
-    pub fn new(mtu: usize, queue_depth: usize) -> Self {
+    pub fn new(mtu: usize, depths: QueueDepths) -> Self {
         Self {
             mtu,
-            queue_depth,
+            depths,
             from_guest: VecDeque::new(),
             to_guest: VecDeque::new(),
             dropped_to_guest: 0,
@@ -74,7 +98,7 @@ impl GuestDevice {
         if bytes.len() > self.mtu {
             return PushOutcome::DroppedOversized;
         }
-        if self.from_guest.len() >= self.queue_depth {
+        if self.from_guest.len() >= self.depths.from_guest {
             return PushOutcome::DroppedQueueFull;
         }
         self.from_guest.push_back(bytes.to_vec());
@@ -101,6 +125,10 @@ impl GuestDevice {
     /// the guest a retransmission timeout — seconds — with nothing
     /// anywhere to say why. A drop the host cannot see is a drop nobody
     /// will ever debug.
+    ///
+    /// The flow folds the delta into `GatewayMetrics::queue_drops_egress`
+    /// each pass, so this is the debugger's view and the counter is the
+    /// operator's.
     pub fn dropped_to_guest(&self) -> u64 {
         self.dropped_to_guest
     }
@@ -110,7 +138,7 @@ impl GuestDevice {
     /// The queues bound themselves by packet *count*, but the footprint a
     /// memory ceiling has to model is bytes, and the two differ by up to
     /// an MTU per packet. Summed on demand rather than tracked
-    /// incrementally: it is a sum over at most `queue_depth` entries, and
+    /// incrementally: it is a sum over at most a queue's depth of entries, and
     /// a running total is one more thing that can drift out of step with
     /// the queues it claims to describe.
     pub fn bytes_queued(&self) -> usize {
@@ -133,7 +161,7 @@ impl Device for GuestDevice {
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let buffer = self.from_guest.pop_front()?;
-        let queue_depth = self.queue_depth;
+        let queue_depth = self.depths.to_guest;
         let Self {
             to_guest,
             dropped_to_guest,
@@ -150,7 +178,7 @@ impl Device for GuestDevice {
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        let queue_depth = self.queue_depth;
+        let queue_depth = self.depths.to_guest;
         let Self {
             to_guest,
             dropped_to_guest,
@@ -231,14 +259,14 @@ mod tests {
 
     #[test]
     fn a_packet_pushed_from_the_guest_is_visible_to_the_stack() {
-        let mut dev = GuestDevice::new(1500, 64);
+        let mut dev = GuestDevice::new(1500, QueueDepths::symmetric(64));
         assert_eq!(dev.push_from_guest(&ipv4_stub()), PushOutcome::Queued);
         assert_eq!(dev.pending_from_guest(), 1);
     }
 
     #[test]
     fn the_queue_drops_rather_than_growing_without_bound() {
-        let mut dev = GuestDevice::new(1500, 2);
+        let mut dev = GuestDevice::new(1500, QueueDepths::symmetric(2));
         let outcomes: Vec<_> = (0..10).map(|_| dev.push_from_guest(&ipv4_stub())).collect();
         assert_eq!(
             dev.pending_from_guest(),
@@ -260,13 +288,13 @@ mod tests {
     /// measured against the wrong quantity.
     #[test]
     fn the_queues_report_the_bytes_they_hold_not_just_the_packets() {
-        let mut dev = GuestDevice::new(1500, 4);
+        let mut dev = GuestDevice::new(1500, QueueDepths::symmetric(4));
         assert_eq!(dev.bytes_queued(), 0);
         dev.push_from_guest(&ipv4_stub());
         dev.push_from_guest(&ipv4_stub());
         assert_eq!(dev.bytes_queued(), 2 * ipv4_stub().len());
         // Past the bound nothing is added, so nothing is counted either.
-        let mut dev = GuestDevice::new(1500, 1);
+        let mut dev = GuestDevice::new(1500, QueueDepths::symmetric(1));
         for _ in 0..10 {
             dev.push_from_guest(&ipv4_stub());
         }
@@ -277,7 +305,7 @@ mod tests {
     /// the datapath handle guards.
     #[test]
     fn a_packet_larger_than_the_mtu_is_refused_by_the_device_itself() {
-        let mut dev = GuestDevice::new(1500, 4);
+        let mut dev = GuestDevice::new(1500, QueueDepths::symmetric(4));
         assert_eq!(
             dev.push_from_guest(&vec![0u8; 1501]),
             PushOutcome::DroppedOversized
@@ -286,9 +314,43 @@ mod tests {
         assert_eq!(dev.pending_from_guest(), 1);
     }
 
+    /// The two depths are not interchangeable, so a device built with
+    /// them transposed must behave differently — otherwise nothing would
+    /// catch the transposition at the call site.
+    #[test]
+    fn each_direction_is_bounded_by_its_own_depth() {
+        let mut dev = GuestDevice::new(
+            1500,
+            QueueDepths {
+                from_guest: 1,
+                to_guest: 3,
+            },
+        );
+        assert_eq!(dev.push_from_guest(&ipv4_stub()), PushOutcome::Queued);
+        assert_eq!(
+            dev.push_from_guest(&ipv4_stub()),
+            PushOutcome::DroppedQueueFull,
+            "the guest-facing queue must use its own depth, not the guest-bound one"
+        );
+
+        // And the guest-bound queue takes three before it starts counting.
+        for _ in 0..4 {
+            phy::TxToken::consume(
+                Device::transmit(&mut dev, Instant::from_millis(0)).expect("a transmit token"),
+                4,
+                |b| b.fill(0),
+            );
+        }
+        assert_eq!(
+            dev.dropped_to_guest(),
+            1,
+            "a fourth segment against a depth of three is one drop, not four"
+        );
+    }
+
     #[test]
     fn a_full_queue_drops_the_new_packet_and_keeps_the_old() {
-        let mut dev = GuestDevice::new(1500, 1);
+        let mut dev = GuestDevice::new(1500, QueueDepths::symmetric(1));
         let first = ipv4_stub();
         dev.push_from_guest(&first);
         let mut second = ipv4_stub();

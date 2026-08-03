@@ -25,7 +25,7 @@ use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
-use self::device::{GuestDevice, PushOutcome};
+use self::device::{GuestDevice, PushOutcome, QueueDepths};
 use self::limits::{DEFAULT_MAX_HOST_SOCKETS, FD_RESERVE};
 use super::datapath::{
     DatapathError, DatapathHandle, DatapathRequest, ForwardingCapabilities, L3Datapath,
@@ -155,7 +155,12 @@ impl UserspaceSocketDatapath {
             source,
         })?;
 
-        let mut device = GuestDevice::new(accept_mtu(req.mtu as usize)?, DEFAULT_QUEUE_DEPTH);
+        // Symmetric: this device's socket set is empty, so its stack
+        // emits nothing and the guest-bound queue has no burst to hold.
+        let mut device = GuestDevice::new(
+            accept_mtu(req.mtu as usize)?,
+            QueueDepths::symmetric(DEFAULT_QUEUE_DEPTH),
+        );
         let mut config = Config::new(HardwareAddress::Ip);
         // Recommended by smoltcp's own doc on `Config::random_seed`: a
         // predictable seed makes the ISNs and IPv4 identification field

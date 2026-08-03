@@ -60,9 +60,10 @@ use crate::netd::datapath::DatapathError;
 use crate::netd::metrics::GatewayMetrics;
 
 use super::accept_mtu;
-use super::device::{GuestDevice, PushOutcome};
+use super::device::{GuestDevice, PushOutcome, QueueDepths};
 use super::limits::{
-    FLOW_QUEUE_DEPTH, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
+    FLOW_RX_QUEUE_DEPTH, FLOW_TX_QUEUE_DEPTH, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER,
+    SOCKET_TX_BUFFER,
 };
 
 /// A guest SYN held back from the stack while its host connect runs.
@@ -468,12 +469,19 @@ impl EstablishedFlow {
         // would park the whole drive loop on one slow destination.
         host.set_nonblocking(true)?;
 
-        // `FLOW_QUEUE_DEPTH`, never the machine-wide default: this device
-        // is per flow, so its depth multiplies by the socket cap and is
+        // The per-flow depths, never the machine-wide default: this device
+        // is per flow, so its depths multiply by the socket cap and are
         // part of the per-machine ceiling. That ceiling is also computed
         // from the fixed MTU, so an MTU above it is refused rather than
-        // sized for.
-        let mut device = GuestDevice::new(accept_mtu(mtu)?, FLOW_QUEUE_DEPTH);
+        // sized for. Asymmetric because the guest-bound side has to hold
+        // an ACK burst as well as a pass's data.
+        let mut device = GuestDevice::new(
+            accept_mtu(mtu)?,
+            QueueDepths {
+                from_guest: FLOW_RX_QUEUE_DEPTH,
+                to_guest: FLOW_TX_QUEUE_DEPTH,
+            },
+        );
         let mut config = Config::new(HardwareAddress::Ip);
         // Recommended by smoltcp's own doc on `Config::random_seed`: a
         // predictable seed would make the ISNs and IPv4 identification
@@ -550,8 +558,14 @@ impl EstablishedFlow {
     }
 
     /// Move bytes in both directions, once, within a bounded budget.
-    pub fn pump(&mut self, now_millis: u64) -> PumpStats {
+    ///
+    /// Takes `metrics` so a guest-bound queue overflow reaches an operator
+    /// and not only a debugger holding the flow: the drop costs the guest
+    /// a retransmission timeout, and a symptom that expensive has to be
+    /// countable from outside the process.
+    pub fn pump(&mut self, now_millis: u64, metrics: &mut GatewayMetrics) -> PumpStats {
         let mut stats = PumpStats::default();
+        let dropped_before = self.device.dropped_to_guest();
         // Ingest what the guest sent and let the stack answer it, so this
         // pass works on the freshest state rather than the last one's.
         self.poll(now_millis);
@@ -563,6 +577,11 @@ impl EstablishedFlow {
         // Emit what the two directions produced, so the guest's ACKs and
         // the peer's bytes leave in the pass they arrived in.
         self.poll(now_millis);
+        // A delta rather than an assignment: the flow's own counter is
+        // cumulative and several flows share one metrics record.
+        metrics.queue_drops_egress = metrics
+            .queue_drops_egress
+            .saturating_add(self.device.dropped_to_guest() - dropped_before);
         stats
     }
 
@@ -1124,9 +1143,17 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::super::limits::{
-        DEFAULT_MAX_HALF_OPEN, FLOW_BUFFER_BYTES, HALF_OPEN_TIMEOUT_MILLIS, SOCKET_RX_BUFFER,
-        SOCKET_TX_BUFFER,
+        DATA_SEGMENTS_PER_PASS, DEFAULT_MAX_HALF_OPEN, FLOW_BUFFER_BYTES, HALF_OPEN_TIMEOUT_MILLIS,
+        POLLS_PER_PASS, SOCKET_RX_BUFFER, SOCKET_TX_BUFFER,
     };
+
+    impl EstablishedFlow {
+        /// A pass whose drop counter nobody is reading. Tests that assert
+        /// on `queue_drops_egress` call the real signature instead.
+        fn pump_ignoring_metrics(&mut self, now_millis: u64) -> PumpStats {
+            self.pump(now_millis, &mut GatewayMetrics::default())
+        }
+    }
 
     /// The address the session leased this guest. Deliberately not the
     /// source address `syn_bytes` carries: the reset must be addressed from
@@ -1912,7 +1939,7 @@ mod tests {
             self.ack = peer_isn(&flow.take_guest_packets()) + 1;
             self.seq = GUEST_ISN + 1;
             flow.deliver_from_guest(&self.segment(TcpControl::None, Some(self.ack), &[]));
-            flow.pump(0);
+            flow.pump_ignoring_metrics(0);
             let _ = flow.take_guest_packets();
             assert!(
                 flow.is_active(),
@@ -1920,9 +1947,17 @@ mod tests {
             );
         }
 
-        fn send(&mut self, flow: &mut EstablishedFlow, payload: &[u8]) {
-            flow.deliver_from_guest(&self.segment(TcpControl::None, Some(self.ack), payload));
+        /// Offer one segment and report what the device did with it.
+        ///
+        /// The sequence advances either way, exactly as a real guest's
+        /// would: it sent those bytes whether or not the host kept them.
+        /// A refused segment is therefore a sequence hole, which is how a
+        /// test builds one without contriving it.
+        fn send(&mut self, flow: &mut EstablishedFlow, payload: &[u8]) -> PushOutcome {
+            let outcome =
+                flow.deliver_from_guest(&self.segment(TcpControl::None, Some(self.ack), payload));
             self.seq = self.seq.wrapping_add(payload.len() as u32);
+            outcome
         }
 
         /// Push `bytes` of guest data at the flow's device in segments
@@ -2100,7 +2135,7 @@ mod tests {
     fn pump_until_payload(flow: &mut EstablishedFlow, wanted: &[u8]) -> Vec<Vec<u8>> {
         let mut seen = Vec::new();
         for pass in 0..PUMP_ATTEMPTS {
-            flow.pump(pass as u64);
+            flow.pump_ignoring_metrics(pass as u64);
             seen.extend(flow.take_guest_packets());
             if carries_payload(&seen, wanted) {
                 return seen;
@@ -2118,7 +2153,7 @@ mod tests {
         let buffered_before = flow.bytes_buffered();
         assert!(buffered_before > 0, "the fixture must have data to move");
 
-        let stats = flow.pump(0);
+        let stats = flow.pump_ignoring_metrics(0);
 
         assert!(
             stats.stalled > 0,
@@ -2145,7 +2180,7 @@ mod tests {
         let (mut flow, _peer, mut g) = established_flow_with_full_host_buffer();
         for pass in 0..16u64 {
             g.offer(&mut flow, SOCKET_RX_BUFFER);
-            let stats = flow.pump(pass);
+            let stats = flow.pump_ignoring_metrics(pass);
             assert_eq!(stats.to_host, 0, "the host socket is still full");
             assert!(
                 flow.bytes_buffered() <= FLOW_BUFFER_BYTES,
@@ -2180,7 +2215,7 @@ mod tests {
     fn a_guest_fin_arriving_as_a_packet_half_closes_the_host_socket() {
         let (mut flow, _peer, mut g) = established_flow_with_peer();
         g.fin(&mut flow);
-        flow.pump(0);
+        flow.pump_ignoring_metrics(0);
         assert!(flow.host_write_shutdown());
         assert!(!flow.host_socket_closed());
     }
@@ -2196,7 +2231,7 @@ mod tests {
         let request = b"GET / HTTP/1.0\r\n\r\n";
         g.send(&mut flow, request);
         g.fin(&mut flow);
-        flow.pump(0);
+        flow.pump_ignoring_metrics(0);
         assert!(flow.host_write_shutdown());
 
         let mut got = Vec::new();
@@ -2242,7 +2277,7 @@ mod tests {
             "the fixture must offer more than one pass is allowed to take"
         );
 
-        let stats = flow.pump(0);
+        let stats = flow.pump_ignoring_metrics(0);
 
         assert!(stats.to_guest > 0, "a readable peer must produce progress");
         assert!(
@@ -2257,7 +2292,7 @@ mod tests {
         // The stack's send buffer is now full and the guest has
         // acknowledged none of it, so the next pass must refuse to take
         // more off the host socket rather than park it somewhere else.
-        let next = flow.pump(1);
+        let next = flow.pump_ignoring_metrics(1);
         assert_eq!(next.to_guest, 0, "there is nowhere to put more");
         assert!(
             next.stalled > 0,
@@ -2282,7 +2317,7 @@ mod tests {
             .expect("a bounded read");
 
         g.out_of_window_fin(&mut flow);
-        flow.pump(0);
+        flow.pump_ignoring_metrics(0);
         // Both entry points: the pump, and a caller convinced it saw one.
         flow.on_guest_fin();
 
@@ -2296,7 +2331,7 @@ mod tests {
         let request = b"still talking";
         g.send(&mut flow, request);
         g.fin(&mut flow);
-        flow.pump(1);
+        flow.pump_ignoring_metrics(1);
         assert!(
             flow.host_write_shutdown(),
             "the guest's own in-window FIN must still close the write half"
@@ -2349,7 +2384,7 @@ mod tests {
         let (_blocked, stuffed) = fill_until_would_block(&peer);
         assert!(stuffed > max_bytes_per_pass(), "the fixture must saturate");
 
-        let stats = flow.pump(0);
+        let stats = flow.pump_ignoring_metrics(0);
 
         assert_eq!(stats.to_guest, max_bytes_per_pass());
         assert_eq!(
@@ -2370,7 +2405,7 @@ mod tests {
         let (_blocked, stuffed) = fill_until_would_block(&peer);
         assert!(stuffed > max_bytes_per_pass(), "the fixture must saturate");
 
-        let stats = flow.pump(0);
+        let stats = flow.pump_ignoring_metrics(0);
         let packets = flow.take_guest_packets();
 
         assert_eq!(stats.to_guest, max_bytes_per_pass());
@@ -2394,13 +2429,103 @@ mod tests {
         let (host, peer) = host_pair();
         let (mut flow, _g) = flow_over_with(host, FakeGuest::with_tiny_mss(flow_key()));
         let (_blocked, _stuffed) = fill_until_would_block(&peer);
+        let mut metrics = GatewayMetrics::default();
 
-        flow.pump(0);
+        flow.pump(0, &mut metrics);
 
         assert!(
             flow.dropped_to_guest() > 0,
             "a 64 byte MSS turns one buffer into far more segments than any depth \
              holds; the drops must be visible"
+        );
+        assert_eq!(
+            metrics.queue_drops_egress,
+            flow.dropped_to_guest(),
+            "a drop only the flow can see is a drop no operator can see"
+        );
+
+        // A second pass adds its own drops to the same counter rather than
+        // overwriting it with the flow's cumulative figure.
+        let after_first = metrics.queue_drops_egress;
+        flow.pump(1, &mut metrics);
+        assert_eq!(
+            metrics.queue_drops_egress,
+            flow.dropped_to_guest(),
+            "the counter must accumulate across passes; it was {after_first} after one"
+        );
+    }
+
+    /// The failure the guest-bound depth exists to prevent, reached the
+    /// way production reaches it: no hostile MSS, no attacker, just this
+    /// datapath's own modelled congestion drop.
+    ///
+    /// A full guest→stack queue drops a segment. That drop is a sequence
+    /// hole, and smoltcp answers every segment ingested behind a hole with
+    /// an *immediate* ACK — once per segment, in one poll's ingress loop,
+    /// with no rate limit. So a poll can emit as many ACKs as the receive
+    /// queue was deep. A depth that budgeted two of them, one per poll,
+    /// had those ACKs consume the queue before the pass's data segments
+    /// were emitted, and every one of those went out as far as smoltcp was
+    /// concerned while the guest waited an RTO for it.
+    #[test]
+    fn a_queue_full_drop_does_not_cost_the_guest_the_passs_data() {
+        let (host, peer) = host_pair();
+        let (mut flow, mut g) = flow_over(host);
+        let mut metrics = GatewayMetrics::default();
+        let payload = [0xCDu8; 64];
+
+        // Fill the guest→stack queue until it really refuses one. The
+        // refused segment is the hole; nothing about it is contrived.
+        let mut refused = false;
+        for _ in 0..FLOW_RX_QUEUE_DEPTH + 1 {
+            if g.send(&mut flow, &payload) == PushOutcome::DroppedQueueFull {
+                refused = true;
+                break;
+            }
+        }
+        assert!(
+            refused,
+            "the fixture must actually overflow the guest-facing queue, since that \
+             drop is what opens the hole"
+        );
+        flow.pump(0, &mut metrics);
+        let _ = flow.take_guest_packets();
+
+        // Everything the guest sends now sits behind the hole, so each
+        // segment draws its own immediate ACK when the next poll takes it
+        // in. Bounded by the queue that holds them.
+        let burst = FLOW_RX_QUEUE_DEPTH - 1;
+        for _ in 0..burst {
+            assert_eq!(
+                g.send(&mut flow, &payload),
+                PushOutcome::Queued,
+                "the out-of-order burst must fit in the queue it is bounded by"
+            );
+        }
+        // And the peer has a pass's worth of data waiting, so the same
+        // pass emits data segments after the ACKs.
+        let (_blocked, stuffed) = fill_until_would_block(&peer);
+        assert!(stuffed > max_bytes_per_pass(), "the fixture must saturate");
+
+        flow.pump(0, &mut metrics);
+        let packets = flow.take_guest_packets();
+
+        // What the pass *produced*, not what survived: a queue that
+        // dropped some would otherwise look like a quieter pass, and the
+        // non-vacuity check below would pass for the wrong reason.
+        let dropped = flow.dropped_to_guest();
+        let produced = packets.len() + dropped as usize;
+        assert_eq!(
+            dropped, 0,
+            "{dropped} of the {produced} segments this pass produced were discarded, so \
+             the guest waits an RTO apiece for data the host already counted sent"
+        );
+        assert_eq!(metrics.queue_drops_egress, 0);
+        let ack_blind_depth = DATA_SEGMENTS_PER_PASS + POLLS_PER_PASS;
+        assert!(
+            produced > ack_blind_depth,
+            "the pass produced {produced} segments, which a depth blind to ingress ACKs \
+             ({ack_blind_depth}) would have held; the fixture proves nothing"
         );
     }
 
@@ -2478,7 +2603,7 @@ mod tests {
     #[test]
     fn a_pump_pass_on_an_idle_flow_moves_nothing() {
         let (mut flow, _peer, _g) = established_flow_with_peer();
-        assert_eq!(flow.pump(0), PumpStats::default());
+        assert_eq!(flow.pump_ignoring_metrics(0), PumpStats::default());
     }
 
     /// Without a way to actually close it, the half-close test's "still

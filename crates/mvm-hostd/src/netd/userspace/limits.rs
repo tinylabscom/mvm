@@ -45,39 +45,58 @@ pub const SOCKET_TX_BUFFER: usize = 16 * 1024;
 const DEFAULT_SEGMENT_PAYLOAD: usize = 536;
 
 /// Polls one pump pass makes: one to take in what the guest sent, one to
-/// emit what the pass produced. Each can put a pure ACK on the queue
-/// beside the data segments.
-const POLLS_PER_PASS: usize = 2;
+/// emit what the pass produced.
+pub(super) const POLLS_PER_PASS: usize = 2;
 
-/// Packets one flow's guest-facing device queues hold, per direction.
+/// Control segments a poll can emit that ride on no data segment: a FIN
+/// with an empty buffer, a reset, a zero-window probe. One per poll is
+/// generous; the term exists so the derivation is not exactly tight.
+const CONTROL_SEGMENTS_PER_POLL: usize = 1;
+
+/// Guest→stack queue depth: a receive window's worth of segments at the
+/// conservative floor.
 ///
-/// Derived from the socket buffers rather than inherited from
-/// [`DEFAULT_QUEUE_DEPTH`], because this queue is **per flow**: a depth
-/// chosen for one queue per machine multiplies by
-/// [`DEFAULT_MAX_HOST_SOCKETS`] here, and at 256 packets that is three
-/// quarters of a megabyte per flow — far more than the socket buffers the
-/// ceiling was written around.
+/// Deeper buys nothing. The stack discards anything past its receive
+/// window as out of window, so a guest cannot usefully have more than this
+/// in flight however it chops it up.
+pub const FLOW_RX_QUEUE_DEPTH: usize = SOCKET_RX_BUFFER.div_ceil(DEFAULT_SEGMENT_PAYLOAD);
+
+/// Data segments one pump pass can put on the guest-bound queue.
 ///
-/// The size is what one pass legitimately moves: a full buffer's worth of
-/// data at the default segment size, plus an ACK per poll. Sizing it for
-/// the *byte* budget alone was the first attempt and was wrong in both
-/// directions at once — it ignored that a pass emits ACKs as well as data,
-/// and that a segment need not be full-size.
+/// A pass emits data in **two** rounds — whatever was unsent at the first
+/// poll, then whatever the host read into the send buffer before the
+/// second — and each round rounds up to a whole segment independently.
+/// The two rounds share one send buffer's worth of bytes between them
+/// (the second can only write into space the first left free), so the
+/// count is a buffer's worth of segments plus one for the extra rounding.
+pub(super) const DATA_SEGMENTS_PER_PASS: usize =
+    SOCKET_TX_BUFFER.div_ceil(DEFAULT_SEGMENT_PAYLOAD) + (POLLS_PER_PASS - 1);
+
+/// Stack→guest queue depth: the ACK burst a poll's ingress can produce,
+/// plus the data a pass emits, plus control.
 ///
-/// One constant rather than two, because both directions come out at the
-/// same figure by the same argument: the guest cannot usefully queue more
-/// than the stack's receive window (the stack discards the rest as out of
-/// window) and the stack cannot emit more than its send buffer holds, and
-/// both windows are the same size. Split them if that ever stops being
-/// true.
-pub const FLOW_QUEUE_DEPTH: usize = {
-    let window = if SOCKET_RX_BUFFER > SOCKET_TX_BUFFER {
-        SOCKET_RX_BUFFER
-    } else {
-        SOCKET_TX_BUFFER
-    };
-    window.div_ceil(DEFAULT_SEGMENT_PAYLOAD) + POLLS_PER_PASS
-};
+/// **The ACK term is the one that is easy to miss, and it dominates.**
+/// smoltcp answers an ingested segment with an *immediate* ACK whenever
+/// its reassembly hole is non-empty, inside the same ingress loop, once
+/// per segment — and unlike its challenge ACK, that reply is not
+/// rate-limited. One poll drains the whole guest→stack queue, so a poll
+/// can emit as many ACKs as that queue was deep: the bound on the burst is
+/// [`FLOW_RX_QUEUE_DEPTH`], not the number of polls.
+///
+/// The hole that triggers it needs no attacker. This datapath *models*
+/// dropping a guest packet when the receive queue is full
+/// ([`PushOutcome::DroppedQueueFull`](super::device::PushOutcome)); that
+/// drop is itself a sequence hole, and every segment behind it then draws
+/// its own ACK. Sizing this queue for two ACKs — a per-poll *egress*
+/// figure applied to an *ingress* count — left a normal loaded flow
+/// discarding the pass's data segments after smoltcp had already counted
+/// them sent, which costs the guest a retransmission timeout apiece.
+///
+/// Separate from [`FLOW_RX_QUEUE_DEPTH`] because the two are no longer the
+/// same argument: one bounds what a guest can usefully offer, the other
+/// what the stack can produce in reply to it.
+pub const FLOW_TX_QUEUE_DEPTH: usize =
+    FLOW_RX_QUEUE_DEPTH + DATA_SEGMENTS_PER_PASS + POLLS_PER_PASS * CONTROL_SEGMENTS_PER_POLL;
 
 /// Worst-case bytes one established flow holds: both socket ring buffers,
 /// plus both device queues full of MTU-sized packets.
@@ -89,10 +108,13 @@ pub const FLOW_QUEUE_DEPTH: usize = {
 ///
 /// Not in here: the fixed per-flow structs — smoltcp's `Interface`, the
 /// socket-set spine. Those are hundreds of bytes against this figure's tens
-/// of kilobytes, and `a_flows_fixed_overhead_stays_small_beside_its_buffers`
-/// pins them separately so they cannot grow into a second ceiling unseen.
-pub const FLOW_BUFFER_BYTES: usize =
-    SOCKET_RX_BUFFER + SOCKET_TX_BUFFER + 2 * FLOW_QUEUE_DEPTH * MTU_V1 as usize;
+/// of kilobytes, and `a_flows_inline_size_stays_pinned` pins them
+/// separately so they cannot grow into a second ceiling unseen. That test
+/// sees inline bytes only; a new *heap-allocating* field is covered by
+/// neither, and has to be added here by hand.
+pub const FLOW_BUFFER_BYTES: usize = SOCKET_RX_BUFFER
+    + SOCKET_TX_BUFFER
+    + (FLOW_RX_QUEUE_DEPTH + FLOW_TX_QUEUE_DEPTH) * MTU_V1 as usize;
 
 /// Worst-case buffer footprint for one machine at the socket cap: every
 /// flow at its own bound, plus the machine-wide guest-facing device the
@@ -114,14 +136,17 @@ mod tests {
     #[test]
     fn the_per_machine_memory_ceiling_is_what_we_claim() {
         assert_eq!(SOCKET_RX_BUFFER + SOCKET_TX_BUFFER, 32 * 1024);
-        // A 16 KiB window is 31 segments at the 536 byte default MSS, plus
-        // one ACK per poll.
-        assert_eq!(FLOW_QUEUE_DEPTH, 31 + 2);
-        // 32 KiB of ring buffers + 2 × 33 × 1500 bytes of device queues.
-        assert_eq!(FLOW_BUFFER_BYTES, 32_768 + 99_000);
+        // A 16 KiB window is 31 segments at the 536 byte default MSS.
+        assert_eq!(FLOW_RX_QUEUE_DEPTH, 31);
+        // 31 ACKs (one per segment the ingress loop can take in behind a
+        // hole) + 32 data segments (two rounding-up rounds over one send
+        // buffer) + 2 control.
+        assert_eq!(FLOW_TX_QUEUE_DEPTH, 31 + 32 + 2);
+        // 32 KiB of ring buffers + (31 + 65) × 1500 bytes of device queues.
+        assert_eq!(FLOW_BUFFER_BYTES, 32_768 + 144_000);
         // 1024 flows at that, plus the handle's own 2 × 256 × 1500.
-        assert_eq!(MEMORY_CEILING_BYTES, 1024 * 131_768 + 768_000);
-        assert_eq!(MEMORY_CEILING_BYTES, 135_698_432);
+        assert_eq!(MEMORY_CEILING_BYTES, 1024 * 176_768 + 768_000);
+        assert_eq!(MEMORY_CEILING_BYTES, 181_778_432);
         const {
             assert!(
                 DEFAULT_MAX_HOST_SOCKETS < mvm_net::l3::flow::DEFAULT_MAX_FLOWS,
@@ -131,38 +156,60 @@ mod tests {
     }
 
     /// The device queues are the term that broke this formula once, by
-    /// being sized for one queue per machine and then made per flow. They
-    /// must stay the same order of magnitude as the socket buffers they
-    /// sit beside — a depth inherited from the machine-wide default is
-    /// twenty times that and would put the cap near a gigabyte.
+    /// being sized for one queue per machine and then made per flow.
+    ///
+    /// Measured against the machine-wide device rather than the socket
+    /// buffers, because that is the mistake this guards: a per-flow queue
+    /// multiplies by [`DEFAULT_MAX_HOST_SOCKETS`], so it has to stay a
+    /// small fraction of the one queue a machine keeps. The socket-buffer
+    /// comparison is kept as a second, weaker signal — at 144_000 against
+    /// 32_768 the ratio is already 4.4, so it now catches only a further
+    /// large jump, and the fraction-of-machine-wide bound is the one with
+    /// real margin.
     #[test]
-    fn a_flows_device_queues_stay_the_size_of_its_socket_buffers() {
-        let device = 2 * FLOW_QUEUE_DEPTH * MTU_V1 as usize;
+    fn a_flows_device_queues_stay_a_fraction_of_the_machine_wide_one() {
+        let device = (FLOW_RX_QUEUE_DEPTH + FLOW_TX_QUEUE_DEPTH) * MTU_V1 as usize;
+        let machine_wide = 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize;
+        assert!(
+            device * 4 < machine_wide,
+            "a per-flow device queue of {device} bytes is no longer a small fraction of the \
+             {machine_wide} byte machine-wide one, and it multiplies by the socket cap"
+        );
         let sockets = SOCKET_RX_BUFFER + SOCKET_TX_BUFFER;
         assert!(
-            device <= 4 * sockets,
+            device <= 5 * sockets,
             "a per-flow device queue of {device} bytes dwarfs its {sockets} bytes of socket buffers"
         );
         const {
             assert!(
-                FLOW_QUEUE_DEPTH < DEFAULT_QUEUE_DEPTH,
-                "the per-flow depth must sit below the machine-wide one: it multiplies by the socket cap"
+                FLOW_RX_QUEUE_DEPTH < DEFAULT_QUEUE_DEPTH
+                    && FLOW_TX_QUEUE_DEPTH < DEFAULT_QUEUE_DEPTH,
+                "a per-flow depth must sit below the machine-wide one: it multiplies by the socket cap"
             );
         };
     }
 
-    /// The depth has to cover what one pass actually emits, or a normal
-    /// full-throughput pass overflows the guest-bound queue — and that
-    /// overflow costs the guest a retransmission timeout for a segment the
-    /// host threw away. Sizing by byte budget alone gave 12, which is
-    /// below the ~31 segments a 16 KiB window becomes at the default MSS.
+    /// The guest-bound depth must cover an ACK burst *and* a pass's data,
+    /// not one or the other.
+    ///
+    /// This re-derives the constant's own expression, so it pins the
+    /// reasoning rather than an independent figure — treat
+    /// `a_queue_full_drop_does_not_cost_the_guest_the_passs_data` in
+    /// `tcp.rs` as the behavioural witness. What it is good for is naming
+    /// the two terms separately, so dropping either is a failure with a
+    /// message that says which.
     #[test]
-    fn the_queue_depth_covers_a_full_pass_at_the_default_segment_size() {
-        let segments = SOCKET_TX_BUFFER.div_ceil(DEFAULT_SEGMENT_PAYLOAD);
-        assert!(
-            FLOW_QUEUE_DEPTH >= segments + POLLS_PER_PASS,
-            "a depth of {FLOW_QUEUE_DEPTH} cannot hold {segments} segments plus their ACKs"
-        );
+    fn the_guest_bound_depth_covers_both_an_ack_burst_and_a_pass_of_data() {
+        const {
+            assert!(
+                FLOW_TX_QUEUE_DEPTH >= FLOW_RX_QUEUE_DEPTH + DATA_SEGMENTS_PER_PASS,
+                "the guest-bound depth cannot hold a full ACK burst beside a pass of data"
+            );
+            assert!(
+                DATA_SEGMENTS_PER_PASS > SOCKET_TX_BUFFER.div_ceil(DEFAULT_SEGMENT_PAYLOAD),
+                "a pass emits data in two independently rounded rounds, so one round is short"
+            );
+        };
     }
 
     #[test]

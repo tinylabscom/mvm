@@ -491,7 +491,7 @@ mod tests {
     fn the_per_machine_memory_ceiling_is_what_we_claim() {
         assert_eq!(SOCKET_RX_BUFFER + SOCKET_TX_BUFFER, 32 * 1024);
         // Superseded — see the note under Step 4. The landed figure is
-        // 135_698_432, because the ceiling has to count the per-flow
+        // 181_778_432, because the ceiling has to count the per-flow
         // device queues as well as the socket ring buffers.
         assert_eq!(MEMORY_CEILING_BYTES, 32 * 1024 * 1024);
         assert!(
@@ -549,16 +549,28 @@ pub const MEMORY_CEILING_BYTES: usize =
 Task 11 gave every flow its own `GuestDevice`, so the device queues multiply by `DEFAULT_MAX_HOST_SOCKETS` and belong in the ceiling; the constant above counts only the socket ring buffers. The landed form adds a derived per-flow queue depth and the handle's own machine-wide device:
 
 ```rust
-pub const FLOW_QUEUE_DEPTH: usize = /* window.div_ceil(DEFAULT_SEGMENT_PAYLOAD) + POLLS_PER_PASS */;  // 33
+pub const FLOW_RX_QUEUE_DEPTH: usize = SOCKET_RX_BUFFER.div_ceil(DEFAULT_SEGMENT_PAYLOAD);            // 31
 
-pub const FLOW_BUFFER_BYTES: usize =
-    SOCKET_RX_BUFFER + SOCKET_TX_BUFFER + 2 * FLOW_QUEUE_DEPTH * MTU_V1 as usize;                     // 131_768
+const DATA_SEGMENTS_PER_PASS: usize =
+    SOCKET_TX_BUFFER.div_ceil(DEFAULT_SEGMENT_PAYLOAD) + (POLLS_PER_PASS - 1);                        // 32
+
+pub const FLOW_TX_QUEUE_DEPTH: usize =
+    FLOW_RX_QUEUE_DEPTH + DATA_SEGMENTS_PER_PASS + POLLS_PER_PASS * CONTROL_SEGMENTS_PER_POLL;        // 65
+
+pub const FLOW_BUFFER_BYTES: usize = SOCKET_RX_BUFFER + SOCKET_TX_BUFFER
+    + (FLOW_RX_QUEUE_DEPTH + FLOW_TX_QUEUE_DEPTH) * MTU_V1 as usize;                                  // 176_768
 
 pub const MEMORY_CEILING_BYTES: usize =
-    DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize;         // 135_698_432
+    DEFAULT_MAX_HOST_SOCKETS * FLOW_BUFFER_BYTES + 2 * DEFAULT_QUEUE_DEPTH * MTU_V1 as usize;         // 181_778_432
 ```
 
-The depth went 256 (inherited machine-wide default) → 12 (a byte budget at full-size segments) → 33. Twelve was too small in two ways at once: a segment need not be full-size — a guest whose SYN carries no MSS option gets smoltcp's 536 byte default, turning a 16 KiB window into 31 segments — and a pass emits an ACK per poll beside its data. A depth below what one pass emits overflows on ordinary full-throughput traffic, and that overflow costs the guest a retransmission timeout, so the guest-bound queue now counts what it discards (`GuestDevice::dropped_to_guest`) instead of dropping silently. A hostile MSS can still outrun any depth; that becomes a visible number rather than a stall nobody can explain.
+The depth went 256 (inherited machine-wide default) → 12 (a byte budget at full-size segments) → 33 (one symmetric depth) → 31 guest-facing and 65 guest-bound. Twelve was too small in two ways at once: a segment need not be full-size — a guest whose SYN carries no MSS option gets smoltcp's 536 byte default, turning a 16 KiB window into 31 segments — and a pass emits control segments beside its data.
+
+Thirty-three then failed on the term that dominates. smoltcp answers an ingested segment with an **immediate ACK** whenever its reassembly hole is non-empty, once per segment inside one poll's ingress loop, and unlike its challenge ACK that reply is not rate-limited. One poll drains the whole guest→stack queue, so a poll can emit as many ACKs as that queue is deep — the ACK count is bounded by `FLOW_RX_QUEUE_DEPTH`, not by the number of polls, and 33 was a per-poll *egress* figure applied to an *ingress* count. The hole needs no attacker: this datapath models dropping a guest packet when the receive queue is full, and that drop is itself the hole. Behavioural witness: `a_queue_full_drop_does_not_cost_the_guest_the_passs_data`, which under the old depth reports "8 of the 41 segments this pass produced were discarded".
+
+Data is also emitted in two rounds — whatever was unsent at the first poll, then whatever the host read in before the second — each rounding up independently, so the data term is 32 rather than 31. The two rounds share one send buffer's worth of bytes, since the second can only write into space the first left free.
+
+The two directions are separate constants now, and `GuestDevice` takes a named `QueueDepths` rather than two bare `usize` arguments, because transposing them reads correctly at the call site. Overflow that no depth can absorb — a guest advertising a 64-byte MSS — is counted rather than silent: `GuestDevice::dropped_to_guest` feeds `GatewayMetrics::queue_drops_egress` from `pump`, so it reaches an operator and not only a debugger holding the flow.
 
 `MTU_V1` in the formula is the configured MTU too, because `accept_mtu` refuses anything above it at both entry points (`open_handle` and `EstablishedFlow::from_half_open`). Failing closed rather than computing from the configured value keeps the ceiling a compile-time constant: `MTU_V1` is fixed and not negotiated by design, and a ceiling a configuration can raise is not a ceiling.
 
@@ -930,9 +942,11 @@ Mutation-checked, each red in under 0.05 s (never a hang):
 
 Round 1 (`fix(netd): make the per-flow memory ceiling true again, and the FIN the stack's call`): the per-flow device queue was still inheriting `DEFAULT_QUEUE_DEPTH`, so the real footprint was ~800 MiB against an asserted 32 MiB — see the note under Task 6 Step 4. `bytes_buffered()` also grew its device term, and `on_guest_fin` stopped latching on the caller's word: it runs the same drain `pump` does and latches only on `RecvError::Finished`, so a forged out-of-window FIN cannot half-close the host socket.
 
-Round 2 (`fix(netd): size the guest queue for what a pass emits, and stop dropping silently`): the round-1 depth of 12 was below what one pass emits, the guest-bound overflow was silent, and the ceiling read `MTU_V1` where the configured MTU was unvalidated. Depth is now 33, overflow is counted, and `accept_mtu` fails closed above `MTU_V1` at both entry points. The oversize check moved into `GuestDevice::push_from_guest`, so `EstablishedFlow::deliver_from_guest` is covered by the same guard as the handle's `send_to_network` rather than being a second unguarded way in. `a_flows_fixed_overhead_stays_small_beside_its_buffers` became `a_flows_inline_size_stays_pinned`, whose doc states what a `size_of` pin cannot see: everything behind `SocketSet`'s `Vec` is one pointer here, so a new heap-allocating field must be added to `FLOW_BUFFER_BYTES` by hand.
+Round 2 (`fix(netd): size the guest queue for what a pass emits, and stop dropping silently`): the round-1 depth of 12 was below what one pass emits, the guest-bound overflow was silent, and the ceiling read `MTU_V1` where the configured MTU was unvalidated. Depth went to 33 — superseded again by round 3 below — overflow is counted, and `accept_mtu` fails closed above `MTU_V1` at both entry points. The oversize check moved into `GuestDevice::push_from_guest`, so `EstablishedFlow::deliver_from_guest` is covered by the same guard as the handle's `send_to_network` rather than being a second unguarded way in. `a_flows_fixed_overhead_stays_small_beside_its_buffers` became `a_flows_inline_size_stays_pinned`, whose doc states what a `size_of` pin cannot see: everything behind `SocketSet`'s `Vec` is one pointer here, so a new heap-allocating field must be added to `FLOW_BUFFER_BYTES` by hand.
 
 Worth recording about the device term's witnesses: `a_guest_that_floods_the_device_queue_stays_inside_the_flow_bound` is the only runtime test that reddens if `bytes_buffered()` stops counting the device queues. The two backpressure tests assert `bytes_buffered() <= FLOW_BUFFER_BYTES`, an upper bound that a smaller measure satisfies trivially. The constant-level term is separately pinned by `the_per_machine_memory_ceiling_is_what_we_claim`.
+
+Round 3 (`fix(netd): bound the guest queue by the ACK burst a poll can emit`): round 2's `POLLS_PER_PASS = 2` did not bound the control segments a pass emits — see the note under Task 6 Step 4 for the ACK-burst derivation and the two-round data term. The depths are now asymmetric (31 guest-facing, 65 guest-bound), the ceiling is 181_778_432, and `pump` takes `&mut GatewayMetrics` so a guest-bound drop moves `queue_drops_egress`.
 
 - [x] **Step 5: Commit**
 
