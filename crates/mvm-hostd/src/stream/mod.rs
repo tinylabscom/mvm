@@ -32,6 +32,11 @@
 //! [`install_host_console_streamer`] is where the host process wires it to
 //! the workload runner's console hook.
 //!
+//! The other direction is [`input_gate`], and it is the mirror image of all
+//! of the above: capture is always on and authorizes nobody, while a workload's
+//! stdin is default-deny behind a signed plan grant, leased to one writer, and
+//! scanned for the host's own secrets before a byte moves.
+//!
 //! Two sources feed one broker. [`console_source`] republishes the write-only
 //! console capture, which covers boot and the window after the agent dies but
 //! cannot separate the two channels. [`entrypoint_source`] takes the guest
@@ -44,6 +49,7 @@ pub mod console_source;
 pub mod durable;
 pub mod entrypoint_source;
 pub mod fanout;
+pub mod input_gate;
 mod journal;
 pub mod plane;
 pub mod redact;
@@ -57,6 +63,10 @@ pub use entrypoint_source::{EntrypointSink, RecordedCopy, ShownChunk};
 pub use fanout::{
     DEFAULT_READER_BOUNDS, DEFAULT_READER_MAX_BYTES, DEFAULT_READER_MAX_RECORDS, DrainedWindow,
     ReaderHandle, ReaderStart,
+};
+pub use input_gate::{
+    CATEGORY_HOST_SECRET, DEFAULT_LEASE_TTL, InputAudit, InputBinding, InputClose, InputGate,
+    InputRefusal, InputSession, KnownSecret,
 };
 pub use plane::StreamPlane;
 pub use redact::{

@@ -146,6 +146,58 @@ pub mod stream_audit {
     /// under, so a later reader can tell a run that kept no transcript from a
     /// run whose transcript went missing.
     pub const LABEL_RETENTION: &str = "stream_retention";
+
+    /// Emitted when a writer is admitted to a workload's stdin.
+    ///
+    /// Output capture needs no authorization and so audits only the attach;
+    /// input is the direction that changes what the workload does, so the
+    /// admission itself is the fact worth signing. Without it the chain would
+    /// record every writer that was turned away and nothing about the one that
+    /// got in.
+    pub const INPUT_GRANTED_EVENT: &str = "stream.input_granted";
+    /// Emitted whenever the input gate turns a writer away.
+    pub const INPUT_REFUSED_EVENT: &str = "stream.input_refused";
+    /// Label: which writer holds — or was refused because somebody else holds
+    /// — the single-writer input lease.
+    pub const LABEL_HOLDER: &str = "stream_input_holder";
+    /// Label: why the gate refused, as a wire-stable reason word.
+    pub const LABEL_REASON: &str = "stream_input_reason";
+    /// Label: which category of known secret was recognised in the refused
+    /// bytes. The category name, never the matched value — a refusal that
+    /// quoted the secret to explain itself would ship exactly what it stopped.
+    pub const LABEL_SECRET_CATEGORY: &str = "stream_input_secret_category";
+}
+
+/// The label set for one input refusal: the binding, the reason word, and
+/// whatever that reason needs to be actionable.
+///
+/// Written as one exhaustive match so a refusal variant added later cannot
+/// reach the chain unlabelled — and so the compiler is the thing checking that
+/// no arm reaches for the bytes.
+fn input_refused_labels(
+    vm_name: &str,
+    refusal: &crate::stream::InputRefusal,
+) -> Vec<(String, String)> {
+    use crate::stream::InputRefusal as R;
+    use stream_audit as k;
+
+    let mut labels = vec![
+        (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+        (k::LABEL_REASON.to_string(), refusal.reason().to_string()),
+    ];
+    match refusal {
+        R::NotGranted | R::LeaseExpired => {}
+        R::LeaseHeld { holder } => {
+            labels.push((k::LABEL_HOLDER.to_string(), holder.clone()));
+        }
+        R::SecretMaterial { category } => {
+            labels.push((
+                k::LABEL_SECRET_CATEGORY.to_string(),
+                (*category).to_string(),
+            ));
+        }
+    }
+    labels
 }
 
 /// Extract the `image.created` label set from a node's provenance attributes.
@@ -466,6 +518,46 @@ impl AuditEmitter {
                 (k::LABEL_READER_ID.to_string(), reader_id.to_string()),
                 (k::LABEL_FROM_SEQ.to_string(), from_seq.to_string()),
             ],
+        )
+    }
+
+    /// Emit `stream.input_granted` — a writer took `vm_name`'s single input
+    /// lease under `holder`.
+    ///
+    /// Payload-free by construction: a VM name and a lease holder id, decided
+    /// before any byte has been offered.
+    pub fn emit_stream_input_granted(
+        &self,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        holder: &str,
+    ) -> Result<()> {
+        use stream_audit as k;
+        self.emit(
+            plan,
+            k::INPUT_GRANTED_EVENT,
+            [
+                (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
+                (k::LABEL_HOLDER.to_string(), holder.to_string()),
+            ],
+        )
+    }
+
+    /// Emit `stream.input_refused` — the gate turned a writer away.
+    ///
+    /// The label set is the binding and the reason. Not the frame, not its
+    /// length, and — for a refusal that fired on recognised secret material —
+    /// not the material: only the category name it matched.
+    pub fn emit_stream_input_refused(
+        &self,
+        plan: &ExecutionPlan,
+        vm_name: &str,
+        refusal: &crate::stream::InputRefusal,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            stream_audit::INPUT_REFUSED_EVENT,
+            input_refused_labels(vm_name, refusal),
         )
     }
 
