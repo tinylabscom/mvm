@@ -606,14 +606,26 @@ impl MvmClient for LocalBackend {
         let kernel_path = if self.backend.kind() == BackendKind::Hvf {
             let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
             let arch = mvm_core::arch::GuestArch::host().to_string();
-            let path = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
-            if !path.exists() {
-                return Err(backend_err(format!(
-                    "hvf needs a workload kernel at {} — run a `mvmctl machine run` once \
-                     (or `mvmctl build kernel build`) to populate the cache",
-                    path.display()
-                )));
-            }
+            // Through the resolver rather than a bare existence check, so a
+            // cache hit here is verified against its recorded digest like
+            // every other read. `source_checkout: false` only shapes which
+            // non-hit variant comes back; this facade treats any of them the
+            // same way.
+            let path = match mvm_build::kernel_fetch::resolve_kernel(
+                &cache, &arch, "workload", false,
+            ) {
+                mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+                    verified.path().to_path_buf()
+                }
+                _ => {
+                    return Err(backend_err(format!(
+                        "hvf needs a verified workload kernel at {} — run a `mvmctl machine run` \
+                         once (or `mvmctl build kernel build`) to populate the cache",
+                        mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload")
+                            .display()
+                    )));
+                }
+            };
             Some(path)
         } else {
             None

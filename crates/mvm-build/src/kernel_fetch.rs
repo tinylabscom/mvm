@@ -13,11 +13,16 @@ pub enum KernelFetchError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// The file's SHA-256 does not match the expected hash in the
-    /// `KernelArtifactId`. The mismatched file is deleted before this
-    /// error is returned so a partial download can't be reused on retry.
+    /// The file's SHA-256 does not match the expected hash. The mismatched
+    /// file is deleted before this error is returned so a corrupt or partial
+    /// artifact can't be reused on retry.
     #[error("kernel integrity check failed: expected sha256 {expected}, computed {actual}")]
     HashMismatch { expected: String, actual: String },
+
+    /// A cached kernel carries no digest sidecar, so nothing vouches for its
+    /// bytes. Untrusted rather than assumed-good.
+    #[error("cached kernel at {path} has no digest sidecar — refusing to serve it unverified")]
+    Unpinned { path: String },
 }
 
 /// Verify that the kernel image at `path` matches the `artifact_hash`
@@ -50,18 +55,112 @@ pub fn verify_fetched_kernel(path: &Path, id: &KernelArtifactId) -> Result<(), K
     Ok(())
 }
 
+/// File name of the digest sidecar recorded beside a kernel: the lowercase-hex
+/// SHA-256 of its bytes.
+///
+/// SHA-256 rather than the BLAKE3 the apple-container artifact path uses,
+/// because this side already speaks SHA-256 everywhere that matters —
+/// `KernelArtifactId::artifact_hash` and the published
+/// `kernel-<arch>-checksums-sha256.txt` manifests. The two axes coexist
+/// deliberately; nothing rehashes across them.
+pub const KERNEL_DIGEST_SIDECAR: &str = "vmlinux.sha256";
+
+/// A kernel whose bytes have been checked against a recorded digest.
+///
+/// The point of the type is that it cannot be built any other way. Before it,
+/// [`resolve_kernel`] handed back a bare `PathBuf` on a cache hit, which is a
+/// perfectly usable value — so the natural call site used it, no reader could
+/// see that a step had been skipped, and `verify_fetched_kernel` sat with no
+/// production caller for the life of the function. Adding one call would have
+/// fixed that instance and left the same shape for the next caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedKernel(PathBuf);
+
+impl VerifiedKernel {
+    /// The verified kernel's path. Only reachable through a passing check.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// The digest sidecar beside `kernel`.
+pub fn kernel_digest_sidecar(kernel: &Path) -> PathBuf {
+    kernel.with_file_name(KERNEL_DIGEST_SIDECAR)
+}
+
+/// Record the digest of a kernel just produced, beside it.
+///
+/// Called by whoever puts a kernel in the cache: the download path after its
+/// checksum-manifest check, and the local build path from the bytes it just
+/// built. The two have different provenance — one was checked against a
+/// published manifest, the other is simply what we compiled — and the sidecar
+/// claims only the latter: *these are the bytes that were here*. That is what a
+/// later read needs to detect rot, truncation, or a swapped file.
+///
+/// Written temp-then-rename so an interrupted producer cannot leave a sidecar
+/// that disagrees with the kernel beside it.
+pub fn record_kernel_digest(kernel: &Path) -> Result<(), KernelFetchError> {
+    let digest = compute_file_sha256(kernel)?;
+    let sidecar = kernel_digest_sidecar(kernel);
+    let tmp = sidecar.with_extension(format!("sha256.tmp{}", std::process::id()));
+    std::fs::write(&tmp, format!("{digest}\n"))?;
+    std::fs::rename(&tmp, &sidecar)?;
+    Ok(())
+}
+
+/// Verify a cached kernel against its recorded sidecar.
+///
+/// Fail-closed: a missing sidecar is untrusted, not "assume fine". Absence of a
+/// digest must never degrade into trusting the path, which is the whole failure
+/// this replaces. On any failure both the kernel and its sidecar are removed,
+/// so the next resolve re-derives rather than re-adopting the same bytes under
+/// the same name.
+fn verify_cached_kernel(kernel: &Path) -> Result<VerifiedKernel, KernelFetchError> {
+    if std::env::var_os(SKIP_HASH_VERIFY_ENV).is_some() {
+        tracing::warn!(
+            "{SKIP_HASH_VERIFY_ENV} set — serving {} unverified",
+            kernel.display()
+        );
+        return Ok(VerifiedKernel(kernel.to_path_buf()));
+    }
+
+    let sidecar = kernel_digest_sidecar(kernel);
+    let expected = match std::fs::read_to_string(&sidecar) {
+        Ok(contents) => contents.split_whitespace().next().unwrap_or("").to_string(),
+        Err(_) => {
+            evict_kernel(kernel);
+            return Err(KernelFetchError::Unpinned {
+                path: kernel.display().to_string(),
+            });
+        }
+    };
+
+    let actual = compute_file_sha256(kernel)?;
+    if actual != expected {
+        evict_kernel(kernel);
+        return Err(KernelFetchError::HashMismatch { expected, actual });
+    }
+    Ok(VerifiedKernel(kernel.to_path_buf()))
+}
+
+/// Remove a rejected kernel and its sidecar. Removing only one would leave the
+/// other to be re-adopted, which is how a poisoned artifact survives eviction.
+fn evict_kernel(kernel: &Path) {
+    let _ = std::fs::remove_file(kernel);
+    let _ = std::fs::remove_file(kernel_digest_sidecar(kernel));
+}
+
 /// How a kernel pin resolves to a concrete `vmlinux` for a given backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelResolution {
-    /// A cached kernel is already present at this path. Installed builds
-    /// should still [`verify_fetched_kernel`] it against the pin before boot.
-    Cached(PathBuf),
+    /// A cached kernel that verified against its recorded digest.
+    Cached(VerifiedKernel),
     /// Source checkout with no cached kernel — build it to this path
     /// (`mvmctl kernel build`). A source checkout is NEVER fetched: the
     /// local-build invariant forbids depending on a published artifact.
     NeedsBuild(PathBuf),
     /// Installed binary with no cached kernel — fetch the published prebuilt
-    /// to this path, then [`verify_fetched_kernel`] it against the pin.
+    /// to this path, then [`record_kernel_digest`] beside it.
     NeedsFetch(PathBuf),
 }
 
@@ -88,8 +187,20 @@ pub fn resolve_kernel(
 ) -> KernelResolution {
     let path = cached_kernel_path(cache_dir, arch, variant);
     if path.exists() {
-        KernelResolution::Cached(path)
-    } else if source_checkout {
+        match verify_cached_kernel(&path) {
+            Ok(verified) => return KernelResolution::Cached(verified),
+            Err(e) => {
+                // Evicted by the check above, so fall through to re-derive
+                // rather than serving bytes nothing vouches for.
+                tracing::warn!(
+                    kernel = %path.display(),
+                    error = %e,
+                    "cached kernel did not verify; discarded it and will re-derive"
+                );
+            }
+        }
+    }
+    if source_checkout {
         KernelResolution::NeedsBuild(path)
     } else {
         KernelResolution::NeedsFetch(path)
@@ -168,20 +279,25 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cached_when_present() {
+    fn resolve_cached_when_present_and_pinned() {
+        // This test previously staged a kernel with no pin and asserted a hit,
+        // which is exactly the behaviour being removed: existence is not
+        // evidence. A hit now requires a recorded digest that matches.
         let dir = tempfile::tempdir().unwrap();
         let p = cached_kernel_path(dir.path(), "aarch64", "workload");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, b"vmlinux").unwrap();
-        assert_eq!(
-            resolve_kernel(dir.path(), "aarch64", "workload", true),
-            KernelResolution::Cached(p.clone())
-        );
-        // Installed build with a cached kernel also resolves Cached.
-        assert_eq!(
-            resolve_kernel(dir.path(), "aarch64", "workload", false),
-            KernelResolution::Cached(p)
-        );
+        record_kernel_digest(&p).unwrap();
+
+        match resolve_kernel(dir.path(), "aarch64", "workload", true) {
+            KernelResolution::Cached(v) => assert_eq!(v.path(), p),
+            other => panic!("expected a verified hit, got {other:?}"),
+        }
+        // Installed build with a cached, pinned kernel also resolves Cached.
+        match resolve_kernel(dir.path(), "aarch64", "workload", false) {
+            KernelResolution::Cached(v) => assert_eq!(v.path(), p),
+            other => panic!("expected a verified hit, got {other:?}"),
+        }
     }
 
     #[test]
@@ -209,5 +325,134 @@ mod tests {
         let from_file = compute_file_sha256(f.path()).unwrap();
         let from_mem = compute_artifact_hash(bytes);
         assert_eq!(from_file, from_mem, "file and in-memory sha256 must agree");
+    }
+
+    /// A cached kernel is only served when its recorded digest matches its
+    /// bytes.
+    ///
+    /// Before this, `resolve_kernel` returned `Cached` whenever the file
+    /// existed, and `verify_fetched_kernel` — which hashes against a pin and
+    /// deletes on mismatch — had no production caller anywhere. No workload
+    /// kernel had ever been checked against a pin on the read path.
+    mod verified_reads {
+        use super::*;
+
+        /// Every test here calls `resolve_kernel`, which reads
+        /// `MVM_SKIP_HASH_VERIFY`. A sibling test sets that variable to cover
+        /// the escape hatch, and `set_var` is process-global while tests run in
+        /// parallel threads — so without taking the same lock `TestEnv` holds,
+        /// a verification test can observe the skip and serve bytes it should
+        /// have rejected. Constructing the guard is what serializes them.
+        fn env_guard() -> mvm_core::util::test_env::TestEnv {
+            mvm_core::util::test_env::TestEnv::new()
+        }
+
+        fn staged(dir: &Path, bytes: &[u8], pin: bool) -> PathBuf {
+            let kernel = cached_kernel_path(dir, "aarch64", "workload");
+            std::fs::create_dir_all(kernel.parent().unwrap()).unwrap();
+            std::fs::write(&kernel, bytes).unwrap();
+            if pin {
+                record_kernel_digest(&kernel).unwrap();
+            }
+            kernel
+        }
+
+        #[test]
+        fn a_pinned_and_unmodified_kernel_is_served() {
+            let _env = env_guard();
+            let dir = tempfile::tempdir().unwrap();
+            let kernel = staged(dir.path(), b"kernel bytes", true);
+            match resolve_kernel(dir.path(), "aarch64", "workload", true) {
+                KernelResolution::Cached(v) => assert_eq!(v.path(), kernel),
+                other => panic!("expected a verified hit, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn a_kernel_with_no_pin_is_not_served() {
+            let _env = env_guard();
+            // Fail closed: absence of a digest must not degrade into trusting
+            // the path, which is the exact behaviour this replaces.
+            let dir = tempfile::tempdir().unwrap();
+            let kernel = staged(dir.path(), b"kernel bytes", false);
+            assert!(matches!(
+                resolve_kernel(dir.path(), "aarch64", "workload", true),
+                KernelResolution::NeedsBuild(_)
+            ));
+            assert!(
+                !kernel.exists(),
+                "an unpinned kernel is evicted, not left to be re-adopted"
+            );
+        }
+
+        #[test]
+        fn a_modified_kernel_is_rejected_and_both_files_evicted() {
+            let _env = env_guard();
+            let dir = tempfile::tempdir().unwrap();
+            let kernel = staged(dir.path(), b"the real kernel", true);
+            // Same length, so a size check would not notice.
+            std::fs::write(&kernel, b"the fake kernel").unwrap();
+
+            assert!(matches!(
+                resolve_kernel(dir.path(), "aarch64", "workload", true),
+                KernelResolution::NeedsBuild(_)
+            ));
+            assert!(!kernel.exists(), "rejected kernel removed");
+            assert!(
+                !kernel_digest_sidecar(&kernel).exists(),
+                "its pin removed too — leaving one lets the other be re-adopted"
+            );
+        }
+
+        #[test]
+        fn an_intact_kernel_from_another_variant_is_rejected() {
+            let _env = env_guard();
+            // Identity discrepancy: both files are complete and readable, each
+            // simply belongs to the other build. An existence check sees
+            // nothing wrong, which is why kernel cache skew mimics real bugs.
+            let dir = tempfile::tempdir().unwrap();
+            let workload = staged(dir.path(), b"workload kernel", true);
+            let builder = cached_kernel_path(dir.path(), "aarch64", "builder");
+            std::fs::create_dir_all(builder.parent().unwrap()).unwrap();
+            std::fs::write(&builder, b"builder kernel").unwrap();
+            record_kernel_digest(&builder).unwrap();
+
+            // Swap the two intact kernels, leaving each pin in place.
+            let a = std::fs::read(&workload).unwrap();
+            let b = std::fs::read(&builder).unwrap();
+            std::fs::write(&workload, &b).unwrap();
+            std::fs::write(&builder, &a).unwrap();
+
+            assert!(matches!(
+                resolve_kernel(dir.path(), "aarch64", "workload", true),
+                KernelResolution::NeedsBuild(_)
+            ));
+        }
+
+        #[test]
+        fn a_missing_kernel_still_resolves_to_derive_not_error() {
+            let _env = env_guard();
+            let dir = tempfile::tempdir().unwrap();
+            assert!(matches!(
+                resolve_kernel(dir.path(), "aarch64", "workload", true),
+                KernelResolution::NeedsBuild(_)
+            ));
+            assert!(matches!(
+                resolve_kernel(dir.path(), "aarch64", "workload", false),
+                KernelResolution::NeedsFetch(_)
+            ));
+        }
+
+        #[test]
+        fn the_pin_is_the_lowercase_hex_sha256_of_the_bytes() {
+            let _env = env_guard();
+            let dir = tempfile::tempdir().unwrap();
+            let kernel = staged(dir.path(), b"abc", true);
+            let recorded = std::fs::read_to_string(kernel_digest_sidecar(&kernel)).unwrap();
+            assert_eq!(
+                recorded.trim(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+        }
     }
 }
