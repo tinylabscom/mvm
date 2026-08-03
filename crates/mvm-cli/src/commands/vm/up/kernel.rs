@@ -131,14 +131,6 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
     )?))
 }
 
-pub(super) fn persistent_oci_uses_prod_kernel(
-    profile: &str,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-) -> bool {
-    profile != "dev"
-        || runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-}
-
 #[cfg(test)]
 mod resolve_workload_kernel_tests {
     use super::*;
