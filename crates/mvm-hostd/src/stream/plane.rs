@@ -17,6 +17,19 @@
 //! host-agent daemon holding many VMs as registrations rather than spawning a
 //! process each.
 //!
+//! **But the seal is not.** A map entry dies with its process, and most
+//! workloads are not started and stopped by the same one: a detached start
+//! exits immediately, an interrupted foreground run exits early, and the
+//! `stop` that ends either of them is a fresh invocation with an empty map.
+//! If the seal lived only in the map, those runs would leave a directory of
+//! ciphertext no reader could open — "capturable when it exits" met by the
+//! unchained console file rather than by the chained transcript. So each
+//! capture also mirrors its manifest into [`super::journal`] as it is built,
+//! and [`release`](StreamPlane::release) falls back to sealing from that
+//! mirror for a VM this process never attached. A seal rebuilt that way is
+//! marked as one: it cannot account for whatever the departed process
+//! dropped between its last durable append and its exit.
+//!
 //! **The socket bind is the registration token.** Two host processes must
 //! never write one VM's transcript at once: the second would interleave
 //! segment files under the first's manifest and leave a capture that verifies
@@ -50,13 +63,15 @@ use mvm_core::transcript::{
     self, CaptureBinding, MANIFEST_FILENAME, TRANSCRIPT_KEK_RECIPIENT, TranscriptManifest,
     TranscriptWriter,
 };
+use mvm_core::util::atomic_io::atomic_write;
 use mvm_runtime::workload_runner::{ConsoleCapture, ConsoleStreamer};
 
 use crate::stream::broker::{StreamBroker, StreamCaptureIdentity, stream_capture_config};
 use crate::stream::console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
 use crate::stream::entrypoint_source::EntrypointSink;
+use crate::stream::journal;
 use crate::stream::redact::StreamRedaction;
-use crate::stream::serve::{StreamServerHandle, serve_stream};
+use crate::stream::serve::{self, StreamServerHandle, serve_stream};
 
 /// One running VM's live capture: the broker, the socket serving it, and the
 /// console follower feeding it.
@@ -163,14 +178,22 @@ impl StreamPlane {
 
     /// Tear `vm`'s capture down and seal its transcript.
     ///
-    /// A no-op for a VM this plane never attached — the ordinary case for a
-    /// `stop` running in a different process invocation from the `start`, and
-    /// for every VM booted before a streamer was registered.
+    /// Two shapes, and both have to end in a sealed manifest. When this plane
+    /// holds the capture, the seal comes from the writer that produced it and
+    /// accounts for the whole of it. When it does not — a workload started
+    /// detached and stopped by a later invocation, or a foreground run whose
+    /// caller was interrupted — the capture is rebuilt from the journal its
+    /// departed writer left beside the segments and sealed from that instead.
+    /// Doing nothing in the second case is what left every non-foreground
+    /// workload with a directory of ciphertext and no manifest.
     pub fn release(&self, vm: &str) {
-        let Some(stream) = self.registry().remove(vm) else {
-            return;
-        };
-        seal_capture(vm, stream);
+        // Bound to a `let` so the registry lock is released before either
+        // seal runs: both touch the disk, and neither needs the map.
+        let held = self.registry().remove(vm);
+        match held {
+            Some(stream) => seal_capture(vm, stream),
+            None => adopt_capture(vm),
+        }
     }
 
     fn registry(&self) -> MutexGuard<'_, HashMap<String, VmStream>> {
@@ -337,10 +360,96 @@ fn seal_capture(vm: &str, stream: VmStream) {
     }
 }
 
+/// Seal a capture whose writer this process never held.
+///
+/// The whole reason [`release`](StreamPlane::release) used to be a no-op
+/// here. A workload started detached, or one whose foreground caller
+/// detached, leaves its transcript on disk with no manifest — and a
+/// transcript with no manifest is unreadable, so `mvmctl logs` falls back to
+/// the unchained console file and the verifiable half of the capture is dead
+/// weight. Rebuilding from the journal the departed writer mirrored is what
+/// makes "capturable when it exits" true for a workload nobody was watching
+/// when it did.
+///
+/// Three refusals, in order, each protecting something a blind rebuild would
+/// break:
+///
+/// - **A manifest already there** means this capture is sealed. Overwriting
+///   it with a reconstruction would replace an exact seal with a floor.
+/// - **A socket something answers on** means another host process is still
+///   writing this capture. Sealing it from here would publish a manifest that
+///   the very next append makes fail verification.
+/// - **No journal** means there is nothing to rebuild from — an unrecorded
+///   VM, or one whose journal could not be written. Silence is correct.
+fn adopt_capture(vm: &str) {
+    let dir = config::vm_stream_transcript_dir(vm);
+    if dir.join(MANIFEST_FILENAME).exists() {
+        return;
+    }
+    if serve::stream_is_served(&config::vm_stream_socket(vm)) {
+        tracing::debug!(
+            vm = %vm,
+            "another host process is still capturing this workload's output; leaving its \
+             transcript to whoever owns it"
+        );
+        return;
+    }
+    let Some(replayed) = journal::replay(&dir) else {
+        return;
+    };
+    // An append the departed process died partway through leaves bytes past
+    // the last mirrored record. Nothing accounts for them, so the sealed root
+    // loses nothing when they go — and left in place they make every intact
+    // segment in the same manifest fail verification.
+    for (file, declared) in &replayed.declared_lengths {
+        drop_unaccounted_tail(&dir.join(file), *declared);
+    }
+    match write_manifest(&dir, &replayed.manifest) {
+        Ok(()) => {
+            journal::CaptureJournal::discard(&dir.join(journal::JOURNAL_FILENAME));
+            tracing::info!(
+                vm = %vm,
+                chunks = replayed.manifest.chunks.len(),
+                "sealed the transcript of a workload this process did not start; it is marked \
+                 as an incomplete record because the capturing process is gone"
+            );
+        }
+        Err(error) => tracing::warn!(
+            vm = %vm,
+            error = %format!("{error:#}"),
+            "output transcript could not be sealed from its journal; recorded output for this \
+             run is unreadable"
+        ),
+    }
+}
+
+/// Cut bytes no record accounts for off the end of one segment. Best-effort:
+/// a file that will not shrink stays as it is and `verify_chunks` reports it,
+/// which is better than refusing to seal the rest of the capture over it.
+fn drop_unaccounted_tail(path: &Path, declared: u64) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() <= declared {
+        return;
+    }
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|handle| handle.set_len(declared));
+}
+
+/// Publish the manifest, all of it or none of it.
+///
+/// Atomically, because a reader that finds a half-written manifest cannot
+/// tell it from a corrupt one, and the sibling segment store already writes
+/// this way. The read side degrades on an unparseable manifest rather than
+/// hard-erroring; this is the other half of that pair, and the half that
+/// stops the case arising.
 fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
     let path = dir.join(MANIFEST_FILENAME);
     let body = serde_json::to_vec_pretty(manifest).context("serialize the capture manifest")?;
-    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+    atomic_write(&path, &body).with_context(|| format!("write {}", path.display()))
 }
 
 fn now_unix_secs() -> u64 {
@@ -460,6 +569,13 @@ mod tests {
             .into_iter()
             .map(|(_, body)| body)
             .collect()
+    }
+
+    /// The manifest on disk for `vm`, or `None` when nothing sealed one.
+    fn manifest_of(vm: &str) -> Option<TranscriptManifest> {
+        let path = config::vm_stream_transcript_dir(vm).join(MANIFEST_FILENAME);
+        let bytes = std::fs::read(path).ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 
     /// Every record a sealed capture holds, with the channel it was recorded
@@ -695,11 +811,166 @@ mod tests {
     }
 
     #[test]
-    fn releasing_a_vm_that_was_never_attached_is_a_no_op() {
-        // The ordinary shape when `stop` runs in a different process
-        // invocation from the `start` that opened the capture.
+    fn releasing_a_vm_that_never_had_a_capture_is_a_no_op() {
+        // Nothing on disk to rebuild from, so nothing to seal — and above
+        // all, no empty manifest invented for a VM that never ran here.
         let (_env, _tmp) = isolated_home();
         StreamPlane::new().release("never-attached");
+        assert_eq!(manifest_of("never-attached"), None);
+    }
+
+    /// A host process that started a workload and then exited without ever
+    /// stopping it: `machine run -d`, `up`, or a foreground run whose caller
+    /// detached. The plane goes with the process; the VM and its capture
+    /// directory stay.
+    fn detached_start(vm: &str, console: &Path, output: &[u8]) {
+        let plane = StreamPlane::new();
+        plane.attach(&capture(vm, console)).expect("attach");
+        std::fs::write(console, output).expect("write the console capture");
+        // Wait for the follower to have taken those bytes before the process
+        // "exits": a real detached start runs for as long as it takes to
+        // print, and a race here would be the test's, not the plane's.
+        let deadline = std::time::Instant::now() + DEADLINE;
+        while std::fs::read(console).map(|c| c.is_empty()).unwrap_or(true)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(ACCEPT_SETTLE);
+        drop(plane);
+    }
+
+    #[test]
+    fn a_workload_stopped_by_a_later_process_still_gets_a_sealed_transcript() {
+        // The gap this exists to close: the plane that captured the run is
+        // gone, and until now the `stop` that ended the VM wrote no manifest
+        // at all — so `logs` fell back to the unchained console file and the
+        // verifiable half of the capture was dead weight.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-detached");
+        detached_start("plane-detached", &console, b"ran while nobody watched\n");
+        assert_eq!(
+            manifest_of("plane-detached"),
+            None,
+            "the fixture must really leave the capture unsealed"
+        );
+
+        // A fresh process's plane, which never saw this VM start.
+        StreamPlane::new().release("plane-detached");
+
+        assert_eq!(
+            sealed_payloads("plane-detached"),
+            [b"ran while nobody watched\n"]
+        );
+    }
+
+    #[test]
+    fn a_transcript_sealed_by_another_process_says_it_cannot_vouch_for_the_whole_run() {
+        // Nothing on disk records what the departed process shed between its
+        // last durable append and its exit. A manifest that stayed silent
+        // about that would claim a completeness it cannot have.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-adopted");
+        detached_start("plane-adopted", &console, b"partial\n");
+
+        StreamPlane::new().release("plane-adopted");
+
+        let manifest = manifest_of("plane-adopted").expect("a manifest was written");
+        assert!(manifest.adopted);
+        assert!(manifest.is_truncated());
+        transcript::verify_sealed_root(&manifest).expect("an adopted manifest still verifies");
+        transcript::verify_chunks(
+            &manifest,
+            &config::vm_stream_transcript_dir("plane-adopted"),
+        )
+        .expect("its chunks are exactly the bytes on disk");
+    }
+
+    #[test]
+    fn a_capture_another_process_is_still_serving_is_left_alone() {
+        // Sealing behind a live writer's back publishes a manifest the very
+        // next append makes fail verification.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-live-elsewhere");
+        let owner = StreamPlane::new();
+        owner
+            .attach(&capture("plane-live-elsewhere", &console))
+            .expect("attach");
+
+        StreamPlane::new().release("plane-live-elsewhere");
+        assert_eq!(
+            manifest_of("plane-live-elsewhere"),
+            None,
+            "a live capture must not be sealed from under its owner"
+        );
+
+        // And the owner's own seal still lands, unchanged.
+        std::fs::write(&console, b"still mine\n").expect("write the console capture");
+        owner.release("plane-live-elsewhere");
+        assert_eq!(sealed_payloads("plane-live-elsewhere"), [b"still mine\n"]);
+    }
+
+    #[test]
+    fn a_capture_its_own_writer_sealed_is_not_reseated_by_a_later_stop() {
+        // A `stop` after a foreground run must not replace an exact seal with
+        // a reconstruction that only claims to be a floor.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-double-stop");
+        let plane = StreamPlane::new();
+        plane
+            .attach(&capture("plane-double-stop", &console))
+            .expect("attach");
+        std::fs::write(&console, b"foreground run\n").expect("write the console capture");
+        plane.release("plane-double-stop");
+
+        let sealed = manifest_of("plane-double-stop").expect("the owner sealed it");
+        assert!(!sealed.adopted);
+
+        StreamPlane::new().release("plane-double-stop");
+        assert_eq!(
+            manifest_of("plane-double-stop"),
+            Some(sealed),
+            "a second stop must leave the owner's seal exactly as it was"
+        );
+    }
+
+    #[test]
+    fn an_owned_seal_leaves_no_journal_for_a_later_stop_to_rebuild_from() {
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-journal-gone");
+        let plane = StreamPlane::new();
+        plane
+            .attach(&capture("plane-journal-gone", &console))
+            .expect("attach");
+        std::fs::write(&console, b"done\n").expect("write the console capture");
+        plane.release("plane-journal-gone");
+
+        assert!(
+            !config::vm_stream_transcript_dir("plane-journal-gone")
+                .join(journal::JOURNAL_FILENAME)
+                .exists(),
+            "the mirror is superseded by the manifest and must not outlive it"
+        );
+    }
+
+    #[test]
+    fn a_restart_after_a_detached_run_does_not_inherit_the_previous_journal() {
+        // The capture discard clears the whole directory, mirror included; a
+        // journal left from the previous boot would rebuild a manifest naming
+        // segments this boot already deleted.
+        let (_env, _tmp) = isolated_home();
+        let console = console_log_for("plane-detached-restart");
+        detached_start("plane-detached-restart", &console, b"first run\n");
+
+        std::fs::write(&console, b"").expect("truncate the console capture");
+        let plane = StreamPlane::new();
+        plane
+            .attach(&capture("plane-detached-restart", &console))
+            .expect("reattach");
+        std::fs::write(&console, b"second run\n").expect("write the console capture");
+        plane.release("plane-detached-restart");
+
+        assert_eq!(sealed_payloads("plane-detached-restart"), [b"second run\n"]);
     }
 
     #[test]

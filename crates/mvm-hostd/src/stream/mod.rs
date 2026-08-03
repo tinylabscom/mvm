@@ -44,6 +44,7 @@ pub mod console_source;
 pub mod durable;
 pub mod entrypoint_source;
 pub mod fanout;
+mod journal;
 pub mod plane;
 pub mod redact;
 pub mod serve;

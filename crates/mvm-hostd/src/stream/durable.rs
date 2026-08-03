@@ -23,6 +23,7 @@
 //! transcript that lost records rather than handing back an artifact that
 //! verifies clean while being quietly incomplete.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -31,6 +32,8 @@ use std::time::{Duration, Instant};
 
 use mvm_core::transcript::{Direction, TranscriptManifest, TranscriptWriter, sealed_root_hex};
 use mvm_protocol::stream::{StreamKind, StreamRecord};
+
+use crate::stream::journal::{CaptureJournal, JournalShortfall};
 
 /// Records the writer thread may fall behind before the hand-off starts
 /// dropping.
@@ -137,22 +140,38 @@ pub(in crate::stream) struct DurableSink {
     jobs: Option<SyncSender<PersistJob>>,
     worker: Option<JoinHandle<()>>,
     counters: Arc<PersistCounters>,
+    /// The journal the writer thread mirrors landed chunks into, so a process
+    /// that did not open this capture can still seal it. Held here only to
+    /// unlink it once a manifest supersedes it — the file itself belongs to
+    /// the writer thread.
+    journal_path: PathBuf,
 }
 
 impl DurableSink {
     pub fn new(vm: &str, writer: TranscriptWriter) -> Self {
         // Taken before the writer moves behind the lock: an empty manifest is
         // cheap to build and is the only state `seal` can still hand back if
-        // that lock is never released.
+        // that lock is never released. The journal mirrors the same seed.
         let seed = writer.sealed_manifest();
+        let journal = CaptureJournal::new(writer.dir(), seed.clone());
+        let journal_path = journal.path().to_path_buf();
         let writer = Arc::new(Mutex::new(writer));
         let counters = Arc::new(PersistCounters::default());
         let (jobs, inbox) = sync_channel(DURABLE_QUEUE_DEPTH);
-        let worker = spawn_writer(vm, Arc::clone(&writer), Arc::clone(&counters), inbox);
+        let worker = spawn_writer(
+            vm,
+            WriterThread {
+                writer: Arc::clone(&writer),
+                counters: Arc::clone(&counters),
+                journal,
+            },
+            inbox,
+        );
         Self {
             vm: vm.to_string(),
             writer,
             seed,
+            journal_path,
             // A thread that would not start must not cost the capture its
             // transcript by pulling the disk onto the producer's own thread:
             // without one, `push` sheds every record, same as a full queue.
@@ -168,10 +187,12 @@ impl DurableSink {
     #[cfg(test)]
     fn new_without_writer_thread(vm: &str, writer: TranscriptWriter) -> Self {
         let seed = writer.sealed_manifest();
+        let journal_path = writer.dir().join(crate::stream::journal::JOURNAL_FILENAME);
         Self {
             vm: vm.to_string(),
             writer: Arc::new(Mutex::new(writer)),
             seed,
+            journal_path,
             jobs: None,
             worker: None,
             counters: Arc::new(PersistCounters::default()),
@@ -249,6 +270,13 @@ impl DurableSink {
             Some(worker) => wait_for_writer(worker, SEAL_JOIN_TIMEOUT),
             None => true,
         };
+        // The journal exists so a *different* process can seal this capture.
+        // This one just did, and leaving the mirror behind would invite a
+        // later stop to adopt a capture that already has a manifest. Only on
+        // the joined path: a writer still running owns that file.
+        if joined {
+            CaptureJournal::discard(&self.journal_path);
+        }
         if !joined {
             tracing::warn!(
                 vm = %self.vm,
@@ -284,6 +312,28 @@ impl DurableSink {
         manifest.sealed_root_hex =
             sealed_root_hex(&manifest).expect("fixed transcript root metadata serializes");
         manifest
+    }
+}
+
+/// A sink dropped without sealing still lets its writer finish, under the same
+/// bound the seal uses.
+///
+/// This is the host process exiting with a workload still running — a detached
+/// start, or a foreground run whose caller detached. Nothing seals here, and
+/// nothing should: the manifest belongs to whoever ends the VM. What must
+/// happen is that the records already handed over reach the journal, so that
+/// later seal describes the whole of what this process captured rather than
+/// whatever the writer thread happened to have finished when the process
+/// unwound around it.
+///
+/// Bounded, for the reason [`DurableSink::seal`] is bounded: a disk that has
+/// stopped answering must not hold a process open on the way out.
+impl Drop for DurableSink {
+    fn drop(&mut self) {
+        self.jobs = None;
+        if let Some(worker) = self.worker.take() {
+            wait_for_writer(worker, SEAL_JOIN_TIMEOUT);
+        }
     }
 }
 
@@ -356,17 +406,24 @@ fn note_handed_over(vm: &str, counters: &PersistCounters) {
     );
 }
 
+/// Everything one capture's writer thread owns: the transcript it appends to,
+/// the counters it keeps, and the journal it mirrors each landed chunk into.
+struct WriterThread {
+    writer: Arc<Mutex<TranscriptWriter>>,
+    counters: Arc<PersistCounters>,
+    journal: CaptureJournal,
+}
+
 /// Start the writer thread, or report that this capture has none.
 fn spawn_writer(
     vm: &str,
-    writer: Arc<Mutex<TranscriptWriter>>,
-    counters: Arc<PersistCounters>,
+    mut owned_state: WriterThread,
     inbox: Receiver<PersistJob>,
 ) -> Option<JoinHandle<()>> {
     let owned = vm.to_string();
     std::thread::Builder::new()
         .name(format!("mvm-transcript-{vm}"))
-        .spawn(move || run_writer(&owned, &writer, &counters, &inbox))
+        .spawn(move || run_writer(&owned, &mut owned_state, &inbox))
         .inspect_err(|error| {
             tracing::warn!(
                 vm = %vm,
@@ -379,49 +436,67 @@ fn spawn_writer(
 }
 
 /// Drain the queue into the transcript until the sink stops feeding it.
-fn run_writer(
-    vm: &str,
-    writer: &Arc<Mutex<TranscriptWriter>>,
-    counters: &Arc<PersistCounters>,
-    inbox: &Receiver<PersistJob>,
-) {
+fn run_writer(vm: &str, state: &mut WriterThread, inbox: &Receiver<PersistJob>) {
     let mut degraded = false;
     while let Ok(job) = inbox.recv() {
         if let Some(record) = job.record() {
-            degraded = append(vm, writer, counters, &record, degraded);
+            degraded = append(vm, state, &record, degraded);
         }
     }
 }
 
-/// Append one record and report whether persistence is still degraded.
+/// Append one record, mirror it into the journal, and report whether
+/// persistence is still degraded.
 ///
 /// The *transition* into an outage is what gets logged, never the records: a
 /// store that has failed usually keeps failing, so a warning per record would
 /// emit thousands of lines a second for the life of the workload — trading a
 /// bounded disk problem for an unbounded log one. The count keeps climbing;
 /// the log says it started, and says when it stopped.
-fn append(
-    vm: &str,
-    writer: &Arc<Mutex<TranscriptWriter>>,
-    counters: &Arc<PersistCounters>,
-    record: &StreamRecord,
-    degraded: bool,
-) -> bool {
-    match lock_writer(writer).push(direction_for(record.kind), &record.payload) {
+///
+/// The mirror happens under the same lock as the append, and reads the
+/// writer's own totals rather than recomputing them: a journal line that
+/// disagreed with the writer about what had landed would rebuild into a
+/// manifest that does not describe the segments beside it.
+fn append(vm: &str, state: &mut WriterThread, record: &StreamRecord, degraded: bool) -> bool {
+    let mut writer = lock_writer(&state.writer);
+    let outcome = writer.push(direction_for(record.kind), &record.payload);
+    if outcome.is_ok() {
+        let shortfall = JournalShortfall {
+            // The hand-off's own drops belong in the same total the writer's
+            // refusals do — see the module docs on why nothing shed is
+            // silent — so a replayed seal carries the whole shortfall the
+            // owning process knew about.
+            refused_chunks: writer
+                .refused_chunks()
+                .saturating_add(state.counters.shed_chunks.load(Ordering::Relaxed)),
+            refused_bytes: writer
+                .refused_bytes()
+                .saturating_add(state.counters.shed_bytes.load(Ordering::Relaxed)),
+            evicted_chunks: writer.evicted_chunks(),
+            evicted_bytes: writer.evicted_bytes(),
+        };
+        if let Some(chunk) = writer.last_chunk() {
+            state.journal.record(chunk, shortfall);
+        }
+    }
+    drop(writer);
+
+    match outcome {
         Ok(()) => {
             if degraded {
                 tracing::info!(
                     vm = %vm,
-                    missed = counters.refused.load(Ordering::Relaxed),
+                    missed = state.counters.refused.load(Ordering::Relaxed),
                     "stream chunks reaching the transcript again"
                 );
             }
             false
         }
         Err(err) => {
-            counters.refused.fetch_add(1, Ordering::Relaxed);
+            state.counters.refused.fetch_add(1, Ordering::Relaxed);
             if !degraded {
-                counters.lapses.fetch_add(1, Ordering::Relaxed);
+                state.counters.lapses.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     vm = %vm,
                     from_seq = record.seq,

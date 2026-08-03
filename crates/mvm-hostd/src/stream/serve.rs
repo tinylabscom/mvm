@@ -136,13 +136,23 @@ fn spawn_accept_loop(
         })
 }
 
+/// Whether a live server is answering on `path`.
+///
+/// The same one-connect probe [`reclaim_stale_socket`] uses, exposed for the
+/// other caller that must not act behind a live capture's back: a process
+/// deciding whether a VM's transcript is abandoned or still being written by
+/// someone else.
+pub fn stream_is_served(path: &Path) -> bool {
+    path.exists() && UnixStream::connect(path).is_ok()
+}
+
 /// A socket file with no listener behind it is debris from a crash. One
 /// connect attempt tells the two cases apart.
 fn reclaim_stale_socket(path: &Path) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    if UnixStream::connect(path).is_ok() {
+    if stream_is_served(path) {
         return Err(io::Error::new(
             io::ErrorKind::AddrInUse,
             format!("{} is already serving a stream", path.display()),

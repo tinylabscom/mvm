@@ -128,6 +128,10 @@ impl SegmentStore {
         }
     }
 
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Append one chunk's ciphertext, opening a fresh segment first when the
     /// active one is full. `plaintext_len` is carried for retention
     /// accounting only.

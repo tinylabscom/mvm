@@ -429,6 +429,16 @@ fn describe_truncation(truncation: Truncation) -> String {
             truncation.refused_chunks, truncation.refused_bytes
         ));
     }
+    if truncation.adopted {
+        // The counts above came from a manifest rebuilt after the capturing
+        // process was gone, so they are a floor. Saying "0 records lost"
+        // would be the one reading this capture cannot support.
+        parts.push(
+            "the capture was sealed after the process recording it exited, so anything it \
+             dropped on the way out is uncounted"
+                .to_string(),
+        );
+    }
     format!(
         "recorded output is incomplete: {} — what follows is a window, not the whole run",
         parts.join("; ")
@@ -678,6 +688,7 @@ mod tests {
             refused_bytes: 30,
             evicted_chunks: 2,
             evicted_bytes: 20,
+            adopted: false,
         });
         assert!(
             described.contains("2 oldest record(s) (20 bytes)"),
@@ -697,12 +708,32 @@ mod tests {
             refused_bytes: 0,
             evicted_chunks: 4,
             evicted_bytes: 40,
+            adopted: false,
         });
         assert!(described.contains("4 oldest record(s)"), "{described}");
         assert!(
             !described.contains("never reached the store"),
             "{described}"
         );
+    }
+
+    #[test]
+    fn a_capture_sealed_after_its_recorder_exited_says_its_counts_are_a_floor() {
+        // Every count is zero and the capture is still not whole: a run
+        // stopped by a later invocation cannot know what the process that
+        // recorded it dropped on its way out.
+        let described = describe_truncation(Truncation {
+            refused_chunks: 0,
+            refused_bytes: 0,
+            evicted_chunks: 0,
+            evicted_bytes: 0,
+            adopted: true,
+        });
+        assert!(
+            described.contains("sealed after the process"),
+            "{described}"
+        );
+        assert!(described.contains("uncounted"), "{described}");
     }
 
     #[test]

@@ -142,6 +142,12 @@ pub struct Truncation {
     pub evicted_chunks: u64,
     /// Plaintext bytes in those chunks.
     pub evicted_bytes: u64,
+    /// Whether the counts above are a floor rather than the whole shortfall,
+    /// because the manifest was rebuilt by a process that did not own the
+    /// capture. A run started detached and stopped later is the ordinary way
+    /// to get one, and the four counts cannot see what the departed process
+    /// dropped on its way out.
+    pub adopted: bool,
 }
 
 impl Truncation {
@@ -152,6 +158,7 @@ impl Truncation {
             refused_bytes: manifest.refused_bytes,
             evicted_chunks: manifest.evicted_chunks,
             evicted_bytes: manifest.evicted_bytes,
+            adopted: manifest.adopted,
         })
     }
 }
@@ -598,7 +605,9 @@ fn read_history(
     if !exists {
         return Ok(None);
     }
-    let manifest = load_manifest(locator, &manifest_path)?;
+    let Some(manifest) = load_manifest(locator, &manifest_path)? else {
+        return Ok(None);
+    };
     let key = unwrap_capture_key(locator, &manifest)?;
     let chunks = transcript::export_chunks(&manifest, &locator.transcript_dir, &key)
         .map_err(|source| transcript_error(locator, source))?;
@@ -656,7 +665,26 @@ fn classify_empty(
     (tail == Some(0)).then_some(EmptyHistory::NotRequested)
 }
 
-fn load_manifest(locator: &OutputLocator, path: &Path) -> Result<TranscriptManifest, StreamError> {
+/// Read the manifest, or report that there is no usable one.
+///
+/// The two failures here are not the same failure and must not be reported
+/// the same way. An **I/O** error — a permission refusal above all — is about
+/// the reader's access to the capture and has to surface: swallowing it would
+/// print "no output capture" over a transcript that is sitting right there.
+/// A **parse** error is about the file's contents, and the overwhelmingly
+/// likely cause is a manifest written by a process that died partway through
+/// it. Hard-erroring on that costs the operator the console fallback at the
+/// exact moment the host crashed, which is when they most need to see
+/// something. So a manifest that does not parse degrades to "no durable
+/// half", loudly, and the read continues to whatever else can answer.
+///
+/// A manifest that *parses* and then fails verification is the opposite case
+/// and still fails closed — that is the signal the sealed root exists to
+/// give, and it is handled by the caller's verify, not here.
+fn load_manifest(
+    locator: &OutputLocator,
+    path: &Path,
+) -> Result<Option<TranscriptManifest>, StreamError> {
     let bytes = std::fs::read(path).map_err(|e| {
         transcript_error(
             locator,
@@ -666,15 +694,19 @@ fn load_manifest(locator: &OutputLocator, path: &Path) -> Result<TranscriptManif
             },
         )
     })?;
-    serde_json::from_slice(&bytes).map_err(|e| {
-        transcript_error(
-            locator,
-            TranscriptError::Io {
-                file: MANIFEST_FILENAME.to_string(),
-                msg: e.to_string(),
-            },
-        )
-    })
+    match serde_json::from_slice(&bytes) {
+        Ok(manifest) => Ok(Some(manifest)),
+        Err(error) => {
+            tracing::warn!(
+                vm = %locator.vm,
+                path = %path.display(),
+                error = %error,
+                "capture manifest does not parse and is being ignored; it was most likely \
+                 written by a process that did not survive writing it"
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Recover the per-capture data key from under the host KEK.
@@ -1197,6 +1229,77 @@ mod tests {
             panic!("a tampered manifest must not open clean");
         };
         assert!(matches!(err, StreamError::Transcript { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_manifest_torn_by_a_dying_writer_degrades_to_the_console_rather_than_erroring() {
+        // A half-written manifest is what a host crash leaves behind, which is
+        // precisely when the operator needs whatever output survived. Refusing
+        // the whole read over it hides the console capture sitting beside it.
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut locator = stdout_capture(root.path(), &["one", "two"]);
+        locator.console_log = root.path().join("console.log");
+        std::fs::write(&locator.console_log, b"what the guest managed to say")
+            .expect("console capture");
+
+        let manifest_path = locator.transcript_dir.join(MANIFEST_FILENAME);
+        let whole = std::fs::read(&manifest_path).expect("read manifest");
+        std::fs::write(&manifest_path, &whole[..whole.len() / 2]).expect("tear the manifest");
+
+        let mut stream = open_vm_output_at(&locator, OutputRequest::default())
+            .expect("a torn manifest must not fail the read");
+        assert_eq!(stream.availability(), StreamAvailability::ConsoleOnly);
+        assert_eq!(
+            payloads(&drain(&mut stream)),
+            vec!["what the guest managed to say"]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_manifest_still_fails_rather_than_degrading() {
+        // The degrade is for contents, never for access: a manifest the reader
+        // cannot open is a problem with the reader's view of the capture, and
+        // announcing "no capture" over it is the fail-open this refuses.
+        let root = tempfile::tempdir().expect("tempdir");
+        let locator = stdout_capture(root.path(), &["one"]);
+        let manifest_path = locator.transcript_dir.join(MANIFEST_FILENAME);
+        std::fs::remove_file(&manifest_path).expect("remove the manifest file");
+        // A directory where the manifest should be: present to `try_exists`,
+        // an I/O error to `read`.
+        std::fs::create_dir(&manifest_path).expect("stand a directory in its place");
+
+        let Err(err) = open_vm_output_at(&locator, OutputRequest::default()) else {
+            panic!("a manifest that cannot be read must not be reported as absent");
+        };
+        assert!(matches!(err, StreamError::Transcript { .. }), "{err}");
+    }
+
+    #[test]
+    fn an_adopted_capture_reports_that_its_shortfall_is_only_a_floor() {
+        // A manifest rebuilt without the writer that produced it cannot know
+        // what that writer dropped on its way out. Reading it as whole is the
+        // one outcome the flag exists to prevent.
+        let root = tempfile::tempdir().expect("tempdir");
+        let locator = stdout_capture(root.path(), &["one", "two"]);
+        let manifest_path = locator.transcript_dir.join(MANIFEST_FILENAME);
+        let raw = std::fs::read(&manifest_path).expect("read manifest");
+        let mut manifest: TranscriptManifest = serde_json::from_slice(&raw).expect("parse");
+        manifest.adopted = true;
+        manifest.sealed_root_hex =
+            transcript::sealed_root_hex(&manifest).expect("reseal the adopted manifest");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize"),
+        )
+        .expect("write manifest");
+
+        let mut stream = open_vm_output_at(&locator, OutputRequest::default()).expect("open");
+        let truncation = stream
+            .truncation()
+            .expect("an adopted capture is never reported as whole");
+        assert!(truncation.adopted);
+        assert_eq!(truncation.refused_chunks, 0);
+        assert_eq!(payloads(&drain(&mut stream)), vec!["one", "two"]);
     }
 
     #[test]

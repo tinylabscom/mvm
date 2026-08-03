@@ -58,7 +58,12 @@ pub const MANIFEST_FILENAME: &str = "manifest.json";
 /// `ChunkRecord` grew `offset`, and the manifest grew `retention` plus
 /// `evicted_chunks`/`evicted_bytes`. Same reason again — every one of those is
 /// inside the sealed root.
-pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 5;
+///
+/// Bumped 5 -> 6 when the manifest grew `adopted`, which the sealed root
+/// commits to for the same reason it commits to the refusal counters: a
+/// reader must not be able to strip the one field saying this manifest was
+/// reconstructed rather than sealed by the process that wrote the capture.
+pub const TRANSCRIPT_MANIFEST_FORMAT_VERSION: u32 = 6;
 
 /// Direction of a captured chunk relative to the workload: network egress/
 /// ingress, or one of the workload's own output streams (stdout/stderr) plus
@@ -179,6 +184,21 @@ pub struct TranscriptManifest {
     /// Plaintext bytes in the chunks counted by `evicted_chunks`.
     #[serde(default)]
     pub evicted_bytes: u64,
+    /// True when this manifest was reconstructed by a process that did not
+    /// own the live capture — the writer's own state was gone, so the
+    /// refusal and eviction counters above are a **floor** rather than the
+    /// whole shortfall.
+    ///
+    /// A capture is sealed from the writer that produced it whenever the
+    /// process holding that writer is the one that ends the run. When it is
+    /// not — a workload started detached and stopped by a later invocation —
+    /// the seal is rebuilt from what the capture left on disk, and nothing on
+    /// disk records what the departed process dropped between its last
+    /// durable append and its exit. Saying so is the difference between an
+    /// artifact that declares its own limits and one that quietly claims
+    /// completeness it cannot have.
+    #[serde(default)]
+    pub adopted: bool,
     /// RFC-6962 Merkle root over the capture binding, sealed-key metadata,
     /// bounds, retention policy, refusal and eviction counts, and ordered
     /// chunk records. The chunk records contain ciphertext digests, never
@@ -189,11 +209,12 @@ pub struct TranscriptManifest {
 
 impl TranscriptManifest {
     /// Whether this transcript is missing chunks that were captured — lost
-    /// off the tail at a bound, or evicted off the head by the ring. A
-    /// consumer must not read either as a complete record of the workload's
-    /// output.
+    /// off the tail at a bound, evicted off the head by the ring, or
+    /// unaccountable because the manifest was rebuilt without the writer that
+    /// produced it. A consumer must not read any of the three as a complete
+    /// record of the workload's output.
     pub fn is_truncated(&self) -> bool {
-        self.refused_chunks > 0 || self.evicted_chunks > 0
+        self.refused_chunks > 0 || self.evicted_chunks > 0 || self.adopted
     }
 }
 
@@ -258,6 +279,7 @@ struct RootMetadata<'a> {
     refused_bytes: u64,
     evicted_chunks: u64,
     evicted_bytes: u64,
+    adopted: bool,
 }
 
 #[derive(Serialize)]
@@ -286,6 +308,7 @@ pub fn sealed_root_hex(manifest: &TranscriptManifest) -> Result<String, Transcri
         refused_bytes: manifest.refused_bytes,
         evicted_chunks: manifest.evicted_chunks,
         evicted_bytes: manifest.evicted_bytes,
+        adopted: manifest.adopted,
     };
     let mut leaves = Vec::with_capacity(manifest.chunks.len() + 1);
     leaves.push(
@@ -514,6 +537,22 @@ impl TranscriptWriter {
         self.store.segment_count()
     }
 
+    /// Where this capture's segments live, and where its manifest belongs.
+    pub fn dir(&self) -> &Path {
+        self.store.dir()
+    }
+
+    /// The record the most recent successful push produced, or `None` before
+    /// the first one lands.
+    ///
+    /// For a caller mirroring the manifest as it is built, so a later process
+    /// can rebuild the seal this writer would have produced. Reading it after
+    /// a refused push returns the previous record, which is correct: a refusal
+    /// produces no record to mirror.
+    pub fn last_chunk(&self) -> Option<&ChunkRecord> {
+        self.chunks.back()
+    }
+
     /// Encrypt and append one payload chunk, or fail closed on a bound. The
     /// budget is checked on the *plaintext* size before any ciphertext lands.
     pub fn push(&mut self, direction: Direction, plaintext: &[u8]) -> Result<(), TranscriptError> {
@@ -641,6 +680,8 @@ impl TranscriptWriter {
             refused_bytes: self.refused_bytes,
             evicted_chunks: self.evicted_chunks,
             evicted_bytes: self.evicted_bytes,
+            // A writer sealing its own capture accounts for the whole of it.
+            adopted: false,
             sealed_root_hex: String::new(),
         };
         manifest.sealed_root_hex =
@@ -800,6 +841,7 @@ mod tests {
             refused_bytes: 0,
             evicted_chunks: 0,
             evicted_bytes: 0,
+            adopted: false,
             sealed_root_hex: String::new(),
         };
         manifest.sealed_root_hex = sealed_root_hex(&manifest).unwrap();
@@ -890,7 +932,7 @@ mod tests {
         let m = two_chunk_manifest();
         assert_eq!(
             m.sealed_root_hex,
-            "854edc1c7c06e0bed82ea0061653410cd33ab0d0e685f4e9ef8b9d9d911de320"
+            "b061d53821350933ff448cc62975d1a9afac38a53913eccf2779f222fe391239"
         );
     }
 
@@ -925,6 +967,11 @@ mod tests {
     /// the manifest carried a retention policy or an eviction count.
     const PRE_SEGMENT_ROOT_HEX: &str =
         "1c0d5a649e45081b0f2ac16d30744b97aff3117002717719e9ba1601d9ca1c29";
+
+    /// The root `sealed_root_vector_is_pinned` pinned before the manifest
+    /// grew `adopted`.
+    const PRE_ADOPTION_ROOT_HEX: &str =
+        "854edc1c7c06e0bed82ea0061653410cd33ab0d0e685f4e9ef8b9d9d911de320";
 
     /// Same chunk records as `two_chunk_manifest`, but stamped with a caller
     /// supplied root instead of a freshly computed one.
@@ -980,6 +1027,44 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_sealed_before_the_adoption_flag_fails_on_version_not_root() {
+        // Same rule as every prior re-pin: an honest older capture is refused
+        // as old, never as tampered.
+        let mut m = manifest_with_root(PRE_ADOPTION_ROOT_HEX);
+        m.format_version = 5;
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::UnknownFormatVersion {
+                got: 5,
+                expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION
+            })
+        );
+    }
+
+    #[test]
+    fn the_pre_adoption_root_vector_no_longer_verifies() {
+        let m = manifest_with_root(PRE_ADOPTION_ROOT_HEX);
+        assert_eq!(m.format_version, TRANSCRIPT_MANIFEST_FORMAT_VERSION);
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
+    fn flipping_the_adoption_flag_breaks_the_sealed_root() {
+        // The point of putting it inside the root: a manifest cannot be
+        // laundered into looking self-sealed by editing one boolean.
+        let mut m = two_chunk_manifest();
+        verify_sealed_root(&m).expect("the fixture verifies as written");
+        m.adopted = true;
+        assert_eq!(
+            verify_sealed_root(&m),
+            Err(TranscriptError::SealedRootMismatch)
+        );
+    }
+
+    #[test]
     fn stale_format_version_manifest_fails_on_version_not_root_mismatch() {
         // A manifest sealed by pre-linkage code: format_version 2, and a
         // chunk with no `prev_hash` key at all — not a defaulted empty
@@ -1006,7 +1091,7 @@ mod tests {
             verify_sealed_root(&m),
             Err(TranscriptError::UnknownFormatVersion {
                 got: 2,
-                expected: 5
+                expected: TRANSCRIPT_MANIFEST_FORMAT_VERSION
             })
         );
     }

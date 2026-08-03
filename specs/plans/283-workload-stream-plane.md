@@ -1753,28 +1753,57 @@ the chained transcript.
 - Modify: `crates/mvm-hostd/src/stream/plane.rs`
 - Modify: the VM stop path, and whatever owns per-VM state across processes
 
-- [ ] **Step 1: Write the failing tests** — `machine run -d` then `machine stop`
+- [x] **Step 1: Write the failing tests** — `machine run -d` then `machine stop`
   leaves a sealed, verifying transcript; the same for `up`; and a foreground run
   detached with Ctrl-C still seals when the VM later stops. All must fail today.
+  Landed as `a_detached_start_is_sealed_by_the_later_stop_that_ends_the_vm`,
+  `an_entrypoint_run_whose_caller_exits_is_sealed_by_the_stop_that_follows`, and
+  `a_foreground_run_detached_part_way_through_still_seals_when_the_vm_stops` in
+  `crates/mvm-hostd/tests/workload_stream_plane.rs`, modelling the process
+  boundary with two `StreamPlane`s (the registration is a `OnceLock`, so one
+  test binary cannot hold two process-global planes).
 
-- [ ] **Step 2: Run to verify they fail.**
+- [x] **Step 2: Run to verify they fail.** All three failed on
+  `ConsoleOnly != HistoryOnly` with the adopt path stubbed out.
 
-- [ ] **Step 3: Give the plane a lifetime that outlives one CLI process.** The
-  broker is per-VM state, not per-invocation state. A process that stops a VM it
-  did not start must be able to seal that VM's capture.
+- [x] **Step 3: Give the plane a lifetime that outlives one CLI process.** Not
+  the plane — the *seal*. A `TranscriptWriter`'s chunk records live only in the
+  writing process's memory and the segment files carry no framing, so a later
+  process cannot reconstruct a manifest from the ciphertext alone. So the
+  durable writer thread now mirrors each landed chunk into an append-only
+  journal beside the segments (`crates/mvm-hostd/src/stream/journal.rs`), and
+  `StreamPlane::release` seals from that mirror for a VM this process never
+  attached. The mirror is written by the writer thread, never a producer, so
+  the no-stall invariant is untouched; `DurableSink`'s `Drop` joins that thread
+  under the same 3s bound `seal` uses, so a process exiting normally leaves a
+  complete journal.
 
-- [ ] **Step 4: Keep the console hook unconditional.** Whatever owns the new
-  lifetime must not be admission-gated, or console capture vanishes on exactly
-  the unadmitted dev runs where a boot failure is most likely.
+- [x] **Step 4: Keep the console hook unconditional.** Nothing moved to the
+  per-tenant daemon; the plane is still the process-wide registration
+  `install_host_console_streamer` installs, and `ConsoleStreamer::start` is
+  still called on every boot regardless of admission. The new lifetime is a
+  file in the capture directory, which no admission gate touches.
+  `the_console_hook_is_wired_for_an_unadmitted_workload` still passes.
 
-- [ ] **Step 5: Fold in the teardown defects found reviewing the prior task.**
-  The follower is stopped before `kill()`, so shutdown-time guest writes land in
-  `console.log` and never in the chain — reorder so both hold. The manifest is
-  written with `fs::write` while the sibling sink uses `atomic_write`, and
-  `load_manifest` propagates rather than degrades, so a crash mid-write makes
-  `mvmctl logs` hard-error instead of falling back.
+- [x] **Step 5: Fold in the teardown defects found reviewing the prior task.**
+  `WorkloadRunner::stop` kills before releasing the capture (and releases
+  unconditionally, so a failed kill still seals —
+  `the_console_capture_outlives_the_kill_so_a_dying_guests_output_is_recorded`,
+  `a_kill_that_fails_still_releases_the_console_capture`); the same reorder
+  applies to the refused-standby-child path. The manifest is written through
+  `atomic_write`, and `load_manifest` degrades to "no durable half" on a
+  manifest that does not *parse* while still failing closed on one that parses
+  and does not verify.
 
-- [ ] **Step 6: Commit**
+- [x] **Honesty of a rebuilt seal.** `TranscriptManifest` grew `adopted`
+  (inside the sealed root, format version 5 -> 6). Nothing on disk records what
+  a departed process shed between its last durable append and its exit, so a
+  manifest rebuilt from the journal always sets it, `is_truncated()` reports
+  it, and `mvmctl logs` says the counts are a floor. An adopted seal never
+  overwrites an owner's exact seal, and never runs while another process is
+  still answering on the VM's stream socket.
+
+- [x] **Step 6: Commit**
 
 ```sh
 git commit -am "feat(hostd): seal the stream transcript for detached workloads"

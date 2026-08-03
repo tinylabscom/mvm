@@ -36,12 +36,21 @@ for detailed scope and acceptance criteria.
         there. `mvmctl invoke` prints what the broker cleared rather than the
         raw frame, so it and `logs` show the same redacted, chained bytes and
         neither is a path around the redaction seam
+  - [x] T9d — every workload shape seals: the durable writer mirrors each landed
+        chunk into an append-only journal beside the segments, so a `stop` in a
+        different process from the `start` rebuilds and seals that VM's
+        transcript instead of leaving a directory of ciphertext no reader can
+        open. A rebuilt seal is marked `adopted` (inside the sealed root) and
+        reports as incomplete, because nothing on disk records what the
+        departed process shed on its way out. Teardown also kills before
+        releasing the capture, so a dying guest's last words reach the chain
   - [ ] T10 — signed stream-retention mode, ADR-035, and the Phase 1 guide
   - [ ] T11–T16 — the input plane (Phase 2)
-  - [ ] Residual after T9b: the plane lives in the host process that owns the
-        VM's lifecycle, so a detached `machine run -d` takes its broker with it
-        when the CLI exits — the VM keeps running and `logs` falls back to the
-        sealed transcript or the console until a resident host process owns it
+  - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
+        transcript is now sealed by whatever stops the VM. The *follow* half
+        remains: the console follower still dies with the starting process, so
+        output a detached VM produces after that point reaches no capture at
+        all until a resident host process owns the plane
   - [ ] Deferred to the broker task: state a follower's start sequence in the
         first batch, so the reader can close the accept-window gap between the
         transcript snapshot and the live subscription

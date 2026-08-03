@@ -14,6 +14,7 @@
 //! the console hook most has to cover.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
@@ -27,11 +28,12 @@ use mvm_core::stream_client::{
 };
 use mvm_core::util::test_env::TestEnv;
 use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig};
+use mvm_hostd::stream::StreamPlane;
 use mvm_protocol::stream::{StreamKind, StreamSource};
 use mvm_runtime::driver::MockDriver;
 use mvm_runtime::workload_runner::{
-    EndpointSpawnRequest, EndpointSpawner, RealBrokerRegistrar, WorkloadLaunchInputs,
-    WorkloadRunner, console_streamer_installed,
+    ConsoleStreamer, EndpointSpawnRequest, EndpointSpawner, RealBrokerRegistrar,
+    WorkloadLaunchInputs, WorkloadRunner, console_streamer_installed,
 };
 
 /// How long a record may take to cross the console follower's poll interval
@@ -70,6 +72,47 @@ fn runner() -> WorkloadRunner<MockDriver, StubEndpointSpawner, RealBrokerRegistr
         StubEndpointSpawner,
         RealBrokerRegistrar,
     )
+}
+
+/// A runner belonging to one host *process*, modelled by giving it its own
+/// plane instead of the process-global one.
+///
+/// The process registration is a `OnceLock`, so a single test binary cannot
+/// hold two of them — and two host processes is exactly the shape under test:
+/// one starts a workload and exits, another stops it later. Everything else on
+/// the path is the production collaborator, including the plane itself.
+fn runner_in_process(
+    plane: &Arc<StreamPlane>,
+) -> WorkloadRunner<MockDriver, StubEndpointSpawner, RealBrokerRegistrar> {
+    WorkloadRunner::new(
+        MockDriver::default(),
+        StubEndpointSpawner,
+        RealBrokerRegistrar,
+    )
+    .with_console_streamer(Arc::clone(plane) as Arc<dyn ConsoleStreamer>)
+}
+
+/// Let the console follower take what is on disk before the process holding
+/// it goes away. A real detached start runs for as long as the workload takes
+/// to print; a race here would be the test's, not the plane's.
+fn settle() {
+    std::thread::sleep(ACCEPT_SETTLE);
+}
+
+/// The whole durable half of one VM's run, as an operator reads it after the
+/// VM is gone.
+fn sealed_run(vm: &str) -> (StreamAvailability, Vec<OutputRecord>) {
+    let mut stream = open_vm_output(vm, OutputRequest::default()).expect("the capture opens");
+    let availability = stream.availability();
+    let mut records = Vec::new();
+    while let Some(record) = stream.next_output().expect("read the capture") {
+        records.push(record);
+    }
+    (availability, records)
+}
+
+fn payloads(records: &[OutputRecord]) -> Vec<Vec<u8>> {
+    records.iter().map(|r| r.payload.clone()).collect()
 }
 
 fn launch(runner: &WorkloadRunner<MockDriver, StubEndpointSpawner, RealBrokerRegistrar>, vm: &str) {
@@ -342,6 +385,115 @@ fn following_the_console_never_writes_to_it() {
     );
 
     runner.stop(&VmId("readonly-vm".to_string())).expect("stop");
+}
+
+#[test]
+fn a_detached_start_is_sealed_by_the_later_stop_that_ends_the_vm() {
+    // `mvmctl machine run -d`: the CLI boots the workload and exits, and a
+    // separate `mvmctl machine stop` ends it minutes or days later. Until the
+    // stop learned to seal, that whole shape wrote no manifest at all — so
+    // `logs` resolved to the unchained console file and the verifiable half
+    // of the capture was dead weight for every workload but a foreground one.
+    register();
+    let (_env, _tmp) = isolated_home();
+
+    let starting = Arc::new(StreamPlane::new());
+    launch(&runner_in_process(&starting), "detached-vm");
+    std::fs::write(console_log("detached-vm"), b"started and left running\n")
+        .expect("write the console capture");
+    settle();
+    // The starting process exits with the VM still up.
+    drop(starting);
+
+    let stopping = Arc::new(StreamPlane::new());
+    runner_in_process(&stopping)
+        .stop(&VmId("detached-vm".to_string()))
+        .expect("stop");
+
+    let (availability, records) = sealed_run("detached-vm");
+    assert_eq!(
+        availability,
+        StreamAvailability::HistoryOnly,
+        "the run must be readable off the durable half, not the console fallback"
+    );
+    assert_eq!(payloads(&records), [b"started and left running\n"]);
+    assert!(records.iter().all(|r| r.origin == RecordOrigin::Durable));
+}
+
+#[test]
+fn an_entrypoint_run_whose_caller_exits_is_sealed_by_the_stop_that_follows() {
+    // `mvmctl up`: an admitted workload whose entrypoint output arrives over
+    // the agent channel rather than the console. Same process boundary, and
+    // the same requirement — except that these frames are the only ones that
+    // carry which channel a byte came out of, so losing them costs the
+    // transcript the one thing the console can never supply.
+    register();
+    let (_env, _tmp) = isolated_home();
+
+    let starting = Arc::new(StreamPlane::new());
+    launch(&runner_in_process(&starting), "up-vm");
+    let mut sink = starting.entrypoint_sink("up-vm");
+    assert!(sink.is_recorded(), "the workload is attached to this plane");
+    sink.ingest(StreamKind::Stdout, b"the result\n");
+    sink.ingest(StreamKind::Stderr, b"the warning\n");
+    drop(sink);
+    settle();
+    drop(starting);
+
+    let stopping = Arc::new(StreamPlane::new());
+    runner_in_process(&stopping)
+        .stop(&VmId("up-vm".to_string()))
+        .expect("stop");
+
+    let (availability, records) = sealed_run("up-vm");
+    assert_eq!(availability, StreamAvailability::HistoryOnly);
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| (r.kind, r.payload.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (StreamKind::Stdout, b"the result\n".to_vec()),
+            (StreamKind::Stderr, b"the warning\n".to_vec()),
+        ],
+        "the sealed capture keeps the channel the entrypoint sent each frame on"
+    );
+}
+
+#[test]
+fn a_foreground_run_detached_part_way_through_still_seals_when_the_vm_stops() {
+    // The documented Ctrl-C detach: the foreground caller goes away while the
+    // workload keeps running, so the `stop` that eventually ends it belongs
+    // to a process that saw none of the output.
+    register();
+    let (_env, _tmp) = isolated_home();
+
+    let foreground = Arc::new(StreamPlane::new());
+    launch(&runner_in_process(&foreground), "detached-later-vm");
+    std::fs::write(
+        console_log("detached-later-vm"),
+        b"printed before the detach\n",
+    )
+    .expect("write the console capture");
+    settle();
+    drop(foreground);
+
+    // Nothing seals on the way out, and nothing should: the VM is still
+    // running and the manifest belongs to whoever ends it. Until then the
+    // only readable source is the console file — the state this task exists
+    // to make temporary rather than permanent.
+    assert_eq!(
+        sealed_run("detached-later-vm").0,
+        StreamAvailability::ConsoleOnly
+    );
+
+    runner_in_process(&Arc::new(StreamPlane::new()))
+        .stop(&VmId("detached-later-vm".to_string()))
+        .expect("stop");
+
+    let (availability, records) = sealed_run("detached-later-vm");
+    assert_eq!(availability, StreamAvailability::HistoryOnly);
+    assert_eq!(payloads(&records), [b"printed before the detach\n"]);
 }
 
 /// Sanity: the helper resolves paths the same way the reader does, so a

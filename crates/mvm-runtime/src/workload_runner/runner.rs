@@ -635,9 +635,11 @@ impl<D: VmmDriver, S: EndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, 
             // only tears down the VMM, not the console follower this claim
             // started above and `VmBackend::stop` never runs for a name that
             // is refused here and never becomes live state, so this is the
-            // one place responsible for reaping it.
-            self.console_streamer.stop(&child.0);
+            // one place responsible for reaping it — after the teardown, so
+            // whatever the refused child prints as it dies is in the record
+            // of why it was refused.
             self.force_stop(&child.0, "refused forked standby child");
+            self.console_streamer.stop(&child.0);
             return Err(refusal);
         }
 
@@ -1129,13 +1131,21 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static, B: BrokerRegistrar + 
         // that registered none.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
         crate::host_agent_spawn::reap_host_agent_services_from_state(&vm_state_dir(&id.0), &id.0);
-        // Idempotent no-op for a VM whose console was never followed (the
-        // no-op default, or a cold-boot failure before `start` reached this
-        // point). Unconditional and ahead of the fallible attach+kill below
-        // so a leaked follower thread never depends on the VM having
-        // stopped cleanly.
+        // Kill first, release the capture second. A guest writes its last
+        // words during the kill — a shutdown trace, a panic, whatever the
+        // kernel prints on the way down — and a follower stopped before it
+        // captures none of them: they land in the write-only console file and
+        // never in the chain, which is exactly the output an operator opens
+        // the transcript to find.
+        //
+        // The order costs nothing the other one had. The release is
+        // unconditional and runs whether or not the kill worked, so a VM that
+        // will not die still gets its capture sealed rather than stranding
+        // the follower; and for a VM whose console was never followed here it
+        // is the idempotent no-op it always was.
+        let killed = self.driver.attach(id).and_then(|vm| vm.kill());
         self.console_streamer.stop(&id.0);
-        self.driver.attach(id)?.kill()
+        killed
     }
 
     fn stop_all(&self) -> Result<()> {
@@ -1482,6 +1492,72 @@ mod tests {
                 .expect("stop captured this vm's console"),
             b"kernel panic\n"
         );
+    }
+
+    #[test]
+    fn the_console_capture_outlives_the_kill_so_a_dying_guests_output_is_recorded() {
+        // A guest prints its last words *during* teardown. Releasing the
+        // capture before the kill leaves those bytes in the write-only
+        // console file and out of the chain — which is exactly the output an
+        // operator opens the transcript to find.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(tmp.path());
+
+        let policy = NetworkPolicy::deny_all();
+        let redaction = RedactionPolicy::default();
+        let streamer = Arc::new(RecordingConsoleStreamer::default());
+        let runner = WorkloadRunner::new(
+            MockDriver::default().printing_on_kill(b"panic on the way down\n"),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        )
+        .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
+
+        let cfg = config("w-dying");
+        let vm = runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "tenant-x",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: "root=/dev/vda".into(),
+            })
+            .expect("start_workload succeeds against the mock driver");
+        std::fs::write(
+            vm_state_dir(&cfg.name).join("console.log"),
+            b"while it lived\n",
+        )
+        .expect("write the console capture");
+
+        runner.stop(vm.id()).expect("stop");
+
+        // The snapshot the hook takes at `stop` is what a real follower's
+        // final drain would see. It must hold the kill-time bytes.
+        let captured = streamer.captured_at_stop.lock().unwrap();
+        let seen = captured.get("w-dying").expect("stop captured this vm");
+        assert_eq!(seen.as_slice(), b"while it lived\npanic on the way down\n");
+    }
+
+    #[test]
+    fn a_kill_that_fails_still_releases_the_console_capture() {
+        // The property the old ordering bought and this one must not lose: a
+        // VM that will not die cannot strand its follower, or leave its
+        // transcript unsealed.
+        let streamer = Arc::new(RecordingConsoleStreamer::default());
+        let runner = WorkloadRunner::new(
+            MockDriver::default().refusing_attach(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        )
+        .with_console_streamer(streamer.clone() as Arc<dyn ConsoleStreamer>);
+
+        let err = runner
+            .stop(&VmId("w-undead".to_string()))
+            .expect_err("the driver refuses to attach");
+        assert!(format!("{err:#}").contains("no such vm"), "{err:#}");
+        assert_eq!(streamer.stopped.lock().unwrap().as_slice(), ["w-undead"]);
     }
 
     #[test]
