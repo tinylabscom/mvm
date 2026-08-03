@@ -155,8 +155,14 @@ impl UserspaceSocketDatapath {
             source,
         })?;
 
-        // Symmetric: this device's socket set is empty, so its stack
-        // emits nothing and the guest-bound queue has no burst to hold.
+        // Symmetric, and at the machine-wide default: this is the one
+        // device a machine has, so its depth does not multiply by the
+        // socket cap the way a flow's does. The asymmetric per-flow
+        // derivation exists to keep 1024 copies affordable; against a
+        // single queue there is no such pressure, in either direction.
+        // (Not "because its stack emits nothing" — an interface answers
+        // unmatched ingress with a reset or an unreachable whether or not
+        // its socket set is empty.)
         let mut device = GuestDevice::new(
             accept_mtu(req.mtu as usize)?,
             QueueDepths::symmetric(DEFAULT_QUEUE_DEPTH),

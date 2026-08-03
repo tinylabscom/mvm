@@ -2429,7 +2429,15 @@ mod tests {
         let (host, peer) = host_pair();
         let (mut flow, _g) = flow_over_with(host, FakeGuest::with_tiny_mss(flow_key()));
         let (_blocked, _stuffed) = fill_until_would_block(&peer);
+
+        // Seeded, and deliberately not from zero. A record that starts
+        // empty with one flow pumping into it cannot tell an accumulation
+        // from an assignment: both leave it holding exactly this flow's
+        // cumulative figure. The seed stands in for every other flow and
+        // every earlier pass that shares this record in production.
+        const ALREADY_COUNTED: u64 = 7;
         let mut metrics = GatewayMetrics::default();
+        metrics.queue_drops_egress += ALREADY_COUNTED;
 
         flow.pump(0, &mut metrics);
 
@@ -2440,17 +2448,18 @@ mod tests {
         );
         assert_eq!(
             metrics.queue_drops_egress,
-            flow.dropped_to_guest(),
-            "a drop only the flow can see is a drop no operator can see"
+            ALREADY_COUNTED + flow.dropped_to_guest(),
+            "a drop only the flow can see is a drop no operator can see, and it must \
+             add to what the record already held rather than replace it"
         );
 
-        // A second pass adds its own drops to the same counter rather than
-        // overwriting it with the flow's cumulative figure.
+        // And a second pass adds its own drops on top rather than
+        // restating the flow's cumulative figure.
         let after_first = metrics.queue_drops_egress;
         flow.pump(1, &mut metrics);
         assert_eq!(
             metrics.queue_drops_egress,
-            flow.dropped_to_guest(),
+            ALREADY_COUNTED + flow.dropped_to_guest(),
             "the counter must accumulate across passes; it was {after_first} after one"
         );
     }
