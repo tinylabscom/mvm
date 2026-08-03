@@ -64,7 +64,24 @@ updates only its own entry below.
       duplicate-name/unknown-posture matrix, serde round-trips,
       unknown-field rejection, and the no-secret/no-host-path guarantees.
 
-- [ ] #2080 — reusable local encrypted-volume lifecycle service.
+- [x] #2080 — reusable local encrypted-volume lifecycle service.
+      `mvm_client::volume` now owns the canonical lifecycle behind the
+      object-safe `VolumeService` contract with strict secret-free DTOs:
+      encrypted block-volume create, unlock/lock with DEK-binding tamper
+      refusal, typed attachments (mount allow-roots, read-only default,
+      dev-profile gate for read-write), exclusive persistent launch leases
+      with RAII rollback, just-in-time unlock with re-seal on final release,
+      idempotent crash/orphan recovery, and immutable snapshot/restore. The
+      CLI volume commands, launch merge, and stop-path release are thin shims
+      over the service (host-encryption probe injected from doctor); the
+      former CLI-private lifecycle is deleted, not duplicated. 41 service
+      tests plus 8 CLI shim tests cover create/list, RO + permitted RW
+      attach, duplicate guest paths, exclusive-lease refusal, profile
+      refusal, detach/relock, failed-launch cleanup, orphan recovery,
+      persistent restart, tampered-ciphertext refusal, and key-material
+      absence from DTOs/debug output. The live KVM BDD scenario extends to
+      prove relock after the final release; guest write/read + restart remain
+      covered by the existing `s26_volumes` firecracker scenarios.
 
 - [ ] #2081 — reusable write-only local secret lifecycle service.
 

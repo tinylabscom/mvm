@@ -97,6 +97,8 @@ Feature: Encrypted block volume lifecycle and attachment
     And the output contains "volume-persisted"
     When I run mvmctl in the isolated mvm home with "machine stop bdd-persistent-volume --yes"
     Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine volume lock work"
+    Then the command exits with code 0
 
   @live @firecracker
   Scenario: a read-only block attachment refuses a guest write

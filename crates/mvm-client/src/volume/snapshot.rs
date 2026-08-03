@@ -1,4 +1,10 @@
 //! Immutable encrypted snapshots for managed local block volumes.
+//!
+//! A snapshot copies the sealed ciphertext archive (never plaintext) plus a
+//! canonical-JSON manifest binding the payload hash, size, artifact kind, and
+//! the wrapped key that decrypts it. Restore verifies the manifest identity,
+//! payload digest, and wrapped-key binding before replacing the live
+//! ciphertext, staging the swap so an interrupted restore recovers cleanly.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -6,13 +12,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use mvm_core::domain::volume::WrappedKey;
-use mvm_runtime::vm::volume_registry::{LocalVolumeEncryption, LocalVolumeKind, LocalVolumeState};
+use mvm_runtime::vm::volume_registry::{
+    LocalVolumeEncryption, LocalVolumeKind, LocalVolumeState, MvmManagedVolumeEncryption,
+};
 use serde::{Deserialize, Serialize};
 
-use super::{
+use super::lease::ensure_volume_not_attached;
+use super::lifecycle::{
     acquire_volume_lifecycle_lock, ciphertext_content_hash, ensure_private_dir,
-    ensure_volume_not_attached, recover_local_volume_catalog, set_local_volume_state,
-    validate_volume_name,
+    recover_local_volume_catalog, set_local_volume_state, validate_volume_name,
 };
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
@@ -32,7 +40,8 @@ struct LocalVolumeSnapshotManifest {
     wrapped_key: WrappedKey,
 }
 
-pub(super) fn create(volume_name: &str, snapshot_id: &str) -> Result<()> {
+/// Create an immutable encrypted snapshot of a locked managed volume.
+pub(crate) fn create(volume_name: &str, snapshot_id: &str) -> Result<()> {
     validate_snapshot_inputs(volume_name, snapshot_id)?;
     let _lifecycle_lock = acquire_volume_lifecycle_lock()?;
     let catalog = recover_local_volume_catalog()?;
@@ -114,7 +123,6 @@ pub(super) fn create(volume_name: &str, snapshot_id: &str) -> Result<()> {
         let _ = fs::remove_dir_all(&staging);
     }
     result?;
-    println!("created snapshot {snapshot_id:?} for volume {volume_name:?}");
     mvm_core::audit_emit!(
         VolumeSnapshot,
         "volume={volume_name} snapshot={snapshot_id} state=created"
@@ -122,7 +130,8 @@ pub(super) fn create(volume_name: &str, snapshot_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn restore(volume_name: &str, snapshot_id: &str) -> Result<()> {
+/// Restore a locked managed volume from an immutable local snapshot.
+pub(crate) fn restore(volume_name: &str, snapshot_id: &str) -> Result<()> {
     validate_snapshot_inputs(volume_name, snapshot_id)?;
     let _lifecycle_lock = acquire_volume_lifecycle_lock()?;
     let mut catalog = recover_local_volume_catalog()?;
@@ -190,7 +199,6 @@ pub(super) fn restore(volume_name: &str, snapshot_id: &str) -> Result<()> {
         .with_context(|| format!("chmod 0600 {}", ciphertext.display()))?;
     set_local_volume_state(&mut catalog, volume_name, LocalVolumeState::Locked)?;
     catalog.save()?;
-    println!("restored volume {volume_name:?} from snapshot {snapshot_id:?}");
     mvm_core::audit_emit!(
         VolumeRestore,
         "volume={volume_name} snapshot={snapshot_id} state=restored"
@@ -202,7 +210,7 @@ fn managed_locked_encryption<'a>(
     encryption: &'a LocalVolumeEncryption,
     volume_name: &str,
     operation: &str,
-) -> Result<&'a mvm_runtime::vm::volume_registry::MvmManagedVolumeEncryption> {
+) -> Result<&'a MvmManagedVolumeEncryption> {
     let LocalVolumeEncryption::MvmManaged(encryption) = encryption else {
         bail!("volume {volume_name:?} is host-backed and cannot perform {operation}");
     };
@@ -285,31 +293,9 @@ mod tests {
 
     use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
 
+    use super::super::service::{LocalVolumeService, VolumeService};
+    use super::super::test_support::TestVolumeHome;
     use super::*;
-    use crate::commands::vm::volume::{create_mvm_managed, lock, unlock};
-
-    struct TestVolumeHome {
-        _env: mvm_core::util::test_env::TestEnv,
-        root: tempfile::TempDir,
-    }
-
-    impl TestVolumeHome {
-        fn new() -> Self {
-            let root = tempfile::tempdir().unwrap();
-            let mut env = mvm_core::util::test_env::TestEnv::new();
-            env.set("MVM_HOME", root.path());
-            Self { _env: env, root }
-        }
-
-        fn create(&self) {
-            create_mvm_managed(
-                "work",
-                Some(self.root.path().join("managed").to_str().unwrap()),
-                "16M",
-            )
-            .unwrap();
-        }
-    }
 
     fn write_marker(value: u8) {
         let catalog = LocalVolumeCatalog::load().unwrap();
@@ -337,28 +323,29 @@ mod tests {
     #[test]
     fn snapshot_restore_roundtrip_recovers_prior_encrypted_bytes() {
         let home = TestVolumeHome::new();
-        home.create();
-        unlock("work").unwrap();
+        home.create_block("work", 16);
+        let service = LocalVolumeService::new();
+        service.unlock_volume("work").unwrap();
         write_marker(0x41);
-        lock("work").unwrap();
+        service.lock_volume("work").unwrap();
         create("work", "before").unwrap();
 
-        unlock("work").unwrap();
+        service.unlock_volume("work").unwrap();
         write_marker(0x42);
-        lock("work").unwrap();
+        service.lock_volume("work").unwrap();
         restore("work", "before").unwrap();
-        unlock("work").unwrap();
+        service.unlock_volume("work").unwrap();
         assert_eq!(read_marker(), 0x41);
     }
 
     #[test]
     fn restore_refuses_tampered_snapshot_without_replacing_current_ciphertext() {
         let home = TestVolumeHome::new();
-        home.create();
+        home.create_block("work", 16);
         create("work", "before").unwrap();
         let catalog = LocalVolumeCatalog::load().unwrap();
         let encryption = match &catalog.get("work").unwrap().encryption {
-            LocalVolumeEncryption::MvmManaged(encryption) => encryption,
+            LocalVolumeEncryption::MvmManaged(encryption) => encryption.clone(),
             LocalVolumeEncryption::HostBacked => panic!("expected managed encryption"),
         };
         let current = ciphertext_content_hash(Path::new(&encryption.ciphertext_path)).unwrap();
@@ -382,7 +369,7 @@ mod tests {
     #[test]
     fn snapshot_manifest_is_canonical_strict_and_roundtrips() {
         let home = TestVolumeHome::new();
-        home.create();
+        home.create_block("work", 16);
         create("work", "before").unwrap();
         let manifest_path = snapshot_volume_root("work")
             .join("before")
