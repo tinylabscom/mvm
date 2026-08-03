@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-08-02
+Last updated: 2026-08-03
 
 This is the cross-plan progress index. The owning plan remains authoritative
 for detailed scope and acceptance criteria.
@@ -65,7 +65,7 @@ for detailed scope and acceptance criteria.
   - [x] Add a fail-closed bounding-set result classifier whose Linux mutation
         witness kills the final comparison survivor from the corrected-head run
 
-- [ ] Plan 283 — Production object-store volumes
+- [x] Plan 283 — Production object-store volumes
       (`specs/plans/283-production-object-store-volumes.md`, issue #2040)
   - [x] Canonical mvm contract and dead S3-path removal
   - [x] Live local/block attachment through the admitted VM launch path
@@ -74,7 +74,7 @@ for detailed scope and acceptance criteria.
   - [x] Canonical worker handoff, Linux/KVM composition proof, and follow-up PR
         matrices are green
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
-  - [ ] Reconcile rejected speculative clauses and close #2040 with evidence
+  - [x] Reconcile rejected speculative clauses and close #2040 with evidence
 
 - [x] Plan 282 — Merge queue auto-requeue
       (`specs/plans/282-merge-queue-auto-requeue.md`)

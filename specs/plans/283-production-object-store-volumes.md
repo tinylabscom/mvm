@@ -1,6 +1,6 @@
 # Production object-store volumes
 
-**Status:** In progress — canonical cross-worker handoff and required PR matrices are green; landing and issue closeout remain (2026-08-02).
+**Status:** Complete — canonical cross-worker handoff, live KVM proof, required PR and merge-queue matrices, and cross-repository landing are complete (2026-08-03).
 
 **Issue:** [#2040](https://github.com/tinylabscom/mvm/issues/2040)
 
@@ -350,7 +350,7 @@ restore, and clean detach. The follow-up PR matrix required by WS7 is green.
       repositories, including all BDD and live lanes.
 - [x] Update both sprint specs, the owning plan checkboxes, and refactor/status
       rollups with final test counts and evidence.
-- [ ] Link the implementing PRs and evidence from this plan and close #2040 with
+- [x] Link the implementing PRs and evidence from this plan and close #2040 with
       an explicit shipped-versus-rejected scope ledger after the required live
       and CI evidence is green.
 
@@ -365,6 +365,10 @@ restore, and clean detach. The follow-up PR matrix required by WS7 is green.
 - Provider ETags are preserved as metadata where available, but the canonical
   manifest digest is the portable integrity identity because ETags are not
   uniformly content digests.
+- Remote object I/O remains in the host and worker userspace planes. Guests see
+  only the admitted block device; no object-store, S3, network-filesystem, or
+  FUSE support was added to the guest kernel. The mvm merge-group Nix lane
+  passed its static-musl, glibc-free, and 50 MB guest-artifact footprint gates.
 - Online master/data-key rotation is not implemented or advertised. The
   operator documentation describes safe export/import recovery under fresh
   keys and warns against swapping the master secret, so no nonexistent rotation
@@ -372,21 +376,22 @@ restore, and clean detach. The follow-up PR matrix required by WS7 is green.
 - The platform fsyncs checkpoint source images. Freezing an arbitrary guest
   database safely requires an application-specific operator/workload contract.
 
-Merged implementation PRs so far: mvm
+Merged implementation PRs: mvm
 [`#2044`](https://github.com/tinylabscom/mvm/pull/2044) and
-[`#2064`](https://github.com/tinylabscom/mvm/pull/2064); mvmd
+[`#2064`](https://github.com/tinylabscom/mvm/pull/2064), followed by the
+canonical hostd v3 worker-transfer protocol in
+[`#2100`](https://github.com/tinylabscom/mvm/pull/2100); mvmd
 [`#198`](https://github.com/tinylabscom/mvmd/pull/198),
 [`#199`](https://github.com/tinylabscom/mvmd/pull/199),
 [`#200`](https://github.com/tinylabscom/mvmd/pull/200),
 [`#201`](https://github.com/tinylabscom/mvmd/pull/201), and
-[`#202`](https://github.com/tinylabscom/mvmd/pull/202). Issue #2040 was closed
-prematurely on 2026-08-02; the worker-handoff follow-up and its evidence must
-land before the shipped ledger is final.
-
-Follow-up review: mvm
-[`#2100`](https://github.com/tinylabscom/mvm/pull/2100) and mvmd
-[`#203`](https://github.com/tinylabscom/mvmd/pull/203). Both required matrices
-are green. Issue #2040 remains open until both changes land.
+[`#202`](https://github.com/tinylabscom/mvmd/pull/202), followed by the exact
+gateway→agent→hostd worker data plane in
+[`#203`](https://github.com/tinylabscom/mvmd/pull/203). The final PR matrices
+and mvm merge-group matrix are green. The composed KVM witness preserves boot
+counts 1→2 across source restart, transfers only detached ciphertext, and
+observes boot count 3 after verified destination restore. The closeout corrects
+the premature 2026-08-02 issue closure with the now-landed canonical proof.
 
 ## Out of scope
 
