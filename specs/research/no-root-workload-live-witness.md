@@ -57,6 +57,11 @@ Command: `mvmctl machine run --image alpine [--hypervisor hvf] -- /bin/sh -c 'ec
 | Firecracker (Linux/KVM, Hetzner) | `uid=901 gid=901` | `uid=901 gid=901` |
 | HVF (macOS 26.5.2 arm64) | **`uid=0(root) gid=0(root)`** | **`uid=901 gid=901`** |
 
+Both "after" figures are runs of a binary built from this branch, with the guest
+binaries recompiled on each host — not a carry-over of the earlier result. The
+Firecracker column is the regression check: the fix changes the OCI init, and
+Firecracker had to be shown still landing on 901 rather than assumed to.
+
 ## The gate, witnessed live
 
 Reverting only the mechanism and re-running on HVF — a planted defect, not a hypothetical:
