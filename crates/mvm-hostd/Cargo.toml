@@ -148,7 +148,11 @@ zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-smoltcp = { version = "0.13.1", default-features = false, features = ["medium-ip", "proto-ipv4", "socket-tcp", "socket-udp"] }
+# `proto-ipv6` is enabled for the wire types, not to give the guest an IPv6
+# path: the guest-facing interface is configured with an IPv4 address and no
+# IPv6 one, so it can neither originate nor answer IPv6, and admission
+# refuses a non-IPv4 destination before any packet reaches the stack.
+smoltcp = { version = "0.13.1", default-features = false, features = ["medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

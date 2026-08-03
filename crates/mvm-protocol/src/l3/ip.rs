@@ -317,22 +317,46 @@ fn parse_transport(protocol: u8, buf: &[u8]) -> Result<Transport, IpParseError> 
     }
 }
 
-/// Read the TCP flag byte from a validated packet's buffer, if it has one.
-/// Separate from [`parse`] because only the flow tracker needs it.
-pub fn tcp_flags(buf: &[u8], packet: &ParsedIpPacket) -> Option<u8> {
+/// Where a validated packet's TCP header starts, for the readers below.
+///
+/// One definition of the offset rather than one per field: the IPv6 arm
+/// walks an extension chain, and a second copy of that walk is a second
+/// place for it to be wrong.
+fn tcp_header_offset(buf: &[u8], packet: &ParsedIpPacket) -> Option<usize> {
     if packet.protocol != proto::TCP || packet.fragment {
         return None;
     }
-    let offset = match packet.version {
-        4 => ((*buf.first()? & 0x0f) as usize) * 4,
-        6 => {
+    match packet.version {
+        4 => Some(((*buf.first()? & 0x0f) as usize) * 4),
+        6 => Some(
             walk_v6_extensions(*buf.get(6)?, buf.get(..packet.total_len)?)
                 .ok()?
-                .1
-        }
-        _ => return None,
-    };
-    buf.get(offset + 13).copied()
+                .1,
+        ),
+        _ => None,
+    }
+}
+
+/// Read the TCP flag byte from a validated packet's buffer, if it has one.
+/// Separate from [`parse`] because only the flow tracker needs it.
+pub fn tcp_flags(buf: &[u8], packet: &ParsedIpPacket) -> Option<u8> {
+    buf.get(tcp_header_offset(buf, packet)? + 13).copied()
+}
+
+/// Read the TCP sequence number from a validated packet's buffer.
+///
+/// Read at its fixed offset within the TCP header rather than through a
+/// parser that first honours the data-offset nibble. The nibble is
+/// guest-written and can declare a header longer than the bytes present;
+/// a reader that validates it first would refuse packets whose sequence
+/// number is right there, and a guest could use that to suppress a reset
+/// the host owes it. The sequence number sits at bytes 4..8, and [`parse`]
+/// has already guaranteed a TCP packet carries at least 20 transport
+/// bytes, so those four are always present.
+pub fn tcp_sequence(buf: &[u8], packet: &ParsedIpPacket) -> Option<u32> {
+    let offset = tcp_header_offset(buf, packet)?;
+    let seq = buf.get(offset + 4..offset + 8)?;
+    Some(u32::from_be_bytes(seq.try_into().ok()?))
 }
 
 #[cfg(test)]
@@ -653,6 +677,62 @@ mod tests {
     }
 
     #[test]
+    fn tcp_sequence_reads_the_sequence_number() {
+        let mut payload = tcp_payload(50_000, 443, TCP_SYN);
+        payload[4..8].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        let pkt = v4(proto::TCP, [10, 0, 0, 2], [1, 1, 1, 1], &payload);
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(tcp_sequence(&pkt, &parsed), Some(0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn tcp_sequence_returns_none_for_non_tcp() {
+        let pkt = v4(proto::UDP, [10, 0, 0, 2], [1, 1, 1, 1], &udp_payload(1, 2));
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(tcp_sequence(&pkt, &parsed), None);
+    }
+
+    /// The data-offset nibble is guest-written and can declare a header
+    /// longer than the bytes present. A reader that honoured it first would
+    /// refuse a sequence number sitting right there at bytes 4..8, which
+    /// hands a guest a way to suppress a reset the host owes it.
+    #[test]
+    fn a_lying_data_offset_does_not_hide_the_sequence_number() {
+        let mut payload = tcp_payload(50_000, 443, TCP_SYN);
+        payload[4..8].copy_from_slice(&7u32.to_be_bytes());
+        // 15 words = a 60-byte header declared inside 20 bytes.
+        payload[12] = 0xF0;
+        let pkt = v4(proto::TCP, [10, 0, 0, 2], [1, 1, 1, 1], &payload);
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(tcp_sequence(&pkt, &parsed), Some(7));
+        assert_eq!(tcp_flags(&pkt, &parsed), Some(TCP_SYN));
+    }
+
+    /// Every packet that reaches a sequence-number reader has been through
+    /// [`parse`], which refuses a TCP packet carrying fewer than 20
+    /// transport bytes — so the four the reader wants are always present.
+    #[test]
+    fn a_truncated_tcp_header_never_reaches_the_sequence_reader() {
+        let pkt = v4(proto::TCP, [10, 0, 0, 2], [1, 1, 1, 1], &[0u8; 12]);
+        assert!(matches!(
+            parse(&pkt),
+            Err(IpParseError::TruncatedTransport { proto: "TCP" })
+        ));
+    }
+
+    #[test]
+    fn tcp_sequence_reads_past_an_ipv6_extension_chain() {
+        let mut payload = tcp_payload(50_000, 443, TCP_SYN);
+        payload[4..8].copy_from_slice(&99u32.to_be_bytes());
+        let mut inner = vec![proto::TCP, 0, 0, 0, 0, 0, 0, 0];
+        inner.extend_from_slice(&payload);
+        let pkt = v6(ext::HOP_BY_HOP, [1; 16], [2; 16], &inner);
+        let parsed = parse(&pkt).unwrap();
+        assert_eq!(parsed.protocol, proto::TCP);
+        assert_eq!(tcp_sequence(&pkt, &parsed), Some(99));
+    }
+
+    #[test]
     fn arbitrary_input_never_panics() {
         let mut state = 0xD1B5_4A32_D192_ED03u64;
         let mut next = move || {
@@ -668,6 +748,7 @@ mod tests {
             }
             if let Ok(parsed) = parse(&buf) {
                 let _ = tcp_flags(&buf, &parsed);
+                let _ = tcp_sequence(&buf, &parsed);
             }
             // Force the version nibble so the deep paths get exercised
             // rather than bouncing off UnsupportedVersion.
@@ -675,10 +756,12 @@ mod tests {
                 buf[0] = 0x45;
                 if let Ok(parsed) = parse(&buf) {
                     let _ = tcp_flags(&buf, &parsed);
+                    let _ = tcp_sequence(&buf, &parsed);
                 }
                 buf[0] = 0x60;
                 if let Ok(parsed) = parse(&buf) {
                     let _ = tcp_flags(&buf, &parsed);
+                    let _ = tcp_sequence(&buf, &parsed);
                 }
             }
         }

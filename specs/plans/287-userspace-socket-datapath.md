@@ -758,11 +758,13 @@ git commit -m "feat(netd): defer the guest handshake until the host connect reso
 
 **Files:**
 - Modify: `crates/mvm-hostd/src/netd/userspace/tcp.rs`
+- Also modified: `crates/mvm-hostd/src/netd/test_packets.rs` (restore the TTL the helper lost when it moved out of `gateway.rs`), `crates/mvm-protocol/src/l3/ip.rs` (`tcp_sequence`, sharing one transport-offset walk with `tcp_flags`), `crates/mvm-hostd/Cargo.toml` (smoltcp `proto-ipv6`, for the wire types only)
 
 **Interfaces:**
-- Produces: `fn assert_peer_matches(socket: &TcpStream, admitted: IpAddr) -> Result<(), DatapathError>`; `fn synthesize_rst(key: &FlowKey) -> Vec<u8>`.
+- Produces: `fn assert_peer_matches(socket: &TcpStream, admitted: IpAddr) -> Result<(), DatapathError>`; `fn synthesize_rst(key: &FlowKey, guest: IpAddr, acknowledging: u32) -> Option<Vec<u8>>` (signature changed — see Step 3).
+- Also produces: `HalfOpen::reset_for_guest(&self, guest: IpAddr)`, `HalfOpenTable::guest()`, `Resolved::resets`. `HalfOpenTable::new` now takes the leased guest address and `resolve` now takes `&mut GatewayMetrics`; Task 11 consumes these shapes.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 /// With a host TUN the admitted packet's bytes are what goes on the wire,
@@ -795,21 +797,25 @@ fn a_failed_connect_synthesizes_a_reset_toward_the_guest() {
 }
 ```
 
-- [ ] **Step 2: Run and confirm failure**
+- [x] **Step 2: Run and confirm failure**
 
 Run: `cargo nextest run -p mvm-hostd a_socket_connected_elsewhere`
-Expected: FAIL — not defined.
+Observed: FAIL, 10 errors — `E0425: cannot find function 'assert_peer_matches'` / `'same_host'` / `'synthesize_rst'`, `E0599: no method named 'resets'`. Each behaviour was additionally mutation-checked after implementing, since "not defined" only proves the symbol was absent.
 
-- [ ] **Step 3: Implement**
+- [~] **Step 3 (implemented; `synthesize_rst` signature changed): Implement**
 
 `assert_peer_matches` compares `socket.peer_addr()?.ip()` against the admitted destination and returns `DatapathError` on mismatch. Call it immediately after connect completion, before the SYN is replayed. `connect()` is only ever handed the `IpAddr` from the admitted packet — never a hostname, never a string through `ToSocketAddrs`, which would re-enter DNS resolution below the policy seam.
 
-- [ ] **Step 4: Run tests and confirm they pass**
+Deviation: `synthesize_rst(key: &FlowKey) -> Vec<u8>` cannot produce a reset a guest accepts. `FlowKey` deliberately omits the guest address (its own doc says so), and RFC 793 requires the reset to acknowledge the SYN's sequence plus one — a reset outside that window is discarded by the guest's stack. It takes the leased guest address and the sequence to acknowledge, and returns `Option` for the family-mismatch case that cannot arise. Comparison is on the canonical form, so `::ffff:x` and `x` are one host; admission refuses non-IPv4 destinations outright, so the mapped form is never admitted in the first place.
 
-Run: `cargo nextest run -p mvm-hostd -E 'test(peer) or test(reset_toward_the_guest)'`
-Expected: PASS.
+- [x] **Step 4: Run tests and confirm they pass**
 
-- [ ] **Step 5: Commit**
+Run: `cargo nextest run -p mvm-hostd -E 'binary_id(mvm-hostd) and test(/netd::userspace::tcp/)'`
+Result: 28 passed. Plus `-p mvm-hostd` 1347 passed, `-p mvm-protocol` 465 passed, clippy `-D warnings` clean, nightly fmt clean, `check-file-size` clean, Linux zigbuild and wasm32 check clean.
+
+- [~] **Step 5 (two commits, not one): Commit**
+
+Review round 1 landed as a second commit: the destination-integrity violation now counts a `DenyCode::WrongDestination` deny, `synthesize_rst` grew a real `Ipv6Repr` arm, the reset is addressed from the lease rather than the guest-written SYN source, and `mvm_protocol::l3::ip::tcp_sequence` reads the sequence at its fixed offset so a crafted data-offset nibble cannot suppress a reset.
 
 ```sh
 git add crates/mvm-hostd/src/netd/userspace/tcp.rs
