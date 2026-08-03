@@ -247,10 +247,15 @@ impl HalfOpenTable {
     /// The guest is told the same thing either way — a reset — but the
     /// *host* is not. A destination-integrity violation is a policy event
     /// and a refused connect is not, so a mismatch counts a
-    /// [`DenyCode::WrongDestination`] deny on `metrics` while an ordinary
-    /// failure counts nothing. Without that an operator reading the
-    /// counters cannot tell the one thing this check exists to detect from
-    /// a destination that happened to be down.
+    /// [`DenyCode::PeerDestinationMismatch`] deny on `metrics` while an
+    /// ordinary failure counts nothing. Without that an operator reading
+    /// the counters cannot tell the one thing this check exists to detect
+    /// from a destination that happened to be down.
+    ///
+    /// The label is its own, not [`DenyCode::WrongDestination`]: that one
+    /// counts inbound packets addressed to somebody else, which is routine
+    /// noise, and a shared counter would let any guest bury this signal
+    /// under it.
     pub fn resolve(&mut self, metrics: &mut GatewayMetrics) -> Resolved {
         let guest = self.guest;
         let mut out = Resolved::default();
@@ -264,7 +269,7 @@ impl HalfOpenTable {
                     match assert_peer_matches(&entry.socket, entry.key.remote) {
                         Ok(()) => out.established.push(entry),
                         Err(_) => {
-                            metrics.record_deny(DenyCode::WrongDestination);
+                            metrics.record_deny(DenyCode::PeerDestinationMismatch);
                             fail_flow(&mut out, entry, guest, metrics);
                         }
                     }
@@ -1160,21 +1165,31 @@ mod tests {
         assert!(t.is_empty());
     }
 
-    /// The violation must be *visible*. A refused connect and a socket that
-    /// reached the wrong host are the same event to the guest and entirely
-    /// different events to the operator: one is a destination being down,
-    /// the other is the single failure destination integrity exists to
-    /// catch. If the counters cannot separate them, nobody ever learns the
-    /// second one happened.
+    /// The violation must be *visible*, and visible as itself. A refused
+    /// connect and a socket that reached the wrong host are the same event
+    /// to the guest and entirely different events to the operator: one is a
+    /// destination being down, the other is the single failure destination
+    /// integrity exists to catch.
+    ///
+    /// So the mismatch counts, a refusal does not, and — the part that is
+    /// easy to get wrong — the mismatch does **not** land on
+    /// `wrong_destination`, which `admit` already uses for inbound packets
+    /// addressed to somebody else. Sharing that label would let any guest
+    /// bury this signal under routine noise it generates itself.
     #[test]
-    fn a_wrong_destination_is_counted_as_a_deny_and_a_refusal_is_not() {
+    fn a_peer_mismatch_counts_under_its_own_label_and_a_refusal_counts_at_all() {
         let held = listener();
         let mut t = HalfOpenTable::new(DEFAULT_MAX_HALF_OPEN, guest());
         let entry = mismatched_entry(&held);
         t.entries.insert(entry.key, entry);
         let mut mismatch = GatewayMetrics::default();
         t.resolve(&mut mismatch);
-        assert_eq!(mismatch.denies_for(DenyCode::WrongDestination), 1);
+        assert_eq!(mismatch.denies_for(DenyCode::PeerDestinationMismatch), 1);
+        assert_eq!(
+            mismatch.denies_for(DenyCode::WrongDestination),
+            0,
+            "inbound noise and a mis-connected socket must not share a counter"
+        );
         assert_eq!(mismatch.total_denies(), 1, "and nothing else");
 
         // The same shape of failure, arrived at honestly: the destination
@@ -1185,13 +1200,28 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             if !t.resolve(&mut refusal).failed.is_empty() {
-                assert_eq!(refusal.denies_for(DenyCode::WrongDestination), 0);
+                assert_eq!(refusal.denies_for(DenyCode::PeerDestinationMismatch), 0);
                 assert_eq!(refusal.total_denies(), 0);
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("a refused connect must resolve rather than linger");
+    }
+
+    /// The two labels are distinct strings, not just distinct variants: the
+    /// metrics map is keyed by `as_str`, so equal labels would collapse the
+    /// two counters however different the enum looked.
+    #[test]
+    fn the_peer_mismatch_label_is_distinct_from_the_inbound_one() {
+        assert_eq!(
+            DenyCode::PeerDestinationMismatch.as_str(),
+            "peer_destination_mismatch"
+        );
+        assert_ne!(
+            DenyCode::PeerDestinationMismatch.as_str(),
+            DenyCode::WrongDestination.as_str()
+        );
     }
 
     /// The end of the failed-connect path: a guest whose connect failed is

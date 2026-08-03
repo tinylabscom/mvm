@@ -148,10 +148,23 @@ zeroize.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-# `proto-ipv6` is enabled for the wire types, not to give the guest an IPv6
-# path: the guest-facing interface is configured with an IPv4 address and no
-# IPv6 one, so it can neither originate nor answer IPv6, and admission
-# refuses a non-IPv4 destination before any packet reaches the stack.
+# `proto-ipv6` is enabled so the userspace datapath can emit an IPv6 reset,
+# not to give the guest an IPv6 path.
+#
+# What keeps that surface dark is exactly one thing: `mvm_net::l3::admit`'s
+# `admit_outbound` denies `meta.version != 4` outright, so no IPv6 packet a
+# guest writes ever becomes an `AdmittedPacket`, and `send_to_network` takes
+# nothing else. Relax that check and this surface goes live the same day.
+#
+# It is specifically NOT kept dark by the interface having no IPv6 address.
+# In smoltcp 0.13.1 `process_ipv6` runs `process_hopbyhop` before any
+# address check, so an option chain is parsed — and can answer with an
+# ICMPv6 ParamProblem — with no IPv6 address configured; and the
+# "no assigned address" drop is not total, since `::1` passes via
+# `is_loopback()` and `ff02::1` passes `has_multicast_group` even with the
+# `multicast` feature off, both reaching `process_nxt_hdr` and socket
+# dispatch. Do not weaken the admission guard on the strength of the
+# interface configuration.
 smoltcp = { version = "0.13.1", default-features = false, features = ["medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -117,13 +117,14 @@ mod tests {
             DenyCode::HostSocketUnavailable,
             DenyCode::UnsolicitedInbound,
             DenyCode::WrongDestination,
+            DenyCode::PeerDestinationMismatch,
             DenyCode::SessionNotReady,
         ] {
             m.record_deny(code);
             m.record_deny(code);
         }
         // Recording the same closed set twice cannot grow the label set.
-        assert_eq!(m.denies().count(), 22);
-        assert_eq!(m.total_denies(), 44);
+        assert_eq!(m.denies().count(), 23);
+        assert_eq!(m.total_denies(), 46);
     }
 }

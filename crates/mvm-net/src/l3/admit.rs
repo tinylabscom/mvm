@@ -105,7 +105,21 @@ pub enum DenyCode {
     /// the OS grants it, and the two send an operator to different places.
     HostSocketUnavailable,
     UnsolicitedInbound,
+    /// An inbound packet was not addressed to this machine's guest. Routine
+    /// noise on a shared segment, and a guest that generates a lot of it is
+    /// unremarkable.
     WrongDestination,
+    /// A host socket completed a connect to somewhere other than the
+    /// destination policy admitted, and the flow was torn down.
+    ///
+    /// Deliberately not [`Self::WrongDestination`], however similar the two
+    /// read. That one counts an inbound packet nobody asked for; this one
+    /// counts the datapath reaching a host policy never approved — the
+    /// failure that socket translation, unlike a packet-forwarding
+    /// datapath, makes representable at all. Sharing a label would let
+    /// ordinary inbound noise bury the single signal this check exists to
+    /// raise.
+    PeerDestinationMismatch,
     SessionNotReady,
 }
 
@@ -134,6 +148,7 @@ impl DenyCode {
             Self::HostSocketUnavailable => "host_socket_unavailable",
             Self::UnsolicitedInbound => "unsolicited_inbound",
             Self::WrongDestination => "wrong_destination",
+            Self::PeerDestinationMismatch => "peer_destination_mismatch",
             Self::SessionNotReady => "session_not_ready",
         }
     }
@@ -1523,6 +1538,7 @@ mod tests {
             DenyCode::HostSocketUnavailable,
             DenyCode::UnsolicitedInbound,
             DenyCode::WrongDestination,
+            DenyCode::PeerDestinationMismatch,
             DenyCode::SessionNotReady,
         ];
         let mut labels: Vec<_> = codes.iter().map(|c| c.as_str()).collect();
