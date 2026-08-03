@@ -22,6 +22,20 @@ pub enum MachineStatus {
     Failed,
 }
 
+impl MachineStatus {
+    /// The snake_case wire label — the exact string the serde form emits,
+    /// which SDK facades parse out of machine listings.
+    pub fn wire_label(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Paused => "paused",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// What to run — intent only. No host paths, no signing material.
 ///
 /// Build one fluently with [`MachineSpec::builder`]:
@@ -431,6 +445,20 @@ mod tests {
             serde_json::to_string(&MachineStatus::Paused).unwrap(),
             "\"paused\""
         );
+    }
+
+    #[test]
+    fn wire_label_matches_the_serde_form_for_every_variant() {
+        for status in [
+            MachineStatus::Starting,
+            MachineStatus::Running,
+            MachineStatus::Stopped,
+            MachineStatus::Paused,
+            MachineStatus::Failed,
+        ] {
+            let serde_form = serde_json::to_value(status).unwrap();
+            assert_eq!(serde_form, status.wire_label(), "{status:?}");
+        }
     }
 
     #[test]

@@ -89,7 +89,7 @@ Recorded so no workstream re-proposes them.
 - **S7 — an address digest must be collision-resistant; an attestation digest need not be.** MD5, CRC32C and CRC64 are legitimate *attestations* and disqualified as *addresses*. Enforce the distinction with disjoint types and a compile-fail test, not with review — the same posture `mvm_core::semantic_address` already takes by having no conversions between identity families.
 - **S8 — never sign state that cannot be substantiated.** The order is content → index → root → signature → publication. A crash before signing is recoverable; the reverse order forks the chain with no recovery path. This binds WS3's transcript-root vector and any future signed root.
 - **S9 — a reconciliation root is not a commitment.** If distributed transport is ever revisited (recon Phase 3), the fingerprint must be multiset-homomorphic — an XOR aggregation lets a peer withhold arbitrary data by claiming absence, with no collision-finding and no functional-test signal — and an MST page/root digest from a non-cryptographic hash must never be signed. Out of scope here; recorded so it is not rediscovered late.
-- **S6 — one tier vocabulary, or the gates disagree.** Two independent honesty axes are live: `model/claims.toml` `level` (`some-true` | `build` | `open`) and the ADR claim-frontmatter `status` (`Planned` | `Preview` | `Shipped` | `Not-claimed`) that `check-no-overclaim` enforces. Nothing currently checks them against each other, so a claim can read `open` in the register and `Shipped` in its frontmatter — which would silently disengage the over-claim gate on a property that was only ever measured. WS1 exists to close that, and must not introduce a third vocabulary.
+- **S6 — the two honesty registers are separate, and the witness bar is the real gap.** *(Corrected 2026-08-02. The first draft of this said `model/claims.toml` `level` and the ADR claim-frontmatter `status` were two vocabularies over the same claims, and that a claim reading `open` in one and `Shipped` in the other would silently disengage `check-no-overclaim`. That is wrong. They are separate registers with no shared key: the model holds 16 numbered `MVM-SEC-NN` claims keyed by number, the frontmatter holds 3 phrase-gating claims keyed by name — `trust-gradient`, `catalog`, `egress-no-secret-to-guest` — and no claim appears in both. No mistiering of the kind described is reachable.)* The register's honesty half is already enforced: `check-honesty` is the behavioural gate over `open`/`some-true` IDs and `check-conformance` the structural one. What nothing enforced was the **evidence** half — a claim could be delisted from a whole kind of witness with every gate green.
 
 ## Workstreams
 
@@ -99,15 +99,18 @@ Recorded so no workstream re-proposes them.
 - [ ] Record the **σ-set contract** as the address-identity policy (one storage address reachable by ≥1 protocol digest), superseding the earlier "pin SHA-256 as the canonical axis" line. SHA-256 remains what mvm mints on.
 - [ ] Owner moves WS1 + WS3–WS7 into `specs/SPRINT.md` when scheduling; until then they stay Proposed.
 
-### WS1 — Reconcile the claim evidence tiers (U1)
+### WS1 — Pin the evidence each claim rests on (U1)
 
-Scope changed: the tier fields exist, unreconciled (S6). Do not add a `tier:` column.
+Scope corrected twice on contact with the data, and both corrections are worth recording because each was a plausible-sounding rule that the tree refuses.
 
-- [ ] Define the mapping between `model/claims.toml` `level` and ADR claim-frontmatter `status`, and record it in ADR-001 next to the ledger table (the exhaustive pairs, including which combinations are illegal).
-- [ ] Extend `xtask check-claim-catalog` to fail on a claim whose `level` and `status` disagree — specifically, `level = "open"` with `status = "Shipped"`, which would disengage `check-no-overclaim` on a measured-not-asserted property.
-- [ ] Enforce the witness bar per status: `Shipped` requires a live `fn:` **and** `ci:` witness; `Preview` requires ≥1; `open` must not appear in the ADR-001 numbered prose table.
-- [ ] Backfill any claim whose two fields currently disagree; claim 16 (egress-substitution leak-gate) and the OCI-provenance claim are the known promotion-pending cases.
-- [ ] Gate wired into `ci.yml` + `ci-full.yml` Lint; falsifiability row in `VERIFICATION.md` (planted: flip an `open` claim's frontmatter to `Shipped` → gate fires).
+**U1 as written is not implementable here.** It asks that a `shipped` claim carry both a live `fn:` and a live `ci:` witness. Eight of the fifteen `build`-level claims fail that bar today, and for several the failure is structural rather than an oversight: MVM-SEC-04 ("no `do_exec` in a production build") and MVM-SEC-05 (fuzz coverage) are properties of a shipped artifact and a CI lane, observable in CI and nowhere else. Forcing an `fn:` witness for them buys a fabricated test, not assurance. Enforcing one bar across claims that differ in kind is the wrong shape.
+
+**What the tree actually lacked** was any pin on the evidence a claim rests on. `check-claim-catalog` verifies that *listed* witnesses exist, and the ledger cross-check catches a witness removed from one file — but removing it from both `model/claims.toml` and the ADR-001 row, which is how a witness would really be retired, left every gate green. Demonstrated: delisting `ci:seccomp-functional` from both files reported `clean (16 claims, 48 witnesses verified)`, with claim 1 having quietly lost its only CI evidence.
+
+- [x] Add `witness_kinds` to each claim in `model/claims.toml`, declaring the kinds of evidence that claim legitimately rests on, with the non-uniformity explained in the file rather than left implicit.
+- [x] Extend `check-claim-catalog`: every declared kind must have ≥1 live witness, and every present kind must be declared. Dropping a kind becomes an explicit edit to the declaration — visible in review, and reading as the reduction in evidence it is.
+- [x] Falsifiability rows for both directions, each with the planted defect recorded.
+- [ ] Consider whether the three frontmatter claims should also carry a witness declaration; they are gated by phrase today and by nothing else.
 
 ### WS2 — Prose over-claim meta-gate (U2) — shipped
 - [x] `xtask check-no-overclaim` scans user-facing `.md` and `.rs` for phrases gated by a claim whose `status` is not `Shipped`, honouring per-claim `exempt_paths`.
@@ -117,19 +120,31 @@ No residual work. WS1's cross-field check is what makes this gate trustworthy �
 
 ### WS3 — Replay golden-vector lane (U4)
 
-The remaining high-value item, and untouched. `xtask check-content-address-determinism` is **not** this lane — it only asserts the non-build `serde_json` unit reachable from `mvm-core`/`mvm-protocol` does not carry `preserve_order`. That pins one drift mechanism; it pins no address. There is no vector corpus in the tree.
+Premise verified before building, and this time it held: five of seven surfaces had no frozen address at all. `SemanticAddress` (13 literals, incl. 12 published UOR-ADDR fixtures) and the plan-280 transcript root were the exceptions. `bundle_sha256`'s single literal was `sha256("abc")` — a textbook vector pinning lowercase-hex output, not a bundle address.
 
-- [ ] Create a frozen `(input → expected address)` corpus for **every** surface: `SemanticAddress`, `ir_hash`, `plan_id`, `bundle_sha256`/manifest, the audit `prev_hash` spine, the RFC-6962 Merkle root, and the plan-280 transcript manifest root (new since the first draft — it is a content address on the signed chain and must not drift either).
-- [ ] A test recomputes each and asserts byte-equality; fails on any canonicalization drift (`serde_jcs` bump, field reorder, NFC change).
-- [ ] Seed with current shipped behavior (freezes S5's NFC status quo). Include astral-plane-key + Unicode-normalization edge vectors.
-- [ ] Where a transform is in play, record **both σ and κ** — only the pair pins the encoding (WS7 / recon §7.8). Every surface in mvm is `Identity` today, so today the two are equal; the vector must still carry both so the day one of them stops being `Identity` is a vector diff and not a silent re-address.
-- [ ] Run in nextest (workspace); `VERIFICATION.md` row (planted: reorder a JCS key emitter → vector mismatch fires).
+The sharpest finding is what the existing `ir_hash` tests are: **all four are relational** — stable for identical input, key-order independent, different values differ, 64 hex long. A canonicalization change that moves every address consistently satisfies all of them. Demonstrated by planting exactly that (hash the canonical form with a trailing newline): the four unit tests stayed green and only the new vectors fired.
+
+- [x] `crates/mvm-protocol/tests/address_vectors.rs` — 14 vectors over `ir_hash`, `leaf_hash`, `interior_hash`, `merkle_root`. Includes the RFC-6962 odd-tail case (promote, never duplicate — the property that avoids the duplicate-leaf forgery) and astral-plane keys, where JCS's UTF-16 sort order diverges from UTF-8.
+- [x] NFC and NFD forms pinned as *different* addresses, recording in a test that `ir_hash` does not normalize (S5's status quo) rather than leaving it as tribal knowledge.
+- [x] `compute_plan_id` vectors in `plan/content_id.rs`. Worth pinning specifically because this surface does **not** use JCS — it relies on serde_json's default key ordering, which holds only while `preserve_order` is off. `check-content-address-determinism` pins that feature flag; nothing pinned the address the flag protects.
+- [x] `bundle_sha256` vectors in `plan/bundle.rs`, including a raw-byte case (NUL, 0xff, 0x80) that a digest passing through any string conversion would fail.
+- [x] Seeded from shipped behaviour, so they freeze what ships rather than asserting what it ought to be. `MVM_PRINT_ADDRESS_VECTORS=1` prints instead of asserting, making a reseed a deliberate act with a diff that has to be justified.
+- [x] Falsifiability rows for both crates, each with the planted defect recorded.
+- [x] The audit `prev_hash` spine, closed by WS4: the spine is exercised by the frozen signed corpus, whose `a_reordered_corpus_breaks_the_chain` vector swaps two validly-signed entries and must fail — signatures alone do not order a chain.
+- [ ] Fold `SemanticAddress`'s existing 13 goldens into the same corpus shape, so WS4 has one vector set rather than two conventions.
 
 ### WS4 — Two-verifier oracle bar (U5)
-- [ ] Make the WS3 replay corpus the shared vector set the existing host↔no_std audit-verifiers both consume (`mvm_verify_matches_supervisor_chain` pins the equivalence today over ad-hoc input, not a frozen corpus).
-- [ ] Add the riscv32/ESP32 verifier (edge tier) as the third independent oracle over the same corpus where it builds.
-- [ ] Record in `model/claims.toml` which claims are backed by ≥2 independent verifiers.
-- [ ] `VERIFICATION.md` row (planted: diverge one verifier's canonicalizer → parity test fires).
+
+**What the bar actually needed.** `mvm_verify_matches_supervisor_chain` already compared the two implementations, but over a chain generated **fresh with a random key on every run**. Those bytes exist only inside that process, so they can never reach a verifier that does not link the host signer — and an oracle bar means little if each implementation only ever sees input it produced itself.
+
+**Honesty about the third verifier.** The riscv32 target is `cargo build -p mvm-protocol --lib` only; bare metal has no test harness, so it is a *compile* oracle, not an executing one. The executing pair is the host verifier and the `no_std` mirror, with wasm executing the mirror a second way. Claiming three executing oracles would have been wrong.
+
+- [x] `tests/vectors/audit-chain-v1.jsonl` + `.pubkey` — a signed chain frozen on disk. Deterministic via a fixed signing seed and fixed timestamps (Ed25519 is deterministic per RFC 8032). `MVM_REGEN_AUDIT_CORPUS=1` rewrites it.
+- [x] `mvm-hostd` owns generating it and asserts the committed bytes still match what the signer emits, so the corpus cannot drift from the writer unnoticed — the failure names the real consequence: every chain already written just became unverifiable.
+- [x] The `no_std` mirror reads the same bytes via `include_str!` rather than the filesystem, which is what lets the identical test execute under `wasm32-wasip1`.
+- [x] Vectors cover the shapes the two must agree on: optional-field absence (`skip_serializing_if`), content-address labels that lineage verification reads back, a tampered entry, and a reordering of validly-signed entries.
+- [x] `model/claims.toml` records `independent_verifiers` on MVM-SEC-08, with the two corpus tests as witnesses. The field is documented as meaning *one shared corpus*, since implementations that only see their own output agree by construction.
+- [x] Falsifiability: diverging the mirror's serialization of an absent optional field fires `SignatureInvalid` over the shared corpus.
 
 ### WS5 — Falsifiability binding (U3)
 
@@ -162,17 +177,36 @@ There are two read paths and they fail differently. The dev-build artifact cache
 
 ### WS7 — σ/κ separation and the transform descriptor (recon §7.8)
 
-New scope from the 2026-08-01 revision. Every mvm content-address surface is `Identity`-transform today, so σ and κ are numerically equal everywhere and this is a type separation with no migration. The moment any surface compresses, encrypts, deltas or erasure-codes at rest, modelling this as one label — or as an "encrypted" boolean — costs a format migration per transform family. Precedent is unanimous: git object IDs never hash the bytes on disk (loose objects deflated, packed objects delta-encoded), and ZFS compresses and encrypts beneath a checksum carried in the parent block pointer.
+**Premise corrected.** This workstream said σ/κ was "cheap now because every mvm content-address surface is `Identity`-transform today." That is wrong, and the correction strengthens the case rather than weakening it — there are already two live non-identity transforms:
 
-- [ ] Introduce the pair as disjoint types with no conversion: **σ** the protocol digest over plaintext, **κ** the storage address over bytes at rest (path derivation, verification target, unit of transfer). Extend `mvm_core::semantic_address`'s identity taxonomy rather than starting a new one.
-- [ ] Model σ as a **set** — one κ reachable by ≥1 σ — which is what a dual-hash transition and multi-axis registration need, and what WS0's σ-set contract records as policy.
-- [ ] Represent the descriptor as an open enumeration, not a boolean: `framing: Whole | Fixed{frame_size} | Chunked{manifest}`, `per_frame: [Identity | Aead | Deflate | Delta{base} | Erasure{k,m}]`, `seek_map: Implicit | Explicit{cumulative} | None`. Framing is the outer layer; transforms apply per frame, which is what keeps ranged reads possible — whole-object sealing turns a ten-byte range request against a large object into a whole-object operation, removing the operation rather than slowing it.
-- [ ] Enforce S7 at the type level: an address family that admits MD5/CRC32C/CRC64 must not compile. Compile-fail test, not review.
-- [ ] `VERIFICATION.md` row (planted: add a σ→κ conversion → compile-fail test fires).
+- An **OCI layer is `tar+gzip`**. The digest the fetch path verifies is over the compressed bytes — κ. The config's `diff_id` is the uncompressed digest — σ. `diff_id` is written only into test fixtures and is never read or verified; not a vulnerability, since verifying κ transitively pins what it decompresses to, but σ is declared-and-unconsumed.
+- A **sealed transcript stores ciphertext**, so `ChunkRecord.sha256_hex` is κ. σ is deliberately absent, because a plaintext digest on a third-party-verifiable chain is a confirmation oracle (S2).
+
+The tree was already keeping them apart correctly, under different names. What it lacked was a type that makes the distinction unrepresentable-if-wrong rather than a convention.
+
+- [x] `mvm_core::at_rest`: `ProtocolDigest` (σ) and `StorageAddress` (κ) as disjoint newtypes over the validated `Sha256Hex`, with no `From`/`Into`/`Deref` between them.
+- [x] σ modelled as a **set** — `AddressBinding` holds one κ and a `BTreeSet` of σ, which is what a dual-hash transition and multi-axis registration need and what a single-value σ forecloses.
+- [x] The descriptor as an open enumeration, not a boolean: `Framing` (whole / fixed / chunked-by-manifest) × `per_frame: Vec<FrameTransform>` (identity / aead / deflate / delta / erasure) × `SeekMap` (implicit / explicit / absent). A chunked manifest is typed κ, since it is itself a stored object.
+- [x] S7 enforced by construction: both constructors go through `Sha256Hex`, whose width check rejects MD5 (32 hex), CRC32C (8) and CRC64 (16). Those stay legitimate attestations and are disqualified as addresses without review having to catch it.
+- [x] Compile-fail doctest, and it needed sharpening: the first version used a bare `let kappa: StorageAddress = sigma;`, which never compiles whatever impls exist, so it passed **with a `From` bridge present** — a vacuous test. Rewritten to `sigma.into()`, which compiles exactly when a bridge exists; planting the bridge now fails it.
+- [x] Cross-referenced from the `semantic_address` taxonomy prose, which separates *what* is identified; this is the orthogonal *which bytes* axis.
+- [ ] Adopt the types at the two live sites — the OCI layer/`diff_id` pair and the transcript chunk records. Deliberately separate: introducing the vocabulary is additive, and changing what those paths store is a format question that wants its own review.
 
 ## Sequencing
 
-Reordered by the 2026-08-01 revision. **WS6 first** — integrity-on-read is the unenforced property, and plan 279 WS1 is blocked behind it. **WS3 second**, freezing address behavior before anything else touches it. **WS7 alongside WS3** — the σ/κ types are what WS3's vectors record, and doing it while every transform is still `Identity` is the whole reason it is cheap. Then WS1 (it makes `check-no-overclaim` trustworthy per S6), then WS4 (consumes WS3's corpus). WS5 is independent throughout. WS0's remaining ratification items are paperwork and gate nothing. Each workstream is its own PR.
+**Done:** WS2 (shipped before this plan was written), WS6's dev-build half (#2053), WS1.
+
+**Next, in order:**
+
+1. **WS3 — the replay golden-vector corpus.** The foundational item, and the only one with no substrate in the tree at all: `check-content-address-determinism` pins the `serde_json preserve_order` drift mechanism, not any address. It goes first because it freezes address behaviour before anything else touches it, and because WS4 consumes its corpus.
+2. **WS7 — σ/κ separation**, alongside WS3. The types are what WS3's vectors record, and every surface being `Identity` today is the entire reason this is cheap now and a per-transform-family migration later.
+3. **WS4 — the ≥2-verifier bar.** Blocked on WS3's corpus existing; the verifiers themselves (host, no_std/wasm, riscv32) already do.
+4. **WS5 — falsifiability binding.** Independent of the rest. The mutation surface, the freshness gate and the `VERIFICATION.md` rows all exist, so this is the witness → red-proof binding and nothing more.
+5. **WS6's kernel half** — scoped separately as plan 288, because it needs the published pin threaded through the release surface.
+
+WS0's remaining ratification items are paperwork and gate nothing. Each workstream is its own PR.
+
+**A note for whoever picks these up.** Two of this plan's workstreams turned out to be specified against a tree that did not match the spec: WS2 was already shipped and broader than described, and WS1's premise — two tier vocabularies over the same claims — was simply false, since the two registers share no key. Both were caught by reading the code before writing any, and both corrections are recorded above rather than quietly amended. Treat the remaining descriptions as hypotheses to verify first, not as instructions.
 
 ## Relationship to the build/CAS thread
 

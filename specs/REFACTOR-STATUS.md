@@ -142,15 +142,23 @@ for detailed scope and acceptance criteria.
 - [~] Plan 276 — Content-addressing conformance and defense
       (`specs/plans/276-content-addressing-conformance-and-defense.md`)
   - [x] WS0 — plan + recon note landed (#1964); axis/policy ratification open
-  - [ ] WS1 — reconcile the two claim tier vocabularies (`model/claims.toml`
-        `level` vs ADR claim-frontmatter `status`) so a mistier cannot
-        silently disengage `check-no-overclaim`
+  - [x] WS1 — pin the evidence each claim rests on: `witness_kinds` per claim
+        in `model/claims.toml`, gated by `check-claim-catalog`. The original
+        premise (two tier vocabularies over the same claims) was wrong — the
+        registers share no key; the real gap was that a claim could be
+        delisted from a whole kind of witness with every gate green
   - [x] WS2 — prose over-claim meta-gate, shipped as `xtask check-no-overclaim`
-  - [ ] WS3 — replay golden-vector corpus across every content-address surface,
-        recording σ and κ where a transform is in play (no corpus in tree;
-        `check-content-address-determinism` pins the `serde_json preserve_order`
-        drift mechanism, not an address)
-  - [ ] WS4 — ≥2 independent verifiers over the WS3 corpus
+  - [~] WS3 — replay golden-vector corpus. `ir_hash`, `leaf_hash`,
+        `interior_hash`, `merkle_root`, `compute_plan_id` and `bundle_sha256`
+        now carry frozen addresses. The existing `ir_hash` tests were all
+        *relational*, so a canonicalization change moving every address
+        consistently passed all four — planted and confirmed. The audit `prev_hash`
+        spine is closed by WS4's frozen signed corpus
+  - [x] WS4 — one frozen signed audit chain both verifiers read. The existing
+        parity test compared them over a randomly-keyed chain generated per
+        run, which no verifier outside that process could ever see. riscv32 is
+        a compile oracle, not an executing one — the executing pair is the host
+        verifier and the no_std mirror, with wasm executing the mirror
   - [ ] WS5 — bind each witness to its recorded red-proof
   - [~] WS6 — **lead item**: content-address the caches, verify on read. The
         2026-08-01 recon revision reverses finding 2 — integrity-on-read is the
@@ -167,10 +175,12 @@ for detailed scope and acceptance criteria.
           Scoped as plan 288
           (`specs/plans/288-kernel-cache-verify-on-read.md`)
     - [ ] Cold-tier background scrub (recon §7.9)
-  - [ ] WS7 — σ/κ separation and the transform descriptor: the protocol digest
+  - [~] WS7 — σ/κ separation: `mvm_core::at_rest` gives the protocol digest
         over plaintext and the storage address over bytes at rest as disjoint
-        types, σ as a set, descriptor as an open enumeration. Free while every
-        surface is `Identity`; a format migration per transform family later
+        types, σ as a set, and the transform descriptor as an open enumeration.
+        The plan's "everything is Identity today" premise was wrong — OCI
+        layers are tar+gzip and transcripts store ciphertext — which
+        strengthens the case. Remaining: adopt the types at those two sites
   - [x] Discharged elsewhere: sealed transcript root anchored into the audit
         chain (recon §7.6 → plan 280, #2017); post-restore child verb grant
         (recon §7.7 → #2019)

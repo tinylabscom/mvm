@@ -24,6 +24,44 @@
       all-target Clippy remains before WS1 acceptance; streaming bodies, policy
       lowering, admission posture and claim witnesses remain in WS2-WS4.
 
+### mvm-studio local-service wave (issues #2078–#2082; #2083 deferred)
+
+Wave 0 scaffolded the `mvm-client` service module seams (`inventory`,
+`volume`, `secret`, `audit`). Each issue lands via its own PR; each PR
+updates only its own entry below.
+
+- [x] #2078 — canonical unified machine inventory through mvm-client.
+      `mvm_core::client::inventory` adds the typed `MachineInventoryRecord`
+      contract (identity/name, persistent-vs-transient kind, status +
+      detail incl. paused, fail-closed `build_mode` posture where any
+      unknown label deserializes to prod, source/backend, cpu/memory,
+      readiness, TTL, created/last-started, tags, host-path-free volume
+      attachment summaries, secret-reference count only) plus the shared
+      `InventoryQuery` visibility semantics (stopped persistent
+      definitions stay visible; stopped transients hide unless included;
+      expired hide unless included). `mvm_client::inventory` hosts the
+      spec×live join (duplicate live names collapse with the live row
+      winning), the fail-closed posture resolver the SDK envelope now
+      delegates to, and the read-only `list_local_inventory` composition
+      over any `MvmClient` — mock backend included; the `MvmClient` trait
+      and gateway are unchanged. `mvmctl machine ls` now renders the
+      shared records and its `--json` is the serialized record verbatim
+      (SDK-parsed `name`/`status`/`build_mode`/`kind` keys pinned by
+      tests). 41 new/updated unit tests across the three crates cover the
+      persistent-only/transient-only/joined/paused/failed/stopped/expired/
+      duplicate-name/unknown-posture matrix, serde round-trips,
+      unknown-field rejection, and the no-secret/no-host-path guarantees.
+
+- [ ] #2080 — reusable local encrypted-volume lifecycle service.
+
+- [ ] #2081 — reusable write-only local secret lifecycle service.
+
+- [ ] #2082 — normalized verified local audit events for UI consumers.
+
+- [ ] #2079 — persistent + transient launch lifecycle through
+      `LocalBackend` (starts after #2078/#2080/#2081 land the shared
+      inventory/volume/secret types).
+
 - [x] Guest-kernel hardware floor — **plan 286**. Audit the resolved Linux
       6.12.100 configs and remove unsupported physical hardware, radio/input,
       filesystem, power-management, tracing/debug, keyring, task-accounting,
@@ -189,7 +227,34 @@
       directions are enforced by tests that parse the specific named nix list;
       both were planted against and recorded in `specs/VERIFICATION.md`.
 
-- [ ] Build cache verify-on-read — schedule **plan 276 WS6**. `~/.mvm/dev/builds/
+- [x] Two-verifier oracle bar — **plan 276 WS4**. A signed audit chain frozen
+      at `tests/vectors/audit-chain-v1.jsonl`, read by both the host verifier
+      and the `no_std` mirror. The previous parity test compared them over a
+      chain generated fresh with a random key each run, so neither ever saw
+      bytes the other could also see. Diverging the mirror's serialization of
+      an absent optional field now fails over the shared corpus. riscv32 stays
+      a compile oracle — bare metal has no test harness.
+
+- [~] Content-address replay vectors — **plan 276 WS3**. Frozen
+      input→address vectors for `ir_hash`, the RFC-6962 leaf/interior/root
+      helpers, `compute_plan_id` and `bundle_sha256`. The tests that covered
+      these were relational only: hashing the canonical form with a trailing
+      newline moved every address and all four `ir_hash` unit tests stayed
+      green. `compute_plan_id` matters most — it does not use JCS, relying on
+      serde_json's default key ordering, so the gate pinned the feature flag
+      while nothing pinned the address it protects. Remaining: the audit
+      `prev_hash` spine, which needs a fixed keypair and belongs with WS4.
+
+- [x] Claim evidence pinned — **plan 276 WS1**. Each claim in
+      `model/claims.toml` now declares the `witness_kinds` it rests on, and
+      `check-claim-catalog` fails if a declared kind has no live witness, or if
+      a present kind is undeclared. Retiring a witness is now an explicit edit
+      to that declaration rather than a deletion nothing notices. Before this,
+      delisting a witness from both the model and the ADR-001 ledger left the
+      board green — claim 1 lost its only CI evidence and the run still
+      reported `clean (16 claims, 48 witnesses verified)`.
+
+- [~] Build cache verify-on-read — **plan 276 WS6**. `~/.mvm/dev/builds/
       <rev>/` was served on a hit if `rootfs.ext4` merely existed as a file: no
       digest, no signature, so content substitution went undetected and the
       provenance recorder then signed whatever bytes were on disk — the audit

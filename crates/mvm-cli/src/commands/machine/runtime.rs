@@ -184,32 +184,13 @@ fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'stati
     resolve_machine_build_mode(args.manifest.as_deref(), name)
 }
 
-/// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) from its manifest
-/// slot's template revision, falling back to the runtime accessibility flag.
-/// Shared by the boot-time SDK envelope and the `machine ls --json` listing so
-/// an attach-from-a-fresh-process client reads the same value the boot path
-/// stamps. Fails closed on `"prod"` — only an explicitly dev-built template or
-/// an accessible (dev) runtime resolves to `"dev"`.
+/// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) for the boot-time
+/// SDK envelope. Delegates to the shared inventory service's fail-closed
+/// posture resolution so this envelope, `machine ls --json`, and every other
+/// inventory consumer read the same value — only an explicitly dev-built
+/// template or an accessible (dev) runtime resolves to `"dev"`.
 pub(super) fn resolve_machine_build_mode(manifest: Option<&str>, name: &str) -> &'static str {
-    if let Some(manifest) = manifest {
-        let slot_name = manifest
-            .trim_end_matches('/')
-            .split('/')
-            .next_back()
-            .unwrap_or(manifest);
-        if let Ok(Some(revision)) =
-            mvm_runtime::vm::template::lifecycle::template_load_current_revision(slot_name)
-        {
-            return match revision.build_mode.as_deref() {
-                Some("dev") => "dev",
-                _ => "prod",
-            };
-        }
-    }
-    match mvm_runtime::vm::runtime_meta::read(name) {
-        Ok(Some(meta)) if meta.accessible => "dev",
-        _ => "prod",
-    }
+    mvm_client::inventory::resolve_workload_posture(manifest, name).label()
 }
 
 fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<String>) -> Result<()> {

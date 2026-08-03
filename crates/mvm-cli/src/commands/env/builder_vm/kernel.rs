@@ -294,5 +294,16 @@ pub(crate) fn build_kernel_via_stage0(
     }
     let _ = std::fs::remove_dir_all(&staging_dir);
 
+    // A locally built kernel has no published checksum to check against — a
+    // source checkout is never fetched. The pin records what we just built, so
+    // a later read can still catch rot, truncation, or a swap. It claims that
+    // and nothing more.
+    if let Err(e) = mvm_build::kernel_fetch::record_kernel_digest(&dest) {
+        ui::warn(&format!(
+            "could not record the kernel digest beside {} ({e}); it will be rebuilt on next use",
+            dest.display()
+        ));
+    }
+
     Ok(dest)
 }
