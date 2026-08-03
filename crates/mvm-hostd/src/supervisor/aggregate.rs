@@ -1206,6 +1206,7 @@ mod tests {
 
     fn sample_plan() -> ExecutionPlan {
         let mut plan = ExecutionPlan {
+            environment: None,
             build_provenance: Default::default(),
             snapshot_at: Default::default(),
             network_mode: Default::default(),

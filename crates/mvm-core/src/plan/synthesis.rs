@@ -43,10 +43,10 @@
 
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec, L3NetworkSpec,
-    NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
-    RuntimeProfileRef, SCHEMA_VERSION, SecretBinding, SecretReleasePolicy, SignedImageRef,
-    TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
+    AuditTaxonomy, DepsVolumeBinding, EnvironmentRef, ExecutionPlan, FsPolicyRef, KeyRotationSpec,
+    L3NetworkSpec, NetworkMode, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle,
+    Resources, RuntimeProfileRef, SCHEMA_VERSION, SecretBinding, SecretReleasePolicy,
+    SignedImageRef, TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -94,6 +94,10 @@ pub struct SynthesisInput<'a> {
     /// image_verify::sha256_file` or upstream Nix).
     pub image_name: &'a str,
     pub image_sha256: &'a str,
+    /// Lowercase-hex SHA-256 of the kernel this workload boots, pinning the
+    /// environment into the signed plan. `None` = the caller resolved no kernel
+    /// (a backend that supplies its own bundled one), and the plan pins none.
+    pub kernel_sha256: Option<&'a str>,
     pub image_cosign_bundle: Option<&'a str>,
     /// Purpose this run is admitted for. `None` means
     /// `DEFAULT_INTENT`.
@@ -220,6 +224,14 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
             input.image_sha256.len()
         );
     }
+    if let Some(kernel) = input.kernel_sha256
+        && kernel.len() != 64
+    {
+        anyhow::bail!(
+            "kernel_sha256 must be a 64-character lowercase hex digest, got {} chars",
+            kernel.len()
+        );
+    }
     let intent = input.intent.unwrap_or(DEFAULT_INTENT);
     if intent.is_empty() {
         anyhow::bail!("intent must not be empty");
@@ -264,7 +276,12 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         entrypoint_present: true,
     };
 
+    let environment = input.kernel_sha256.map(|kernel_sha256| EnvironmentRef {
+        kernel_sha256: kernel_sha256.to_string(),
+    });
+
     let mut plan = ExecutionPlan {
+        environment,
         build_provenance: Default::default(),
         snapshot_at: Default::default(),
         network_mode: input.network_mode,
@@ -401,6 +418,7 @@ mod tests {
 
     fn input(vm_name: &str) -> SynthesisInput<'_> {
         SynthesisInput {
+            kernel_sha256: None,
             network_mode: NetworkMode::default(),
             l3_network: None,
             vm_name,
