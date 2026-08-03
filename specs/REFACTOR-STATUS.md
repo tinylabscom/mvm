@@ -50,8 +50,8 @@ for detailed scope and acceptance criteria.
   - [x] Live local/block attachment through the admitted VM launch path
   - [x] mvmd OpenDAL → `object_store` migration with mandatory encryption
   - [x] Authenticated remote volume CLI/client lifecycle with typed failures
-  - [ ] Canonical worker handoff and Linux/KVM composition proof are green;
-        final follow-up PR-matrix closeout remains
+  - [x] Canonical worker handoff, Linux/KVM composition proof, and follow-up PR
+        matrices are green
   - [x] MinIO integration plus Linux/KVM persistence and restore proof
   - [ ] Reconcile rejected speculative clauses and close #2040 with evidence
 

@@ -1,6 +1,6 @@
 # Production object-store volumes
 
-**Status:** In progress — canonical cross-worker handoff is implemented and live-proven; the follow-up PR matrix remains open (2026-08-02).
+**Status:** In progress — canonical cross-worker handoff and required PR matrices are green; landing and issue closeout remain (2026-08-02).
 
 **Issue:** [#2040](https://github.com/tinylabscom/mvm/issues/2040)
 
@@ -230,7 +230,7 @@ repository's documented transitive exceptions, and cargo-deny.
       publish the manifest last with a conditional write, and make retry resume
       or converge without accepting partial chunks. Application-aware quiescing
       remains an explicit workload/operator responsibility.
-- [ ] Restore onto a different worker by fetching the pinned manifest/chunks,
+- [x] Restore onto a different worker by fetching the pinned manifest/chunks,
       enforcing scope and lineage, verifying integrity before decryption,
       atomically materializing the local encrypted image, and only then making it
       eligible for mvm attachment.
@@ -260,8 +260,8 @@ one, observes guest boot counters 1 and 2 across a real Firecracker restart,
 pulls the detached ciphertext through gateway → agent → hostd, restores it
 through a distinct authenticated worker, and observes counter 3 in that guest.
 The exact ignored test passes in 103.33 seconds with 1,532 other gateway tests
-filtered. This checkbox remains open only until the cross-repository PR matrix
-is green.
+filtered. Both cross-repository PR matrices are green, satisfying this
+cross-worker restore requirement.
 
 ## WS5 — Remote CLI, API, policy, and observability
 
@@ -308,7 +308,7 @@ final required matrices passed.
 - [x] Run Linux/KVM tests for LUKS/ext4 lifecycle, checkpoint/restore, and
       attachment preparation; no Nix, Firecracker, mvmctl runtime, or Linux-only
       syscall runs on the macOS host.
-- [ ] Add KVM E2E proving create → attach → guest write → restart → guest read →
+- [x] Add KVM E2E proving create → attach → guest write → restart → guest read →
       checkpoint → restore on fresh host state → guest read → clean detach.
 - [x] Reconcile the proposed immutable read-only block-volume multi-attach as
       outside the `VolumeRecord` contract. The existing guest/device read-only
@@ -332,8 +332,7 @@ worker handoff. The follow-up composed run now supplies that missing proof with
 two mount/PID-isolated production workers, distinct hostd and agent processes,
 exact node identities, worker-derived LUKS2 keys, real Firecracker/jailer
 launches, restart persistence, bounded ciphertext transfer, destination
-restore, and clean detach. The end-to-end checkbox remains open only for the
-follow-up PR matrix required by WS7.
+restore, and clean detach. The follow-up PR matrix required by WS7 is green.
 
 ## WS7 — Composition, documentation, and closeout
 
@@ -347,7 +346,7 @@ follow-up PR matrix required by WS7.
 - [x] Update operator runbooks and public docs with provider configuration,
       credential handling, durability/RPO semantics, restore, key recovery, quotas,
       limits, unsupported operations, and incident recovery.
-- [ ] Run the complete required quality/security/supply-chain matrix in both
+- [x] Run the complete required quality/security/supply-chain matrix in both
       repositories, including all BDD and live lanes.
 - [x] Update both sprint specs, the owning plan checkboxes, and refactor/status
       rollups with final test counts and evidence.
@@ -386,8 +385,8 @@ land before the shipped ledger is final.
 
 Follow-up review: mvm
 [`#2100`](https://github.com/tinylabscom/mvm/pull/2100) and mvmd
-[`#203`](https://github.com/tinylabscom/mvmd/pull/203). Both remain draft and
-issue #2040 remains open until their required matrices are green and they land.
+[`#203`](https://github.com/tinylabscom/mvmd/pull/203). Both required matrices
+are green. Issue #2040 remains open until both changes land.
 
 ## Out of scope
 

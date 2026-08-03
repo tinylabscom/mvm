@@ -171,8 +171,8 @@ updates only its own entry below.
         The composed Linux/KVM proof is now green: two isolated production
         workers preserve boot counts 1→2 across a source restart, transfer the
         encrypted image through gateway→agent→hostd, and observe boot count 3
-        after destination restore. This item remains open for the follow-up PR
-        matrix; issue #2040 must not close before it is green.
+        after destination restore. Both follow-up PR matrices are green; this
+        item and issue #2040 remain open until both changes land.
 
 - [x] Merge-queue auto-requeue: bounded recovery for transiently ejected pull
       requests, with conflict refusal, persistent attempt counting, no checkout
