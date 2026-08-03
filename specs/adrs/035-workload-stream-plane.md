@@ -7,10 +7,18 @@ Accepted for the output half. Implemented by plan 283 phase 1: the guest pump
 (`mvm-hostd::stream`), and the consumers (`mvmctl machine logs`, `machine run`
 attach, `mvm-client`/SDK readers).
 
-The input half — a plan-bound, default-deny channel to a running workload's
-stdin — is designed in plan 283 and **not decided here**. It changes claim 15
-from a structural guarantee to a policy one, which is a separate decision with
-its own ledger work.
+Accepted for the input half, with its cost recorded in §"Claim 15 becomes a
+policy, and what that bought". Implemented by plan 283 phase 2: the input frame
+DTOs and the plan grant (`mvm-protocol::stream::input`), the gate
+(`mvm-hostd::stream::input_gate`), the route to the guest sink, agent-side
+delivery with explicit EOF (`mvm-agentd::stream_input`), and the sealed-tier
+refusal of the grant for a shell-shaped entrypoint.
+
+The input half is **built and dormant**. Nothing outside tests reaches
+`StreamPlane::open_input`, so no real VM has ever executed either the grant path
+or the refusal path. ADR-001's claim 17 carries it at status `Preview` with the
+four limits that keep it there. This ADR records the decision; it does not
+record an operating channel.
 
 Three limits below (§"What this does not do") are stated as limits, not as
 future work. They are true of the shipped code.
@@ -209,6 +217,58 @@ Framing separation is not authorship: without that gate a workload could write
 its own gap marker and make a verifier bless a chain that skips a range it
 excised itself.
 
+### Claim 15 becomes a policy, and what that bought
+
+The input half costs a claim its shape, so the trade is recorded here rather
+than left to be discovered in the ledger.
+
+**Before.** Claim 15 held by *absence*. A sealed production microVM had no
+host→guest byte path at all: no shell, no `do_exec`, no PTY, and nothing else
+that carried a byte inward. "Nobody can drive it" needed no policy, no gate and
+no code to be true, which is the strongest form a claim can take — there was
+nothing to get wrong.
+
+**After.** There is a path. Refusing to use it is a decision host code makes,
+against a signed document, at run time. That is strictly weaker: a policy can
+have a bug, a policy can be misconfigured, and a policy is only as good as the
+code that evaluates it. Nothing about the new claim is as strong as the old one,
+and the ledger says so in those words rather than in softer ones.
+
+**What survives, and it is not nothing.** The channel writes into a pipe, not
+into a launcher. It cannot select a program, alter argv or the environment, or
+spawn anything, because the entrypoint is fixed at admission and the bytes reach
+a descriptor of a process that is already running. So the *interactive-access*
+half of claim 15 — the half the claim is named for — is unchanged by
+construction, not by policy. What became policy is narrower: whether a granted
+workload receives stdin at all.
+
+**Why that was worth it.** The alternative to a plan-bound channel is not "no
+input". It is input arriving some other way, unaudited. Every workload shape
+this repository is built for — a function invoked with an argument, a filter fed
+a document, a REPL-less program that reads a request off stdin and writes a
+response — needs bytes to travel inward. Absence was buying its strength by
+declaring those workloads out of scope, and they are not out of scope; they are
+the product. Refusing to build the channel would have pushed the same bytes into
+a share, a volume, a config drive or a network hop, each of which is a path with
+*less* structure than this one: no grant in the signed plan, no single-writer
+arbitration, no per-decision audit entry, and no fixed entrypoint standing
+between the bytes and a launcher.
+
+So the trade is a strong claim over a narrow surface exchanged for a weaker
+claim over the surface the product actually has. The mitigation is that every
+weakening is written down: the grant is in the signed plan, both outcomes are in
+the chain, and ADR-001 carries the claim at `Preview` with four limits rather
+than promoting it on the strength of the tests alone.
+
+**What is explicitly not claimed.** The sealed-tier refusal of the grant for a
+shell-shaped entrypoint is a *heuristic* and is documented as one. A wrapper
+that `exec`s a shell, a program that spawns one, or an interpreter under an
+unfamiliar name all pass it, and moving input onto a side descriptor would not
+help because a shell can read fd 4 and pipe it into itself. No argv test
+separates "reads stdin" from "will interpret stdin as commands"; that is a
+property of the program. The refusal raises the cost of laundering interactive
+access through a plan that looks ordinary. The control is the grant.
+
 ## What this does not do
 
 Three limits. Each was found while building this, each is true of the shipped
@@ -264,14 +324,21 @@ says the repetition is expected.
 
 **Unaffected.** Claims 1–3 (host-fs access, uid 0, verity): a stream is a read
 of a file the host already writes and a read of frames the host already
-receives. Claim 4: no exec path is added. Claim 10: no NIC anywhere on this
-path; `check-vsock-only-egress` and `check-uniform-vsock-egress` stay green.
-Claim 15: the console capture is opened read-only and the trait cannot hand
-out a writable handle, so `prod_console_attachment_has_no_input` continues to
-hold — this plane adds a reader, never an input fd.
+receives. Claim 4: no exec path is added — the input half writes to a fixed
+entrypoint's stdin and cannot start a process. Claim 10: no NIC anywhere on
+this path; `check-vsock-only-egress` and `check-uniform-vsock-egress` stay
+green.
 
-**Extended.** Claim 8's admitted plan gains one more decision it binds, and
-one more label in the chain.
+**Weakened, deliberately.** Claim 15. The console capture is still opened
+read-only and the trait still cannot hand out a writable handle, so
+`prod_console_attachment_has_no_input` continues to hold; the *output* half
+adds a reader and never an input fd. The *input* half adds a host→guest byte
+path that did not exist, which moves the claim from enforced-by-absence to
+enforced-by-policy. §"Claim 15 becomes a policy, and what that bought" records
+the trade; ADR-001 carries the reworded row and the new claim 17 at `Preview`.
+
+**Extended.** Claim 8's admitted plan gains two more decisions it binds — the
+retention mode and the input grant — and matching labels in the chain.
 
 **Not strengthened, despite appearances.** The reader-side anchoring rule
 defeats a *buggy* broker, not a hostile one: nothing cross-checks a claimed

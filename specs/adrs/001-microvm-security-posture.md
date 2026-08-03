@@ -169,9 +169,12 @@ the ledger's "Preview 17 limits" note below and are load-bearing: the
 known-secret set is empty on every real VM, the shell-entrypoint refusal
 is dormant, the granted half of the path has no operator surface, and the
 scan is a backstop rather than a defence. The ungranted-refusal half —
-the default-deny that matters most — *is* proven end to end against the
-real admission pipeline and the real audit chain. Promotion to a numbered
-claim waits on the rest becoming live.
+the default-deny that matters most — *is* exercised against the real
+admission pipeline and the real audit chain, but in a test process: the
+only route into the gate has no caller outside
+`crates/mvm-hostd/tests/workload_input_plane.rs`, so no real VM has
+executed either half. Promotion to a numbered claim waits on the rest
+becoming live.
 
 **Preview 16 — egress substitution keeps a raw secret off the guest.** A
 tokenized-replacement mechanism on the host-owned substitution proxy
@@ -543,14 +546,18 @@ failure this table exists to prevent.
    the grant is dormant too. Whoever makes the input grant live must wire a
    live entrypoint resolver in the same change, or the refusal ships as a
    label rather than a control.
-3. **The granted half has no operator surface.** No CLI verb calls
-   `StreamPlane::open_input`, `mvmctl invoke` always sends
-   `stream_input: false`, and nothing refreshes the lease from the client
-   side. The *ungranted-refusal* half is proven end to end — against a real
-   `admit_for_run`, a real chain, and `verify_audit_chain`
+3. **Neither half of the input plane runs on a real VM.**
+   `StreamPlane::open_input` is the only route to `InputGate::open`, and its
+   only callers are in `crates/mvm-hostd/tests/workload_input_plane.rs` — no
+   CLI verb calls it, `mvmctl invoke` always sends `stream_input: false`, and
+   nothing refreshes the lease from the client side. So the gate has never
+   executed outside a test process, granted or refused. The *ungranted-refusal*
+   half is exercised at full fidelity — against a real `admit_for_run`, a real
+   chain, and `verify_audit_chain`
    (`fn:a_plan_from_the_real_admission_pipeline_opens_the_gate`,
-   `fn:every_refusal_is_audited`). The granted half is proven in-process
-   only.
+   `fn:every_refusal_is_audited`) — which is a statement about the test's
+   fidelity, not about the channel being live. This is the reader-favourable
+   fact: nothing can misuse a channel nothing can open.
 4. **The scan is a backstop, not a defence.** Base64, hex, any derivation,
    and a split that straddles the sliding window all defeat it. It catches
    a confused host-side caller, not a determined one. The real guarantee is

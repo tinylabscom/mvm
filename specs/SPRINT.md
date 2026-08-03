@@ -58,6 +58,35 @@
       gates, and all 76 BDD scenarios pass. Tracked in
       `specs/plans/280-transcript-root-audit-binding.md`.
 
+- [~] Workload stream plane — 22 tasks, **Phase 1 complete, Phase 2 landed
+      dormant**. Tracked in `specs/plans/283-workload-stream-plane.md` and
+      `specs/adrs/035-workload-stream-plane.md`.
+      Phase 1 (output, T1–T10 plus T5b/T6b/T9b–T9d) ships: the guest pump emits
+      as produced instead of buffering to exit, the 1 MiB cap that *killed* a
+      chatty workload is replaced by ring retention with recorded gap markers,
+      records are redacted at one seam then hash-chained and sealed to an
+      RFC-6962 root, and `mvmctl machine logs`/`machine run` attach/`mvm-client`
+      read the same verified stream from broker, transcript, or console. Three
+      limits are stated rather than deferred: the console fallback is
+      unredacted, a detached VM's later output reaches no recorder, and a
+      spliced read repeats its adopted prefix.
+      Phase 2 (input, T11–T16) builds the host→guest stdin channel — grant in
+      the signed plan (`host.stream.v1`), single-writer lease, cross-frame
+      secret scan, explicit EOF, chain-signed refusals, and a sealed-tier
+      refusal of the grant for a shell-shaped entrypoint — and it is **not
+      reachable**. `StreamPlane::open_input` has no caller outside
+      `crates/mvm-hostd/tests/workload_input_plane.rs`, `mvmctl invoke`
+      hardcodes `stream_input: false`, and nothing refreshes the lease, so the
+      known-secret set is empty on every real VM and the shell refusal never
+      sees an entrypoint to classify. ADR-001 reworded claim 15 from
+      enforced-by-absence to enforced-by-policy and added claim 17 at `Preview`
+      with those limits; ADR-035 records why the trade was worth making. T16
+      documented the channel (`guides/workload-input.md`) and reconciled the
+      user-facing prose that still asserted claim 15 in its absence form.
+      **Next:** a follow-on plan must land the operator surface and a live
+      entrypoint resolver together, or the shell refusal ships as a label
+      rather than as a control.
+
 - [x] BDD / conformance integration: introduced `model/*.toml` as the single
       source for conformance claims, generated `CONFORMANCE.md`, and added
       `xtask` gates for R1 (`check-conformance`), R2 (`check-honesty`), and R4

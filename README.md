@@ -29,7 +29,7 @@ Linux + /dev/kvm           →  Firecracker
   conformance-pinned surface
 - **Security claims, CI-enforced** — 15+ numbered claims (signed execution
   plans, chain-signed audit log, dm-verity boot, default-deny egress, sealed
-  prod images with no interactive access, secret substitution over vsock)
+  prod images that refuse interactive access, secret substitution over vsock)
 
 ## Install
 
@@ -199,8 +199,8 @@ mvmctl machine run   --flake . -- ./app # build + boot + run
 
 Builds run `nix build` inside a builder VM — **host Nix is never used or
 required**, so the same `mvmctl` produces byte-identical artifacts on every host.
-Sealed images are dm-verity verified and have no interactive access; the dev
-form keeps a console. See the
+Sealed images are dm-verity verified and refuse interactive access — no shell,
+no `do_exec`, no PTY; the dev form keeps a console. See the
 [mkGuest guide](public/src/content/docs/guides/nix-flakes.md) and
 `nix/lib/default.nix` for the full API.
 
@@ -498,9 +498,22 @@ claims), each backed by a named test or workflow gate. In summary:
     authorized cleartext path.
 14. **Every `run --image` admission records OCI image provenance** in the
     chain-signed audit log.
-15. **No interactive access to a sealed production microVM** — the console is
+15. **A sealed production microVM has no shell, no `do_exec`, no PTY, and no
+    input that can change what runs** — the console is
     `interactive`-feature-gated, the prod rootfs is verity-sealed, console
     capture is write-only, and the host gate refuses `console` on a sealed VM.
+    The host→guest input channel carries bytes to an already-running
+    entrypoint's stdin and nothing else — it cannot select a program, alter
+    argv or env, or spawn anything, and it is refused outright without a grant
+    in the signed plan.
+
+Claim 15 used to hold by *absence*: there was no host→guest byte path at all.
+The workload input channel built one, so refusing input is now a policy
+decision rather than a consequence of there being nothing to refuse. ADR-001
+carries that rewording, plus a `Preview` claim 17 for the input channel with
+the four limits that keep it a preview — including that it has no operator
+surface yet. See
+[Workload input](public/src/content/docs/guides/workload-input.md).
 
 The guest agent runs as an unprivileged uid under `setpriv`; `~/.mvm` and
 `~/.mvm/cache` are mode 0700. **Out of scope** (named in ADR-001): a malicious

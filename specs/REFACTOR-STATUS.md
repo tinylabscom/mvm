@@ -66,7 +66,26 @@ for detailed scope and acceptance criteria.
         have no production caller yet: the known-secret set is empty on every
         real VM, the shell-entrypoint refusal is dormant behind an empty
         `entrypoint_argv`, and the granted half has no operator surface
-  - [ ] T16 — the input plane's documentation
+  - [x] T16 — the input plane's documentation: a sibling guide
+        `guides/workload-input.md` (grant, single-writer lease, secret scan,
+        explicit EOF, the `--prod` shell refusal stated as the heuristic it is,
+        and the four limits), the claim-15 trade recorded as a decision in
+        ADR-035, and the reconciliation of every user-facing site that still
+        asserted claim 15 in its old absence form — README ×3, the
+        isolation-tiers reference, `specs/01-project.md` ×3, plus ADR-035's own
+        security-posture section and the sealed-prod verb table in
+        `reference/guest-agent.md`, which had drifted from the `ProdSafe`
+        classification of `StreamInput`/`CloseStreamInput`. ADR-001's limit 3
+        sharpened: `StreamPlane::open_input` is the only route into the gate and
+        has no caller outside `tests/workload_input_plane.rs`, so *neither* half
+        of the input plane has run on a real VM — "proven end to end" described
+        test fidelity, not liveness
+  - [ ] Phase 2 has no operator surface. Nothing outside tests opens an input
+        stream, `mvmctl invoke` hardcodes `stream_input: false`, and no client
+        refreshes the lease — so the secret scan's known set is empty on every
+        real VM and the shell-entrypoint refusal never sees an entrypoint to
+        classify. Claim 17 stays `Preview` until a follow-on lands the surface
+        and a live entrypoint resolver together
   - [~] Residual after T9b/T9d: T9d closed the *seal* half — a detached run's
         transcript is now sealed by whatever stops the VM. The *follow* half
         remains: the console follower still dies with the starting process, so

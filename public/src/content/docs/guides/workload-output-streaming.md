@@ -254,6 +254,9 @@ bytes survive the trip.
 
 ## See also
 
+- [Workload input](/guides/workload-input/) — the other direction. Output is a
+  property of running a workload; input is a capability that has to be granted
+  in the signed plan, and it has no operator surface yet.
 - [Audit and receipts](/guides/audit-and-receipts/) — the chain that carries
   the retention mode and the subscribe events.
 - [Observability and results](/guides/observability-and-results/) — how

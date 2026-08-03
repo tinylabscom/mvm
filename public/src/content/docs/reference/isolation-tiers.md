@@ -60,8 +60,10 @@ few categories:
   nothing reaches the network by default.
 - Secrets never enter the guest — credential substitution happens host-side; <!-- allow(doc-claim:secret-non-leakage): summarizes an existing shipped host-side property -->
   raw secret bytes never cross into guest memory.
-- No interactive access to a sealed production guest — there is no shell into
-  a production workload.
+- No interactive access to a sealed production guest — no shell, no `do_exec`,
+  no PTY. The one host-to-guest byte path is a plan-granted, default-deny
+  channel to a fixed entrypoint's stdin, which cannot select a program or spawn
+  anything; see [Workload input](/guides/workload-input/).
 
 These categories describe what a full OS lets you reason about: a process
 model, a filesystem boundary, a network stack you can filter, an audit trail

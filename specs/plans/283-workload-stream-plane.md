@@ -364,7 +364,7 @@ gates them:
       boundary, the redaction trade, and the three shipped limits. The claim-15
       trade and the input asymmetry stay with the input plane (T11–T16), which
       is where that decision is actually made.
-- [ ] Claim 15 reworded and claim 17 added to the claims table in
+- [x] Claim 15 reworded and claim 17 added to the claims table in
       `specs/adrs/001-microvm-security-posture.md`, each with `fn:`/`ci:`
       witnesses that `xtask check-claim-catalog` resolves.
 - [x] `CLAUDE.md` corrected on three drifts this plan had to work around: the
@@ -381,7 +381,17 @@ gates them:
       stream surfaces added to
       `public/src/content/docs/reference/cli-commands.md`. Feeding a running
       workload, the claim-15 rewording, and claim 17 belong to T15–T16.
-- [ ] `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` updated in the same
+- [x] Website documentation (Phase 2 half):
+      `public/src/content/docs/guides/workload-input.md` — the grant, the
+      single-writer lease, the secret scan and what it is worth, explicit EOF,
+      the `--prod` shell refusal stated as the heuristic it is, the claim-15
+      trade, and the four limits. A sibling page rather than a section of the
+      output guide, because output is on by default and the input channel has
+      no operator surface; one page must not lend the other its "this works"
+      framing. The sealed-prod verb table in
+      `public/src/content/docs/reference/guest-agent.md` gains the stdin verbs
+      it had drifted from.
+- [x] `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` updated in the same
       change as each workstream lands.
 
 ## Open questions
@@ -513,7 +523,7 @@ Full gate before any push: `just ci` plus `cargo run -p xtask check-file-size`,
   `verify_chain(records: &[StreamRecord]) -> Result<(), ChainError>`;
   `ChainError::{SeqGap { expected, got }, HashMismatch { seq }, Empty}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/mvm-protocol/src/stream/chain.rs`:
 
@@ -572,12 +582,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo nextest run -p mvm-protocol stream::chain`
 Expected: FAIL — `stream` module unresolved.
 
-- [ ] **Step 3: Implement the DTOs and verifier**
+- [x] **Step 3: Implement the DTOs and verifier**
 
 `record.rs` defines the three types with `#[derive(Debug, Clone, PartialEq, Eq,
 Serialize, Deserialize)]` and `#[serde(deny_unknown_fields)]` on `StreamRecord`
@@ -588,17 +598,17 @@ domain-separation prefix so a record hash can never collide with a Merkle leaf.
 `prev_hash` equals the previous record's `hash()`; the first record's
 `prev_hash` must be all-zero.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo nextest run -p mvm-protocol stream::`
 Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Confirm the crate still builds no_std for wasm**
+- [x] **Step 5: Confirm the crate still builds no_std for wasm**
 
 Run: `cargo build -p mvm-protocol --target wasm32-unknown-unknown`
 Expected: success. This is the property that lets a browser verify a chain.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git add crates/mvm-protocol/src/stream crates/mvm-protocol/src/lib.rs
@@ -619,7 +629,7 @@ git commit -m "feat(protocol): stream record DTOs and chain verification"
   `ChunkRecord.prev_hash: String` (64-char lowercase hex, `#[serde(default)]`);
   `TranscriptWriter::push` maintaining the linkage.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -646,18 +656,18 @@ fn pushed_chunks_link_to_their_predecessor() {
 `writer_at` is a local helper building a `TranscriptWriter` with a fixed test
 key and `CaptureBounds { max_duration_secs: 60, max_bytes: 1 << 20, max_chunks: 64 }`.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo nextest run -p mvm-core transcript::`
 Expected: FAIL — `Direction::Stdout` does not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add the three variants to `Direction`. Add `prev_hash: String` to `ChunkRecord`
 with `#[serde(default)]`. In `push_inner`, set `prev_hash` from the previous
 chunk's `sha256_hex` (all-zero for `seq == 0`) before pushing the record.
 
-- [ ] **Step 4: Re-pin the deterministic root vector, and witness the re-pin**
+- [x] **Step 4: Re-pin the deterministic root vector, and witness the re-pin**
 
 `sealed_root_hex` covers the ordered chunk records, so adding `prev_hash`
 changes the root and the pinned deterministic vector must be updated. A silent
@@ -677,12 +687,12 @@ fn the_pre_linkage_root_vector_no_longer_verifies() {
 }
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo nextest run -p mvm-core transcript::`
 Expected: PASS. Every existing sealed-root and `verify_chunks` test stays green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git add crates/mvm-core/src/transcript.rs
@@ -705,7 +715,7 @@ git commit -m "feat(transcript): stream directions and per-chunk linkage"
   `Admission::{Accept, AcceptAfterPruning { pruned_seqs: Vec<u64>, dropped_bytes: u64 }}`;
   `GapMarker { after_seq: u64, dropped_chunks: u64, dropped_bytes: u64 }`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -756,12 +766,12 @@ fn a_chunk_larger_than_the_whole_bound_is_still_accepted() {
 `Admission` has no refusing variant, so the exhaustive match in the third test
 is itself the type-level guarantee that a bound can never silence a workload.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo nextest run -p mvm-core transcript::ring`
 Expected: FAIL — module does not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `RingState` tracks live bytes and chunk count. `admit` prunes oldest entries
 until the incoming size fits both bounds, returning the pruned sequence numbers
@@ -769,12 +779,12 @@ so the caller can unlink the chunk files and emit one `GapMarker`. A single
 chunk larger than `max_bytes` prunes everything and is still accepted — the
 newest data always wins.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo nextest run -p mvm-core transcript::ring`
 Expected: PASS, 3 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add crates/mvm-core/src/transcript/ring.rs crates/mvm-core/src/transcript.rs
@@ -799,7 +809,7 @@ git commit -m "feat(transcript): ring retention for continuous stream captures"
 This is the task that satisfies the hard requirement. Everything else is
 plumbing around it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -835,12 +845,12 @@ fn stdout_reaches_the_sink_before_the_child_exits() {
 The 1500 ms timeout against a 3 s child is the whole point: it fails on any
 implementation that waits for exit.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo nextest run -p mvm-agentd stream_pump -j 6`
 Expected: FAIL — `pump_child` not found.
 
-- [ ] **Step 3: Implement the pump**
+- [x] **Step 3: Implement the pump**
 
 One reader thread per fd (stdout, stderr, fd-3) doing bounded reads into a
 64 KiB buffer and emitting an event per read, plus the existing `poll_for_exit`
@@ -848,12 +858,12 @@ for the child. Threads send through a channel the caller drains, so the sink is
 invoked on one thread and ordering within a stream is preserved. A cap breach
 prunes and emits a gap marker instead of killing the child.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo nextest run -p mvm-agentd stream_pump -j 6`
 Expected: PASS.
 
-- [ ] **Step 5: Rewire `execute()` and keep existing behaviour green**
+- [x] **Step 5: Rewire `execute()` and keep existing behaviour green**
 
 Replace `entrypoint.rs:596-622` with a `pump_child` call. `CallOutcome::PayloadCap`
 loses its kill semantics; update the tests that assert termination on breach to
@@ -862,7 +872,7 @@ assert a gap marker instead.
 Run: `cargo nextest run -p mvm-agentd -j 6`
 Expected: PASS across the crate.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git add crates/mvm-agentd/src/stream_pump.rs crates/mvm-agentd/src/entrypoint.rs crates/mvm-agentd/src/lib.rs
@@ -884,26 +894,26 @@ git commit -m "feat(agent): stream entrypoint output as it is produced"
   `decode_fd3_frame(buf: &[u8]) -> Result<(usize, EntrypointEvent), Fd3Error>`;
   `Fd3Error::{HeaderTooLarge, PayloadTooLarge, NonUtf8Header, Incomplete}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Cover: a well-formed frame decodes to `Control` with the header verbatim; a
 header longer than 64 KiB is refused; a non-UTF-8 header is refused; a truncated
 frame reports `Incomplete` without consuming bytes.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo nextest run -p mvm-agentd fd3 -j 6` — FAIL.
 
-- [ ] **Step 3: Implement the decoder**
+- [x] **Step 3: Implement the decoder**
 
 Frame layout is fixed by the protocol doc comment: `header_len: u32 LE` (max
 64 KiB), `header_json` bytes, `payload_len: u32 LE`, `payload` bytes. The agent
 validates UTF-8 and the length bounds and does no further parsing — record
 semantics belong to the host.
 
-- [ ] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-agentd fd3 -j 6`
+- [x] **Step 4: Run to verify it passes** — `cargo nextest run -p mvm-agentd fd3 -j 6`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git commit -am "feat(agent): decode and emit fd-3 control records"
@@ -932,7 +942,7 @@ no user sees live output until this lands.
   a buffered outcome (warm-pool prewarm, probes); it becomes a thin wrapper
   that passes a collecting sink, so there is one execution path, not two.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -955,13 +965,13 @@ fn entrypoint_rpc_frames_reach_the_host_before_the_child_exits() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo nextest run -p mvm-agentd rpc::entrypoint -j 6`
 Expected: FAIL — the frame arrives only after the child exits, so the read
 times out.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Thread the response writer into the sink so each `EntrypointEvent` is framed
 and written as it arrives. Preserve the two contracts the wire already has:
@@ -970,18 +980,18 @@ event ends the response per call. Interleaving between stdout and stderr now
 reflects arrival order rather than replay order — that is the intended change,
 not a regression.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo nextest run -p mvm-agentd -j 6`
 Expected: PASS across the crate, including the warm-pool and probe callers that
 still want a buffered outcome.
 
-- [ ] **Step 5: Confirm a slow host does not stall the workload**
+- [x] **Step 5: Confirm a slow host does not stall the workload**
 
 The host reading slowly must not block the guest's child. Add a test with a
 deliberately slow frame reader asserting the child still exits on time.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git commit -am "feat(agent): stream entrypoint events over the RPC as they arrive"
@@ -1204,24 +1214,24 @@ git commit -am "feat(transcript): batch stream chunks into segments"
 - Produces: `ConsoleSource::follow(path: &Path, broker: SharedBroker) -> ConsoleSourceHandle`;
   `ConsoleSourceHandle::stop(self)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Cover: bytes appended to the file after `follow` starts reach the broker tagged
 `StreamSource::Console`; a file that does not yet exist is tolerated and picked
 up when created (the VM state dir is populated during boot); `stop` terminates
 the follower without losing already-read bytes.
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-hostd console_source` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-hostd console_source` — FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 A polling tail holding a read offset. Polling rather than an OS watch keeps it
 identical across macOS and Linux and across all four backends, which each
 already write `<state_dir>/console.log`.
 
-- [ ] **Step 4: Run to verify it passes** — PASS.
+- [x] **Step 4: Run to verify it passes** — PASS.
 
-- [ ] **Step 5: Wire the source into workload start, by inversion**
+- [x] **Step 5: Wire the source into workload start, by inversion**
 
 **Corrected during execution.** This step originally said to modify
 `crates/mvm-runtime/src/workload_runner/runner.rs` to call `ConsoleSource::follow`
@@ -1252,7 +1262,7 @@ Verify no net device is introduced:
 Run: `cargo run -p xtask check-vsock-only-egress && cargo run -p xtask check-uniform-vsock-egress`
 Expected: both clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```sh
 git commit -am "feat(hostd): follow console capture as a stream source"
@@ -1704,7 +1714,7 @@ Review found step 3 had gone one step too far, plus two smaller defects.
   ring. Burst cost on the read thread is back to bare-write parity (1.07 µs at
   64 B, 4.9 µs at 4 KiB). Sustained throughput past the queue is unchanged
   (~23 µs/frame) — the writer does the same syscalls.
-  - [ ] **Deferred:** `SegmentStore::append` opens and closes the active segment
+  - [x] **Deferred:** `SegmentStore::append` opens and closes the active segment
     per chunk, and that is the remaining lever on the sustained figure. Out of
     scope here: the store is shared with the forensic egress capture, whose
     disturbance detection depends on the path-based `stat` that would have to
@@ -1921,16 +1931,16 @@ exit. Run `just ci` before opening the PR.
 - Produces: `InputFrame { seq: u64, payload: Vec<u8> }`; `CloseInput`;
   `ServiceId::parse("host.stream.v1")` as the grant token.
 
-- [ ] **Step 1: Write the failing tests** — serde round-trip both types; unknown
+- [x] **Step 1: Write the failing tests** — serde round-trip both types; unknown
   fields rejected; a plan without `host.stream.v1` reports `grants_input() == false`.
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-protocol stream::input` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-protocol stream::input` — FAIL.
 
-- [ ] **Step 3: Implement** with `#[serde(deny_unknown_fields)]`.
+- [x] **Step 3: Implement** with `#[serde(deny_unknown_fields)]`.
 
-- [ ] **Step 4: Run to verify it passes** — PASS.
+- [x] **Step 4: Run to verify it passes** — PASS.
 
-- [ ] **Step 5: Commit** — `git commit -am "feat(protocol): workload input frame DTOs"`
+- [x] **Step 5: Commit** — `git commit -am "feat(protocol): workload input frame DTOs"`
 
 ---
 
@@ -1945,7 +1955,7 @@ exit. Run `just ci` before opening the PR.
   `InputSession::close(self)`;
   `InputRefusal::{NotGranted, LeaseHeld { holder: String }, SecretMaterial { category: &'static str }, LeaseExpired}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -1985,18 +1995,18 @@ fn every_refusal_is_audited() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-hostd input_gate` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-hostd input_gate` — FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Grant check first, then lease acquisition with an expiry the caller refreshes,
 then the sliding-window secret scan over a buffer at least as long as the
 longest known secret minus one byte. Every refusal emits a chain-signed audit
 entry carrying the reason and no payload bytes.
 
-- [ ] **Step 4: Run to verify it passes** — PASS, 4 tests.
+- [x] **Step 4: Run to verify it passes** — PASS, 4 tests.
 
-- [ ] **Step 5: Assert the chain carries no payload**
+- [x] **Step 5: Assert the chain carries no payload**
 
 Write the test — do not assume one exists. Earlier drafts pointed at
 `audit_chain_carries_no_payload_bytes`, which is absent from the tree; running
@@ -2007,7 +2017,7 @@ frame bytes, including the refused secret material.
 Run: `cargo nextest run -p mvm-hostd stream_input_audit`
 Expected: PASS, and the filter must match a nonzero number of tests.
 
-- [ ] **Step 6: Commit** — `git commit -am "feat(hostd): plan-gated, leased, secret-scanned workload input"`
+- [x] **Step 6: Commit** — `git commit -am "feat(hostd): plan-gated, leased, secret-scanned workload input"`
 
 ---
 
@@ -2022,7 +2032,7 @@ Expected: PASS, and the filter must match a nonzero number of tests.
   `InputSink::write_frame(&mut self, f: InputFrame) -> io::Result<()>`;
   `InputSink::close(self)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -2039,18 +2049,18 @@ fn close_input_delivers_eof_so_a_read_to_end_child_terminates() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-agentd stream_input -j 6` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-agentd stream_input -j 6` — FAIL.
 
-- [ ] **Step 3: Implement.** `close` drops the `ChildStdin`, which closes the fd.
+- [x] **Step 3: Implement.** `close` drops the `ChildStdin`, which closes the fd.
 
-- [ ] **Step 4: Run to verify it passes** — PASS.
+- [x] **Step 4: Run to verify it passes** — PASS.
 
-- [ ] **Step 5: Confirm the agent stays runtime-free**
+- [x] **Step 5: Confirm the agent stays runtime-free**
 
 Run: `cargo run -p xtask check-guest-agent-runtime-free`
 Expected: clean.
 
-- [ ] **Step 6: Commit** — `git commit -am "feat(agent): deliver streamed input to the entrypoint with explicit EOF"`
+- [x] **Step 6: Commit** — `git commit -am "feat(agent): deliver streamed input to the entrypoint with explicit EOF"`
 
 ---
 
@@ -2118,7 +2128,7 @@ git commit -am "feat(stream): route granted input frames to the workload's stdin
 **Interfaces:**
 - Produces: `entrypoint_is_shell_shaped(plan: &ExecutionPlan) -> bool`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Cover each limb of the rule from the design section: basename in
 `{sh, bash, dash, ash, busybox, zsh, ksh, fish}`; a script whose shebang
@@ -2126,13 +2136,13 @@ interpreter basename is in that set; argv carrying `-c`. Plus: a non-shell
 entrypoint with the grant is admitted under `--prod`, and a shell entrypoint
 *without* the grant is admitted (output streaming stays unconditional).
 
-- [ ] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-cli admission` — FAIL.
+- [x] **Step 2: Run to verify it fails** — `cargo nextest run -p mvm-cli admission` — FAIL.
 
-- [ ] **Step 3: Implement.** Refuse before any network or boot work.
+- [x] **Step 3: Implement.** Refuse before any network or boot work.
 
-- [ ] **Step 4: Run to verify it passes** — PASS.
+- [x] **Step 4: Run to verify it passes** — PASS.
 
-- [ ] **Step 5: Commit** — `git commit -am "feat(cli): refuse the input grant for shell entrypoints under --prod"`
+- [x] **Step 5: Commit** — `git commit -am "feat(cli): refuse the input grant for shell entrypoints under --prod"`
 
 ---
 
@@ -2201,23 +2211,36 @@ Expected: PASS — the console capture still has no host input fd.
   `specs/adrs/035-workload-stream-plane.md`, `specs/SPRINT.md`,
   `specs/REFACTOR-STATUS.md`
 
-- [ ] **Step 1: Document the input half** — the grant, the single-writer lease,
+- [x] **Step 1: Document the input half** — the grant, the single-writer lease,
   the secret gate, explicit EOF, and the `--prod` shell refusal, including the
   honest statement that shell detection is a heuristic.
 
-- [ ] **Step 2: Record the claim-15 trade in ADR-035** — enforced-by-absence
+- [x] **Step 2: Record the claim-15 trade in ADR-035** — enforced-by-absence
   becomes enforced-by-policy, and why that was worth it.
 
-- [ ] **Step 3: Tick this plan's boxes and update the rollups**, bumping
+- [x] **Step 3: Tick this plan's boxes and update the rollups**, bumping
   `REFACTOR-STATUS.md`'s "Last updated".
 
-- [ ] **Step 4: Run the full gate**
+- [x] **Step 4: Run the full gate**
 
 Run: `just ci && cargo run -p xtask check-doc-claims && cargo run -p xtask check-file-size`
 Expected: clean.
 
-- [ ] **Step 5: Commit** — `git commit -am "docs: workload input plane guide and claim-15 trade"`
+- [x] **Step 5: Commit** — `git commit -am "docs: workload input plane guide and claim-15 trade"`
 
 **Phase 2 exit criterion:** a plan-granted external consumer feeds a running
 workload's stdin and sees its output in the same stream; an ungranted one is
 refused and the refusal is in the chain.
+
+**Phase 2 status: met in the harness, not on a VM.** Both halves are covered by
+`crates/mvm-hostd/tests/workload_input_plane.rs` against a real `admit_for_run`,
+a real chain and `verify_audit_chain`. Neither is met by an operator, because
+`StreamPlane::open_input` is the only route into the gate and has no caller
+outside that test: no CLI verb opens an input stream, `mvmctl invoke` always
+sends `stream_input: false`, and nothing refreshes the lease client-side. So the
+secret scan's known-secret set is empty on every real VM, and the
+shell-entrypoint refusal never sees an entrypoint to classify because every
+production admission passes an empty `entrypoint_argv`. ADR-001 carries this as
+claim 17 at `Preview` with those limits. Closing them is a follow-on plan, and
+it must land the operator surface and a live entrypoint resolver in the same
+change — otherwise the refusal ships as a label rather than as a control.
